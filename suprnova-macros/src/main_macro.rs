@@ -143,6 +143,21 @@ fn main_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
         None => quote! {},
     };
 
+    // `[package.metadata.suprnova.schema]` of the binary's package. The
+    // migrations build their schema at run time, where no macro runs, so
+    // `main` installs the setting before anything else: every migration
+    // this binary runs, a library's too, then makes the same columns.
+    let schema = match crate::package_settings::crate_dir()
+        .map(|dir| crate::package_settings::schema_settings(&dir))
+        .transpose()
+    {
+        Ok(read) => read,
+        Err(problem) => {
+            return syn::Error::new(proc_macro2::Span::call_site(), problem).to_compile_error();
+        }
+    };
+    let install_schema = schema_installation(schema.as_ref());
+
     // `load_env` runs before the builder line on purpose, and the ordering
     // is the entire point of this macro - see the module doc.
     // `set_default_build_id` runs immediately after: `env!` expands where
@@ -156,6 +171,7 @@ fn main_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
     let expanded = quote! {
         #(#attrs)*
         #vis fn #name() #output {
+            #install_schema
             ::suprnova::boot::load_env_or_exit();
             ::suprnova::boot::set_default_build_id(::core::env!("CARGO_PKG_VERSION"));
             let __suprnova_heap_profile = ::suprnova::profiling::start();
@@ -176,6 +192,31 @@ fn main_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
     expanded
 }
 
+/// The statements that install the binary's schema settings, and an
+/// `include_bytes!` of the manifest they came from, so cargo re-expands
+/// `main` when the settings change: cargo does not fingerprint
+/// `[package.metadata]`. Nothing for a package without a manifest.
+fn schema_installation(
+    read: Option<&crate::package_settings::Read<crate::package_settings::SchemaSettings>>,
+) -> TokenStream2 {
+    let Some(read) = read else {
+        return TokenStream2::new();
+    };
+    let tracking = match read.manifest.as_deref().and_then(std::path::Path::to_str) {
+        Some(path) => quote! { const _: &[u8] = ::core::include_bytes!(#path); },
+        None => TokenStream2::new(),
+    };
+    let unsigned_ids = if read.settings.unsigned_ids {
+        quote! { ::suprnova::schema::Schema::use_unsigned_ids(); }
+    } else {
+        TokenStream2::new()
+    };
+    quote! {
+        #tracking
+        #unsigned_ids
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! The parser is the part with branches; the expansion is a
@@ -183,6 +224,28 @@ mod tests {
 
     use super::*;
     use syn::parse2;
+
+    /// `unsigned_ids = true` becomes the documented call, and nothing else
+    /// does: a package without the table, or with `false`, gets no call.
+    #[test]
+    fn unsigned_ids_installs_the_documented_call() {
+        use crate::package_settings::{Read, SchemaSettings};
+        let on = Read {
+            settings: SchemaSettings { unsigned_ids: true },
+            manifest: None,
+        };
+        let off = Read {
+            settings: SchemaSettings::default(),
+            manifest: None,
+        };
+        assert!(
+            schema_installation(Some(&on))
+                .to_string()
+                .contains("Schema :: use_unsigned_ids ()")
+        );
+        assert!(schema_installation(Some(&off)).is_empty());
+        assert!(schema_installation(None).is_empty());
+    }
 
     #[test]
     fn no_arguments_defaults_to_multi_thread() {

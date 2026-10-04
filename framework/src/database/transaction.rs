@@ -959,6 +959,7 @@ impl ExecutorChoice {
         A: sea_orm::ActiveModelTrait + sea_orm::ActiveModelBehavior + Send + 'static,
         <A::Entity as sea_orm::EntityTrait>::Model: Send + sea_orm::IntoActiveModel<A>,
     {
+        refuse_unsigned_overflow_in(self.backend(), &am)?;
         match self {
             ExecutorChoice::Tx(t, _) => {
                 <A as sea_orm::ActiveModelTrait>::insert(am, t.as_ref()).await
@@ -980,6 +981,7 @@ impl ExecutorChoice {
         A: sea_orm::ActiveModelTrait + sea_orm::ActiveModelBehavior + Send + 'static,
         <A::Entity as sea_orm::EntityTrait>::Model: Send + sea_orm::IntoActiveModel<A>,
     {
+        refuse_unsigned_overflow_in(self.backend(), &am)?;
         match self {
             ExecutorChoice::Tx(t, _) => {
                 <A as sea_orm::ActiveModelTrait>::update(am, t.as_ref()).await
@@ -997,6 +999,7 @@ impl ExecutorChoice {
     where
         A: sea_orm::ActiveModelTrait + sea_orm::ActiveModelBehavior + Send + 'static,
     {
+        refuse_unsigned_overflow_in(self.backend(), &am)?;
         match self {
             ExecutorChoice::Tx(t, _) => {
                 <A as sea_orm::ActiveModelTrait>::delete(am, t.as_ref()).await
@@ -1006,6 +1009,42 @@ impl ExecutorChoice {
             }
         }
     }
+}
+
+/// Refuses an active model that holds a `u64` its table cannot store on
+/// `backend`, naming the column, before SeaORM builds the statement.
+///
+/// Postgres and SQLite store a `u64` field in a signed `BIGINT`, and
+/// sea-query-sqlx's binders for both unwrap the conversion, so a value above
+/// `i64::MAX` would panic in the middle of the write instead of failing it.
+/// Only `BIGINT UNSIGNED` columns are read, the type every `u64` field
+/// declares, so the other values of the row are never copied.
+fn refuse_unsigned_overflow_in<A>(backend: sea_orm::DbBackend, am: &A) -> Result<(), sea_orm::DbErr>
+where
+    A: sea_orm::ActiveModelTrait,
+{
+    use sea_orm::{ColumnTrait, EntityName, IdenStatic, Iterable};
+
+    if backend == sea_orm::DbBackend::MySql {
+        return Ok(());
+    }
+    for column in <<A::Entity as sea_orm::EntityTrait>::Column as Iterable>::iter() {
+        if column.def().get_column_type() != &sea_orm::sea_query::ColumnType::BigUnsigned {
+            continue;
+        }
+        if let sea_orm::ActiveValue::Set(value) | sea_orm::ActiveValue::Unchanged(value) =
+            am.get(column)
+        {
+            crate::eloquent::casts::unsigned::refuse_unsigned_overflow(
+                backend,
+                <A::Entity as Default>::default().table_name(),
+                IdenStatic::as_str(&column),
+                &value,
+            )
+            .map_err(sea_orm::DbErr::Custom)?;
+        }
+    }
+    Ok(())
 }
 
 impl Transaction {

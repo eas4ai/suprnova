@@ -232,8 +232,9 @@ month, date arithmetic, `NOW()` comparisons - work on it:
 | `AsOptionalNaiveDateTime` | `Option<DateTime<Utc>>` | the same, nullable |
 
 A `DateTime<Utc>` field defaults to `AsDateTime`, so declare these per
-field. The model's automatic timestamps, `touch()`, soft deletes and the
-touch of an owner all store through the declared cast.
+field, or for a whole package with `datetime_cast` (described below). The
+model's automatic timestamps, `touch()`, soft deletes and the touch of an
+owner all store through the declared cast.
 
 ```rust
 #[model(
@@ -256,6 +257,49 @@ storage type against it. A table Laravel's `timestamps()` created is
 without time zone` on Postgres, which only `AsNaiveDateTime` reads. The
 schema builder's `timestamps_tz()` and `datetimes()` create the two shapes
 (see [Migrations](migrations.md#timestamps-and-soft-deletes)).
+
+An application whose tables all have native date-time columns, such as one
+ported from Laravel, can choose the cast once for a whole package in its
+`Cargo.toml`, instead of naming it on each field:
+
+```toml
+[package.metadata.suprnova.model]
+datetime_cast = "native"
+```
+
+`#[suprnova::model]` reads the setting from the package that declares the
+model. Every `DateTime<Utc>` field without a cast of its own then gets
+`AsNativeDateTime`, and every `Option<DateTime<Utc>>` field gets
+`AsOptionalNativeDateTime`, the managed `created_at`, `updated_at` and
+`deleted_at` included. The setting converts no column, so each value needs
+its own columns:
+
+| Value | Casts | Columns it needs |
+|---|---|---|
+| `"native"` | `AsNativeDateTime`, `AsOptionalNativeDateTime` | `TIMESTAMP` (what Laravel's `timestamps()` creates on MySQL) or `DATETIME` on MySQL, `timestamp with time zone` on Postgres, text on SQLite |
+| `"naive"` | `AsNaiveDateTime`, `AsOptionalNaiveDateTime` | `DATETIME` on MySQL, `timestamp` (what Laravel's `timestamps()` creates on Postgres) on Postgres, text on SQLite |
+
+Without the setting, the cast is `AsDateTime`, which needs a text column. A
+field whose column differs from the rest names its own cast, which wins:
+
+```rust
+#[model(
+    table = "imports",
+    casts = {
+        // A text column, in a package whose datetime_cast is "native".
+        received_at = AsDateTime,
+    },
+)]
+pub struct Import {
+    pub id: u64,
+    pub received_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+```
+
+A key or a value the framework doesn't know fails the build of the model and
+names it. A new project carries the setting commented out in `Cargo.toml`.
 
 Laravel's timestamp columns are nullable, and another application can leave
 them NULL. Declare such fields `Option<DateTime<Utc>>` with

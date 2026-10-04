@@ -19,6 +19,7 @@
 mod cases;
 mod catalog;
 mod laravel_cases;
+mod laravel_defaults;
 mod mysql;
 mod postgres;
 mod sqlite;

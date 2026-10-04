@@ -387,9 +387,9 @@ impl<'a> ColumnBuilder<'a> {
     /// no unsigned integers and keep the signed type, as Laravel does. On a
     /// column that is not an integer the migration fails.
     ///
-    /// On MySQL a model reads an unsigned column into an unsigned field:
-    /// `u64` for a `BIGINT UNSIGNED`, with `key_type = "u64"` on the model
-    /// when it is the primary key.
+    /// A model reads a `BIGINT UNSIGNED` column into a `u64` field, the
+    /// primary key included; the same field reads the signed column Postgres
+    /// and SQLite create.
     pub fn unsigned(self) -> Self {
         self.blueprint.set_unsigned(self.column);
         self

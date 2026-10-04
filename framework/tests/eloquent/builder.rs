@@ -891,15 +891,16 @@ async fn collection_model_keys_matches_the_builder_terminal() {
     assert_eq!(from_collection, vec![1_i64, 2]);
 }
 
-// A second model over the same physical table, deliberately declaring
-// its primary key as a TEXT column (`email`) while leaving `key_type`
-// at its default `i64`. `model_keys` has no way to notice that
-// mismatch at compile time - the whole point of this fixture is to
-// drive the runtime decode path into failure.
+// A second model over the same physical table, deliberately keyed by
+// the TEXT column `email` while declaring that field `i64`, so the key
+// type the model takes from the field disagrees with the column.
+// `model_keys` has no way to notice that mismatch at compile time - the
+// whole point of this fixture is to drive the runtime decode path into
+// failure.
 #[model(table = "t5_users", primary_key = "email", timestamps = false)]
 pub struct T5UserKeyedByEmail {
     pub id: i64,
-    pub email: String,
+    pub email: i64,
 }
 
 #[tokio::test]

@@ -99,7 +99,7 @@ configuration.
 |-----------|------|---------|-------|
 | `table` | string | snake_case-plural of struct name | Override the table name |
 | `primary_key` | string | `"id"` | Override the PK column name |
-| `key_type` | type | `i64` | PK type - `String` for UUID, `i32` for legacy schemas |
+| `key_type` | type | the primary-key field's type | Optional. The key type comes from the field `primary_key` names; a `key_type` that names another type fails the build |
 | `auto_increment` | bool | `true` | Disable for UUID PKs |
 | `connection` | string | `"default"` | Multi-connection apps name a non-default connection |
 | `fillable` | list of strings | (default = `guarded = ["id"]`) | Mass-assignment allowlist |
@@ -2919,13 +2919,25 @@ contract - primitive, temporal, structured, enum, encrypted, hashed,
 plus the `casts!` runtime override macro - lives in
 [Eloquent Casts, Accessors & Mutators](eloquent-mutators.md).
 
-### Explicit-only
+### Explicit, with two defaults
 
-Casts are declared in `#[model(casts = { ... })]` - there is no
-auto-detection from field types. A `prefs: Json` field doesn't
-implicitly become `AsJson`; you write `casts = { prefs = AsJson }`.
-Rationale: you should be able to read the model and know exactly
-what runs at storage boundaries. No magic.
+Casts are declared in `#[model(casts = { ... })]`. A `prefs: Json` field
+doesn't implicitly become `AsJson`; you write `casts = { prefs = AsJson }`.
+Rationale: you should be able to read the model and know exactly what runs
+at storage boundaries.
+
+Two field types get a cast without one, because they don't work without it.
+A field's own cast wins over both:
+
+- A `DateTime<Utc>` or `Option<DateTime<Utc>>` field gets `AsDateTime` or
+  `AsOptionalDateTime`, which store text. `datetime_cast` in the package's
+  `Cargo.toml` swaps them for the native casts; see
+  [Native date-time casts](eloquent-mutators.md#native-date-time-casts).
+- A `u64` or `Option<u64>` field, the key included, gets `AsU64` or
+  `AsOptionalU64`. SeaORM reads a `u64` on MySQL only; the cast reads it on
+  Postgres and SQLite too, where it holds `0` to `i64::MAX`. For more
+  information, see
+  [Laravel tables on MySQL](migrations.md#laravel-tables-on-mysql).
 
 ### Example
 
@@ -4441,13 +4453,13 @@ declarative-and-permanent visibility control, use the `#[model(hidden
 
 Suprnova's analogue of Laravel's `HasUuids` / `HasUlids` /
 `HasVersion4Uuids` trait family. Set the attribute, type the PK as
-`String`, and the macro auto-populates the ID before INSERT.
+`String`, and the macro auto-populates the ID before INSERT. The key type
+comes from the `String` field.
 
 ```rust
 #[model(
     table = "users",
     primary_key = "id",
-    key_type = "String",
     auto_increment = false,
     unique_id = "uuid",      // or "uuid_v4", "ulid"
 )]

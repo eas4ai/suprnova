@@ -29,6 +29,7 @@ mod model_attribute;
 mod multipart;
 mod notification_mail;
 mod observer;
+mod package_settings;
 mod policy;
 mod redirect;
 mod request;
@@ -303,6 +304,13 @@ pub fn service(attr: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// Accepts the same `flavor` and `worker_threads` arguments as
 /// `#[tokio::main]`.
+///
+/// It also reads `[package.metadata.suprnova.schema]` from the binary's
+/// `Cargo.toml` and installs it before anything else runs: with
+/// `unsigned_ids = true`, every migration the binary runs creates
+/// unsigned keys on MySQL from `id()` and `foreign_id()`
+/// (`suprnova::schema::Schema::use_unsigned_ids`). A key or value it does
+/// not know fails the build, naming it.
 ///
 /// ```rust,ignore
 /// use suprnova::Application;
@@ -926,7 +934,9 @@ pub fn derive_notification_mailable(input: TokenStream) -> TokenStream {
 ///   the struct's snake-case name (`User` → `users`).
 /// - `primary_key = "..."` - primary-key column name. Defaults to `"id"`.
 /// - `key_type = "..."` - primary-key Rust type (parsed as a `Type`).
-///   Defaults to `"i64"`.
+///   Optional: the key type is the type of the field `primary_key` names,
+///   and a `key_type` that names another type fails the build, naming
+///   both.
 /// - `auto_increment = true|false` - defaults to `true`.
 /// - `connection = "..."` - multi-connection routing identifier.
 ///   Defaults to `"default"`.
@@ -935,6 +945,15 @@ pub fn derive_notification_mailable(input: TokenStream) -> TokenStream {
 /// `created_at`, `updated_at`, `soft_deletes`, `soft_deletes_column`,
 /// `appends`, `hidden`, `visible`, `mutators`, `touches`) are parsed
 /// here but only consumed by later Phase 10A tasks.
+///
+/// # Package settings
+///
+/// The macro reads `[package.metadata.suprnova.model]` from the
+/// `Cargo.toml` of the package that declares the model.
+/// `datetime_cast = "native"` or `"naive"` gives every `DateTime<Utc>`
+/// and `Option<DateTime<Utc>>` field without a cast of its own the native
+/// or naive date-time cast, instead of the text `AsDateTime`. A key or
+/// value it does not know fails the build, naming it.
 ///
 /// # Example
 ///

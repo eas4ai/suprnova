@@ -60,22 +60,20 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         // materialisation fails at the driver boundary. The user's
         // struct keeps the runtime type; the From<...> impls in
         // derive_eloquent::emit bridge between the two via
-        // `Cast::to_storage` / `Cast::from_storage`. PK fields keep
-        // their declared type - PKs aren't cast-routed.
-        let field_ty = if !is_pk {
-            if let Some(cast_ty) = input.cast_for_field(&ident.to_string()) {
-                let alias = format_ident!("__Suprnova_Cast_Storage_{ident}");
-                // The alias is `pub` because the generated entity names it;
-                // it is plumbing, so it stays out of the model's rustdoc.
-                storage_aliases.push(quote! {
-                    #[doc(hidden)]
-                    #[allow(non_camel_case_types)]
-                    pub type #alias = <#cast_ty as ::suprnova::eloquent::casts::Cast>::Storage;
-                });
-                quote! { #alias }
-            } else {
-                quote! { #user_ty }
-            }
+        // `Cast::to_storage` / `Cast::from_storage`. A primary key is
+        // cast-routed too: a `u64` key is stored as `StoredU64`, which
+        // SeaORM reads on every database, and its `ValueType` is then
+        // that storage type.
+        let field_ty = if let Some(cast_ty) = input.cast_for_field(&ident.to_string()) {
+            let alias = format_ident!("__Suprnova_Cast_Storage_{ident}");
+            // The alias is `pub` because the generated entity names it;
+            // it is plumbing, so it stays out of the model's rustdoc.
+            storage_aliases.push(quote! {
+                #[doc(hidden)]
+                #[allow(non_camel_case_types)]
+                pub type #alias = <#cast_ty as ::suprnova::eloquent::casts::Cast>::Storage;
+            });
+            quote! { #alias }
         } else {
             quote! { #user_ty }
         };

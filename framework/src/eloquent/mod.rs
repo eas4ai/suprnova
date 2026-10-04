@@ -36,8 +36,8 @@ pub use casts::{
     AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat, AsHashed,
     AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsNaiveDateTime, AsNativeDateTime,
     AsObject, AsOptionalArray, AsOptionalArrayObject, AsOptionalCollection, AsOptionalDateTime,
-    AsOptionalJson, AsOptionalNaiveDateTime, AsOptionalNativeDateTime, AsOptionalObject, AsString,
-    AsTimestamp, Cast, DynCast, IntoDynCast,
+    AsOptionalJson, AsOptionalNaiveDateTime, AsOptionalNativeDateTime, AsOptionalObject,
+    AsOptionalU64, AsString, AsTimestamp, AsU64, Cast, DynCast, IntoDynCast, StoredU64,
 };
 pub use collection::Collection;
 pub use fillable::{
@@ -68,6 +68,20 @@ pub use timestamps::{
 };
 pub use unique_id::{HasUniqueId, UniqueIdKind};
 
+/// Holds when `Self` and `K` are one type. The `#[suprnova::model]` macro
+/// asserts it between the primary-key field's type and a `key_type`
+/// attribute spelled otherwise, so a `key_type` that disagrees with the
+/// field fails the build, naming both. Not part of the public API.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`key_type = \"{K}\"` disagrees with the primary-key field's type `{Self}`",
+    label = "`key_type` names `{K}`, the primary-key field is `{Self}`",
+    note = "remove `key_type`: the model takes the key type from the primary-key field"
+)]
+pub trait KeyTypeMatches<K> {}
+
+impl<T> KeyTypeMatches<T> for T {}
+
 /// The values a mass soft delete binds. Built by the `#[suprnova::model]`
 /// macro; not part of the public API.
 #[doc(hidden)]
@@ -89,8 +103,8 @@ pub trait EloquentModel: Sized {
     type Entity: crate::EntityTrait;
     /// Column enum for this model (`<inner_mod>::Column`).
     type Column;
-    /// The Rust type of this model's primary key - whatever
-    /// `#[model(key_type = "...")]` names (default `i64`).
+    /// The Rust type of this model's primary key: the primary-key field's
+    /// declared type, which `#[model(key_type = "...")]` may only repeat.
     ///
     /// Declared on the trait rather than derived from the SeaORM entity
     /// so a terminal that projects the key can name the type the
@@ -177,6 +191,17 @@ pub trait EloquentModel: Sized {
     #[doc(hidden)]
     fn bind_column(_column: &str, _value: &serde_json::Value) -> Option<sea_orm::Value> {
         None
+    }
+
+    /// Reads this model's key out of `row`, from the column `column`.
+    ///
+    /// The default decodes [`Self::Key`] straight from the row. The macro
+    /// overrides it when the key field has a cast, a `u64` key among them:
+    /// SeaORM decodes a `u64` on MySQL only, so the key is read through the
+    /// cast's storage type and converted.
+    #[doc(hidden)]
+    fn __decode_key(row: &sea_orm::QueryResult, column: &str) -> Result<Self::Key, sea_orm::DbErr> {
+        row.try_get::<Self::Key>("", column)
     }
 
     /// The value this model's `updated_at` column stores for `now`,
