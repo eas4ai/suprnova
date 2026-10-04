@@ -1102,7 +1102,14 @@ async fn connect(url: &str) -> Result<DatabaseConnection, FrameworkError> {
 
 /// Writes `contents` to `path` through a temporary file beside it, so an
 /// earlier file is replaced only by a complete one.
+///
+/// Each call stages its own file, created new under a name no other call
+/// holds, so two dumps to one path at once never write into each other's
+/// staging file: each rename moves a whole dump, and the last one stands.
+/// A staging file a failed call leaves is removed.
 fn write_replacing(path: &Path, contents: &str) -> Result<(), FrameworkError> {
+    use std::io::Write;
+
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -1114,14 +1121,55 @@ fn write_replacing(path: &Path, contents: &str) -> Result<(), FrameworkError> {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "schema.sql".to_owned());
-    let partial = path.with_file_name(format!(".{name}.partial"));
-    write(&partial, contents)?;
-    std::fs::rename(&partial, path).map_err(|e| {
-        FrameworkError::internal(format!(
-            "could not move the dump to {}: {e}",
-            path.display()
-        ))
-    })
+    let (partial, mut file) = create_staging_file(path, &name)?;
+    let staged = file
+        .write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|e| {
+            FrameworkError::internal(format!("could not write {}: {e}", partial.display()))
+        })
+        .and_then(|()| {
+            drop(file);
+            std::fs::rename(&partial, path).map_err(|e| {
+                FrameworkError::internal(format!(
+                    "could not move the dump to {}: {e}",
+                    path.display()
+                ))
+            })
+        });
+    if staged.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    staged
+}
+
+/// A new staging file beside `path`, named `.<name>.<pid>.<n>.partial`. It
+/// is created with `create_new`, so a name another call or process already
+/// holds is skipped rather than shared.
+fn create_staging_file(
+    path: &Path,
+    name: &str,
+) -> Result<(std::path::PathBuf, std::fs::File), FrameworkError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let partial = path.with_file_name(format!(".{name}.{}.{n}.partial", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)
+        {
+            Ok(file) => return Ok((partial, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(FrameworkError::internal(format!(
+                    "could not create {}: {e}",
+                    partial.display()
+                )));
+            }
+        }
+    }
 }
 
 fn read(path: &Path) -> Result<String, FrameworkError> {
@@ -1210,5 +1258,48 @@ mod tests {
                 ("PGSSLMODE", "require".to_owned())
             ]
         );
+    }
+
+    // DATA-058: replacements of one dump that run at the same time each
+    // stage their own file. They used to share `.<name>.partial`, so one
+    // writer truncated what another was about to rename, and a rename could
+    // find its staging file already moved.
+    #[test]
+    fn concurrent_replacements_of_one_dump_each_land_whole() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("schema.sql");
+        let payloads: Vec<String> = (0..8)
+            .map(|writer| format!("-- writer {writer}\n").repeat(150_000))
+            .collect();
+        std::thread::scope(|scope| {
+            let writers: Vec<_> = payloads
+                .iter()
+                .map(|payload| {
+                    let path = &path;
+                    scope.spawn(move || {
+                        for _ in 0..4 {
+                            write_replacing(path, payload)?;
+                        }
+                        Ok::<(), FrameworkError>(())
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer
+                    .join()
+                    .expect("a writer thread")
+                    .expect("every replacement succeeds");
+            }
+        });
+        let landed = std::fs::read_to_string(&path).expect("the dump");
+        assert!(
+            payloads.contains(&landed),
+            "the dump is one writer's whole file"
+        );
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("the directory")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        assert_eq!(left, ["schema.sql"], "no staging file is left behind");
     }
 }
