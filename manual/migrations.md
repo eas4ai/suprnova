@@ -1001,7 +1001,12 @@ dump is written or loaded, and `pg_dump` must be at least the server's
 major version. They reach the database the way your app does: the URL's
 TLS settings (`sslmode`, `sslrootcert`, `sslcert`, and `sslkey` for
 Postgres; `ssl-mode`, `ssl-ca`, `ssl-cert`, and `ssl-key` for MySQL and
-MariaDB) and its socket go with them. The password reaches them through
+MariaDB) and its socket go with them, in every spelling the app's
+connection accepts (`ssl-mode` and `ssl-root-cert` for Postgres,
+`sslmode` and `sslca` for MySQL, and so on). When a parameter appears in
+two spellings, the later one wins, as it does for the connection. A
+Postgres `password` parameter wins over the password in the URL's user
+part, as it does for the connection. The password reaches them through
 `PGPASSWORD` or a private option file, never through their arguments,
 and a password in `~/.my.cnf` does not replace it. A dump that fails
 leaves the earlier file as it was, and a load that fails runs no

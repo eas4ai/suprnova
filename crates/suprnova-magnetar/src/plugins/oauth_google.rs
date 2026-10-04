@@ -16,7 +16,9 @@
 //!   default; no quirk handler needed
 //!   ([`AuthorizationRequestShape::default`]/[`TokenRequestShape::default`]
 //!   are used unmodified).
-//! - **PKCE posture**: [`PkcePosture::Required`] (the 09 engine default).
+//! - **PKCE posture**:
+//!   [`PkcePosture::Required`](crate::oauth::PkcePosture::Required) (the 09
+//!   engine default).
 //! - **Identity source**: a userinfo `GET` the host performs against
 //!   `https://www.googleapis.com/oauth2/v3/userinfo`
 //!   (`framework/src/torii_integration/oauth.rs`'s well-known table), which

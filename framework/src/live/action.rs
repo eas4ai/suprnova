@@ -133,7 +133,8 @@ pub fn route_intent(
 /// Stable failure classes for authored registered-route intents.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RouteIntentErrorKind {
-    /// The named route was absent or its opaque identity was not unique.
+    /// The named route was absent, or two different route patterns shared
+    /// its opaque identity. Several names on one pattern are one route.
     RouteUnavailable,
     /// Parameters were not a bounded scalar object satisfying route placeholders.
     InvalidParameters,
@@ -252,7 +253,10 @@ pub(crate) async fn handle(request: Request) -> Response {
         Err(error) => return failure_response(error.kind(), &error),
     };
     let (service, completion) = runtime.endpoint_service(upload_context);
-    let (response, failure) = service.handle_reported(endpoint_request).await;
+    // Session-only fields the request's components staged reach the
+    // session only once the outcome is accepted, below.
+    let ((response, failure), staged_session) =
+        super::session_state::scope(service.handle_reported(endpoint_request)).await;
     let completed = response.status.is_success();
     let projected = project_response(response);
     if let Some(breach) = failure.and_then(|error| size_breach(&error)) {
@@ -268,6 +272,7 @@ pub(crate) async fn handle(request: Request) -> Response {
     if let Err(error) = completion.commit() {
         return failure_response(EndpointErrorKind::KernelUnavailable, &error);
     }
+    super::session_state::commit(staged_session);
     projected
 }
 

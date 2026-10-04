@@ -187,6 +187,30 @@ async fn db_seed_class_unknown_returns_not_found_error() {
     seed::clear();
 }
 
+/// A named class that nothing registered is not found whether or not other
+/// seeders exist. With an empty registry the command used to take the
+/// "nothing to run" path first and report success for work it never found.
+#[tokio::test]
+#[serial]
+async fn db_seed_class_on_an_empty_registry_returns_not_found_error() {
+    seed::clear();
+
+    let argv = vec![
+        "console".to_string(),
+        "db:seed".to_string(),
+        "--class=DoesNotExist".to_string(),
+    ];
+    let err = console::dispatch_argv(argv)
+        .await
+        .expect_err("a class nothing registered must fail the command");
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("no seeder registered for `DoesNotExist`"),
+        "expected not-found, got: {msg}"
+    );
+}
+
 // --- Progress reporting on a targeted run (Wave 6 T51) ------------------
 //
 // The lines themselves go to stdout, which the libtest harness owns, so

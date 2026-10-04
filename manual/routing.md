@@ -352,7 +352,11 @@ let profile = route("users.show", &[("id", "123")]);
 
 `route` returns `Option<String>` and percent-encodes parameter values
 into path-safe form (so `("slug", "a/b")` becomes `/posts/a%2Fb` -
-matchit-safe and round-trips through `req.param("slug")`). For redirect
+matchit-safe and round-trips through `req.param("slug")`). A catch-all
+segment such as `/files/{*rest}` takes its value under the name the
+handler reads it by, `rest`, and keeps its slashes:
+`route("files.show", &[("rest", "docs/a b.txt")])` returns
+`/files/docs/a%20b.txt`. For redirect
 targets and email links use the strict sibling `suprnova::routing::try_route`,
 which returns `Result<String, RouteUrlError>` and refuses to emit a URL
 containing an unfilled `{placeholder}` segment. See

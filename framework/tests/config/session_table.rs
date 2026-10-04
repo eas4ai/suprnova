@@ -52,3 +52,25 @@ fn a_valid_session_table_boots_and_reaches_the_session_config() {
 
     assert_eq!(SessionConfig::from_env().table_name, "app_sessions");
 }
+
+/// A boot that fails registers nothing. `Config::init` used to register
+/// `AppConfig` before it checked the rest, so a caller that handled the
+/// error kept a half-applied configuration.
+#[test]
+fn a_failed_boot_leaves_the_registered_configuration_alone() {
+    let _env = crate::env_lock::lock_env();
+    __reset_loaded_keys_for_tests();
+    let _snap = EnvSnapshot::capture(&["APP_NAME", "SESSION_TABLE"]);
+    suprnova::config::repository::register(
+        suprnova::AppConfig::builder()
+            .name("before-the-boot")
+            .build(),
+    );
+    set_env("APP_NAME", Some("from-the-failed-boot"));
+    set_env("SESSION_TABLE", Some("bad name"));
+
+    boot().expect_err("a bad session table fails the boot");
+
+    let app = suprnova::Config::get::<suprnova::AppConfig>().expect("an AppConfig is registered");
+    assert_eq!(app.name, "before-the-boot");
+}

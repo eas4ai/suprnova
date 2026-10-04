@@ -21,6 +21,7 @@ mod response;
 pub(crate) mod revocation;
 mod routes;
 mod runtime;
+pub(crate) mod session_state;
 mod ui_assets;
 pub(crate) use runtime::LiveMountRegistration;
 // `render_cache::RenderCache::install` derives its own `SnapshotKeyRing`

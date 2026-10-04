@@ -92,6 +92,17 @@ pub trait FactorVerifier: Send + Sync {
     /// Return whether this user has a confirmed second-factor enrollment.
     async fn has_confirmed_enrollment(&self, user_id: &str) -> Result<bool>;
 
+    /// Return whether this user has a second-factor enrollment at all,
+    /// confirmed or waiting for its confirmation.
+    ///
+    /// A host that keeps a second factor of its own asks this before it
+    /// enrolls one, so an account never holds both. The default answers for
+    /// confirmed enrollments only; verifiers that keep pending enrollments
+    /// override it.
+    async fn has_enrollment(&self, user_id: &str) -> Result<bool> {
+        self.has_confirmed_enrollment(user_id).await
+    }
+
     /// Read and verify a submitted code without consuming one-time state.
     async fn prepare_code(
         &self,

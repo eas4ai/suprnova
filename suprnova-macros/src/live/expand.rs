@@ -1,5 +1,5 @@
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{TokenStream as TokenStream2, TokenTree};
 
 pub(crate) fn finish(result: syn::Result<TokenStream2>) -> TokenStream {
     match result {
@@ -8,21 +8,36 @@ pub(crate) fn finish(result: syn::Result<TokenStream2>) -> TokenStream {
     }
 }
 
+/// Refuse generated code that names a development crate instead of the
+/// `::suprnova::live` facade an application depends on.
+///
+/// Only identifiers are paths. A string literal such as a component name,
+/// a view path or text in an action body is not a path, so it is not
+/// checked: `test_support.page` is a valid component name. The forbidden
+/// roots are the engine crate and its development crates, which all start
+/// with `suprnova_live`, and `$crate`, which only resolves inside the crate
+/// that defines a macro.
 pub(crate) fn enforce_runtime_path_contract(tokens: &TokenStream2) -> syn::Result<()> {
-    let source = tokens.to_string();
-    for forbidden in [
-        "suprnova_live",
-        "suprnova-live-macros",
-        "$crate",
-        "macro_fixture",
-        "test_support",
-    ] {
-        if source.contains(forbidden) {
+    let mut previous_dollar = false;
+    for tree in tokens.clone() {
+        let forbidden = match &tree {
+            TokenTree::Ident(ident) => {
+                let name = ident.to_string();
+                name.starts_with("suprnova_live") || (previous_dollar && name == "crate")
+            }
+            TokenTree::Group(group) => {
+                enforce_runtime_path_contract(&group.stream())?;
+                false
+            }
+            TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+        };
+        if forbidden {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
                 "generated runtime paths must use the final ::suprnova::live facade",
             ));
         }
+        previous_dollar = matches!(&tree, TokenTree::Punct(punct) if punct.as_char() == '$');
     }
     Ok(())
 }
@@ -57,7 +72,23 @@ mod tests {
     #[test]
     fn path_guard_rejects_development_runtime_names() {
         assert!(enforce_runtime_path_contract(&quote!(::suprnova_live::metadata)).is_err());
+        assert!(
+            enforce_runtime_path_contract(&quote!(::suprnova_live_test_support::host)).is_err()
+        );
+        assert!(enforce_runtime_path_contract(&quote!({ $crate::metadata })).is_err());
         assert!(enforce_runtime_path_contract(&quote!(::suprnova::live::metadata)).is_ok());
+    }
+
+    #[test]
+    fn path_guard_ignores_names_and_text_that_are_not_paths() {
+        assert!(
+            enforce_runtime_path_contract(&quote!(
+                ComponentName::parse("test_support.page");
+                ViewName::parse("live/macro_fixture/suprnova_live.html");
+                let crate_name = "suprnova-live-macros";
+            ))
+            .is_ok()
+        );
     }
 
     #[test]

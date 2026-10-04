@@ -243,12 +243,17 @@ where
         >,
     <S::User as EntityBinding>::Column: ColumnTrait,
 {
+    /// Stamp the user whose address is `identity` locked for this cycle.
+    /// A table whose identities are not addresses touches no user row.
     async fn lock_user_for_cycle(
         transaction: &DatabaseTransaction,
         identity: &str,
         locked_at: DateTime<Utc>,
         window_start: DateTime<Utc>,
     ) -> Result<bool> {
+        if !S::Lockout::IDENTITY_IS_EMAIL {
+            return Ok(false);
+        }
         let mut user = <S::User as EntityBinding>::ActiveModel::default();
         S::User::write_locked_at(&mut user, Some(locked_at));
         let lock_column = S::User::locked_at_column();
@@ -266,7 +271,12 @@ where
         Ok(update.rows_affected > 0)
     }
 
+    /// Clear the lock stamp of the user whose address is `identity`. A
+    /// table whose identities are not addresses touches no user row.
     async fn clear_user_lock(transaction: &DatabaseTransaction, identity: &str) -> Result<()> {
+        if !S::Lockout::IDENTITY_IS_EMAIL {
+            return Ok(());
+        }
         let mut user = <S::User as EntityBinding>::ActiveModel::default();
         S::User::write_locked_at(&mut user, None);
         let _ = <S::User as EntityBinding>::Entity::update_many()

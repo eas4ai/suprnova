@@ -335,6 +335,10 @@ An `OFFSET` on the builder positions the first page only, the page
 requested without a cursor. Every later page starts at its cursor, so
 an offset never skips rows between two pages.
 
+On a union, the cursor bounds the rows of the whole union, written as a
+derived table, so every arm is paged together. The first query keeps an
+ordering and a limit it had before `union`.
+
 ### Cursors are encrypted and authenticated
 
 Suprnova cursors are **not** Laravel's base64-JSON plaintext. The wire

@@ -15,9 +15,10 @@
 //!   (X API v2 OAuth 2.0 documentation); this provider builds that header
 //!   locally (pure computation, not I/O) and hands it to the injected
 //!   [`RevocationTransport`] rather than performing the request itself.
-//! - **PKCE posture**: [`PkcePosture::Required`] -- X mandates PKCE on
-//!   every client, confidential or not (the 09 engine default already
-//!   matches).
+//! - **PKCE posture**:
+//!   [`PkcePosture::Required`](crate::oauth::PkcePosture::Required) -- X
+//!   mandates PKCE on every client, confidential or not (the 09 engine
+//!   default already matches).
 //! - **Identity source**: a `GET` the host performs against
 //!   `https://api.twitter.com/2/users/me?user.fields=profile_image_url`,
 //!   whose body wraps the profile in a `data` object

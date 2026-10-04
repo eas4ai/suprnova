@@ -223,6 +223,12 @@ user.roles().detach(role.id).await?;
 user.roles().sync([role_a.id, role_b.id, role_c.id]).await?;
 ```
 
+Extra pivot columns go through the pivot model's casts and mutators, as
+`Model::create` does: a column the pivot declares `AsEncrypted` is
+stored encrypted, and reads back through `r.pivot::<RoleUser>()` as the
+plain value. A key the pivot model does not declare is written as it
+is.
+
 `sync` reads the current pivot set, computes
 `attach_set = ids - current` and `detach_set = current - ids`, and
 runs the deltas inside a transaction. Duplicates in the input set
@@ -400,7 +406,8 @@ across the join, fall back to two explicit relation hops.
 Through relations filter both the intermediate and the target by their
 soft-delete column when those models declare `#[model(soft_deletes)]`,
 matching Laravel's `hasManyThrough`: trashed rows on either side stay
-out of the join.
+out of the join. Eager loads (`with(["posts"])`), counts and aggregates
+of a Through relation leave out the same rows.
 
 To include trashed rows, query the two hops yourself: load the
 intermediate models through their own relation, then query the target
@@ -801,6 +808,13 @@ for u in &users {
     );
 }
 ```
+
+A count or an aggregate covers the rows `with` would load: the related
+model's soft-delete filter and its global scopes apply, so a trashed
+post is neither counted nor summed. A `HasManyThrough` count also
+leaves out rows reached through a trashed intermediate. The count of a
+many-to-many relation counts its pivot rows, the attachments, as
+`user.roles().count()` does.
 
 See [Eloquent → Eager loading → Cache layout](eloquent.md#cache-layout)
 for the full storage contract.

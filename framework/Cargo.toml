@@ -125,7 +125,7 @@ multer = "3"
 reqsign-aws-v4 = { version = "3.0.0", git = "https://github.com/apache/opendal-reqsign.git", rev = "b49cd2996b9d2d9944e84481f8835ff55b188b97", optional = true, default-features = false }
 reqsign-core = { version = "3.0.1", git = "https://github.com/apache/opendal-reqsign.git", rev = "b49cd2996b9d2d9944e84481f8835ff55b188b97", optional = true, default-features = false }
 reqsign-file-read-tokio = { version = "3.0.1", git = "https://github.com/apache/opendal-reqsign.git", rev = "b49cd2996b9d2d9944e84481f8835ff55b188b97", optional = true, default-features = false }
-opendal = { version = "0.58.0", git = "https://github.com/eas4ai/opendal.git", rev = "88717391eb72c9839d3f8e79fccad9f22fc3a1b4", optional = true, default-features = false, features = [
+opendal = { version = "0.58.0", git = "https://github.com/eas4ai/opendal.git", rev = "83f5a495a11f40885af02c3306fec0e1fda06bc2", optional = true, default-features = false, features = [
     "services-fs",
     "services-s3",
     "services-memory",
@@ -512,6 +512,10 @@ path = "tests/live/dogfood_forms.rs"
 [[test]]
 name = "live_dogfood_server"
 path = "tests/live/dogfood_server.rs"
+
+[[test]]
+name = "live_session_fields"
+path = "tests/live/session_fields.rs"
 
 [[test]]
 name = "live_assets"

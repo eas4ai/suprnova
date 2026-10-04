@@ -694,6 +694,7 @@ fn gate_contains_required_checks_and_delegates_feature_matrix_with_live_env_gati
         "cargo check --all-targets --all-features",
         "cargo fmt --all -- --check",
         "cargo clippy --all-targets --all-features",
+        "RUSTC_BOOTSTRAP=1 cargo rustdoc --lib --all-features -- -Z unstable-options --output-format json",
         "cargo nextest run --profile ci --all-features",
         "cargo test --doc --all-features",
         "cargo nextest run --profile ci --test concurrency --all-features",

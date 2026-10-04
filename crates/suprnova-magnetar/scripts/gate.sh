@@ -92,6 +92,12 @@ cargo fmt --all -- --check
 printf 'Running lint check...\n'
 cargo clippy --all-targets --all-features
 
+# The crate root denies broken and private intra-doc links, and only rustdoc
+# checks them. The JSON renderer runs those lints without the much heavier
+# HTML pass; it is unstable output, hence RUSTC_BOOTSTRAP.
+printf 'Running rustdoc link check...\n'
+RUSTC_BOOTSTRAP=1 cargo rustdoc --lib --all-features -- -Z unstable-options --output-format json
+
 # PostgreSQL and MySQL suites are manual `#[ignore]`d qualification tests.
 # Run their individual test targets while changing a backend-specific boundary;
 # the permanent gate stays self-contained and never requires live services.

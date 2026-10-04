@@ -21,9 +21,10 @@
 //!   have caught.
 //! - **Client authentication**: [`ClientAuthentication::RequestBody`] (the
 //!   RFC 6749 default; no quirk handler needed for the request shapes).
-//! - **PKCE posture**: [`PkcePosture::Required`] -- the 09 engine default
-//!   stands. Meta's own manually-built login flow reference does not
-//!   *mention* `code_challenge`/`code_verifier`
+//! - **PKCE posture**:
+//!   [`PkcePosture::Required`](crate::oauth::PkcePosture::Required) -- the
+//!   09 engine default stands. Meta's own manually-built login flow
+//!   reference does not *mention* `code_challenge`/`code_verifier`
 //!   (`developers.facebook.com/documentation/facebook-login/guides/advanced/manual-flow`),
 //!   but that is silence, not evidence of rejection, and 09's rule places
 //!   the burden on the latter ("default-on stands unless live evidence
