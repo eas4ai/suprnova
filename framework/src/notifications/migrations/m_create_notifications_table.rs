@@ -12,7 +12,10 @@
 //!   keys share one schema without per-driver casting.
 //! - `data` is `TEXT` holding the JSON payload. MySQL `TEXT` holds 65,535
 //!   bytes, more than any realistic notification.
-//! - The timestamps are `TIMESTAMP` without a zone; the channel writes UTC.
+//! - The timestamps are `DATETIME` (`timestamp` on Postgres) without a
+//!   zone; the channel writes UTC. Not MySQL's `TIMESTAMP`, which refuses
+//!   any time after 2038-01-19. Tables this migration created before have
+//!   `TIMESTAMP` there, and the read helpers read both.
 
 use sea_orm_migration::prelude::*;
 
@@ -60,15 +63,15 @@ impl MigrationTrait for Migration {
                             .not_null(),
                     )
                     .col(ColumnDef::new(Notifications::Data).text().not_null())
-                    .col(ColumnDef::new(Notifications::ReadAt).timestamp().null())
+                    .col(ColumnDef::new(Notifications::ReadAt).date_time().null())
                     .col(
                         ColumnDef::new(Notifications::CreatedAt)
-                            .timestamp()
+                            .date_time()
                             .not_null(),
                     )
                     .col(
                         ColumnDef::new(Notifications::UpdatedAt)
-                            .timestamp()
+                            .date_time()
                             .not_null(),
                     )
                     .to_owned(),

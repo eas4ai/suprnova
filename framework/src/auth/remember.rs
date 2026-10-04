@@ -114,10 +114,8 @@ pub const COOKIE_NAME: &str = "remember_me";
 
 /// The columns verification and revocation read from a token row.
 ///
-/// The time columns are left out on purpose. The queries filter on
-/// `expires_at` in SQL, and older scaffolds created it with `.timestamp()`:
-/// `TIMESTAMP` on MySQL and MariaDB, which the public [`entity::Model`]'s
-/// `NaiveDateTime` cannot decode there.
+/// The time columns are left out: the queries filter on `expires_at` in
+/// SQL and never need its value.
 #[derive(FromQueryResult)]
 struct TokenRow {
     id: i64,
@@ -177,15 +175,46 @@ pub async fn generate_token() -> Result<(String, String, String), FrameworkError
     Ok((selector, verifier_plaintext, verifier_hash))
 }
 
+/// `ttl_minutes` as a lifetime, and the moment a token issued now with it
+/// expires.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] naming the lifetime when no date can hold
+/// it: the minutes overflow a duration, or the expiry runs past the dates
+/// the clock represents. `ttl_minutes` comes from configuration and from
+/// callers of the public API, so a value that large is an error, not a
+/// panic.
+pub(crate) fn remember_expiry(
+    ttl_minutes: i64,
+) -> Result<(Duration, chrono::DateTime<chrono::Utc>), FrameworkError> {
+    Duration::try_minutes(ttl_minutes)
+        .and_then(|lifetime| {
+            crate::clock::now()
+                .checked_add_signed(lifetime)
+                .map(|expires_at| (lifetime, expires_at))
+        })
+        .ok_or_else(|| {
+            FrameworkError::internal(format!(
+                "remember-me lifetime of {ttl_minutes} minutes runs past the dates the clock can hold"
+            ))
+        })
+}
+
 /// Issue a new remember token for `user_id`. Inserts a row keyed on a
 /// random selector and storing the bcrypt hash of the verifier;
 /// returns the composite plaintext `"{selector}.{verifier}"` to the
 /// caller. The caller is responsible for shipping the plaintext to the
 /// client (via the session middleware's pending-cookies slot, set by
 /// `Auth::login_remember`).
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] when `ttl_minutes` puts the expiry outside
+/// the dates the clock can hold, or when hashing or the database fails.
 pub async fn issue(user_id: &str, ttl_minutes: i64) -> Result<String, FrameworkError> {
+    let (_, expires_at) = remember_expiry(ttl_minutes)?;
     let (selector, verifier_plaintext, verifier_hash) = generate_token().await?;
-    let expires_at = crate::clock::now() + Duration::minutes(ttl_minutes);
     let now = crate::clock::now();
 
     let conn = DB::connection()?;
@@ -194,8 +223,8 @@ pub async fn issue(user_id: &str, ttl_minutes: i64) -> Result<String, FrameworkE
         user_id: Set(user_id.to_string()),
         selector: Set(selector.clone()),
         token_hash: Set(verifier_hash),
-        expires_at: Set(storable_expiry(backend, expires_at.naive_utc())),
-        created_at: Set(now.naive_utc()),
+        expires_at: Set(storable_expiry(backend, expires_at.naive_utc()).into()),
+        created_at: Set(now.into()),
         last_used_at: Set(None),
         ..Default::default()
     };
@@ -423,11 +452,11 @@ pub async fn prune_expired() -> Result<u64, FrameworkError> {
 /// - `created_at`   DATETIME not null
 /// - `last_used_at` DATETIME null - currently informational (rotation deletes the row before update)
 ///
-/// The time columns may be `TIMESTAMP` or `DATETIME` (`timestamp` or
-/// `timestamptz` on Postgres). The functions above work with each, but
-/// `Model`'s `NaiveDateTime` fields decode only from `DATETIME` on MySQL
-/// and `timestamp` on Postgres, so reading whole rows through this entity
-/// fails on the other types.
+/// Older scaffolds created the time columns as `TIMESTAMP` on MySQL and
+/// MariaDB, and a table may have `timestamptz` on Postgres. The fields are
+/// [`StoredDateTime`](crate::database::StoredDateTime), which reads each of
+/// those as well as `DATETIME`, `timestamp` and SQLite text, so a
+/// whole-row read through this entity works on every one.
 pub mod entity {
     use sea_orm::entity::prelude::*;
 
@@ -446,11 +475,11 @@ pub mod entity {
         /// Bcrypt hash of the verifier - the private half of the token.
         pub token_hash: String,
         /// TTL boundary; the cookie is rejected once `now > expires_at`.
-        pub expires_at: chrono::NaiveDateTime,
+        pub expires_at: crate::database::StoredDateTime,
         /// Wall-clock time the token row was created.
-        pub created_at: chrono::NaiveDateTime,
+        pub created_at: crate::database::StoredDateTime,
         /// Informational; current rotation strategy deletes the row instead of updating this.
-        pub last_used_at: Option<chrono::NaiveDateTime>,
+        pub last_used_at: Option<crate::database::StoredDateTime>,
     }
 
     /// SeaORM relation enum - `remember_tokens` is a leaf table with no
@@ -488,5 +517,21 @@ mod tests {
             !hashing::verify(&ver2, &hash).expect("verify"),
             "wrong verifier must not verify"
         );
+    }
+
+    /// A lifetime no date can hold is an error, not a panic: `i64::MAX`
+    /// minutes overflows the duration, and a smaller one that fits the
+    /// duration still runs past the last date chrono represents.
+    #[tokio::test]
+    async fn issue_refuses_a_lifetime_no_date_can_hold() {
+        for ttl_minutes in [i64::MAX, i64::MIN, 100_000_000_000_000] {
+            let outcome = tokio::spawn(issue("overflow-user", ttl_minutes)).await;
+            // The error names the lifetime: no database is registered here,
+            // so any other error would come from a later step.
+            assert!(
+                matches!(&outcome, Ok(Err(error)) if error.to_string().contains("lifetime")),
+                "ttl_minutes {ttl_minutes} must return an error, got {outcome:?}"
+            );
+        }
     }
 }
