@@ -1476,11 +1476,13 @@ impl AsyncRuntime {
                     return Err("engine_sequence_state_invalid");
                 }
                 if case == "replay-overflow" {
-                    let mut transcript = Vec::with_capacity(MAX_REPLAY_TRANSCRIPT_ENVELOPES + 1);
-                    for offset in 0..=MAX_REPLAY_TRANSCRIPT_ENVELOPES {
-                        let offset = u64::try_from(offset).map_err(|_| "engine_replay_invalid")?;
-                        transcript.push(engine.envelope(&authorization, sequence + offset + 1)?);
-                    }
+                    // The engine refuses a transcript one past its maximum on
+                    // the count, before it reads a single envelope, so the
+                    // transcript repeats one validated envelope. Validating
+                    // every one is a canonical encode and decode each, which
+                    // took seconds in all on an async worker under this lock.
+                    let envelope = engine.envelope(&authorization, sequence + 1)?;
+                    let transcript = vec![envelope; MAX_REPLAY_TRANSCRIPT_ENVELOPES + 1];
                     let error = match transport.document.admit_replay(
                         &authorization,
                         transcript,
@@ -2133,6 +2135,64 @@ mod tests {
             transport
         );
         drop(reader);
+        runtime.retire().await.expect("runtime retires");
+        assert_eq!(resources.current(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replay_overflow_is_refused_on_its_count_without_seconds_of_work() {
+        let resources = Arc::new(ResourceCounter::default());
+        let runtime = AsyncRuntime::new(ReferenceFaultSchedule::None, Arc::clone(&resources))
+            .await
+            .expect("async runtime");
+        let created = runtime
+            .create(
+                TransportCreateRequest {
+                    kind: "sse".to_owned(),
+                    position: None,
+                    prior_subscription: None,
+                    subscription: "orders".to_owned(),
+                    transport_generation: 1,
+                },
+                "http://127.0.0.1:4197",
+            )
+            .await
+            .expect("transport");
+        let transport = created["transport"].as_str().expect("transport");
+        let membership = &created["memberships"][0];
+        runtime
+            .membership(
+                transport,
+                membership["subscription"].as_str().expect("subscription"),
+                MembershipRequest {
+                    authority: membership["authority"]
+                        .as_str()
+                        .expect("authority")
+                        .to_owned(),
+                    control_nonce: "replay-overflow-subscribe".to_owned(),
+                    operation: "subscribe".to_owned(),
+                    transport_generation: 1,
+                },
+            )
+            .await
+            .expect("subscribed membership");
+
+        // The control runs synchronously on an async worker while it holds
+        // the runtime's lock, so its cost is time that worker and every other
+        // async route spend waiting. Building the full over-limit transcript
+        // took seconds in a debug build; the refusal itself takes
+        // milliseconds.
+        let started = std::time::Instant::now();
+        let outcome = runtime
+            .adversarial_delivery(transport, "replay-overflow")
+            .expect("replay-overflow outcome");
+        let elapsed = started.elapsed();
+        assert_eq!(outcome.disposition, "invalid_envelope");
+        assert_eq!(outcome.recovery, "fresh_render");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the replay-overflow control took {elapsed:?}"
+        );
         runtime.retire().await.expect("runtime retires");
         assert_eq!(resources.current(), 0);
     }
