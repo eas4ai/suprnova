@@ -414,3 +414,160 @@ async fn password_reset_keeps_a_verification_made_while_it_ran() {
         "the newer verification survives"
     );
 }
+
+// ---- Password writes independent of mutators and serialization -------------
+
+/// The manual's mutator example: every mass-assigned password is trimmed,
+/// checked and hashed.
+#[model(
+    table = "mutated_users",
+    fillable = ["email", "password"],
+    mutators = ["password"]
+)]
+pub struct MutatedUser {
+    pub id: i64,
+    pub email: String,
+    pub password: String,
+    pub email_verified_at: Option<DateTime<Utc>>,
+}
+
+impl MutatedUser {
+    #[suprnova::mutator]
+    pub fn set_password(
+        &mut self,
+        value: serde_json::Value,
+    ) -> Result<(), suprnova::FrameworkError> {
+        let raw: String = serde_json::from_value(value)
+            .map_err(|e| suprnova::FrameworkError::validation("password", format!("{e}")))?;
+        let trimmed = raw.trim().to_string();
+        if trimmed.len() < 12 {
+            return Err(suprnova::FrameworkError::validation(
+                "password",
+                "must be at least 12 characters",
+            ));
+        }
+        self.password = suprnova::hashing::hash(&trimmed)?;
+        Ok(())
+    }
+}
+
+/// A model that keeps its password hash out of every serialized form.
+#[model(table = "quiet_users", fillable = ["email"])]
+pub struct QuietUser {
+    pub id: i64,
+    pub email: String,
+    #[serde(skip_serializing)]
+    pub password: String,
+    pub email_verified_at: Option<DateTime<Utc>>,
+}
+
+macro_rules! auth_flow_user {
+    ($model:ty) => {
+        impl Authenticatable for $model {
+            fn get_auth_identifier(&self) -> String {
+                self.id.to_string()
+            }
+            fn get_auth_password(&self) -> Option<&str> {
+                Some(&self.password)
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+            fn into_arc_any(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn Any + Send + Sync> {
+                self
+            }
+        }
+
+        impl MustVerifyEmail for $model {
+            fn email(&self) -> &str {
+                &self.email
+            }
+            fn email_verified_at(&self) -> Option<DateTime<Utc>> {
+                self.email_verified_at
+            }
+            fn set_email_verified_at(&mut self, v: Option<DateTime<Utc>>) {
+                self.email_verified_at = v;
+            }
+        }
+
+        impl CanResetPassword for $model {
+            fn email_for_reset(&self) -> &str {
+                &self.email
+            }
+            fn set_password_hash(&mut self, hash: &str) {
+                self.password = hash.to_string();
+            }
+        }
+    };
+}
+
+auth_flow_user!(MutatedUser);
+auth_flow_user!(QuietUser);
+
+async fn user_table(table: &str) -> TestDatabase {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(&format!(
+        "CREATE TABLE {table} (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            email TEXT NOT NULL, \
+            password TEXT NOT NULL, \
+            email_verified_at TEXT, \
+            created_at TEXT, \
+            updated_at TEXT\
+         )"
+    ))
+    .await
+    .unwrap();
+    db.execute_unprepared(&format!(
+        "INSERT INTO {table} (email, password) VALUES ('reset@b.com', 'old-hash')"
+    ))
+    .await
+    .unwrap();
+    db
+}
+
+/// A password reset hands the provider a finished hash. It must be stored
+/// as it is: run through the manual's hashing mutator it becomes the hash
+/// of a hash, and the new password never works.
+#[tokio::test]
+async fn a_password_reset_stores_the_hash_verbatim_through_a_mutator() {
+    let _db = user_table("mutated_users").await;
+    let p = EloquentUserProvider::<MutatedUser>::new();
+    let hash = suprnova::hash("brand-new-password").unwrap();
+
+    p.set_password("1", &hash).await.unwrap();
+
+    let stored = <MutatedUser as suprnova::Model>::find(1_i64)
+        .await
+        .unwrap()
+        .expect("user 1");
+    assert_eq!(stored.password, hash, "the hash is stored verbatim");
+    let user = p.retrieve_by_id("1").await.unwrap().expect("user 1");
+    assert!(
+        p.validate_credentials(
+            &*user,
+            &Credentials::password("reset@b.com", "brand-new-password").as_value()
+        )
+        .await
+        .unwrap(),
+        "the reset password signs in"
+    );
+}
+
+/// The write does not depend on how the model serializes: a password the
+/// model never serializes is still written.
+#[tokio::test]
+async fn a_password_reset_writes_a_column_the_model_never_serializes() {
+    let _db = user_table("quiet_users").await;
+    let p = EloquentUserProvider::<QuietUser>::new();
+
+    p.set_password("1", "new-hash").await.unwrap();
+    p.mark_email_verified("1").await.unwrap();
+
+    let stored = <QuietUser as suprnova::Model>::find(1_i64)
+        .await
+        .unwrap()
+        .expect("user 1");
+    assert_eq!(stored.password, "new-hash");
+    assert!(stored.email_verified_at.is_some());
+}

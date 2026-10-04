@@ -27,7 +27,7 @@ use serde_json::Value;
 use super::authenticatable::Authenticatable;
 use super::must_verify_email::{AuthFlowUser, CanResetPassword, MustVerifyEmail};
 use super::provider::UserProvider;
-use crate::eloquent::{Attrs, EagerLoadDispatch, Model};
+use crate::eloquent::{EagerLoadDispatch, Model};
 use crate::error::FrameworkError;
 use crate::hashing;
 
@@ -274,9 +274,8 @@ where
     async fn set_password(&self, id: &str, hashed: &str) -> Result<(), FrameworkError> {
         // Absent id → no-op.
         if let Some(user) = self.find_by_identifier(id).await? {
-            // `hashed` arrives ALREADY HASHED - store it verbatim. The write
-            // runs unguarded, so the password column persists regardless of
-            // fillable/guarded.
+            // `hashed` arrives ALREADY HASHED - store it verbatim: the write
+            // bypasses mutators and fillable/guarded alike.
             write_changed_columns(user, |user| user.set_password_hash(hashed)).await?;
         }
         Ok(())
@@ -301,12 +300,11 @@ where
 /// admission does not serialize writes to one user, so the write itself
 /// must be narrow.
 ///
-/// `change` runs on a copy of the row. The columns whose serialized value
-/// it changed go through [`Model::update`], which writes only those columns
-/// (and bumps `updated_at`) and still fires the model lifecycle
-/// (Updating/Saving/Updated/Saved) for observers and audit. The update runs
-/// unguarded: these columns are written by the framework on the user's
-/// behalf, not mass-assigned from a request.
+/// The value is written exactly as `change` sets it - a finished password
+/// hash must not pass through a hashing mutator again - and whatever the
+/// model's serde attributes say; see
+/// [`crate::eloquent::model::save_changed_columns`]. The model lifecycle
+/// events still fire for observers and audit.
 async fn write_changed_columns<M>(
     user: M,
     change: impl FnOnce(&mut M),
@@ -323,31 +321,8 @@ where
     <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
-    let before = serialized_columns(&user)?;
     let mut changed = user.clone();
     change(&mut changed);
-    let after = serialized_columns(&changed)?;
-
-    let mut attrs = Attrs::new();
-    for (column, value) in after {
-        if before.get(&column) != Some(&value) {
-            attrs.insert(column, value);
-        }
-    }
-    crate::eloquent::unguarded(|| user.update(attrs)).await?;
+    crate::eloquent::model::save_changed_columns(&user, changed).await?;
     Ok(())
-}
-
-fn serialized_columns<M: Serialize>(
-    user: &M,
-) -> Result<serde_json::Map<String, Value>, FrameworkError> {
-    match serde_json::to_value(user) {
-        Ok(Value::Object(columns)) => Ok(columns),
-        Ok(_) => Err(FrameworkError::internal(
-            "user model did not serialize to an object of columns",
-        )),
-        Err(error) => Err(FrameworkError::internal(format!(
-            "serialize user model: {error}"
-        ))),
-    }
 }
