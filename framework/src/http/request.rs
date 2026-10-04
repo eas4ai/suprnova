@@ -1,5 +1,8 @@
 use super::ParamError;
-use super::body::{collect_body_with_cap, global_max_request_body_bytes, parse_form, parse_json};
+use super::body::{
+    collect_body_with_cap, global_max_request_body_bytes, is_form_urlencoded, parse_form,
+    parse_json,
+};
 use super::cookie::parse_cookies;
 use super::trusted_proxies::TrustedProxiesConfig;
 use crate::error::FrameworkError;
@@ -1204,7 +1207,9 @@ impl Request {
 
     /// Return the list of acceptable content types in priority order,
     /// derived from the `Accept` header (q-value sorted descending).
-    /// Mirrors Laravel's `Request::getAcceptableContentTypes()`.
+    /// Mirrors Laravel's `Request::getAcceptableContentTypes()`, except
+    /// that a range weighted `q=0` is left out: RFC 9110 12.4.2 defines
+    /// that weight as "not acceptable", where Laravel lists it.
     pub fn acceptable_content_types(&self) -> Vec<String> {
         let raw = match self.header("Accept") {
             Some(v) => v,
@@ -1213,23 +1218,44 @@ impl Request {
         parse_accept(raw)
     }
 
+    /// Every range of the `Accept` header, refused ones included.
+    ///
+    /// The helpers below need both halves: the refused ranges to decide
+    /// whether a type is refused, and the full count to tell "no Accept
+    /// header" (anything goes) from "every listed type was refused"
+    /// (nothing goes).
+    fn accept_header_ranges(&self) -> Vec<AcceptRange> {
+        self.header("Accept").map(accept_ranges).unwrap_or_default()
+    }
+
     /// Determine if the request accepts ANY of the given content
     /// types. Mirrors Laravel's `Request::accepts($contentTypes)`.
+    ///
+    /// A type refused with `q=0` is not accepted, also when a wildcard
+    /// such as `*/*` would otherwise cover it: the most specific matching
+    /// range decides a type's weight (RFC 9110 12.5.1).
     pub fn accepts(&self, content_types: &[&str]) -> bool {
-        let accepts = self.acceptable_content_types();
-        if accepts.is_empty() {
+        let ranges = self.accept_header_ranges();
+        if ranges.is_empty() {
             return true;
         }
-        for accept in &accepts {
-            let bare = accept.split(';').next().unwrap_or(accept).trim();
-            if bare == "*/*" || bare == "*" {
-                return true;
+        for range in ranges.iter().filter(|range| range.q > 0.0) {
+            let accept_lc = range.media.as_str();
+            if accept_lc == "*/*" || accept_lc == "*" {
+                if content_types.is_empty()
+                    || content_types
+                        .iter()
+                        .any(|ty| !refuses(&ranges, &ty.to_ascii_lowercase()))
+                {
+                    return true;
+                }
+                continue;
             }
-            let accept_lc = bare.to_ascii_lowercase();
             for ty in content_types {
                 let ty_lc = ty.to_ascii_lowercase();
-                if Self::matches_type(&accept_lc, &ty_lc)
-                    || accept_lc == format!("{}/*", ty_lc.split('/').next().unwrap_or(""))
+                if (Self::matches_type(accept_lc, &ty_lc)
+                    || accept_lc == format!("{}/*", ty_lc.split('/').next().unwrap_or("")))
+                    && !refuses(&ranges, &ty_lc)
                 {
                     return true;
                 }
@@ -1240,19 +1266,23 @@ impl Request {
 
     /// Pick the most suitable response content type from the offered
     /// list, based on the request's `Accept` header. Returns `None`
-    /// when none match. Mirrors Laravel's `Request::prefers($types)`.
+    /// when none match. Mirrors Laravel's `Request::prefers($types)`,
+    /// except that a type the header refuses with `q=0` is never picked.
     pub fn prefers(&self, content_types: &[&str]) -> Option<String> {
-        let accepts = self.acceptable_content_types();
-        for accept in &accepts {
-            let bare = accept.split(';').next().unwrap_or(accept).trim();
-            if bare == "*/*" || bare == "*" {
-                return content_types.first().map(|s| s.to_string());
+        let ranges = self.accept_header_ranges();
+        for range in ranges.iter().filter(|range| range.q > 0.0) {
+            let accept_lc = range.media.as_str();
+            if accept_lc == "*/*" || accept_lc == "*" {
+                return content_types
+                    .iter()
+                    .find(|ty| !refuses(&ranges, &ty.to_ascii_lowercase()))
+                    .map(|s| s.to_string());
             }
-            let accept_lc = bare.to_ascii_lowercase();
             for ty in content_types {
                 let ty_lc = ty.to_ascii_lowercase();
-                if Self::matches_type(&ty_lc, &accept_lc)
-                    || accept_lc == format!("{}/*", ty_lc.split('/').next().unwrap_or(""))
+                if (Self::matches_type(&ty_lc, accept_lc)
+                    || accept_lc == format!("{}/*", ty_lc.split('/').next().unwrap_or("")))
+                    && !refuses(&ranges, &ty_lc)
                 {
                     return Some((*ty).to_string());
                 }
@@ -1263,12 +1293,16 @@ impl Request {
 
     /// Returns `true` when the request accepts any content type
     /// (no Accept header, or `*/*` / `*` as the top preference).
-    /// Mirrors Laravel's `Request::acceptsAnyContentType()`.
+    /// Mirrors Laravel's `Request::acceptsAnyContentType()`. A header
+    /// whose every range is refused accepts nothing, not anything.
     pub fn accepts_any_content_type(&self) -> bool {
-        let acceptable = self.acceptable_content_types();
-        acceptable.is_empty()
+        let ranges = self.accept_header_ranges();
+        ranges.is_empty()
             || matches!(
-                acceptable.first().map(|s| s.as_str()),
+                ranges
+                    .iter()
+                    .find(|range| range.q > 0.0)
+                    .map(|range| range.raw.as_str()),
                 Some("*/*") | Some("*")
             )
     }
@@ -1470,7 +1504,7 @@ impl Request {
     pub fn cached_form_field(&self, name: &str) -> Option<String> {
         let bytes = self.cached_body()?;
         let content_type = self.header("content-type").unwrap_or_default();
-        if !content_type.starts_with("application/x-www-form-urlencoded") {
+        if !is_form_urlencoded(content_type) {
             return None;
         }
         let mut found = None;
@@ -1539,7 +1573,7 @@ impl Request {
         let (parts, bytes) = self.body_bytes().await?;
 
         match parts.content_type.as_deref() {
-            Some(ct) if ct.starts_with("application/x-www-form-urlencoded") => parse_form(&bytes),
+            Some(ct) if is_form_urlencoded(ct) => parse_form(&bytes),
             _ => parse_json(&bytes),
         }
     }
@@ -1624,15 +1658,38 @@ fn port_of(host: &str) -> Option<u16> {
     suffix.parse().ok()
 }
 
-/// Parse an `Accept` header into a list of content types in priority
-/// order. Bare media types (no `q=`) are kept in source order ahead of
-/// any explicitly lower-q items. Mirrors Symfony's `AcceptHeader`
-/// q-sort, simplified to the subset Laravel exposes.
+/// Parse an `Accept` header into a list of acceptable content types in
+/// priority order. Bare media types (no `q=`) are kept in source order
+/// ahead of any explicitly lower-q items. Mirrors Symfony's
+/// `AcceptHeader` q-sort, simplified to the subset Laravel exposes.
+///
+/// A range weighted `q=0`, or clamped to it, is left out: RFC 9110
+/// 12.4.2 defines that weight as "not acceptable".
+fn parse_accept(raw: &str) -> Vec<String> {
+    accept_ranges(raw)
+        .into_iter()
+        .filter(|range| range.q > 0.0)
+        .map(|range| range.raw)
+        .collect()
+}
+
+/// One media range of an `Accept` header.
+struct AcceptRange {
+    /// The range as sent, parameters included (`text/html;q=0.9`).
+    raw: String,
+    /// The bare range, lowercased (`text/html`).
+    media: String,
+    /// Its weight, clamped to `[0.0, 1.0]`.
+    q: f32,
+}
+
+/// Every range of an `Accept` header, refused ones included, sorted by
+/// weight with source order breaking ties.
 ///
 /// `q` values are clamped to `[0.0, 1.0]` per RFC 7231 §5.3.1, so a
 /// malformed weight (e.g. `q=5`) cannot outrank a legitimately
 /// top-priority type and invert content negotiation.
-fn parse_accept(raw: &str) -> Vec<String> {
+fn accept_ranges(raw: &str) -> Vec<AcceptRange> {
     let mut entries: Vec<(usize, f32, String)> = Vec::new();
     for (idx, piece) in raw.split(',').enumerate() {
         let piece = piece.trim();
@@ -1658,7 +1715,59 @@ fn parse_accept(raw: &str) -> Vec<String> {
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.0.cmp(&b.0))
     });
-    entries.into_iter().map(|(_, _, s)| s).collect()
+    entries
+        .into_iter()
+        .map(|(_, q, raw)| AcceptRange {
+            media: raw
+                .split(';')
+                .next()
+                .unwrap_or(&raw)
+                .trim()
+                .to_ascii_lowercase(),
+            raw,
+            q,
+        })
+        .collect()
+}
+
+/// Whether the `Accept` ranges refuse `ty` (lowercased): the most specific
+/// range that matches it carries `q=0` (RFC 9110 12.5.1), so `*/*` does
+/// not re-admit a type the header refused by name. Ranges at the same
+/// specificity resolve to their highest weight, so a header that both
+/// lists and refuses a type does not refuse it.
+fn refuses(ranges: &[AcceptRange], ty: &str) -> bool {
+    let mut best: Option<(u8, f32)> = None;
+    for range in ranges {
+        let Some(specificity) = range_specificity(&range.media, ty) else {
+            continue;
+        };
+        best = match best {
+            Some((held, q)) if held > specificity => Some((held, q)),
+            Some((held, q)) if held == specificity => Some((held, q.max(range.q))),
+            _ => Some((specificity, range.q)),
+        };
+    }
+    best.is_some_and(|(_, q)| q <= 0.0)
+}
+
+/// How specifically a lowercased media `range` names `ty`: 3 for the type
+/// itself, 2 for a `+suffix` match (`application/json` naming
+/// `application/vnd.api+json`), 1 for `type/*`, 0 for `*/*`. `None` when
+/// the range does not cover the type.
+fn range_specificity(range: &str, ty: &str) -> Option<u8> {
+    if range == ty {
+        return Some(3);
+    }
+    if Request::matches_type(range, ty) {
+        return Some(2);
+    }
+    if range == format!("{}/*", ty.split('/').next().unwrap_or("")) {
+        return Some(1);
+    }
+    if range == "*/*" || range == "*" {
+        return Some(0);
+    }
+    None
 }
 
 /// Simple `*`-wildcard pattern match used by [`Request::is`] and
@@ -1819,19 +1928,21 @@ mod url_helper_tests {
         );
     }
 
-    /// A negative `q` is clamped up to 0.0 (the RFC floor), so it still
-    /// sorts last rather than wrapping into an unexpected ordering.
+    /// A negative `q` is clamped up to 0.0 (the RFC floor) rather than
+    /// wrapping into an unexpected ordering, and 0.0 means "not
+    /// acceptable" (RFC 9110 12.4.2), so the range is left out.
     #[test]
     fn parse_accept_clamps_negative_q_to_floor() {
         let parsed = parse_accept("text/html;q=-3, application/json;q=0.5");
         assert_eq!(
             parsed,
-            vec![
-                "application/json;q=0.5".to_string(),
-                "text/html;q=-3".to_string(),
-            ],
-            "q=-3 must clamp to 0.0 and sort below a positive-weight type"
+            vec!["application/json;q=0.5".to_string()],
+            "q=-3 must clamp to 0.0, which is a refusal, not a low preference"
         );
+        let ranges = accept_ranges("text/html;q=-3, application/json;q=0.5");
+        assert_eq!(ranges.len(), 2, "the refused range is still a range");
+        assert_eq!(ranges[1].media, "text/html");
+        assert_eq!(ranges[1].q, 0.0);
     }
 
     /// A pre-buffered body (typical of CSRF-buffered form requests) must

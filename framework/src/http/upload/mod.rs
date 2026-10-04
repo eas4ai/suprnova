@@ -569,7 +569,8 @@ where
     let mut mem: Vec<u8> = Vec::new();
     let mut spill: Option<(NamedTempFile, tokio::fs::File)> = None;
     let mut size: u64 = 0;
-    let mut sniff: Vec<u8> = Vec::with_capacity(SNIFF_BYTES.min(spill_threshold + 1));
+    // `saturating_add`: `usize::MAX` is the documented "never spill" value.
+    let mut sniff: Vec<u8> = Vec::with_capacity(SNIFF_BYTES.min(spill_threshold.saturating_add(1)));
 
     while let Some(chunk) = field
         .chunk()

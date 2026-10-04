@@ -310,12 +310,24 @@ use std::sync::Arc;
 ///
 /// # Where the identity is read from
 ///
-/// `field` is looked up in the query string first, then in a buffered
-/// form body - so one key function serves `POST /resend?email=…` and a
-/// form-encoded `POST /password/request` alike. Reading the body
-/// requires
+/// `field` is read from the query string and from a buffered form body -
+/// so one key function serves `POST /resend?email=…` and a form-encoded
+/// `POST /password/request` alike. Reading the body requires
 /// [`RateLimitMiddleware::key_reads_body`]; without it the body half is
-/// simply skipped.
+/// simply skipped. A blank value in one place does not hide the other.
+///
+/// # Ambiguous requests
+///
+/// A handler reads the identity from one place, and the key function
+/// cannot know which. If the query string and the body name two different
+/// identities, trusting either would let a caller put the real address
+/// where the handler reads it and a fresh decoy where the key does, buying
+/// a new bucket per decoy. Such a request is keyed on one bucket per
+/// `prefix` and `field` that every ambiguous request shares, so changing
+/// the decoy buys nothing. No legitimate client sends two different
+/// addresses, so the shared bucket only ever holds attempts to evade the
+/// limit. The same address in both places, after normalisation, is one
+/// identity.
 ///
 /// # Normalisation and hashing
 ///
@@ -358,14 +370,19 @@ use std::sync::Arc;
 /// ```
 pub fn identity_key(request: &Request, field: &str, prefix: &str) -> String {
     match read_identity(request, field) {
-        Some(value) if !value.trim().is_empty() => {
-            let normalised = value.trim().to_lowercase();
-            format!("{prefix}:{field}:{}", hashed_identity(&normalised))
+        Identity::Named(value) => {
+            format!(
+                "{prefix}:{field}:{}",
+                hashed_identity(&normalise_identity(&value))
+            )
         }
+        // Two different identities - one bucket for every such request,
+        // so a varying decoy cannot open fresh ones.
+        Identity::Ambiguous => format!("{prefix}:{field}-ambiguous"),
         // No identity to key on - fall back to the caller, so the request
         // is still throttled by *something*. The `-absent` marker keeps
         // this out of any co-mounted per-IP limiter's bucket.
-        _ => format!(
+        Identity::Absent => format!(
             "{prefix}:{field}-absent:ip:{}",
             request.ip().unwrap_or_else(|| "anon".into())
         ),
@@ -397,17 +414,43 @@ pub fn identity_key(request: &Request, field: &str, prefix: &str) -> String {
 /// Shares [`identity_key`]'s lookup exactly, so the two cannot disagree
 /// about whether a field is present.
 pub fn names_identity(request: &Request, field: &str) -> bool {
-    read_identity(request, field).is_some()
+    !matches!(read_identity(request, field), Identity::Absent)
 }
 
-/// Query string first, then a buffered form body. `None` for absent or
-/// blank - a blank value is not an identity, and treating it as one
-/// would hand every caller who sends `field=` the same free bucket.
-fn read_identity(request: &Request, field: &str) -> Option<String> {
-    request
-        .query_param(field)
-        .or_else(|| request.cached_form_field(field))
-        .filter(|value| !value.trim().is_empty())
+/// What a request says about the identity in one field.
+enum Identity {
+    /// One identity: from the query string, the body, or both agreeing.
+    Named(String),
+    /// The query string and the body name two different identities.
+    Ambiguous,
+    /// Neither place names one.
+    Absent,
+}
+
+/// Read `field` from the query string and from a buffered form body.
+///
+/// Blank counts as absent - a blank value is not an identity, and treating
+/// it as one would hand every caller who sends `field=` the same free
+/// bucket. Each place is checked on its own: a blank `?field=` used to end
+/// the lookup before the body, so the address the handler acted on went
+/// unkeyed and `names_identity` stood the limiter aside.
+fn read_identity(request: &Request, field: &str) -> Identity {
+    let present = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+    let query = present(request.query_param(field));
+    let body = present(request.cached_form_field(field));
+    match (query, body) {
+        (Some(query), Some(body)) if normalise_identity(&query) != normalise_identity(&body) => {
+            Identity::Ambiguous
+        }
+        (Some(value), _) | (None, Some(value)) => Identity::Named(value),
+        (None, None) => Identity::Absent,
+    }
+}
+
+/// Trimmed and lowercased, because `Alice@Example.com` and
+/// `alice@example.com` reach the same mailbox.
+fn normalise_identity(value: &str) -> String {
+    value.trim().to_lowercase()
 }
 
 /// Hex of the first 16 bytes of SHA-256. Not a secret - a stable,

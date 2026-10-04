@@ -3972,6 +3972,29 @@ async fn app_flash_survives_redirect_into_session() {
     );
 }
 
+/// With no session to carry them across the redirect, flashed values
+/// stay in the request's own bag, where the current response can still
+/// read them. The bridge used to drain the bag first and then find no
+/// session, dropping them.
+#[tokio::test]
+async fn app_flash_stays_in_the_bag_when_a_redirect_has_no_session() {
+    use suprnova::Redirect;
+
+    let bag = suprnova::inertia::flash_new_bag_for_test();
+    suprnova::inertia::flash_scope_for_test(bag.clone(), async {
+        suprnova::App::flash("status", serde_json::json!("Saved!"));
+        let _: suprnova::Response = Redirect::to("/dashboard").into();
+    })
+    .await;
+
+    let remaining = bag.lock().unwrap();
+    assert_eq!(
+        remaining.get("status"),
+        Some(&serde_json::json!("Saved!")),
+        "without a session the flashed value must stay in the bag"
+    );
+}
+
 #[tokio::test]
 async fn app_flash_redirect_destination_sees_flash_in_page() {
     // Full round-trip: request A flashes via App::flash + Redirect,

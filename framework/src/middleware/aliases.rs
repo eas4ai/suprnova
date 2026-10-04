@@ -327,7 +327,8 @@ pub enum MiddlewareResolveError {
         missing: String,
     },
     /// A nested group references itself (direct or via a chain). Detected
-    /// so we don't loop forever on a misconfigured group definition.
+    /// so we don't loop forever on a misconfigured group definition. A group
+    /// that two sibling branches both include is not a cycle.
     CycleDetected {
         /// Name of the group at which the cycle was detected.
         group: String,
@@ -364,27 +365,37 @@ impl std::error::Error for MiddlewareResolveError {}
 ///
 /// Nested groups: an entry in a group's alias list whose name matches a
 /// registered group is recursively expanded. Cycle detection prevents
-/// infinite recursion on a misconfigured definition.
+/// infinite recursion on a misconfigured definition; a group reused by
+/// several branches (`api = [read, write]`, both including `base`) is
+/// expanded in each of them.
 pub fn resolve_middleware_group(
     name: &str,
 ) -> Result<Vec<BoxedMiddleware>, MiddlewareResolveError> {
-    let mut visited: Vec<String> = Vec::new();
+    let mut ancestors: Vec<String> = Vec::new();
     let mut out: Vec<BoxedMiddleware> = Vec::new();
-    resolve_group_inner(name, &mut visited, &mut out)?;
+    resolve_group_inner(name, &mut ancestors, &mut out)?;
     Ok(out)
 }
 
+/// Expand `name` into `out`.
+///
+/// `ancestors` holds the groups on the current expansion path only, not
+/// every group seen so far: a cycle is a group that reaches one of its own
+/// ancestors, while a group reached again through a sibling branch is a
+/// diamond and expands normally. Each group pops itself off when its
+/// expansion completes. An error abandons the whole resolution, so the
+/// early returns leave the path as it was.
 fn resolve_group_inner(
     name: &str,
-    visited: &mut Vec<String>,
+    ancestors: &mut Vec<String>,
     out: &mut Vec<BoxedMiddleware>,
 ) -> Result<(), MiddlewareResolveError> {
-    if visited.iter().any(|v| v == name) {
+    if ancestors.iter().any(|v| v == name) {
         return Err(MiddlewareResolveError::CycleDetected {
             group: name.to_string(),
         });
     }
-    visited.push(name.to_string());
+    ancestors.push(name.to_string());
 
     let aliases = {
         let lock = group_lock();
@@ -405,7 +416,7 @@ fn resolve_group_inner(
         // same way).
         if is_registered_group(&entry) {
             // Recurse - but pass through any UnknownAlias / nested error.
-            resolve_group_inner(&entry, visited, out).map_err(|e| match e {
+            resolve_group_inner(&entry, ancestors, out).map_err(|e| match e {
                 MiddlewareResolveError::UnknownGroup(missing) => {
                     MiddlewareResolveError::UnknownNestedGroup {
                         group: name.to_string(),
@@ -424,6 +435,7 @@ fn resolve_group_inner(
         })?;
         out.push(resolved);
     }
+    ancestors.pop();
     Ok(())
 }
 
@@ -701,6 +713,44 @@ mod tests {
 
         let mws = resolve_middleware_group("api").expect("api resolves");
         assert_eq!(mws.len(), 3);
+    }
+
+    /// A group reused by two sibling branches is a diamond, not a cycle.
+    /// Cycle detection must reject only a group that reaches one of its
+    /// own ancestors.
+    #[test]
+    fn a_nested_group_reused_by_sibling_branches_is_not_a_cycle() {
+        let _guard = SERIAL_TEST_LOCK.lock().unwrap();
+        reset_all();
+
+        register_middleware_alias("auth", || AuthMw);
+        register_middleware_alias("throttle", || ThrottleMw);
+        register_middleware_alias("cors", || CorsMw);
+        register_middleware_group("base", ["auth".to_string()]);
+        register_middleware_group("read", ["base".to_string(), "throttle".to_string()]);
+        register_middleware_group("write", ["base".to_string(), "cors".to_string()]);
+        register_middleware_group("api", ["read".to_string(), "write".to_string()]);
+
+        let mws = resolve_middleware_group("api").expect("a diamond of groups must resolve");
+        assert_eq!(
+            mws.len(),
+            4,
+            "each branch expands its own copy of base: auth, throttle, auth, cors"
+        );
+
+        // Listing the same group twice in one group is the same shape.
+        register_middleware_group("twice", ["base".to_string(), "base".to_string()]);
+        let mws = resolve_middleware_group("twice").expect("a repeated group must resolve");
+        assert_eq!(mws.len(), 2);
+
+        // A real cycle below the root is still refused.
+        register_middleware_group("loop_a", ["loop_b".to_string()]);
+        register_middleware_group("loop_b", ["base".to_string(), "loop_c".to_string()]);
+        register_middleware_group("loop_c", ["loop_b".to_string()]);
+        match resolve_middleware_group("loop_a") {
+            Err(MiddlewareResolveError::CycleDetected { group }) => assert_eq!(group, "loop_b"),
+            other => panic!("expected CycleDetected for loop_b, got {:?}", other.err()),
+        }
     }
 
     #[test]

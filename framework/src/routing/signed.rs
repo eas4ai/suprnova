@@ -12,14 +12,15 @@
 //! expiration `expires_at` (epoch seconds):
 //!
 //! 1. Append `expires` if present: `?foo=1&bar=2&expires=1748800000`
-//! 2. Sort query pairs lexicographically by `(key, value)` so equivalent
-//!    URLs hash identically regardless of caller insertion order. Sorting
-//!    on the value too - not the key alone - is what makes the order total
-//!    when a key repeats.
+//! 2. Sort query pairs by key, stably, so URLs that differ only in the
+//!    order of distinct keys hash identically. The values of a repeated
+//!    key keep their order: a handler reads them as an ordered list (the
+//!    last one, through `Request::query_param`), so their order is part of
+//!    what the signature covers.
 //! 3. Build the canonical string `path?<sorted_kv>` (omit the `?` when no
 //!    pairs exist). **Every pair is carried, including repeated keys.**
 //!    Collapsing them into a map was SEC-04: the verifier hashed the last
-//!    value for a repeated key while the handler read the first, so
+//!    value for a repeated key while the handler then read the first, so
 //!    prepending a value to a legitimately signed URL left the signature
 //!    intact and changed what the handler did.
 //! 4. HMAC-SHA256 with the framework's APP_KEY; hex-encode the result.
@@ -36,7 +37,9 @@
 //!   `/orders/2` invalidates the signature even when query parameters match.
 //! - **Sorted query** prevents trivial reorderings from producing different
 //!   signatures for the same effective URL (matching Laravel's
-//!   `ksort($queryString)` policy).
+//!   `ksort($queryString)` policy). Reordering the values of one repeated
+//!   key is not trivial - it changes the value a handler reads - so it
+//!   changes the signature.
 //! - **`expires` inside the signed payload** binds the expiration to the
 //!   signature itself - a client cannot strip or extend the expiration
 //!   without invalidating the HMAC.
@@ -182,6 +185,8 @@ fn split_url(url: &str) -> (String, Vec<(String, String)>) {
 /// For a URL with no repeated keys this emits byte-identical output to the
 /// map version it replaces, so signatures minted before the fix still
 /// verify - the format did not change, only what it refuses to lose.
+/// (`Request::query_param` has since moved to the last value; the order
+/// of repeated values is signed, see [`sort_pairs`].)
 fn canonicalize(path: &str, pairs: &[(String, String)]) -> String {
     if pairs.is_empty() {
         return path.to_string();
@@ -200,12 +205,19 @@ fn canonicalize(path: &str, pairs: &[(String, String)]) -> String {
 /// Order query pairs into the canonical sequence both signing and
 /// verification hash over.
 ///
-/// Sorted by `(key, value)` rather than by key alone: sorting by key leaves
-/// repeated keys in caller order, which would make the signature depend on
-/// something a proxy is free to reorder. With the value as tiebreak the
-/// ordering is total, so equivalent URLs always canonicalise identically.
+/// Sorted by key only, and stably, so the values of a repeated key keep
+/// their wire order. That order is not cosmetic: `Request::query_param`
+/// returns a repeated key's last value, and a list extractor reads them
+/// in order. Sorting by `(key, value)` made `?mode=a&mode=b` and
+/// `?mode=b&mode=a` one signature, so a client could swap them and change
+/// what the handler read without breaking it. Distinct keys still sort,
+/// so reordering them changes nothing.
+///
+/// A URL signed under the old `(key, value)` order still verifies: the
+/// signer emitted its repeated values in that sorted order, and reading
+/// them back in wire order reproduces the payload it signed.
 fn sort_pairs(pairs: &mut [(String, String)]) {
-    pairs.sort();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
 }
 
 /// Sign a URL with the framework signing key.
@@ -237,8 +249,8 @@ pub fn sign_url(
     }
 
     // Canonical order. Every pair survives, including repeated keys - a
-    // caller signing `?tag=a&tag=b` gets both values covered by the HMAC
-    // rather than silently losing one.
+    // caller signing `?tag=a&tag=b` gets both values, in that order,
+    // covered by the HMAC rather than silently losing one.
     sort_pairs(&mut pairs);
     let canonical = canonicalize(&path, &pairs);
 
@@ -839,8 +851,8 @@ mod tests {
     /// for the same key, and send the original signature untouched. Under
     /// the map-based canonical form the verifier hashed only the *last*
     /// value - `victim` - so the signature still matched, while
-    /// `Request::query_param` handed the handler the *first*. Verified and
-    /// executed were different URLs.
+    /// `Request::query_param` then handed the handler the *first* (it
+    /// returns the last now). Verified and executed were different URLs.
     #[test]
     fn a_prepended_duplicate_value_no_longer_verifies() {
         let key = vec![7u8; 32];
@@ -904,17 +916,69 @@ mod tests {
         );
     }
 
-    /// Reordering equivalent parameters must not change the signature -
-    /// the property the sort exists for, now that ordering includes the
-    /// value as a tiebreak.
+    /// Reordering distinct keys must not change the signature - the
+    /// property the sort exists for.
     #[test]
-    fn repeated_values_canonicalise_independently_of_wire_order() {
+    fn distinct_keys_canonicalise_independently_of_wire_order() {
         let key = vec![3u8; 32];
-        let one = sign_url_with_key("/feed?tag=b&tag=a", &key, None);
-        let two = sign_url_with_key("/feed?tag=a&tag=b", &key, None);
+        let one = sign_url_with_key("/feed?b=2&a=1&tag=x", &key, None);
+        let two = sign_url_with_key("/feed?tag=x&a=1&b=2", &key, None);
         assert_eq!(
             one, two,
-            "two spellings of the same parameter set must canonicalise identically"
+            "two orderings of distinct keys must canonicalise identically"
+        );
+    }
+
+    /// The values of a repeated key are an ordered list to a handler:
+    /// `Request::query_param` returns the last one. Sorting them by value
+    /// let a client swap `?mode=a&mode=b` to `?mode=b&mode=a` under the
+    /// same signature and change what the handler read. Their order is
+    /// part of the signed payload now.
+    #[test]
+    fn reordering_the_values_of_a_repeated_key_breaks_the_signature() {
+        let key = vec![3u8; 32];
+        let signed = sign_url_with_key("/operation?mode=a&mode=b", &key, None);
+        assert_eq!(
+            verify_signature_with_keys(&signed, 0, &key, &[]),
+            SignatureVerdict::Valid
+        );
+
+        let sig = signed.rsplit_once("signature=").expect("signature").1;
+        let reordered = format!("/operation?mode=b&mode=a&signature={sig}");
+        assert_eq!(
+            verify_signature_with_keys(&reordered, 0, &key, &[]),
+            SignatureVerdict::Invalid,
+            "the swapped order hands the handler a different last value"
+        );
+    }
+
+    /// The signer keeps the caller's order of a repeated key's values, so
+    /// the value the caller put last is the one the handler reads.
+    #[test]
+    fn signing_keeps_the_callers_order_of_repeated_values() {
+        ensure_key();
+        let signed = sign_url("/operation?mode=b&mode=a&id=7", None).expect("sign");
+        assert!(
+            signed.starts_with("/operation?id=7&mode=b&mode=a&signature="),
+            "repeated values must keep their order; got {signed}"
+        );
+        assert_eq!(
+            verify_signature(&signed, 0).unwrap(),
+            SignatureVerdict::Valid
+        );
+    }
+
+    /// A signature minted when repeated values were sorted by value still
+    /// verifies: the signer emitted them in that sorted order, and reading
+    /// them back in wire order reproduces the same payload.
+    #[test]
+    fn a_signature_minted_with_value_sorted_repeats_still_verifies() {
+        let key = vec![5u8; 32];
+        let minted_payload = "/feed?a=1&tag=a&tag=b";
+        let sig = hmac_hex(&key, minted_payload.as_bytes());
+        assert_eq!(
+            verify_signature_with_keys(&format!("{minted_payload}&signature={sig}"), 0, &key, &[]),
+            SignatureVerdict::Valid
         );
     }
 

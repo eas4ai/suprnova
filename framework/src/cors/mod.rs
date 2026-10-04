@@ -192,20 +192,19 @@ fn default_methods() -> Vec<String> {
         .collect()
 }
 
-/// Anchor a user-supplied regex with `^` / `$` if missing. Half-anchored
-/// patterns produce surprising matches (`https://evil.com/?u=app.example`
-/// would match `https://.*\.example`), so we always anchor to whole-string
-/// match.
+/// Anchor a user-supplied regex so it can only match a whole origin.
+/// Half-anchored patterns produce surprising matches
+/// (`https://evil.com/?u=app.example` would match `https://.*\.example`).
+///
+/// The pattern is wrapped in a non-capturing group before the anchors go
+/// on. `^` and `$` bind tighter than `|`, so anchoring the bare text turns
+/// `a|b` into `^a|b$`: `a` stays open on the right and `b` on the left, and
+/// `https://app\.example|https://admin\.example` matches the attacker
+/// origin `https://app.example.evil.test`. Anchors the caller already wrote
+/// stay harmless inside the group, and a trailing escaped `\$` is no longer
+/// mistaken for one.
 fn anchor_regex(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len() + 2);
-    if !raw.starts_with('^') {
-        out.push('^');
-    }
-    out.push_str(raw);
-    if !raw.ends_with('$') {
-        out.push('$');
-    }
-    out
+    format!("^(?:{raw})$")
 }
 
 /// A Laravel-style URL path pattern, compiled once when the configuration
@@ -356,9 +355,11 @@ impl CorsConfig {
     /// dynamic subdomains (`https://*.example.com`), preview environments,
     /// or per-tenant origins.
     ///
-    /// Patterns are anchored automatically: `^` and `$` are prepended /
-    /// appended if missing, so `r"https://.*\.example\.com"` and
-    /// `r"^https://.*\.example\.com$"` are equivalent.
+    /// Patterns are anchored automatically: each one must match the whole
+    /// origin, so `r"https://.*\.example\.com"` and
+    /// `r"^https://.*\.example\.com$"` are equivalent, and every
+    /// alternative of `r"https://a\.example|https://b\.example"` is
+    /// anchored on both sides.
     ///
     /// # Panics
     ///
@@ -997,10 +998,43 @@ mod tests {
     // -- helper utilities -------------------------------------------------
 
     #[test]
-    fn anchor_regex_preserves_existing_anchors() {
-        assert_eq!(anchor_regex("^https://app$"), "^https://app$");
-        assert_eq!(anchor_regex("^https://app"), "^https://app$");
-        assert_eq!(anchor_regex("https://app$"), "^https://app$");
-        assert_eq!(anchor_regex("https://app"), "^https://app$");
+    fn anchored_patterns_match_the_whole_origin() {
+        let whole = |raw: &str, origin: &str| {
+            Regex::new(&anchor_regex(raw))
+                .expect("pattern compiles")
+                .is_match(origin)
+        };
+        // Already anchored, half anchored, or bare: the same whole-string match.
+        for raw in [
+            "^https://app$",
+            "^https://app",
+            "https://app$",
+            "https://app",
+        ] {
+            assert!(whole(raw, "https://app"), "{raw} must match its origin");
+            assert!(
+                !whole(raw, "https://app.evil.test"),
+                "{raw} must not match a longer origin"
+            );
+            assert!(
+                !whole(raw, "https://evil.test/https://app"),
+                "{raw} must not match a longer origin"
+            );
+        }
+
+        // Top-level alternation: every alternative is anchored on both
+        // sides, not just the first on the left and the last on the right.
+        let alternation = r"https://app\.example|https://admin\.example";
+        assert!(whole(alternation, "https://app.example"));
+        assert!(whole(alternation, "https://admin.example"));
+        assert!(!whole(alternation, "https://app.example.evil.test"));
+        assert!(!whole(
+            alternation,
+            "https://evil.test.https://admin.example"
+        ));
+
+        // A pattern ending in an escaped `\$` is not anchored by it.
+        assert!(!whole(r"https://app\$", "https://app$.evil.test"));
+        assert!(whole(r"https://app\$", "https://app$"));
     }
 }

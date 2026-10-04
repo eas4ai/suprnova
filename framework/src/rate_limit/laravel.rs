@@ -316,9 +316,12 @@ impl RateLimiter {
     /// `i64::MAX` is treated as unlimited: the counter is still bumped (so
     /// usage stays observable) but the bucket never trips.
     ///
-    /// Window self-healing is implicit: the counter shares its TTL with the
-    /// `:timer` deadline, so once the window expires both age out together and
-    /// the next call re-seeds the timer and starts the count fresh at 1.
+    /// Window self-healing: the counter shares its TTL with the `:timer`
+    /// deadline, so once the window expires both age out together and the
+    /// next call re-seeds the timer and starts the count fresh at 1.
+    /// [`increment`](Self::increment) restores that TTL when the counter
+    /// expires between its `add` and its increment, so a hit on the window
+    /// boundary cannot leave a counter that never ages out.
     ///
     /// The atomicity is per backing store - see the module-level note on
     /// needing Redis for correct multi-process limiting.
@@ -357,8 +360,9 @@ impl RateLimiter {
         // Seed the counter at zero on first hit so `increment` has
         // something to bump. Mirrors Laravel's `add($key, 0, $decay)`
         // before the increment call.
-        Cache::add(&key, &0_i64, Some(decay)).await?;
+        let seeded = Cache::add(&key, &0_i64, Some(decay)).await?;
         let new_value = Cache::increment(&key, amount).await?;
+        restore_counter_ttl(&key, seeded, new_value, Some(amount), decay).await?;
         Ok(new_value)
     }
 
@@ -374,8 +378,10 @@ impl RateLimiter {
         let decay = Duration::from_secs(decay_seconds);
         let available_at = unix_now_secs() + decay_seconds as i64;
         Cache::add(&timer_key, &available_at, Some(decay)).await?;
-        Cache::add(&key, &0_i64, Some(decay)).await?;
-        Cache::decrement(&key, amount).await
+        let seeded = Cache::add(&key, &0_i64, Some(decay)).await?;
+        let new_value = Cache::decrement(&key, amount).await?;
+        restore_counter_ttl(&key, seeded, new_value, amount.checked_neg(), decay).await?;
+        Ok(new_value)
     }
 
     /// Number of retries remaining before the bucket trips. Mirrors
@@ -484,6 +490,33 @@ impl RateLimiter {
         let _ = App::resolve_make::<dyn crate::cache::CacheStore>();
         Cache::is_initialized()
     }
+}
+
+/// Give a counter its window TTL back when it expired between the `add`
+/// that should have kept it and the increment or decrement that followed.
+///
+/// That gap is real: a hit landing on the window boundary can see the
+/// counter present at `add` (so `add` writes nothing) and gone at the
+/// increment, which then recreates it with no TTL on both shipped backends.
+/// A counter without a TTL outlives every later window - `add` is a no-op
+/// on it - so `hit_and_check` keeps counting and eventually refuses every
+/// request until the key is cleared. A counter this call did not seed whose
+/// new value equals the first step from zero (`from_zero`) is that case.
+///
+/// Mirrors Laravel's repair in `RateLimiter::increment`, but through
+/// `touch`, which sets the TTL without writing the value, so a concurrent
+/// hit's step is never overwritten.
+async fn restore_counter_ttl(
+    key: &str,
+    seeded: bool,
+    new_value: i64,
+    from_zero: Option<i64>,
+    decay: Duration,
+) -> Result<(), FrameworkError> {
+    if !seeded && from_zero == Some(new_value) {
+        Cache::touch(key, decay).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -863,6 +896,157 @@ mod tests {
         assert!(
             !RateLimiter::too_many_attempts(key, 2).await.unwrap(),
             "bucket reopens once the window expires"
+        );
+    }
+
+    /// A store that lets a counter expire in the gap between
+    /// `RateLimiter::increment`'s `add` and its `increment` - a hit landing
+    /// on the window boundary. The next `increment` or `decrement` of the
+    /// armed key first forgets it, then delegates; everything else
+    /// delegates.
+    #[derive(Default)]
+    struct ExpiresMidHit {
+        inner: InMemoryCache,
+        armed: std::sync::Mutex<Option<String>>,
+    }
+
+    impl ExpiresMidHit {
+        fn arm(&self, key: &str) {
+            *self.armed.lock().unwrap() = Some(key.to_string());
+        }
+
+        async fn expire_if_armed(&self, key: &str) -> Result<(), FrameworkError> {
+            let hit = {
+                let mut armed = self.armed.lock().unwrap();
+                if armed.as_deref() == Some(key) {
+                    *armed = None;
+                    true
+                } else {
+                    false
+                }
+            };
+            if hit {
+                self.inner.forget(key).await?;
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CacheStore for ExpiresMidHit {
+        async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError> {
+            self.inner.get_raw(key).await
+        }
+        async fn put_raw(
+            &self,
+            key: &str,
+            value: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), FrameworkError> {
+            self.inner.put_raw(key, value, ttl).await
+        }
+        async fn add_raw(
+            &self,
+            key: &str,
+            value: &str,
+            ttl: Option<Duration>,
+        ) -> Result<bool, FrameworkError> {
+            self.inner.add_raw(key, value, ttl).await
+        }
+        async fn has(&self, key: &str) -> Result<bool, FrameworkError> {
+            self.inner.has(key).await
+        }
+        async fn forget(&self, key: &str) -> Result<bool, FrameworkError> {
+            self.inner.forget(key).await
+        }
+        async fn flush(&self) -> Result<(), FrameworkError> {
+            self.inner.flush().await
+        }
+        async fn increment(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+            self.expire_if_armed(key).await?;
+            self.inner.increment(key, amount).await
+        }
+        async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+            self.expire_if_armed(key).await?;
+            self.inner.decrement(key, amount).await
+        }
+        async fn tagged_put_raw(
+            &self,
+            tags: &[&str],
+            key: &str,
+            value: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), FrameworkError> {
+            self.inner.tagged_put_raw(tags, key, value, ttl).await
+        }
+        async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError> {
+            self.inner.flush_tags(tags).await
+        }
+        async fn acquire_lock(
+            &self,
+            key: &str,
+            ttl: Duration,
+        ) -> Result<Option<String>, FrameworkError> {
+            self.inner.acquire_lock(key, ttl).await
+        }
+        async fn release_lock(&self, key: &str, token: &str) -> Result<bool, FrameworkError> {
+            self.inner.release_lock(key, token).await
+        }
+        async fn refresh_lock(
+            &self,
+            key: &str,
+            token: &str,
+            ttl: Duration,
+        ) -> Result<bool, FrameworkError> {
+            self.inner.refresh_lock(key, token, ttl).await
+        }
+        async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
+            self.inner.touch(key, ttl).await
+        }
+    }
+
+    /// A counter that expires between `add` and `increment` comes back
+    /// from the increment with no TTL. Unrepaired, it outlives every later
+    /// window: `add` is a no-op on it, so `hit_and_check` keeps counting
+    /// from the old total and refuses every request until the key is
+    /// cleared. The window must reopen on schedule instead. `decrement`
+    /// has the same gap.
+    #[tokio::test]
+    async fn a_counter_that_expires_mid_hit_still_ages_out_with_the_window() {
+        let _g = TestContainer::fake();
+        let store = Arc::new(ExpiresMidHit::default());
+        TestContainer::bind::<dyn CacheStore>(store.clone());
+
+        // The counter exists when the hit starts, so `add` leaves it
+        // alone; it then expires before the increment.
+        let hit_key = "boundary:hit";
+        RateLimiter::hit(hit_key, 1).await.unwrap();
+        store.arm(hit_key);
+        assert!(
+            !RateLimiter::hit_and_check(hit_key, 1, 1).await.unwrap(),
+            "the hit that lands in the gap starts a new count at 1"
+        );
+
+        let decrement_key = "boundary:decrement";
+        RateLimiter::hit(decrement_key, 1).await.unwrap();
+        store.arm(decrement_key);
+        RateLimiter::decrement(decrement_key, 1, 1).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+
+        assert_eq!(
+            RateLimiter::attempts(hit_key).await.unwrap(),
+            0,
+            "the counter must age out with the window, not persist forever"
+        );
+        assert!(
+            !RateLimiter::hit_and_check(hit_key, 1, 1).await.unwrap(),
+            "the next window must open fresh instead of staying refused"
+        );
+        assert_eq!(
+            RateLimiter::attempts(decrement_key).await.unwrap(),
+            0,
+            "a decremented counter must age out with the window too"
         );
     }
 }

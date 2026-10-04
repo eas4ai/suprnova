@@ -67,6 +67,23 @@ async fn decrement_is_increment_negated() {
     assert_eq!(s.decrement("count", 3), 7);
 }
 
+/// `i64::MIN` has no negation, so decrementing by it cannot be an
+/// increment by `-amount`. It saturates like every other overflowing
+/// amount instead of panicking (or, without overflow checks, subtracting
+/// the wrong way).
+#[tokio::test]
+async fn decrement_by_the_minimum_amount_saturates_instead_of_overflowing() {
+    let mut s = data();
+    assert_eq!(s.decrement("count", i64::MIN), i64::MAX);
+    assert_eq!(s.get::<i64>("count"), Some(i64::MAX));
+
+    s.put("count", -5i64);
+    assert_eq!(s.decrement("count", i64::MIN), i64::MAX - 4);
+
+    s.put("count", i64::MIN + 1);
+    assert_eq!(s.decrement("count", 2), i64::MIN);
+}
+
 #[tokio::test]
 async fn remember_runs_default_on_miss_and_skips_on_hit() {
     let mut s = data();
@@ -192,6 +209,33 @@ async fn reflash_moves_old_into_new() {
     s.reflash();
     s.age_flash_data();
     assert_eq!(s.get_flash::<String>("again").as_deref(), Some("yes"));
+}
+
+/// Aging moves only the leading namespace. A caller key that happens to
+/// contain `_flash.new.` used to have that text rewritten too, so the
+/// value landed under a key `get_flash` never asks for.
+#[tokio::test]
+async fn a_flash_key_containing_the_internal_prefix_survives_aging() {
+    let mut s = data();
+    s.flash("part._flash.new.name", "kept");
+    s.age_flash_data();
+    assert_eq!(
+        s.get_flash::<String>("part._flash.new.name").as_deref(),
+        Some("kept")
+    );
+}
+
+/// The same rule for `reflash`, which moves `_flash.old.` back to
+/// `_flash.new.`. The key carries both internal prefixes so neither move
+/// can rewrite text that belongs to the caller.
+#[tokio::test]
+async fn reflash_keeps_a_key_containing_the_internal_prefixes() {
+    let mut s = data();
+    let key = "x._flash.old.y._flash.new.z";
+    s.now(key, "kept");
+    s.reflash();
+    s.age_flash_data();
+    assert_eq!(s.get_flash::<String>(key).as_deref(), Some("kept"));
 }
 
 #[tokio::test]
