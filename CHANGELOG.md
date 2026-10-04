@@ -856,7 +856,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   many-to-many reads; as in Laravel, they apply when the pivot model is
   queried on its own. A soft `delete()` sets `updated_at` along with
   `deleted_at`, and `delete_or_fail` touches the owners named in
-  `touches`, as `delete()` does. This landed after the `v3.1.0` tag.
+  `touches`, as `delete()` does. A `BelongsTo` declared without an owner
+  key finds its owner by the owner model's primary key instead of `id`, in
+  lazy and eager reads, counts and aggregates, `has` and owner touches.
+  `has`, `where_has` and `doesnt_have` on a `MorphedByMany` relation work;
+  they named a pivot column that does not exist. This landed after the
+  `v3.1.0` tag.
 - **Magnetar hashing and sign-up races.** Magnetar password hashing runs on
   Tokio's blocking pool instead of stalling async workers. A magic-link or
   passkey sign-up that loses a race for a new email address answers as the
