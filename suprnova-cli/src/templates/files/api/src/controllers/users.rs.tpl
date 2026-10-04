@@ -4,7 +4,7 @@
 //! Registration and login use Magnetar through `Auth::password()`.
 
 use serde::Deserialize;
-use suprnova::{handler, Auth, FrameworkError, Request, Resource, Response};
+use suprnova::{handler, Auth, FrameworkError, HttpResponse, Request, Resource, Response};
 
 use crate::models::user::User;
 use crate::resources::user_resource::UserResource;
@@ -60,16 +60,18 @@ pub async fn register(req: Request) -> Response {
         .await
         .map_err(|e| FrameworkError::bad_request(e.to_string()))?;
 
-    let user = Auth::password()
+    // An address that already has an account is `Registration::Accepted`:
+    // its account is neither changed nor returned. Both outcomes get the
+    // same answer, so this endpoint does not reveal which addresses are
+    // registered. The client signs in through `POST /api/auth/login`.
+    let _registration = Auth::password()
         .register(&body.email, &body.password)
         .await?;
 
-    Ok(Resource::single(UserResource {
-        id: user.id.to_string(),
-        email: user.email,
-    })
-    .render()
-    .await?)
+    Ok(HttpResponse::json(serde_json::json!({
+        "message": "Registration received. Sign in with your email and password."
+    }))
+    .status(202))
 }
 
 // ============================================================================

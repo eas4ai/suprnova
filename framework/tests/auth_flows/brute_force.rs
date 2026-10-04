@@ -30,7 +30,9 @@ fn record_and_lockout_lifecycle() {
         suprnova::Auth::password()
             .register("alice-bf@example.com", "longpassword123")
             .await
-            .unwrap();
+            .unwrap()
+            .created()
+            .expect("registration creates a new account");
 
         // Fresh account: not locked.
         assert!(
@@ -99,7 +101,9 @@ fn reset_attempts_clears_counter() {
         suprnova::Auth::password()
             .register("bob-bf@example.com", "longpassword123")
             .await
-            .unwrap();
+            .unwrap()
+            .created()
+            .expect("registration creates a new account");
 
         BruteForce::record_failed_attempt("bob-bf@example.com", None)
             .await
@@ -323,7 +327,9 @@ fn middleware_passes_through_when_account_not_locked() {
         suprnova::Auth::password()
             .register("clara-bf@example.com", "longpassword123")
             .await
-            .unwrap();
+            .unwrap()
+            .created()
+            .expect("registration creates a new account");
 
         // Fresh user - no failed attempts → not locked.
         let router = Router::new()
@@ -349,7 +355,9 @@ fn middleware_429s_when_account_locked() {
         suprnova::Auth::password()
             .register("dora-bf@example.com", "longpassword123")
             .await
-            .unwrap();
+            .unwrap()
+        .created()
+        .expect("registration creates a new account");
 
         // Drive the account into the locked state.
         for _ in 0..5 {
@@ -401,7 +409,9 @@ fn account_locked_fires_once_on_transition() {
         suprnova::Auth::password()
             .register("eve-bf@example.com", "longpassword123")
             .await
-            .unwrap();
+            .unwrap()
+            .created()
+            .expect("registration creates a new account");
 
         let _guard = EventFacade::fake();
 

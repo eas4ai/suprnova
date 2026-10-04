@@ -1103,7 +1103,9 @@ async fn run_password_host_engine_scenario() {
             .await
     })
     .await
-    .expect("password facade registers through real Magnetar storage");
+    .expect("password facade registers through real Magnetar storage")
+    .created()
+    .expect("registration creates a new account");
     assert_eq!(registered.email, "host-engine@example.test");
     let created = storage
         .find_by_email("host-engine@example.test")

@@ -119,7 +119,9 @@ fn valid_bearer_token_reaches_handler_without_session_middleware() {
         Auth::password()
             .register("bearer-no-session@example.com", "Bearer1!")
             .await
-            .unwrap();
+            .unwrap()
+            .created()
+            .expect("registration creates a new account");
 
         let (_user, magnetar_session) = Auth::password()
             .authenticate("bearer-no-session@example.com", "Bearer1!", None, None)
@@ -166,7 +168,9 @@ fn valid_bearer_does_not_satisfy_stateful_basic() {
         Auth::password()
             .register("bearer-before-basic@example.com", "BearerBasic1!")
             .await
-            .unwrap();
+            .unwrap()
+            .created()
+            .expect("registration creates a new account");
 
         let (_user, magnetar_session) = Auth::password()
             .authenticate(

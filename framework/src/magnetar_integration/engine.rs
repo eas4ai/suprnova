@@ -63,7 +63,7 @@ use sea_orm::DatabaseConnection;
 use uuid::Uuid;
 use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential};
 
-use super::{LockoutStatus, Session, SessionToken, User, UserId};
+use super::{LockoutStatus, Registration, Session, SessionToken, User, UserId};
 
 /// The connection and typed Magnetar storage used by an authentication engine.
 ///
@@ -1058,18 +1058,21 @@ where
         let decision = self.complete_sign_in(principal).await?;
         Ok((user, decision))
     }
-    /// Register through the initialized Magnetar password provider and map the
-    /// resulting application row through the host users adapter.
-    pub async fn password_register(&self, input: RegisterInput) -> Result<User>
+    /// Register through the initialized Magnetar password provider and map a
+    /// newly created row through the host users adapter.
+    ///
+    /// An existing address maps to [`Registration::Accepted`] without reading
+    /// the existing row: its account must never reach the caller.
+    pub async fn password_register(&self, input: RegisterInput) -> Result<Registration>
     where
         A: HostUserAdapter<User = User>,
     {
-        let user_id = match self.register_password(input).await? {
-            RegistrationOutcome::Created { user_id, .. }
-            | RegistrationOutcome::Existing { user_id } => user_id,
-        };
-
-        self.users.user_for_id(&user_id).await
+        match self.register_password(input).await? {
+            RegistrationOutcome::Created { user_id, .. } => Ok(Registration::Created(
+                self.users.user_for_id(&user_id).await?,
+            )),
+            RegistrationOutcome::Existing { .. } => Ok(Registration::Accepted),
+        }
     }
     /// Mint one plaintext magic-link token through Magnetar's single-use
     /// token store. The returned plaintext is for app-owned delivery only.
@@ -1202,8 +1205,10 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
         token: SecretString,
         password: SecretString,
     ) -> Result<PasswordResetFlowOutcome>;
-    /// Register one password credential through Magnetar and map its user row.
-    async fn password_register(&self, input: RegisterInput) -> Result<User>;
+    /// Register one password credential through Magnetar. A new account maps
+    /// its user row; an address that already has an account must yield
+    /// [`Registration::Accepted`], never that account.
+    async fn password_register(&self, input: RegisterInput) -> Result<Registration>;
     /// Resolve one bearer token through the initialized Magnetar session store.
     async fn bearer_user_id(&self, token: &str) -> Result<Option<String>>;
     /// Issue an epoch-bound remember credential.
@@ -1486,7 +1491,7 @@ where
         MagnetarHostEngine::issue_host_session(self, user_id, metadata).await
     }
 
-    async fn password_register(&self, input: RegisterInput) -> Result<User> {
+    async fn password_register(&self, input: RegisterInput) -> Result<Registration> {
         MagnetarHostEngine::password_register(self, input).await
     }
 

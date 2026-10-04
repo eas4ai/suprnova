@@ -141,7 +141,9 @@ async fn default_installer_runs_password_session_and_lockout_flows() {
     let user = Auth::password()
         .register("default-engine@example.test", "correct-password")
         .await
-        .expect("register user");
+        .expect("register user")
+        .created()
+        .expect("registration creates a new account");
     let (authenticated, session) = Auth::password()
         .authenticate(
             "DEFAULT-ENGINE@example.test",
@@ -153,6 +155,23 @@ async fn default_installer_runs_password_session_and_lockout_flows() {
         .expect("authenticate user");
     assert_eq!(authenticated.id, user.id);
     assert!(session.token.is_some());
+
+    // The same address again, in another case and with another password:
+    // the existing account is neither returned nor changed.
+    let again = Auth::password()
+        .register(" Default-Engine@example.test", "attacker-password")
+        .await
+        .expect("register an existing address");
+    assert_eq!(again, suprnova::Registration::Accepted);
+    Auth::password()
+        .authenticate(
+            "default-engine@example.test",
+            "attacker-password",
+            None,
+            None,
+        )
+        .await
+        .expect_err("the submitted password must not replace the owner's");
     assert_eq!(
         suprnova::magnetar_integration::find_user_by_id(user.id.as_str())
             .await

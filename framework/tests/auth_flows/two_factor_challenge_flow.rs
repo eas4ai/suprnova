@@ -264,7 +264,9 @@ async fn register_and_enroll_with_recovery(label: &str) -> (String, String, Stri
     let user = Auth::password()
         .register(&email, "p@ssw0rd")
         .await
-        .expect("magnetar register");
+        .expect("magnetar register")
+        .created()
+        .expect("registration creates a new account");
     let user_id = user.id.to_string();
 
     let tf_user = ChallengeUser {

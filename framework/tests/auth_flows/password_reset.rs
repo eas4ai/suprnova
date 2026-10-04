@@ -39,7 +39,7 @@ impl MagnetarPasswordAuthEngine for ResetEngine {
     async fn password_register(
         &self,
         _input: magnetar::plugins::password::RegisterInput,
-    ) -> magnetar::Result<User> {
+    ) -> magnetar::Result<suprnova::Registration> {
         Err(Self::unavailable())
     }
 

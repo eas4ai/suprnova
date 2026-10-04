@@ -32,9 +32,9 @@ use suprnova::database::DbConnection;
 use suprnova::session::SessionConfig;
 use suprnova::{
     App, Auth, AuthConfig, AuthManager, Authenticatable, Credentials, Crypt, EncryptionKey,
-    FrameworkError, HttpResponse, MagnetarConfig, MiddlewareRegistry, RateLimiterDriver, Request,
-    Response, Router, SessionMiddleware, SlidingWindowConfig, UserProvider, handle_request,
-    init_magnetar,
+    FrameworkError, HttpResponse, MagnetarConfig, MiddlewareRegistry, RateLimiterDriver,
+    Registration, Request, Response, Router, SessionMiddleware, SlidingWindowConfig, UserProvider,
+    handle_request, init_magnetar,
 };
 use tokio::sync::OnceCell;
 
@@ -125,7 +125,9 @@ async fn setup() -> Account {
             let user = Auth::password()
                 .register("framework-login@example.test", PASSWORD)
                 .await
-                .expect("register the Magnetar user");
+                .expect("register the Magnetar user")
+                .created()
+                .expect("registration creates a new account");
             ACCOUNT
                 .set(Account {
                     id: user.id.to_string(),
@@ -209,6 +211,27 @@ fn header(request: &Request, name: &str) -> String {
 /// form, and a page that reports who is signed in.
 fn router() -> Router {
     Router::new()
+        // Register, then sign a new account in: the pattern an app with its
+        // own registration form writes. An address that already has an
+        // account gets the same answer, and nobody is signed in.
+        .get("/register", |request: Request| async move {
+            let registration = match Auth::password()
+                .register(
+                    &header(&request, "x-email"),
+                    &header(&request, "x-password"),
+                )
+                .await
+            {
+                Ok(registration) => registration,
+                Err(error) => return failure(error),
+            };
+            if let Registration::Created(user) = registration
+                && let Err(error) = Auth::login_id(user.id.to_string())
+            {
+                return failure(error);
+            }
+            Ok(HttpResponse::text("registered"))
+        })
         .get("/login-id", |request: Request| async move {
             match Auth::login_id(header(&request, "x-user-id")) {
                 Ok(()) => Ok(HttpResponse::text("signed in")),
@@ -467,4 +490,52 @@ async fn a_login_the_engine_cannot_bind_fails_closed() {
     let (status, _body) = browser.get("/login-id", &[("x-user-id", "999999")]).await;
     assert_eq!(status, 500, "an unbindable login must not report success");
     assert_eq!(browser.whoami().await, "guest");
+}
+
+/// Registering an address that already has an account, with another
+/// password, must neither hand back that account nor sign anyone in as it,
+/// on this request or the ones after it.
+#[tokio::test]
+async fn registering_an_existing_address_never_signs_in_as_its_owner() {
+    let victim = setup().await;
+    let mut attacker = Browser::open().await;
+
+    let (status, body) = attacker
+        .get(
+            "/register",
+            &[
+                ("x-email", &victim.email),
+                ("x-password", "attacker-chosen-pass"),
+            ],
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body, "registered",
+        "the answer matches a fresh registration"
+    );
+    for _ in 0..2 {
+        let whoami = attacker.whoami().await;
+        assert_ne!(
+            whoami, victim.id,
+            "the attacker must never act as the owner"
+        );
+        assert_eq!(whoami, "guest");
+    }
+
+    // A fresh address registers and signs in as the new account.
+    let mut newcomer = Browser::open().await;
+    let (status, body) = newcomer
+        .get(
+            "/register",
+            &[
+                ("x-email", "newcomer@example.test"),
+                ("x-password", "newcomer-password"),
+            ],
+        )
+        .await;
+    assert_eq!((status, body.as_str()), (200, "registered"));
+    let newcomer_id = newcomer.whoami().await;
+    assert_ne!(newcomer_id, "guest");
+    assert_ne!(newcomer_id, victim.id);
 }

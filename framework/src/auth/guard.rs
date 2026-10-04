@@ -1338,7 +1338,9 @@ impl Auth {
     /// use suprnova::Auth;
     ///
     /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
-    /// let user = Auth::password().register("alice@example.com", "s3cret!").await?;
+    /// // An address that already has an account yields
+    /// // `Registration::Accepted` and never that account.
+    /// let _registration = Auth::password().register("alice@example.com", "s3cret!").await?;
     /// let (user, session) = Auth::password()
     ///     .authenticate("alice@example.com", "s3cret!", None, None)
     ///     .await?;

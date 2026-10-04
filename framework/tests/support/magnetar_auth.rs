@@ -200,10 +200,10 @@ impl MagnetarPasswordAuthEngine for TestEngine {
     async fn password_register(
         &self,
         input: magnetar::plugins::password::RegisterInput,
-    ) -> magnetar::Result<User> {
+    ) -> magnetar::Result<suprnova::Registration> {
         let email = input.email.trim().to_ascii_lowercase();
-        if let Some(user) = self.user_by_email(&email) {
-            return Ok(user);
+        if self.user_by_email(&email).is_some() {
+            return Ok(suprnova::Registration::Accepted);
         }
         let user_id = format!("usr_{}", uuid::Uuid::new_v4().simple());
         let user = User::builder()
@@ -219,7 +219,7 @@ impl MagnetarPasswordAuthEngine for TestEngine {
             email,
             (user.clone(), input.password.expose_secret().to_owned()),
         );
-        Ok(user)
+        Ok(suprnova::Registration::Created(user))
     }
 
     async fn issue_host_session(
@@ -635,6 +635,10 @@ impl MagnetarPasswordAuthEngine for TestEngine {
                 password: secrecy::SecretString::from(uuid::Uuid::new_v4().to_string()),
             })
             .await?
+            .created()
+            .ok_or_else(|| magnetar::Error::Internal {
+                message: "magic-link registration raced an existing account".to_owned(),
+            })?
         };
         let token = uuid::Uuid::new_v4().to_string();
         self.state

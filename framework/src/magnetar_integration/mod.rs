@@ -34,7 +34,7 @@ pub use default_engine::{MagnetarConfig, init_magnetar};
 #[cfg(feature = "magnetar-oauth")]
 pub use default_engine::{MagnetarOAuthOnlyConfig, init_magnetar_oauth_only};
 pub use engine::MagnetarFactorAuthEngine;
-pub use sign_in::SignInOutcome;
+pub use sign_in::{Registration, SignInOutcome};
 
 /// Completion facade for factor challenges returned by Magnetar sign-in providers.
 pub struct FactorAuth;

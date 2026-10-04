@@ -103,7 +103,9 @@ fn failed_2fa_verifies_lock_the_account() {
         suprnova::Auth::password()
             .register("victim-bf-2fa@example.com", "longpassword123")
             .await
-            .expect("register");
+            .expect("register")
+            .created()
+            .expect("registration creates a new account");
 
         let user = FakeUser {
             id: "victim-bf-2fa-uid".into(),
@@ -143,7 +145,9 @@ fn failed_recovery_code_consumes_lock_the_account() {
         suprnova::Auth::password()
             .register("victim-rec-bf@example.com", "longpassword123")
             .await
-            .expect("register");
+            .expect("register")
+            .created()
+            .expect("registration creates a new account");
 
         let user = FakeUser {
             id: "victim-rec-bf-uid".into(),
@@ -185,7 +189,9 @@ fn successful_2fa_verify_resets_failed_attempts() {
         suprnova::Auth::password()
             .register("success-resets@example.com", "longpassword123")
             .await
-            .expect("register");
+            .expect("register")
+            .created()
+            .expect("registration creates a new account");
 
         let user = FakeUser {
             id: "success-resets-uid".into(),

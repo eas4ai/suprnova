@@ -198,10 +198,19 @@ Use the Magnetar password facade when the application wants the integrated
 credential, lockout, factor-gate, and session path:
 
 ```rust,ignore
-let user = Auth::password()
+use suprnova::{Auth, HttpResponse, Registration};
+
+// Both outcomes get the same answer, so the endpoint does not reveal which
+// addresses already have an account.
+let _registration: Registration = Auth::password()
     .register("alice@example.com", password)
     .await?;
+let response = HttpResponse::json(serde_json::json!({
+    "message": "Registration received. Sign in with your email and password."
+}))
+.status(202);
 
+// Later, on the sign-in endpoint:
 let (user, session) = Auth::password()
     .authenticate(
         "alice@example.com",
@@ -211,6 +220,23 @@ let (user, session) = Auth::password()
     )
     .await?;
 ```
+
+`register` returns a `Registration`. `Registration::Created(user)` carries the
+new account. An address that already has an account returns
+`Registration::Accepted`, which carries nothing: that account is neither
+changed nor returned, so registration can never sign the requester in as its
+owner. Signing a `Created` account in at once is safe, because its password is
+the one just submitted, but that answer differs from the one `Accepted` can
+give, so it shows that the address was free. Answer both variants the same way
+when registration must not reveal which addresses have accounts.
+
+### Why Suprnova diverges
+
+Laravel's starter kits validate registration with a `unique:users` rule, which
+answers "The email has already been taken" and so tells any visitor which
+addresses have accounts. `register` instead reports an existing address as
+`Registration::Accepted` and returns nothing about its account, so the
+application can give one answer to every registration.
 
 `authenticate` returns HTTP 401 errors for invalid credentials, lockout, or a
 required second factor. Storage and engine failures remain server errors. The

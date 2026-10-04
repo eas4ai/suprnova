@@ -213,7 +213,9 @@ async fn installed_engine_remember_hydration_rotates_and_binds_both_sessions() {
     let user = Auth::password()
         .register("remember-middleware@example.test", "correct-password")
         .await
-        .expect("register Magnetar user");
+        .expect("register Magnetar user")
+        .created()
+        .expect("registration creates a new account");
     let store = Arc::new(MemorySessionStore::default());
     let mut config = SessionConfig::default();
     config.cookie_secure = false;
@@ -443,7 +445,9 @@ async fn failed_remembered_session_issuance_returns_a_successor_cookie_for_retry
     let user = Auth::password()
         .register("remember-session-retry@example.test", "correct-password")
         .await
-        .expect("register remembered-session retry user");
+        .expect("register remembered-session retry user")
+        .created()
+        .expect("registration creates a new account");
     let user_db_id = user
         .id
         .as_str()
@@ -595,7 +599,9 @@ async fn failed_framework_session_write_retires_the_unpersisted_opaque_session()
     let user = Auth::password()
         .register("remember-write-failure@example.test", "correct-password")
         .await
-        .expect("register framework-write failure user");
+        .expect("register framework-write failure user")
+        .created()
+        .expect("registration creates a new account");
     let store = Arc::new(MemorySessionStore::default());
     let mut config = SessionConfig::default();
     config.cookie_secure = false;
@@ -666,7 +672,9 @@ async fn handler_identity_transition_retires_a_retryable_successor() {
     let user = Auth::password()
         .register("remember-retry-transition@example.test", "correct-password")
         .await
-        .expect("register retry-transition user");
+        .expect("register retry-transition user")
+        .created()
+        .expect("registration creates a new account");
     let user_db_id = user
         .id
         .as_str()
@@ -723,6 +731,8 @@ async fn handler_identity_transition_retires_a_retryable_successor() {
         )
         .await
         .expect("register transition target")
+        .created()
+        .expect("registration creates a new account")
         .id
         .to_string();
     let transition_next: suprnova::middleware::Next = Arc::new(move |_request| {
@@ -869,11 +879,15 @@ async fn installed_engine_fresh_binding_clears_hydrated_identity_carrier() {
     let previous = Auth::password()
         .register("remember-switch-previous@example.test", "previous-password")
         .await
-        .expect("register previous remembered identity");
+        .expect("register previous remembered identity")
+        .created()
+        .expect("registration creates a new account");
     let fresh = Auth::password()
         .register("remember-switch-fresh@example.test", "fresh-password")
         .await
-        .expect("register fresh identity");
+        .expect("register fresh identity")
+        .created()
+        .expect("registration creates a new account");
 
     let store = Arc::new(MemorySessionStore::default());
     let mut config = SessionConfig::default();

@@ -193,7 +193,6 @@ pub use magnetar::{
         oauth_x::{XOAuthProvider, XProviderConfig},
     },
 };
-pub use magnetar_integration::SignInOutcome;
 #[cfg(any(
     feature = "database-sqlite",
     feature = "database-postgres",
@@ -212,6 +211,7 @@ pub use magnetar_integration::{
     install_magnetar_oauth_engine_with_factor,
     oauth_transport::ReqwestOAuthTransport,
 };
+pub use magnetar_integration::{Registration, SignInOutcome};
 #[cfg(feature = "magnetar-oauth")]
 pub use secrecy::SecretString;
 

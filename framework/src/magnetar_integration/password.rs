@@ -1,6 +1,6 @@
 //! Password authentication through the installed Magnetar engine.
 
-use super::{Session, SignInOutcome, User};
+use super::{Registration, Session, SignInOutcome, User};
 use crate::error::FrameworkError;
 
 /// Password authentication facade returned by `Auth::password`.
@@ -9,10 +9,20 @@ pub struct PasswordAuth;
 impl PasswordAuth {
     /// Register a password credential without exposing whether the email exists.
     ///
+    /// An address that already has an account yields
+    /// [`Registration::Accepted`]: that account is neither changed nor
+    /// returned, so the result can never sign the requester in as its owner.
+    /// Answer both variants the same way to keep registration from revealing
+    /// which addresses have accounts; see [`Registration`].
+    ///
     /// # Errors
     ///
     /// Returns an error when the engine is not installed or registration fails.
-    pub async fn register(&self, email: &str, password: &str) -> Result<User, FrameworkError> {
+    pub async fn register(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> Result<Registration, FrameworkError> {
         super::abuse_limiter::check_auth_abuse(
             super::abuse_limiter::AuthAbuseRoute::PasswordRegister,
             email,
