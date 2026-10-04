@@ -163,6 +163,10 @@ impl<'a> TemplateEnv<'a> {
     }
 }
 
+/// The names that splice a macro's caller content: `caller` itself, and any
+/// alias a `{% set c = caller %}` makes.
+type CallerNames = BTreeSet<String>;
+
 /// The expansion scope handed down the node walk: the template whose macros
 /// are visible, the argument bindings of the macro being expanded, and the
 /// caller content a `{{ caller() }}` splices in.
@@ -170,8 +174,20 @@ struct Scope<'s, 'a> {
     template: &'s TemplateEnv<'a>,
     bindings: &'s Bindings,
     raw: &'s RawNames,
-    caller: Option<&'s Fragment<'a>>,
+    caller: Option<&'s CallerContent<'s, 'a>>,
+    caller_names: &'s CallerNames,
     macro_depth: usize,
+}
+
+/// The body of a `{% call %}` block, kept unrendered. Askama renders it at
+/// each `caller()` inside the macro, in the macro's scope, so a macro
+/// parameter or local shadows the call site's name; it resolves macros
+/// through the call site's template.
+struct CallerContent<'c, 'a> {
+    nodes: &'c [Box<Node<'a>>],
+    template: &'c TemplateEnv<'a>,
+    place: Place<'c, 'a>,
+    overrides: &'c Overrides<'a>,
 }
 
 /// One macro expansion: the definition, the template that defines it, the
@@ -181,7 +197,7 @@ struct Invocation<'i, 'a> {
     definition: &'i Macro<'a>,
     template: &'i TemplateEnv<'a>,
     arguments: &'i [WithSpan<Box<Expr<'a>>>],
-    caller: Option<&'i Fragment<'a>>,
+    caller: Option<&'i CallerContent<'i, 'a>>,
     span: Span,
 }
 
@@ -348,11 +364,13 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             imports,
         };
         let root_bindings = Bindings::new();
+        let no_caller = CallerNames::new();
         let scope = Scope {
             template: &env,
             bindings: &root_bindings,
             raw,
             caller: None,
+            caller_names: &no_caller,
             macro_depth: 0,
         };
         let place = Place { view, file, source };
@@ -534,17 +552,18 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         // A `{% let %}` rebinds a name for the nodes after it in this block:
         // it shadows a macro argument's literal and makes the name raw or
         // not, by its value.
-        let mut environment: Option<(Bindings, RawNames)> = None;
+        let mut environment: Option<(Bindings, RawNames, CallerNames)> = None;
         for (index, node) in nodes.iter().enumerate() {
-            let (bindings, raw) = match &environment {
-                Some((bindings, raw)) => (bindings, raw),
-                None => (scope.bindings, scope.raw),
+            let (bindings, raw, caller_names) = match &environment {
+                Some((bindings, raw, caller_names)) => (bindings, raw, caller_names),
+                None => (scope.bindings, scope.raw, scope.caller_names),
             };
             let scope = &Scope {
                 template: scope.template,
                 bindings,
                 raw,
                 caller: scope.caller,
+                caller_names,
                 macro_depth: scope.macro_depth,
             };
             let mut rebound = None;
@@ -568,7 +587,8 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     // Askama writes `{{ show(x) }}` and `{{ ui::show(x) }}` as
                     // macro calls when the name resolves to a macro, so the
                     // body is expanded and checked where the call stands.
-                    if !is_caller_call(expression)
+                    let splices_caller = is_caller_call(expression, scope.caller_names);
+                    if !splices_caller
                         && let Expr::Call(call) = strip_groups(expression)
                         && let Some((definition, template)) = expression_macro(scope, call)
                     {
@@ -582,8 +602,8 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         self.expand_macro(out, invocation, place, stack, scope)?;
                         continue;
                     }
-                    if is_caller_call(expression) {
-                        let Some(caller) = scope.caller else {
+                    if splices_caller || is_caller_call(expression, &bare_caller()) {
+                        let Some(caller) = scope.caller.filter(|_| splices_caller) else {
                             let (line, column) = expression_location(source, expression);
                             self.push(
                                 DiagnosticCode::DynamicStructureUnproved,
@@ -594,7 +614,26 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             );
                             continue;
                         };
-                        self.inline(out, caller, origin, view)?;
+                        // The macro's bindings and raw names here already lie
+                        // over the call site's; `caller` itself is not visible
+                        // inside its own content.
+                        let no_caller = CallerNames::new();
+                        let caller_scope = Scope {
+                            template: caller.template,
+                            bindings: scope.bindings,
+                            raw: scope.raw,
+                            caller: None,
+                            caller_names: &no_caller,
+                            macro_depth: scope.macro_depth,
+                        };
+                        self.expand_nodes(
+                            caller.nodes,
+                            out,
+                            caller.overrides,
+                            caller.place,
+                            stack,
+                            &caller_scope,
+                        )?;
                         continue;
                     }
                     if let Some(Binding::Literal(literal)) =
@@ -705,6 +744,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         bindings: shadowed.as_ref().unwrap_or(scope.bindings),
                         raw: loop_raw.as_ref().unwrap_or(scope.raw),
                         caller: scope.caller,
+                        caller_names: scope.caller_names,
                         macro_depth: scope.macro_depth,
                     };
                     // The loop's own names are bound in its body, not in
@@ -781,7 +821,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     self.expand_nodes(&block.nodes, out, overrides, place, stack, scope)?;
                 }
                 // A macro call: the body is walked with the call's literal
-                // arguments bound, the caller content rendered first for
+                // arguments bound, the caller content spliced at each
                 // `{{ caller() }}`, and the defining template's macros in
                 // scope. A call the checker cannot resolve, or one passing
                 // caller arguments, stays an explicit unproved result.
@@ -810,11 +850,12 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         );
                         continue;
                     }
-                    // An empty call block is empty caller content. A caller
-                    // that fails to render stops the path, as its failure
-                    // would stop the template.
-                    let mut caller = Fragment::default();
-                    self.expand_nodes(&call.nodes, &mut caller, overrides, place, stack, scope)?;
+                    let caller = CallerContent {
+                        nodes: &call.nodes,
+                        template: scope.template,
+                        place,
+                        overrides,
+                    };
                     let invocation = Invocation {
                         definition,
                         template,
@@ -864,7 +905,22 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     }
                     let raw = rebind_raw(scope.raw, &names, value_is_raw)
                         .unwrap_or_else(|| scope.raw.clone());
-                    rebound = Some((bindings, raw));
+                    // `{% set c = caller %}` makes `c()` splice the caller
+                    // content; any other value shadows a caller alias.
+                    let mut caller_names = scope.caller_names.clone();
+                    let aliases_caller = matches!(
+                        (&node.var, &node.val),
+                        (Target::Name(_), LetValueOrBlock::Value(value))
+                            if matches!(&***value, Expr::Var(name) if scope.caller_names.contains(*name))
+                    );
+                    for name in &names {
+                        if aliases_caller {
+                            caller_names.insert((*name).to_owned());
+                        } else {
+                            caller_names.remove(*name);
+                        }
+                    }
+                    rebound = Some((bindings, raw, caller_names));
                 }
                 // A name declared without a value is assigned later, possibly
                 // inside a nested block whose value it keeps after the block,
@@ -873,7 +929,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     let name = *declare.var_name;
                     let later = possibly_raw_names(&nodes[index + 1..], scope.raw);
                     if let Some(raw) = rebind_raw(scope.raw, &[name], later.contains(name)) {
-                        rebound = Some((scope.bindings.clone(), raw));
+                        rebound = Some((scope.bindings.clone(), raw, scope.caller_names.clone()));
                     }
                 }
                 // `{% mut x = value %}` and the compound forms leave `x` raw
@@ -883,7 +939,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         && let Some(name) = assigned_name(&compound.op.lhs)
                         && let Some(raw) = rebind_raw(scope.raw, &[name], true)
                     {
-                        rebound = Some((scope.bindings.clone(), raw));
+                        rebound = Some((scope.bindings.clone(), raw, scope.caller_names.clone()));
                     }
                 }
                 Node::Comment(_)
@@ -930,11 +986,17 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         }
         let bindings = bind_arguments(definition, arguments, scope.bindings);
         let raw = bind_raw_arguments(definition, arguments, scope.raw);
+        let caller_names = if caller.is_some() {
+            bare_caller()
+        } else {
+            CallerNames::new()
+        };
         let inner = Scope {
             template,
             bindings: &bindings,
             raw: &raw,
             caller,
+            caller_names: &caller_names,
             macro_depth: scope.macro_depth + 1,
         };
         let body = Place {
@@ -975,6 +1037,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 bindings: choice.shadowed.as_ref().unwrap_or(scope.bindings),
                 raw: choice.raw.as_ref().unwrap_or(scope.raw),
                 caller: scope.caller,
+                caller_names: scope.caller_names,
                 macro_depth: scope.macro_depth,
             };
             let mut arm = Fragment::default();
@@ -1470,7 +1533,9 @@ fn bind_arguments(
     supplied: &[WithSpan<Box<Expr<'_>>>],
     outer: &Bindings,
 ) -> Bindings {
-    let mut bindings = Bindings::new();
+    // Askama expands a macro in the calling scope, so the caller's literal
+    // bindings stay visible under the parameters.
+    let mut bindings = outer.clone();
     let mut positional = supplied
         .iter()
         .filter(|argument| !matches!(&****argument, Expr::NamedArgument(_, _)));
@@ -1696,11 +1761,19 @@ fn expression_macro<'s, 'a>(
     }
 }
 
-fn is_caller_call(expression: &Expr<'_>) -> bool {
-    match expression {
-        Expr::Call(call) => call.args.is_empty() && matches!(&**call.path, Expr::Var("caller")),
+/// Whether the expression, inside any parentheses, calls one of `names` with
+/// no arguments: a splice of the caller content.
+fn is_caller_call(expression: &Expr<'_>, names: &CallerNames) -> bool {
+    match strip_groups(expression) {
+        Expr::Call(call) => {
+            call.args.is_empty() && matches!(&**call.path, Expr::Var(name) if names.contains(*name))
+        }
         _ => false,
     }
+}
+
+fn bare_caller() -> CallerNames {
+    CallerNames::from(["caller".to_owned()])
 }
 
 /// Escapes a substituted literal the way Askama escapes `{{ }}` output, so

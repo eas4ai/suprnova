@@ -867,3 +867,28 @@ fn a_macro_called_as_an_expression_is_expanded_and_checked() {
         scoped.diagnostics()
     );
 }
+/// Caller content renders inside the macro's scope, where a macro
+/// parameter shadows the call site's name, and it is spliced wherever the
+/// macro writes `caller()`, grouped or through a `set` alias.
+#[test]
+fn caller_content_renders_in_the_macro_scope_at_every_splice() {
+    let shadowed = check(
+        "{% macro card(body) %}<div>{{ caller() }}</div>{% endmacro %}{% call card(notice|safe) %}\n<p>{{ body }}</p>{% endcall %}",
+    );
+    assert_eq!(
+        raw_locations(&shadowed),
+        vec![(2, 7)],
+        "{:?}",
+        shadowed.diagnostics()
+    );
+    for splice in ["{{ (caller()) }}", "{% set c = caller %}{{ c() }}"] {
+        let report = check(format!(
+            "{{% macro frame() %}}<div>{splice}</div>{{% endmacro %}}{{% call frame() %}}<button type=\"button\" live:click=\"missing\">Go</button>{{% endcall %}}"
+        ));
+        assert!(
+            has_code(&report, DiagnosticCode::UnknownAction),
+            "{splice}: {:?}",
+            report.diagnostics()
+        );
+    }
+}
