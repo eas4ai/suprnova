@@ -1821,13 +1821,21 @@ mod tests {
                     })
                     .await?;
                 assert!(inner.is_none());
-                assert_eq!(on_a_inside.load(Ordering::SeqCst), 0, "A's deferral was skipped");
+                assert_eq!(
+                    on_a_inside.load(Ordering::SeqCst),
+                    0,
+                    "A's deferral was skipped"
+                );
                 Ok(())
             })
             .await
             .unwrap();
         assert!(err.is_none());
         assert_eq!(on_a.load(Ordering::SeqCst), 10);
-        assert_eq!(on_b.load(Ordering::SeqCst), 1, "A's event was replayed on B");
+        assert_eq!(
+            on_b.load(Ordering::SeqCst),
+            1,
+            "A's event was replayed on B"
+        );
     }
 }
