@@ -1184,7 +1184,13 @@ async fn a_canceled_publication_finishes_before_a_newer_one_can_run() {
         "the older publication's future was dropped mid-write"
     );
 
-    let mut newer = {
+    // Whether the older write still owns the store's lock decides, without a
+    // timer, what a newer publication does next. If the lock went with the
+    // dropped future, the newer one runs to completion now, while the older
+    // write is still held before its rename; otherwise it waits for that
+    // write to finish and fences against it.
+    let lock_held_by_the_older_write = store.publication_lock_is_held_for_test();
+    let newer = {
         let store = Arc::clone(&store);
         let k = k.clone();
         tokio::spawn(async move {
@@ -1193,24 +1199,21 @@ async fn a_canceled_publication_finishes_before_a_newer_one_can_run() {
                 .await
         })
     };
-    // A newer publication either completes on its own (the lock was given up
-    // with the dropped future) or waits for the older one's file work to
-    // finish. Release the older write once the newer has had its chance.
-    let newer_finished_first = tokio::select! {
-        _ = &mut newer => true,
-        () = tokio::time::sleep(std::time::Duration::from_secs(2)) => false,
+    let newer = if lock_held_by_the_older_write {
+        Err(newer)
+    } else {
+        Ok(newer.await.expect("join").expect("publish"))
     };
     release_tx.send(()).expect("release the older write");
     tokio::task::spawn_blocking(move || renamed_rx.recv())
         .await
         .expect("join")
         .expect("the older write's rename landed");
-    if !newer_finished_first {
-        assert_eq!(
-            newer.await.expect("join").expect("publish"),
-            PublishOutcome::Published
-        );
-    }
+    let newer = match newer {
+        Ok(outcome) => outcome,
+        Err(waiting) => waiting.await.expect("join").expect("publish"),
+    };
+    assert_eq!(newer, PublishOutcome::Published);
 
     let live = store.get(&k).await.expect("get").expect("an entry");
     assert_eq!(

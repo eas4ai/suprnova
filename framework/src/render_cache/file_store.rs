@@ -337,6 +337,16 @@ impl FileRenderStore {
             .swap(0, std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Test-only: whether something holds the lock every publication,
+    /// eviction, sweep and read of this store takes. How a test proves a
+    /// canceled publication's file work still owns it (DATA-024) without
+    /// waiting on a timer to see whether another operation gets through.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn publication_lock_is_held_for_test(&self) -> bool {
+        self.state.try_lock().is_err()
+    }
+
     /// Counts `examined` tracked entries toward the test-only
     /// `take_eviction_examined_for_test`.
     fn note_eviction_examined(&self, examined: usize) {
