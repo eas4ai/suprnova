@@ -1165,12 +1165,12 @@ impl Storage {
         // promotion write and the existence probes can use the high-level
         // operator API. It is the same backend as the stack the layer wraps,
         // so there is no second disk and no way to recurse.
-        let composed = primary.clone().layer(read_through::ReadThroughLayer {
+        let composed = primary.clone().layer(read_through::ReadThroughLayer::new(
             primary,
             fallback,
-            copy: config.copy,
-            throw_on_promotion_failure: config.throw_on_promotion_failure,
-        });
+            config.copy,
+            config.throw_on_promotion_failure,
+        ));
 
         registry::register(name, layer_fn(composed));
         Ok(())

@@ -648,16 +648,30 @@ warning if that delete fails rather than failing the read. Nothing sweeps a
 sibling left by a failed delete, a process that crashed, or a read future
 cancelled mid-promotion: those have to be removed by hand.
 
-A read that resolves from the fallback holds the object in memory until the
-promotion write completes, because promotion needs the whole object. That
-suits the tiering case a read-through disk is for. For very large cold
-objects, read the fallback disk directly or use
-[`copy_between_disks`](#cross-disk-streaming-copy) instead.
+A promoting read streams the cold object from the fallback into the primary,
+then answers from the primary. Nothing holds the whole object in memory, but
+the first read of a cold object waits for the whole transfer, even when it
+asks for a small range. A read that is not promoted fetches only the range it
+asked for: a read with `copy: false`, a versioned or conditional read, and the
+rest of a read whose promotion failed. A chunked read does not retry a failed
+promotion for every chunk. A fallback that answers a range with more bytes than
+the range holds, the way a server that ignores `Range` does, fails the read
+after one chunk instead of being read to the end.
 
 Laravel hands back the fallback's own stream when `copy` is `false` and
-buffers through `php://temp` when it is `true`. Suprnova instead narrows the
-fallback fetch to the requested range when `copy` is `false`, and buffers only
-on the promoting path where the whole object is needed anyway.
+buffers through `php://temp` when it is `true`. Suprnova narrows the fallback
+fetch to the requested range when nothing is promoted, and streams the
+promotion instead of buffering it.
+
+A delete or a move of a path that overlaps a promotion of the same path is not
+undone by it. Within one process, the promotion publishes only if no delete or
+move of its path ran after it started fetching; otherwise it discards its
+staged copy. Processes do not coordinate this, so a delete on one node can
+still race a promotion on another.
+
+A versioned or conditional read reaches the fallback even when the primary
+cannot express the version or condition. The primary's refusal applies only
+when the primary holds the object.
 
 Laravel's cross-fallback `copy` and `move` also buffer the source through
 `php://temp`. Suprnova streams it in 64 KiB chunks instead, because the
@@ -669,6 +683,11 @@ OpenDAL carries conditions on `copy` and `rename` that Flysystem has no
 equivalent for, so Suprnova has to decide what each one means when the source
 is only on the fallback: `if_not_exists` and a copy's source version are
 honored, and a copy's `if_match` is refused rather than dropped.
+
+Before it deletes anything, a move checks that the primary accepts the
+destination: a local primary's path guard refuses a destination outside its
+root or inside its staging directory, and a refused move leaves both disks as
+they were.
 
 Laravel deletes the fallback source after the move on both paths. Suprnova
 deletes it first when the primary holds the source, because the two orders

@@ -38,11 +38,30 @@
 //! them with a `rename` whenever the primary advertises one. Backends without a
 //! rename (memory, S3, Azure Blob, GCS) publish a write as a single indivisible
 //! operation, so for those the direct write is already atomic and is what runs.
+//!
+//! # Promotion streams
+//!
+//! A promotion streams the cold object from the fallback into the primary and
+//! then answers the read from the primary. Nothing holds the whole object in
+//! memory, so a multi-gigabyte cold object costs a transfer, not a buffer. A
+//! read that is not promoted - `copy: false`, a versioned or conditional read,
+//! or a read whose promotion already failed - fetches only the range it was
+//! asked for, and refuses a fallback that answers a range with more bytes than
+//! the range holds instead of collecting them.
+//!
+//! # A delete is never undone by a promotion
+//!
+//! A promotion that overlaps a delete or a move of the same path must not
+//! republish the bytes it fetched before the delete. Within one process every
+//! publish, delete and move of a path is serialized through [`Publications`],
+//! and a promotion that started before a delete or a move of its path discards
+//! its staged copy instead of publishing it. Processes do not coordinate: a
+//! delete on one node can still race a promotion on another.
 
 use super::streaming::WriterGuard;
 use futures::TryStreamExt;
-use opendal::options::{DeleteOptions, ReadOptions, ReaderOptions, WriteOptions};
-use opendal::raw::oio::Copy as _;
+use opendal::options::{DeleteOptions, ReaderOptions, WriteOptions};
+use opendal::raw::oio::{Copy as _, Read as _, ReadStream as _};
 use opendal::raw::{
     Layer, OpCopier, OpCopy, OpCreateDir, OpDelete, OpList, OpPresign, OpRead, OpRename, OpStat,
     OpWrite, PresignOperation, RpCreateDir, RpPresign, RpRead, RpRename, RpStat, Service,
@@ -51,7 +70,9 @@ use opendal::raw::{
 use opendal::{
     Buffer, BytesRange, Capability, Error, ErrorKind, Metadata, OperationContext, Operator, Result,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
 /// Build the sibling path a promotion stages its bytes at before renaming them
@@ -63,6 +84,132 @@ use uuid::Uuid;
 /// store a cross-prefix rename can be a different operation entirely.
 fn staging_path(path: &str) -> String {
     format!("{path}.suprnova-promote-{}.tmp", Uuid::new_v4().simple())
+}
+
+/// Serializes, within one process, the moment a promotion publishes a path
+/// with the deletes and moves that remove it.
+///
+/// A promotion fetches from the fallback, stages, and publishes some time
+/// later. A delete that completes in between finds nothing on the primary to
+/// remove, so without coordination the promotion would put the deleted object
+/// back. Every publish, delete and move of a path therefore holds that path's
+/// slot, and each delete or move advances the slot's generation. A promotion
+/// records the generation before it fetches and publishes only if it is
+/// unchanged. A recursive delete covers paths it cannot name one by one, so it
+/// takes the whole table exclusively and advances a table-wide generation.
+///
+/// Slots exist only while something holds them, so the table stays as small
+/// as the number of operations in flight.
+#[derive(Debug, Default)]
+pub(crate) struct Publications {
+    /// Advanced by every recursive delete. Publishers hold it shared; a
+    /// recursive delete holds it exclusively.
+    tree: tokio::sync::RwLock<u64>,
+    /// One slot per path some operation currently holds.
+    slots: std::sync::Mutex<HashMap<String, Arc<PathSlot>>>,
+}
+
+/// The coordination state for one path.
+#[derive(Debug, Default)]
+struct PathSlot {
+    /// Advanced by every delete or move of the path, and held across every
+    /// publish, delete and move of it.
+    generation: tokio::sync::Mutex<u64>,
+}
+
+/// A held claim on one path's slot. Dropping it releases the slot, and the
+/// last claim removes the slot from the table.
+struct SlotClaim<'a> {
+    publications: &'a Publications,
+    path: String,
+    slot: Arc<PathSlot>,
+}
+
+impl Drop for SlotClaim<'_> {
+    fn drop(&mut self) {
+        let mut slots = self
+            .publications
+            .slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The table's own reference plus this claim's: nobody else holds it.
+        if Arc::strong_count(&self.slot) == 2 {
+            slots.remove(&self.path);
+        }
+    }
+}
+
+/// What a promotion records before it fetches: the generations a later
+/// delete or move would advance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Generations {
+    tree: u64,
+    path: u64,
+}
+
+impl Publications {
+    fn claim(&self, path: &str) -> SlotClaim<'_> {
+        let slot = self
+            .slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(path.to_owned())
+            .or_default()
+            .clone();
+        SlotClaim {
+            publications: self,
+            path: path.to_owned(),
+            slot,
+        }
+    }
+
+    /// The generations in force for `claim`'s path right now.
+    async fn generations(&self, claim: &SlotClaim<'_>) -> Generations {
+        let tree = *self.tree.read().await;
+        let path = *claim.slot.generation.lock().await;
+        Generations { tree, path }
+    }
+
+    /// Run `remove` - a delete or a move of `path` - so that no promotion
+    /// that started before it can publish `path` afterwards.
+    async fn retire<T>(
+        &self,
+        path: &str,
+        recursive: bool,
+        remove: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        if recursive {
+            let mut tree = self.tree.write().await;
+            *tree += 1;
+            return remove.await;
+        }
+        let claim = self.claim(path);
+        let _tree = self.tree.read().await;
+        let mut generation = claim.slot.generation.lock().await;
+        *generation += 1;
+        remove.await
+    }
+
+    /// Run `publish` only if no delete or move of the claimed path has run
+    /// since `recorded`. Returns `None` when one has, and the publish was
+    /// skipped.
+    async fn publish<T>(
+        &self,
+        claim: &SlotClaim<'_>,
+        recorded: Generations,
+        publish: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<Option<T>> {
+        let tree = self.tree.read().await;
+        let generation = claim.slot.generation.lock().await;
+        if (Generations {
+            tree: *tree,
+            path: *generation,
+        }) != recorded
+        {
+            return Ok(None);
+        }
+        publish.await.map(Some)
+    }
 }
 
 /// [`Layer`] that turns the primary disk it wraps into a read-through disk over
@@ -83,8 +230,29 @@ pub(crate) struct ReadThroughLayer {
     /// Whether a fallback hit is written through to the primary. See
     /// [`crate::ReadThroughConfig::copy`].
     pub(crate) copy: bool,
-    /// Whether a failed promotion fails the read. See [`ReadThroughReader::promote`].
+    /// Whether a failed promotion fails the read. See [`ReadThroughReader::degrade`].
     pub(crate) throw_on_promotion_failure: bool,
+    /// Shared by every service this layer builds, so re-layering the
+    /// composite never splits the coordination between two tables.
+    pub(crate) publications: Arc<Publications>,
+}
+
+impl ReadThroughLayer {
+    /// A read-through layer over `primary` and `fallback`.
+    pub(crate) fn new(
+        primary: Operator,
+        fallback: Operator,
+        copy: bool,
+        throw_on_promotion_failure: bool,
+    ) -> Self {
+        Self {
+            primary,
+            fallback,
+            copy,
+            throw_on_promotion_failure,
+            publications: Arc::default(),
+        }
+    }
 }
 
 impl Layer for ReadThroughLayer {
@@ -100,6 +268,7 @@ impl Layer for ReadThroughLayer {
             throw_on_promotion_failure: self.throw_on_promotion_failure,
             promote_conditionally: capability.write_with_if_not_exists,
             promote_atomically: capability.rename,
+            publications: Arc::clone(&self.publications),
         })
     }
 }
@@ -122,6 +291,8 @@ pub(crate) struct ReadThroughService {
     promote_conditionally: bool,
     /// Whether the primary can publish a promotion with an atomic `rename`.
     promote_atomically: bool,
+    /// Keeps a promotion from republishing a path a delete or move removed.
+    publications: Arc<Publications>,
 }
 
 impl Service for ReadThroughService {
@@ -150,6 +321,14 @@ impl Service for ReadThroughService {
         // source off the fallback but still need the primary to accept the
         // destination.
         capability.read |= fallback.read;
+        // A versioned or conditional read the primary cannot express is still
+        // answered when the object lives only on the fallback, so these are
+        // the union too. A primary that holds the object refuses them itself.
+        capability.read_with_version |= fallback.read_with_version;
+        capability.read_with_if_match |= fallback.read_with_if_match;
+        capability.read_with_if_none_match |= fallback.read_with_if_none_match;
+        capability.read_with_if_modified_since |= fallback.read_with_if_modified_since;
+        capability.read_with_if_unmodified_since |= fallback.read_with_if_unmodified_since;
         capability.stat |= fallback.stat;
         capability.presign |= fallback.presign;
         capability.presign_read |= fallback.presign_read;
@@ -188,7 +367,12 @@ impl Service for ReadThroughService {
         // return a lazy handle and open nothing until the first range is asked
         // for. The reader keeps its own clone of `args` because a fallback read
         // has to carry the caller's version and conditional headers too.
-        let primary_reader = self.inner.read(ctx, path, args.clone())?;
+        //
+        // A primary that cannot express those arguments refuses to build a
+        // reader at all. That refusal only matters if the primary turns out to
+        // hold the object, so it is kept and raised then, rather than here,
+        // where it would stop a fallback that can answer from being asked.
+        let primary_reader = self.inner.read(ctx, path, args.clone());
         Ok(ReadThroughReader {
             primary_reader,
             primary: self.primary.clone(),
@@ -199,6 +383,8 @@ impl Service for ReadThroughService {
             throw_on_promotion_failure: self.throw_on_promotion_failure,
             promote_conditionally: self.promote_conditionally,
             promote_atomically: self.promote_atomically,
+            publications: Arc::clone(&self.publications),
+            promotion_failed: AtomicBool::new(false),
         })
     }
 
@@ -212,6 +398,7 @@ impl Service for ReadThroughService {
         Ok(ReadThroughDeleter {
             inner: self.inner.delete(ctx)?,
             fallback: self.fallback.clone(),
+            publications: Arc::clone(&self.publications),
         })
     }
 
@@ -299,7 +486,9 @@ impl Service for ReadThroughService {
         // The fallback's copy of the source goes on both branches: leaving it
         // behind would let the next read promote it straight back and undo the
         // move. Deleting a missing path is a success in opendal, so neither
-        // branch needs an existence probe first.
+        // branch needs an existence probe first. Both branches retire `from`,
+        // so a promotion of it that is already in flight cannot republish it
+        // once the move has removed it.
         if self.primary.exists(from).await? {
             // Everything the primary would refuse this rename for has to be
             // established *before* the fallback source is deleted. A move that
@@ -345,6 +534,17 @@ impl Service for ReadThroughService {
                     ));
                 }
             }
+            // The primary may also refuse the destination path itself - a
+            // local disk's path guard refuses one that leaves its root or
+            // names its staging directory. A `stat` of the destination runs
+            // the same checks without changing anything: a miss is the
+            // expected answer, and any other error is a refusal to report now,
+            // while both disks still hold the source.
+            match self.inner.stat(ctx, to, OpStat::new()).await {
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(move_failed(from, to, e)),
+            }
 
             // Now delete the fallback's copy, *before* the rename. While the
             // primary holds `from`, that copy is unreachable through this disk,
@@ -360,11 +560,15 @@ impl Service for ReadThroughService {
             // retry re-enters this same branch, finds the fallback delete a
             // no-op, and runs the rename again - so the failure costs the cold
             // copy and nothing else.
-            self.fallback
-                .delete(from)
-                .await
-                .map_err(|e| move_failed(from, to, e))?;
-            self.inner.rename(ctx, from, to, args).await?;
+            self.publications
+                .retire(from, false, async {
+                    self.fallback
+                        .delete(from)
+                        .await
+                        .map_err(|e| move_failed(from, to, e))?;
+                    self.inner.rename(ctx, from, to, args).await
+                })
+                .await?;
             return Ok(RpRename::new());
         }
 
@@ -374,14 +578,18 @@ impl Service for ReadThroughService {
             source_version: None,
             if_not_exists: args.if_not_exists(),
         };
-        stream_across(&self.primary, &self.fallback, from, to, &conditions)
-            .await
-            .map_err(|e| move_failed(from, to, e))?;
+        self.publications
+            .retire(from, false, async {
+                stream_across(&self.primary, &self.fallback, from, to, &conditions)
+                    .await
+                    .map_err(|e| move_failed(from, to, e))?;
 
-        self.fallback
-            .delete(from)
-            .await
-            .map_err(|e| move_failed(from, to, e))?;
+                self.fallback
+                    .delete(from)
+                    .await
+                    .map_err(|e| move_failed(from, to, e))
+            })
+            .await?;
 
         Ok(RpRename::new())
     }
@@ -417,8 +625,9 @@ impl Service for ReadThroughService {
 /// The reader produced by [`ReadThroughService`]. Resolves each range against
 /// the primary first and promotes what it has to fetch from the fallback.
 pub(crate) struct ReadThroughReader {
-    /// The primary's lazy reader, used whenever the primary owns the object.
-    primary_reader: oio::Reader,
+    /// The primary's lazy reader, used whenever the primary owns the object,
+    /// or the refusal building it returned. See [`ReadThroughService::read`].
+    primary_reader: Result<oio::Reader>,
     /// The primary disk, for the existence probes and the promotion write.
     primary: Operator,
     /// The disk a miss on the primary falls back to.
@@ -435,6 +644,31 @@ pub(crate) struct ReadThroughReader {
     promote_conditionally: bool,
     /// Whether the promotion can be published with an atomic `rename`.
     promote_atomically: bool,
+    /// Keeps a promotion from republishing a path a delete or move removed.
+    publications: Arc<Publications>,
+    /// Set once a promotion for this read has failed. A chunked read asks
+    /// for one range at a time; retrying the promotion for each would move
+    /// the whole object once per chunk, so the rest of the read takes ranged
+    /// reads from the fallback instead.
+    promotion_failed: AtomicBool,
+}
+
+/// Which disk answers a range.
+enum Route {
+    /// The primary holds the object, or a promotion just put it there.
+    Primary,
+    /// Only the fallback holds it, and nothing is promoted for this range.
+    Fallback,
+}
+
+/// How a promotion ended, when it did not fail.
+enum Promotion {
+    /// The object is on the primary now: this promotion published it, or a
+    /// writer or another promotion got there first.
+    OnPrimary,
+    /// A delete or move of the path ran while the promotion was fetching, so
+    /// its bytes were discarded instead of published.
+    Superseded,
 }
 
 impl ReadThroughReader {
@@ -455,109 +689,116 @@ impl ReadThroughReader {
             && self.args.if_unmodified_since().is_none()
     }
 
-    /// The options the fallback read runs under, fetching `range`.
+    /// The primary's reader, or the refusal building it returned.
+    fn primary_reader(&self) -> Result<&oio::Reader> {
+        self.primary_reader
+            .as_ref()
+            .map_err(|e| Error::new(e.kind(), e.to_string()))
+    }
+
+    /// The arguments a fallback read runs under.
     ///
     /// Everything the caller set on the original read that selects *which*
     /// object comes back is replayed here. Dropping any of it would answer a
     /// versioned read with the fallback's current object, or hand back a body
     /// where the caller expected `ConditionNotMatch`.
+    fn fallback_args(&self) -> OpRead {
+        let mut args = OpRead::new();
+        if let Some(version) = self.args.version() {
+            args = args.with_version(version);
+        }
+        if let Some(etag) = self.args.if_match() {
+            args = args.with_if_match(etag);
+        }
+        if let Some(etag) = self.args.if_none_match() {
+            args = args.with_if_none_match(etag);
+        }
+        if let Some(at) = self.args.if_modified_since() {
+            args = args.with_if_modified_since(at);
+        }
+        if let Some(at) = self.args.if_unmodified_since() {
+            args = args.with_if_unmodified_since(at);
+        }
+        args
+    }
+
+    /// Open `range` of the fallback object as a stream that never yields more
+    /// than the range holds.
     ///
-    /// The range is a parameter because the two read paths want different
-    /// ones. A promoting read passes the default - the whole object, because
-    /// that is what gets written through - and slices the caller's range out
-    /// of it afterwards. A non-promoting read passes the caller's range, since
-    /// nothing is written back and there is no reason to fetch more.
-    fn fallback_read_options(&self, range: BytesRange) -> ReadOptions {
-        ReadOptions {
+    /// The read goes to the fallback's own reader rather than through
+    /// `Operator::read`, which collects whatever the backend sends before it
+    /// checks the length. A backend that ignores `Range` and answers with the
+    /// whole body would otherwise be read to the end, all of it held in
+    /// memory, for a range of a few bytes.
+    async fn open_fallback(&self, range: BytesRange) -> Result<(RpRead, BoundedStream)> {
+        let reader = self.fallback.service().read(
+            self.fallback.context(),
+            &self.path,
+            self.fallback_args(),
+        )?;
+        let (reply, stream) = reader.open(range).await?;
+        // Only a range that names its size can be held to it. An open-ended
+        // range (`5..`) streams through unchecked; a whole-object read is the
+        // common case of that shape.
+        let limit = if range.is_suffix() {
+            None
+        } else {
+            range.size()
+        };
+        let stream = BoundedStream {
+            inner: stream,
+            limit,
+            read: 0,
+            path: self.path.clone(),
             range,
-            version: self.args.version().map(str::to_owned),
-            if_match: self.args.if_match().map(str::to_owned),
-            if_none_match: self.args.if_none_match().map(str::to_owned),
-            if_modified_since: self.args.if_modified_since(),
-            if_unmodified_since: self.args.if_unmodified_since(),
-            ..Default::default()
-        }
+        };
+        Ok((reply, stream))
     }
 
-    /// Resolve one range.
-    ///
-    /// `Ok(None)` means the primary owns the object and the caller should
-    /// delegate to its reader - that keeps ranged and conditional reads on the
-    /// backend instead of buffering them here, and it is also how the race
-    /// re-check reports "somebody else got there first".
-    async fn resolve_from_fallback(&self, range: BytesRange) -> Result<Option<Buffer>> {
+    /// Decide which disk answers, promoting the object first when this read
+    /// should and can.
+    async fn route(&self) -> Result<Route> {
         if self.primary.exists(&self.path).await? {
-            return Ok(None);
+            return Ok(Route::Primary);
+        }
+        if !self.copy || !self.is_promotable() || self.promotion_failed.load(Ordering::Acquire) {
+            return Ok(Route::Fallback);
         }
 
-        if !self.copy {
-            // Nothing is written back, so there is nothing to fetch beyond what
-            // the caller asked for - and no race re-check, because there is no
-            // write to lose a race with.
-            return self
-                .fallback
-                .read_options(&self.path, self.fallback_read_options(range))
-                .await
-                .map(Some);
-        }
-
-        // Promotion needs the whole object, so the whole object is what we
-        // fetch. A fallback-resolved read therefore holds the object in memory
-        // until the promotion write completes.
-        let full = self
-            .fallback
-            .read_options(
-                &self.path,
-                self.fallback_read_options(BytesRange::default()),
-            )
-            .await?;
-
-        // Re-check after the fetch: a writer that landed on the primary while
-        // we were pulling the fallback bytes must win, not be overwritten by a
-        // stale copy of the cold tier.
-        match self.primary.exists(&self.path).await {
-            Ok(true) => return Ok(None),
-            Ok(false) => {
-                if self.is_promotable() {
-                    self.promote(&full).await?;
-                }
+        // The fallback's own metadata rides along with the bytes. Without it an
+        // S3-to-S3 read-through would silently drop `Content-Type` the first
+        // time each object crossed over, and nothing would ever restore it. A
+        // miss here is not a promotion failure: the object is on neither disk.
+        let metadata = match self.fallback.stat(&self.path).await {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Err(e),
+            Err(e) => {
+                self.degrade(e)?;
+                return Ok(Route::Fallback);
             }
-            // This probe exists only to protect the promotion write, and the
-            // caller's bytes are already in hand, so a primary that cannot
-            // answer it is a promotion failure like any other. Failing the read
-            // here would put a permissions or transport fault on the promotion
-            // side outside the degrade contract entirely.
-            Err(e) => self.degrade(e)?,
-        }
+        };
 
-        let slice = range.to_content_range(full.len())?;
-        Ok(Some(full.slice(slice)))
-    }
-
-    /// Write a fallback hit through to the primary.
-    ///
-    /// Failure is a performance problem rather than a read failure unless
-    /// `throw_on_promotion_failure` is set: the caller already holds the bytes
-    /// it asked for, so an unwritable primary degrades the disk to "read the
-    /// fallback every time" instead of taking the application down. Losing a
-    /// conditional write is not a failure at all - the object that won came
-    /// from the same fallback and holds the same bytes.
-    async fn promote(&self, contents: &Buffer) -> Result<()> {
-        match self.publish(contents).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == ErrorKind::ConditionNotMatch => Ok(()),
-            Err(e) => self.degrade(e),
+        match self.promote(&metadata).await {
+            Ok(Promotion::OnPrimary) => Ok(Route::Primary),
+            Ok(Promotion::Superseded) => Ok(Route::Fallback),
+            Err(e) => {
+                self.degrade(e)?;
+                Ok(Route::Fallback)
+            }
         }
     }
 
     /// Apply the configured outcome to a promotion-side failure.
     ///
     /// Every operation that runs only because the read is promoting - the
-    /// race re-check, the fallback `stat`, the staged write, the publish -
+    /// fallback `stat`, the staged write, the race re-check, the publish -
     /// routes its failure through here, so `throw_on_promotion_failure` means
-    /// the same thing for all of them and no single step can fail a read that
-    /// has already resolved.
+    /// the same thing for all of them. Failure is a performance problem rather
+    /// than a read failure unless that flag is set: the fallback can still
+    /// answer, so an unwritable primary degrades the disk to "read the
+    /// fallback every time" instead of taking the application down.
     fn degrade(&self, e: Error) -> Result<()> {
+        self.promotion_failed.store(true, Ordering::Release);
         if self.throw_on_promotion_failure {
             return Err(Error::new(
                 ErrorKind::Unexpected,
@@ -572,13 +813,13 @@ impl ReadThroughReader {
         tracing::warn!(
             path = %self.path,
             error = %e,
-            "read-through promotion to the primary disk failed; serving the fallback bytes"
+            "read-through promotion to the primary disk failed; serving from the fallback"
         );
         Ok(())
     }
 
-    /// Put the promoted bytes on the primary so that no reader can observe them
-    /// half-written.
+    /// Stream the fallback object into the primary so that no reader can
+    /// observe it half-written, and no delete that overlaps it is undone.
     ///
     /// Where the primary advertises a `rename`, the bytes are staged at a
     /// unique sibling and renamed onto the target. That covers any primary
@@ -589,25 +830,21 @@ impl ReadThroughReader {
     ///
     /// The staged form cannot use that condition: its path is unique, so the
     /// condition would be vacuous. It re-checks the primary immediately before
-    /// the rename instead, so a write that lands on the primary inside that
-    /// window is overwritten rather than winning.
+    /// the rename instead, and a write that landed in the meantime wins.
     ///
-    /// Every step here belongs to the promotion, the fallback `stat` included.
-    /// The caller's bytes are already in hand by the time this runs, so a
-    /// fallback that has just pruned the object or is briefly unreachable has
-    /// to degrade the promotion through [`ReadThroughReader::promote`] rather
-    /// than fail a read that already succeeded.
-    async fn publish(&self, contents: &Buffer) -> Result<()> {
-        // The fallback's own metadata rides along with the bytes. Without it an
-        // S3-to-S3 read-through would silently drop `Content-Type` the first
-        // time each object crossed over, and nothing would ever restore it.
-        let metadata = self.fallback.stat(&self.path).await?;
+    /// Either way the publish runs through [`Publications::publish`], and a
+    /// promotion that a delete or move of the path overtook discards its bytes.
+    async fn promote(&self, metadata: &Metadata) -> Result<Promotion> {
+        let claim = self.publications.claim(&self.path);
+        // Recorded before the first byte is fetched: a delete that removes the
+        // fallback copy after this point advances it.
+        let recorded = self.publications.generations(&claim).await;
 
         if !self.promote_atomically {
-            let options = self.promotion_options(&metadata, self.promote_conditionally);
+            let options = self.promotion_options(metadata, self.promote_conditionally);
             let writer = self.primary.writer_options(&self.path, options).await?;
-            // Abort multipart state on cancellation, but never delete a
-            // published object: another reader may have won the condition.
+            // Abort multipart state on failure, but never delete a published
+            // object: another reader may have won the condition.
             let mut guard = WriterGuard::new(
                 self.primary.clone(),
                 "read-through primary",
@@ -615,16 +852,33 @@ impl ReadThroughReader {
                 writer,
             )
             .preserve_destination();
-            let result = async {
-                guard.writer().write(contents.clone()).await?;
-                guard.writer().close().await.map(|_| ())
+            if let Err(e) = self.stream_into(guard.writer()).await {
+                return guard.settle(Err(e)).await;
             }
-            .await;
-            return guard.settle(result).await;
+            // The close is the publish on these backends, so it is what runs
+            // under the coordination.
+            let closed = self
+                .publications
+                .publish(&claim, recorded, guard.writer().close())
+                .await;
+            return match closed {
+                Ok(Some(_)) => guard.settle(Ok(Promotion::OnPrimary)).await,
+                Ok(None) => {
+                    guard.cleanup().await;
+                    Ok(Promotion::Superseded)
+                }
+                // Losing the condition is not a failure: the object that won
+                // came from the same fallback and holds the same bytes.
+                Err(e) if e.kind() == ErrorKind::ConditionNotMatch => {
+                    guard.cleanup().await;
+                    Ok(Promotion::OnPrimary)
+                }
+                Err(e) => guard.settle(Err(e)).await,
+            };
         }
 
         let staged = staging_path(&self.path);
-        let options = self.promotion_options(&metadata, false);
+        let options = self.promotion_options(metadata, false);
         let writer = self.primary.writer_options(&staged, options).await?;
         // Own both the writer's staging and the unique sibling until the
         // final rename completes. Cleanup never targets the published path.
@@ -634,23 +888,52 @@ impl ReadThroughReader {
             &staged,
             writer,
         );
-        let result: Result<bool> = async {
-            guard.writer().write(contents.clone()).await?;
+        let staged_result: Result<()> = async {
+            self.stream_into(guard.writer()).await?;
             guard.writer().close().await?;
-            if self.primary.exists(&self.path).await? {
-                // Somebody published while we were staging. Their object wins.
-                return Ok(false);
-            }
-            self.primary.rename(&staged, &self.path).await?;
-            Ok(true)
+            Ok(())
         }
         .await;
-        match result {
-            Ok(false) => {
+        if let Err(e) = staged_result {
+            return guard.settle(Err(e)).await;
+        }
+
+        let published = self
+            .publications
+            .publish(&claim, recorded, async {
+                if self.primary.exists(&self.path).await? {
+                    // Somebody published while we were staging. Their object
+                    // wins.
+                    return Ok(false);
+                }
+                self.primary.rename(&staged, &self.path).await?;
+                Ok(true)
+            })
+            .await;
+        match published {
+            Ok(Some(true)) => guard.settle(Ok(Promotion::OnPrimary)).await,
+            Ok(Some(false)) => {
                 guard.cleanup().await;
-                Ok(())
+                Ok(Promotion::OnPrimary)
             }
-            result => guard.settle(result.map(|_| ())).await,
+            Ok(None) => {
+                guard.cleanup().await;
+                Ok(Promotion::Superseded)
+            }
+            Err(e) => guard.settle(Err(e)).await,
+        }
+    }
+
+    /// Copy the whole fallback object into `writer`, one fallback chunk at a
+    /// time, without closing it.
+    async fn stream_into(&self, writer: &mut opendal::Writer) -> Result<()> {
+        let (_, mut stream) = self.open_fallback(BytesRange::default()).await?;
+        loop {
+            let chunk = stream.read().await?;
+            if chunk.is_empty() {
+                return Ok(());
+            }
+            writer.write(chunk).await?;
         }
     }
 
@@ -671,23 +954,79 @@ impl ReadThroughReader {
 
 impl oio::Read for ReadThroughReader {
     async fn open(&self, range: BytesRange) -> Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
-        match self.resolve_from_fallback(range).await? {
-            None => self.primary_reader.open(range).await,
-            // `Buffer` is itself a `ReadStream`, so the promoted bytes can be
-            // handed back without another adapter type.
-            Some(buffer) => Ok((
-                RpRead::default(),
-                Box::new(buffer) as Box<dyn oio::ReadStreamDyn>,
-            )),
+        match self.route().await? {
+            Route::Primary => self.primary_reader()?.open(range).await,
+            Route::Fallback => {
+                let (reply, stream) = self.open_fallback(range).await?;
+                Ok((reply, Box::new(stream) as Box<dyn oio::ReadStreamDyn>))
+            }
         }
     }
 
     async fn read(&self, range: BytesRange) -> Result<(RpRead, Buffer)> {
-        match self.resolve_from_fallback(range).await? {
-            None => self.primary_reader.read(range).await,
-            Some(buffer) => Ok((RpRead::default(), buffer)),
+        match self.route().await? {
+            Route::Primary => self.primary_reader()?.read(range).await,
+            Route::Fallback => {
+                let (reply, mut stream) = self.open_fallback(range).await?;
+                let buffer = stream.read_all().await?;
+                Ok((reply, buffer))
+            }
         }
     }
+}
+
+/// A fallback stream that fails as soon as it would yield more bytes than the
+/// range asked for, or ends with fewer.
+///
+/// It is what keeps a ranged fallback read bounded by its range: the chunk
+/// that crosses the limit is refused rather than handed on, so a backend that
+/// ignores `Range` costs one chunk, not the whole body.
+pub(crate) struct BoundedStream {
+    inner: Box<dyn oio::ReadStreamDyn>,
+    /// The bytes the range holds, when it says.
+    limit: Option<u64>,
+    /// The bytes yielded so far.
+    read: u64,
+    path: String,
+    range: BytesRange,
+}
+
+impl oio::ReadStream for BoundedStream {
+    async fn read(&mut self) -> Result<Buffer> {
+        let chunk = self.inner.read_dyn().await?;
+        let Some(limit) = self.limit else {
+            return Ok(chunk);
+        };
+        if chunk.is_empty() {
+            if self.read < limit {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    format!(
+                        "the fallback disk answered {} bytes of '{}' for the range {}, which \
+                         holds {limit}",
+                        self.read, self.path, self.range
+                    ),
+                ));
+            }
+            return Ok(chunk);
+        }
+        self.read += chunk.len() as u64;
+        if self.read > limit {
+            return Err(range_ignored(&self.path, self.range));
+        }
+        Ok(chunk)
+    }
+}
+
+/// The error for a fallback that answered a range with bytes outside it.
+fn range_ignored(path: &str, range: BytesRange) -> Error {
+    Error::new(
+        ErrorKind::Unexpected,
+        format!(
+            "the fallback disk answered the range {range} of '{path}' with bytes outside \
+             it; the backend ignores range requests"
+        ),
+    )
 }
 
 /// The deleter produced by [`ReadThroughService`]. Removes the object from the
@@ -698,6 +1037,8 @@ pub(crate) struct ReadThroughDeleter {
     inner: oio::Deleter,
     /// The disk the same delete is replayed against first.
     fallback: Operator,
+    /// Keeps a promotion in flight from republishing what this removes.
+    publications: Arc<Publications>,
 }
 
 impl oio::Delete for ReadThroughDeleter {
@@ -711,8 +1052,17 @@ impl oio::Delete for ReadThroughDeleter {
             version: args.version().map(str::to_owned),
             recursive: args.recursive(),
         };
-        self.fallback.delete_options(path, options).await?;
-        self.inner.delete(path, args).await
+        let Self {
+            inner,
+            fallback,
+            publications,
+        } = self;
+        publications
+            .retire(path, args.recursive(), async {
+                fallback.delete_options(path, options).await?;
+                inner.delete(path, args).await
+            })
+            .await
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -847,6 +1197,51 @@ mod tests {
         writes: Mutex<Vec<(String, OpWrite)>>,
         renames: Mutex<Vec<(String, String)>>,
         deletes: Mutex<Vec<String>>,
+        /// The size of every buffer a writer was handed, in order.
+        write_sizes: Mutex<Vec<usize>>,
+        /// How many pieces a piecewise stream has handed out.
+        pieces_pulled: Mutex<usize>,
+        /// Held by the next read until the test releases it.
+        read_gate: Mutex<Option<ReadGate>>,
+        /// What closed writers stored, by path, moved by a rename and
+        /// removed by a delete. A path found here answers ahead of the
+        /// stub's fixed body, so a promotion can be read back.
+        stored: Mutex<std::collections::HashMap<String, Buffer>>,
+    }
+
+    /// Stops one read part-way so a test can act while it is in flight.
+    struct ReadGate {
+        /// Told when the read reaches the gate.
+        entered: tokio::sync::oneshot::Sender<()>,
+        /// Awaited before the read goes on.
+        release: tokio::sync::oneshot::Receiver<()>,
+    }
+
+    impl std::fmt::Debug for ReadGate {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("ReadGate")
+        }
+    }
+
+    /// Wait at the journal's gate, if a test set one.
+    async fn pass_read_gate(journal: &Journal) {
+        let gate = locked(&journal.read_gate).take();
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(());
+            let _ = gate.release.await;
+        }
+    }
+
+    /// The bytes a list of fetched ranges covers over an object of `len`.
+    fn fetched_bytes(ranges: &[BytesRange], len: u64) -> u64 {
+        ranges
+            .iter()
+            .map(|range| {
+                range
+                    .size()
+                    .unwrap_or_else(|| len.saturating_sub(range.offset()))
+            })
+            .sum()
     }
 
     /// Take a lock without caring whether a failing test poisoned it first.
@@ -936,6 +1331,12 @@ mod tests {
         /// produces are different.
         renames_conditionally: bool,
         writes: WriteBehavior,
+        /// Answer every read with the whole body whatever range was asked
+        /// for, the way an HTTP backend that ignores `Range` answers `200`.
+        ignores_range: bool,
+        /// Hand an opened stream out in pieces of this many bytes, the way a
+        /// network body arrives, instead of in one buffer.
+        stream_piece: Option<usize>,
     }
 
     /// A disk that answers from a fixed body and records what it is asked for.
@@ -990,9 +1391,32 @@ mod tests {
     /// it to the reader - so journaling it here is the only way to observe how
     /// much of the fallback object a read actually fetches.
     struct StubReader {
+        path: String,
         contents: Buffer,
         read_fails_after: Option<usize>,
+        ignores_range: bool,
+        stream_piece: Option<usize>,
         journal: Arc<Journal>,
+    }
+
+    /// A body handed out a piece at a time, counting the pieces.
+    struct PieceStream {
+        rest: Buffer,
+        piece: usize,
+        journal: Arc<Journal>,
+    }
+
+    impl oio::ReadStream for PieceStream {
+        async fn read(&mut self) -> Result<Buffer> {
+            if self.rest.is_empty() {
+                return Ok(Buffer::new());
+            }
+            let take = self.piece.min(self.rest.len());
+            let piece = self.rest.slice(0..take);
+            self.rest = self.rest.slice(take..self.rest.len());
+            *locked(&self.journal.pieces_pulled) += 1;
+            Ok(piece)
+        }
     }
 
     impl StubReader {
@@ -1008,26 +1432,46 @@ mod tests {
                     "the stub disk dropped the transfer part-way through",
                 ));
             }
-            let slice = range.to_content_range(self.contents.len())?;
-            Ok(self.contents.slice(slice))
+            // Looked up per range, not when the reader was built: a
+            // promotion stores its object after the reader exists.
+            let contents = locked(&self.journal.stored)
+                .get(&self.path)
+                .cloned()
+                .unwrap_or_else(|| self.contents.clone());
+            if self.ignores_range {
+                return Ok(contents);
+            }
+            let slice = range.to_content_range(contents.len())?;
+            Ok(contents.slice(slice))
         }
     }
 
     impl oio::Read for StubReader {
         async fn open(&self, range: BytesRange) -> Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
-            Ok((
-                RpRead::default(),
-                Box::new(self.slice(range)?) as Box<dyn oio::ReadStreamDyn>,
-            ))
+            pass_read_gate(&self.journal).await;
+            let body = self.slice(range)?;
+            let stream: Box<dyn oio::ReadStreamDyn> = match self.stream_piece {
+                Some(piece) => Box::new(PieceStream {
+                    rest: body,
+                    piece,
+                    journal: Arc::clone(&self.journal),
+                }),
+                None => Box::new(body),
+            };
+            Ok((RpRead::default(), stream))
         }
 
         async fn read(&self, range: BytesRange) -> Result<(RpRead, Buffer)> {
+            pass_read_gate(&self.journal).await;
             Ok((RpRead::default(), self.slice(range)?))
         }
     }
 
     struct StubWriter {
         fails: bool,
+        path: String,
+        body: Vec<Buffer>,
+        journal: Arc<Journal>,
     }
 
     impl StubWriter {
@@ -1040,10 +1484,12 @@ mod tests {
     }
 
     impl oio::Write for StubWriter {
-        async fn write(&mut self, _buffer: Buffer) -> Result<()> {
+        async fn write(&mut self, buffer: Buffer) -> Result<()> {
+            locked(&self.journal.write_sizes).push(buffer.len());
             if self.fails {
                 return Err(Self::failure());
             }
+            self.body.push(buffer);
             Ok(())
         }
 
@@ -1051,6 +1497,11 @@ mod tests {
             if self.fails {
                 return Err(Self::failure());
             }
+            let body: Buffer = std::mem::take(&mut self.body)
+                .into_iter()
+                .flatten()
+                .collect();
+            locked(&self.journal.stored).insert(self.path.clone(), body);
             Ok(Metadata::new(EntryMode::FILE))
         }
 
@@ -1079,6 +1530,7 @@ mod tests {
                     "the stub disk cannot delete right now",
                 ));
             }
+            locked(&self.journal.stored).remove(path);
             Ok(())
         }
 
@@ -1150,7 +1602,8 @@ mod tests {
                     "the stub disk cannot answer a stat right now",
                 ));
             }
-            match &self.contents {
+            let stored = locked(&self.journal.stored).get(path).cloned();
+            match stored.as_ref().or(self.contents.as_ref()) {
                 Some(contents) => {
                     let mut metadata =
                         Metadata::new(EntryMode::FILE).with_content_length(contents.len() as u64);
@@ -1163,14 +1616,17 @@ mod tests {
             }
         }
 
-        fn read(&self, _ctx: &OperationContext, _path: &str, args: OpRead) -> Result<Self::Reader> {
+        fn read(&self, _ctx: &OperationContext, path: &str, args: OpRead) -> Result<Self::Reader> {
             locked(&self.journal.reads).push(args);
             // Real backends hand back a lazy reader and only fail once a range
             // is asked for, which is what lets the layer build the primary's
             // reader before it knows whether the primary holds the object.
             Ok(StubReader {
+                path: path.to_owned(),
                 contents: self.contents.clone().unwrap_or_default(),
                 read_fails_after: self.spec.read_fails_after,
+                ignores_range: self.spec.ignores_range,
+                stream_piece: self.spec.stream_piece,
                 journal: Arc::clone(&self.journal),
             })
         }
@@ -1184,8 +1640,18 @@ mod tests {
             locked(&self.journal.writes).push((path.to_owned(), args));
             match self.spec.writes {
                 WriteBehavior::Refuse => Err(unsupported()),
-                WriteBehavior::FailAfterOpen => Ok(StubWriter { fails: true }),
-                WriteBehavior::Accept => Ok(StubWriter { fails: false }),
+                WriteBehavior::FailAfterOpen => Ok(StubWriter {
+                    fails: true,
+                    path: path.to_owned(),
+                    body: Vec::new(),
+                    journal: Arc::clone(&self.journal),
+                }),
+                WriteBehavior::Accept => Ok(StubWriter {
+                    fails: false,
+                    path: path.to_owned(),
+                    body: Vec::new(),
+                    journal: Arc::clone(&self.journal),
+                }),
             }
         }
 
@@ -1224,6 +1690,10 @@ mod tests {
             _args: OpRename,
         ) -> Result<RpRename> {
             locked(&self.journal.renames).push((from.to_owned(), to.to_owned()));
+            let mut stored = locked(&self.journal.stored);
+            if let Some(body) = stored.remove(from) {
+                stored.insert(to.to_owned(), body);
+            }
             Ok(RpRename::default())
         }
 
@@ -1266,12 +1736,12 @@ mod tests {
     ) -> (Operator, Arc<Journal>, Arc<Journal>) {
         let (primary, primary_journal) = StubDisk::operator(primary_spec);
         let (fallback, fallback_journal) = StubDisk::operator(fallback_spec);
-        let assets = primary.clone().layer(ReadThroughLayer {
+        let assets = primary.clone().layer(ReadThroughLayer::new(
             primary,
             fallback,
             copy,
             throw_on_promotion_failure,
-        });
+        ));
         (assets, primary_journal, fallback_journal)
     }
 
@@ -1507,14 +1977,17 @@ mod tests {
         );
     }
 
-    /// A promoting disk over a primary that answers the first existence probe
-    /// and then cannot answer the race re-check.
+    /// A promoting disk over a rename-capable primary that answers the first
+    /// existence probe and then cannot answer the race re-check, which runs
+    /// just before the staged copy is renamed into place. A primary without a
+    /// rename has no re-check: its conditional write is the guard.
     fn re_check_fails_read_through(
         throw_on_promotion_failure: bool,
     ) -> (Operator, Arc<Journal>, Arc<Journal>) {
         read_through(
             StubSpec {
                 stat_fails_after: Some(1),
+                renames: true,
                 writes: WriteBehavior::Accept,
                 ..Default::default()
             },
@@ -1533,7 +2006,7 @@ mod tests {
         let bytes = assets
             .read("cold.txt")
             .await
-            .expect("the bytes were already in hand when the re-check failed");
+            .expect("a failed re-check degrades to reading the fallback");
         assert_eq!(&bytes.to_vec(), b"cold bytes");
         assert_eq!(
             primary.stats().len(),
@@ -1541,9 +2014,14 @@ mod tests {
             "the read probed the primary once to route and once to re-check"
         );
         assert!(
-            primary.write_paths().is_empty(),
+            primary.renames().is_empty(),
             "a re-check that cannot answer must not promote over whatever is \
              there"
+        );
+        assert_eq!(
+            primary.deletes(),
+            primary.write_paths(),
+            "the staged copy that was never published is removed"
         );
     }
 
@@ -1637,8 +2115,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_promoting_read_still_fetches_the_whole_fallback_object() {
-        let (assets, _primary, fallback) = stub_read_through();
+    async fn a_promoting_read_streams_the_whole_object_once_then_reads_the_primary() {
+        let (assets, primary, fallback) =
+            rename_capable_read_through(WriteBehavior::Accept, false, false);
 
         let bytes = assets
             .read_with("cold.txt")
@@ -1652,7 +2131,12 @@ mod tests {
         assert!(
             ranges[0].is_full(),
             "promotion writes the whole object through, so the whole object is \
-             what a promoting read fetches"
+             what a promoting read streams from the fallback"
+        );
+        assert_eq!(
+            primary.renames().len(),
+            1,
+            "the object was published, and the range was then read from the primary"
         );
     }
 
@@ -1676,12 +2160,9 @@ mod tests {
     /// part-way or lose a delete, which only the stub can do.
     fn read_through_over(primary: Operator, fallback_spec: StubSpec) -> (Operator, Arc<Journal>) {
         let (fallback, fallback_journal) = StubDisk::operator(fallback_spec);
-        let assets = primary.clone().layer(ReadThroughLayer {
-            primary,
-            fallback,
-            copy: true,
-            throw_on_promotion_failure: false,
-        });
+        let assets = primary
+            .clone()
+            .layer(ReadThroughLayer::new(primary, fallback, true, false));
         (assets, fallback_journal)
     }
 
@@ -1942,6 +2423,216 @@ mod tests {
             fallback.deletes().is_empty(),
             "a move the condition refuses never happens, so its source stays \
              where it is on both disks"
+        );
+    }
+
+    /// One MiB, in sixteen transfer chunks.
+    const ONE_MIB: usize = 1024 * 1024;
+
+    /// DRIVERS-018: a read that is never promoted fetches only the range it
+    /// asked for, even on a disk with `copy: true`. A versioned read used to
+    /// fetch the whole object although nothing was written back.
+    #[tokio::test]
+    async fn a_versioned_ranged_read_on_a_copying_disk_fetches_only_the_range() {
+        let (assets, primary, fallback) = stub_read_through();
+
+        let bytes = assets
+            .read_with("cold.txt")
+            .range(5..10)
+            .version("v7")
+            .await
+            .expect("a versioned ranged read resolves from the fallback");
+        assert_eq!(&bytes.to_vec(), b"bytes");
+
+        let ranges = fallback.ranges();
+        assert_eq!(ranges.len(), 1, "the fallback was read once");
+        assert_eq!(
+            (ranges[0].offset(), ranges[0].size()),
+            (5, Some(5)),
+            "a read that is never promoted has no reason to fetch the whole object"
+        );
+        assert!(primary.write_paths().is_empty());
+    }
+
+    /// DRIVERS-018: once a promotion has failed, the rest of the read takes
+    /// ranged reads from the fallback. Every chunk of a chunked read used to
+    /// retry the promotion and fetch the whole object again, so the bytes
+    /// moved grew with the square of the object size.
+    #[tokio::test]
+    async fn a_failed_promotion_is_not_retried_by_every_chunk_of_the_read() {
+        let (assets, _primary, fallback) = read_through(
+            StubSpec::default(),
+            StubSpec {
+                generated_bytes: Some(ONE_MIB),
+                ..Default::default()
+            },
+            false,
+        );
+
+        let reader = assets
+            .reader_with("cold.bin")
+            .chunk(CROSS_DISK_CHUNK_BYTES)
+            .await
+            .expect("a chunked reader opens");
+        let chunks: Vec<_> = reader
+            .into_bytes_stream(0..ONE_MIB as u64)
+            .await
+            .expect("the stream opens")
+            .try_collect()
+            .await
+            .expect("every chunk resolves from the fallback");
+        let total: usize = chunks.iter().map(|chunk| chunk.len()).sum();
+        assert_eq!(total, ONE_MIB, "the whole object was served");
+
+        let fetched = fetched_bytes(&fallback.ranges(), ONE_MIB as u64);
+        assert!(
+            fetched <= (ONE_MIB + CROSS_DISK_CHUNK_BYTES) as u64,
+            "serving one MiB moved {fetched} bytes from the fallback"
+        );
+    }
+
+    /// DRIVERS-018: a promotion streams the object into the primary instead
+    /// of holding all of it in memory. It used to fetch the whole object into
+    /// one buffer and write that buffer through in a single call.
+    #[tokio::test]
+    async fn a_promotion_streams_the_object_instead_of_buffering_it() {
+        let (assets, primary, _fallback) = read_through(
+            StubSpec {
+                renames: true,
+                writes: WriteBehavior::Accept,
+                ..Default::default()
+            },
+            StubSpec {
+                generated_bytes: Some(ONE_MIB),
+                stream_piece: Some(16 * 1024),
+                ..Default::default()
+            },
+            false,
+        );
+
+        let _ = assets.read_with("cold.bin").range(5..10).await;
+
+        let sizes = locked(&primary.write_sizes).clone();
+        assert!(!sizes.is_empty(), "the promotion wrote the object through");
+        assert_eq!(
+            sizes.iter().sum::<usize>(),
+            ONE_MIB,
+            "the promotion wrote the whole object"
+        );
+        let largest = sizes.iter().copied().max().unwrap_or_default();
+        assert!(
+            largest <= CROSS_DISK_CHUNK_BYTES,
+            "the promotion handed the primary a {largest}-byte buffer: the object was \
+             held in memory whole instead of streamed"
+        );
+    }
+
+    /// The DRIVERS-018 follow-up: a fallback that ignores `Range` and answers
+    /// with the whole body cannot make a ranged read hold the whole body.
+    /// The read used to collect every byte the backend sent before anything
+    /// noticed the length was wrong, and returned them.
+    #[tokio::test]
+    async fn a_fallback_that_ignores_the_range_cannot_make_a_ranged_read_hold_the_body() {
+        let (assets, _primary, fallback) = read_through_with_copy(
+            StubSpec::default(),
+            StubSpec {
+                generated_bytes: Some(ONE_MIB),
+                ignores_range: true,
+                stream_piece: Some(16 * 1024),
+                ..Default::default()
+            },
+            false,
+            false,
+        );
+
+        let result = assets.read_with("cold.bin").range(5..10).await;
+        assert!(
+            result.is_err(),
+            "a ranged read answered with the whole body must fail, got {} bytes",
+            result.as_ref().map_or(0, |bytes| bytes.len())
+        );
+        let pulled = *locked(&fallback.pieces_pulled);
+        assert!(
+            pulled <= 2,
+            "the read pulled {pulled} pieces of a body it could never use"
+        );
+    }
+
+    /// DRIVERS-019: a delete that completes while a promotion is in flight is
+    /// not undone by that promotion. The promotion used to publish whatever
+    /// it had fetched as soon as the primary looked empty, which is exactly
+    /// how the primary looks right after a delete.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_delete_during_a_promotion_is_not_undone_by_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let primary = fs_operator(tmp.path());
+        let (fallback, fallback_journal) = StubDisk::operator(StubSpec {
+            contents: Some("cold bytes"),
+            ..Default::default()
+        });
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *locked(&fallback_journal.read_gate) = Some(ReadGate {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        let assets = primary.clone().layer(ReadThroughLayer::new(
+            primary.clone(),
+            fallback,
+            true,
+            false,
+        ));
+
+        let reader = tokio::spawn({
+            let assets = assets.clone();
+            async move { assets.read("cold.txt").await }
+        });
+        entered_rx
+            .await
+            .expect("the promotion reached the fallback");
+        assets
+            .delete("cold.txt")
+            .await
+            .expect("the delete completes while the promotion is held");
+        release_tx.send(()).expect("release the promotion");
+        // The overlapping read may still answer with the old bytes; what it
+        // may not do is put them back.
+        let _ = reader.await.expect("the read task");
+
+        assert!(
+            !primary.exists("cold.txt").await.expect("exists answers"),
+            "the promotion republished an object a completed delete had removed"
+        );
+    }
+
+    /// DRIVERS-020: a versioned read reaches a fallback that can answer it
+    /// even when the primary cannot read versions at all. The read used to
+    /// build the primary's reader first, and the primary's correctness check
+    /// refused the version before the fallback was ever asked.
+    #[tokio::test]
+    async fn a_versioned_read_reaches_the_fallback_through_a_primary_without_versions() {
+        let primary = memory();
+        let (fallback, fallback_journal) = StubDisk::operator(StubSpec {
+            contents: Some("cold bytes"),
+            ..Default::default()
+        });
+        let assets = primary
+            .clone()
+            .layer(ReadThroughLayer::new(primary, fallback, true, false));
+
+        let bytes = assets
+            .read_with("cold.txt")
+            .version("v7")
+            .await
+            .expect("the fallback answers a versioned read the primary cannot");
+        assert_eq!(&bytes.to_vec(), b"cold bytes");
+        assert_eq!(
+            fallback_journal
+                .reads()
+                .first()
+                .and_then(|read| read.version()),
+            Some("v7"),
+            "the version must reach the fallback"
         );
     }
 }
