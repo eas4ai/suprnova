@@ -4,7 +4,10 @@
     gap: var(--sn-space-2);
   }
 
+  /* The 8px grid gap spaces the parts below the label; the label takes
+     2px of it back, so it sits 6px above the input like a field label. */
   .sn-upload-label {
+    margin-block-end: calc(var(--sn-space-1) / -2);
     font-weight: var(--sn-font-weight-medium);
   }
 
@@ -75,6 +78,7 @@
     background: var(--sn-color-surface-raised);
     color: var(--sn-color-text);
     font: inherit;
+    font-size: var(--sn-density-control-font-size);
     cursor: pointer;
   }
 

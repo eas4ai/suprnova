@@ -2,10 +2,22 @@
   display: flex;
   align-items: center;
   gap: var(--sn-space-2);
+  font-size: var(--sn-font-size-sm);
   font-weight: var(--sn-font-weight-normal);
 }
 
 .sn-checkbox-group {
   display: grid;
   gap: var(--sn-space-2);
+}
+
+/* The space below it in a plain form. The selector weighs nothing, so a
+   container that spaces its parts with a gap clears it with any rule. */
+:where(.sn-checkbox, .sn-checkbox-group) {
+  margin-block-end: var(--sn-density-field-gap);
+}
+
+/* The group's gap alone spaces its options. */
+.sn-checkbox-group > * {
+  margin-block: 0;
 }

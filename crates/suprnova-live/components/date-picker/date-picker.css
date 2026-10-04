@@ -1,7 +1,7 @@
 @layer suprnova-ui {
   .sn-date {
     display: grid;
-    gap: var(--sn-space-2);
+    gap: var(--sn-space-1);
   }
 
   .sn-date-label {
@@ -61,6 +61,7 @@
     padding: var(--sn-space-1) var(--sn-space-2);
     border-radius: var(--sn-radius-sm);
     scroll-snap-align: center;
+    font-size: var(--sn-font-size-sm);
     font-variant-numeric: tabular-nums;
     cursor: pointer;
   }

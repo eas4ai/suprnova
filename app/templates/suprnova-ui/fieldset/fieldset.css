@@ -1,4 +1,17 @@
 .sn-fieldset {
   display: grid;
-  gap: var(--sn-space-2);
+  gap: var(--sn-density-field-gap);
+}
+
+/* The grid gap spaces the parts. The block margins that space a field, a
+   group or a label in a plain form would add to it here. */
+.sn-fieldset > *,
+.sn-fieldset > .sn-field {
+  margin-block: 0;
+}
+
+/* A label macro's label takes the gap back down to 6px above its input,
+   where a field puts its label. */
+.sn-fieldset > .sn-label {
+  margin-block-end: calc(var(--sn-space-1) * 1.5 - var(--sn-density-field-gap));
 }
