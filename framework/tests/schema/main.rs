@@ -31,6 +31,7 @@ mod unsigned_auth;
 mod unsigned_exact;
 mod unsigned_keys;
 mod unsigned_keyset;
+mod unsigned_pivots;
 mod unsigned_reads;
 mod unsigned_table_reads;
 mod unsigned_table_writes;

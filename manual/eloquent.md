@@ -1792,6 +1792,14 @@ for r in &roles {
   existing pivot row untouched, extra columns and timestamps included.
   Wrapped in a transaction. Laravel's `syncWithoutDetaching`.
 
+Each id and extra column binds by the type its column has: the pivot
+model's field, or else the key the column holds. On Postgres and SQLite,
+a `u64` above `i64::MAX` written to the pivot fails with an error that
+names the column, and nothing is sent. `detach` of such an id deletes
+nothing on Postgres, and on SQLite it compares the id's digits, as it does
+a literal. On MySQL an unsigned pivot column holds the whole `u64` range,
+and `sync` and `.get()` read its ids back.
+
 `.get()` returns `Vec<R>` with the pivot stamped on each row's
 internal `__pivot` field. The `.pivot::<P>()` accessor downcasts the
 `Arc<dyn Any>` to the pivot type you declared. Calling it with the
