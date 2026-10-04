@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: memory-footprint
+Current: application-port-second-round
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -308,6 +308,23 @@ Requirements: MEM-001, MEM-002, MEM-003, MEM-004, MEM-005, MEM-006, MEM-007
    (`memory.md` MEM-001 to MEM-007). Done when the mechanism passes on a
    committed tree, and a dhat profile of the dogfood app on one fixed
    workload, before and after, is in the delivery report.
+
+## application-port-second-round
+
+Requirements: PAR-041, PAR-042, PAR-043, PAR-044, PAR-045, LIVE-039
+
+27. application-port-second-round - issues #137, #139 and #140 from the
+   application port, which the developer asked for on 2026-10-04: the
+   provider avatar on every OAuth identity, with the Facebook profile
+   request naming its fields (PAR-041); the multipart request's
+   asynchronous hook, stage order and field-level validation errors that
+   reach an Inertia form (PAR-042, PAR-043); the model key type taken
+   from its field, `u64` keys on every database, and the app-wide
+   date-time cast and unsigned-key settings (PAR-044, PAR-045); and the
+   Live gate's browser suite reset that cancels a stalled test's uploads
+   (LIVE-039). Delivery includes a release of the GitHub provider crate
+   that fills `avatar_url`. Done when the mechanisms pass on a committed
+   tree, the schema ones against SQLite, Postgres and MySQL.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

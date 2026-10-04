@@ -610,3 +610,116 @@ Falsifier: after `--prune`, an applied migration's file remains, a pending migra
 Mechanism: `par-schema-dump`.
 Rationale: Laravel's `--prune` deletes every migration file, applied or not; Suprnova keeps the ones the dump does not cover, and keeps each pruned name, because SeaORM refuses a ledger row whose migration is not in the list.
 Status: Agreed 2026-10-03
+
+## Requests from an application port, second round
+
+The same application team filed issues #137, #139 and #140 for the next
+gaps it met. The developer asked for them to be done on 2026-10-04 ("let's
+knock out the issues").
+
+[PAR-041] A provider identity MUST carry `avatar_url`: the URL of the
+account's picture as the provider reports it, or none, documented as
+untrusted profile data that an application checks (scheme, length)
+before it renders, fetches or stores it. `ProviderIdentity`, which a
+provider plugin returns, and `OAuthIdentity`, which `verify_oauth_identity`
+returns, MUST both hold it. Google MUST take it from the userinfo
+`picture` claim, TikTok from `avatar_url`, Facebook from
+`picture.data.url`, with its profile request naming the fields `id`,
+`name`, `email` and `picture`, and X from `profile_image_url` with that
+among the user fields it requests; Apple reports none. A profile without a picture, or with an
+empty one, MUST give none at both layers, and sign-in MUST proceed as
+before. Adding the field changes the provider SDK: the manual's provider
+chapter and the release notes MUST show a provider adding `avatar_url`
+to its `ProviderIdentity`, and the GitHub provider crate MUST ship a
+release that fills it from GitHub's `avatar_url`.
+Falsifier: a Google, TikTok, Facebook or X callback whose profile carries a picture returns no `avatar_url`, or a value other than the provider's, in `ProviderIdentity` or `OAuthIdentity`; a profile without one, or with an empty string, fails sign-in or returns a value; the Facebook profile request does not name `email` and `picture`, or the X one `profile_image_url`; or a provider built like the manual's example fails to compile.
+Mechanism: `par-oauth-avatar`.
+Rationale: Socialite's `getAvatar()`; issue #140 asked for Google, and every provider that reports a picture fills it. The Facebook plugin's documentation names `/me?fields=id,name,email`, but it requests a bare `/me`, for which the Graph API returns only `id` and `name`, so Facebook sign-in never received an email.
+Status: Agreed 2026-10-04
+
+[PAR-042] `MultipartRequestHooks` MUST offer `after_validation_async`.
+A multipart request MUST run its stages in this order, each only after
+the one before it succeeded: `authorize`, before the body is read;
+extraction with its field validation (PAR-043); `after_validation`;
+`after_validation_async`; the handler. A hook's non-empty
+`ValidationErrors` MUST answer as a validation failure, a 422 whose body
+holds `errors`, which the Inertia validation middleware turns into a
+redirect back with the errors for an Inertia request; an empty set of
+errors counts as success. The default `after_validation_async` succeeds.
+Falsifier: a multipart request whose `after_validation_async` returns an error reaches its handler, answers anything but a 422 with that field's error in `errors`, or through Inertia does not redirect back with it in `props.errors`; a stage runs after an earlier one failed, the async hook before the sync one, or `authorize` after the body was read; or an empty error set fails the request.
+Mechanism: `par-multipart-validation`.
+Rationale: Issue #139: upload forms need database checks before the handler runs, which `FormRequest` already allows.
+Status: Agreed 2026-10-04
+
+[PAR-043] A multipart extraction failure that belongs to one field MUST
+answer as `ValidationErrors` under the field's form input name, the
+`#[field(...)]` name where one is given, with a trailing `[]` replaced by
+a zero-based index, so `#[field("files[]")]` gives `files.1` for the
+second file; hook errors use the same names. The failures are: a missing
+required field (`validation-required`); a text part that does not parse
+as its field's type (`validation-integer`, `validation-numeric` or
+`validation-boolean` by that type, `validation-format` for any other); a
+file part where text belongs or a text part where a file belongs
+(`validation-file`, `validation-string`); and a file an `UploadValidator`
+refuses as a validation failure: too large for `MaxSize`
+(`validation-max-file`, with the limit in kilobytes as Laravel words it),
+not an image (`validation-image`), or of a type `MimeType` does not allow
+(`validation-mimetypes`). Each message MUST come from the validation
+catalog by that key, so an application's `lang/<locale>/validation.ftl`
+overrides it. An `UploadValidator` MUST be able to return a validation
+failure with a catalog key, apart from an operational error, which keeps
+its own status. A field failure found while the body streams, as
+`MaxSize` is, MUST stop reading the body after the chunk that crossed
+the limit, skip both hooks and the handler, and remove every temporary
+file the extraction wrote. A limit on the whole request, the body's byte
+cap, `max_parts` and a field's `max_count`, MUST refuse with 413 without
+reading the body further, and wins when one chunk crosses both kinds.
+Falsifier: a multipart form missing a required file, or with a PDF as the second element of a `#[field("files[]")]` field of images, answers anything but a 422 whose `errors` holds `files.1`, or through Inertia does not redirect back with it in `props.errors`; a text part that does not parse answers 400; a message ignores an application catalog's entry for its key; an oversized file is read past the chunk that crossed `MaxSize`, or leaves a temporary file behind; a validator's operational error becomes a 422; or a body over its cap, too many parts or too many files for `max_count` is read further or answers other than 413.
+Mechanism: `par-multipart-validation`.
+Rationale: Issue #139: today these failures answer 400, 413 or a 422 without `errors`, so an Inertia form shows no error under the field; `max_count` answered 422 and moves to 413 with the other request-wide limits, as the issue asks.
+Status: Agreed 2026-10-04
+
+[PAR-044] Without `key_type`, `#[model]` MUST take the key type from the
+primary-key field's declared type, the field `primary_key` names, and a
+`key_type` that disagrees with that field MUST fail to compile with an
+error naming both. A model field declared `u64` or `Option<u64>`, the key
+and foreign keys included, MUST read and write on SQLite, Postgres and
+MySQL: the whole `u64` range on MySQL's unsigned columns, and
+`0..=i64::MAX` on SQLite and Postgres, which have no unsigned integers
+and store it in a signed column. On those two, writing a value above
+`i64::MAX` MUST fail with an error naming the column before anything is
+sent, never a panic, truncation or wrap, and reading a negative value
+MUST fail with an error naming the column.
+Falsifier: a model whose key field is `u64` and that names no `key_type` gets an `i64` key; a disagreeing `key_type` compiles; on any of SQLite, Postgres and MySQL, a `u64`-keyed model with a `u64` foreign key and an `Option<u64>` field returns a wrong id, field, related record, order or count, or fails, through create with a generated id, update, `find`, `find_many`, a `where` on the key, a direct and an eager relation, `with_count` and a paginated query; on SQLite or Postgres a write of `i64::MAX + 1` panics or is sent, or a stored negative value reads as a `u64`.
+Mechanism: `par-laravel-defaults`.
+Rationale: Issue #137 and its follow-up comment: a Laravel table's keys are unsigned on MySQL, while SeaORM reads a `u64` only on MySQL and its Postgres and SQLite binders unwrap the conversion, so a model over one could not run on `TestDatabase`, which is SQLite.
+Status: Agreed 2026-10-04
+
+[PAR-045] An application MAY set `[package.metadata.suprnova.model]`
+`datetime_cast` and `[package.metadata.suprnova.schema]` `unsigned_ids`
+in a package's `Cargo.toml`; without them nothing changes. The model
+table is read from the package that declares the model, by `#[model]`;
+the schema table from the package of the binary, by `#[suprnova::main]`,
+which installs it before anything runs. `datetime_cast = "native"` makes
+every `DateTime<Utc>` and `Option<DateTime<Utc>>` field of a model with
+no cast of its own, the managed timestamps included, use
+`AsNativeDateTime` or `AsOptionalNativeDateTime`, a time-zone-aware
+column; `"naive"` uses `AsNaiveDateTime` or `AsOptionalNaiveDateTime`, for
+the time-zone-free columns Laravel creates on Postgres; a field's own
+cast wins. The setting chooses casts and converts no column: the manual
+and the scaffold's comment MUST say which column types each value needs
+and show the per-field override for a column that differs. SQLite MAY
+store a native date-time as its driver's text, so long as the value
+round-trips. `unsigned_ids = true` makes `id()` and `foreign_id()` create
+what `unsigned_id()` and `unsigned_foreign_id()` create, unsigned on
+MySQL and unchanged on Postgres and SQLite, in every migration the
+binary runs; a program that runs migrations without `#[suprnova::main]`
+MUST be able to install the same setting with one documented call. A
+key or value in either table that the framework does not know MUST fail
+the build of the macro that reads it, naming it. The scaffold's
+`Cargo.toml` MUST carry both settings commented out, saying they match
+Laravel's MySQL schema.
+Falsifier: with `datetime_cast = "native"` or `"naive"`, a model's managed timestamp uses another cast, or a field's explicit cast is replaced; a native value does not round-trip on any of SQLite, Postgres and MySQL; with `unsigned_ids = true`, `migrate` on the app binary against MySQL creates a signed `id` or foreign key, or changes a Postgres or SQLite column; a migrations library run by a binary with the setting misses it, or a program using the documented call does; without the tables any column or cast differs from today's; an unknown key or value builds; or a new scaffold lacks the commented settings.
+Mechanism: `par-laravel-defaults`.
+Rationale: Issue #137; the schema setting reaches the migrations through `#[suprnova::main]` because migrations build their schema at run time, where no macro reads `Cargo.toml`, and compiling it in keeps one schema for every environment.
+Status: Agreed 2026-10-04

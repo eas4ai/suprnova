@@ -343,3 +343,14 @@ Falsifier: sixty consecutive whole-file runs of `crates/suprnova-live/tests/uplo
 Mechanism: `live-upload-store-flush`.
 Rationale: Evidence: `write_all_fragmented` in `crates/suprnova-live/crates/suprnova-live-test-support/src/file_quarantine_store.rs` wrote through a tokio file and never flushed it, so a write the provider had awaited could still be in that file's buffer; six of sixty runs failed on an idle machine, and four Live gate runs on 2026-09-17 were red. Refines: LIVE-010, the Live gate proves the engine's upload behavior. Agreed by promotion `the-quarantine-store-the-live-gate-runs-completes-a-write-only-when-the-bytes-have-reached-the-file`.
 Status: Agreed 2026-09-17
+
+[LIVE-039] The reset the Live gate's browser suite runs between tests
+MUST cancel every upload the finished test left unfinished in the
+reference host, and only then reset its creation window, so one stalled
+request fails only its own test. An upload operation dropped mid-request,
+as when the browser closes the connection, MUST keep today's recoverable
+state, so a retry within the same test can still complete it.
+Falsifier: in the reference host's upload runtime, a completion paused and then aborted leaves the next reset refusing or the active-upload count above zero, or a retry of the aborted upload before the reset cannot complete it.
+Mechanism: `live-upload-abandoned-operation`.
+Rationale: Evidence: release 3.1.0 attempt 2 (2026-10-03), one WebKit `/complete` never answered and 66 later WebKit tests failed on `uploads: 1`, because `UploadOperation`'s drop in `crates/suprnova-live/crates/suprnova-live-test-support/src/reference_host/uploads.rs` restores the upload with its active lease, the host's fixed clock never expires it, and the reset refuses while any upload is unfinished. Refines: LIVE-038.
+Status: Agreed 2026-10-04
