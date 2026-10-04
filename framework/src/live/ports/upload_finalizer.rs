@@ -35,6 +35,13 @@ impl UploadFinalizer for SuprnovaUploadFinalizer {
     ) -> UploadFuture<'a, Result<Option<DurableUpload>, UploadError>> {
         unavailable()
     }
+
+    /// Nothing is ever made durable here, so finalization is refused before
+    /// the upload enters `Finalizing`, where it would wait forever
+    /// (ROOT-16).
+    fn can_finalize(&self) -> bool {
+        false
+    }
 }
 
 fn unavailable<'a, T>() -> UploadFuture<'a, Result<T, UploadError>> {

@@ -102,6 +102,9 @@ struct StoredCleanup {
     retries: u32,
     orphaned: bool,
     scheduled_at: Option<UnixMillis>,
+    /// The record entered `Finalizing` at some point, so cleanup retires its
+    /// bytes rather than deleting them.
+    after_finalization: bool,
 }
 
 struct StoredCleanupLease {
@@ -239,6 +242,7 @@ impl MemoryUploadLedger {
         let machine = machine_for(&record, self.limits)?;
         let handle = record.authority().handle().clone();
         let cleanup_at = cleanup_deadline(&record, record.created_at());
+        let stored_state = record.state();
         state.records.insert(
             handle.clone(),
             StoredUpload {
@@ -249,7 +253,10 @@ impl MemoryUploadLedger {
                 creation_sequence: 0,
                 machine,
                 transition_keys: HashSet::new(),
-                cleanup: StoredCleanup::default(),
+                cleanup: StoredCleanup {
+                    after_finalization: finalization_began(stored_state),
+                    ..StoredCleanup::default()
+                },
             },
         );
         if let Some(cleanup_at) = cleanup_at {
@@ -564,6 +571,7 @@ impl UploadLedger for MemoryUploadLedger {
                     if let Some(retained_bytes) = retained_bytes {
                         stored.cleanup.retained_bytes = retained_bytes;
                     }
+                    stored.cleanup.after_finalization |= finalization_began(outcome.state());
                     stored
                         .transition_keys
                         .insert(request.transition().idempotency_key().clone());
@@ -619,6 +627,8 @@ impl UploadCleanupLedger for MemoryUploadLedger {
                             | UploadState::Transferring
                             | UploadState::Verifying
                             | UploadState::Ready
+                            | UploadState::Finalizing
+                            | UploadState::Finalized
                     )
                     .then_some(stored.record.expires_at());
                     let eligible = cleanup_state_eligible(&stored.record, request.now());
@@ -660,27 +670,43 @@ impl UploadCleanupLedger for MemoryUploadLedger {
                     {
                         stored.cleanup.lease = None;
                     }
-                    if matches!(
-                        stored.record.state(),
+                    match stored.record.state() {
                         UploadState::Created
-                            | UploadState::Queued
-                            | UploadState::Transferring
-                            | UploadState::Verifying
-                            | UploadState::Ready
-                    ) {
-                        let expired = stored
-                            .machine
-                            .expire_for_cleanup(stored.record.revision())?;
-                        stored.record = stored.record.with_outcome(expired)?;
+                        | UploadState::Queued
+                        | UploadState::Transferring
+                        | UploadState::Verifying
+                        | UploadState::Ready => {
+                            let expired = stored
+                                .machine
+                                .expire_for_cleanup(stored.record.revision())?;
+                            stored.record = stored.record.with_outcome(expired)?;
+                        }
+                        UploadState::Finalizing => {
+                            let failed =
+                                stored.machine.fail_for_cleanup(stored.record.revision())?;
+                            stored.record = stored.record.with_outcome(failed)?;
+                        }
+                        _ => {}
                     }
-                    let claim = CleanupClaim::from_store(
-                        &stored.record,
-                        stored.cleanup.retained_bytes,
-                        request.lease_id().clone(),
-                        request.lease_expires_at(),
-                        stored.cleanup.retries,
-                        stored.cleanup.orphaned,
-                    )?;
+                    let claim = if stored.cleanup.after_finalization {
+                        CleanupClaim::from_store_after_finalization(
+                            &stored.record,
+                            stored.cleanup.retained_bytes,
+                            request.lease_id().clone(),
+                            request.lease_expires_at(),
+                            stored.cleanup.retries,
+                            stored.cleanup.orphaned,
+                        )?
+                    } else {
+                        CleanupClaim::from_store(
+                            &stored.record,
+                            stored.cleanup.retained_bytes,
+                            request.lease_id().clone(),
+                            request.lease_expires_at(),
+                            stored.cleanup.retries,
+                            stored.cleanup.orphaned,
+                        )?
+                    };
                     stored.cleanup.retry_at = None;
                     stored.cleanup.lease = Some(StoredCleanupLease {
                         id: request.lease_id().clone(),
@@ -747,18 +773,23 @@ impl UploadCleanupLedger for MemoryUploadLedger {
     }
 }
 
+/// Whether `record` may be claimed at `now`. A `Finalizing` record waits for
+/// its upload to expire, after which its finalization can no longer commit,
+/// and a `Finalized` record waits out the same expiry as its idempotency
+/// window (ROOT-16).
 fn cleanup_state_eligible(record: &UploadRecord, now: UnixMillis) -> bool {
     match record.state() {
         UploadState::Created
         | UploadState::Queued
         | UploadState::Transferring
         | UploadState::Verifying
-        | UploadState::Ready => record.expires_at() <= now,
+        | UploadState::Ready
+        | UploadState::Finalizing
+        | UploadState::Finalized => record.expires_at() <= now,
         UploadState::Rejected
         | UploadState::Canceled
         | UploadState::Expired
         | UploadState::Failed => true,
-        UploadState::Finalizing | UploadState::Finalized => false,
     }
 }
 
@@ -768,13 +799,19 @@ fn cleanup_deadline(record: &UploadRecord, terminal_at: UnixMillis) -> Option<Un
         | UploadState::Queued
         | UploadState::Transferring
         | UploadState::Verifying
-        | UploadState::Ready => Some(record.expires_at()),
+        | UploadState::Ready
+        | UploadState::Finalizing
+        | UploadState::Finalized => Some(record.expires_at()),
         UploadState::Rejected
         | UploadState::Canceled
         | UploadState::Expired
         | UploadState::Failed => Some(terminal_at),
-        UploadState::Finalizing | UploadState::Finalized => None,
     }
+}
+
+/// Whether a record in `state` has entered `Finalizing`.
+fn finalization_began(state: UploadState) -> bool {
+    matches!(state, UploadState::Finalizing | UploadState::Finalized)
 }
 
 fn machine_for(

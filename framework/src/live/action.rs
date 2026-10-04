@@ -345,6 +345,7 @@ pub(crate) struct SuprnovaEndpointKernel {
     clock: Arc<dyn Clock>,
     upload_finalization: Arc<UploadFinalizationService>,
     upload_operation_locks: Arc<super::upload::UploadOperationLocks>,
+    upload_provider: Arc<super::ports::upload_provider::SuprnovaUploadProviderRouter>,
     upload_context: Option<suprnova_live::host::TrustedLiveRequestContext>,
 }
 
@@ -397,6 +398,7 @@ impl SuprnovaEndpointKernel {
             clock,
             upload_finalization,
             upload_operation_locks: Arc::clone(&ports.uploads.operation_locks),
+            upload_provider: Arc::clone(&ports.uploads.provider_adapter),
             upload_context,
         }
     }
@@ -908,7 +910,23 @@ impl SuprnovaEndpointKernel {
                     )
                     .await;
                 match result {
-                    Ok(_) => break,
+                    Ok(_) => {
+                        // The upload is durable, so the slots it held go back
+                        // now rather than when cleanup reclaims the record
+                        // (ROOT-16). The action already committed; a failure
+                        // here leaves the slots to that cleanup.
+                        if let Err(error) = self
+                            .upload_provider
+                            .release_after_finalization(upload.proposal.handle())
+                            .await
+                        {
+                            tracing::warn!(
+                                kind = error.kind().as_str(),
+                                "a finalized Live upload kept its slots until cleanup"
+                            );
+                        }
+                        break;
+                    }
                     Err(error)
                         if attempt == 0
                             && matches!(
