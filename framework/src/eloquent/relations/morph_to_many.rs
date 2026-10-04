@@ -92,7 +92,9 @@ use crate::eloquent::builder::{Builder, IntoColumn, IntoVal, WhereTerm};
 use crate::eloquent::collection::Collection;
 use crate::eloquent::lazy_loading::LazyLoadGuard;
 use crate::eloquent::model::{Model, json_value_to_sea_value};
-use crate::eloquent::relations::belongs_to_many::unique_pivot_ids;
+use crate::eloquent::relations::belongs_to_many::{
+    PivotExtra, PivotMatch, load_pivot_rows, pivot_extras_through_casts, unique_pivot_ids,
+};
 use crate::eloquent::relations::pivot_filters::{PivotFilters, pivot_filter_methods};
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::error::FrameworkError;
@@ -369,6 +371,10 @@ where
         // is active.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
+        let id_col = format!("{}_id", self.morph_name);
+        let type_col = format!("{}_type", self.morph_name);
+        let extra =
+            pivot_extras_through_casts::<P>(extra, &[&self.pivot_related_key, &id_col, &type_col])?;
         match &exec {
             ExecutorChoice::Tx(t, _) => {
                 morph_attach_one(
@@ -602,7 +608,7 @@ where
                         &self.parent_key_value,
                         &self.parent_morph_type,
                         related_id,
-                        Attrs::new(),
+                        Vec::new(),
                         self.with_timestamps,
                     )
                     .await?;
@@ -637,7 +643,7 @@ where
                         &self.parent_key_value,
                         &self.parent_morph_type,
                         related_id,
-                        Attrs::new(),
+                        Vec::new(),
                         self.with_timestamps,
                     )
                     .await?;
@@ -734,22 +740,26 @@ where
         };
 
         // Fetch the pivot rows attached to this parent (filtered by
-        // both id and type), under the same predicates the id scan
-        // used - otherwise a filtered read could stamp `__pivot` from a
-        // row the filter excluded.
-        let pivot_rows: Vec<P> = self
-            .pivot_filters
-            .apply(
-                P::query()
-                    .filter(id_col.as_str(), self.parent_key_value.clone())
-                    .filter(
-                        type_col.as_str(),
-                        serde_json::Value::String(self.parent_morph_type.clone()),
-                    ),
-            )
-            .get()
-            .await?
-            .into_vec();
+        // both id and type), from the table the id scan read and under
+        // the same predicates - otherwise a filtered read, or a relation
+        // that names its own pivot table, could stamp `__pivot` from a
+        // row the scan never saw.
+        let pivot_rows: Vec<P> = load_pivot_rows::<P>(
+            &self.pivot_table,
+            L::default_connection_name(),
+            vec![
+                (
+                    id_col.clone(),
+                    PivotMatch::Eq(self.parent_key_value.clone()),
+                ),
+                (
+                    type_col.clone(),
+                    PivotMatch::Eq(serde_json::Value::String(self.parent_morph_type.clone())),
+                ),
+            ],
+            &self.pivot_filters,
+        )
+        .await?;
 
         // Index pivots by related_key value (JSON-string form).
         use std::collections::HashMap;
@@ -1129,22 +1139,25 @@ where
         let type_col = format!("{}_type", self.morph_name);
 
         // Query 1: pivot rows, full row (we need the morph-id column
-        // to zip + the rest for `__pivot` context). Goes through the
-        // typed `Builder<P>` path so casts on P's columns flow through
-        // SeaORM's deserialiser correctly.
-        let pivot_rows: Vec<P> = self
-            .pivot_filters
-            .apply(
-                P::query()
-                    .filter(self.pivot_foreign_key.as_str(), self.tag_key_value.clone())
-                    .filter(
-                        type_col.as_str(),
-                        serde_json::Value::String(self.target_morph_type.clone()),
-                    ),
-            )
-            .get()
-            .await?
-            .into_vec();
+        // to zip + the rest for `__pivot` context), from the relation's
+        // own pivot table - the one `count` reads - hydrated through P's
+        // casts.
+        let pivot_rows: Vec<P> = load_pivot_rows::<P>(
+            &self.pivot_table,
+            L::default_connection_name(),
+            vec![
+                (
+                    self.pivot_foreign_key.clone(),
+                    PivotMatch::Eq(self.tag_key_value.clone()),
+                ),
+                (
+                    type_col.clone(),
+                    PivotMatch::Eq(serde_json::Value::String(self.target_morph_type.clone())),
+                ),
+            ],
+            &self.pivot_filters,
+        )
+        .await?;
         if pivot_rows.is_empty() {
             return Ok(Collection::new());
         }
@@ -1361,7 +1374,7 @@ async fn morph_attach_one<C: ConnectionTrait>(
     parent_id: &serde_json::Value,
     parent_morph_type: &str,
     related_id: &serde_json::Value,
-    extra: Attrs,
+    extra: Vec<PivotExtra>,
     with_timestamps: bool,
 ) -> Result<(), FrameworkError> {
     let id_col = format!("{morph_name}_id");
@@ -1379,22 +1392,12 @@ async fn morph_attach_one<C: ConnectionTrait>(
         Some(json_value_to_sea_value(parent_id)),
         Some(sea_orm::Value::from(parent_morph_type.to_string())),
     ];
-    for (k, v) in extra.iter() {
-        if k == pivot_related_key || k == id_col.as_str() || k == type_col.as_str() {
-            continue;
-        }
-        // Validate caller-supplied column names before interpolating
-        // them into the INSERT - see `belongs_to_many.rs::attach_one`
-        // for the full rationale. Pivot writes share the
-        // identifier-injection footgun shape with the regular
-        // DbTableBuilder::insert path.
-        crate::database::validate_identifier(k)?;
-        columns.push(k.to_string());
-        values.push(if v.is_null() {
-            None
-        } else {
-            Some(json_value_to_sea_value(v))
-        });
+    // Extras arrive encoded through the pivot model's casts, their
+    // names checked and the framework-written columns dropped - see
+    // `belongs_to_many::pivot_extras_through_casts`.
+    for (column, value) in extra {
+        columns.push(column);
+        values.push(value);
     }
     if with_timestamps {
         let now = crate::clock::now();

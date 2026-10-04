@@ -1432,7 +1432,10 @@ tx.
 Three-way precedence for routing an operation through a connection:
 
 1. **Builder-level override** - `Builder::with_tx(&tx)` or any
-   `Model::*_with_tx(&tx, ...)` shim. Explicit beats ambient.
+   `Model::*_with_tx(&tx, ...)` shim. Explicit beats ambient. The
+   eager loads of such a query read through the same transaction, and
+   those of an `on(name)` query read from that connection, unless the
+   related model declares a connection of its own.
 2. **The ambient transaction** - installed by `DB::transaction` /
    `DB::transaction_with_attempts` for the closure's task scope.
    A read that names another connection, through `on(name)` or a
@@ -1590,6 +1593,7 @@ it when the query runs.
 | `Model::without_global_scopes()` | No |
 | `Model::query().without_global_scope::<S>()` | Yes, minus `S`, wherever it is chained |
 | `Model::with_trashed()` / `Model::only_trashed()` | Yes - only the soft-delete filter is lifted |
+| `RouteParam<Model>` route binding | Yes - the bound row is read through `Model::query()` |
 | `Model::find(id)` | No - PK lookup goes through SeaORM directly |
 | `Model::find_many([...])` | No - same reason |
 | `Model::all()` | No - same reason |
@@ -2214,7 +2218,10 @@ let users = User::query()
 
 The per-row `__eager` cache cells are keyed by:
 
-- `<rel>` (relation NAME alone) for `with` and `with_count`.
+- `<rel>` (relation NAME alone) for `with` and `with_count`. The rows
+  and the count are kept in separate cells, so `with(["posts"])` and
+  `with_count(["posts"])` on one query keep both, and a count alone
+  does not count as loaded rows for `load_missing`.
 - `<rel>_<kind>_<col>` (e.g. `posts_sum_views`) for the four
   aggregate kinds - `with_sum` / `with_avg` / `with_min` / `with_max`.
   This wide key lets multiple aggregates on the same relation coexist
@@ -3737,7 +3744,9 @@ impl Prunable for ExpiredSession {
 
 For high-volume tables (audit logs, request logs, expired cache
 entries) `MassPrunable` skips per-row events and runs a single
-`DELETE WHERE …` statement:
+`DELETE WHERE …` statement. It runs where the `prunable()` query routes,
+the same place the `--pretend` count reads: the model's declared
+connection, or the query's own `on(name)` or `with_tx`:
 
 ```rust
 use suprnova::eloquent::MassPrunable;
@@ -4524,6 +4533,11 @@ code paths where a missing row is a bug.
 let user = user.update_or_fail(attrs).await?;   // not_found if row deleted mid-flight
 user.delete_or_fail().await?;
 ```
+
+On a model declared with `soft_deletes`, `delete_or_fail`, `delete_quietly`,
+`destroy`, and a `delete` called through the `Model` trait all tombstone
+the row, as `delete()` does. `delete_or_fail` answers not-found for a row
+that is already trashed.
 
 ### Filtered serialisation - `to_array_except` / `to_array_only`
 

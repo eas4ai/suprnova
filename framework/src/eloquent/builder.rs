@@ -4242,6 +4242,41 @@ where
         builder
     }
 
+    /// The rows of `M` a relation count or aggregate reads, as the SQL
+    /// source of its `FROM` or `JOIN`, aliased `alias`, with the values
+    /// that source binds. The binds come first in the statement, so the
+    /// caller numbers its own placeholders after them.
+    ///
+    /// The `with_count` / `with_sum` family runs one grouped statement
+    /// per relation, written by the `#[suprnova::model]` macro. Reading
+    /// the related table bare would count rows that `with` never loads:
+    /// trashed rows, and rows a global scope hides. The source is the
+    /// related model's own scoped query instead, so a count and a total
+    /// cover exactly the rows `M::query()` returns. A model with no
+    /// soft-delete filter and no scope reads its table as before.
+    ///
+    /// **Not part of the public API.** It is `pub` because the macro
+    /// expands into user crates.
+    #[doc(hidden)]
+    pub fn __relation_source(
+        backend: DbBackend,
+        alias: &str,
+    ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
+        crate::database::validate_identifier(alias)?;
+        let scoped = Self::__scoped().into_effective();
+        scoped.observe_reads();
+        if scoped.where_terms.is_empty() && scoped.joins.is_empty() {
+            let source = if alias == M::TABLE {
+                M::TABLE.to_string()
+            } else {
+                format!("{} {alias}", M::TABLE)
+            };
+            return Ok((source, Vec::new()));
+        }
+        let (sql, values) = scoped.render_select_for(backend, M::TABLE, "*")?;
+        Ok((format!("({sql}) {alias}"), values))
+    }
+
     /// Record, for the render cache, every table this query reads: the
     /// model's own, each joined table and every table a subquery reads,
     /// so a write to any of them invalidates a cached page built from it.
@@ -5100,11 +5135,11 @@ where
         // T11: `EagerLoadDispatch` takes `&DatabaseConnection` (concrete,
         // emitted by the macro across every relation kind). The `db`
         // parameter is retained for trait-signature stability - the
-        // actual routing happens at each SQL leaf (`belongs_to_many.rs`
-        // etc.) via `ExecutorChoice::resolve()`, which consults
-        // `CURRENT_TX` and routes through the active transaction when
-        // present. Outside a tx, leaves use the same pool we pass here;
-        // inside a tx, this `db` is effectively ignored.
+        // actual routing happens at each SQL leaf, which resolves its own
+        // executor. Each leaf is a fresh query of the related model, so
+        // this query's `with_tx` / `on(name)` is installed around the
+        // loads as an `EagerRoute`, which every leaf read inherits; the
+        // ambient `CURRENT_TX` reaches them as it reaches any read.
         //
         // An empty result still reaches the orchestrator: a dotted path
         // is checked against its relations even when no row loads, so a
@@ -5116,12 +5151,17 @@ where
                 M::default_connection_name(),
             )
             .await?;
-            crate::eloquent::relations::eager::apply_eager_specs::<M>(
-                &mut out,
-                eager_specs,
-                eager_db.inner(),
-            )
-            .await?;
+            let route = crate::database::transaction::EagerRoute {
+                tx: this.tx_override.clone(),
+                connection: this.connection_override.clone(),
+            };
+            route
+                .scope(crate::eloquent::relations::eager::apply_eager_specs::<M>(
+                    &mut out,
+                    eager_specs,
+                    eager_db.inner(),
+                ))
+                .await?;
         }
 
         // Phase 10C T1 - Retrieved fires ONCE per hydrated row, AFTER

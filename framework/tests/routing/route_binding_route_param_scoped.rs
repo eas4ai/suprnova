@@ -5,7 +5,7 @@
 //!
 //! | Handler param shape          | Scope policy                            |
 //! |------------------------------|-----------------------------------------|
-//! | `RouteParam<User>`           | Routes through `User::find(id)` - applies global scopes + soft-delete filter |
+//! | `RouteParam<User>`           | Reads through `User::query()` - applies global scopes + soft-delete filter |
 //! | bare `<inner>::Model`        | Bypasses the Eloquent scope - exposes trashed rows |
 //!
 //! The wrapped path is the safe default (Laravel-equivalent
@@ -135,4 +135,65 @@ async fn route_param_param_parse_error_for_non_integer() {
         .await
         .expect_err("non-numeric id");
     assert!(matches!(err, FrameworkError::ParamParse { .. }));
+}
+
+// A model without `soft_deletes` and a registered tenant scope: the
+// scoped binding must apply the scope through the same builder every
+// `Model::query()` read uses, not only the soft-delete filter. The
+// model type is unique to these tests, so the process-wide
+// `ScopeRegistry` entry cannot reach any other test.
+#[model(table = "rbsc_articles", fillable = ["tenant_id", "title"])]
+pub struct RbScArticle {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub title: String,
+}
+
+pub struct RbScTenantScope;
+
+impl suprnova::eloquent::scopes::GlobalScope<RbScArticle> for RbScTenantScope {
+    fn apply(&self, query: suprnova::Builder<RbScArticle>) -> suprnova::Builder<RbScArticle> {
+        query.filter("tenant_id", 1_i64)
+    }
+}
+
+#[tokio::test]
+async fn route_param_applies_global_scopes_on_a_model_without_soft_deletes() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE rbsc_articles (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            tenant_id INTEGER NOT NULL, \
+            title TEXT NOT NULL\
+         )",
+    )
+    .await
+    .unwrap();
+    // Rows are written before the scope is registered, through raw SQL,
+    // so neither insert depends on the scope's write behaviour.
+    db.execute_unprepared(
+        "INSERT INTO rbsc_articles (id, tenant_id, title) VALUES \
+            (1, 1, 'mine'), (2, 2, 'another tenant')",
+    )
+    .await
+    .unwrap();
+    suprnova::eloquent::scopes::ScopeRegistry::register::<RbScArticle, _>(RbScTenantScope);
+
+    // The row the scope admits binds.
+    let bound = <RouteParam<RbScArticle> as AutoRouteBinding>::from_route_param("1")
+        .await
+        .expect("scoped binding finds the current tenant's row");
+    assert_eq!(bound.title, "mine");
+
+    // The row the scope hides is a 404, as a missing row is: a guessed id
+    // of another tenant's row must not bind.
+    let err = <RouteParam<RbScArticle> as AutoRouteBinding>::from_route_param("2")
+        .await
+        .expect_err("scoped binding hides another tenant's row");
+    match err {
+        FrameworkError::ModelNotFound { model_name } => {
+            assert_eq!(model_name, "RbScArticle");
+        }
+        other => panic!("expected ModelNotFound, got {other:?}"),
+    }
 }
