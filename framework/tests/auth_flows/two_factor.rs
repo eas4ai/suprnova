@@ -1146,3 +1146,117 @@ async fn an_unavailable_attempt_store_fails_closed() {
     ];
     assert_eq!(statuses, [Some(503); 5]);
 }
+
+// ---- Enrollment writes conditional on what was read -------------------------
+//
+// `confirm` reads the enrollment, reserves an attempt, checks the code, then
+// writes. A trigger on the attempt reservation lands a concurrent change at
+// exactly that point, between the read and the write.
+
+async fn on_attempt_reservation(db: &TestDatabase, change: &str) {
+    db.execute_unprepared(&format!(
+        "CREATE TRIGGER concurrent_change AFTER INSERT ON two_factor_attempts \
+         BEGIN {change}; END"
+    ))
+    .await
+    .unwrap();
+}
+
+async fn stored_secret(db: &TestDatabase, user_id: &str) -> String {
+    use sea_orm::EntityTrait;
+    suprnova::auth_flows::two_factor::entity::Entity::find_by_id(user_id.to_owned())
+        .one(db.conn())
+        .await
+        .unwrap()
+        .expect("enrollment row")
+        .secret
+}
+
+/// A second enrollment replaces the secret after `confirm` read it: the code
+/// proved possession of the old secret only, so nothing is confirmed.
+#[tokio::test]
+async fn a_confirmation_cannot_bless_a_secret_replaced_while_it_ran() {
+    ensure_crypt();
+    let db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let user = FakeUser {
+        id: "replaced-mid-confirm".into(),
+        email: "replaced-mid-confirm@example.com".into(),
+    };
+    let resp = TwoFactor::enroll(&user).await.expect("enroll");
+    let other = suprnova::Crypt::encrypt_string(
+        suprnova::CryptPurpose::TwoFactorSecret,
+        "JBSWY3DPEHPK3PXP",
+    )
+    .unwrap();
+    on_attempt_reservation(
+        &db,
+        &format!(
+            "UPDATE two_factor_credentials SET secret = '{other}' WHERE user_id = '{}'",
+            user.id
+        ),
+    )
+    .await;
+
+    let error = TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .expect_err("the enrollment changed after it was read");
+    assert_eq!(error.status_code(), 409);
+    assert!(
+        !TwoFactor::is_enabled(&user).await.unwrap(),
+        "an unproven secret must stay unconfirmed"
+    );
+    assert_eq!(stored_secret(&db, &user.id).await, other);
+}
+
+/// Another confirmation of the same enrollment lands while this one runs:
+/// the enrollment is confirmed once, and `TwoFactorEnrolled` fires once.
+#[tokio::test]
+async fn a_confirmation_racing_another_confirms_once() {
+    ensure_crypt();
+    let db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let _events = suprnova::EventFacade::fake();
+    let user = FakeUser {
+        id: "double-confirm".into(),
+        email: "double-confirm@example.com".into(),
+    };
+    let resp = TwoFactor::enroll(&user).await.expect("enroll");
+    on_attempt_reservation(
+        &db,
+        &format!(
+            "UPDATE two_factor_credentials SET confirmed_at = updated_at WHERE user_id = '{}'",
+            user.id
+        ),
+    )
+    .await;
+
+    let error = TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .expect_err("the enrollment was confirmed meanwhile");
+    assert_eq!(error.status_code(), 409);
+    suprnova::events::testing::assert_not_dispatched::<
+        suprnova::auth_flows::events::TwoFactorEnrolled,
+    >(|_| true);
+}
+
+/// `enroll` decides whether it may replace the row in the same statement
+/// that replaces it, so a confirmed enrollment - even one confirmed after
+/// any earlier read - is never replaced without `re_enroll`'s proof.
+#[tokio::test]
+async fn enroll_never_replaces_a_confirmed_secret() {
+    ensure_crypt();
+    let db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let user = FakeUser {
+        id: "confirmed-kept".into(),
+        email: "confirmed-kept@example.com".into(),
+    };
+    let resp = TwoFactor::enroll(&user).await.expect("enroll");
+    TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .expect("confirm");
+    let confirmed = stored_secret(&db, &user.id).await;
+
+    let error = TwoFactor::enroll(&user).await.expect_err("already enabled");
+    assert_eq!(error.status_code(), 409);
+    assert_eq!(stored_secret(&db, &user.id).await, confirmed);
+    assert!(TwoFactor::is_enabled(&user).await.unwrap());
+}

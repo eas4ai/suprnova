@@ -695,8 +695,10 @@ Both writes are conditional on what was read, so concurrent requests on
 one account cannot cross. `confirm` stamps only the enrollment whose
 secret the code was checked against: if a second `enroll` replaced the
 secret in between, `confirm` returns `409` and the new secret stays
-unconfirmed. `enroll` re-checks that the row is still unconfirmed as it
-writes, so a confirmation that lands while it runs also gets the `409`.
+unconfirmed. A confirmation stamps an enrollment once: a second
+confirmation racing it gets `409` and fires no second `TwoFactorEnrolled`.
+`enroll` checks that the row is still unconfirmed in the statement that
+writes it, so a confirmation that lands while it runs also gets the `409`.
 
 ### Replay protection
 

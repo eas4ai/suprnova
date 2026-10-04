@@ -139,16 +139,13 @@ impl TwoFactor {
     /// valid TOTP code or recovery code as proof.
     ///
     /// Re-enrolling on an unconfirmed (pending) row is allowed - the
-    /// prior enrollment never became authoritative. The write itself
-    /// re-checks that the row is still unconfirmed, so a confirmation that
-    /// lands while `enroll` runs also gets the `409`.
+    /// prior enrollment never became authoritative. The check is part of
+    /// the write itself, so a confirmation that lands while `enroll` runs
+    /// also gets the `409`.
     pub async fn enroll<U: TwoFactorUser>(user: &U) -> Result<EnrollmentResponse, FrameworkError> {
-        if Self::is_enabled(user).await? {
-            return Err(FrameworkError::domain(
-                "2FA is already enabled for this account; call re_enroll with a valid TOTP or recovery code as proof to rotate the secret",
-                409,
-            ));
-        }
+        // No separate "already enabled?" read: the write refuses a
+        // confirmed row in the same statement that replaces a pending one,
+        // so a confirmation cannot land between a check and the write.
         Self::write_new_enrollment(user, EnrollmentWrite::Fresh).await
     }
 
@@ -1110,7 +1107,7 @@ async fn write_enrollment_row(
 }
 
 /// Stamp `confirmed_at` on the enrollment whose code was just checked.
-/// Returns `false` when that enrollment is gone.
+/// Returns `false` when that enrollment is gone or already confirmed.
 ///
 /// `checked_ciphertext` is the stored secret the code was checked against.
 /// Each enrollment encrypts a fresh secret with a fresh nonce, so the
@@ -1129,6 +1126,10 @@ async fn stamp_confirmation(
         .col_expr(entity::Column::UpdatedAt, Expr::value(crate::clock::now()))
         .filter(entity::Column::UserId.eq(user_id))
         .filter(entity::Column::Secret.eq(checked_ciphertext))
+        // A confirmation is stamped once. A second confirmation of the same
+        // enrollment racing this one must neither re-stamp it nor fire
+        // `TwoFactorEnrolled` again.
+        .filter(entity::Column::ConfirmedAt.is_null())
         .exec(db.inner())
         .await
         .map_err(|e| FrameworkError::internal(format!("two_factor confirm: {e}")))?;
@@ -1455,124 +1456,6 @@ mod tests {
                 .await
                 .expect("B claims"),
             "a code accepted at step S must not be accepted again at step S+1"
-        );
-    }
-
-    /// The row as it is stored now.
-    async fn stored_row() -> Option<entity::Model> {
-        let db = DB::connection().expect("test connection");
-        entity::Entity::find_by_id(User.user_id().to_owned())
-            .one(db.inner())
-            .await
-            .expect("read enrollment")
-    }
-
-    #[tokio::test]
-    async fn a_confirmation_cannot_bless_a_secret_replaced_after_its_code_was_checked() {
-        ensure_crypt();
-        let _db = TestDatabase::fresh::<Migrator>().await.expect("fresh db");
-        let now = Utc::now().timestamp();
-
-        // Confirm reads secret A and checks a code from A.
-        TwoFactor::enroll(&User).await.expect("enroll A");
-        let checked = load_secret(User.user_id())
-            .await
-            .expect("load A")
-            .expect("A is stored");
-        let code_a = stored_code_at(now).await;
-        assert!(check_code(&checked.secret_b32, &code_a, now).expect("check A"));
-
-        // A second enrollment (a second tab, or a session-holding attacker)
-        // replaces A with B before confirm writes.
-        TwoFactor::enroll(&User).await.expect("enroll B");
-
-        // Confirm's write must not land on B: nobody proved possession of B.
-        let stamped = stamp_confirmation(User.user_id(), &checked.ciphertext, Utc::now())
-            .await
-            .expect("stamp");
-        assert!(
-            !stamped,
-            "the confirmation of A must not stamp enrollment B"
-        );
-        assert!(
-            !TwoFactor::is_enabled(&User).await.expect("is_enabled"),
-            "an unproven secret must stay unconfirmed"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_fresh_enrollment_cannot_replace_a_confirmation_that_landed_after_its_check() {
-        ensure_crypt();
-        let _db = TestDatabase::fresh::<Migrator>().await.expect("fresh db");
-
-        // enroll checked `is_enabled == false` while the row was pending ...
-        TwoFactor::enroll(&User).await.expect("enroll");
-        // ... then the user's confirmation landed ...
-        let code = stored_code_at(Utc::now().timestamp()).await;
-        TwoFactor::confirm(&User, &code).await.expect("confirm");
-        let confirmed = stored_row().await.expect("row exists");
-
-        // ... and only then does enroll's write run. Without proof of the
-        // confirmed secret it must not replace it.
-        let replacement = Crypt::encrypt_string(
-            crate::crypto::CryptPurpose::TwoFactorSecret,
-            "JBSWY3DPEHPK3PXP",
-        )
-        .expect("encrypt");
-        let recovery = Crypt::encrypt_string(
-            crate::crypto::CryptPurpose::TwoFactorRecovery,
-            "000000-000000",
-        )
-        .expect("encrypt");
-        let error = write_enrollment_row(
-            User.user_id(),
-            replacement,
-            recovery,
-            EnrollmentWrite::Fresh,
-        )
-        .await
-        .expect_err("a fresh enrollment must not overwrite a confirmed one");
-        assert_eq!(error.status_code(), 409);
-
-        let after = stored_row().await.expect("row exists");
-        assert_eq!(after.secret, confirmed.secret, "the confirmed secret stays");
-        assert!(after.confirmed_at.is_some(), "the confirmation stays");
-    }
-
-    #[tokio::test]
-    async fn a_rotation_replaces_a_confirmed_enrollment() {
-        ensure_crypt();
-        let _db = TestDatabase::fresh::<Migrator>().await.expect("fresh db");
-
-        TwoFactor::enroll(&User).await.expect("enroll");
-        let code = stored_code_at(Utc::now().timestamp()).await;
-        TwoFactor::confirm(&User, &code).await.expect("confirm");
-        let confirmed = stored_row().await.expect("row exists");
-
-        let replacement = Crypt::encrypt_string(
-            crate::crypto::CryptPurpose::TwoFactorSecret,
-            "JBSWY3DPEHPK3PXP",
-        )
-        .expect("encrypt");
-        let recovery = Crypt::encrypt_string(
-            crate::crypto::CryptPurpose::TwoFactorRecovery,
-            "000000-000000",
-        )
-        .expect("encrypt");
-        write_enrollment_row(
-            User.user_id(),
-            replacement,
-            recovery,
-            EnrollmentWrite::Rotation,
-        )
-        .await
-        .expect("re_enroll proved the secret, so it may replace it");
-
-        let after = stored_row().await.expect("row exists");
-        assert_ne!(after.secret, confirmed.secret);
-        assert!(
-            after.confirmed_at.is_none(),
-            "the new secret needs its own confirmation"
         );
     }
 }
