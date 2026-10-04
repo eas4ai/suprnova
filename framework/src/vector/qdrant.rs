@@ -13,7 +13,8 @@
 //! 1. If the string is the canonical decimal spelling of a `u64` (no
 //!    sign, no leading zero), use the `Num(u64)` variant.
 //! 2. If the string is a UUID in its canonical spelling (lowercase,
-//!    hyphenated), use the `Uuid(String)` variant verbatim.
+//!    hyphenated) and not of version 5, use the `Uuid(String)` variant
+//!    verbatim.
 //! 3. Otherwise, derive a deterministic v5 UUID from the framework's
 //!    namespace and the bytes of the original string.
 //!
@@ -21,7 +22,9 @@
 //! Rules 1 and 2 take only the canonical spelling because Rust parses
 //! `"01"` and `"+1"` as `1`, and Qdrant reads the uppercase, simple,
 //! braced and urn spellings of a UUID as one UUID; every other spelling
-//! falls to rule 3.
+//! falls to rule 3. Rule 2 also leaves out version 5, the version rule 3
+//! produces: a caller who passes the UUID derived from another id would
+//! otherwise name that id's point.
 //!
 //! In all three cases the original caller-side string is stashed in
 //! the point's payload under [`SUPRNOVA_ID_PAYLOAD_KEY`] so similarity
@@ -29,11 +32,7 @@
 //! the metadata returned by [`VectorDriver::similar`] - consumers
 //! never see it through the trait surface. It IS visible if you query
 //! Qdrant directly (see [`QdrantVectorDriver::client`]).
-//!
-//! One collision remains by construction: a caller-chosen UUID equal to
-//! the v5 UUID derived from another caller-chosen string names the same
-//! point as that string. Closing it would mean deriving every id, which
-//! moves every point already written.
+
 //!
 //! # Auto-create
 //!
@@ -224,7 +223,8 @@ impl QdrantVectorDriver {
     /// Only a canonical spelling maps to a native id: `"01"` and `"+1"`
     /// parse as `1`, and Qdrant treats every spelling of a UUID as one,
     /// so taking them as-is would let two different ids overwrite each
-    /// other.
+    /// other. A version 5 UUID is derived too, because derived ids are
+    /// version 5: taken verbatim, a caller could name another id's point.
     pub fn resolve_point_id(id: &str) -> PointId {
         if let Ok(n) = id.parse::<u64>()
             && n.to_string() == id
@@ -233,6 +233,7 @@ impl QdrantVectorDriver {
         }
         if let Ok(uuid) = Uuid::parse_str(id)
             && uuid.hyphenated().to_string() == id
+            && uuid.get_version_num() != 5
         {
             return PointId::from(id.to_string());
         }
