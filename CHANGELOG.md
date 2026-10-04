@@ -420,8 +420,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   parts its field takes: a text part sent where a file belongs fails as
   `validation-file`, and a later part for a field that holds one file is
   ignored without being read into memory or a temporary file. For a field
-  that holds one value, the first part that is not empty decides it, so
-  several failing parts report one error. An `UploadValidator` returns
+  that holds one value, its first part decides it, valid or not, so
+  several failing parts report one error; an empty part does not decide a
+  field that is not a `String`, so the next part of its name can. An `UploadValidator` returns
   `FrameworkError::invalid_upload` for a validation failure, and its other
   errors keep their status. A `bool` field accepts `1`, `0`, `true`,
   `false`, `on` and `off`. An empty part, which Inertia sends for `null`,
