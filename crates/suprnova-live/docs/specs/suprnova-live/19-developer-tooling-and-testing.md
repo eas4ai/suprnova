@@ -1,7 +1,7 @@
 # Suprnova Live -- 19 Developer Tooling and Testing
 
 Status: Normative design specification
-Last revised: 2026-09-16
+Last revised: 2026-10-04
 
 ## Scope
 
@@ -468,6 +468,11 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-10-04 -- `live:inspect` reports every configured Live limit by the
+  `.env` key that sets it, with its value and unit, instead of three named
+  byte and lifetime fields. The CLI and the application helper moved to
+  tooling protocol 2 together; the CLI refuses a protocol 1 helper and any
+  limit whose key is not a `LIVE_*` key or whose unit is not a plain word.
 - 2026-09-16 -- The checker renders an empty call block to a macro that
   splices `caller()` as empty caller content, and fails a component whose view
   renders no branch (LIVE-025). The empty caller had rendered zero branches,

@@ -92,12 +92,19 @@ Acceptance criteria:
 
 The production optional artifact owns one upload manager per document and one
 current-document transfer owner per selected file. It uses the shared bounded
-owner for queueing, permits, lifecycle, and disposal; defaults to four active
-files and 256 KiB chunks; retains at most one uncertain chunk in JavaScript and
-never more than two chunk buffers per active transfer; and computes chunk plus
-whole-file SHA-256 incrementally without reading the whole file into framework
-memory. Public configuration cannot exceed 16 active transfers, 64 files, 4 MiB
-chunks, or 4 MiB of manager queue accounting. Transport, connectivity, retry
+owner for queueing, permits, lifecycle, and disposal; takes its chunk size,
+active transfers, file size, pending files and pending bytes from the server's
+configuration (`LIVE_UPLOAD_CHUNK_BYTES` 8 MiB, `LIVE_UPLOAD_MAX_ACTIVE` 8,
+`LIVE_UPLOAD_MAX_FILE_BYTES` 1 GiB, `LIVE_UPLOAD_MAX_PENDING_FILES` 1,024 and
+`LIVE_UPLOAD_MAX_PENDING_BYTES` 4 GiB by default) in the configuration element;
+retains at most one uncertain chunk in JavaScript and never more than two chunk
+buffers per active transfer; and computes chunk plus whole-file SHA-256
+incrementally without reading the whole file into framework memory. Public
+configuration may lower any of those limits but never raise one past the
+server's, and a selection past one is refused before any transfer with the
+limit, both values and the key. The server builds its upload profile from the
+same keys, plus `LIVE_UPLOAD_MAX_STORAGE_BYTES` (16 GiB) for the temporary
+store, which never reaches the page. Transport, connectivity, retry
 randomness, and the optional application reacquisition port are injected before
 runtime boot through `configureUploads`; `resumeUpload` is the supported
 document/island-scoped explicit reacquisition entry rather than a second feature
@@ -302,6 +309,21 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-04 -- Upload limits are server configuration delivered in the
+  configuration element: `LIVE_UPLOAD_CHUNK_BYTES` (8 MiB, 64 MiB ceiling),
+  `LIVE_UPLOAD_MAX_ACTIVE` (8), `LIVE_UPLOAD_MAX_FILE_BYTES` (1 GiB, 1 TiB
+  ceiling), `LIVE_UPLOAD_MAX_PENDING_FILES` (1,024),
+  `LIVE_UPLOAD_MAX_PENDING_BYTES` (4 GiB) and the server-only
+  `LIVE_UPLOAD_MAX_STORAGE_BYTES` (16 GiB). They replace the browser's
+  256 KiB default chunk, its 4 MiB chunk and manager-queue ceilings, its 16
+  transfers and 64 files, the 64-handle proposal and morph caps, and the
+  framework's use of the engine reference profile (256 KiB chunks, 64 MiB
+  files, 16 files per field). The pending-bytes limit counts the selected
+  files' real sizes. A file or selection past a limit is refused in the browser
+  before any transfer, and on the server with a 413 whose report names the
+  key. Upload control requests keep their 16 KiB fixed-shape grammar: every
+  field in them is an identifier, digest or count with its own bound, so the
+  request size follows from the format, not from page content.
 - 2026-10-04 -- The reference fetch adapter reads an upload control response
   without the 16 KiB browser cap. The response is the framework server's own
   typed reply on its reserved route, and a browser cap protected nothing the

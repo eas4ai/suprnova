@@ -273,6 +273,12 @@ blob store merely to replay bytes.
 
 ## Decisions and revisions
 
+- 2026-10-04 -- A redirect or reflected URL is bounded by
+  `LIVE_MAX_REDIRECT_BYTES` (64 KiB by default, at most the response limit and
+  at most 2 MiB, the longest URL a browser follows) instead of a fixed 2,048
+  bytes, in the engine's response parser, the host's navigation targets and
+  the browser's validator. A longer one fails with the limit, both values and
+  the key.
 - 2026-10-04 -- Removed every arbitrary small cap on Live messages. The
   server's configuration is the single source of each limit, with defaults
   sized for modern pages: `LIVE_MAX_REQUEST_BYTES`, `LIVE_MAX_RESPONSE_BYTES`

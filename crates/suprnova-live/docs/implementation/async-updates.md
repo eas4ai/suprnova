@@ -227,14 +227,18 @@ presentation only and never changes freshness semantics.
 
 ## Backpressure
 
-The server queue is bounded to 64 unapplied envelopes and 256 KiB of canonical
-envelope bytes per document delivery owner. A payload is at most 32 KiB and an
-event declares at most 16 target scopes. Although the internal Rust metadata
+The server queue is bounded to the configured `LIVE_ASYNC_MAX_QUEUED_EVENTS`
+unapplied envelopes (4,096 by default) and `LIVE_ASYNC_MAX_BUFFER_BYTES` of
+canonical envelope bytes (16 MiB) per document delivery owner, and the browser's
+document queue reads the same depth from its configuration element. A payload
+is at most `LIVE_ASYNC_MAX_PAYLOAD_BYTES` (1 MiB) and an event declares at most
+16 target scopes. Although the internal Rust metadata
 type can represent fanout up to 1,024, browser authorization and registered-event
 admission reject a contract above 256. The effective end-to-end event fanout
 ceiling is 256 and signed registration or deployment policy may lower it. The
-independent replay transcript limit is 1,024 envelopes; it is not a fanout
-allowance. A component declares at most 32 subscriptions, and one server
+independent replay transcript limit is the configured
+`LIVE_ASYNC_MAX_REPLAY_EVENTS` (4,096 by default, at most the queue depth); it
+is not a fanout allowance. A component declares at most 32 subscriptions, and one server
 document transport owns at most 128 logical memberships. Browser-side logical
 membership and diagnostic/resource collections have their own closed bounds.
 
@@ -304,12 +308,12 @@ issue afresh.
 Application code publishes through `suprnova::live::LiveStreams`:
 `refresh(topic)` and `event::<T>(topic, LiveEventTarget, CanonicalValue)`
 append to the bounded per-subscription log of every current subscription
-whose signed topics contain `topic`. The log keeps at most 256 envelopes or
-64 KiB per subscription; heartbeats are appended to idle memberships every
+whose signed topics contain `topic`. The log keeps at most
+`LIVE_ASYNC_MAX_REPLAY_EVENTS` envelopes and `LIVE_ASYNC_MAX_BUFFER_BYTES` per
+subscription; heartbeats are appended to idle memberships every
 five seconds and the browser heartbeat timeout is fifteen seconds. Delivery
-runs through the engine's bounded document transport with the Iteration 004
-limits (64 retained events, 256 KiB, 32 KiB payloads, 128 memberships per
-document). A gap or degraded lane is re-baselined at its delivery cursor
+runs through the engine's bounded document transport under the configured
+queue depth, queue bytes and payload size, with 128 memberships per document. A gap or degraded lane is re-baselined at its delivery cursor
 through `recover_from_authoritative_refresh`; the browser deduplicates the
 overlap. One SSE transport has exactly one reader; a second reader is
 `async_transport_reader_exists`, a reader disconnect retires the transport and

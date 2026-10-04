@@ -224,6 +224,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-04 -- The configuration element also carries
+  `async_max_queued_events`, `async_max_replay_events`, `max_redirect_bytes`
+  and the five `upload_*` limits, and the runtime hands them to every optional
+  feature through its document context, with a callback that prints a tripped
+  limit's key. A feature holds no limit of its own.
 - 2026-10-04 -- The configuration element carries every page limit the
   browser applies, as the server configured it: `max_request_bytes`,
   `max_response_bytes`, `max_html_bytes`, `max_json_depth`,
