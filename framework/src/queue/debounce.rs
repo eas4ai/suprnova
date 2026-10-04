@@ -9,6 +9,18 @@
 //!
 //! Ports `Illuminate\Bus\DebounceLock`.
 //!
+//! # The window is claimed only once the envelope is queued
+//!
+//! Arming reserves a dispatch its place in the burst, one past the dispatch
+//! that last claimed the window; the owner token is written only after the
+//! driver has accepted the envelope. A dispatch that fails, or is cancelled,
+//! between the two never names the owner, so it cannot make an earlier,
+//! successfully queued envelope look superseded and get it dropped. The token
+//! carries the place, and the worker drops an envelope only for a token from a
+//! *later* place: an envelope that runs before its own claim lands still runs.
+//! Every race between dispatches then costs at worst a duplicate run, never a
+//! lost one, and a failed dispatch has nothing to hand back.
+//!
 //! # Why this is not a `Cache::lock`
 //!
 //! [`Cache::lock`](crate::cache::Cache::lock) is mutual exclusion: on Redis it
@@ -27,11 +39,12 @@ use std::time::Duration;
 /// The result of arming a debounce window.
 #[derive(Debug, Clone)]
 pub struct Debounced {
-    /// Token identifying this dispatch as the current owner of the window.
+    /// Token this dispatch claims the window with once its envelope is on the
+    /// queue: `"{place}:{id}"`, its place in the burst, then a unique id.
     ///
-    /// Stamped on the envelope and compared at run time: an envelope whose
-    /// token is no longer the stored one was superseded by a newer dispatch and
-    /// is dropped instead of run.
+    /// Stamped on the envelope and compared at run time: an envelope is
+    /// dropped instead of run when the window has since been claimed by a
+    /// dispatch from a later place in its burst.
     pub owner: String,
     /// Whether this dispatch hit the configured maximum wait.
     ///
@@ -101,45 +114,60 @@ pub(crate) fn first_dispatched_key(key: &str) -> String {
     format!("{key}:first_dispatched_at")
 }
 
-/// Arm (or re-arm) the debounce window for `key`, returning the new owner token.
+/// Arm (or re-arm) the debounce window for `key`, returning the token this
+/// dispatch will claim it with.
 ///
-/// The write **overwrites** any existing token: that is the mechanism, not an
-/// oversight - see the module docs. Returns `max_wait_exceeded == true` when
-/// the burst has been deferring the run for at least `max_wait`, in which case
-/// the caller queues the job with no delay at all.
+/// Nothing is written for the owner here: the caller claims the window with
+/// [`claim`] once its envelope is on the queue - see the module docs. The
+/// claim **overwrites** any earlier token, and that is the mechanism, not an
+/// oversight. Returns `max_wait_exceeded == true` when the burst has been
+/// deferring the run for at least `max_wait`, in which case the caller queues
+/// the job with no delay at all.
 pub(crate) async fn acquire(
     key: &str,
     window: Duration,
     max_wait: Option<Duration>,
 ) -> Result<Debounced, FrameworkError> {
     let ttl = lock_ttl(window);
-    let owner = uuid::Uuid::new_v4().to_string();
-    Cache::put(key, &owner, Some(ttl)).await?;
-    match max_wait_exceeded(key, ttl, max_wait).await {
-        Ok(max_wait_exceeded) => Ok(Debounced {
-            owner,
-            max_wait_exceeded,
-        }),
-        Err(e) => {
-            // The owner token is already written, but this arming never
-            // completes, so no envelope will ever carry the token. Left in
-            // place it would supersede - and so silently discard - every
-            // earlier envelope of the burst, each of whose pushes returned
-            // `Ok`. Hand the window back instead: a lapsed window fails open.
-            // Best-effort, and owner-checked inside `abandon`, so a dispatch
-            // that overtook us in the meantime keeps its window.
-            if let Err(cleanup) = abandon(key, &owner).await {
-                tracing::warn!(
-                    key = %key,
-                    error = %cleanup,
-                    "a debounce window could not be handed back after its arming \
-                     failed; envelopes already queued for this window may be dropped \
-                     as superseded by a dispatch that was never completed"
-                );
-            }
-            Err(e)
-        }
+    let claimed = current_owner(key).await?;
+    let place = claimed.as_deref().and_then(place).unwrap_or(0);
+    let max_wait_exceeded = max_wait_exceeded(key, ttl, max_wait).await?;
+    Ok(Debounced {
+        owner: format!("{}:{}", place.saturating_add(1), uuid::Uuid::new_v4()),
+        max_wait_exceeded,
+    })
+}
+
+/// Claim the window for `owner`, whose envelope the driver has accepted.
+pub(crate) async fn claim(key: &str, owner: &str, window: Duration) -> Result<(), FrameworkError> {
+    Cache::put(key, &owner, Some(lock_ttl(window))).await
+}
+
+/// Whether the window's token `current` supersedes an envelope stamped with
+/// `envelope`: true only for a token from a later place in the burst, the id
+/// breaking a tie between two dispatches that armed from the same claim.
+///
+/// A token from before places existed carries only an id. An envelope
+/// stamped with one is judged as it always was, superseded by any other
+/// token. A placed envelope is never superseded by an unplaced token, which
+/// can only belong to a dispatch from before it.
+pub(crate) fn supersedes(current: &str, envelope: &str) -> bool {
+    match (parse(current), parse(envelope)) {
+        (Some(current), Some(envelope)) => current > envelope,
+        (None, Some(_)) => false,
+        (_, None) => current != envelope,
     }
+}
+
+/// A token's place and id, or `None` for a token from before places.
+fn parse(token: &str) -> Option<(u64, &str)> {
+    let (place, id) = token.split_once(':')?;
+    Some((place.parse().ok()?, id))
+}
+
+/// A token's place in its burst, or `None` for a token from before places.
+pub(crate) fn place(token: &str) -> Option<u64> {
+    parse(token).map(|(place, _)| place)
 }
 
 /// Whether the burst owning `key` has been deferring its run for `max_wait`.
@@ -174,32 +202,6 @@ pub(crate) async fn current_owner(key: &str) -> Result<Option<String>, Framework
     Cache::get::<String>(key).await
 }
 
-/// Hand back the debounce window for `key`, but only while `owner` still holds
-/// it.
-///
-/// Called when a dispatch armed the window and then failed to put an envelope
-/// behind the token. Leaving the token would name an owner that does not
-/// exist, and the worker would read every earlier envelope of the burst as
-/// superseded and drop it - losing work whose own push reported success.
-/// Letting the window lapse instead [fails open](current_owner): whatever is
-/// still queued runs.
-///
-/// The owner check is what keeps that from becoming the opposite bug. A
-/// dispatch whose driver write fails slowly can be overtaken by a newer one
-/// that armed the window and enqueued successfully; an unconditional forget
-/// would tear down that live window and un-collapse the whole burst, turning
-/// one run into twenty. Ports the owner guard on `DebounceLock::release`.
-/// The timestamp key is cleared under the same guard, for the same reason: a
-/// live burst's max-wait clock is not ours to reset.
-pub(crate) async fn abandon(key: &str, owner: &str) -> Result<(), FrameworkError> {
-    if current_owner(key).await?.as_deref() != Some(owner) {
-        return Ok(());
-    }
-    Cache::forget(key).await?;
-    Cache::forget(&first_dispatched_key(key)).await?;
-    Ok(())
-}
-
 /// Start a fresh max-wait window for `key`, leaving the owner token alone.
 ///
 /// Called at the start of every actual run (Laravel #61281). Before that fix,
@@ -229,6 +231,29 @@ mod tests {
             Duration::from_secs(u64::MAX),
             "a preposterous window saturates instead of overflowing"
         );
+    }
+
+    #[test]
+    fn only_a_later_place_supersedes() {
+        assert!(supersedes("3:b", "2:a"), "a later place supersedes");
+        assert!(!supersedes("2:a", "3:b"), "an earlier claim never does");
+        assert!(
+            !supersedes("2:a", "2:a"),
+            "nor does the envelope's own claim"
+        );
+        assert!(
+            supersedes("2:b", "2:a") != supersedes("2:a", "2:b"),
+            "a tie breaks one way"
+        );
+        assert!(
+            !supersedes("legacy", "1:a"),
+            "an unplaced token predates every placed one"
+        );
+        assert!(
+            supersedes("1:a", "legacy"),
+            "an unplaced envelope keeps the equality rule"
+        );
+        assert!(!supersedes("legacy", "legacy"));
     }
 
     #[test]

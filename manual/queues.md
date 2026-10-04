@@ -674,6 +674,11 @@ is what makes the surviving run carry the newest payload rather than the oldest.
 If the token has expired or been evicted, the job runs - debouncing fails open,
 because a lost token is not evidence that somebody else owns the window.
 
+A dispatch claims the window only once the driver has accepted its envelope.
+A push that fails, or a dispatch cancelled before its push - an HTTP handler
+whose client disconnects - leaves the window to the last dispatch that reached
+the queue, so the work already queued still runs.
+
 The [`sync` driver](#drivers) has no worker, so it runs every dispatch inline
 and nothing is ever collapsed. Laravel's sync driver behaves the same way.
 `Queue::bulk` pushes at the driver level and does not arm a window either, so a
