@@ -1,7 +1,7 @@
 .sn-field {
   display: grid;
   gap: var(--sn-space-1);
-  margin-block-end: var(--sn-density-stack);
+  margin-block-end: var(--sn-density-field-gap);
 }
 
 .sn-hint {

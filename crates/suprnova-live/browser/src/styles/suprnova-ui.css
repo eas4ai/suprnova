@@ -139,6 +139,8 @@
     --sn-density-control-padding-y: calc(var(--sn-space-2) * var(--sn-density-scale));
     --sn-density-gap: calc(var(--sn-space-2) * var(--sn-density-scale));
     --sn-density-stack: calc(var(--sn-space-4) * var(--sn-density-scale));
+    /* the space from one form field to the next */
+    --sn-density-field-gap: calc(var(--sn-space-3) * var(--sn-density-scale));
     /* the text inside controls and buttons, a step below body text */
     --sn-density-control-font-size: var(--sn-font-size-sm);
 

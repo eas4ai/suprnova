@@ -22,6 +22,9 @@ const SITE = {
   textarea: 94.84,
   button: 42,
   buttonText: 15.2,
+  // The sign-in and register forms put 14 px between one field and the
+  // next, measured from the bottom of a control or its hint.
+  fieldGap: 14,
 } as const;
 
 // The rows a textarea gets when the view passes none: the macro's default,
@@ -183,6 +186,98 @@ test("the form controls are no larger than the suprnova.app form fields", async 
   // choice labels are 14.08 px.
   expect(measured.choices).toHaveLength(4);
   for (const choice of measured.choices) expect(choice.font, choice.kind).toBe(14);
+});
+
+// A form as an application writes one: fields in plain flow, then the same
+// controls in a fieldset, whose grid gap spaces its parts; and the components
+// that put their label in their own grid or row.
+const RHYTHM = `<main style="padding: 1.5rem; max-inline-size: 40rem">
+<form id="flow">
+${field("flow_name", "Name", `<input class="sn-input" id="flow_name" name="flow_name" type="text">`, "", "Enter your name.")}
+${field("flow_password", "Password", `<input class="sn-input" id="flow_password" name="flow_password" type="password">`, "At least 12 characters.")}
+${field("flow_email", "Email", `<input class="sn-input" id="flow_email" name="flow_email" type="email">`)}
+</form>
+<form><fieldset class="sn-fieldset" id="grouped"><legend>Account</legend>
+${field("set_name", "Name", `<input class="sn-input" id="set_name" name="set_name" type="text">`, "The server reads it on every change.")}
+${field("set_email", "Email", `<input class="sn-input" id="set_email" name="set_email" type="email">`)}
+<fieldset class="sn-radio-group" id="set_plan"><legend>Plan</legend><label class="sn-radio"><input class="sn-radio-input" name="set_plan" type="radio" value="starter"> <span>Starter</span></label></fieldset>
+<label class="sn-checkbox"><input class="sn-checkbox-input" id="set_agree" name="set_agree" type="checkbox"> <span>I agree to the terms</span></label>
+<label class="sn-switch"><input class="sn-switch-input" id="set_news" name="set_news" type="checkbox" role="switch"> <span>Send me the newsletter</span></label>
+${field("set_city", "City", `<input class="sn-input" id="set_city" name="set_city" type="text">`)}
+</fieldset></form>
+<sn-input-otp class="sn-otp" data-sn-length="6"><label class="sn-otp-label" for="code">One-time code</label><input class="sn-input sn-otp-input" id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" spellcheck="false" autocapitalize="off" required><span class="sn-otp-cells" aria-hidden="true"><span class="sn-otp-cell" data-sn-index="1"></span><span class="sn-otp-cell" data-sn-index="2"></span></span></sn-input-otp>
+<div class="sn-upload" data-sn-upload="attachment"><label class="sn-upload-label" for="attachment">Attachment</label><input class="sn-upload-input" id="attachment" type="file" accept="image/png"><progress class="sn-upload-progress" max="100" aria-label="Attachment upload progress"></progress><p class="sn-upload-status"><span class="sn-upload-state" data-sn-state="idle">No file chosen.</span></p><div class="sn-upload-controls" role="group" aria-label="Attachment upload controls"><button class="sn-upload-control" type="button">Cancel upload</button></div></div>
+<form class="sn-datatable-filter" role="search" aria-label="Filter invoices"><label class="sn-datatable-filter-label" for="invoices-filter">Filter invoices</label><input class="sn-datatable-filter-input" id="invoices-filter" name="filter" type="search" value=""><button class="sn-datatable-filter-button" type="submit">Apply</button></form>
+</main>`;
+
+test("fields and their labels sit no farther apart than on the suprnova.app forms", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await mountComponents(page, {
+    html: RHYTHM,
+    components: [...COMPONENTS, "fieldset", "input-otp", "datatable"],
+  });
+  await expect(page.locator("sn-input-otp")).toHaveAttribute("data-sn-upgraded", "");
+  const measured = await page.evaluate(() => {
+    const box = (selector: string): DOMRect => {
+      const element = document.querySelector(selector);
+      if (element === null) throw new Error(`no ${selector}`);
+      return element.getBoundingClientRect();
+    };
+    // The space from the bottom of one part (its hint or error included)
+    // to the top of the next.
+    const between = (parts: readonly Element[]): number[] =>
+      parts
+        .slice(1)
+        .map((part, index) =>
+          Math.round(
+            part.getBoundingClientRect().top -
+              (parts[index]?.getBoundingClientRect().bottom ?? Number.NaN),
+          ),
+        );
+    const visibleChildren = (selector: string): Element[] =>
+      [...document.querySelectorAll(`${selector} > :not(legend)`)].filter(
+        (child) => child.getBoundingClientRect().height > 0,
+      );
+    const gap = (above: string, below: string): number =>
+      Math.round(box(below).top - box(above).bottom);
+    return {
+      flow: between(visibleChildren("#flow")),
+      fieldset: between(visibleChildren("#grouped")),
+      labelGaps: {
+        otp: gap(".sn-otp-label", "#code"),
+        upload: gap(".sn-upload-label", "#attachment"),
+        filter: gap(".sn-datatable-filter-label", "#invoices-filter"),
+      },
+      innerGaps: {
+        otpCells: gap("#code", ".sn-otp-cells"),
+        uploadStatus: gap("#attachment", ".sn-upload-status"),
+        uploadControls: gap(".sn-upload-status", ".sn-upload-controls"),
+        filterButton: gap("#invoices-filter", ".sn-datatable-filter-button"),
+      },
+    };
+  });
+
+  expect(measured.flow).toHaveLength(2);
+  expect(measured.fieldset).toHaveLength(5);
+  const over = [
+    ...measured.flow.map((space, index) => ["flow field", index, space] as const),
+    ...measured.fieldset.map((space, index) => ["fieldset part", index, space] as const),
+  ]
+    .filter(([, , space]) => space > SITE.fieldGap)
+    .map(([where, index, space]) => `${where} ${String(index)} to the next: ${String(space)}`);
+  expect.soft(over).toEqual([]);
+
+  // A label in its component's own grid or row sits as close to its control
+  // as a field label does, and the parts below it keep their 8 px.
+  expect.soft(measured.labelGaps).toEqual({ otp: 6, upload: 6, filter: 6 });
+  expect.soft(measured.innerGaps).toEqual({
+    otpCells: 8,
+    uploadStatus: 8,
+    uploadControls: 8,
+    filterButton: 8,
+  });
 });
 
 test.describe("on a touch screen", () => {
