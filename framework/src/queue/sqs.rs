@@ -1349,6 +1349,9 @@ impl QueueDriver for SqsQueueDriver {
         token: &ReservationToken,
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError> {
+        // Resolved before the reservation is taken, so a delay no date can
+        // hold fails with the job still reserved.
+        let available_at = crate::queue::driver::available_after(requeue_delay)?;
         let Some(held) = self.take(token)? else {
             return Ok(());
         };
@@ -1364,9 +1367,7 @@ impl QueueDriver for SqsQueueDriver {
             // counts the attempt and waits out the delay, and drop this one.
             let (mut copy, _) = self.decode(&held.body).await?;
             copy.attempts = held.attempts.saturating_add(1);
-            copy.available_at = crate::clock::now()
-                + chrono::Duration::from_std(requeue_delay)
-                    .unwrap_or_else(|_| chrono::Duration::zero());
+            copy.available_at = available_at;
             self.send(&held.queue_url, &copy).await?;
             return self.delete_held(&held, true).await;
         }
@@ -1388,13 +1389,15 @@ impl QueueDriver for SqsQueueDriver {
         env: &Envelope,
         delay: Duration,
     ) -> Result<(), FrameworkError> {
+        // Resolved before the reservation is taken, so a delay no date can
+        // hold fails with the job still reserved.
+        let available_at = crate::queue::driver::available_after(delay)?;
         let Some(held) = self.take(token)? else {
             return Ok(());
         };
         let mut copy = env.clone();
         copy.attempts = held.attempts;
-        copy.available_at = crate::clock::now()
-            + chrono::Duration::from_std(delay).unwrap_or_else(|_| chrono::Duration::zero());
+        copy.available_at = available_at;
         self.send(&held.queue_url, &copy).await?;
         self.delete_held(&held, true).await
     }

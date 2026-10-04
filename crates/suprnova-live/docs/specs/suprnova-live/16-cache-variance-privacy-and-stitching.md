@@ -1,7 +1,7 @@
 # Suprnova Live -- 16 Cache Variance, Privacy, and Stitching
 
 Status: Normative design specification
-Last revised: 2026-09-13
+Last revised: 2026-10-04
 
 ## Scope
 
@@ -93,7 +93,9 @@ Acceptance criteria:
   This holds for the browser's own cache too: a private cached response is
   sent `Cache-Control: private, no-cache`, because the browser keys a stored
   response by method and URL and never by the principal or tenant material in
-  the server's key.
+  the server's key. Every other response sent without shared-cache
+  permission is `private, no-cache` as well, so the browser never reuses a
+  page past the write that invalidated it.
 - Classification reasoning is inspectable in development and tests.
 
 UX flow:
@@ -356,6 +358,15 @@ prose.
 
 ## Decisions and revisions
 
+- 2026-10-04 -- Sent every response without shared-cache permission
+  `Cache-Control: private, no-cache`, not only private cached ones: a public
+  page whose route sets no `s-maxage`, a zero-slot composite, and the
+  leader's render of either. Their `private, max-age=<fresh>` let the browser
+  reuse a page for the whole window without asking, past a write that had
+  already invalidated the stored entry. Revalidation is a `304` from storage
+  while the entry is unchanged. A route with `SharedCachePolicy::SMaxAge`
+  keeps `public, max-age, s-maxage`, and a slotted composite keeps
+  `private, no-store`.
 - 2026-10-04 -- Sent private cached responses `Cache-Control: private,
   no-cache` instead of `private, max-age=<fresh>`. The browser keyed the
   stored response by URL alone, so within the freshness window it replayed one

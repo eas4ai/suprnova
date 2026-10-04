@@ -58,6 +58,16 @@ impl<'a> ActionAuthorizationRequest<'a> {
         Self { component, action }
     }
 
+    /// Builds a request outside the engine, for a host's tests of its own
+    /// [`ActionAuthorizationPort`]. The engine builds every real request from
+    /// a registered action; a host test asks its port about the same
+    /// identities without registering and dispatching one.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn for_test(component: &'a ComponentName, action: &'a ActionName) -> Self {
+        Self::new(component, action)
+    }
+
     /// Returns the registered component identity.
     #[must_use]
     pub const fn component(&self) -> &ComponentName {

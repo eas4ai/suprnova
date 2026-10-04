@@ -728,6 +728,41 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Durations too long for a date are errors, not panics.** A workflow
+  lease or retry backoff too long for a date is refused at boot:
+  `WORKFLOW_LOCK_TIMEOUT_SECS` above 253402300799, or
+  `WORKFLOW_RETRY_BACKOFF_SECS` times `WORKFLOW_MAX_ATTEMPTS` above it,
+  stops the worker at start with an error naming the setting, and lease
+  refreshes return an error for such a lease. `Queue::later` and its
+  variants, a job's `delay()`, and requeues in the default, SQS and
+  database drivers return an error naming the delay, where they panicked
+  or, past a chrono duration's range, requeued with no delay at all. This
+  landed after the `v3.1.0` tag.
+- **A refused cookieless request stores no session.** `CsrfMiddleware`
+  marks a new session for storage only when the response succeeds or
+  redirects. An anonymous request that an auth gate refuses with 401, or
+  any other 4xx or 5xx, gets no `XSRF-TOKEN` and writes no session row, so
+  it no longer turns into a 500 when the session store is unavailable. A
+  cookieless JSON or `HEAD` bootstrap that succeeds still gets its token
+  with its session. This landed after the `v3.1.0` tag.
+- **Live uploads, private responses and tooling.** Finalized uploads free
+  their pending slots when finalization commits, so a session no longer
+  runs out of upload capacity until restart, and are reclaimed when they
+  expire. A finalization that failed or stalled is reclaimed at expiry,
+  and an app without a finalizer leaves uploads Ready instead of stuck in
+  Finalizing. Cleanup deletes only temporary and uncommitted bytes; bytes
+  finalization committed as output are never deleted. Every RenderCache
+  response without shared-cache permission, public pages without
+  `s-maxage` and zero-slot composites included, is `private, no-cache`.
+  Making room for a file-store publication reads only the entries it
+  evicts. A Live tooling timeout kills every process the helper started,
+  and Ctrl+C still reaches the helper. A Live action with `validate =
+  "arguments"` and a typed `#[validate(action = ...)]` hook compiles
+  without a component-level `#[validate]` hook. Generated route helpers
+  handle optional parameters (`{id?}`) as `route()` does, leaving an empty
+  one out of the URL. Schema dump and load reach Postgres over a Unix
+  socket named in the URL host (`postgres://%2Frun%2Fpostgresql/db`). This
+  landed after the `v3.1.0` tag.
 - **Scaffolded apps on MySQL 8.4 and Postgres, and dates past 2038.** The
   auth-flow token table's hash is `VARCHAR(64)`; MySQL 8.4 refused the
   UNIQUE key on the old `TEXT` column (error 1170), so a new app's

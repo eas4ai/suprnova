@@ -62,3 +62,58 @@ async fn queue_later_dispatches_via_driver_and_honors_delay() {
 
     driver.ack(&reservation.token).await.unwrap();
 }
+
+/// A job that asks to wait a million years: a delay that fits a duration
+/// but runs past the last date the clock can hold.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct MillionYearNote;
+
+const MILLION_YEARS: Duration = Duration::from_secs(1_000_000 * 365 * 86_400);
+
+#[async_trait]
+impl Job for MillionYearNote {
+    fn job_name() -> &'static str {
+        "MillionYearNote"
+    }
+    fn delay() -> Option<Duration> {
+        Some(MILLION_YEARS)
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+/// A delay too long for any date is an error naming the delay, not a panic
+/// in the date arithmetic, for every delayed dispatch.
+#[tokio::test]
+#[serial]
+async fn a_delay_too_long_for_a_date_is_an_error() {
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let note = || ScheduledNote {
+        body: "forever".into(),
+    };
+
+    let outcomes = [
+        tokio::spawn(Queue::later(MILLION_YEARS, note())).await,
+        tokio::spawn(Queue::later_with(
+            MILLION_YEARS,
+            note(),
+            suprnova::EnvelopeOverrides::default(),
+        ))
+        .await,
+        tokio::spawn(async move { Queue::later_unique(MILLION_YEARS, note()).await.map(|_| ()) })
+            .await,
+        tokio::spawn(Queue::push(MillionYearNote)).await,
+    ];
+    for (call, outcome) in ["later", "later_with", "later_unique", "Job::delay"]
+        .iter()
+        .zip(&outcomes)
+    {
+        assert!(
+            matches!(outcome, Ok(Err(error)) if error.to_string().contains("delay")),
+            "{call} with a million-year delay must return an error, got {outcome:?}"
+        );
+    }
+    assert_eq!(driver.size().await.unwrap(), 0, "nothing was queued");
+}

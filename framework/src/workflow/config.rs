@@ -15,6 +15,21 @@ pub const MIN_CONCURRENCY: usize = 1;
 /// under normal scheduling; admission separately refreshes before user code.
 pub const MIN_LOCK_TIMEOUT_SECS: u64 = 2;
 
+/// Longest allowed workflow lease in seconds: from the Unix epoch to
+/// 9999-12-31 23:59:59 UTC, the bound `session::MAX_SESSION_LIFETIME_SECS`
+/// uses.
+///
+/// A lease under it keeps `now + lease` far inside the dates chrono can
+/// hold, so stamping `locked_until` cannot overflow. A longer one is
+/// refused at boot rather than panicking at the first claim.
+pub const MAX_LOCK_TIMEOUT_SECS: u64 = 253_402_300_799;
+
+/// Longest allowed total retry backoff in seconds, `retry_backoff_secs`
+/// times `max_attempts`: the same bound as [`MAX_LOCK_TIMEOUT_SECS`], for
+/// the same reason. The worker stamps `next_run_at` with the backoff times
+/// the attempt number, which never exceeds `max_attempts`.
+pub const MAX_RETRY_BACKOFF_SECS: i64 = 253_402_300_799;
+
 /// Minimum allowed `max_attempts`. A value below 1 prevents any attempt
 /// from running (`attempts < max_attempts` is never true after the
 /// first claim increments `attempts` to 1).
@@ -26,14 +41,19 @@ pub const MIN_MAX_ATTEMPTS: i32 = 1;
 ///
 /// - `WORKFLOW_POLL_INTERVAL_MS` - Worker poll interval in milliseconds (default: 1000)
 /// - `WORKFLOW_CONCURRENCY` - Number of workflows to process concurrently (default: 4, min: 1)
-/// - `WORKFLOW_LOCK_TIMEOUT_SECS` - Lease duration in seconds (default: 30, min: 2)
+/// - `WORKFLOW_LOCK_TIMEOUT_SECS` - Lease duration in seconds (default: 30, min: 2,
+///   max: [`MAX_LOCK_TIMEOUT_SECS`])
 /// - `WORKFLOW_MAX_ATTEMPTS` - Max workflow attempts (default: 3, min: 1)
-/// - `WORKFLOW_RETRY_BACKOFF_SECS` - Linear backoff seconds (default: 5, min: 0)
+/// - `WORKFLOW_RETRY_BACKOFF_SECS` - Linear backoff seconds (default: 5, min: 0;
+///   times `WORKFLOW_MAX_ATTEMPTS`, at most [`MAX_RETRY_BACKOFF_SECS`])
 ///
 /// # Validation
 ///
-/// Out-of-range environment values are clamped (with a structured warning
-/// emitted via `tracing`) so a typo in `.env` cannot brick a worker.
+/// Environment values below a minimum are clamped (with a structured
+/// warning emitted via `tracing`) so a typo in `.env` cannot brick a
+/// worker. A lease or a total backoff above its maximum is not clamped:
+/// [`WorkflowConfig::validate`], which the worker runs before it starts,
+/// refuses it, naming the setting.
 /// Use [`WorkflowConfig::validate`] for fail-fast checks on programmatic
 /// configs supplied through the typed config registry.
 #[derive(Debug, Clone)]
@@ -156,13 +176,23 @@ impl WorkflowConfig {
                 self.lock_timeout_secs
             )));
         }
-        if self.lock_timeout_secs > i64::MAX as u64 {
+        if self.lock_timeout_secs > MAX_LOCK_TIMEOUT_SECS {
             return Err(FrameworkError::internal(format!(
-                "WorkflowConfig.lock_timeout_secs must be <= {} (i64::MAX); got {}. \
-                 Values above this wrap to a negative chrono duration, making every \
-                 workflow lease appear expired and causing reclaim thrashing.",
-                i64::MAX,
+                "WorkflowConfig.lock_timeout_secs (WORKFLOW_LOCK_TIMEOUT_SECS) must be <= \
+                 {MAX_LOCK_TIMEOUT_SECS}; got {}. A longer lease ends past the dates the \
+                 clock can hold, so no claim could stamp it.",
                 self.lock_timeout_secs
+            )));
+        }
+        let total_backoff = self
+            .retry_backoff_secs
+            .checked_mul(i64::from(self.max_attempts));
+        if total_backoff.is_none_or(|total| total > MAX_RETRY_BACKOFF_SECS) {
+            return Err(FrameworkError::internal(format!(
+                "WorkflowConfig.retry_backoff_secs (WORKFLOW_RETRY_BACKOFF_SECS) times \
+                 max_attempts must be <= {MAX_RETRY_BACKOFF_SECS} seconds; got {} x {}. \
+                 A longer backoff schedules a retry past the dates the clock can hold.",
+                self.retry_backoff_secs, self.max_attempts
             )));
         }
         Ok(())
@@ -369,6 +399,38 @@ mod tests {
             retry_backoff_secs: 5,
         };
         cfg.validate().expect("two-second lease is the minimum");
+    }
+
+    /// A lease or a total retry backoff too long for the clock is refused
+    /// at boot, naming the setting, instead of panicking in the date
+    /// arithmetic of the first claim or the first retry.
+    #[test]
+    fn validate_refuses_a_lease_or_backoff_too_long_for_the_clock() {
+        let sane = WorkflowConfig {
+            poll_interval_ms: 1000,
+            concurrency: 4,
+            lock_timeout_secs: 30,
+            max_attempts: 3,
+            retry_backoff_secs: 5,
+        };
+        let lease = WorkflowConfig {
+            lock_timeout_secs: i64::MAX as u64,
+            ..sane.clone()
+        };
+        let backoff = WorkflowConfig {
+            retry_backoff_secs: i64::MAX,
+            ..sane.clone()
+        };
+        let lease_error = lease.validate().map_err(|error| error.to_string());
+        let backoff_error = backoff.validate().map_err(|error| error.to_string());
+        assert!(
+            matches!(&lease_error, Err(message) if message.contains("lock_timeout_secs")),
+            "a lease of i64::MAX seconds must be refused, got {lease_error:?}"
+        );
+        assert!(
+            matches!(&backoff_error, Err(message) if message.contains("retry_backoff_secs")),
+            "a backoff of i64::MAX seconds must be refused, got {backoff_error:?}"
+        );
     }
 
     #[test]

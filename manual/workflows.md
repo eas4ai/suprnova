@@ -138,9 +138,9 @@ cannot brick the daemon.
 |---|---|---|
 | `WORKFLOW_POLL_INTERVAL_MS` | `1000` | Sleep between empty claim rounds |
 | `WORKFLOW_CONCURRENCY` | `4` | Max workflows running per worker (min 1) |
-| `WORKFLOW_LOCK_TIMEOUT_SECS` | `30` | Lease duration before another worker may reclaim |
+| `WORKFLOW_LOCK_TIMEOUT_SECS` | `30` | Lease duration before another worker may reclaim (min 2, max 253402300799) |
 | `WORKFLOW_MAX_ATTEMPTS` | `3` | Per-workflow attempt budget (min 1) |
-| `WORKFLOW_RETRY_BACKOFF_SECS` | `5` | Linear backoff: `attempts * value` (min 0) |
+| `WORKFLOW_RETRY_BACKOFF_SECS` | `5` | Linear backoff: `attempts * value` (min 0; times the attempt budget, max 253402300799) |
 
 `WorkflowWorker::new()` reads the config from the typed config registry and
 panics at boot when the config is invalid or a `#[workflow]` name is

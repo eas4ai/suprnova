@@ -140,16 +140,26 @@ await fetch('/api/data', {
 ## The `XSRF-TOKEN` cookie
 
 On every response - read or write - `CsrfMiddleware` attaches an
-`XSRF-TOKEN` cookie containing the current session's token. This is
+`XSRF-TOKEN` cookie containing the current session's token, with one
+exception described below. This is
 the Laravel-Axios convention: the SPA library reads the cookie via
 JavaScript and echoes it as `X-XSRF-TOKEN` on the next state-changing
 request, completing the round-trip without ever touching a meta tag.
 
 The token belongs to the session, so a response that hands it out also
-keeps the session: when the request started a new session, `CsrfMiddleware`
-marks it for storage, and `SessionMiddleware` sends its cookie with the
-response. A cookieless SPA that calls a JSON or `HEAD` endpoint first gets a
-token its next unsafe request can use.
+keeps the session: when the request started a new session and the response
+is a success (2xx) or a redirect (3xx), `CsrfMiddleware` marks the session
+for storage, and `SessionMiddleware` sends its cookie with the response. A
+cookieless SPA that calls a JSON or `HEAD` endpoint first gets a token its
+next unsafe request can use.
+
+The exception is a refused or failed response to a request that started a
+new session and changed nothing in it: a 401 from an auth gate, a 403, a
+404, or a 500. That response carries no `XSRF-TOKEN` and stores no session.
+The caller was turned away, a token without its stored session would only
+earn a 419, and an anonymous probe of a route that refuses it costs no
+session write and does not fail when the session store is unavailable. A
+request that arrived with a stored session always gets its token.
 
 The cookie is **not** `HttpOnly` - it has to be readable from JS. The
 value is therefore stored as plaintext (no encryption round-trip),
@@ -435,6 +445,7 @@ reference shape for higher-level integration tests.
 | `$except = ['stripe/*']` | `.except(["stripe/*"])` |
 | Glob `*` (mid / leading / trailing) | Same - full `Str::is` semantics |
 | `XSRF-TOKEN` cookie + `X-XSRF-TOKEN` header round-trip | Same convention |
+| `XSRF-TOKEN` on every response, the session always saved | **Diverged:** a refused or failed response (4xx/5xx) to a request without a stored session gets no token and stores no session |
 | `$addHttpCookie = false` | `.without_xsrf_cookie()` |
 | `PreventRequestForgery::allowSameSite(true)` | `.allow_same_site()` |
 | `PreventRequestForgery::useOriginOnly(true)` | `.origin_only()` |

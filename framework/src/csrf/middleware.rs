@@ -529,24 +529,41 @@ impl CsrfMiddleware {
     /// Attach the `XSRF-TOKEN` cookie to the response, if policy
     /// allows and a session token exists. Mirrors Laravel's
     /// `addCookieToResponse` running inside the `tap()` after `next`.
-    /// A session created by this request is marked for storage, so the
-    /// browser gets the session the token belongs to.
+    /// The token goes out only with a session that is stored: a session
+    /// created by this request is marked for storage on a success or a
+    /// redirect, and gets no token on a refusal or a failure.
     fn maybe_attach_xsrf_cookie(&self, response: Response) -> Response {
         if !self.should_attach_xsrf_cookie() {
             return response;
         }
+        let status = match &response {
+            Ok(http) | Err(http) => http.status_code(),
+        };
         // The token is good only with the session that holds it. A session
-        // this request created is stored only when something changed it, and
-        // handing out its token is such a change: a cookieless JSON or HEAD
+        // this request created is stored only when something changed it.
+        // Handing out its token on a success or a redirect, the answers a
+        // bootstrap gives, is such a change: a cookieless JSON or HEAD
         // bootstrap would otherwise receive a token whose session is never
         // stored, and its next unsafe request would meet a new session and a
-        // 419. A session loaded from the store is left as it is.
+        // 419. A refusal or a failure (an auth gate's 401, a 404, a 500) is
+        // not: the caller was turned away, so its untouched session stays
+        // unstored and it gets no token, which without its session could only
+        // earn a 419. Storing one would cost a session write for every
+        // anonymous request a route refuses, and turn each of them into a 500
+        // whenever the session store is unavailable. A session loaded from
+        // the store, or one this request already changed, is stored anyway
+        // and always gets its token.
+        let bootstrap = (200..400).contains(&status);
         let Some(token) = crate::session::session_mut(|session| {
-            if !session.loaded_from_store {
+            if !session.loaded_from_store && !session.is_dirty() {
+                if !bootstrap {
+                    return None;
+                }
                 session.dirty = true;
             }
-            session.csrf_token.clone()
-        }) else {
+            Some(session.csrf_token.clone())
+        })
+        .flatten() else {
             return response;
         };
         let cookie = self.build_xsrf_cookie(&token);
