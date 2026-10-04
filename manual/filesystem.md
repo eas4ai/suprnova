@@ -656,7 +656,9 @@ asked for: a read with `copy: false`, a versioned or conditional read, and the
 rest of a read whose promotion failed. A chunked read does not retry a failed
 promotion for every chunk. A fallback that answers a range with more bytes than
 the range holds, the way a server that ignores `Range` does, fails the read
-after one chunk instead of being read to the end.
+after one chunk instead of being read to the end. On S3, Azure Blob, and GCS
+the service refuses such a response before reading its body, for an
+open-ended range as well.
 
 Laravel hands back the fallback's own stream when `copy` is `false` and
 buffers through `php://temp` when it is `true`. Suprnova narrows the fallback

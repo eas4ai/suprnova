@@ -46,8 +46,10 @@
 //! memory, so a multi-gigabyte cold object costs a transfer, not a buffer. A
 //! read that is not promoted - `copy: false`, a versioned or conditional read,
 //! or a read whose promotion already failed - fetches only the range it was
-//! asked for, and refuses a fallback that answers a range with more bytes than
-//! the range holds instead of collecting them.
+//! asked for. opendal's readers stop a read at its range, and its S3, Azure
+//! Blob and GCS services refuse a response outside the requested range before
+//! reading the body. This layer keeps its own bound on top, for a fallback
+//! built without opendal's default layers.
 //!
 //! # A delete is never undone by a promotion
 //!
@@ -785,11 +787,13 @@ impl ReadThroughReader {
     /// Open `range` of the fallback object as a stream that never yields more
     /// than the range holds.
     ///
-    /// The read goes to the fallback's own reader rather than through
-    /// `Operator::read`, which collects whatever the backend sends before it
-    /// checks the length. A backend that ignores `Range` and answers with the
-    /// whole body would otherwise be read to the end, all of it held in
-    /// memory, for a range of a few bytes.
+    /// opendal stops a read at its range in its completion layer and in its
+    /// stream reader, and its S3, Azure Blob and GCS services refuse a
+    /// response outside the requested range before reading the body. A disk
+    /// built with `Operator::from_parts` skips the completion layer, and a
+    /// custom service may not check, so this bound stays as the backstop: a
+    /// backend that ignores `Range` and answers with the whole body costs one
+    /// chunk here, not the whole body held in memory.
     async fn open_fallback(&self, range: BytesRange) -> Result<(RpRead, BoundedStream)> {
         let reader = self.fallback.service().read(
             self.fallback.context(),
@@ -797,9 +801,11 @@ impl ReadThroughReader {
             self.fallback_args(),
         )?;
         let (reply, stream) = reader.open(range).await?;
-        // Only a range that names its size can be held to it. An open-ended
-        // range (`5..`) streams through unchecked; a whole-object read is the
-        // common case of that shape.
+        // Only a range that names its size can be held to a length here. An
+        // open-ended range (`5..`) has none; on S3, Azure Blob and GCS the
+        // service itself refuses a response that does not start at the
+        // requested offset, and a whole-object read is the common case of
+        // that shape.
         let limit = if range.is_suffix() {
             None
         } else {
