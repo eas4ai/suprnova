@@ -106,7 +106,11 @@ The rules:
 - **In `local` and `development`, catalogs hot-reload.** Each request
   stats `lang/` and reparses only when something actually changed, so
   editing a `.ftl` shows up on the next refresh. Production never
-  re-stats; catalogs are read once at boot.
+  re-stats; catalogs are read once at boot. A deploy hook that ships new
+  catalogs to a running process calls `Lang::reload().await`. Both reloads
+  also make the [RenderCache](render-cache.md) entries rendered from the
+  old text miss; `Translator::reload` alone swaps the catalogs and leaves
+  those entries valid until they expire.
 
 ## FTL in five minutes
 
@@ -222,6 +226,7 @@ locale**, which the middleware bound for this request.
 | `Lang::locale()` | `Locale` | The current locale |
 | `Lang::set_locale(locale)` | `()` | Change it for the rest of this request |
 | `Lang::available_locales()` | `Vec<Locale>` | Every locale with a loaded catalog |
+| `Lang::reload()` | `Result<bool, FrameworkError>` (async) | Re-reads the catalogs and invalidates the cached pages built from them; `true` when a catalog's text changed |
 
 ```rust
 use suprnova::{Lang, Locale, TranslateArgs};

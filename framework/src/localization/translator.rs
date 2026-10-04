@@ -51,6 +51,11 @@ pub trait Translator: Send + Sync {
     fn catalog(&self, locale: &Locale) -> Option<CatalogSource>;
 
     /// Re-read catalogs from disk (dev hot-reload).
+    ///
+    /// This reloads the driver alone. Cached RenderCache entries rendered
+    /// from the old catalogs stay valid until something advances the locale
+    /// generation; [`Lang::reload`](super::Lang::reload) reloads and does
+    /// that, and is the call to make from a deploy hook.
     fn reload(&self) -> Result<(), FrameworkError>;
 
     /// Re-read catalogs from disk only if they changed since the last

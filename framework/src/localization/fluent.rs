@@ -137,7 +137,8 @@ impl FluentTranslator {
     /// locale directory appearing or disappearing, since that changes
     /// which files exist). Returns whether a reload actually happened.
     /// Intended for a dev-mode watcher; production deployments call
-    /// `reload()` explicitly (e.g. on a deploy hook) instead of polling.
+    /// [`Lang::reload`](super::Lang::reload) explicitly (e.g. on a deploy
+    /// hook) instead of polling.
     pub fn reload_if_stale(&self) -> Result<bool, FrameworkError> {
         if !self.is_stale(&mtime_snapshot(&self.dir)) {
             return Ok(false);
