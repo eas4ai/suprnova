@@ -287,7 +287,10 @@ impl Default for CacheMaintenanceMode {
 #[async_trait]
 impl MaintenanceMode for CacheMaintenanceMode {
     async fn activate(&self, payload: &MaintenancePayload) -> Result<(), FrameworkError> {
-        Cache::put(&self.key, payload, None).await
+        // `forever`, not `put(.., None)`: a `None` TTL on `put` applies
+        // `CACHE_DEFAULT_TTL`, and the key expiring would end maintenance
+        // mode without anyone running `up`.
+        Cache::forever(&self.key, payload).await
     }
 
     async fn deactivate(&self) -> Result<(), FrameworkError> {
@@ -791,6 +794,42 @@ mod tests {
         let read = driver.data().await.unwrap();
         assert_eq!(read.refresh, Some(15));
         assert_eq!(read.status, 418);
+
+        driver.deactivate().await.unwrap();
+        assert!(!driver.active().await.unwrap());
+    }
+
+    /// ROOT-01: the cache driver keeps the application down until `up`. It
+    /// used to write with `Cache::put(.., None)`, which applies
+    /// `CACHE_DEFAULT_TTL`, so maintenance lifted itself when the key expired.
+    #[tokio::test]
+    async fn cache_driver_stays_down_past_the_cache_default_ttl() {
+        use crate::cache::{CacheConfig, CacheStore, InMemoryCache};
+
+        let _scope = crate::testing::TestContainer::fake();
+        let config = CacheConfig {
+            default_ttl: 1,
+            ..CacheConfig::default()
+        };
+        let store = std::sync::Arc::new(InMemoryCache::with_config(&config));
+        crate::testing::TestContainer::bind::<dyn CacheStore>(store);
+
+        let driver = CacheMaintenanceMode::with_key(format!(
+            "test:maint:ttl:{}",
+            temp_down_path().display()
+        ));
+        driver
+            .activate(&MaintenancePayload::default())
+            .await
+            .unwrap();
+
+        // The in-memory store measures expiry with `std::time::Instant`, so
+        // only real time can carry the key past the one-second default.
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        assert!(
+            driver.active().await.unwrap(),
+            "maintenance mode expired with the cache's default TTL; only `up` may end it"
+        );
 
         driver.deactivate().await.unwrap();
         assert!(!driver.active().await.unwrap());
