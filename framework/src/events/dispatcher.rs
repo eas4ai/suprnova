@@ -23,6 +23,14 @@ tokio::task_local! {
     static DEFER_BUFFER: DeferBuffer;
 }
 
+// Set on every queued-listener task. A dispatch made from inside one does not
+// wait for its listeners to be admitted: the listener making it holds an
+// admission permit while it waits, so at the concurrency limit every holder
+// would be waiting on a permit only a holder can release.
+tokio::task_local! {
+    static IN_QUEUED_LISTENER: ();
+}
+
 /// One deferred dispatch: a boxed re-dispatch closure that, given a borrowed
 /// dispatcher, re-runs the original dispatch operation. Closes over a clone of
 /// the event payload and the dispatch mode (`dispatch` vs `dispatch_best_effort`)
@@ -401,23 +409,29 @@ impl EventDispatcher {
         }
     }
 
-    /// Acquire a backpressure permit, then spawn the listener into the
-    /// drainable task set with a bounded retry loop. The permit is acquired
-    /// **before** the spawn so the semaphore actually bounds concurrency
-    /// (acquiring inside the task would spawn unconditionally); it then moves
-    /// into the task and releases on completion. The retry loop lives inside
-    /// the single task so all attempts share one permit and one drain slot.
+    /// Spawn the listener into the drainable task set, where it waits for a
+    /// backpressure permit and then runs a bounded retry loop.
+    ///
+    /// The task is in the set before it holds a permit, so a drain sees every
+    /// listener a dispatch admitted: there is no moment where a permit is held
+    /// by something the drain cannot find, wait for, or abort. The caller
+    /// still waits until its listener holds a permit, so under a flood of
+    /// queued events `dispatch` slows rather than piling up running work. The
+    /// retry loop lives inside the single task so all attempts share one
+    /// permit and one drain slot.
+    ///
+    /// A dispatch from inside a queued listener does not wait. That listener
+    /// holds a permit for as long as it runs; waiting for another permit
+    /// while holding one deadlocks at the concurrency limit, which at a limit
+    /// of 1 is the first chained event.
     async fn spawn_queued_listener<E: super::Event>(
         &self,
         listener: Arc<dyn ErasedListener>,
         event: E,
     ) {
-        let permit = match Arc::clone(&self.queued_permits).acquire_owned().await {
-            Ok(p) => p,
-            // The semaphore is only closed if we explicitly close it, which we
-            // never do; treat a closed semaphore as "do not spawn".
-            Err(_) => return,
-        };
+        let nested = IN_QUEUED_LISTENER.try_with(|_| ()).is_ok();
+        let permits = Arc::clone(&self.queued_permits);
+        let (admitted, on_admitted) = tokio::sync::oneshot::channel::<()>();
 
         // A spawned task starts without the task-local context, so the
         // listener gets a snapshot of the dispatcher's, taken now. It works
@@ -426,65 +440,83 @@ impl EventDispatcher {
         // starts from the snapshot, as every attempt of a queued job does,
         // so a retry never sees what the failed attempt wrote.
         let context = crate::context::Context::dehydrate();
-        let mut tasks = self.queued_tasks.lock().await;
-        // A JoinSet keeps each finished task until it is joined, and only a
-        // drain at shutdown joins them; reaping here keeps the set as large
-        // as the listeners still running, not every one the process ran.
-        while let Some(finished) = tasks.try_join_next() {
-            settle_queued_task(finished);
-        }
-        tasks.spawn(async move {
-            let _permit = permit; // released when the task ends
-            let mut attempt: u32 = 1;
-            loop {
-                // Wrap each attempt in a panic boundary so a panicking
-                // listener feeds the existing retry-on-Err branch (bounded by
-                // MAX_QUEUED_ATTEMPTS) instead of aborting the spawned task
-                // and silently disappearing - see drain_queued's is_panic
-                // log for the defense-in-depth case where a panic somehow
-                // escapes this boundary.
-                //
-                // Each attempt also runs in a container scope of its own,
-                // outermost, as each attempt of a queued job does: the
-                // listener is a unit of work, it does not share the scoped
-                // values of the dispatcher, and a retry never sees what
-                // the failed attempt built.
-                let dispatch =
-                    crate::context::Context::restored(context.clone(), listener.dispatch(&event));
-                let dispatch = crate::container::scope::run_in_new_scope(dispatch);
-                let attempt_result = match AssertUnwindSafe(dispatch).catch_unwind().await {
-                    Ok(r) => r,
-                    Err(payload) => Err(FrameworkError::internal(format!(
-                        "queued listener panicked: {}",
-                        crate::server::panic_payload_message(&payload)
-                    ))),
+        {
+            let mut tasks = self.queued_tasks.lock().await;
+            // A JoinSet keeps each finished task until it is joined, and only
+            // a drain at shutdown joins them; reaping here keeps the set as
+            // large as the listeners still running, not every one the process
+            // ran.
+            while let Some(finished) = tasks.try_join_next() {
+                settle_queued_task(finished);
+            }
+            tasks.spawn(IN_QUEUED_LISTENER.scope((), async move {
+                let _permit = match permits.acquire_owned().await {
+                    Ok(permit) => permit, // released when the task ends
+                    // The semaphore is only closed if we explicitly close it,
+                    // which we never do; treat a closed semaphore as "do not
+                    // run".
+                    Err(_) => return,
                 };
-                match attempt_result {
-                    Ok(()) => return,
-                    Err(e) if attempt >= MAX_QUEUED_ATTEMPTS => {
-                        error!(
-                            event = E::event_name(),
-                            attempts = attempt,
-                            error = %e,
-                            "queued listener failed after retries; giving up"
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        let backoff = retry_backoff(attempt);
-                        warn!(
-                            event = E::event_name(),
-                            attempt,
-                            retry_in_ms = backoff.as_millis() as u64,
-                            error = %e,
-                            "queued listener failed; retrying"
-                        );
-                        tokio::time::sleep(backoff).await;
-                        attempt += 1;
+                // The dispatch waiting on this may have been cancelled.
+                let _ = admitted.send(());
+                let mut attempt: u32 = 1;
+                loop {
+                    // Wrap each attempt in a panic boundary so a panicking
+                    // listener feeds the existing retry-on-Err branch (bounded
+                    // by MAX_QUEUED_ATTEMPTS) instead of aborting the spawned
+                    // task and silently disappearing - see drain_queued's
+                    // is_panic log for the defense-in-depth case where a panic
+                    // somehow escapes this boundary.
+                    //
+                    // Each attempt also runs in a container scope of its own,
+                    // outermost, as each attempt of a queued job does: the
+                    // listener is a unit of work, it does not share the scoped
+                    // values of the dispatcher, and a retry never sees what
+                    // the failed attempt built.
+                    let dispatch = crate::context::Context::restored(
+                        context.clone(),
+                        listener.dispatch(&event),
+                    );
+                    let dispatch = crate::container::scope::run_in_new_scope(dispatch);
+                    let attempt_result = match AssertUnwindSafe(dispatch).catch_unwind().await {
+                        Ok(r) => r,
+                        Err(payload) => Err(FrameworkError::internal(format!(
+                            "queued listener panicked: {}",
+                            crate::server::panic_payload_message(&payload)
+                        ))),
+                    };
+                    match attempt_result {
+                        Ok(()) => return,
+                        Err(e) if attempt >= MAX_QUEUED_ATTEMPTS => {
+                            error!(
+                                event = E::event_name(),
+                                attempts = attempt,
+                                error = %e,
+                                "queued listener failed after retries; giving up"
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            let backoff = retry_backoff(attempt);
+                            warn!(
+                                event = E::event_name(),
+                                attempt,
+                                retry_in_ms = backoff.as_millis() as u64,
+                                error = %e,
+                                "queued listener failed; retrying"
+                            );
+                            tokio::time::sleep(backoff).await;
+                            attempt += 1;
+                        }
                     }
                 }
-            }
-        });
+            }));
+        }
+        if !nested {
+            // An error means the task ended before it was admitted: a drain
+            // aborted it. Either way the dispatch is done waiting.
+            let _ = on_admitted.await;
+        }
     }
 
     /// Wait for in-flight queued-listener tasks to finish, up to `timeout`.
@@ -492,6 +524,8 @@ impl EventDispatcher {
     /// not cut off best-effort listeners mid-flight. Returns the number of
     /// tasks still running when the deadline elapsed (`0` = fully drained);
     /// any stragglers past the deadline are aborted so shutdown cannot hang.
+    /// Stragglers include listeners admitted while the drain was waiting,
+    /// and listeners still waiting for a permit.
     ///
     /// The task set is taken out under the lock and drained without holding
     /// it, so a listener that itself dispatches a queued event cannot deadlock
@@ -499,14 +533,15 @@ impl EventDispatcher {
     pub async fn drain_queued(&self, timeout: Duration) -> usize {
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
-        // Outer loop re-swaps the task set after each batch drains. A
-        // `spawn_queued_listener` parked at `acquire_owned().await` can resume
-        // *after* the swap below and `spawn` into the fresh JoinSet - past the
-        // point a single-shot drain would observe. Re-swapping until a lock
-        // acquisition finds an empty set closes that shutdown race without
-        // closing the permit semaphore (which would leave the dispatcher
-        // permanently unusable). The shared `deadline` spans all batches so a
-        // continuous arrival stream still can't hang shutdown.
+        // Outer loop re-swaps the task set after each batch drains. A listener
+        // that a running one dispatches is spawned into the fresh JoinSet -
+        // past the point a single-shot drain would observe. Re-swapping until
+        // a lock acquisition finds an empty set closes that shutdown race
+        // without closing the permit semaphore (which would leave the
+        // dispatcher permanently unusable). A listener is in the set before
+        // it holds a permit, so an empty set means nothing admitted is still
+        // to run. The shared `deadline` spans all batches so a continuous
+        // arrival stream still can't hang shutdown.
         loop {
             let mut set = {
                 let mut guard = self.queued_tasks.lock().await;
@@ -524,8 +559,20 @@ impl EventDispatcher {
                         }
                     }
                     _ = &mut deadline => {
-                        let remaining = set.len();
-                        set.abort_all();
+                        // Listeners admitted while this batch drained went
+                        // into the fresh set; they are stragglers too.
+                        let mut late = {
+                            let mut guard = self.queued_tasks.lock().await;
+                            std::mem::replace(&mut *guard, JoinSet::new())
+                        };
+                        let mut remaining = 0;
+                        for straggling in [&mut set, &mut late] {
+                            while let Some(finished) = straggling.try_join_next() {
+                                settle_queued_task(finished);
+                            }
+                            remaining += straggling.len();
+                            straggling.abort_all();
+                        }
                         return remaining;
                     }
                 }
@@ -1562,5 +1609,139 @@ mod tests {
             "finished listener tasks were kept: the set holds {held}"
         );
         assert_eq!(d.drain_queued(std::time::Duration::from_secs(5)).await, 0);
+    }
+
+    #[derive(Debug, Clone)]
+    struct QueuedParent;
+    impl EventTrait for QueuedParent {
+        fn event_name() -> &'static str {
+            "QueuedParent"
+        }
+        fn queued() -> bool {
+            true
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct QueuedChild;
+    impl EventTrait for QueuedChild {
+        fn event_name() -> &'static str {
+            "QueuedChild"
+        }
+        fn queued() -> bool {
+            true
+        }
+    }
+
+    struct DispatchesChild(std::sync::Weak<EventDispatcher>);
+    #[async_trait]
+    impl Listener<QueuedParent> for DispatchesChild {
+        async fn handle(&self, _event: &QueuedParent) -> Result<(), FrameworkError> {
+            let Some(d) = self.0.upgrade() else {
+                return Ok(());
+            };
+            d.dispatch(QueuedChild).await
+        }
+    }
+
+    struct SignalsChild(std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>);
+    #[async_trait]
+    impl Listener<QueuedChild> for SignalsChild {
+        async fn handle(&self, _event: &QueuedChild) -> Result<(), FrameworkError> {
+            if let Some(tx) = self.0.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            Ok(())
+        }
+    }
+
+    /// DRIVERS-010: a queued listener that dispatches another queued event
+    /// held its permit while its nested dispatch waited for one, so at
+    /// concurrency 1 the first chained event hung forever.
+    #[tokio::test]
+    async fn a_queued_listener_dispatching_a_queued_event_does_not_deadlock() {
+        let d = Arc::new(EventDispatcher::with_concurrency(1));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        d.listen::<QueuedParent, _>(Arc::new(DispatchesChild(Arc::downgrade(&d))))
+            .await;
+        d.listen::<QueuedChild, _>(Arc::new(SignalsChild(std::sync::Mutex::new(Some(tx)))))
+            .await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), d.dispatch(QueuedParent))
+            .await
+            .expect("the top-level dispatch was admitted")
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("the child listener never ran: the parent held the only permit while its nested dispatch waited for it")
+            .unwrap();
+        assert_eq!(d.drain_queued(std::time::Duration::from_secs(5)).await, 0);
+    }
+
+    /// DRIVERS-011: a dispatch that held its backpressure permit but had
+    /// not reached the task set yet was invisible to the drain, which
+    /// reported the dispatcher fully drained.
+    #[tokio::test]
+    async fn drain_never_reports_drained_while_an_admitted_listener_is_unspawned() {
+        let d = EventDispatcher::with_concurrency(1);
+        let hits = Arc::new(AtomicI64::new(0));
+        d.listen::<QueuedPing, _>(Arc::new(Quick(hits.clone())))
+            .await;
+
+        // Freeze the task set so the drain queues on its lock first and the
+        // dispatch queues behind it.
+        let held = d.queued_tasks.lock().await;
+        let drain = d.drain_queued(std::time::Duration::from_secs(5));
+        tokio::pin!(drain);
+        assert!(futures::poll!(drain.as_mut()).is_pending());
+        let dispatch = d.dispatch(QueuedPing);
+        tokio::pin!(dispatch);
+        assert!(futures::poll!(dispatch.as_mut()).is_pending());
+        drop(held);
+
+        let ((remaining, free_permits), dispatched) = tokio::join!(
+            async {
+                let remaining = drain.await;
+                (remaining, d.queued_permits.available_permits())
+            },
+            dispatch
+        );
+        dispatched.unwrap();
+        assert!(
+            remaining > 0 || free_permits == 1,
+            "drain reported every listener finished while an admitted one still held its permit"
+        );
+        assert_eq!(d.drain_queued(std::time::Duration::from_secs(5)).await, 0);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// DRIVERS-011: a listener admitted into the fresh task set while the
+    /// drain was waiting on an earlier batch outlived the deadline, and the
+    /// returned count left it out.
+    #[tokio::test(start_paused = true)]
+    async fn drain_deadline_aborts_listeners_admitted_during_the_drain() {
+        let d = EventDispatcher::with_concurrency(2);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        d.listen::<QueuedPing, _>(Arc::new(Blocker {
+            started: started.clone(),
+            release: release.clone(),
+        }))
+        .await;
+
+        d.dispatch(QueuedPing).await.unwrap();
+        started.notified().await;
+        let drain = d.drain_queued(std::time::Duration::from_secs(1));
+        tokio::pin!(drain);
+        assert!(futures::poll!(drain.as_mut()).is_pending());
+        d.dispatch(QueuedPing).await.unwrap();
+        started.notified().await;
+
+        let remaining = drain.await;
+        assert_eq!(remaining, 2, "the drain counted only the first batch");
+        assert!(
+            d.queued_tasks.lock().await.is_empty(),
+            "a listener admitted during the drain was left running past the deadline"
+        );
     }
 }

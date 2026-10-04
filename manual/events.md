@@ -86,6 +86,12 @@ ceiling is 256 concurrent tasks; override per dispatcher with
 with 100ms→2s jittered backoff before giving up - these are in-process
 transient-fault retries, not the durable queue's minutes-long schedule.
 
+At the ceiling, `dispatch` waits until a running listener finishes, so a
+flood of events slows the code dispatching them instead of piling up
+work. A queued listener that dispatches another queued event does not
+wait: it holds a slot while it runs, and waiting for a second one could
+leave every slot held by a listener waiting for another.
+
 ## Subscribers - bundle related registrations
 
 When several listeners belong to one feature, a `Subscriber`
@@ -266,7 +272,8 @@ if still_running > 0 {
 
 Drain returns the count still running when the deadline elapsed (`0`
 = fully drained). Stragglers past the deadline are aborted so
-shutdown cannot hang.
+shutdown cannot hang. Stragglers include listeners dispatched while the
+drain was waiting and listeners still waiting for a slot.
 
 ## Bridging events to broadcasting
 
