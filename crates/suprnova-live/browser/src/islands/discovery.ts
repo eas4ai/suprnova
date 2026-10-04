@@ -29,7 +29,7 @@ import { parseUpdateResponse } from "../protocol.js";
 import { captureContinuity, CompositionTracker } from "../continuity/capture.js";
 import { restoreContinuity, restoreContinuityFocus } from "../continuity/restore.js";
 import type { ContinuityRecord } from "../continuity/types.js";
-import { breachOf } from "../limits.js";
+import { breachOf, type LiveLimitBreach } from "../limits.js";
 import { morphLimitsFrom } from "../morph/limits.js";
 import { preflightIslandMorph } from "../morph/preflight.js";
 import { consumeMorphProvenance } from "../morph/idiomorph.js";
@@ -916,6 +916,10 @@ export class DocumentRuntime {
             : "operation_rejected",
         );
       },
+      limit: (breach: LiveLimitBreach) => {
+        this.#diagnostics.limit?.(breach);
+      },
+      limits: this.#config.limits,
       stimulus: this.#stimulus,
       trackResource: (kind: CoreResourceKind, dispose: VoidFunction) => {
         const tracked = this.#resourceLedger?.add(kind, dispose);

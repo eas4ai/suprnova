@@ -250,7 +250,7 @@ impl UploadLimits {
             && config.max_in_flight_bytes >= config.max_chunk_bytes
             && config.max_storage_bytes >= config.max_aggregate_bytes
             && config.max_idempotency_outcomes >= config.max_chunks_per_file.saturating_add(6);
-        let finite = config.max_files_per_field <= 1_024
+        let finite = config.max_files_per_field <= 100_000
             && config.max_pending_per_scope <= 100_000
             && config.max_file_bytes <= TIB
             && config.max_aggregate_bytes <= 16 * TIB

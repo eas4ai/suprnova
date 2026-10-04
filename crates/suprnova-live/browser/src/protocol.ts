@@ -301,11 +301,11 @@ function validateUpdateResponseV1(
   const redirect = root["redirect"];
   if (redirect !== undefined) {
     const target = asString(redirect);
+    checkTargetSize(target, limits, "redirect");
     if (
       !target.startsWith("/") ||
       target.startsWith("//") ||
       target.includes("\\") ||
-      utf8Length(target) > 2_048 ||
       hasControlCharacter(target)
     ) {
       throw new ProtocolValidationError("unsafe_redirect");
@@ -541,14 +541,14 @@ function validateUpdateResponseV2(
     const intent = urlIntent;
     requireExactKeys(intent, ["kind", "target"]);
     const kind = asString(intent["kind"]);
-    validateSafeTarget(intent["target"]);
+    validateSafeTarget(intent["target"], limits, "url intent");
     if (kind === "reflected") reflected = true;
     else if (kind === "navigated") navigated = true;
     else throw new ProtocolValidationError("invalid_protocol_envelope");
   }
 
   const redirect = root["redirect"];
-  if (redirect !== undefined) validateSafeTarget(redirect);
+  if (redirect !== undefined) validateSafeTarget(redirect, limits, "redirect");
   if (redirect !== undefined && urlIntent !== undefined) {
     throw new ProtocolValidationError("response_outcome_mismatch");
   }
@@ -830,14 +830,24 @@ function validateRecovery(
   }
 }
 
-function validateSafeTarget(value: unknown): void {
+/// A target URL is bounded by the configured redirect size
+/// (`LIVE_MAX_REDIRECT_BYTES`), not by a browser constant: the server checked
+/// it against the same value before it sent it.
+function checkTargetSize(target: string, limits: LiveLimits, subject: string): void {
+  const bytes = utf8Length(target);
+  if (bytes > limits.maxRedirectBytes) {
+    overLimit("unsafe_redirect", "maxRedirectBytes", bytes, limits, subject);
+  }
+}
+
+function validateSafeTarget(value: unknown, limits: LiveLimits, subject: string): void {
   const target = asString(value);
+  checkTargetSize(target, limits, subject);
   const path = target.split(/[?#]/u, 1)[0] ?? "";
   if (
     !target.startsWith("/") ||
     target.startsWith("//") ||
     target.includes("\\") ||
-    utf8Length(target) > 2_048 ||
     hasControlCharacter(target) ||
     !hasNormalizedPathSegments(path)
   ) {

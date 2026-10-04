@@ -49,7 +49,7 @@ pub mod __private;
 pub use assets::{LiveBootstrap, LiveBootstrapOptions, LiveBootstrapStrategy};
 pub use config::{
     LedgerDriver, LiveConfig, LiveConfigBuilder, LiveConfigError, LiveConfigErrorKind,
-    LiveLimitExceeded, LiveMorphLimits,
+    LiveLimitExceeded, LiveMorphLimits, LiveUploadLimits,
 };
 pub(crate) use document::NestedSegmentIdentity;
 pub use document::{

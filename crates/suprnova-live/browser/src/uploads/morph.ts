@@ -1,5 +1,5 @@
 import type { RuntimeFeatureDirectiveOwnership } from "../features/contract.js";
-import { MAX_UPLOAD_FILES_PER_DOCUMENT, validateUploadField } from "./types.js";
+import { validateUploadField } from "./types.js";
 
 import { stableKeyOf } from "../directives/key.js";
 const SAFE_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
@@ -92,9 +92,8 @@ export function captureUploadMorph(
   ownerships: readonly RuntimeFeatureDirectiveOwnership[],
   activeFields: readonly string[],
 ): UploadMorphContinuity {
-  if (activeFields.length > MAX_UPLOAD_FILES_PER_DOCUMENT) {
-    throw new Error("upload_morph_field_limit");
-  }
+  // The manager's active fields are already bounded by its pending-file
+  // limit (`LIVE_UPLOAD_MAX_PENDING_FILES`).
   const fields = new Set<string>();
   for (const field of activeFields) {
     validateUploadField(field);

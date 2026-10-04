@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { estimateUploadManagerOwnedBytes } from "../benchmarks/upload-accounting.js";
+import type { LiveLimitBreach } from "../src/limits.js";
 import { UploadManager } from "../src/uploads/manager.js";
 import type {
   UploadApplicationPort,
@@ -179,7 +180,7 @@ function manager(transport = new MemoryTransport(), maxActive = 4) {
       connectivity: new Online(),
       maxActive,
       maxItems: 64,
-      maxQueueBytes: 256 * KIB,
+      maxQueueBytes: 64 * 1024 * KIB,
       randomness: new Sequence(),
       transport,
     }),
@@ -195,7 +196,7 @@ describe("current-document upload manager", () => {
       connectivity: new Online(),
       maxActive: 4,
       maxItems: 64,
-      maxQueueBytes: 256 * KIB,
+      maxQueueBytes: 64 * 1024 * KIB,
       randomness: new Sequence(),
       resourceObserver: {
         progressApplicationCompleted() {
@@ -237,7 +238,7 @@ describe("current-document upload manager", () => {
         connectivity: new Online(),
         maxActive: 4,
         maxItems: 64,
-        maxQueueBytes: 256 * KIB,
+        maxQueueBytes: 64 * 1024 * KIB,
         randomness: new Sequence(),
         resourceObserver: {
           progressApplicationCompleted() {
@@ -359,7 +360,7 @@ describe("current-document upload manager", () => {
       connectivity: new Online(),
       maxActive: 1,
       maxItems: 2,
-      maxQueueBytes: 256 * KIB,
+      maxQueueBytes: 64 * 1024 * KIB,
       randomness: new Sequence(),
       transport,
     });
@@ -390,7 +391,7 @@ describe("current-document upload manager", () => {
       connectivity: new Online(),
       maxActive: 1,
       maxItems: 1,
-      maxQueueBytes: 256 * KIB,
+      maxQueueBytes: 64 * 1024 * KIB,
       randomness: new Sequence(),
       transport,
     });
@@ -419,7 +420,7 @@ describe("current-document upload manager", () => {
       connectivity: new Online(),
       maxActive: 1,
       maxItems: 1,
-      maxQueueBytes: 256 * KIB,
+      maxQueueBytes: 64 * 1024 * KIB,
       randomness: new Sequence(),
       transport,
     });
@@ -509,25 +510,95 @@ describe("current-document upload manager", () => {
     fixture.dispose();
   });
 
-  it("rejects upload settings above the upload-specific resource ceilings", () => {
+  it("runs under the server's configured upload limits, far past the old ceilings", () => {
+    // 8 MiB chunks, 1,024 pending files, 32 transfers and 4 GiB pending: the
+    // browser once refused anything over 4 MiB, 64, 16 and 4 MiB.
+    const fixture = new UploadManager({
+      chunkBytes: 8 * 1024 * KIB,
+      connectivity: new Online(),
+      maxActive: 32,
+      maxFileBytes: 1024 * 1024 * KIB,
+      maxItems: 1_024,
+      maxQueueBytes: 4 * 1024 * 1024 * KIB,
+      randomness: new Sequence(),
+      transport: new MemoryTransport(),
+    });
+    fixture.dispose();
     const base = {
       chunkBytes: 256 * KIB,
       connectivity: new Online(),
       maxActive: 4,
       maxItems: 64,
-      maxQueueBytes: 256 * KIB,
+      maxQueueBytes: 64 * 1024 * KIB,
       randomness: new Sequence(),
       transport: new MemoryTransport(),
     };
-    expect(() => new UploadManager({ ...base, maxItems: 65 })).toThrow(
+    expect(() => new UploadManager({ ...base, maxActive: 65 })).toThrow(
       "upload_manager_limits_invalid",
     );
-    expect(() => new UploadManager({ ...base, maxActive: 17 })).toThrow(
+    expect(() => new UploadManager({ ...base, chunkBytes: 0 })).toThrow(
       "upload_manager_limits_invalid",
     );
-    expect(() => new UploadManager({ ...base, chunkBytes: 4 * 1024 * KIB + 1 })).toThrow(
-      "upload_manager_limits_invalid",
+  });
+
+  it("refuses a file over the configured file size before any transfer, naming the key", async () => {
+    const breaches: LiveLimitBreach[] = [];
+    const transport = new MemoryTransport();
+    const fixture = new UploadManager({
+      chunkBytes: 4,
+      connectivity: new Online(),
+      limit: (breach) => breaches.push(breach),
+      maxActive: 4,
+      maxFileBytes: 8,
+      maxItems: 64,
+      maxQueueBytes: 64 * 1024 * KIB,
+      randomness: new Sequence(),
+      transport,
+    });
+    const owner = island("file-limit");
+    await fixture.select({ field: "attachment", input: input(), island: owner.port }, [
+      file("large.bin", 9),
+    ]);
+    expect(transport.requests).toEqual([]);
+    expect(breaches.map(({ key }) => key)).toEqual(["LIVE_UPLOAD_MAX_FILE_BYTES"]);
+    expect(breaches[0]?.message).toContain(
+      "upload file size limit exceeded: measured 9 bytes, configured 8 bytes",
     );
+    fixture.dispose();
+  });
+
+  it("refuses files past the configured pending bytes and count, naming each key", async () => {
+    const breaches: LiveLimitBreach[] = [];
+    const transport = new MemoryTransport();
+    const fixture = new UploadManager({
+      chunkBytes: 4,
+      connectivity: new Online(),
+      limit: (breach) => breaches.push(breach),
+      maxActive: 2,
+      maxFileBytes: 64,
+      maxItems: 2,
+      maxQueueBytes: 10,
+      randomness: new Sequence(),
+      transport,
+    });
+    const owner = island("pending-limits");
+    await fixture.select({ field: "attachments", input: input(true), island: owner.port }, [
+      file("one.bin", 6),
+      file("two.bin", 6),
+    ]);
+    await fixture.select({ field: "more", input: input(true), island: owner.port }, [
+      file("a.bin", 1),
+      file("b.bin", 1),
+      file("c.bin", 1),
+    ]);
+    expect(transport.requests).toEqual([]);
+    expect(breaches.map(({ key }) => key)).toEqual([
+      "LIVE_UPLOAD_MAX_PENDING_BYTES",
+      "LIVE_UPLOAD_MAX_PENDING_FILES",
+    ]);
+    expect(breaches[0]?.message).toContain("measured 12 bytes, configured 10 bytes");
+    expect(breaches[1]?.message).toContain("measured 3 files, configured 2 files");
+    fixture.dispose();
   });
 
   it("adopts an explicitly reacquired transfer and resumes real network work", async () => {
@@ -557,7 +628,7 @@ describe("current-document upload manager", () => {
       connectivity: new Online(),
       maxActive: 1,
       maxItems: 64,
-      maxQueueBytes: 256 * KIB,
+      maxQueueBytes: 64 * 1024 * KIB,
       randomness: new Sequence(),
       transport,
     });
@@ -600,7 +671,7 @@ describe("current-document upload manager", () => {
       connectivity: new Online(),
       maxActive: 1,
       maxItems: 64,
-      maxQueueBytes: 256 * KIB,
+      maxQueueBytes: 64 * 1024 * KIB,
       randomness: new Sequence(),
       transport,
     });
@@ -652,7 +723,7 @@ describe("current-document upload manager", () => {
       connectivity: new Online(),
       maxActive: 1,
       maxItems: 64,
-      maxQueueBytes: 256 * KIB,
+      maxQueueBytes: 64 * 1024 * KIB,
       randomness: new Sequence(),
       transport: new MemoryTransport(),
     });

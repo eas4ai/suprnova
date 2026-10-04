@@ -27,9 +27,11 @@ const PRESSURE_CAUSE_KIND_COUNT: usize = 4;
 const MAX_TRACKED_PRESSURE_CAUSES: usize =
     super::MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS * PRESSURE_CAUSE_KIND_COUNT;
 
-/// Maximum unapplied entries retained by one server document delivery queue:
-/// the protocol's queue depth, which the browser's document queue mirrors.
-pub const MAX_ASYNC_BUFFER_EVENTS: usize = 64;
+/// Ceiling on the unapplied entries one server document delivery queue may
+/// be configured to retain. The configured depth (`LIVE_ASYNC_MAX_QUEUED_EVENTS`,
+/// 4,096 by default in the framework) applies first and reaches the browser
+/// in its configuration element; the queue's bytes are bounded separately.
+pub const MAX_ASYNC_BUFFER_EVENTS: usize = 65_536;
 /// Ceiling on the canonical envelope bytes one server document delivery queue
 /// retains. The queue is server memory per open document; the configured
 /// limit (`LIVE_ASYNC_MAX_BUFFER_BYTES`, 16 MiB by default in the framework)

@@ -41,9 +41,31 @@ export interface LiveLimits {
   /// Milliseconds one morph may run before it is abandoned
   /// (`LIVE_MORPH_DEADLINE_MS`); `0` means no deadline.
   readonly morphDeadlineMs: number;
+  /// One redirect URL a Live response may carry (`LIVE_MAX_REDIRECT_BYTES`).
+  readonly maxRedirectBytes: number;
+  /// Asynchronous events the document may hold before its islands apply them
+  /// (`LIVE_ASYNC_MAX_QUEUED_EVENTS`).
+  readonly asyncMaxQueuedEvents: number;
+  /// Events in one asynchronous replay after a reconnect
+  /// (`LIVE_ASYNC_MAX_REPLAY_EVENTS`). A replay is queued whole, so it fits
+  /// inside the queued-event limit.
+  readonly asyncMaxReplayEvents: number;
+  /// Bytes in one upload chunk request (`LIVE_UPLOAD_CHUNK_BYTES`).
+  readonly uploadChunkBytes: number;
+  /// Upload transfers running at once (`LIVE_UPLOAD_MAX_ACTIVE`).
+  readonly uploadMaxActive: number;
+  /// Bytes in one uploaded file (`LIVE_UPLOAD_MAX_FILE_BYTES`).
+  readonly uploadMaxFileBytes: number;
+  /// Bytes across the files one page has selected and not yet finished
+  /// (`LIVE_UPLOAD_MAX_PENDING_BYTES`).
+  readonly uploadMaxPendingBytes: number;
+  /// Files one page has selected and not yet finished
+  /// (`LIVE_UPLOAD_MAX_PENDING_FILES`).
+  readonly uploadMaxPendingFiles: number;
 }
 
 const MIB = 1024 * 1024;
+const GIB = 1024 * MIB;
 
 /// The server's defaults, mirrored from `framework/src/live/config.rs`.
 export const SERVER_DEFAULT_LIMITS: LiveLimits = Object.freeze({
@@ -60,6 +82,14 @@ export const SERVER_DEFAULT_LIMITS: LiveLimits = Object.freeze({
   morphMaxAttributes: 10_000_000,
   morphMaxAttributesPerElement: 4_096,
   morphDeadlineMs: 0,
+  maxRedirectBytes: 65_536,
+  asyncMaxQueuedEvents: 4_096,
+  asyncMaxReplayEvents: 4_096,
+  uploadChunkBytes: 8 * MIB,
+  uploadMaxActive: 8,
+  uploadMaxFileBytes: GIB,
+  uploadMaxPendingBytes: 4 * GIB,
+  uploadMaxPendingFiles: 1_024,
 });
 
 /// The engine's hard ceiling on JSON nesting. A recursive walk that runs before
@@ -101,6 +131,38 @@ const DESCRIPTORS: Readonly<Record<LiveLimitName, LimitDescriptor>> = Object.fre
     unit: "attributes",
   },
   morphDeadlineMs: { key: "LIVE_MORPH_DEADLINE_MS", label: "morph deadline", unit: "ms" },
+  maxRedirectBytes: { key: "LIVE_MAX_REDIRECT_BYTES", label: "redirect URL size", unit: "bytes" },
+  asyncMaxQueuedEvents: {
+    key: "LIVE_ASYNC_MAX_QUEUED_EVENTS",
+    label: "async queued event count",
+    unit: "events",
+  },
+  asyncMaxReplayEvents: {
+    key: "LIVE_ASYNC_MAX_REPLAY_EVENTS",
+    label: "async replay event count",
+    unit: "events",
+  },
+  uploadChunkBytes: { key: "LIVE_UPLOAD_CHUNK_BYTES", label: "upload chunk size", unit: "bytes" },
+  uploadMaxActive: {
+    key: "LIVE_UPLOAD_MAX_ACTIVE",
+    label: "upload transfer count",
+    unit: "transfers",
+  },
+  uploadMaxFileBytes: {
+    key: "LIVE_UPLOAD_MAX_FILE_BYTES",
+    label: "upload file size",
+    unit: "bytes",
+  },
+  uploadMaxPendingBytes: {
+    key: "LIVE_UPLOAD_MAX_PENDING_BYTES",
+    label: "upload pending size",
+    unit: "bytes",
+  },
+  uploadMaxPendingFiles: {
+    key: "LIVE_UPLOAD_MAX_PENDING_FILES",
+    label: "upload pending file count",
+    unit: "files",
+  },
 });
 
 /// One limit that tripped, with everything a developer needs to change it.
@@ -192,7 +254,12 @@ export function validLiveLimits(limits: LiveLimits): boolean {
     limits.maxJsonDepth <= JSON_DEPTH_CEILING &&
     limits.morphMaxAttributesPerElement <= limits.morphMaxAttributes &&
     limits.maxHtmlBytes <= limits.maxResponseBytes &&
-    limits.maxResponseBytes <= limits.maxRequestBytes
+    limits.maxResponseBytes <= limits.maxRequestBytes &&
+    limits.maxRedirectBytes <= limits.maxResponseBytes &&
+    limits.asyncMaxReplayEvents <= limits.asyncMaxQueuedEvents &&
+    limits.uploadChunkBytes <= limits.uploadMaxFileBytes &&
+    limits.uploadMaxFileBytes <= limits.uploadMaxPendingBytes &&
+    limits.uploadMaxActive <= limits.uploadMaxPendingFiles
   );
 }
 

@@ -17,8 +17,9 @@ use crate::async_updates::{
     BoundedEventContracts, BoundedEventNames, BoundedPresentationSignalContracts, BoundedTargets,
     BoundedTopics, BrowserPayloadSchema, CapabilityVersion, CompletionReason,
     CurrentSubscriptionRegistration, EventCyclePolicy, EventOrder, EventSource, EventTarget,
-    MAX_ASYNC_ENVELOPE_ENTRIES, PollFallbackPolicy, PollInitialBehavior, PollVisibilityPolicy,
-    PresentationSignalContract, PresentationSignalSchema, ReconnectPolicy, RegisteredBrowserEvent,
+    MAX_ASYNC_ENVELOPE_ENTRIES, MAX_REPLAY_TRANSCRIPT_ENVELOPES, PollFallbackPolicy,
+    PollInitialBehavior, PollVisibilityPolicy, PresentationSignalContract,
+    PresentationSignalSchema, ReconnectPolicy, RegisteredBrowserEvent,
     RegisteredPresentationSignal, ReplayDispatchError, ReplayDispatchOutcome,
     ResolvedAsyncDelivery, SUPPORTED_ASYNC_PROTOCOL_VERSIONS, SequenceDisposition,
     SequenceErrorKind, SequenceMachine, SequenceState, StreamEpoch, StreamErrorCode, StreamName,
@@ -981,7 +982,7 @@ fn byte_depth_entry_string_and_payload_limits_are_enforced() {
 }
 
 #[test]
-fn entry_limits_accept_exactly_their_count_and_replay_accepts_1024_and_rejects_1025() {
+fn entry_limits_accept_exactly_their_count_and_replay_accepts_the_ceiling_and_rejects_one_more() {
     const ENVELOPE_ENTRY_OVERHEAD: usize = 12;
     const ENTRY_LIMIT: usize = 1_024;
     // The production codec's entry count is the engine ceiling: the server
@@ -1036,7 +1037,12 @@ fn entry_limits_accept_exactly_their_count_and_replay_accepts_1024_and_rejects_1
         assert_eq!(result.map(|_| ()).map_err(|error| error.kind()), expected);
     }
 
-    for replay_len in [1_024_usize, 1_025] {
+    // The replay ceiling is 65,536 envelopes; the configured count
+    // (`LIVE_ASYNC_MAX_REPLAY_EVENTS`) applies below it.
+    for replay_len in [
+        MAX_REPLAY_TRANSCRIPT_ENVELOPES,
+        MAX_REPLAY_TRANSCRIPT_ENVELOPES + 1,
+    ] {
         let context = context();
         let registry = membership_registry();
         let mut machine = SequenceMachine::new(&context);
@@ -1061,9 +1067,9 @@ fn entry_limits_accept_exactly_their_count_and_replay_accepts_1024_and_rejects_1
             .map(|envelope| admit(&context, envelope, &registry))
             .collect::<Vec<_>>();
         let result = machine.recover_from_replay(guards, UnixMillis::new(1_200), &mut dispatcher);
-        if replay_len == 1_024 {
+        if replay_len == MAX_REPLAY_TRANSCRIPT_ENVELOPES {
             let outcome = result.expect("exact replay limit");
-            assert_eq!(outcome.applied(), 1_024);
+            assert_eq!(outcome.applied(), MAX_REPLAY_TRANSCRIPT_ENVELOPES);
             assert_eq!(outcome.current(), position(4, high_water));
         } else {
             let error = result.expect_err("first replay beyond production limit");

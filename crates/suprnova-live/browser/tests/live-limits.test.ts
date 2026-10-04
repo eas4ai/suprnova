@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { decodeAsyncEnvelope } from "../src/async-updates/envelope.js";
 import type { AuthorizedLogicalSubscription } from "../src/async-updates/types.js";
 import { canonicalize, parseCanonicalJson, type JsonValue } from "../src/canonical.js";
+import type { RuntimeFeatureDocumentContext } from "../src/features/contract.js";
 import { breachOf, limitBreach, SERVER_DEFAULT_LIMITS, type LiveLimits } from "../src/limits.js";
 import { IdiomorphAdapter } from "../src/morph/idiomorph.js";
 import { morphLimitsFrom } from "../src/morph/limits.js";
@@ -13,6 +14,7 @@ import { decodeSnapshotPublicView } from "../src/protocol/snapshot-view.js";
 import { ProtocolValidationError, validateUpdateResponse } from "../src/protocol.js";
 import { CONFIG_ELEMENT_ID, parseRuntimeConfig } from "../src/runtime/config.js";
 import { CoreRuntimeDiagnostics } from "../src/runtime/diagnostics.js";
+import { resolveUploadManagerOptions } from "../src/uploads/feature.js";
 import { asElement, element, morphFixture, text } from "./support/morph-dom.js";
 
 // The 2026-10-04 ruling: no arbitrary small caps. Every limit is the server's
@@ -230,11 +232,66 @@ describe("asynchronous envelopes the server sends", () => {
   });
 });
 
+describe("redirect URLs the server sends", () => {
+  function v1Redirect(target: string): string {
+    const fixtures = JSON.parse(
+      readFileSync(new URL("../../fixtures/v1/protocol-success.json", import.meta.url), "utf8"),
+    ) as { cases: { id: string; encoded: string }[] };
+    const found = fixtures.cases.find((candidate) => candidate.id === "redirect-response");
+    if (found === undefined) throw new Error("missing fixture redirect-response");
+    const response = JSON.parse(found.encoded) as Json;
+    response["redirect"] = target;
+    return canonicalize(response);
+  }
+
+  function v2Redirect(target: string): string {
+    const response = protocolFixture("child-delivery-response");
+    for (const key of ["accepted_revision", "render", "snapshot"]) {
+      Reflect.deleteProperty(response, key);
+    }
+    response["child_deliveries"] = [];
+    response["url_intent"] = null;
+    response["redirect"] = target;
+    return canonicalize(response);
+  }
+
+  const long = `/reports?${"q=x&".repeat(2_500)}`;
+
+  it("follows a 10,000-byte redirect, past the old 2,048-byte bound", () => {
+    expect(long.length).toBeGreaterThan(10_000);
+    for (const encoded of [v1Redirect(long), v2Redirect(long)]) {
+      expect(
+        refusal(() => {
+          validateUpdateResponse(encoded);
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("refuses a redirect over the configured size and names the key", () => {
+    for (const encoded of [v1Redirect(long), v2Redirect(long)]) {
+      const error = refusal(() => {
+        validateUpdateResponse(encoded, limits({ maxRedirectBytes: 4_096 }));
+      });
+      expect(error).toBeInstanceOf(ProtocolValidationError);
+      expect((error as ProtocolValidationError).code).toBe("unsafe_redirect");
+      expect(breachOf(error)?.key).toBe("LIVE_MAX_REDIRECT_BYTES");
+      expect((error as Error).message).toContain(
+        `redirect URL size limit exceeded (redirect): measured ${String(long.length)} bytes, ` +
+          "configured 4096 bytes",
+      );
+    }
+  });
+});
+
 describe("the boot configuration carries every limit", () => {
   const LIMITS_CONFIG = {
+    async_max_queued_events: 4_096,
+    async_max_replay_events: 4_096,
     max_html_bytes: 16 * MIB,
     max_json_depth: 32,
     max_json_entries: 1_000_000,
+    max_redirect_bytes: 65_536,
     max_request_bytes: 16 * MIB,
     max_request_items: 65_536,
     max_response_items: 65_536,
@@ -244,6 +301,11 @@ describe("the boot configuration carries every limit", () => {
     morph_max_depth: 512,
     morph_max_keys: 1_000_000,
     morph_max_nodes: 1_000_000,
+    upload_chunk_bytes: 8 * MIB,
+    upload_max_active: 8,
+    upload_max_file_bytes: 1024 * MIB,
+    upload_max_pending_bytes: 4096 * MIB,
+    upload_max_pending_files: 1_024,
   };
 
   function configDocument(config: Record<string, unknown>): Document {
@@ -293,6 +355,32 @@ describe("the boot configuration carries every limit", () => {
     expect(large.limits.morphMaxNodes).toBe(5_000_000);
     expect(large.limits.morphDeadlineMs).toBe(30_000);
   });
+
+  it("reads the upload, asynchronous queue and redirect limits the server configured", () => {
+    const parsed = parseRuntimeConfig(
+      configDocument(
+        config({
+          async_max_queued_events: 65_536,
+          async_max_replay_events: 20_000,
+          max_redirect_bytes: 2_097_152,
+          max_response_bytes: 16 * MIB,
+          upload_chunk_bytes: 64 * MIB,
+          upload_max_active: 64,
+          upload_max_file_bytes: 1024 * 1024 * MIB,
+          upload_max_pending_bytes: 4096 * 1024 * MIB,
+          upload_max_pending_files: 65_536,
+        }),
+      ),
+    );
+    expect(parsed.limits.asyncMaxQueuedEvents).toBe(65_536);
+    expect(parsed.limits.asyncMaxReplayEvents).toBe(20_000);
+    expect(parsed.limits.maxRedirectBytes).toBe(2_097_152);
+    expect(parsed.limits.uploadChunkBytes).toBe(64 * MIB);
+    expect(parsed.limits.uploadMaxActive).toBe(64);
+    expect(parsed.limits.uploadMaxFileBytes).toBe(1024 * 1024 * MIB);
+    expect(parsed.limits.uploadMaxPendingBytes).toBe(4096 * 1024 * MIB);
+    expect(parsed.limits.uploadMaxPendingFiles).toBe(65_536);
+  });
 });
 
 describe("a tripped limit reaches the developer", () => {
@@ -313,5 +401,62 @@ describe("a tripped limit reaches the developer", () => {
     const silent = { error: vi.fn() };
     new CoreRuntimeDiagnostics("off", silent).limit(breach);
     expect(silent.error).not.toHaveBeenCalled();
+  });
+});
+
+describe("upload settings come from the server's configuration", () => {
+  const transport = { send: () => Promise.reject(new Error("unused")) };
+  const ports = {
+    connectivity: { online: () => true },
+    randomness: { idempotencyKey: () => "key" },
+    transport,
+  };
+  function context(limits?: LiveLimits): RuntimeFeatureDocumentContext {
+    return {
+      diagnose: () => undefined,
+      ...(limits === undefined ? {} : { limits }),
+      onDispose: () => undefined,
+    };
+  }
+
+  it("uses the configured chunk, transfer, file and pending limits", () => {
+    const configured = resolveUploadManagerOptions(
+      ports,
+      context({
+        ...SERVER_DEFAULT_LIMITS,
+        uploadChunkBytes: MIB,
+        uploadMaxActive: 3,
+        uploadMaxFileBytes: 10 * MIB,
+        uploadMaxPendingBytes: 20 * MIB,
+        uploadMaxPendingFiles: 5,
+      }),
+    );
+    expect(configured).toMatchObject({
+      chunkBytes: MIB,
+      maxActive: 3,
+      maxFileBytes: 10 * MIB,
+      maxItems: 5,
+      maxQueueBytes: 20 * MIB,
+    });
+    expect(resolveUploadManagerOptions(ports, context())).toMatchObject({
+      chunkBytes: 8 * MIB,
+      maxActive: 8,
+      maxFileBytes: 1024 * MIB,
+      maxItems: 1_024,
+      maxQueueBytes: 4096 * MIB,
+    });
+  });
+
+  it("lets an application option lower a limit but never raise it", () => {
+    const lowered = resolveUploadManagerOptions(
+      { ...ports, chunkBytes: 64 * MIB, maxActive: 2, maxItems: 1, maxQueueBytes: MIB },
+      context(SERVER_DEFAULT_LIMITS),
+    );
+    expect(lowered).toMatchObject({
+      chunkBytes: 8 * MIB,
+      maxActive: 1,
+      maxItems: 1,
+      maxQueueBytes: MIB,
+    });
   });
 });

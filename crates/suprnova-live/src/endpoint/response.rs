@@ -28,9 +28,14 @@ use super::{EndpointErrorKind, EndpointKernelError, ParsedLiveMediaType};
 pub struct EndpointNavigationTarget(String);
 
 impl EndpointNavigationTarget {
-    /// Validates the browser's bounded root-relative same-origin target profile.
+    /// Validates the browser's root-relative same-origin target profile.
+    ///
+    /// The length bound is the browser's own URL ceiling
+    /// ([`crate::protocol::MAX_REDIRECT_BYTES`]); the host checks its
+    /// configured redirect size first, and the response is parsed again under
+    /// that configured size before it is sent.
     pub fn parse(target: &str) -> Result<Self, EndpointNavigationTargetError> {
-        if target.len() > 2_048
+        if target.len() > crate::protocol::MAX_REDIRECT_BYTES
             || target
                 .chars()
                 .any(|character| character == '\\' || character.is_control())

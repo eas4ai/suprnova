@@ -13,9 +13,12 @@ export const NAVIGATION_RUNTIME_LIMITS = Object.freeze({
 // Every page limit the server configures, by its configuration-element key.
 // The element is the only place the browser learns them (spec 09).
 const LIMIT_KEYS = Object.freeze({
+  async_max_queued_events: "asyncMaxQueuedEvents",
+  async_max_replay_events: "asyncMaxReplayEvents",
   max_html_bytes: "maxHtmlBytes",
   max_json_depth: "maxJsonDepth",
   max_json_entries: "maxJsonEntries",
+  max_redirect_bytes: "maxRedirectBytes",
   max_request_bytes: "maxRequestBytes",
   max_request_items: "maxRequestItems",
   max_response_bytes: "maxResponseBytes",
@@ -26,6 +29,11 @@ const LIMIT_KEYS = Object.freeze({
   morph_max_depth: "morphMaxDepth",
   morph_max_keys: "morphMaxKeys",
   morph_max_nodes: "morphMaxNodes",
+  upload_chunk_bytes: "uploadChunkBytes",
+  upload_max_active: "uploadMaxActive",
+  upload_max_file_bytes: "uploadMaxFileBytes",
+  upload_max_pending_bytes: "uploadMaxPendingBytes",
+  upload_max_pending_files: "uploadMaxPendingFiles",
 } as const satisfies Readonly<Record<string, keyof LiveLimits>>);
 
 const CONFIG_KEYS = [

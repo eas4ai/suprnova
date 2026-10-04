@@ -37,7 +37,6 @@ import type {
 const SUBSCRIPTION_PATH = "/__live/async/subscriptions";
 const MEMBERSHIP_PATH = "/__live/async/memberships";
 const CONTROL_MARKER = "async-v1";
-const MAX_REPLAY_ENVELOPES = 4096;
 const MEMBERSHIP_TIMEOUT_MS = 10_000;
 const MAX_TEXT_BYTES = 1024;
 
@@ -258,7 +257,9 @@ export function decodeAuthorizedSubscription(value: unknown): AuthorizedLogicalS
 function decodeAuthorization(value: unknown): AsyncAuthorizationResult {
   const fields = record(value);
   const replay = fields["replay"] ?? [];
-  if (!Array.isArray(replay) || replay.length > MAX_REPLAY_ENVELOPES) {
+  // The subscription checks the replay's length against the configured
+  // replay count (`LIVE_ASYNC_MAX_REPLAY_EVENTS`) before it decodes one.
+  if (!Array.isArray(replay)) {
     throw new Error("async_authority_invalid");
   }
   return Object.freeze({

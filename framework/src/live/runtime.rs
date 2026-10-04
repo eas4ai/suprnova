@@ -40,7 +40,7 @@ use suprnova_live::ledger::{
     AcceptedOutcome, AcceptedOutcomeKind, ClaimOutcome, ClaimRequest, DistributedInstanceLedger,
     LedgerLimits, LiveInstanceLedger, MemoryInstanceLedger, MountInstanceRecord,
 };
-use suprnova_live::limits::{InputLimits, UploadLimitConfig, UploadLimits};
+use suprnova_live::limits::{InputLimits, UploadLimits};
 use suprnova_live::mount::{
     DocumentMountKey, DocumentMountScope, MountFlags, MountLimits, MountProviders,
     PrivateMountOutput, PrivateMountRequest, PrivateMountService, PublicMountProviders,
@@ -363,7 +363,7 @@ struct RuntimeProviders {
 }
 
 impl RuntimeProviderCandidates {
-    fn production(registry: &LiveRegistry) -> Result<Self, FrameworkError> {
+    fn production(registry: &LiveRegistry, config: LiveConfig) -> Result<Self, FrameworkError> {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let random: Arc<dyn InstanceIdGenerator> = Arc::new(SystemInstanceIdGenerator);
         let key_ring = Arc::new(build_key_ring()?);
@@ -406,7 +406,7 @@ impl RuntimeProviderCandidates {
             key_ring: Some(key_ring),
             ledger: Some(ledger),
             ledger_driver,
-            ports: super::ports::HostPortCandidates::production(registry)?,
+            ports: super::ports::HostPortCandidates::production(registry, config)?,
         })
     }
 
@@ -507,7 +507,7 @@ impl LiveRuntime {
         let config = LiveConfig::resolve()?;
         let registry =
             App::resolve::<LiveRegistry>().unwrap_or_else(|_| LiveRegistry::builder().build());
-        let candidates = RuntimeProviderCandidates::production(&registry)?;
+        let candidates = RuntimeProviderCandidates::production(&registry, config)?;
         let runtime = assemble_runtime(config, registry, candidates)?;
 
         App::singleton_if_absent(runtime);
@@ -1633,28 +1633,38 @@ impl LiveRuntime {
         document_path: &MountedDocumentPath,
         context: &TrustedLiveRequestContext,
     ) -> Result<PublicSeedMountOutput, FrameworkError> {
-        self.graph
-            .public_mount
-            .mount_component_for_document(document, key, parameters, flags, document_path, context)
-            .await
-            .map_err(|error| {
-                // The framework error carries no engine detail, so the closed engine kinds are
-                // recorded here for an operator.
-                match mount_limit(error.cause()) {
-                    Some(limit) => tracing::warn!(
-                        kind = ?error.kind(),
-                        cause = ?error.cause(),
-                        limit = %limit,
-                        "Live public mount was rejected"
-                    ),
-                    None => tracing::warn!(
-                        kind = ?error.kind(),
-                        cause = ?error.cause(),
-                        "Live public mount was rejected"
-                    ),
-                }
-                FrameworkError::internal("Live public mount was rejected")
-            })
+        // Boxed: the engine's mount future (execution pipeline, render and
+        // island validation) stays on the heap instead of inside every
+        // handler future that awaits a mount. Unboxed, a debug build of a
+        // page mounting several islands came within a few KiB of tokio's
+        // 2 MiB worker stack.
+        Box::pin(self.graph.public_mount.mount_component_for_document(
+            document,
+            key,
+            parameters,
+            flags,
+            document_path,
+            context,
+        ))
+        .await
+        .map_err(|error| {
+            // The framework error carries no engine detail, so the closed engine kinds are
+            // recorded here for an operator.
+            match mount_limit(error.cause()) {
+                Some(limit) => tracing::warn!(
+                    kind = ?error.kind(),
+                    cause = ?error.cause(),
+                    limit = %limit,
+                    "Live public mount was rejected"
+                ),
+                None => tracing::warn!(
+                    kind = ?error.kind(),
+                    cause = ?error.cause(),
+                    "Live public mount was rejected"
+                ),
+            }
+            FrameworkError::internal("Live public mount was rejected")
+        })
     }
 
     pub(crate) async fn mount_private_component(
@@ -1663,9 +1673,8 @@ impl LiveRuntime {
         request: PrivateMountRequest,
         context: &TrustedLiveRequestContext,
     ) -> Result<PrivateMountOutput, FrameworkError> {
-        self.graph
-            .private_mount
-            .mount(document, request, context)
+        // Boxed for the reason `mount_public_component` gives.
+        Box::pin(self.graph.private_mount.mount(document, request, context))
             .await
             .map_err(|error| {
                 // The framework error carries no engine detail, so the closed engine kinds are
@@ -1853,6 +1862,7 @@ fn assemble_runtime(
         max_effects: config.max_response_items(),
         max_extensions: config.max_response_items(),
     })
+    .and_then(|limits| limits.with_max_redirect_bytes(config.max_redirect_bytes()))
     .map_err(|_| live_boot_error())?;
     let endpoint_config = LiveEndpointConfig::new(protocol_limits, snapshot_limits.clone())
         .and_then(|endpoint| endpoint.with_max_response_bytes(config.max_response_bytes()))
@@ -1936,7 +1946,7 @@ fn assemble_runtime(
     );
     let context_validator = LiveRequestContextValidator::new(config.max_context_lifetime_ms())
         .map_err(|_| live_boot_error())?;
-    let uploads = assemble_upload_runtime(&ports, Arc::clone(&clock))?;
+    let uploads = assemble_upload_runtime(&ports, Arc::clone(&clock), config)?;
     let async_state = AsyncState::new(
         build_key_ring()?,
         Arc::clone(&clock),
@@ -2081,7 +2091,7 @@ pub(super) fn assemble_for_harness(
     config: LiveConfig,
     registry: LiveRegistry,
 ) -> Result<LiveRuntime, FrameworkError> {
-    let candidates = RuntimeProviderCandidates::production(&registry)?;
+    let candidates = RuntimeProviderCandidates::production(&registry, config)?;
     assemble_runtime(config, registry, candidates)
 }
 
@@ -2090,7 +2100,7 @@ pub(super) fn assemble_for_harness_with_clock(
     registry: LiveRegistry,
     clock: Arc<dyn Clock>,
 ) -> Result<LiveRuntime, FrameworkError> {
-    let mut candidates = RuntimeProviderCandidates::production(&registry)?;
+    let mut candidates = RuntimeProviderCandidates::production(&registry, config)?;
     let ledger_limits = production_ledger_limits()?;
     candidates.clock = Some(Arc::clone(&clock));
     candidates.ledger = Some(Arc::new(MemoryInstanceLedger::new(clock, ledger_limits)));
@@ -2141,9 +2151,11 @@ pub(crate) struct RuntimeReadiness {
 fn assemble_upload_runtime(
     ports: &super::ports::HostPorts,
     clock: Arc<dyn Clock>,
+    config: LiveConfig,
 ) -> Result<UploadRuntimeGraph, FrameworkError> {
-    let limits = UploadLimits::new(UploadLimitConfig::reference())
-        .map_err(|_| FrameworkError::internal("Live upload limits were rejected"))?;
+    // The configured upload limits (`LIVE_UPLOAD_*`), the same profile the
+    // host ports were built with and the browser reads.
+    let limits = config.engine_upload_limits()?;
     let authority = Arc::new(
         UploadService::new(
             Arc::clone(&ports.uploads.ledger),

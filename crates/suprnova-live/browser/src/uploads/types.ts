@@ -1,12 +1,11 @@
 import type { IslandExtensionIdentity } from "../extensions/registry.js";
+import type { LiveLimitBreach } from "../limits.js";
 import { parseUploadProtocolState } from "./state.js";
 
-export const DEFAULT_UPLOAD_CHUNK_BYTES = 256 * 1024;
-export const MAX_UPLOAD_FILES_PER_DOCUMENT = 64;
-export const MAX_UPLOAD_HANDLE_COUNT = 64;
-export const MAX_UPLOAD_ACTIVE_TRANSFERS = 16;
-export const MAX_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
-export const MAX_UPLOAD_QUEUE_BYTES = 4 * 1024 * 1024;
+// The upload limits are the server's: `LIVE_UPLOAD_CHUNK_BYTES`,
+// `LIVE_UPLOAD_MAX_ACTIVE`, `LIVE_UPLOAD_MAX_FILE_BYTES`,
+// `LIVE_UPLOAD_MAX_PENDING_BYTES` and `LIVE_UPLOAD_MAX_PENDING_FILES`, read
+// from the configuration element. The browser holds no ceiling of its own.
 
 const UPLOAD_FIELD = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/u;
 const UPLOAD_HANDLE = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -211,10 +210,20 @@ export interface UploadResourceObserver {
 
 export interface UploadManagerOptions {
   readonly application?: UploadApplicationPort | undefined;
+  /// Bytes in one chunk request, at most `LIVE_UPLOAD_CHUNK_BYTES`.
   readonly chunkBytes: number;
   readonly connectivity: UploadConnectivity;
+  /// Hears each selection refused because it went over a configured limit.
+  readonly limit?: ((breach: LiveLimitBreach) => void) | undefined;
+  /// Transfers running at once, at most `LIVE_UPLOAD_MAX_ACTIVE`.
   readonly maxActive: number;
+  /// Bytes in one file (`LIVE_UPLOAD_MAX_FILE_BYTES`); absent, only the
+  /// server checks it.
+  readonly maxFileBytes?: number | undefined;
+  /// Files selected and not yet finished (`LIVE_UPLOAD_MAX_PENDING_FILES`).
   readonly maxItems: number;
+  /// Bytes across the files selected and not yet finished
+  /// (`LIVE_UPLOAD_MAX_PENDING_BYTES`).
   readonly maxQueueBytes: number;
   readonly randomness: UploadRandomness;
   readonly resourceObserver?: UploadResourceObserver | undefined;
@@ -261,11 +270,9 @@ export function validateUploadProposal(
     validateUploadHandle(proposal);
     return;
   }
-  if (
-    !Array.isArray(proposal) ||
-    proposal.length < 1 ||
-    proposal.length > MAX_UPLOAD_HANDLE_COUNT
-  ) {
+  // The handle count is bounded where the handles come from: the upload
+  // manager's pending-file limit (`LIVE_UPLOAD_MAX_PENDING_FILES`).
+  if (!Array.isArray(proposal) || proposal.length < 1) {
     throw new Error("upload_handle_proposal_invalid");
   }
   const handles = new Set<string>();

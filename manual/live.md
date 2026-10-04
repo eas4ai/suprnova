@@ -535,12 +535,24 @@ App::singleton(config);
 | `LIVE_MORPH_DEADLINE_MS` | 0, no deadline | How long one morph may run |
 | `LIVE_ASYNC_MAX_PAYLOAD_BYTES` | 1 MiB | One asynchronous event payload |
 | `LIVE_ASYNC_MAX_BUFFER_BYTES` | 16 MiB | One open document's delivery queue |
+| `LIVE_ASYNC_MAX_QUEUED_EVENTS` | 4,096 | Events one open document holds before its islands apply them |
+| `LIVE_ASYNC_MAX_REPLAY_EVENTS` | 4,096 | Events in one reconnect replay |
+| `LIVE_MAX_REDIRECT_BYTES` | 64 KiB | One redirect or reflected URL |
+| `LIVE_UPLOAD_CHUNK_BYTES` | 8 MiB | One upload chunk request |
+| `LIVE_UPLOAD_MAX_ACTIVE` | 8 | Upload transfers running at once |
+| `LIVE_UPLOAD_MAX_FILE_BYTES` | 1 GiB | One uploaded file |
+| `LIVE_UPLOAD_MAX_PENDING_FILES` | 1,024 | Files selected and not yet finished |
+| `LIVE_UPLOAD_MAX_PENDING_BYTES` | 4 GiB | Bytes across the files selected and not yet finished |
+| `LIVE_UPLOAD_MAX_STORAGE_BYTES` | 16 GiB | The temporary upload store, across every visitor |
 
 The byte limits nest: the island HTML travels inside the response, and the
 response's snapshot comes back in the next request, so `LIVE_MAX_HTML_BYTES`
 must be at most `LIVE_MAX_RESPONSE_BYTES`, which must be at most
 `LIVE_MAX_REQUEST_BYTES`. A setting you leave unset follows the one it must fit
-inside, so lowering only `LIVE_MAX_REQUEST_BYTES` lowers all three. Every key's
+inside, so lowering only `LIVE_MAX_REQUEST_BYTES` lowers all three. The upload
+limits nest the other way: a chunk is part of one file, one file is part of the
+pending bytes, and the pending bytes are part of the store, so an unset pending
+or store limit grows to hold a larger file. Every key's
 type and range is in [Environment Variables](env-vars.md#live).
 
 When a limit trips, the message names the limit, both values and the key to
@@ -557,7 +569,11 @@ A request the browser would have to send over `LIVE_MAX_REQUEST_BYTES` fails in
 the browser before it is sent. A render over `LIVE_MAX_HTML_BYTES` fails on the
 server, which logs the `limit` field beside the failed operation's cause. A
 published payload over `LIVE_ASYNC_MAX_PAYLOAD_BYTES` fails with a
-`LiveStreamError` whose `limit()` names the setting.
+`LiveStreamError` whose `limit()` names the setting. A file over
+`LIVE_UPLOAD_MAX_FILE_BYTES`, or a selection past the pending limits, is
+refused in the browser before any transfer starts; the server refuses the same
+file with a 413 and logs the key. `suprnova live:inspect` prints every limit the
+application runs under, by its key.
 
 ## Component library
 

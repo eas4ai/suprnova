@@ -190,6 +190,7 @@ function canonicalize(value) {
 
 // src/limits.ts
 var MIB = 1024 * 1024;
+var GIB = 1024 * MIB;
 var SERVER_DEFAULT_LIMITS = Object.freeze({
   maxRequestBytes: 16 * MIB,
   maxResponseBytes: 16 * MIB,
@@ -203,7 +204,15 @@ var SERVER_DEFAULT_LIMITS = Object.freeze({
   morphMaxKeys: 1e6,
   morphMaxAttributes: 1e7,
   morphMaxAttributesPerElement: 4096,
-  morphDeadlineMs: 0
+  morphDeadlineMs: 0,
+  maxRedirectBytes: 65536,
+  asyncMaxQueuedEvents: 4096,
+  asyncMaxReplayEvents: 4096,
+  uploadChunkBytes: 8 * MIB,
+  uploadMaxActive: 8,
+  uploadMaxFileBytes: GIB,
+  uploadMaxPendingBytes: 4 * GIB,
+  uploadMaxPendingFiles: 1024
 });
 var JSON_DEPTH_CEILING = 64;
 var DESCRIPTORS = Object.freeze({
@@ -231,7 +240,39 @@ var DESCRIPTORS = Object.freeze({
     label: "morph attributes-per-element count",
     unit: "attributes"
   },
-  morphDeadlineMs: { key: "LIVE_MORPH_DEADLINE_MS", label: "morph deadline", unit: "ms" }
+  morphDeadlineMs: { key: "LIVE_MORPH_DEADLINE_MS", label: "morph deadline", unit: "ms" },
+  maxRedirectBytes: { key: "LIVE_MAX_REDIRECT_BYTES", label: "redirect URL size", unit: "bytes" },
+  asyncMaxQueuedEvents: {
+    key: "LIVE_ASYNC_MAX_QUEUED_EVENTS",
+    label: "async queued event count",
+    unit: "events"
+  },
+  asyncMaxReplayEvents: {
+    key: "LIVE_ASYNC_MAX_REPLAY_EVENTS",
+    label: "async replay event count",
+    unit: "events"
+  },
+  uploadChunkBytes: { key: "LIVE_UPLOAD_CHUNK_BYTES", label: "upload chunk size", unit: "bytes" },
+  uploadMaxActive: {
+    key: "LIVE_UPLOAD_MAX_ACTIVE",
+    label: "upload transfer count",
+    unit: "transfers"
+  },
+  uploadMaxFileBytes: {
+    key: "LIVE_UPLOAD_MAX_FILE_BYTES",
+    label: "upload file size",
+    unit: "bytes"
+  },
+  uploadMaxPendingBytes: {
+    key: "LIVE_UPLOAD_MAX_PENDING_BYTES",
+    label: "upload pending size",
+    unit: "bytes"
+  },
+  uploadMaxPendingFiles: {
+    key: "LIVE_UPLOAD_MAX_PENDING_FILES",
+    label: "upload pending file count",
+    unit: "files"
+  }
 });
 
 // src/signals/name.ts
@@ -514,7 +555,7 @@ var ContinuityMachine = class {
     this.#state = "current";
   }
   validateReplay(positions) {
-    if (this.#state === "closed" || positions.length === 0 || positions.length > 1024) {
+    if (this.#state === "closed" || positions.length === 0) {
       throw new Error("async_replay_invalid");
     }
     let prior = this.#position;
@@ -1250,9 +1291,16 @@ function defineFeature(slot, definition, cache) {
       connected = true;
       const port = value;
       const track = port.trackResource?.bind(port);
+      const limit = port.limit?.bind(port);
       const context = Object.freeze({
         diagnose: (detail) => {
           port.diagnose(detail);
+        },
+        ...port.limits === void 0 ? {} : { limits: port.limits },
+        ...limit === void 0 ? {} : {
+          limit: (breach) => {
+            limit(breach);
+          }
         },
         onDispose: (dispose) => {
           own(documentDisposers, dispose);
@@ -1512,8 +1560,15 @@ function createOptionalFeatureDriver() {
     if (state !== 1 || (started & bit) !== 0 || documentPort === null) return;
     started |= bit;
     const track = documentPort.trackResource?.bind(documentPort);
+    const limit = documentPort.limit?.bind(documentPort);
     const context = Object.freeze({
       diagnose: report2,
+      ...documentPort.limits === void 0 ? {} : { limits: documentPort.limits },
+      ...limit === void 0 ? {} : {
+        limit: (breach) => {
+          limit(breach);
+        }
+      },
       onDispose(dispose) {
         if (typeof dispose !== "function") report2("operation_rejected");
       },
@@ -1992,9 +2047,6 @@ var UploadProtocolStateMachine = class {
 };
 
 // src/uploads/types.ts
-var DEFAULT_UPLOAD_CHUNK_BYTES = 256 * 1024;
-var MAX_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
-var MAX_UPLOAD_QUEUE_BYTES = 4 * 1024 * 1024;
 var UPLOAD_FIELD = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/u;
 var UPLOAD_HANDLE = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 var IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;

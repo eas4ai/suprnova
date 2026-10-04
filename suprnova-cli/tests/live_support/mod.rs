@@ -32,7 +32,7 @@ pub fn envelope_with(
         None => "null".to_owned(),
     };
     format!(
-        "{{\"protocol\":1,\"sequence\":{sequence},\"operation\":\"{operation}\",\"framework\":\"{framework}\",\"assets\":{assets},\"body\":{body}}}\n"
+        "{{\"protocol\":2,\"sequence\":{sequence},\"operation\":\"{operation}\",\"framework\":\"{framework}\",\"assets\":{assets},\"body\":{body}}}\n"
     )
 }
 
@@ -98,7 +98,7 @@ pub fn runtime(sequence: u32) -> String {
         sequence,
         "inspect",
         &format!(
-            "{{\"kind\":\"runtime\",\"payload\":{{\"registry_bound\":true,\"components\":1,\"config\":{{\"max_request_bytes\":1048576,\"max_response_bytes\":1048576,\"max_context_lifetime_ms\":30000}},\"upload_host\":{{\"installed\":false,\"finalizer\":false,\"direct_provider\":false,\"scanner\":false,\"application_validator\":false}},\"runtime_bound\":true,\"readiness\":{{\"clock\":true,\"random\":true,\"key_ring\":true,\"ledger\":true,\"promotion\":true,\"execution\":true,\"context_validator\":true,\"host_ports\":true,\"upload_ports\":true,\"upload_services\":true,\"mount_catalog\":true,\"response_and_cancellation\":true,\"subscription_ports\":true,\"async_state\":true}},\"asset_identity\":\"{IDENTITY}\",\"browser_runtime_version\":\"0.1.0\",\"runtime_contract_version\":1,\"protocol_versions\":[1,2]}}}}"
+            "{{\"kind\":\"runtime\",\"payload\":{{\"registry_bound\":true,\"components\":1,\"config\":{{\"limits\":[{{\"setting\":\"LIVE_MAX_REQUEST_BYTES\",\"value\":16777216,\"unit\":\"bytes\"}},{{\"setting\":\"LIVE_MORPH_MAX_KEYS\",\"value\":1000000,\"unit\":\"keyed elements\"}},{{\"setting\":\"LIVE_UPLOAD_MAX_FILE_BYTES\",\"value\":1073741824,\"unit\":\"bytes\"}}]}},\"upload_host\":{{\"installed\":false,\"finalizer\":false,\"direct_provider\":false,\"scanner\":false,\"application_validator\":false}},\"runtime_bound\":true,\"readiness\":{{\"clock\":true,\"random\":true,\"key_ring\":true,\"ledger\":true,\"promotion\":true,\"execution\":true,\"context_validator\":true,\"host_ports\":true,\"upload_ports\":true,\"upload_services\":true,\"mount_catalog\":true,\"response_and_cancellation\":true,\"subscription_ports\":true,\"async_state\":true}},\"asset_identity\":\"{IDENTITY}\",\"browser_runtime_version\":\"0.1.0\",\"runtime_contract_version\":1,\"protocol_versions\":[1,2]}}}}"
         ),
     )
 }

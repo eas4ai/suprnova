@@ -3,6 +3,8 @@ const D100_ISLANDS = 100;
 const SIGNATURE = "A".repeat(43);
 const RUNTIME_CONFIG = `<script id="suprnova-live-config" type="application/json">${JSON.stringify({
   asset_identity: "browser-budget-v1",
+  async_max_queued_events: 4_096,
+  async_max_replay_events: 4_096,
   credentials: "same-origin",
   endpoint: "/live",
   max_html_bytes: 16_777_216,
@@ -10,6 +12,7 @@ const RUNTIME_CONFIG = `<script id="suprnova-live-config" type="application/json
   max_json_entries: 1_000_000,
   max_parallel_per_island: 1,
   max_queued_per_island: 8,
+  max_redirect_bytes: 65_536,
   max_request_bytes: 16_777_216,
   max_request_items: 65_536,
   max_response_bytes: 16_777_216,
@@ -23,6 +26,11 @@ const RUNTIME_CONFIG = `<script id="suprnova-live-config" type="application/json
   protocol: { maximum: 2, minimum: 1 },
   request_timeout_ms: 60_000,
   runtime_contract_version: 1,
+  upload_chunk_bytes: 8_388_608,
+  upload_max_active: 8,
+  upload_max_file_bytes: 1_073_741_824,
+  upload_max_pending_bytes: 4_294_967_296,
+  upload_max_pending_files: 1_024,
 })}</script>`;
 
 export type MorphWorkloadId = "M1K" | "M5K";

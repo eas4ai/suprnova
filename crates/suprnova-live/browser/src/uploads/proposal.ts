@@ -62,8 +62,11 @@ export class UploadProposalAuthority<Owner extends object> {
   readonly #claims = new Map<UploadHandle, UploadHandleClaim<Owner>>();
   readonly #maximumClaims: number;
 
-  constructor(maximumClaims = 4_096) {
-    if (!Number.isSafeInteger(maximumClaims) || maximumClaims < 1 || maximumClaims > 65_536) {
+  // Claims live until the document goes, so the bound counts every handle a
+  // page proposes in its lifetime; it guards memory against a feature that
+  // proposes handles without end, not the uploads a real page makes.
+  constructor(maximumClaims = 1_048_576) {
+    if (!Number.isSafeInteger(maximumClaims) || maximumClaims < 1 || maximumClaims > 16_777_216) {
       throw new RangeError("feature_upload_handle_limit_invalid");
     }
     this.#maximumClaims = maximumClaims;

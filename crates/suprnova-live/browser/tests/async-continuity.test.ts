@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { canonicalize, type JsonValue } from "../src/canonical.js";
 import type { AsyncEnvelopeDispatcher } from "../src/async-updates/dispatch.js";
-import { AsyncSubscription } from "../src/async-updates/subscription.js";
+import { AsyncDocumentQueueBudget, AsyncSubscription } from "../src/async-updates/subscription.js";
+import type { LiveLimitBreach } from "../src/limits.js";
 import type {
   AsyncPayload,
   AuthorizedLogicalSubscription,
@@ -373,5 +374,57 @@ describe("browser asynchronous subscription continuity", () => {
       ]),
     ).toEqual({ applied: 1, through: position(4n, 42n) });
     expect(subscription.state()).toBe("current");
+  });
+});
+
+describe("the asynchronous queue and replay limits the server configured", () => {
+  function heartbeats(count: number): string[] {
+    return Array.from({ length: count }, (_, index) =>
+      envelope(position(4n, 41n + BigInt(index)), Object.freeze({ kind: "heartbeat" })),
+    );
+  }
+
+  it("applies a 2,000-event replay, past the old 1,024-event and 64-event bounds", () => {
+    const { subscription } = fixture();
+    expect(subscription.receiveReplay(heartbeats(2_000))).toEqual({
+      applied: 2_000,
+      through: position(4n, 2_040n),
+    });
+  });
+
+  it("refuses a replay over the configured count and names the key", () => {
+    const breaches: LiveLimitBreach[] = [];
+    const subscription = new AsyncSubscription(
+      authorized(),
+      { dispatch: () => "observed" },
+      { now: () => 1_000 },
+      undefined,
+      undefined,
+      undefined,
+      new AsyncDocumentQueueBudget(100, 10, (breach) => breaches.push(breach)),
+    );
+    expect(() => subscription.receiveReplay(heartbeats(11))).toThrow(
+      "Raise LIVE_ASYNC_MAX_REPLAY_EVENTS",
+    );
+    expect(breaches.map(({ message }) => message)).toEqual([
+      "Suprnova Live async replay event count limit exceeded: measured 11 events, configured " +
+        "10 events. Raise LIVE_ASYNC_MAX_REPLAY_EVENTS in the application's .env file to allow it.",
+    ]);
+    expect(subscription.receiveReplay(heartbeats(10))).toEqual({
+      applied: 10,
+      through: position(4n, 50n),
+    });
+  });
+
+  it("queues past 64 events and refuses past the configured depth, naming the key", () => {
+    const breaches: LiveLimitBreach[] = [];
+    const budget = new AsyncDocumentQueueBudget(100, 100, (breach) => breaches.push(breach));
+    expect(budget.reserve(65, 1)).toBe(true);
+    expect(budget.reserve(36, 1)).toBe(false);
+    expect(breaches.map(({ key }) => key)).toEqual(["LIVE_ASYNC_MAX_QUEUED_EVENTS"]);
+    expect(breaches[0]?.message).toContain("measured 101 events, configured 100 events");
+    expect(() => new AsyncDocumentQueueBudget(10, 11)).toThrow(
+      "async_document_queue_limits_invalid",
+    );
   });
 });

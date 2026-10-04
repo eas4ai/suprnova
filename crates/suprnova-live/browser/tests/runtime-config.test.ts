@@ -12,6 +12,8 @@ import type { BootstrapOptions } from "../src/runtime/types.js";
 
 const VALID_CONFIG = {
   asset_identity: "runtime-test-v1",
+  async_max_queued_events: 4_096,
+  async_max_replay_events: 4_096,
   credentials: "same-origin",
   endpoint: "/_suprnova/live",
   max_html_bytes: 1_048_576,
@@ -19,6 +21,7 @@ const VALID_CONFIG = {
   max_json_entries: 1_000_000,
   max_parallel_per_island: 1,
   max_queued_per_island: 16,
+  max_redirect_bytes: 65_536,
   max_request_bytes: 16_777_216,
   max_request_items: 65_536,
   max_response_bytes: 1_048_576,
@@ -32,6 +35,11 @@ const VALID_CONFIG = {
   protocol: { maximum: 2, minimum: 1 },
   request_timeout_ms: 15_000,
   runtime_contract_version: 1,
+  upload_chunk_bytes: 8_388_608,
+  upload_max_active: 8,
+  upload_max_file_bytes: 1_073_741_824,
+  upload_max_pending_bytes: 4_294_967_296,
+  upload_max_pending_files: 1_024,
 };
 
 interface FakeConfigElement {
@@ -135,6 +143,21 @@ describe("bounded runtime configuration", () => {
       [encoded({ morph_max_attributes: 10, morph_max_attributes_per_element: 11 })],
       "config_limit",
     );
+    // The pairs the server nests stay nested: a replay is queued whole, a
+    // chunk is part of one file, a file is part of the pending bytes, and a
+    // redirect URL travels inside the response.
+    expectConfigFailure(
+      [encoded({ async_max_queued_events: 10, async_max_replay_events: 11 })],
+      "config_limit",
+    );
+    expectConfigFailure(
+      [encoded({ upload_chunk_bytes: 2_048, upload_max_file_bytes: 1_024 })],
+      "config_limit",
+    );
+    expectConfigFailure([encoded({ upload_max_pending_bytes: 1_024 })], "config_limit");
+    expectConfigFailure([encoded({ upload_max_active: 2_000 })], "config_limit");
+    expectConfigFailure([encoded({ max_redirect_bytes: 2_097_152 })], "config_limit");
+    expectConfigFailure([encoded({ upload_chunk_bytes: 0 })], "config_limit");
     expectConfigFailure([encoded({ runtime_contract_version: 2 })], "config_version");
     expectConfigFailure([encoded({ protocol: { minimum: 2, maximum: 1 } })], "config_protocol");
     expectConfigFailure([encoded({ credentials: "omit" })], "config_credentials");

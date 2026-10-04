@@ -102,9 +102,9 @@ function integrity(value) {
   return `sha256-${sha256(value)}`;
 }
 
-const externalModuleIntegrity = "sha256-FKhuAOCxkzbJ6s/XZzKeTheNi4IUy2nNxuho1BYguk4=";
+const externalModuleIntegrity = "sha256-N9ZgKTd35LHVDEXRifU9iDqM9mvAn0SO6ATKLd7EYAc=";
 const externalClassicBootIntegrity = "sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=";
-const externalClassicRuntimeIntegrity = "sha256-VR5c4C0I6tRgnMG3bfpL5d0RbpAqnfeitzTooglGjgY=";
+const externalClassicRuntimeIntegrity = "sha256-SQ4PmWTLMRTx87AMu9PGcvoQrVyrN575KxYZYfJnfDY=";
 
 function requireReviewedIntegrity(value, expected, name) {
   if (integrity(value) !== expected) throw new Error(`${name}_integrity_drift`);
@@ -119,7 +119,7 @@ function externalModuleScript(variant = "plain") {
   }
   if (variant === "integrity") {
     requireReviewedIntegrity(externalModuleBootSource, externalModuleIntegrity, "module_boot");
-    return '<script type="module" src="/test-boot/module.js" integrity="sha256-FKhuAOCxkzbJ6s/XZzKeTheNi4IUy2nNxuho1BYguk4=" crossorigin="anonymous"></script>';
+    return '<script type="module" src="/test-boot/module.js" integrity="sha256-N9ZgKTd35LHVDEXRifU9iDqM9mvAn0SO6ATKLd7EYAc=" crossorigin="anonymous"></script>';
   }
   throw new Error("unsupported_external_module_script_variant");
 }
@@ -156,7 +156,7 @@ function hashOnlyClassicDocument() {
   requireReviewedIntegrity(externalClassicBootSource, externalClassicBootIntegrity, "classic_boot");
   return document(
     island(),
-    '<script src="/assets/suprnova-live.classic.js" integrity="sha256-VR5c4C0I6tRgnMG3bfpL5d0RbpAqnfeitzTooglGjgY=" crossorigin="anonymous"></script><script src="/test-boot/classic.js" integrity="sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=" crossorigin="anonymous"></script>',
+    '<script src="/assets/suprnova-live.classic.js" integrity="sha256-SQ4PmWTLMRTx87AMu9PGcvoQrVyrN575KxYZYfJnfDY=" crossorigin="anonymous"></script><script src="/test-boot/classic.js" integrity="sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=" crossorigin="anonymous"></script>',
   );
 }
 
@@ -304,9 +304,12 @@ export function stimulusChild() {
 // The page limits the framework server writes into the configuration element,
 // at its defaults (framework/src/live/config.rs).
 export const SERVER_DEFAULT_LIMIT_CONFIG = Object.freeze({
+  async_max_queued_events: 4_096,
+  async_max_replay_events: 4_096,
   max_html_bytes: 16_777_216,
   max_json_depth: 32,
   max_json_entries: 1_000_000,
+  max_redirect_bytes: 65_536,
   max_request_bytes: 16_777_216,
   max_request_items: 65_536,
   max_response_bytes: 16_777_216,
@@ -317,6 +320,11 @@ export const SERVER_DEFAULT_LIMIT_CONFIG = Object.freeze({
   morph_max_depth: 512,
   morph_max_keys: 1_000_000,
   morph_max_nodes: 1_000_000,
+  upload_chunk_bytes: 8_388_608,
+  upload_max_active: 8,
+  upload_max_file_bytes: 1_073_741_824,
+  upload_max_pending_bytes: 4_294_967_296,
+  upload_max_pending_files: 1_024,
 });
 
 function config(overrides = {}) {
@@ -892,7 +900,6 @@ function uploadsBoot() {
       chunkBytes: 256 * 1024,
       maxActive: 1,
       maxItems: 8,
-      maxQueueBytes: 256 * 1024,
       randomness: {
         next: 0,
         idempotencyKey() {

@@ -2,6 +2,7 @@ import type { JsonValue } from "../canonical.js";
 import type { AuthorizedLogicalSubscription, SubscriptionState } from "../async-updates/types.js";
 import { MAX_PRESENT_DIRECTIVES } from "../directives/parser.js";
 import type { IslandExtensionIdentity } from "../extensions/registry.js";
+import type { LiveLimitBreach, LiveLimits } from "../limits.js";
 import { ISLAND_ROOT_SELECTOR } from "../islands/metadata.js";
 import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
 import type { CoreResourceKind, Disposable } from "../lifecycle/resources.js";
@@ -59,6 +60,12 @@ export interface RuntimeFeatureDirectiveOwnership {
 
 export interface RuntimeFeatureDocumentContext {
   diagnose(detail: RuntimeFeatureDiagnosticDetail): void;
+  /// The server's configured limits for this page, from the configuration
+  /// element. A feature reads its own limits here rather than holding any.
+  readonly limits?: LiveLimits | undefined;
+  /// Reports a configured limit the feature refused something for, so the
+  /// developer reads which key to raise.
+  limit?(breach: LiveLimitBreach): void;
   onDispose(dispose: () => void): void;
   trackResource?(kind: CoreResourceKind, dispose: () => void): Disposable;
 }
@@ -450,10 +457,19 @@ function defineFeature(
       connected = true;
       const port = value;
       const track = port.trackResource?.bind(port);
+      const limit = port.limit?.bind(port);
       const context: RuntimeFeatureDocumentContext = Object.freeze({
         diagnose: (detail: RuntimeFeatureDiagnosticDetail) => {
           port.diagnose(detail);
         },
+        ...(port.limits === undefined ? {} : { limits: port.limits }),
+        ...(limit === undefined
+          ? {}
+          : {
+              limit: (breach: LiveLimitBreach) => {
+                limit(breach);
+              },
+            }),
         onDispose: (dispose: VoidFunction) => {
           own(documentDisposers, dispose);
         },
@@ -767,8 +783,17 @@ export function createOptionalFeatureDriver(): OptionalFeatureDriver {
     if (state !== 1 || (started & bit) !== 0 || documentPort === null) return;
     started |= bit;
     const track = documentPort.trackResource?.bind(documentPort);
+    const limit = documentPort.limit?.bind(documentPort);
     const context: RuntimeFeatureDocumentContext = Object.freeze({
       diagnose: report,
+      ...(documentPort.limits === undefined ? {} : { limits: documentPort.limits }),
+      ...(limit === undefined
+        ? {}
+        : {
+            limit: (breach: LiveLimitBreach) => {
+              limit(breach);
+            },
+          }),
       onDispose(dispose: VoidFunction) {
         if (typeof dispose !== "function") report("operation_rejected");
       },

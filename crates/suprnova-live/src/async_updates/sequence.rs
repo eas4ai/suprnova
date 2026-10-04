@@ -10,8 +10,11 @@ use super::{
     StreamName, StreamPosition, SubscriptionId,
 };
 
-/// Maximum number of validated envelopes accepted as one replay transcript.
-pub const MAX_REPLAY_TRANSCRIPT_ENVELOPES: usize = 1_024;
+/// Ceiling on the validated envelopes one replay transcript may be configured
+/// to carry. The configured count (`LIVE_ASYNC_MAX_REPLAY_EVENTS`, 4,096 by
+/// default in the framework) applies first; a replay is queued whole, so it
+/// never exceeds the document queue's depth either.
+pub const MAX_REPLAY_TRANSCRIPT_ENVELOPES: usize = 65_536;
 
 /// Whether the current logical subscription may apply ordered payloads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

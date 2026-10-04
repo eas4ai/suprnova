@@ -136,6 +136,64 @@ pub struct LiveConfig {
     morph: LiveMorphLimits,
     async_max_payload_bytes: usize,
     async_max_buffer_bytes: usize,
+    async_max_queued_events: usize,
+    async_max_replay_events: usize,
+    max_redirect_bytes: usize,
+    upload: LiveUploadLimits,
+}
+
+/// The limits on file uploads, which the server enforces and the browser
+/// reads from the configuration element.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LiveUploadLimits {
+    chunk_bytes: usize,
+    max_active: usize,
+    max_file_bytes: u64,
+    max_pending_files: usize,
+    max_pending_bytes: u64,
+    max_storage_bytes: u64,
+}
+
+impl LiveUploadLimits {
+    /// Bytes in one chunk request (`LIVE_UPLOAD_CHUNK_BYTES`). The server
+    /// holds a chunk in memory while it checks and stores it.
+    #[must_use]
+    pub const fn chunk_bytes(self) -> usize {
+        self.chunk_bytes
+    }
+
+    /// Transfers running at once (`LIVE_UPLOAD_MAX_ACTIVE`).
+    #[must_use]
+    pub const fn max_active(self) -> usize {
+        self.max_active
+    }
+
+    /// Bytes in one uploaded file (`LIVE_UPLOAD_MAX_FILE_BYTES`).
+    #[must_use]
+    pub const fn max_file_bytes(self) -> u64 {
+        self.max_file_bytes
+    }
+
+    /// Files one visitor may have selected and not yet finished
+    /// (`LIVE_UPLOAD_MAX_PENDING_FILES`).
+    #[must_use]
+    pub const fn max_pending_files(self) -> usize {
+        self.max_pending_files
+    }
+
+    /// Bytes across one visitor's unfinished files
+    /// (`LIVE_UPLOAD_MAX_PENDING_BYTES`).
+    #[must_use]
+    pub const fn max_pending_bytes(self) -> u64 {
+        self.max_pending_bytes
+    }
+
+    /// Bytes the temporary upload store may hold across every visitor
+    /// (`LIVE_UPLOAD_MAX_STORAGE_BYTES`).
+    #[must_use]
+    pub const fn max_storage_bytes(self) -> u64 {
+        self.max_storage_bytes
+    }
 }
 
 /// The browser morph's limits on one rendered island.
@@ -254,6 +312,45 @@ const DEFAULT_ASYNC_MAX_PAYLOAD_BYTES: usize = MIB;
 const DEFAULT_ASYNC_MAX_BUFFER_BYTES: usize = 16 * MIB;
 const HARD_MAX_ASYNC_PAYLOAD_BYTES: usize = suprnova_live::async_updates::MAX_ASYNC_PAYLOAD_BYTES;
 const HARD_MAX_ASYNC_BUFFER_BYTES: usize = suprnova_live::async_updates::MAX_ASYNC_BUFFER_BYTES;
+/// Events one open document may hold before its browser applies them, and
+/// events one reconnect replay may carry. Each queued event is server memory
+/// already bounded in bytes by `LIVE_ASYNC_MAX_BUFFER_BYTES`; the count bounds
+/// the per-event bookkeeping, and the engine's ceiling is its own.
+const DEFAULT_ASYNC_MAX_QUEUED_EVENTS: usize = 4_096;
+const DEFAULT_ASYNC_MAX_REPLAY_EVENTS: usize = 4_096;
+const HARD_MAX_ASYNC_EVENTS: usize = suprnova_live::async_updates::MAX_ASYNC_BUFFER_EVENTS;
+/// One redirect or history URL a Live response carries. Browsers refuse a
+/// URL past 2 MiB, so a longer one could never be followed.
+const DEFAULT_MAX_REDIRECT_BYTES: usize = 64 * 1024;
+const HARD_MAX_REDIRECT_BYTES: usize = 2 * MIB;
+/// Upload limits. A file is stored in chunks, each held in server memory
+/// while it is checked, so the chunk size and the transfers running at once
+/// bound that memory; the file and pending sizes bound disk.
+const GIB: u64 = 1024 * 1024 * 1024;
+const TIB: u64 = 1024 * GIB;
+const DEFAULT_UPLOAD_CHUNK_BYTES: usize = 8 * MIB;
+const HARD_MAX_UPLOAD_CHUNK_BYTES: usize = 64 * MIB;
+const DEFAULT_UPLOAD_MAX_ACTIVE: usize = 8;
+const HARD_MAX_UPLOAD_ACTIVE: usize = 1_024;
+/// Chunk bytes times transfers running at once: the chunk memory one process
+/// may hold for uploads.
+const HARD_MAX_UPLOAD_IN_FLIGHT_BYTES: u64 = GIB;
+const DEFAULT_UPLOAD_MAX_FILE_BYTES: u64 = GIB;
+const HARD_MAX_UPLOAD_FILE_BYTES: u64 = TIB;
+const DEFAULT_UPLOAD_MAX_PENDING_FILES: usize = 1_024;
+const HARD_MAX_UPLOAD_PENDING_FILES: usize = 100_000;
+const DEFAULT_UPLOAD_MAX_PENDING_BYTES: u64 = 4 * GIB;
+const HARD_MAX_UPLOAD_PENDING_BYTES: u64 = 16 * TIB;
+const DEFAULT_UPLOAD_MAX_STORAGE_BYTES: u64 = 16 * GIB;
+const HARD_MAX_UPLOAD_STORAGE_BYTES: u64 = 64 * TIB;
+/// The chunks one file may take: the engine retains a record per chunk and
+/// a retry outcome per chunk plus six, under its ceiling of 100,000.
+const HARD_MAX_UPLOAD_CHUNKS_PER_FILE: u64 = 99_994;
+/// The chunk records retained per file when the file size does not need
+/// more; the engine's reference profile.
+const MIN_UPLOAD_CHUNKS_PER_FILE: u64 = 4_096;
+/// What one chunk copies besides its own bytes while it is buffered.
+const UPLOAD_CHUNK_COPY_BYTES: u64 = 64 * 1024;
 
 /// A configured Live limit that a request, response, render or event went
 /// over, with everything a developer needs to change it: the limit, the
@@ -324,6 +421,45 @@ impl LiveLimitExceeded {
         )
     }
 
+    /// One redirect or history URL over `LIVE_MAX_REDIRECT_BYTES`.
+    #[must_use]
+    pub const fn redirect_bytes(measured: u64, configured: u64) -> Self {
+        Self::new(
+            "redirect URL size",
+            "LIVE_MAX_REDIRECT_BYTES",
+            "bytes",
+            measured,
+            configured,
+            false,
+        )
+    }
+
+    /// One uploaded file over `LIVE_UPLOAD_MAX_FILE_BYTES`.
+    #[must_use]
+    pub const fn upload_file_bytes(measured: u64, configured: u64) -> Self {
+        Self::new(
+            "upload file size",
+            "LIVE_UPLOAD_MAX_FILE_BYTES",
+            "bytes",
+            measured,
+            configured,
+            false,
+        )
+    }
+
+    /// One upload chunk over `LIVE_UPLOAD_CHUNK_BYTES`.
+    #[must_use]
+    pub const fn upload_chunk_bytes(measured: u64, configured: u64, at_least: bool) -> Self {
+        Self::new(
+            "upload chunk size",
+            "LIVE_UPLOAD_CHUNK_BYTES",
+            "bytes",
+            measured,
+            configured,
+            at_least,
+        )
+    }
+
     const fn new(
         label: &'static str,
         key: &'static str,
@@ -386,28 +522,161 @@ impl fmt::Display for LiveLimitExceeded {
 
 impl Error for LiveLimitExceeded {}
 
-/// Every `LIVE_*` limit key and the unit its value is counted in, in the
-/// order the manual lists them.
-pub(crate) const LIVE_LIMIT_KEYS: &[(&str, &str)] = &[
-    ("LIVE_MAX_REQUEST_BYTES", "bytes"),
-    ("LIVE_MAX_RESPONSE_BYTES", "bytes"),
-    ("LIVE_MAX_HTML_BYTES", "bytes"),
-    ("LIVE_MAX_JSON_DEPTH", "levels"),
-    ("LIVE_MAX_JSON_ENTRIES", "entries"),
-    ("LIVE_MAX_REQUEST_ITEMS", "items"),
-    ("LIVE_MAX_RESPONSE_ITEMS", "items"),
-    ("LIVE_MAX_CONTEXT_LIFETIME_MS", "ms"),
-    ("LIVE_REQUEST_TIMEOUT_MS", "ms"),
-    ("LIVE_MAX_QUEUED_PER_ISLAND", "requests"),
-    ("LIVE_MAX_PARALLEL_PER_ISLAND", "requests"),
-    ("LIVE_MORPH_MAX_NODES", "nodes"),
-    ("LIVE_MORPH_MAX_DEPTH", "levels"),
-    ("LIVE_MORPH_MAX_KEYS", "keyed elements"),
-    ("LIVE_MORPH_MAX_ATTRIBUTES", "attributes"),
-    ("LIVE_MORPH_MAX_ATTRIBUTES_PER_ELEMENT", "attributes"),
-    ("LIVE_MORPH_DEADLINE_MS", "ms"),
-    ("LIVE_ASYNC_MAX_PAYLOAD_BYTES", "bytes"),
-    ("LIVE_ASYNC_MAX_BUFFER_BYTES", "bytes"),
+/// One `LIVE_*` limit key: its name, the unit its value is counted in, and
+/// how to read its value from a built configuration.
+pub(crate) struct LiveLimitKey {
+    /// The `.env` key, such as `LIVE_MAX_HTML_BYTES`.
+    pub(crate) key: &'static str,
+    /// The unit its value is counted in, such as `bytes`.
+    pub(crate) unit: &'static str,
+    /// Reads its value from a built configuration.
+    pub(crate) value: fn(LiveConfig) -> u64,
+}
+
+/// Every `LIVE_*` limit key, in the order the manual lists them. The tooling
+/// report and the manual check both walk this table, so a key added here is
+/// reported and must be documented.
+pub(crate) const LIVE_LIMIT_KEYS: &[LiveLimitKey] = &[
+    LiveLimitKey {
+        key: "LIVE_MAX_REQUEST_BYTES",
+        unit: "bytes",
+        value: |config| config.max_request_bytes as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_MAX_RESPONSE_BYTES",
+        unit: "bytes",
+        value: |config| config.max_response_bytes as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_MAX_HTML_BYTES",
+        unit: "bytes",
+        value: |config| config.max_html_bytes as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_MAX_JSON_DEPTH",
+        unit: "levels",
+        value: |config| config.max_json_depth as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_MAX_JSON_ENTRIES",
+        unit: "entries",
+        value: |config| config.max_json_entries as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_MAX_REQUEST_ITEMS",
+        unit: "items",
+        value: |config| config.max_request_items as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_MAX_RESPONSE_ITEMS",
+        unit: "items",
+        value: |config| config.max_response_items as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_MAX_CONTEXT_LIFETIME_MS",
+        unit: "ms",
+        value: |config| config.max_context_lifetime_ms,
+    },
+    LiveLimitKey {
+        key: "LIVE_REQUEST_TIMEOUT_MS",
+        unit: "ms",
+        value: |config| u64::from(config.request_timeout_ms),
+    },
+    LiveLimitKey {
+        key: "LIVE_MAX_QUEUED_PER_ISLAND",
+        unit: "requests",
+        value: |config| u64::from(config.max_queued_per_island),
+    },
+    LiveLimitKey {
+        key: "LIVE_MAX_PARALLEL_PER_ISLAND",
+        unit: "requests",
+        value: |config| u64::from(config.max_parallel_per_island),
+    },
+    LiveLimitKey {
+        key: "LIVE_MORPH_MAX_NODES",
+        unit: "nodes",
+        value: |config| u64::from(config.morph.max_nodes),
+    },
+    LiveLimitKey {
+        key: "LIVE_MORPH_MAX_DEPTH",
+        unit: "levels",
+        value: |config| u64::from(config.morph.max_depth),
+    },
+    LiveLimitKey {
+        key: "LIVE_MORPH_MAX_KEYS",
+        unit: "keyed elements",
+        value: |config| u64::from(config.morph.max_keys),
+    },
+    LiveLimitKey {
+        key: "LIVE_MORPH_MAX_ATTRIBUTES",
+        unit: "attributes",
+        value: |config| u64::from(config.morph.max_attributes),
+    },
+    LiveLimitKey {
+        key: "LIVE_MORPH_MAX_ATTRIBUTES_PER_ELEMENT",
+        unit: "attributes",
+        value: |config| u64::from(config.morph.max_attributes_per_element),
+    },
+    LiveLimitKey {
+        key: "LIVE_MORPH_DEADLINE_MS",
+        unit: "ms",
+        value: |config| u64::from(config.morph.deadline_ms),
+    },
+    LiveLimitKey {
+        key: "LIVE_ASYNC_MAX_PAYLOAD_BYTES",
+        unit: "bytes",
+        value: |config| config.async_max_payload_bytes as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_ASYNC_MAX_BUFFER_BYTES",
+        unit: "bytes",
+        value: |config| config.async_max_buffer_bytes as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_ASYNC_MAX_QUEUED_EVENTS",
+        unit: "events",
+        value: |config| config.async_max_queued_events as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_ASYNC_MAX_REPLAY_EVENTS",
+        unit: "events",
+        value: |config| config.async_max_replay_events as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_MAX_REDIRECT_BYTES",
+        unit: "bytes",
+        value: |config| config.max_redirect_bytes as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_UPLOAD_CHUNK_BYTES",
+        unit: "bytes",
+        value: |config| config.upload.chunk_bytes as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_UPLOAD_MAX_ACTIVE",
+        unit: "transfers",
+        value: |config| config.upload.max_active as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_UPLOAD_MAX_FILE_BYTES",
+        unit: "bytes",
+        value: |config| config.upload.max_file_bytes,
+    },
+    LiveLimitKey {
+        key: "LIVE_UPLOAD_MAX_PENDING_FILES",
+        unit: "files",
+        value: |config| config.upload.max_pending_files as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_UPLOAD_MAX_PENDING_BYTES",
+        unit: "bytes",
+        value: |config| config.upload.max_pending_bytes,
+    },
+    LiveLimitKey {
+        key: "LIVE_UPLOAD_MAX_STORAGE_BYTES",
+        unit: "bytes",
+        value: |config| config.upload.max_storage_bytes,
+    },
 ];
 
 impl LiveConfig {
@@ -442,6 +711,17 @@ impl LiveConfig {
             },
             async_max_payload_bytes: DEFAULT_ASYNC_MAX_PAYLOAD_BYTES,
             async_max_buffer_bytes: DEFAULT_ASYNC_MAX_BUFFER_BYTES,
+            async_max_queued_events: DEFAULT_ASYNC_MAX_QUEUED_EVENTS,
+            async_max_replay_events: DEFAULT_ASYNC_MAX_REPLAY_EVENTS,
+            max_redirect_bytes: DEFAULT_MAX_REDIRECT_BYTES,
+            upload: LiveUploadLimits {
+                chunk_bytes: DEFAULT_UPLOAD_CHUNK_BYTES,
+                max_active: DEFAULT_UPLOAD_MAX_ACTIVE,
+                max_file_bytes: DEFAULT_UPLOAD_MAX_FILE_BYTES,
+                max_pending_files: DEFAULT_UPLOAD_MAX_PENDING_FILES,
+                max_pending_bytes: DEFAULT_UPLOAD_MAX_PENDING_BYTES,
+                max_storage_bytes: DEFAULT_UPLOAD_MAX_STORAGE_BYTES,
+            },
         }
     }
 
@@ -574,6 +854,75 @@ impl LiveConfig {
     pub const fn async_max_buffer_bytes(self) -> usize {
         self.async_max_buffer_bytes
     }
+
+    /// Asynchronous events one open document may hold before its browser
+    /// applies them (`LIVE_ASYNC_MAX_QUEUED_EVENTS`).
+    #[must_use]
+    pub const fn async_max_queued_events(self) -> usize {
+        self.async_max_queued_events
+    }
+
+    /// Events one reconnect replay may carry (`LIVE_ASYNC_MAX_REPLAY_EVENTS`).
+    /// A replay is queued whole, so it fits inside the queued-event limit.
+    #[must_use]
+    pub const fn async_max_replay_events(self) -> usize {
+        self.async_max_replay_events
+    }
+
+    /// One redirect or history URL a response carries
+    /// (`LIVE_MAX_REDIRECT_BYTES`).
+    #[must_use]
+    pub const fn max_redirect_bytes(self) -> usize {
+        self.max_redirect_bytes
+    }
+
+    /// The upload limits.
+    #[must_use]
+    pub const fn upload(self) -> LiveUploadLimits {
+        self.upload
+    }
+
+    /// Every configured limit as its `.env` key, unit and value, in the order
+    /// the manual lists them; `live:inspect` reports exactly these.
+    pub(crate) fn limit_values(self) -> Vec<(&'static str, &'static str, u64)> {
+        LIVE_LIMIT_KEYS
+            .iter()
+            .map(|limit| (limit.key, limit.unit, (limit.value)(self)))
+            .collect()
+    }
+
+    /// The engine's upload profile under these limits. Every value the
+    /// configuration does not name stays at the engine's reference profile.
+    pub(crate) fn engine_upload_limits(
+        self,
+    ) -> Result<suprnova_live::limits::UploadLimits, FrameworkError> {
+        let upload = self.upload;
+        let chunk = upload.chunk_bytes as u64;
+        let chunks_per_file = upload
+            .max_file_bytes
+            .div_ceil(chunk)
+            .max(MIN_UPLOAD_CHUNKS_PER_FILE);
+        let in_flight = (chunk + UPLOAD_CHUNK_COPY_BYTES)
+            .saturating_mul(upload.max_active as u64)
+            .min(HARD_MAX_UPLOAD_IN_FLIGHT_BYTES);
+        let rejected = || FrameworkError::internal("Live upload limits were rejected");
+        let config = suprnova_live::limits::UploadLimitConfig {
+            max_files_per_field: upload.max_pending_files,
+            max_pending_per_scope: upload.max_pending_files,
+            max_file_bytes: upload.max_file_bytes,
+            max_aggregate_bytes: upload.max_pending_bytes,
+            max_chunk_bytes: upload.chunk_bytes,
+            max_chunks_per_file: usize::try_from(chunks_per_file).map_err(|_| rejected())?,
+            max_in_flight_bytes: usize::try_from(in_flight).map_err(|_| rejected())?,
+            max_concurrent_transfers: upload.max_active,
+            max_creations_per_window: upload.max_pending_files,
+            max_storage_bytes: upload.max_storage_bytes,
+            max_idempotency_outcomes: usize::try_from(chunks_per_file + 6)
+                .map_err(|_| rejected())?,
+            ..suprnova_live::limits::UploadLimitConfig::reference()
+        };
+        suprnova_live::limits::UploadLimits::new(config).map_err(|_| rejected())
+    }
 }
 
 impl Default for LiveConfig {
@@ -585,11 +934,14 @@ impl Default for LiveConfig {
 /// Startup-only builder for [`LiveConfig`].
 ///
 /// A setting left unset follows the setting it must fit inside: the response
-/// limit follows the request limit down, the island HTML limit follows the
-/// response limit, the per-element attribute limit follows the island-wide
-/// one, and the asynchronous payload limit follows the queue limit. Setting
-/// only `max_request_bytes(256 * 1024)` therefore lowers all three byte
-/// limits together instead of failing.
+/// limit follows the request limit down, the island HTML and redirect limits
+/// follow the response limit, the per-element attribute limit follows the
+/// island-wide one, the asynchronous payload limit follows the queue bytes,
+/// the replay count follows the queue depth, and the upload chunk follows the
+/// file size. The upload pending files, pending bytes and store size follow
+/// up instead, to the limits they must hold. Setting only
+/// `max_request_bytes(256 * 1024)` therefore lowers all three byte limits
+/// together instead of failing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LiveConfigBuilder {
     max_request_bytes: usize,
@@ -611,6 +963,15 @@ pub struct LiveConfigBuilder {
     morph_deadline_ms: u32,
     async_max_payload_bytes: Option<usize>,
     async_max_buffer_bytes: usize,
+    async_max_queued_events: usize,
+    async_max_replay_events: Option<usize>,
+    max_redirect_bytes: Option<usize>,
+    upload_chunk_bytes: Option<usize>,
+    upload_max_active: usize,
+    upload_max_file_bytes: u64,
+    upload_max_pending_files: Option<usize>,
+    upload_max_pending_bytes: Option<u64>,
+    upload_max_storage_bytes: Option<u64>,
 }
 
 impl LiveConfigBuilder {
@@ -637,6 +998,15 @@ impl LiveConfigBuilder {
             morph_deadline_ms: DEFAULT_MORPH_DEADLINE_MS,
             async_max_payload_bytes: None,
             async_max_buffer_bytes: DEFAULT_ASYNC_MAX_BUFFER_BYTES,
+            async_max_queued_events: DEFAULT_ASYNC_MAX_QUEUED_EVENTS,
+            async_max_replay_events: None,
+            max_redirect_bytes: None,
+            upload_chunk_bytes: None,
+            upload_max_active: DEFAULT_UPLOAD_MAX_ACTIVE,
+            upload_max_file_bytes: DEFAULT_UPLOAD_MAX_FILE_BYTES,
+            upload_max_pending_files: None,
+            upload_max_pending_bytes: None,
+            upload_max_storage_bytes: None,
         }
     }
 
@@ -659,8 +1029,8 @@ impl LiveConfigBuilder {
             raw.trim().parse::<u64>().map(Some).map_err(|_| {
                 let unit = LIVE_LIMIT_KEYS
                     .iter()
-                    .find(|(name, _)| *name == key)
-                    .map_or("units", |(_, unit)| *unit);
+                    .find(|limit| limit.key == key)
+                    .map_or("units", |limit| limit.unit);
                 FrameworkError::internal(format!(
                     "Live configuration rejected: {key}={} is not a whole number of {unit}. \
                      Set it to a plain integer, such as {key}=16777216, in the application's \
@@ -731,6 +1101,33 @@ impl LiveConfigBuilder {
         }
         if let Some(value) = number("LIVE_ASYNC_MAX_BUFFER_BYTES")? {
             builder.async_max_buffer_bytes = bytes(value);
+        }
+        if let Some(value) = number("LIVE_ASYNC_MAX_QUEUED_EVENTS")? {
+            builder.async_max_queued_events = bytes(value);
+        }
+        if let Some(value) = number("LIVE_ASYNC_MAX_REPLAY_EVENTS")? {
+            builder.async_max_replay_events = Some(bytes(value));
+        }
+        if let Some(value) = number("LIVE_MAX_REDIRECT_BYTES")? {
+            builder.max_redirect_bytes = Some(bytes(value));
+        }
+        if let Some(value) = number("LIVE_UPLOAD_CHUNK_BYTES")? {
+            builder.upload_chunk_bytes = Some(bytes(value));
+        }
+        if let Some(value) = number("LIVE_UPLOAD_MAX_ACTIVE")? {
+            builder.upload_max_active = bytes(value);
+        }
+        if let Some(value) = number("LIVE_UPLOAD_MAX_FILE_BYTES")? {
+            builder.upload_max_file_bytes = value;
+        }
+        if let Some(value) = number("LIVE_UPLOAD_MAX_PENDING_FILES")? {
+            builder.upload_max_pending_files = Some(bytes(value));
+        }
+        if let Some(value) = number("LIVE_UPLOAD_MAX_PENDING_BYTES")? {
+            builder.upload_max_pending_bytes = Some(value);
+        }
+        if let Some(value) = number("LIVE_UPLOAD_MAX_STORAGE_BYTES")? {
+            builder.upload_max_storage_bytes = Some(value);
         }
         Ok(builder)
     }
@@ -870,6 +1267,73 @@ impl LiveConfigBuilder {
     #[must_use]
     pub const fn async_max_buffer_bytes(mut self, max: usize) -> Self {
         self.async_max_buffer_bytes = max;
+        self
+    }
+
+    /// Sets the per-document asynchronous queue depth
+    /// (`LIVE_ASYNC_MAX_QUEUED_EVENTS`).
+    #[must_use]
+    pub const fn async_max_queued_events(mut self, max: usize) -> Self {
+        self.async_max_queued_events = max;
+        self
+    }
+
+    /// Sets the events one reconnect replay may carry
+    /// (`LIVE_ASYNC_MAX_REPLAY_EVENTS`).
+    #[must_use]
+    pub const fn async_max_replay_events(mut self, max: usize) -> Self {
+        self.async_max_replay_events = Some(max);
+        self
+    }
+
+    /// Sets the redirect URL limit (`LIVE_MAX_REDIRECT_BYTES`).
+    #[must_use]
+    pub const fn max_redirect_bytes(mut self, max: usize) -> Self {
+        self.max_redirect_bytes = Some(max);
+        self
+    }
+
+    /// Sets the upload chunk size (`LIVE_UPLOAD_CHUNK_BYTES`).
+    #[must_use]
+    pub const fn upload_chunk_bytes(mut self, bytes: usize) -> Self {
+        self.upload_chunk_bytes = Some(bytes);
+        self
+    }
+
+    /// Sets the upload transfers running at once (`LIVE_UPLOAD_MAX_ACTIVE`).
+    #[must_use]
+    pub const fn upload_max_active(mut self, max: usize) -> Self {
+        self.upload_max_active = max;
+        self
+    }
+
+    /// Sets the upload file size limit (`LIVE_UPLOAD_MAX_FILE_BYTES`).
+    #[must_use]
+    pub const fn upload_max_file_bytes(mut self, max: u64) -> Self {
+        self.upload_max_file_bytes = max;
+        self
+    }
+
+    /// Sets the unfinished files one visitor may hold
+    /// (`LIVE_UPLOAD_MAX_PENDING_FILES`).
+    #[must_use]
+    pub const fn upload_max_pending_files(mut self, max: usize) -> Self {
+        self.upload_max_pending_files = Some(max);
+        self
+    }
+
+    /// Sets the bytes across one visitor's unfinished files
+    /// (`LIVE_UPLOAD_MAX_PENDING_BYTES`).
+    #[must_use]
+    pub const fn upload_max_pending_bytes(mut self, max: u64) -> Self {
+        self.upload_max_pending_bytes = Some(max);
+        self
+    }
+
+    /// Sets the temporary upload store's size (`LIVE_UPLOAD_MAX_STORAGE_BYTES`).
+    #[must_use]
+    pub const fn upload_max_storage_bytes(mut self, max: u64) -> Self {
+        self.upload_max_storage_bytes = Some(max);
         self
     }
 
@@ -1013,6 +1477,33 @@ impl LiveConfigBuilder {
             "must be from 1 byte to 16777216 bytes and at most LIVE_ASYNC_MAX_BUFFER_BYTES: a \
              payload is queued whole",
         )?;
+        let queued = self.async_max_queued_events;
+        check(
+            (1..=HARD_MAX_ASYNC_EVENTS).contains(&queued),
+            Kind::InvalidAsyncLimits,
+            "LIVE_ASYNC_MAX_QUEUED_EVENTS",
+            "must be from 1 to 65536 events, the engine's ceiling on one document's queue",
+        )?;
+        let replay = self
+            .async_max_replay_events
+            .unwrap_or(DEFAULT_ASYNC_MAX_REPLAY_EVENTS.min(queued));
+        check(
+            replay >= 1 && replay <= queued,
+            Kind::InvalidAsyncLimits,
+            "LIVE_ASYNC_MAX_REPLAY_EVENTS",
+            "must be from 1 event to LIVE_ASYNC_MAX_QUEUED_EVENTS: a replay is queued whole",
+        )?;
+        let redirect = self
+            .max_redirect_bytes
+            .unwrap_or(DEFAULT_MAX_REDIRECT_BYTES.min(response));
+        check(
+            (1..=HARD_MAX_REDIRECT_BYTES).contains(&redirect) && redirect <= response,
+            Kind::InvalidByteLimits,
+            "LIVE_MAX_REDIRECT_BYTES",
+            "must be from 1 byte to 2097152 bytes, the longest URL a browser follows, and at \
+             most LIVE_MAX_RESPONSE_BYTES: the URL travels inside the response",
+        )?;
+        let upload = self.build_upload()?;
         Ok(LiveConfig {
             max_request_bytes: request,
             max_response_bytes: response,
@@ -1035,6 +1526,84 @@ impl LiveConfigBuilder {
             },
             async_max_payload_bytes: payload,
             async_max_buffer_bytes: self.async_max_buffer_bytes,
+            async_max_queued_events: queued,
+            async_max_replay_events: replay,
+            max_redirect_bytes: redirect,
+            upload,
+        })
+    }
+
+    /// Validates the upload limits. An unset limit follows the one it must
+    /// hold: the chunk follows the file size down, and the pending files,
+    /// pending bytes and store size follow up to the limits they must hold.
+    fn build_upload(self) -> Result<LiveUploadLimits, LiveConfigError> {
+        use LiveConfigErrorKind as Kind;
+        let file = self.upload_max_file_bytes;
+        check(
+            (1..=HARD_MAX_UPLOAD_FILE_BYTES).contains(&file),
+            Kind::InvalidUploadLimits,
+            "LIVE_UPLOAD_MAX_FILE_BYTES",
+            "must be from 1 to 1099511627776 bytes (1 TiB)",
+        )?;
+        let chunk = self.upload_chunk_bytes.unwrap_or_else(|| {
+            let fitted = DEFAULT_UPLOAD_CHUNK_BYTES as u64;
+            usize::try_from(fitted.min(file)).unwrap_or(DEFAULT_UPLOAD_CHUNK_BYTES)
+        });
+        check(
+            (1..=HARD_MAX_UPLOAD_CHUNK_BYTES).contains(&chunk)
+                && chunk as u64 <= file
+                && file.div_ceil(chunk as u64) <= HARD_MAX_UPLOAD_CHUNKS_PER_FILE,
+            Kind::InvalidUploadLimits,
+            "LIVE_UPLOAD_CHUNK_BYTES",
+            "must be from 1 to 67108864 bytes, at most LIVE_UPLOAD_MAX_FILE_BYTES, and large \
+             enough that a file of LIVE_UPLOAD_MAX_FILE_BYTES takes at most 99994 chunks",
+        )?;
+        let active = self.upload_max_active;
+        check(
+            (1..=HARD_MAX_UPLOAD_ACTIVE).contains(&active)
+                && (chunk as u64).saturating_mul(active as u64) <= HARD_MAX_UPLOAD_IN_FLIGHT_BYTES,
+            Kind::InvalidUploadLimits,
+            "LIVE_UPLOAD_MAX_ACTIVE",
+            "must be from 1 to 1024 transfers, and times LIVE_UPLOAD_CHUNK_BYTES at most \
+             1073741824 bytes: each running transfer holds one chunk in memory",
+        )?;
+        let files = self
+            .upload_max_pending_files
+            .unwrap_or(DEFAULT_UPLOAD_MAX_PENDING_FILES.max(active));
+        check(
+            (1..=HARD_MAX_UPLOAD_PENDING_FILES).contains(&files) && files >= active,
+            Kind::InvalidUploadLimits,
+            "LIVE_UPLOAD_MAX_PENDING_FILES",
+            "must be from LIVE_UPLOAD_MAX_ACTIVE to 100000 files: every running transfer is a \
+             pending file",
+        )?;
+        let pending = self
+            .upload_max_pending_bytes
+            .unwrap_or(DEFAULT_UPLOAD_MAX_PENDING_BYTES.max(file));
+        check(
+            pending >= file && pending <= HARD_MAX_UPLOAD_PENDING_BYTES,
+            Kind::InvalidUploadLimits,
+            "LIVE_UPLOAD_MAX_PENDING_BYTES",
+            "must be from LIVE_UPLOAD_MAX_FILE_BYTES to 17592186044416 bytes (16 TiB): one file \
+             is pending on its own",
+        )?;
+        let storage = self
+            .upload_max_storage_bytes
+            .unwrap_or(DEFAULT_UPLOAD_MAX_STORAGE_BYTES.max(pending));
+        check(
+            storage >= pending && storage <= HARD_MAX_UPLOAD_STORAGE_BYTES,
+            Kind::InvalidUploadLimits,
+            "LIVE_UPLOAD_MAX_STORAGE_BYTES",
+            "must be from LIVE_UPLOAD_MAX_PENDING_BYTES to 70368744177664 bytes (64 TiB): the \
+             store holds every visitor's pending files",
+        )?;
+        Ok(LiveUploadLimits {
+            chunk_bytes: chunk,
+            max_active: active,
+            max_file_bytes: file,
+            max_pending_files: files,
+            max_pending_bytes: pending,
+            max_storage_bytes: storage,
         })
     }
 }
@@ -1077,8 +1646,11 @@ pub enum LiveConfigErrorKind {
     InvalidIslandScheduling,
     /// A morph node, depth, key, attribute or deadline limit was out of range.
     InvalidMorphLimits,
-    /// An asynchronous payload or queue limit was out of range.
+    /// An asynchronous payload, queue or replay limit was out of range.
     InvalidAsyncLimits,
+    /// An upload chunk, transfer, file, pending or store limit was out of
+    /// range.
+    InvalidUploadLimits,
 }
 
 impl LiveConfigErrorKind {
@@ -1094,6 +1666,7 @@ impl LiveConfigErrorKind {
             Self::InvalidIslandScheduling => "invalid_live_island_scheduling",
             Self::InvalidMorphLimits => "invalid_live_morph_limits",
             Self::InvalidAsyncLimits => "invalid_live_async_limits",
+            Self::InvalidUploadLimits => "invalid_live_upload_limits",
         }
     }
 }
@@ -1189,6 +1762,16 @@ mod limit_tests {
         assert_eq!(config.morph().deadline_ms(), 0);
         assert_eq!(config.async_max_payload_bytes(), MIB);
         assert_eq!(config.async_max_buffer_bytes(), 16 * MIB);
+        assert_eq!(config.async_max_queued_events(), 4_096);
+        assert_eq!(config.async_max_replay_events(), 4_096);
+        assert_eq!(config.max_redirect_bytes(), 64 * 1024);
+        let upload = config.upload();
+        assert_eq!(upload.chunk_bytes(), 8 * MIB);
+        assert_eq!(upload.max_active(), 8);
+        assert_eq!(upload.max_file_bytes(), 1024 * 1024 * 1024);
+        assert_eq!(upload.max_pending_files(), 1_024);
+        assert_eq!(upload.max_pending_bytes(), 4 * 1024 * 1024 * 1024);
+        assert_eq!(upload.max_storage_bytes(), 16 * 1024 * 1024 * 1024);
         assert_eq!(LiveConfig::builder().build(), Ok(config));
         assert_eq!(
             parsed(&[]).expect("an empty environment is the defaults"),
@@ -1218,6 +1801,15 @@ mod limit_tests {
             ("LIVE_MORPH_DEADLINE_MS", "30000"),
             ("LIVE_ASYNC_MAX_PAYLOAD_BYTES", "8388608"),
             ("LIVE_ASYNC_MAX_BUFFER_BYTES", "67108864"),
+            ("LIVE_ASYNC_MAX_QUEUED_EVENTS", "65536"),
+            ("LIVE_ASYNC_MAX_REPLAY_EVENTS", "20000"),
+            ("LIVE_MAX_REDIRECT_BYTES", "2097152"),
+            ("LIVE_UPLOAD_CHUNK_BYTES", "33554432"),
+            ("LIVE_UPLOAD_MAX_ACTIVE", "32"),
+            ("LIVE_UPLOAD_MAX_FILE_BYTES", "1099511627776"),
+            ("LIVE_UPLOAD_MAX_PENDING_FILES", "100000"),
+            ("LIVE_UPLOAD_MAX_PENDING_BYTES", "4398046511104"),
+            ("LIVE_UPLOAD_MAX_STORAGE_BYTES", "8796093022208"),
         ])
         .expect("every value is in range");
         assert_eq!(config.max_request_bytes(), 1024 * MIB);
@@ -1239,6 +1831,23 @@ mod limit_tests {
         assert_eq!(config.morph().deadline_ms(), 30_000);
         assert_eq!(config.async_max_payload_bytes(), 8 * MIB);
         assert_eq!(config.async_max_buffer_bytes(), 64 * MIB);
+        assert_eq!(config.async_max_queued_events(), 65_536);
+        assert_eq!(config.async_max_replay_events(), 20_000);
+        assert_eq!(config.max_redirect_bytes(), 2 * MIB);
+        let upload = config.upload();
+        assert_eq!(upload.chunk_bytes(), 32 * MIB);
+        assert_eq!(upload.max_active(), 32);
+        assert_eq!(upload.max_file_bytes(), 1 << 40);
+        assert_eq!(upload.max_pending_files(), 100_000);
+        assert_eq!(upload.max_pending_bytes(), 4 << 40);
+        assert_eq!(upload.max_storage_bytes(), 8 << 40);
+        let engine = config
+            .engine_upload_limits()
+            .expect("the engine accepts the profile");
+        assert_eq!(engine.max_chunk_bytes(), 32 * MIB);
+        assert_eq!(engine.max_file_bytes(), 1 << 40);
+        assert_eq!(engine.max_concurrent_transfers(), 32);
+        assert_eq!(engine.max_files_per_field(), 100_000);
     }
 
     #[test]
@@ -1250,6 +1859,21 @@ mod limit_tests {
         assert_eq!(config.morph().max_attributes_per_element(), 100);
         let config = parsed(&[("LIVE_ASYNC_MAX_BUFFER_BYTES", "4096")]).expect("a small queue");
         assert_eq!(config.async_max_payload_bytes(), 4_096);
+        let config = parsed(&[("LIVE_ASYNC_MAX_QUEUED_EVENTS", "64")]).expect("a short queue");
+        assert_eq!(config.async_max_replay_events(), 64);
+        let config = parsed(&[("LIVE_MAX_REQUEST_BYTES", "4096")]).expect("a small request");
+        assert_eq!(config.max_redirect_bytes(), 4_096);
+        let config = parsed(&[("LIVE_UPLOAD_MAX_FILE_BYTES", "1048576")]).expect("small files");
+        assert_eq!(config.upload().chunk_bytes(), 1_048_576);
+        let config = parsed(&[("LIVE_UPLOAD_MAX_FILE_BYTES", "17179869184")]).expect("16 GiB");
+        assert_eq!(config.upload().max_pending_bytes(), 17_179_869_184);
+        assert_eq!(config.upload().max_storage_bytes(), 17_179_869_184);
+        let config = parsed(&[
+            ("LIVE_UPLOAD_CHUNK_BYTES", "1048576"),
+            ("LIVE_UPLOAD_MAX_ACTIVE", "1024"),
+        ])
+        .expect("many transfers");
+        assert_eq!(config.upload().max_pending_files(), 1_024);
     }
 
     #[test]
@@ -1303,6 +1927,16 @@ mod limit_tests {
             ("LIVE_MORPH_MAX_DEPTH", "4097"),
             ("LIVE_MORPH_DEADLINE_MS", "2147483648"),
             ("LIVE_ASYNC_MAX_PAYLOAD_BYTES", "16777217"),
+            ("LIVE_ASYNC_MAX_QUEUED_EVENTS", "65537"),
+            ("LIVE_ASYNC_MAX_REPLAY_EVENTS", "4097"),
+            ("LIVE_MAX_REDIRECT_BYTES", "2097153"),
+            ("LIVE_UPLOAD_CHUNK_BYTES", "67108865"),
+            ("LIVE_UPLOAD_CHUNK_BYTES", "1024"),
+            ("LIVE_UPLOAD_MAX_ACTIVE", "129"),
+            ("LIVE_UPLOAD_MAX_FILE_BYTES", "1099511627777"),
+            ("LIVE_UPLOAD_MAX_PENDING_FILES", "4"),
+            ("LIVE_UPLOAD_MAX_PENDING_BYTES", "1024"),
+            ("LIVE_UPLOAD_MAX_STORAGE_BYTES", "1024"),
         ] {
             let message = parsed(&[(key, value)])
                 .expect_err("out of range")
@@ -1349,6 +1983,21 @@ mod limit_tests {
         assert!(request.contains("LIVE_MAX_REQUEST_BYTES"), "{request}");
         let response = LiveLimitExceeded::response_bytes(20, 10, false).to_string();
         assert!(response.contains("LIVE_MAX_RESPONSE_BYTES"), "{response}");
+        let redirect = LiveLimitExceeded::redirect_bytes(70_000, 65_536).to_string();
+        assert_eq!(
+            redirect,
+            "Suprnova Live redirect URL size limit exceeded: measured 70000 bytes, configured \
+             65536 bytes. Raise LIVE_MAX_REDIRECT_BYTES in the application's .env file to allow it."
+        );
+        let file = LiveLimitExceeded::upload_file_bytes(9, 8).to_string();
+        assert!(
+            file.contains("upload file size limit exceeded: measured 9 bytes, configured 8 bytes"),
+            "{file}"
+        );
+        assert!(file.contains("LIVE_UPLOAD_MAX_FILE_BYTES"), "{file}");
+        let chunk = LiveLimitExceeded::upload_chunk_bytes(9, 8, true).to_string();
+        assert!(chunk.contains("measured at least 9 bytes"), "{chunk}");
+        assert!(chunk.contains("LIVE_UPLOAD_CHUNK_BYTES"), "{chunk}");
         let payload = LiveLimitExceeded::async_payload_bytes(2_000_000, 1_048_576).to_string();
         assert!(payload.contains("async payload size"), "{payload}");
         assert!(
@@ -1358,11 +2007,36 @@ mod limit_tests {
     }
 
     #[test]
+    fn every_limit_is_reported_by_its_key_with_its_configured_value() {
+        let config = parsed(&[
+            ("LIVE_MAX_HTML_BYTES", "1048576"),
+            ("LIVE_UPLOAD_MAX_FILE_BYTES", "17179869184"),
+            ("LIVE_ASYNC_MAX_REPLAY_EVENTS", "100"),
+        ])
+        .expect("in range");
+        let values = config.limit_values();
+        assert_eq!(values.len(), LIVE_LIMIT_KEYS.len());
+        for expected in [
+            ("LIVE_MAX_HTML_BYTES", "bytes", 1_048_576),
+            ("LIVE_UPLOAD_MAX_FILE_BYTES", "bytes", 17_179_869_184),
+            ("LIVE_UPLOAD_MAX_STORAGE_BYTES", "bytes", 17_179_869_184),
+            ("LIVE_ASYNC_MAX_REPLAY_EVENTS", "events", 100),
+            ("LIVE_MORPH_MAX_KEYS", "keyed elements", 1_000_000),
+            ("LIVE_REQUEST_TIMEOUT_MS", "ms", 60_000),
+        ] {
+            assert!(
+                values.contains(&expected),
+                "{expected:?} missing from {values:?}"
+            );
+        }
+    }
+
+    #[test]
     fn every_key_is_documented_in_both_manual_chapters() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../manual");
         let env_vars = std::fs::read_to_string(root.join("env-vars.md")).expect("env-vars.md");
         let live = std::fs::read_to_string(root.join("live.md")).expect("live.md");
-        for (key, _) in LIVE_LIMIT_KEYS {
+        for LiveLimitKey { key, .. } in LIVE_LIMIT_KEYS {
             assert!(
                 env_vars.contains(&format!("`{key}`")),
                 "{key} missing from env-vars.md"

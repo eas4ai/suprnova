@@ -11,7 +11,7 @@ use suprnova::container::testing::{TestContainer, TestContainerGuard};
 use suprnova::live::assets::live_asset_catalog;
 use suprnova::live::tooling::{ToolRequest, ToolingErrorKind, execute};
 use suprnova::live::tooling_protocol::{
-    AssetKind, Body, COMMAND_NAME, Envelope, MAX_LINE_BYTES, MAX_TEMPLATE_FILE_BYTES,
+    AssetKind, Body, COMMAND_NAME, Envelope, MAX_LIMITS, MAX_LINE_BYTES, MAX_TEMPLATE_FILE_BYTES,
     MAX_TEMPLATE_ROOTS, MAX_TEXT_BYTES, Operation, Outcome, PROTOCOL_VERSION, Severity,
 };
 use suprnova::live::{LiveComponent, LiveConfig, LiveRegistry, live};
@@ -268,19 +268,40 @@ fn inspect_reports_only_safe_bounded_metadata() {
         .expect("one runtime report");
     assert!(runtime.registry_bound);
     assert_eq!(runtime.components, 2);
+    // Every configured limit, by its `.env` key, not three named fields.
     let config = LiveConfig::standard();
-    assert_eq!(
-        runtime.config.max_request_bytes,
-        config.max_request_bytes() as u64
-    );
-    assert_eq!(
-        runtime.config.max_response_bytes,
-        config.max_response_bytes() as u64
-    );
-    assert_eq!(
-        runtime.config.max_context_lifetime_ms,
-        config.max_context_lifetime_ms()
-    );
+    let limits: Vec<(&str, u64, &str)> = runtime
+        .config
+        .limits
+        .iter()
+        .map(|limit| (limit.setting.as_str(), limit.value, limit.unit.as_str()))
+        .collect();
+    assert_eq!(limits.len(), 28, "{limits:?}");
+    for expected in [
+        (
+            "LIVE_MAX_REQUEST_BYTES",
+            config.max_request_bytes() as u64,
+            "bytes",
+        ),
+        (
+            "LIVE_MAX_CONTEXT_LIFETIME_MS",
+            config.max_context_lifetime_ms(),
+            "ms",
+        ),
+        ("LIVE_MORPH_MAX_NODES", 1_000_000, "nodes"),
+        ("LIVE_MAX_REDIRECT_BYTES", 65_536, "bytes"),
+        ("LIVE_ASYNC_MAX_QUEUED_EVENTS", 4_096, "events"),
+        ("LIVE_ASYNC_MAX_REPLAY_EVENTS", 4_096, "events"),
+        ("LIVE_UPLOAD_CHUNK_BYTES", 8_388_608, "bytes"),
+        ("LIVE_UPLOAD_MAX_FILE_BYTES", 1_073_741_824, "bytes"),
+        ("LIVE_UPLOAD_MAX_STORAGE_BYTES", 17_179_869_184, "bytes"),
+    ] {
+        assert!(
+            limits.contains(&expected),
+            "{expected:?} missing from {limits:?}"
+        );
+    }
+    assert!(limits.len() <= MAX_LIMITS);
     assert!(!runtime.upload_host.installed);
     assert_eq!(runtime.runtime_bound, runtime.readiness.is_some());
     let catalog = live_asset_catalog().expect("artifacts validate");

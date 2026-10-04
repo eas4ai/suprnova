@@ -606,6 +606,9 @@ fn valid_nonce(value: &str) -> bool {
 /// never enforces a limit tighter than the one set here.
 fn config_element(identity: &str, config: LiveConfig, protocol: (u16, u16)) -> String {
     let morph = config.morph();
+    // The store's total size is the server's own business; the browser gets
+    // the limits it applies before it sends anything.
+    let upload = config.upload();
     let mut protocol_object = serde_json::Map::new();
     protocol_object.insert("maximum".to_owned(), serde_json::Value::from(protocol.1));
     protocol_object.insert("minimum".to_owned(), serde_json::Value::from(protocol.0));
@@ -674,6 +677,29 @@ fn config_element(identity: &str, config: LiveConfig, protocol: (u16, u16)) -> S
             number(u64::from(
                 suprnova_live::artifacts::RUNTIME_CONTRACT_VERSION,
             )),
+        ),
+        (
+            "async_max_queued_events",
+            number(config.async_max_queued_events() as u64),
+        ),
+        (
+            "async_max_replay_events",
+            number(config.async_max_replay_events() as u64),
+        ),
+        (
+            "max_redirect_bytes",
+            number(config.max_redirect_bytes() as u64),
+        ),
+        ("upload_chunk_bytes", number(upload.chunk_bytes() as u64)),
+        ("upload_max_active", number(upload.max_active() as u64)),
+        ("upload_max_file_bytes", number(upload.max_file_bytes())),
+        (
+            "upload_max_pending_bytes",
+            number(upload.max_pending_bytes()),
+        ),
+        (
+            "upload_max_pending_files",
+            number(upload.max_pending_files() as u64),
         ),
     ];
     entries.sort_by(|left, right| left.0.cmp(right.0));
@@ -747,10 +773,25 @@ mod tests {
             .morph_max_nodes(5_000_000)
             .morph_deadline_ms(30_000)
             .request_timeout_ms(120_000)
+            .async_max_queued_events(65_536)
+            .async_max_replay_events(20_000)
+            .max_redirect_bytes(2 * 1024 * 1024)
+            .upload_chunk_bytes(64 * 1024 * 1024)
+            .upload_max_active(16)
+            .upload_max_file_bytes(1024 * 1024 * 1024 * 1024)
+            .upload_max_pending_files(100_000)
             .build()
             .expect("the hard maxima are legal");
         let element = config_element("id", large, (1, 2));
         for expected in [
+            "\"async_max_queued_events\":65536",
+            "\"async_max_replay_events\":20000",
+            "\"max_redirect_bytes\":2097152",
+            "\"upload_chunk_bytes\":67108864",
+            "\"upload_max_active\":16",
+            "\"upload_max_file_bytes\":1099511627776",
+            "\"upload_max_pending_bytes\":1099511627776",
+            "\"upload_max_pending_files\":100000",
             "\"max_request_bytes\":1073741824",
             "\"max_response_bytes\":1073741824",
             "\"max_html_bytes\":536870912",
@@ -793,12 +834,24 @@ mod tests {
             "\"morph_max_keys\":1000000",
             "\"morph_max_nodes\":1000000",
             "\"request_timeout_ms\":60000",
+            "\"async_max_queued_events\":4096",
+            "\"async_max_replay_events\":4096",
+            "\"max_redirect_bytes\":65536",
+            "\"upload_chunk_bytes\":8388608",
+            "\"upload_max_active\":8",
+            "\"upload_max_file_bytes\":1073741824",
+            "\"upload_max_pending_bytes\":4294967296",
+            "\"upload_max_pending_files\":1024",
         ] {
             assert!(
                 element.contains(expected),
                 "{expected} missing from {element}"
             );
         }
+        assert!(
+            !element.contains("upload_max_storage"),
+            "the store's total size stays on the server: {element}"
+        );
     }
 
     #[test]
@@ -808,9 +861,9 @@ mod tests {
             element.starts_with("<script id=\"suprnova-live-config\" type=\"application/json\">")
         );
         assert!(element.ends_with("</script>"));
-        assert!(
-            element.contains("\"asset_identity\":\"suprnova-live-0.1.0-abcdef\",\"credentials\"")
-        );
+        assert!(element.contains(
+            "\"asset_identity\":\"suprnova-live-0.1.0-abcdef\",\"async_max_queued_events\""
+        ));
         assert!(element.contains("\"protocol\":{\"maximum\":2,\"minimum\":1}"));
         assert!(!element.contains('<') || element.matches('<').count() == 2);
     }

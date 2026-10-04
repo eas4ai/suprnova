@@ -351,7 +351,7 @@ pub(crate) fn parse_update_response_fields(
         .map(|value| parse_render(value, limits))
         .transpose()?;
     let redirect = take_optional(&mut fields, "redirect")
-        .map(parse_redirect)
+        .map(|value| parse_redirect(value, limits))
         .transpose()?;
     let validation = parse_bounded_object(
         take(&mut fields, "validation")?,
@@ -447,13 +447,18 @@ pub(crate) fn parse_render(
     }
 }
 
-pub(crate) fn parse_redirect(value: CanonicalValue) -> Result<String, ProtocolError> {
+/// A redirect or history URL, bounded by the configured redirect size rather
+/// than a fixed number.
+pub(crate) fn parse_redirect(
+    value: CanonicalValue,
+    limits: &ProtocolLimits,
+) -> Result<String, ProtocolError> {
     let CanonicalValue::String(value) = value else {
         return Err(ProtocolError::new(ProtocolErrorKind::UnsafeRedirect));
     };
     let valid = value.starts_with('/')
         && !value.starts_with("//")
-        && value.len() <= 2_048
+        && value.len() <= limits.max_redirect_bytes()
         && !value.contains('\\')
         && !value.chars().any(char::is_control);
     if !valid {
