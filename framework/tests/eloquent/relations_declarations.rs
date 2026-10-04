@@ -1479,3 +1479,37 @@ async fn morph_to_touches_find_the_owner_by_its_primary_key() {
     let doc = RdKeyedDoc::find(5).await.unwrap().unwrap();
     assert_ne!(doc.updated_at.to_rfc3339(), "2001-01-01T00:00:00+00:00");
 }
+
+#[model(table = "rd_lk_holders", primary_key = "uid", relations = {
+    teams: BelongsToMany<RdTeam, RdLkHolderTeam> { lk = "id" },
+    tasks: HasManyThrough<RdSquad, RdTask> { first_key = "owner_key", lk = "id" },
+})]
+pub struct RdLkHolder {
+    pub uid: i64,
+    pub id: i64,
+}
+
+#[model(
+    table = "rd_lk_holder_team",
+    primary_key = "row_id",
+    timestamps = false
+)]
+pub struct RdLkHolderTeam {
+    pub row_id: i64,
+    pub rd_lk_holder_id: i64,
+    pub rd_team_id: i64,
+}
+
+/// A relation that declares `lk = "id"` on a model keyed on `uid`
+/// reports `id`, the key it reads, not the model's primary key.
+#[tokio::test]
+async fn a_declared_local_key_named_id_is_reported_as_declared() {
+    use suprnova::Relation;
+    let holder = RdLkHolder {
+        uid: 1,
+        id: 2,
+        ..Default::default()
+    };
+    assert_eq!(holder.teams().parent_key(), "id");
+    assert_eq!(holder.tasks().parent_key(), "id");
+}

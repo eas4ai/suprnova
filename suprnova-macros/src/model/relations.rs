@@ -1807,11 +1807,10 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             } else {
                 quote! {}
             };
-            let local_key_chain = if lk == "id" {
-                quote! {}
-            } else {
-                quote! { .local_key(#lk) }
-            };
+            // Always chained: the runtime default is the model's primary
+            // key, so a declared `lk` that happens to be `id` still has
+            // to be passed on.
+            let local_key_chain = quote! { .local_key(#lk) };
             // Related-side key column - see `related_key_expr`. Chained
             // as `.related_pk(...)` so the runtime IN-filter (`.get()`)
             // reads the column the eager arm and the aggregate JOIN read.
@@ -1885,11 +1884,10 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             let lk = lk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| pk_name.clone());
-            let local_key_chain = if lk == "id" {
-                quote! {}
-            } else {
-                quote! { .local_key(#lk) }
-            };
+            // Always chained: the runtime default is the model's primary
+            // key, so a declared `lk` that happens to be `id` still has
+            // to be passed on.
+            let local_key_chain = quote! { .local_key(#lk) };
             // Second local key - column on the intermediate `B`
             // matched by `second_key` (`second_local_key_expr`).
             // Chained as `.second_local_key(...)` so the runtime JOIN
@@ -2368,11 +2366,10 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             } else {
                 quote! {}
             };
-            let local_key_chain = if lk == "id" {
-                quote! {}
-            } else {
-                quote! { .local_key(#lk) }
-            };
+            // Always chained: the runtime default is the model's primary
+            // key, so a declared `lk` that happens to be `id` still has
+            // to be passed on.
+            let local_key_chain = quote! { .local_key(#lk) };
             let related_key = related_key_expr(rel, target_ty);
             let related_key_chain = quote! { .related_pk(#related_key) };
 
@@ -2444,11 +2441,10 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             let lk = lk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| pk_name.clone());
-            let local_key_chain = if lk == "id" {
-                quote! {}
-            } else {
-                quote! { .local_key(#lk) }
-            };
+            // Always chained: the runtime default is the model's primary
+            // key, so a declared `lk` that happens to be `id` still has
+            // to be passed on.
+            let local_key_chain = quote! { .local_key(#lk) };
             let related_key = related_key_expr(rel, target_ty);
             let related_key_chain = quote! { .related_pk(#related_key) };
 
