@@ -56,6 +56,9 @@ impl HttpMethod {
 #[derive(Debug, Clone)]
 pub struct PathParam {
     pub name: String,
+    /// `{name?}`: the route matches without it, and the helper leaves it
+    /// out the way the backend's `route()` does.
+    pub optional: bool,
 }
 
 /// A parsed route definition from routes.rs
@@ -283,7 +286,7 @@ fn route_definition(
     let name = chained_string(chain, "name").map(|name| format!("{}{name}", scope.name_prefix));
     let path_params = path_param_names(&path)
         .into_iter()
-        .map(|name| PathParam { name })
+        .map(|(name, optional)| PathParam { name, optional })
         .collect();
 
     Some(RouteDefinition {
@@ -366,14 +369,18 @@ enum Placeholder<'a> {
     /// `{*name}`: the rest of the path, slashes included. The backend
     /// captures it under `name`, without the `*`.
     CatchAll(&'a str),
+    /// `{name?}`: one path segment the route matches without.
+    Optional(&'a str),
 }
 
-/// Read the text between `{` and `}`. Anything other than a plain name or a
-/// catch-all name (an optional `{id?}`, for one) is not a parameter the
-/// helpers fill in.
+/// Read the text between `{` and `}`. Anything other than a plain, a
+/// catch-all or an optional name is not a parameter the helpers fill in.
 fn placeholder(inner: &str) -> Option<Placeholder<'_>> {
     let is_name =
         |name: &str| !name.is_empty() && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_');
+    if let Some(name) = inner.strip_suffix('?') {
+        return is_name(name).then_some(Placeholder::Optional(name));
+    }
     match inner.strip_prefix('*') {
         Some(name) if is_name(name) => Some(Placeholder::CatchAll(name)),
         None if is_name(inner) => Some(Placeholder::Segment(inner)),
@@ -405,15 +412,27 @@ fn path_pieces(path: &str) -> Vec<Result<Placeholder<'_>, &str>> {
     pieces
 }
 
-/// The parameter names a path's placeholders capture, in order.
-fn path_param_names(path: &str) -> Vec<String> {
+/// The parameter names a path's placeholders capture, in order, and
+/// whether each is optional.
+fn path_param_names(path: &str) -> Vec<(String, bool)> {
     path_pieces(path)
         .into_iter()
         .filter_map(|piece| match piece {
-            Ok(Placeholder::Segment(name) | Placeholder::CatchAll(name)) => Some(name.to_string()),
+            Ok(Placeholder::Segment(name) | Placeholder::CatchAll(name)) => {
+                Some((name.to_string(), false))
+            }
+            Ok(Placeholder::Optional(name)) => Some((name.to_string(), true)),
             Err(_) => None,
         })
         .collect()
+}
+
+/// Whether a path has an optional placeholder, whose URL the generated
+/// `routeUrl` helper builds.
+fn has_optional_placeholder(path: &str) -> bool {
+    path_pieces(path)
+        .iter()
+        .any(|piece| matches!(piece, Ok(Placeholder::Optional(_))))
 }
 
 /// Visitor that collects handler functions with #[handler] attribute
@@ -731,6 +750,13 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
     output.push_str("  data?: TData;\n");
     output.push_str("}\n\n");
 
+    if routes
+        .iter()
+        .any(|route| has_optional_placeholder(&route.definition.path))
+    {
+        output.push_str(ROUTE_URL_HELPER);
+    }
+
     // Collect all unique form request types
     let mut form_request_types: Vec<&FormRequestStruct> = routes
         .iter()
@@ -773,7 +799,8 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
             let interface_name = generate_params_interface_name(route, key);
             output.push_str(&format!("export interface {} {{\n", interface_name));
             for param in &route.definition.path_params {
-                output.push_str(&format!("  {}: string;\n", param.name));
+                let marker = if param.optional { "?" } else { "" };
+                output.push_str(&format!("  {}{marker}: string;\n", param.name));
             }
             output.push_str("}\n\n");
         }
@@ -812,8 +839,14 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
                 )
             } else if has_params {
                 let params_type = generate_params_interface_name(route, fn_name);
+                // Every parameter optional: the helper can be called bare.
+                let default = if route.definition.path_params.iter().all(|p| p.optional) {
+                    " = {}"
+                } else {
+                    ""
+                };
                 (
-                    format!("params: {}", params_type),
+                    format!("params: {params_type}{default}"),
                     "RouteConfig".to_string(),
                 )
             } else if has_data {
@@ -827,7 +860,9 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
             };
 
             // Generate URL with params interpolation
-            let url = if has_params {
+            let url = if has_optional_placeholder(&route.definition.path) {
+                generate_route_url_call(&route.definition.path)
+            } else if has_params {
                 generate_url_with_params(&route.definition.path)
             } else {
                 format!("'{}'", route.definition.path)
@@ -999,6 +1034,9 @@ fn generate_url_with_params(path: &str) -> String {
             Ok(Placeholder::CatchAll(name)) => template.push_str(&format!(
                 "${{String(params.{name}).split('/').map(encodeURIComponent).join('/')}}"
             )),
+            // A path with an optional placeholder goes through
+            // `generate_route_url_call`; kept literal here for completeness.
+            Ok(Placeholder::Optional(name)) => template.push_str(&format!("{{{name}?}}")),
             Err(text) => {
                 for ch in text.chars() {
                     if matches!(ch, '`' | '\\' | '$') {
@@ -1011,6 +1049,67 @@ fn generate_url_with_params(path: &str) -> String {
     }
     template.push('`');
     template
+}
+
+/// The TypeScript helper that builds a URL with optional placeholders the
+/// way the backend's `route()` fills them: a value is encoded as one segment
+/// (a catch-all keeps its slashes), an optional parameter with no value is
+/// left out with its segment, and one with no value before a later given
+/// value stays as its placeholder, since leaving it out would move the later
+/// value into its place. An empty string is no value.
+const ROUTE_URL_HELPER: &str = r#"// Builds a URL the way the backend's route() does: each value is encoded as
+// one segment (a catch-all keeps its slashes), an optional parameter without
+// a value is left out with its segment, and one without a value before a
+// later given value stays as its placeholder.
+type UrlPart = string | { name: string; value: unknown; optional?: boolean; catchAll?: boolean };
+function routeUrl(parts: UrlPart[]): string {
+  const given = (value: unknown): boolean =>
+    value !== undefined && value !== null && String(value) !== '';
+  let lastGiven = -1;
+  parts.forEach((part, index) => {
+    if (typeof part !== 'string' && part.optional && given(part.value)) lastGiven = index;
+  });
+  let url = '';
+  parts.forEach((part, index) => {
+    if (typeof part === 'string') {
+      url += part;
+    } else if (!part.optional || given(part.value)) {
+      const text = String(part.value);
+      url += part.catchAll ? text.split('/').map(encodeURIComponent).join('/') : encodeURIComponent(text);
+    } else if (index < lastGiven) {
+      url += `{${part.name}}`;
+    } else if (url.length > 1 && url.endsWith('/')) {
+      url = url.slice(0, -1);
+    }
+  });
+  return url;
+}
+
+"#;
+
+/// Generate a `routeUrl([...])` call for a path with an optional
+/// placeholder. Literal text is a JSON string, which is a valid TypeScript
+/// string literal.
+fn generate_route_url_call(path: &str) -> String {
+    let quote = |text: &str| serde_json::Value::String(text.to_owned()).to_string();
+    let parts: Vec<String> = path_pieces(path)
+        .into_iter()
+        .map(|piece| match piece {
+            Ok(Placeholder::Segment(name)) => {
+                format!("{{ name: {}, value: params.{name} }}", quote(name))
+            }
+            Ok(Placeholder::CatchAll(name)) => format!(
+                "{{ name: {}, value: params.{name}, catchAll: true }}",
+                quote(name)
+            ),
+            Ok(Placeholder::Optional(name)) => format!(
+                "{{ name: {}, value: params.{name}, optional: true }}",
+                quote(name)
+            ),
+            Err(text) => quote(text),
+        })
+        .collect();
+    format!("routeUrl([{}])", parts.join(", "))
 }
 
 /// Generate routes and write to the output file
@@ -1268,6 +1367,50 @@ routes! {
             .map(|param| param.name.as_str())
             .collect();
         assert_eq!(params, ["rest"]);
+    }
+
+    #[test]
+    fn optional_placeholders_follow_the_backend_route_helper() {
+        let definitions = parse_routes_file(
+            r#"
+routes! {
+    get!("/archive/{year?}/{month?}", controllers::archive::show).name("archive"),
+}
+"#,
+        );
+        let params: Vec<(&str, bool)> = definitions[0]
+            .path_params
+            .iter()
+            .map(|param| (param.name.as_str(), param.optional))
+            .collect();
+        assert_eq!(params, [("year", true), ("month", true)]);
+
+        let ts = generate_typescript(&generated(definitions));
+        assert!(
+            ts.contains("  year?: string;\n  month?: string;\n"),
+            "optional parameters are optional keys; got:\n{ts}"
+        );
+        assert!(
+            ts.contains("show: (params: ArchiveShowParams = {}): RouteConfig =>"),
+            "a route whose parameters are all optional can be called without them; got:\n{ts}"
+        );
+        assert!(
+            ts.contains(
+                r#"url: routeUrl(["/archive/", { name: "year", value: params.year, optional: true }, "/", { name: "month", value: params.month, optional: true }])"#
+            ),
+            "the URL is built by the shared helper; got:\n{ts}"
+        );
+        assert!(
+            ts.contains("function routeUrl(parts: UrlPart[]): string {"),
+            "the helper is emitted once; got:\n{ts}"
+        );
+    }
+
+    #[test]
+    fn routes_without_optional_placeholders_emit_no_url_helper() {
+        let definitions = parse_routes_file(r#"get!("/posts/{slug}", controllers::post::show)"#);
+        let ts = generate_typescript(&generated(definitions));
+        assert!(!ts.contains("routeUrl"), "got:\n{ts}");
     }
 
     #[test]

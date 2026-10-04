@@ -918,7 +918,16 @@ impl Target {
 
     fn postgres_args(&self) -> Vec<String> {
         let mut args = Vec::new();
-        let host = self.param("host").unwrap_or(&self.host);
+        // SQLx reads a URL host that decodes to an absolute path as a Unix
+        // socket directory (`postgres://%2Frun%2Fpostgresql/shop`), the only
+        // way the host part can name one, and any other host as written.
+        let decoded = percent_encoding::percent_decode_str(&self.host).decode_utf8_lossy();
+        let url_host = if decoded.starts_with('/') {
+            decoded.as_ref()
+        } else {
+            self.host.as_str()
+        };
+        let host = self.param("host").unwrap_or(url_host);
         if !host.is_empty() {
             args.push(format!("--host={host}"));
         }
@@ -1306,6 +1315,24 @@ mod tests {
             my.mysql_args(true).join(" "),
             "--host=db --port=3306 --user=app --ssl-ca=/ca.pem --ssl-cert=/client.pem \
              --ssl-key=/client.key --ssl --ssl-verify-server-cert"
+        );
+    }
+
+    /// SQLx reads a URL host that decodes to an absolute path as a Unix
+    /// socket directory, the only way a URL can name one in its host part.
+    /// pg_dump and psql take the directory as `--host`, decoded.
+    #[test]
+    fn a_percent_encoded_socket_directory_reaches_the_tools_decoded() {
+        let socket = Target::parse("postgres://app@%2Frun%2Fpostgresql/shop").expect("a URL");
+        assert_eq!(
+            socket.postgres_args().join(" "),
+            "--host=/run/postgresql --username=app --no-password --dbname=shop"
+        );
+        // A host name stays as written, encoded or not, as it does for SQLx.
+        let host = Target::parse("postgres://app@db%2Dprimary:5433/shop").expect("a URL");
+        assert_eq!(
+            host.postgres_args().join(" "),
+            "--host=db%2Dprimary --port=5433 --username=app --no-password --dbname=shop"
         );
     }
 
