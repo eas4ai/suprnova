@@ -1647,6 +1647,8 @@ struct Nullable {
     title: String,
     #[field("ids[]")]
     ids: Vec<u32>,
+    #[field("tags[]")]
+    tags: Vec<String>,
 }
 
 async fn nullable(req: Request) -> Response {
@@ -1659,6 +1661,7 @@ async fn nullable(req: Request) -> Response {
         "note": form.note,
         "title": form.title,
         "ids": form.ids,
+        "tags": form.tags,
     })))
 }
 
@@ -1677,10 +1680,13 @@ async fn an_empty_part_is_null_for_an_optional_typed_field() {
                 text_part("ratio", ""),
                 text_part("address", ""),
                 text_part("note", ""),
-                text_part("title", ""),
+                text_part("title", "Holiday"),
                 text_part("ids[]", "3"),
                 text_part("ids[]", ""),
                 text_part("ids[]", "4"),
+                text_part("tags[]", "beach"),
+                text_part("tags[]", ""),
+                text_part("tags[]", "sun"),
             ]),
         ),
     )
@@ -1692,12 +1698,71 @@ async fn an_empty_part_is_null_for_an_optional_typed_field() {
     assert_eq!(body["active"], Value::Null);
     assert_eq!(body["ratio"], Value::Null);
     assert_eq!(body["address"], Value::Null);
-    // A string field keeps the empty string, as a `FormRequest` does for
-    // JSON `""` and for urlencoded `note=`.
-    assert_eq!(body["note"], "");
-    assert_eq!(body["title"], "");
-    // A null element of a list of numbers is left out.
+    // A `String` is no exception: Laravel's `ConvertEmptyStringsToNull`
+    // makes the empty text `null` whatever the field's rules.
+    assert_eq!(body["note"], Value::Null);
+    assert_eq!(body["title"], "Holiday");
+    // A null element of a list is left out, of numbers and of text alike.
     assert_eq!(body["ids"], json!([3, 4]));
+    assert_eq!(body["tags"], json!(["beach", "sun"]));
+}
+
+#[derive(MultipartRequest)]
+struct RequiredText {
+    #[field("title")]
+    title: String,
+}
+
+async fn required_text(req: Request) -> Response {
+    let form = RequiredText::from_request(req).await?;
+    Ok(HttpResponse::json(json!({ "title": form.title })))
+}
+
+#[tokio::test]
+async fn an_empty_part_for_a_required_string_field_is_missing() {
+    let app = App::new(Router::new().post("/required-text", required_text));
+
+    // An empty first part, and an empty last part after a value: the last
+    // part decides, and empty text is `null`, so `required` fails.
+    for parts in [
+        vec![text_part("title", "")],
+        vec![text_part("title", "Holiday"), text_part("title", "")],
+    ] {
+        let reply = send(&app, Outgoing::post("/required-text", form(&parts))).await;
+        assert_eq!(reply.status, 422, "{}", reply.text());
+        assert_eq!(
+            first_message(&reply, "title"),
+            "The title field is required."
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_later_part_carries_the_value_after_an_empty_first_part() {
+    let app = App::new(Router::new().post("/nullable", nullable));
+
+    let reply = send(
+        &app,
+        Outgoing::post(
+            "/nullable",
+            form(&[
+                text_part("title", ""),
+                text_part("title", "Holiday"),
+                text_part("note", ""),
+                text_part("note", "kept"),
+                text_part("count", "1"),
+                text_part("count", "2"),
+            ]),
+        ),
+    )
+    .await;
+
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    let body = reply.json();
+    // PHP keeps the last value of a name that is not a list.
+    assert_eq!(body["title"], "Holiday");
+    assert_eq!(body["note"], "kept");
+    assert_eq!(body["count"], 2);
 }
 
 #[derive(MultipartRequest)]
@@ -2079,11 +2144,12 @@ async fn a_text_part_over_the_in_memory_limit_answers_413_and_stops_the_read() {
     assert!(!NOTES_HANDLER_RAN.load(Ordering::SeqCst), "the handler ran");
 }
 
-// ── PAR-043: the first part decides a field that holds one value ──
+// ── PAR-043: the last part decides a text field that holds one value ──
 
 #[tokio::test]
-async fn the_first_part_decides_a_text_field_that_holds_one_value() {
-    // A required field: the second failing part adds nothing.
+async fn the_last_part_decides_a_text_field_that_holds_one_value() {
+    // A required field: only the last part is parsed, so two failing
+    // parts report one error.
     let errors = typed_errors(form(&[
         text_part("count", "abc"),
         text_part("count", "xyz"),
@@ -2092,9 +2158,14 @@ async fn the_first_part_decides_a_text_field_that_holds_one_value() {
     assert_eq!(key(&errors, "count"), "validation-integer");
     assert_eq!(errors.errors["count"].len(), 1, "{errors}");
 
-    // A later part that parses does not undo the first part's failure.
+    // An earlier part that fails is replaced by a later one that parses,
+    // as PHP keeps the last value of the name.
     let errors = typed_errors(form(&[text_part("count", "abc"), text_part("count", "5")])).await;
-    assert_eq!(errors.errors["count"].len(), 1, "{errors}");
+    assert!(!errors.errors.contains_key("count"), "{errors}");
+
+    // And a later part that fails replaces one that parsed.
+    let errors = typed_errors(form(&[text_part("count", "5"), text_part("count", "abc")])).await;
+    assert_eq!(key(&errors, "count"), "validation-integer");
 
     // An optional field, the same.
     let req = crate::common::request_from_multipart(
@@ -2114,4 +2185,62 @@ async fn the_first_part_decides_a_text_field_that_holds_one_value() {
     assert_eq!(key(&errors, "count"), "validation-integer");
     assert_eq!(errors.errors["count"].len(), 1, "{errors}");
     assert_eq!(errors.errors.len(), 1, "{errors}");
+}
+
+// ── Empty text and repeated names: a url-encoded form reads the same ──
+//
+// `FormRequest` reads a url-encoded body by Laravel's rules too, so a form
+// posted either way gives a handler the same values.
+
+/// The text fields of `Nullable`, read from a url-encoded body.
+#[derive(Debug, serde::Deserialize, validator::Validate, suprnova::FormRequestDerive)]
+struct UrlencodedText {
+    title: String,
+    note: Option<String>,
+    count: Option<u32>,
+}
+
+async fn urlencoded(body: &str) -> Result<UrlencodedText, FrameworkError> {
+    let req =
+        crate::common::request_with_body("/", "application/x-www-form-urlencoded", body.as_bytes())
+            .await;
+    UrlencodedText::from_request(req).await
+}
+
+#[tokio::test]
+async fn an_empty_urlencoded_value_for_a_required_string_field_is_missing() {
+    // An empty first value, and an empty last value after a value.
+    for body in ["title=&note=kept", "title=Holiday&title="] {
+        let error = match urlencoded(body).await {
+            Err(error) => error,
+            Ok(form) => panic!("`{body}` extracted {form:?}"),
+        };
+        assert_eq!(error.status_code(), 422, "`{body}`: {error}");
+        assert!(
+            error.to_string().contains("missing field `title`"),
+            "`{body}`: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_empty_urlencoded_value_is_null_for_an_optional_field() {
+    let form = match urlencoded("title=Holiday&note=&count=").await {
+        Ok(form) => form,
+        Err(error) => panic!("{error}"),
+    };
+    assert_eq!(form.title, "Holiday");
+    assert_eq!(form.note, None);
+    assert_eq!(form.count, None);
+}
+
+#[tokio::test]
+async fn a_repeated_urlencoded_name_keeps_its_last_value() {
+    let form = match urlencoded("title=&title=Holiday&note=&note=kept&count=1&count=2").await {
+        Ok(form) => form,
+        Err(error) => panic!("{error}"),
+    };
+    assert_eq!(form.title, "Holiday");
+    assert_eq!(form.note.as_deref(), Some("kept"));
+    assert_eq!(form.count, Some(2));
 }
