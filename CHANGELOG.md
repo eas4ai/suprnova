@@ -778,10 +778,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   or, past a chrono duration's range, requeued with no delay at all. This
   landed after the `v3.1.0` tag.
 - **A refused cookieless request stores no session.** `CsrfMiddleware`
-  marks a new session for storage only when the response succeeds or
-  redirects. An anonymous request that an auth gate refuses with 401, or
-  any other 4xx or 5xx, gets no `XSRF-TOKEN` and writes no session row, so
-  it no longer turns into a 500 when the session store is unavailable. A
+  marks a new, untouched session for storage only when the response
+  succeeds or redirects. An anonymous request that creates a session and is
+  refused with 401, or any other 4xx or 5xx, gets no `XSRF-TOKEN` and
+  writes no session row, so it no longer turns into a 500 when the session
+  store is unavailable; a session that was loaded or changed keeps its
+  token. A
   cookieless JSON or `HEAD` bootstrap that succeeds still gets its token
   with its session. `SessionMiddleware` marks every session that
   `SessionStore::read` returns as loaded from the store, so a custom store
