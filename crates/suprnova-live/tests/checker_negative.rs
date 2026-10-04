@@ -944,3 +944,26 @@ fn inherited_blocks_render_at_the_parent_site_and_super_writes_the_parent_body()
         directive.diagnostics()
     );
 }
+/// A `let` after `&&` in an `if` binds its names as the leading `if let`
+/// does. Askama 0.16 does not parse an array pattern after `&&`, so that
+/// form already fails the check; a pattern it parses carried raw output.
+#[test]
+fn a_let_chain_binding_carries_a_raw_value() {
+    let unparsed = check(
+        "{% let rows = [body|safe] %}{% if open && let [v, ..] = rows.as_slice() %}\n<p>{{ v }}</p>{% endif %}",
+    );
+    assert!(
+        has_code(&unparsed, DiagnosticCode::AskamaSyntax),
+        "{:?}",
+        unparsed.diagnostics()
+    );
+    let report = check(
+        "{% let rows = [body|safe] %}{% if open && let Some(v) = rows.first() %}\n<p>{{ v }}</p>{% endif %}",
+    );
+    assert_eq!(
+        raw_locations(&report),
+        vec![(2, 7)],
+        "{:?}",
+        report.diagnostics()
+    );
+}

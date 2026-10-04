@@ -700,18 +700,14 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             .branches
                             .iter()
                             .map(|branch| {
-                                let mut names = Vec::new();
-                                let mut value_is_raw = false;
-                                if let Some(cond) = branch.cond.as_ref()
-                                    && let Some(target) = cond.target.as_ref()
-                                {
-                                    bound_names(target, &mut names);
-                                    value_is_raw = expression_is_raw(&cond.expr, scope.raw);
-                                }
+                                let (names, raw) = branch.cond.as_ref().map_or_else(
+                                    || (Vec::new(), None),
+                                    |cond| bind_let_chain(cond, scope.raw),
+                                );
                                 Choice {
                                     nodes: branch.nodes.as_slice(),
                                     shadowed: shadowed_bindings(scope.bindings, &names),
-                                    raw: rebind_raw(scope.raw, &names, value_is_raw),
+                                    raw,
                                 }
                             })
                             .collect();
@@ -1548,14 +1544,12 @@ fn collect_raw_assignments(nodes: &[Box<Node<'_>>], raw: &mut RawNames) {
             Node::If(node) => {
                 for branch in &node.branches {
                     if let Some(cond) = &branch.cond
-                        && let Some(target) = &cond.target
-                        && expression_is_raw(&cond.expr, raw)
+                        && let (_, Some(bound)) = bind_let_chain(cond, raw)
                     {
-                        bound_names(target, &mut names);
+                        raw.extend(bound);
                     }
                     collect_raw_assignments(&branch.nodes, raw);
                 }
-                insert_all(raw, &names);
             }
             Node::Match(node) => {
                 let value_is_raw = expression_is_raw(&node.expr, raw);
@@ -1583,6 +1577,56 @@ fn collect_raw_assignments(nodes: &[Box<Node<'_>>], raw: &mut RawNames) {
             | Node::Raw(_)
             | Node::Break(_)
             | Node::Continue(_) => {}
+        }
+    }
+}
+
+/// The names an `if` condition binds and the raw names after it. A leading
+/// `if let` binds from the condition, and each `let` after `&&` binds from
+/// its own expression, left to right, so a later binding can read an earlier
+/// one. `None` when the raw names do not change.
+fn bind_let_chain<'c, 'a>(
+    cond: &'c askama_parser::node::CondTest<'a>,
+    raw: &RawNames,
+) -> (Vec<&'a str>, Option<RawNames>) {
+    let mut lets = Vec::new();
+    collect_lets(cond, &mut lets);
+    let mut names = Vec::new();
+    let mut after = raw.clone();
+    for (target, value) in lets {
+        let mut bound = Vec::new();
+        bound_names(target, &mut bound);
+        let value_is_raw = expression_is_raw(value, &after);
+        if let Some(rebound) = rebind_raw(&after, &bound, value_is_raw) {
+            after = rebound;
+        }
+        names.extend(bound);
+    }
+    let changed = after != *raw;
+    (names, changed.then_some(after))
+}
+
+/// Each `let` of a condition with the expression it binds from, in order.
+fn collect_lets<'c, 'a>(
+    cond: &'c askama_parser::node::CondTest<'a>,
+    lets: &mut Vec<(&'c Target<'a>, &'c Expr<'a>)>,
+) {
+    if let Some(target) = &cond.target {
+        lets.push((target, &cond.expr));
+    }
+    collect_let_conditions(&cond.expr, lets);
+}
+
+fn collect_let_conditions<'c, 'a>(
+    expression: &'c Expr<'a>,
+    lets: &mut Vec<(&'c Target<'a>, &'c Expr<'a>)>,
+) {
+    match expression {
+        Expr::LetCond(cond) => collect_lets(cond, lets),
+        other => {
+            for inner in sub_expressions(other) {
+                collect_let_conditions(inner, lets);
+            }
         }
     }
 }
