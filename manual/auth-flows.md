@@ -852,7 +852,7 @@ matches `Auth::login_id` / `Auth::login_using_id`, so 2FA logins are
 indistinguishable from no-2FA logins in terms of session state and
 listener observability. With the Magnetar engine installed, the promoted
 login is backed by a Magnetar session like every other web login - see
-[Magnetar-backed facade methods](authentication.md#magnetar-backed-facade-methods).
+[Framework logins under the engine](authentication.md#framework-logins-under-the-engine).
 
 Gate every protected route group with `TwoFactorChallengeMiddleware`
 **before** `AuthMiddleware` so a pending session is bounced to the

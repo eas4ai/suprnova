@@ -240,6 +240,16 @@ impl StatefulGuard for SessionGuard {
         remember: bool,
     ) -> Result<(), FrameworkError> {
         let user_id = user.get_auth_identifier();
+        // With the Magnetar engine installed, the default guard's login
+        // needs a Magnetar session. Ask the engine first, before anything
+        // changes or any event fires: it refuses an account whose second
+        // factor this login did not prove, and returns the auth epoch the
+        // session is issued at once the request commits.
+        let host_auth_epoch = if self.name == Auth::default_guard_name() {
+            crate::magnetar_integration::admit_host_sign_in(&user_id).await?
+        } else {
+            None
+        };
         Auth::flush_pending_remember_revocations().await?;
         let remember_to_revoke = Auth::prepare_guard_remember_identity_replacement(&self.name);
 
@@ -254,6 +264,9 @@ impl StatefulGuard for SessionGuard {
         // committed identity transition into a reported failure. Final store
         // persistence remains SessionMiddleware's fail-closed responsibility.
         Auth::login_guard_id(&self.name, user_id.clone())?;
+        if let Some(auth_epoch) = host_auth_epoch {
+            crate::session::middleware::record_host_sign_in_epoch(&user_id, auth_epoch);
+        }
         let remembered = if remember {
             match Auth::issue_remember_cookie_for_guard(
                 &self.name,

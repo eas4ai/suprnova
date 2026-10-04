@@ -1116,16 +1116,10 @@ where
             .try_into()
     }
 
-    /// Issue a session for a user the host application signed in itself,
-    /// at the user's current auth epoch and behind the shared factor gate's
-    /// enrollment check. See
-    /// [`MagnetarFactorAuthEngine::issue_host_session`] for when the
-    /// framework asks for one.
-    pub async fn issue_host_session(
-        &self,
-        user_id: &str,
-        metadata: SessionMetadata,
-    ) -> Result<MagnetarIssuedSession> {
+    /// Admit a host sign-in: refuse an unknown user or one with a confirmed
+    /// second factor, and return the user's current auth epoch. See
+    /// [`MagnetarFactorAuthEngine::admit_host_sign_in`].
+    pub async fn admit_host_sign_in(&self, user_id: &str) -> Result<u64> {
         let user = self
             .binding
             .storage()
@@ -1135,8 +1129,22 @@ where
                 resource: "user".to_owned(),
                 identifier: user_id.to_owned(),
             })?;
+        self.factor_gate.check_host_sign_in(&user.user_id).await?;
+        Ok(user.auth_epoch)
+    }
+
+    /// Issue a host-trusted session for a user the host application signed
+    /// in itself, at the epoch its credential was checked at and behind the
+    /// shared factor gate's enrollment check. See
+    /// [`MagnetarFactorAuthEngine::issue_host_session`].
+    pub async fn issue_host_session(
+        &self,
+        user_id: &str,
+        auth_epoch: u64,
+        metadata: SessionMetadata,
+    ) -> Result<MagnetarIssuedSession> {
         self.factor_gate
-            .complete_host_sign_in(&user.user_id, user.auth_epoch, metadata)
+            .complete_host_sign_in(user_id, auth_epoch, metadata)
             .await?
             .try_into()
     }
@@ -1168,18 +1176,46 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
             message: "factor challenge completion is unavailable".to_owned(),
         })
     }
+    /// Admit a host sign-in for `user_id`: refuse a user this engine cannot
+    /// sign in that way, and return the user's current auth epoch.
+    ///
+    /// The framework calls this when it checks a credential of its own - in
+    /// `Auth::attempt` / `Auth::login` before it logs the user in, in
+    /// `TwoFactor::start_challenge` and again in
+    /// `TwoFactor::complete_challenge` before it reads the code - and passes
+    /// the epoch to [`Self::issue_host_session`] later. A refusal here
+    /// therefore costs no proof and fires no login event. An implementation
+    /// must refuse a user whose confirmed second factor the host did not
+    /// verify, and an id that is not one of its users.
+    ///
+    /// The default refuses, which keeps existing custom engines
+    /// source-compatible; framework logins under such an engine then fail
+    /// closed.
+    async fn admit_host_sign_in(&self, user_id: &str) -> Result<u64> {
+        let _ = user_id;
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar session authority".to_owned(),
+            message: "host sign-in is unavailable".to_owned(),
+        })
+    }
+
     /// Issue an opaque session for a user the host application has already
     /// signed in itself: through a framework session guard (`Auth::login_id`,
     /// `Auth::attempt`, `Auth::login`) or the framework TOTP challenge
     /// (`TwoFactor::complete_challenge`).
     ///
+    /// **Host-trusted.** Like Laravel's `Auth::loginUsingId`, this mints a
+    /// session from a bare user id; the framework calls it only for an
+    /// identity its own login code established, and plugins never see it.
+    ///
     /// With a password/session engine installed, `SessionMiddleware`
     /// requires every default-guard identity to carry a binding to a live
-    /// session in this store, so revocation and auth epochs reach it. Those
-    /// framework paths authenticate outside Magnetar, so the middleware asks
-    /// for a session here before it stores the identity. An implementation
-    /// must keep its factor policy and refuse a user whose confirmed second
-    /// factor the host did not verify.
+    /// session in this store, so revocation and auth epochs reach it. The
+    /// middleware asks for the session here before it stores the identity.
+    /// `auth_epoch` is the epoch [`Self::admit_host_sign_in`] returned when
+    /// the credential was checked; issuance must fail when it is no longer
+    /// current, and must refuse a user whose confirmed second factor the
+    /// host did not verify.
     ///
     /// The default refuses, which keeps existing custom engines
     /// source-compatible; a framework login under such an engine then fails
@@ -1187,9 +1223,10 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
     async fn issue_host_session(
         &self,
         user_id: &str,
+        auth_epoch: u64,
         metadata: SessionMetadata,
     ) -> Result<MagnetarIssuedSession> {
-        let _ = (user_id, metadata);
+        let _ = (user_id, auth_epoch, metadata);
         Err(Error::DependencyUnavailable {
             dependency: "Magnetar password authentication engine".to_owned(),
             message: "host sign-in sessions are unavailable".to_owned(),
@@ -1365,18 +1402,46 @@ pub trait MagnetarFactorAuthEngine: Send + Sync {
     /// List active opaque sessions for one application user.
     async fn list_sessions(&self, user_id: &str) -> Result<Vec<SessionSummary>>;
 
+    /// Admit a host sign-in for `user_id`: refuse a user this engine cannot
+    /// sign in that way, and return the user's current auth epoch.
+    ///
+    /// The framework calls this when it checks a credential of its own - in
+    /// `Auth::attempt` / `Auth::login` before it logs the user in, in
+    /// `TwoFactor::start_challenge` and again in
+    /// `TwoFactor::complete_challenge` before it reads the code - and passes
+    /// the epoch to [`Self::issue_host_session`] later. A refusal here
+    /// therefore costs no proof and fires no login event. An implementation
+    /// must refuse a user whose confirmed second factor the host did not
+    /// verify, and an id that is not one of its users.
+    ///
+    /// The default refuses, which keeps existing custom engines
+    /// source-compatible; framework logins under such an engine then fail
+    /// closed.
+    async fn admit_host_sign_in(&self, user_id: &str) -> Result<u64> {
+        let _ = user_id;
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar session authority".to_owned(),
+            message: "host sign-in is unavailable".to_owned(),
+        })
+    }
+
     /// Issue an opaque session for a user the host application has already
     /// signed in itself: through a framework session guard (`Auth::login_id`,
     /// `Auth::attempt`, `Auth::login`) or the framework TOTP challenge
     /// (`TwoFactor::complete_challenge`).
     ///
+    /// **Host-trusted.** Like Laravel's `Auth::loginUsingId`, this mints a
+    /// session from a bare user id; the framework calls it only for an
+    /// identity its own login code established, and plugins never see it.
+    ///
     /// With a password/session engine installed, `SessionMiddleware`
     /// requires every default-guard identity to carry a binding to a live
-    /// session in this store, so revocation and auth epochs reach it. Those
-    /// framework paths authenticate outside Magnetar, so the middleware asks
-    /// for a session here before it stores the identity. An implementation
-    /// must keep its factor policy and refuse a user whose confirmed second
-    /// factor the host did not verify.
+    /// session in this store, so revocation and auth epochs reach it. The
+    /// middleware asks for the session here before it stores the identity.
+    /// `auth_epoch` is the epoch [`Self::admit_host_sign_in`] returned when
+    /// the credential was checked; issuance must fail when it is no longer
+    /// current, and must refuse a user whose confirmed second factor the
+    /// host did not verify.
     ///
     /// The default refuses, which keeps existing custom engines
     /// source-compatible; a framework login under such an engine then fails
@@ -1384,9 +1449,10 @@ pub trait MagnetarFactorAuthEngine: Send + Sync {
     async fn issue_host_session(
         &self,
         user_id: &str,
+        auth_epoch: u64,
         metadata: SessionMetadata,
     ) -> Result<MagnetarIssuedSession> {
-        let _ = (user_id, metadata);
+        let _ = (user_id, auth_epoch, metadata);
         Err(Error::DependencyUnavailable {
             dependency: "Magnetar factor/session authority".to_owned(),
             message: "host sign-in sessions are unavailable".to_owned(),
@@ -1448,12 +1514,17 @@ where
         self.session_provider.list_for_user(user_id).await
     }
 
+    async fn admit_host_sign_in(&self, user_id: &str) -> Result<u64> {
+        MagnetarHostEngine::admit_host_sign_in(self, user_id).await
+    }
+
     async fn issue_host_session(
         &self,
         user_id: &str,
+        auth_epoch: u64,
         metadata: SessionMetadata,
     ) -> Result<MagnetarIssuedSession> {
-        MagnetarHostEngine::issue_host_session(self, user_id, metadata).await
+        MagnetarHostEngine::issue_host_session(self, user_id, auth_epoch, metadata).await
     }
 }
 
@@ -1483,12 +1554,17 @@ where
         MagnetarHostEngine::complete_challenge(self, selector, code).await
     }
 
+    async fn admit_host_sign_in(&self, user_id: &str) -> Result<u64> {
+        MagnetarHostEngine::admit_host_sign_in(self, user_id).await
+    }
+
     async fn issue_host_session(
         &self,
         user_id: &str,
+        auth_epoch: u64,
         metadata: SessionMetadata,
     ) -> Result<MagnetarIssuedSession> {
-        MagnetarHostEngine::issue_host_session(self, user_id, metadata).await
+        MagnetarHostEngine::issue_host_session(self, user_id, auth_epoch, metadata).await
     }
 
     async fn password_register(&self, input: RegisterInput) -> Result<Registration> {

@@ -576,7 +576,7 @@ impl TwoFactor {
         // /login, no bypass through stale session state).
         crate::session::middleware::clear_auth_user();
         crate::auth::request_state::clear_current_user();
-        crate::session::middleware::set_two_factor_pending(user_id);
+        crate::session::middleware::set_two_factor_pending(user_id.clone());
         crate::session::middleware::set_two_factor_pending_remember(remember);
 
         // STEP 2: Revoke remember-me using the saved id. `Auth::id()`
@@ -597,7 +597,22 @@ impl TwoFactor {
             let clear = crate::session::middleware::create_forget_remember_cookie(&config);
             let _ = crate::session::middleware::push_pending_cookie(clear);
         }
-        Ok(())
+
+        // STEP 3: With the Magnetar engine installed, the promoted login
+        // will need a Magnetar session. Record the auth epoch the password
+        // was checked at, so a password reset or sign-out-everywhere during
+        // the challenge cancels it, and refuse now an account the engine
+        // cannot sign in this way.
+        match crate::magnetar_integration::admit_host_sign_in(&user_id).await {
+            Ok(auth_epoch) => {
+                crate::session::middleware::set_two_factor_pending_epoch(auth_epoch);
+                Ok(())
+            }
+            Err(error) => {
+                Self::cancel_challenge();
+                Err(error)
+            }
+        }
     }
 
     /// Read the user-id of a session that has a 2FA challenge
@@ -725,6 +740,31 @@ impl TwoFactor {
             ));
         }
 
+        // The promotion needs a Magnetar session when the engine requires
+        // one. Ask before the code is read, so a refusal burns no code and
+        // fires no event: an account with a Magnetar second factor this
+        // challenge does not prove, or an auth epoch that moved since the
+        // password was checked (a password reset, sign-out-everywhere).
+        let recorded_epoch = crate::session::middleware::two_factor_pending_epoch();
+        let host_auth_epoch = match crate::magnetar_integration::admit_host_sign_in(&pending_id)
+            .await
+        {
+            Ok(Some(current)) if recorded_epoch.is_some_and(|recorded| recorded != current) => {
+                Self::cancel_challenge();
+                return Err(FrameworkError::domain(
+                    "the sign-in expired because the account's sessions were revoked; sign in again",
+                    401,
+                ));
+            }
+            Ok(current) => recorded_epoch.or(current),
+            Err(error) => {
+                if matches!(error.status_code(), 401 | 409) {
+                    Self::cancel_challenge();
+                }
+                return Err(error);
+            }
+        };
+
         // Reserve the attempt before touching proof material. The store
         // serializes reservations per user, so concurrent requests cannot
         // all pass a separate status read and then verify.
@@ -793,6 +833,9 @@ impl TwoFactor {
         // post-challenge auth.
         crate::session::regenerate_session_id();
         crate::session::middleware::set_auth_user(&pending_id);
+        if let Some(auth_epoch) = host_auth_epoch {
+            crate::session::middleware::record_host_sign_in_epoch(&pending_id, auth_epoch);
+        }
         crate::session::middleware::clear_two_factor_pending();
         crate::session::middleware::clear_two_factor_pending_remember();
         crate::session::session_mut(|session| {

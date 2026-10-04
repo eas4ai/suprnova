@@ -46,6 +46,10 @@ static SETUP: OnceCell<()> = OnceCell::const_new();
 /// The Magnetar user the framework provider below resolves.
 static ACCOUNT: OnceCell<Account> = OnceCell::const_new();
 
+/// The Magnetar database, for the tests that change engine state behind
+/// the facades' back.
+static CONNECTION: OnceCell<sea_orm::DatabaseConnection> = OnceCell::const_new();
+
 #[derive(Clone)]
 struct Account {
     id: String,
@@ -122,6 +126,9 @@ async fn setup() -> Account {
                 )
                 .await
                 .expect("sessions table");
+            CONNECTION
+                .set(connection.clone())
+                .unwrap_or_else(|_| panic!("connection is set once"));
             App::singleton(DbConnection::from_raw(connection));
 
             let user = Auth::password()
@@ -243,14 +250,15 @@ fn router() -> Router {
         .get("/login", |request: Request| async move {
             let credentials =
                 Credentials::password(header(&request, "x-email"), header(&request, "x-password"));
-            let user = match Auth::attempt(&credentials, false).await {
+            let remember = header(&request, "x-remember") == "1";
+            let user = match Auth::attempt(&credentials, remember).await {
                 Ok(Some(user)) => user,
                 Ok(None) => return Ok(HttpResponse::text("invalid credentials").status(401)),
                 Err(error) => return failure(error),
             };
             let user_id = user.get_auth_identifier();
             match TwoFactor::is_enabled_by_id(&user_id).await {
-                Ok(true) => match TwoFactor::start_challenge(user_id, false).await {
+                Ok(true) => match TwoFactor::start_challenge(user_id, remember).await {
                     Ok(()) => Ok(HttpResponse::text("two-factor challenge")),
                     Err(error) => failure(error),
                 },
@@ -261,6 +269,21 @@ fn router() -> Router {
         .get("/two-factor-challenge", |request: Request| async move {
             match TwoFactor::complete_challenge(&header(&request, "x-code")).await {
                 Ok(user) => Ok(HttpResponse::text(user.id.to_string())),
+                Err(error) => failure(error),
+            }
+        })
+        .get("/logout", |_request: Request| async {
+            match Auth::logout().await {
+                Ok(()) => Ok(HttpResponse::text("signed out")),
+                Err(error) => failure(error),
+            }
+        })
+        .get("/login-then-logout", |request: Request| async move {
+            if let Err(error) = Auth::login_id(header(&request, "x-user-id")) {
+                return failure(error);
+            }
+            match Auth::logout().await {
+                Ok(()) => Ok(HttpResponse::text("signed out")),
                 Err(error) => failure(error),
             }
         })
@@ -573,4 +596,237 @@ async fn a_password_success_does_not_clear_second_factor_failures() {
         .await
         .expect_err("the right code is refused while locked");
     assert_eq!(error.status_code(), 429);
+}
+
+async fn magnetar_sql(sql: &str) {
+    CONNECTION
+        .get()
+        .expect("setup ran")
+        .execute_unprepared(sql)
+        .await
+        .expect("engine SQL");
+}
+
+/// A password reset, or "sign out everywhere", advances the account's
+/// auth epoch.
+async fn advance_auth_epoch(account: &Account) {
+    magnetar_sql(&format!(
+        "UPDATE app_users SET auth_epoch = auth_epoch + 1 WHERE id = {}",
+        account.id
+    ))
+    .await;
+}
+
+/// Give the account a confirmed second factor in Magnetar's own store.
+async fn enroll_magnetar_factor(account: &Account) {
+    magnetar_sql(&format!(
+        "INSERT INTO auth_two_factor \
+         (user_id, secret, enrollment_auth_epoch, rotation_pending, confirmed_at) \
+         VALUES ('{}', X'00', 0, 0, CURRENT_TIMESTAMP)",
+        account.id
+    ))
+    .await;
+}
+
+async fn session_count(account: &Account) -> usize {
+    suprnova::magnetar_integration::list_sessions(&account.id)
+        .await
+        .expect("list Magnetar sessions")
+        .len()
+}
+
+/// A password reset or "sign out everywhere" between the password check
+/// and the second factor cancels the challenge: the epoch the password was
+/// checked at is no longer current, so the code is not even read.
+#[tokio::test]
+async fn an_auth_epoch_change_during_a_challenge_cancels_it() {
+    let account = setup().await;
+    let enrollment = TwoFactor::enroll(&account).await.expect("enroll");
+    let code = current_code(&enrollment.otpauth_url);
+    TwoFactor::confirm(&account, &code).await.expect("confirm");
+
+    let mut browser = Browser::open().await;
+    let (status, body) = browser
+        .get(
+            "/login",
+            &[("x-email", &account.email), ("x-password", PASSWORD)],
+        )
+        .await;
+    assert_eq!((status, body.as_str()), (200, "two-factor challenge"));
+
+    advance_auth_epoch(&account).await;
+
+    let (status, body) = browser
+        .get("/two-factor-challenge", &[("x-code", &code)])
+        .await;
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(browser.whoami().await, "guest");
+    assert!(
+        TwoFactor::verify(&account, &code).await.expect("verify"),
+        "the refused challenge did not read the code"
+    );
+}
+
+/// An account with a confirmed Magnetar second factor cannot get a session
+/// from a framework login, which proved no such factor. The challenge is
+/// refused before its code is read, no login event fires, and no
+/// remember-me credential is issued.
+#[tokio::test]
+async fn a_magnetar_second_factor_refuses_the_framework_challenge_up_front() {
+    let _events = suprnova::EventFacade::fake();
+    let account = setup().await;
+    let enrollment = TwoFactor::enroll(&account).await.expect("enroll");
+    let code = current_code(&enrollment.otpauth_url);
+    TwoFactor::confirm(&account, &code).await.expect("confirm");
+
+    let mut browser = Browser::open().await;
+    let (status, body) = browser
+        .get(
+            "/login",
+            &[
+                ("x-email", &account.email),
+                ("x-password", PASSWORD),
+                ("x-remember", "1"),
+            ],
+        )
+        .await;
+    assert_eq!((status, body.as_str()), (200, "two-factor challenge"));
+
+    // The account gains a Magnetar factor while the challenge is pending.
+    enroll_magnetar_factor(&account).await;
+    // The password step's own Login event (Auth::attempt, then demotion)
+    // has fired; the refused challenge must add none.
+    let logins_before =
+        suprnova::events::testing::dispatched_count::<suprnova::auth::events::Login>(|_| true);
+
+    let (status, body) = browser
+        .get("/two-factor-challenge", &[("x-code", &code)])
+        .await;
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        !browser.cookies.contains_key("remember_me"),
+        "no remember-me credential reaches the browser"
+    );
+    assert_eq!(browser.whoami().await, "guest");
+    assert_eq!(
+        suprnova::events::testing::dispatched_count::<suprnova::auth::events::Login>(|_| true),
+        logins_before,
+        "the refused challenge fires no Login"
+    );
+    suprnova::events::testing::assert_not_dispatched::<
+        suprnova::auth_flows::events::TwoFactorChallenged,
+    >(|_| true);
+    assert_eq!(session_count(&account).await, 0);
+    assert!(
+        TwoFactor::verify(&account, &code).await.expect("verify"),
+        "the refused challenge did not read the code"
+    );
+}
+
+/// The password login of such an account is refused before it logs in:
+/// no login event, no remember-me credential, nobody signed in.
+#[tokio::test]
+async fn a_magnetar_second_factor_refuses_a_session_guard_login_up_front() {
+    let _events = suprnova::EventFacade::fake();
+    let account = setup().await;
+    enroll_magnetar_factor(&account).await;
+
+    let mut browser = Browser::open().await;
+    let (status, body) = browser
+        .get(
+            "/login",
+            &[
+                ("x-email", &account.email),
+                ("x-password", PASSWORD),
+                ("x-remember", "1"),
+            ],
+        )
+        .await;
+    assert_eq!(status, 409, "{body}");
+    assert!(!browser.cookies.contains_key("remember_me"));
+    assert_eq!(browser.whoami().await, "guest");
+    suprnova::events::testing::assert_not_dispatched::<suprnova::auth::events::Login>(|_| true);
+    assert_eq!(session_count(&account).await, 0);
+}
+
+/// The binding is real: revoking the Magnetar session signs the browser
+/// out on its next request.
+#[tokio::test]
+async fn revoking_the_magnetar_session_signs_the_browser_out() {
+    let account = setup().await;
+    let mut browser = Browser::open().await;
+    browser
+        .get("/login-id", &[("x-user-id", &account.id)])
+        .await;
+    assert_eq!(browser.whoami().await, account.id);
+
+    suprnova::magnetar_integration::revoke_all_sessions(&account.id)
+        .await
+        .expect("revoke");
+    assert_eq!(browser.whoami().await, "guest");
+}
+
+/// A login and a logout in one request store nobody and leave no Magnetar
+/// session behind.
+#[tokio::test]
+async fn a_login_and_logout_in_one_request_issues_no_session() {
+    let account = setup().await;
+    let mut browser = Browser::open().await;
+    let (status, _) = browser
+        .get("/login-then-logout", &[("x-user-id", &account.id)])
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(browser.whoami().await, "guest");
+    assert_eq!(session_count(&account).await, 0);
+}
+
+/// A login that replaces a bound identity, or a logout, retires the
+/// Magnetar session the old identity was bound to.
+#[tokio::test]
+async fn replacing_or_ending_a_bound_login_retires_its_magnetar_session() {
+    let account = setup().await;
+    let mut browser = Browser::open().await;
+    browser
+        .get("/login-id", &[("x-user-id", &account.id)])
+        .await;
+    assert_eq!(session_count(&account).await, 1);
+
+    browser
+        .get("/login-id", &[("x-user-id", &account.id)])
+        .await;
+    assert_eq!(browser.whoami().await, account.id);
+    assert_eq!(
+        session_count(&account).await,
+        1,
+        "the replaced login's session is revoked"
+    );
+
+    browser.get("/logout", &[]).await;
+    assert_eq!(browser.whoami().await, "guest");
+    assert_eq!(
+        session_count(&account).await,
+        0,
+        "logout revokes the bound session"
+    );
+}
+
+/// When the framework session cannot be stored, the Magnetar session the
+/// login was given is retired with it.
+#[tokio::test]
+async fn a_failed_session_save_retires_the_issued_magnetar_session() {
+    let account = setup().await;
+    magnetar_sql(
+        "CREATE TRIGGER refuse_session_insert BEFORE INSERT ON sessions \
+         BEGIN SELECT RAISE(ABORT, 'injected session write failure'); END",
+    )
+    .await;
+    let mut browser = Browser::open().await;
+    let (status, _) = browser
+        .get("/login-id", &[("x-user-id", &account.id)])
+        .await;
+    magnetar_sql("DROP TRIGGER refuse_session_insert").await;
+
+    assert_eq!(status, 500);
+    assert_eq!(browser.whoami().await, "guest");
+    assert_eq!(session_count(&account).await, 0);
 }

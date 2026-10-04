@@ -106,9 +106,11 @@ impl Auth {
     /// epochs reach it. This method cannot await the engine, so
     /// [`SessionMiddleware`](crate::SessionMiddleware) issues the session for
     /// `user_id` at the end of the request and records its binding before it
-    /// stores the session. When the engine refuses - an unknown user, or a
+    /// stores the session. When the engine refuses - an unknown user, a
     /// Magnetar second factor this login did not prove - the request fails
-    /// with a 500 and nothing is stored.
+    /// with that error and nothing is stored. The async session-guard
+    /// logins ([`Auth::attempt`](Self::attempt), [`Auth::login`](Self::login))
+    /// ask the engine before they log in, so their refusal fires no event.
     pub fn login_id(user_id: impl Into<String>) -> Result<(), crate::error::FrameworkError> {
         Self::refuse_custom_default_guard("login_id", "login")?;
         Self::login_guard_id(&Self::default_guard_name(), user_id)
@@ -226,6 +228,11 @@ impl Auth {
     /// call [`login_remember`](Self::login_remember) instead - it
     /// handles session id rotation + CSRF + auth user + remember-me in
     /// one step.
+    ///
+    /// With the Magnetar engine installed, the credential is a Magnetar
+    /// remember credential, and Magnetar treats a remembered sign-in as
+    /// having proved every factor. Issue one only for a user who proved
+    /// every factor the account has: this method does not check.
     pub async fn issue_remember_cookie(
         user_id: &str,
         ttl_minutes: i64,
@@ -695,6 +702,8 @@ impl Auth {
         // session would share an ID - defeating "complete session
         // destruction." Laravel's `session()->invalidate()` is
         // explicitly `flush()` + `regenerate()`; we match that here.
+        // The default identity's Magnetar session ends with it.
+        crate::session::middleware::retire_default_binding_before_flush();
         regenerate_session_id();
         session_mut(|session| {
             session.flush();

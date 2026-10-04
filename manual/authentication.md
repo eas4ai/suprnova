@@ -180,17 +180,49 @@ application user ID, and records an opaque Magnetar web binding. The framework
 continues to own HTTP middleware, cookies, mail, events, and its guard/provider
 contracts.
 
+#### Framework logins under the engine
+
 The framework's own login paths check credentials outside Magnetar:
 `Auth::login_id`, `Auth::attempt`, `Auth::login`, `Auth::login_using_id`, and
 `TwoFactor::complete_challenge`. With the engine installed, every web login
 needs a Magnetar session, so revocation and auth epochs reach it. For these
 paths, `SessionMiddleware` issues the user's Magnetar session at the end of the
-request and records its binding before it stores the session. The issuance
-keeps Magnetar's factor policy: an account with a confirmed Magnetar second
-factor is refused, because the framework login did not prove it. When the
-engine refuses or fails, the request ends with a `500` and nothing is stored.
-The browser is never told it signed in when the next request would sign it
-out.
+request and records its binding before it stores the session. This issuance is
+host-trusted, like Laravel's `Auth::loginUsingId`: the engine takes the
+framework's word for who signed in, and no Magnetar plugin can reach it.
+
+- **Same user ids.** The default guard's `UserProvider` must resolve
+  Magnetar's user ids, for example a provider over Magnetar's `app_users`
+  table. The framework cannot check this at boot, because a provider is opaque
+  until it resolves a user. A login whose id Magnetar does not know fails with
+  a `500` that names the cause.
+- **Second factors.** An account with a confirmed Magnetar second factor is
+  refused with `409`, because the framework login did not prove it. The
+  session guards and `TwoFactor` ask before they log in or read a code, so a
+  refusal fires no `Login` event, consumes no code, and issues no remember-me
+  credential. `Auth::login_id` cannot await the engine, so its refusal arrives
+  at the end of the request, which then stores nothing and retires a
+  remember-me credential issued during it.
+- **Auth epochs.** The session is issued at the auth epoch read when the
+  credential was checked. A password reset or "sign out everywhere" between
+  `TwoFactor::start_challenge` and `complete_challenge` therefore cancels the
+  challenge with `401` before its code is read.
+- **Remember-me.** The factor check covers remember-me credentials issued
+  during these logins. A credential issued later with
+  `Auth::issue_remember_cookie` is not checked: Magnetar treats a remembered
+  sign-in as having proved every factor, so issue one only for a user who
+  did.
+- **Replaced logins.** When a login replaces a bound identity, or a logout
+  ends one, the old Magnetar session is revoked.
+- **Custom engines.** A custom engine signs these logins in only if it
+  implements `admit_host_sign_in` and `issue_host_session`. Their default
+  bodies refuse, so under an engine without them every framework login fails
+  closed with `503` instead of storing an identity the next request would
+  drop.
+
+When the engine refuses or fails, the request answers with that error and
+stores nothing. The browser is never told it signed in when the next request
+would sign it out.
 
 ### Password authentication
 

@@ -400,19 +400,25 @@ mod host_sign_in {
     }
 
     #[tokio::test]
-    async fn a_stale_epoch_issues_no_session() {
-        let (gate, sessions) = gate(false).await;
-
-        gate.complete_host_sign_in(USER_ID, EPOCH - 1, SessionMetadata::default())
+    async fn the_host_check_refuses_exactly_the_users_with_a_second_factor() {
+        let (open_gate, _) = gate(false).await;
+        open_gate
+            .check_host_sign_in(USER_ID)
             .await
-            .expect_err("an epoch read before a revocation is no longer current");
+            .expect("no factor enrolled");
+
+        let (gated, sessions) = gate(true).await;
+        let error = gated
+            .check_host_sign_in(USER_ID)
+            .await
+            .expect_err("a confirmed factor refuses the host check");
+        assert!(matches!(error, Error::Conflict { .. }), "{error:?}");
         assert!(
             sessions
                 .list_for_user(USER_ID)
                 .await
                 .expect("list")
-                .is_empty(),
-            "a stale sign-in issues no session"
+                .is_empty()
         );
     }
 }

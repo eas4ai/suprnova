@@ -203,22 +203,51 @@ where
         format!("challenge-{:032x}", rand::random::<u128>())
     }
 
+    /// Refuse a host sign-in that would bypass this gate's factor policy.
+    ///
+    /// Hosts call this before they evaluate a proof of their own, so a
+    /// refusal neither consumes the proof nor fires the host's login
+    /// events. [`Self::complete_host_sign_in`] repeats the check when it
+    /// issues.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Conflict`] when the user has a confirmed second factor in
+    /// this gate's verifier, and the verifier's storage errors.
+    pub async fn check_host_sign_in(&self, user_id: &str) -> Result<()> {
+        if user_id.is_empty() {
+            return Err(invalid("user_id", "must not be empty"));
+        }
+        if self.factors.has_confirmed_enrollment(user_id).await? {
+            return Err(Error::Conflict {
+                resource: "host sign-in".to_owned(),
+                message: "the user has a second factor the host did not verify".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Issue a session for a user whose sign-in the host application
     /// completed itself, outside every Magnetar provider.
+    ///
+    /// **Host-trusted.** This mints a session from a bare user id, as
+    /// Laravel's `Auth::loginUsingId` does: the caller asserts that it
+    /// authenticated the user. Only the host that composed this concrete
+    /// gate can call it. Providers and plugins receive an
+    /// `Arc<dyn FactorGate>`, whose trait has no such method, so no plugin
+    /// context can reach it. Never expose it to code that does not own the
+    /// application's authentication decision.
     ///
     /// A host can keep a credential check of its own - a session guard over
     /// its own user table, or its own TOTP store - and still route its
     /// sessions through this store, because revocation, auth epochs and web
-    /// bindings answer to the store. This is that issuance. It stays behind
-    /// the gate's factor policy: a user with a confirmed second factor in
-    /// this gate's verifier is refused, because the host proved no factor
-    /// this verifier owns, and issuing here would bypass it.
+    /// bindings answer to the store. The issuance stays behind the gate's
+    /// factor policy (see [`Self::check_host_sign_in`]).
     ///
-    /// `auth_epoch` is the user's epoch as the host read it. Issuance fails
-    /// once it is no longer current, as it does for every provider.
-    ///
-    /// The method exists on the concrete gate only: providers and plugins
-    /// hold an `Arc<dyn FactorGate>` and cannot reach it.
+    /// `auth_epoch` is the user's epoch as the host read it when it checked
+    /// the user's credential. Issuance fails once it is no longer current,
+    /// so a password reset or a sign-out-everywhere between that check and
+    /// this call cancels the sign-in.
     ///
     /// # Errors
     ///
@@ -231,15 +260,7 @@ where
         auth_epoch: u64,
         metadata: SessionMetadata,
     ) -> Result<SessionGrant> {
-        if user_id.is_empty() {
-            return Err(invalid("user_id", "must not be empty"));
-        }
-        if self.factors.has_confirmed_enrollment(user_id).await? {
-            return Err(Error::Conflict {
-                resource: "host sign-in".to_owned(),
-                message: "the user has a second factor the host did not verify".to_owned(),
-            });
-        }
+        self.check_host_sign_in(user_id).await?;
         let approval = FactorGateApproval {
             user_id: user_id.to_owned(),
             context: AuthenticationContext::new(metadata, auth_epoch, Utc::now()),

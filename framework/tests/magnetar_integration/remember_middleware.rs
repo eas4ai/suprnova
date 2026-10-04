@@ -667,10 +667,34 @@ async fn failed_framework_session_write_retires_the_unpersisted_opaque_session()
 
 #[tokio::test]
 async fn handler_identity_transition_retires_a_retryable_successor() {
+    identity_transition_retires_a_retryable_successor(TransitionTarget::SameUser).await;
+}
+
+#[tokio::test]
+async fn handler_transition_to_another_account_retires_a_retryable_successor() {
+    identity_transition_retires_a_retryable_successor(TransitionTarget::AnotherAccount).await;
+}
+
+/// Who the handler signs in after the remembered sign-in failed retryably.
+enum TransitionTarget {
+    /// The remembered user again.
+    SameUser,
+    /// A second account.
+    AnotherAccount,
+}
+
+async fn identity_transition_retires_a_retryable_successor(target: TransitionTarget) {
     let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
     let connection = magnetar_connection().await;
+    let label = match target {
+        TransitionTarget::SameUser => "same",
+        TransitionTarget::AnotherAccount => "other",
+    };
     let user = Auth::password()
-        .register("remember-retry-transition@example.test", "correct-password")
+        .register(
+            &format!("remember-retry-transition-{label}@example.test"),
+            "correct-password",
+        )
         .await
         .expect("register retry-transition user")
         .created()
@@ -705,6 +729,11 @@ async fn handler_identity_transition_retires_a_retryable_successor() {
     };
     let original_cookie = response_cookie(issue_response.headers(), "remember_me");
 
+    // Refuse the remembered sign-in's Magnetar session, so its outcome is
+    // retryable. The refusal holds only while the user still has a remember
+    // row: the handler's transition revokes the committed successor before
+    // the request commits, so the Magnetar session a framework login is
+    // bound to at commit is issued normally - also for the same user.
     connection
         .execute_raw(Statement::from_string(
             DbBackend::Sqlite,
@@ -712,6 +741,7 @@ async fn handler_identity_transition_retires_a_retryable_successor() {
                 "CREATE TRIGGER fail_retry_transition_session_insert
                  BEFORE INSERT ON auth_sessions
                  WHEN NEW.user_id = {user_db_id}
+                     AND EXISTS (SELECT 1 FROM auth_remember_tokens WHERE user_id = {user_db_id})
                  BEGIN
                      SELECT RAISE(ABORT, 'injected retry-transition session failure');
                  END",
@@ -720,21 +750,20 @@ async fn handler_identity_transition_retires_a_retryable_successor() {
         .await
         .expect("install retry-transition session failure trigger");
 
-    // The handler signs in a second account. The trigger above refuses every
-    // Magnetar session for the remembered user, and a framework login is
-    // bound to a fresh Magnetar session at commit, so a transition back to
-    // the same user would fail closed instead of exercising the cleanup.
-    let transition_user = Auth::password()
-        .register(
-            "remember-retry-transition-target@example.test",
-            "correct-password",
-        )
-        .await
-        .expect("register transition target")
-        .created()
-        .expect("registration creates a new account")
-        .id
-        .to_string();
+    let transition_user = match target {
+        TransitionTarget::SameUser => user.id.to_string(),
+        TransitionTarget::AnotherAccount => Auth::password()
+            .register(
+                "remember-retry-transition-target@example.test",
+                "correct-password",
+            )
+            .await
+            .expect("register transition target")
+            .created()
+            .expect("registration creates a new account")
+            .id
+            .to_string(),
+    };
     let transition_next: suprnova::middleware::Next = Arc::new(move |_request| {
         let transition_user = transition_user.clone();
         Box::pin(async move {

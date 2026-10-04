@@ -160,6 +160,19 @@ impl TestEngine {
         }
     }
 
+    fn registered_user(&self, user_id: &str) -> magnetar::Result<User> {
+        self.state
+            .lock()
+            .expect("test engine state")
+            .users_by_id
+            .get(user_id)
+            .cloned()
+            .ok_or_else(|| magnetar::Error::NotFound {
+                resource: "user".to_owned(),
+                identifier: user_id.to_owned(),
+            })
+    }
+
     fn user_by_email(&self, email: &str) -> Option<User> {
         self.state
             .lock()
@@ -222,22 +235,17 @@ impl MagnetarPasswordAuthEngine for TestEngine {
         Ok(suprnova::Registration::Created(user))
     }
 
+    async fn admit_host_sign_in(&self, user_id: &str) -> magnetar::Result<u64> {
+        self.registered_user(user_id).map(|_| 0)
+    }
+
     async fn issue_host_session(
         &self,
         user_id: &str,
+        _auth_epoch: u64,
         _metadata: magnetar::sessions::SessionMetadata,
     ) -> magnetar::Result<MagnetarIssuedSession> {
-        let user = self
-            .state
-            .lock()
-            .expect("test engine state")
-            .users_by_id
-            .get(user_id)
-            .cloned()
-            .ok_or_else(|| magnetar::Error::NotFound {
-                resource: "user".to_owned(),
-                identifier: user_id.to_owned(),
-            })?;
+        let user = self.registered_user(user_id)?;
         Ok(self.issue_session(&user))
     }
 

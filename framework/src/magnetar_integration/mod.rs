@@ -492,12 +492,19 @@ impl engine::MagnetarFactorAuthEngine for PasswordFactorEngine {
         self.password.list_sessions(user_id).await
     }
 
+    async fn admit_host_sign_in(&self, user_id: &str) -> magnetar::Result<u64> {
+        self.password.admit_host_sign_in(user_id).await
+    }
+
     async fn issue_host_session(
         &self,
         user_id: &str,
+        auth_epoch: u64,
         metadata: magnetar::sessions::SessionMetadata,
     ) -> magnetar::Result<engine::MagnetarIssuedSession> {
-        self.password.issue_host_session(user_id, metadata).await
+        self.password
+            .issue_host_session(user_id, auth_epoch, metadata)
+            .await
     }
 }
 
@@ -963,6 +970,68 @@ pub(crate) async fn unlock_account(email: &str) -> Result<bool, FrameworkError> 
         .unlock_account(email)
         .await
         .map_err(|error| FrameworkError::internal(format!("unlock account: {error}")))
+}
+
+/// The session authority that framework logins must be bound to, when the
+/// installed engine requires it.
+///
+/// A full password/session installation signs out every default-guard
+/// identity without a binding (see `SessionMiddleware`), so a framework
+/// login there needs a Magnetar session. OAuth-only installations do not.
+pub(crate) fn host_sign_in_authority() -> Option<Arc<dyn engine::MagnetarFactorAuthEngine>> {
+    optional_password_engine()?;
+    optional_factor_engine()
+}
+
+/// Admit a framework login of `user_id` before it happens, when the
+/// installed engine requires a binding.
+///
+/// Returns the user's auth epoch to issue the session at, or `None` when no
+/// binding is required. Called before the login reads a proof or fires an
+/// event, so a refusal costs neither.
+///
+/// # Errors
+///
+/// See [`host_sign_in_error`].
+pub(crate) async fn admit_host_sign_in(user_id: &str) -> Result<Option<u64>, FrameworkError> {
+    let Some(authority) = host_sign_in_authority() else {
+        return Ok(None);
+    };
+    authority
+        .admit_host_sign_in(user_id)
+        .await
+        .map(Some)
+        .map_err(host_sign_in_error)
+}
+
+/// Map an engine refusal of a framework login to the error the request
+/// answers with.
+///
+/// - `409` for an account with a second factor the framework login did not
+///   prove: it must sign in through the engine's own flow.
+/// - `401` for a stale auth epoch: a password reset or sign-out-everywhere
+///   happened after the credential was checked, so the sign-in expired.
+/// - `500` for an id the engine does not know: the default guard's provider
+///   must resolve the engine's user ids, and this one did not.
+/// - `503` for anything else, an engine that cannot answer.
+pub(crate) fn host_sign_in_error(error: magnetar::Error) -> FrameworkError {
+    match error {
+        magnetar::Error::Conflict { .. } => FrameworkError::domain(
+            "this account has a second factor that this sign-in did not verify; sign in through Auth::password()",
+            409,
+        ),
+        magnetar::Error::InvalidInput { .. } => FrameworkError::domain(
+            "the sign-in expired because the account's sessions were revoked; sign in again",
+            401,
+        ),
+        magnetar::Error::NotFound { .. } => FrameworkError::internal(
+            "the signed-in id is not a Magnetar user; with the Magnetar engine installed, the default guard's user provider must resolve Magnetar user ids",
+        ),
+        error => {
+            tracing::error!(%error, "Magnetar host sign-in failed");
+            FrameworkError::domain("the sign-in engine is unavailable", 503)
+        }
+    }
 }
 
 /// Look up a Suprnova [`User`] by its opaque application identifier.
