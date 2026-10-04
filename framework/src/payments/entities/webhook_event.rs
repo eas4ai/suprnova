@@ -18,7 +18,17 @@ use chrono::{DateTime, Utc};
 /// Note: no `timestamps` flag - this entity uses `received_at` /
 /// `processed_at` instead of the standard `created_at` / `updated_at`
 /// pair. The macro's auto-touch logic is not applied.
-#[suprnova::model(table = "payments_webhook_events")]
+///
+/// Every timestamp is cast native: the payments migration creates native
+/// `timestamp with time zone` columns, which the default text cast cannot
+/// write on Postgres or read on any engine but SQLite.
+#[suprnova::model(
+    table = "payments_webhook_events",
+    casts = {
+        received_at = suprnova::AsNativeDateTime,
+        processed_at = suprnova::AsOptionalNativeDateTime,
+    },
+)]
 pub struct WebhookEvent {
     /// Surrogate primary key.
     pub id: i64,

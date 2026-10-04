@@ -347,19 +347,17 @@ impl DatabaseEvaluator {
         scope_key: &str,
         enabled: bool,
     ) -> Result<(), FrameworkError> {
-        // Phase 10A T11 - the inner SeaORM `Model` carries the storage
-        // shape (RFC-3339 string for `created_at` / `updated_at` since
-        // `#[model(timestamps)]` auto-injects the `AsDateTime` cast).
-        // Build the ActiveModel by routing through the macro's
-        // cast pipeline rather than handing chrono types directly.
-        let now = crate::clock::now().to_rfc3339();
+        // The entity casts both timestamps native (the migration's
+        // columns are `timestamp with time zone`), so the active model
+        // takes the moment itself.
+        let now = crate::clock::now();
         let model = FeatureActive {
             name: Set(name.to_string()),
             scope_key: Set(scope_key.to_string()),
             enabled: Set(enabled),
             description: Set(None),
             updated_by: Set(None),
-            created_at: Set(now.clone()),
+            created_at: Set(now),
             updated_at: Set(now),
             ..Default::default()
         };
@@ -847,14 +845,14 @@ mod tests {
 
         // Out of band, the way another process flipping a row would be:
         // straight into the table, then a reload.
-        let now = crate::clock::now().to_rfc3339();
+        let now = crate::clock::now();
         FeatureEntity::insert(FeatureActive {
             name: Set("late-override-flag".to_string()),
             scope_key: Set("user:bob".to_string()),
             enabled: Set(false),
             description: Set(None),
             updated_by: Set(None),
-            created_at: Set(now.clone()),
+            created_at: Set(now),
             updated_at: Set(now),
             ..Default::default()
         })
@@ -947,14 +945,14 @@ mod tests {
         let eval = DatabaseEvaluator::new_in_memory().await.unwrap();
         // Seed via a direct insert that bypasses set_flag, so the
         // counter stays at zero and the snapshot stays empty.
-        let now = crate::clock::now().to_rfc3339();
+        let now = crate::clock::now();
         FeatureEntity::insert(FeatureActive {
             name: Set("beta".to_string()),
             scope_key: Set(String::new()),
             enabled: Set(true),
             description: Set(None),
             updated_by: Set(None),
-            created_at: Set(now.clone()),
+            created_at: Set(now),
             updated_at: Set(now),
             ..Default::default()
         })

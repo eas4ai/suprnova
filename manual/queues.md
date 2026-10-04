@@ -1638,19 +1638,23 @@ CREATE TABLE job_batches (
     name          TEXT NOT NULL,
     total_jobs    INTEGER NOT NULL,
     options_json  TEXT NOT NULL,
-    created_at    INTEGER NOT NULL,
-    cancelled_at  INTEGER NULL,
-    finished_at   INTEGER NULL
+    created_at    BIGINT NOT NULL,
+    cancelled_at  BIGINT NULL,
+    finished_at   BIGINT NULL
 );
 
 CREATE TABLE job_batch_settlements (
     batch_id   TEXT NOT NULL,
     job_id     TEXT NOT NULL,
     failed     INTEGER NOT NULL,
-    settled_at INTEGER NOT NULL,
+    settled_at BIGINT NOT NULL,
     PRIMARY KEY (batch_id, job_id)
 );
 ```
+
+The epoch columns are `BIGINT` so they outlive 2038. Tables created with
+`INTEGER` epoch columns from an earlier version of this schema keep
+working: the repository reads every integer column at either width.
 
 `DatabaseBatchRepository::with_tables(db, batches, settlements)` names them
 yourself; both names are validated as SQL identifiers at construction.

@@ -11,7 +11,18 @@
 use chrono::{DateTime, Utc};
 
 /// Mirror row for a provider-side customer record.
-#[suprnova::model(table = "payments_customers", timestamps)]
+///
+/// Every timestamp is cast native: the payments migration creates native
+/// `timestamp with time zone` columns, which the default text cast cannot
+/// write on Postgres or read on any engine but SQLite.
+#[suprnova::model(
+    table = "payments_customers",
+    timestamps,
+    casts = {
+        created_at = suprnova::AsNativeDateTime,
+        updated_at = suprnova::AsNativeDateTime,
+    },
+)]
 pub struct Customer {
     /// Surrogate primary key.
     pub id: i64,

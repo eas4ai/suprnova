@@ -3,3 +3,7 @@
 
 pub mod features;
 pub mod migration;
+// Its tests move the framework clock with `TestClock`, which exists with
+// the `testing` feature only.
+#[cfg(feature = "testing")]
+pub mod native_engines;

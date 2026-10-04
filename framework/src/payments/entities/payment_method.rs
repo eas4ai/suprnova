@@ -12,7 +12,18 @@ use chrono::{DateTime, Utc};
 /// etc.); `method_details` carries the display-safe envelope (brand,
 /// last4, expiry - never PAN or CVV). `is_default` flags the customer's
 /// primary instrument.
-#[suprnova::model(table = "payments_payment_methods", timestamps)]
+///
+/// Every timestamp is cast native: the payments migration creates native
+/// `timestamp with time zone` columns, which the default text cast cannot
+/// write on Postgres or read on any engine but SQLite.
+#[suprnova::model(
+    table = "payments_payment_methods",
+    timestamps,
+    casts = {
+        created_at = suprnova::AsNativeDateTime,
+        updated_at = suprnova::AsNativeDateTime,
+    },
+)]
 pub struct PaymentMethod {
     /// Surrogate primary key.
     pub id: i64,

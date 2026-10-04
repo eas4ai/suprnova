@@ -517,3 +517,89 @@ async fn table_names_are_validated_as_identifiers() {
         "and so is a hostile settlements table name"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Postgres
+// ---------------------------------------------------------------------------
+
+/// The documented schema on Postgres, where `INTEGER` is the 32-bit `int4`.
+///
+/// The repository decoded `total_jobs` and the epoch columns as `i64`, and
+/// sqlx refuses to read an `int4` column into one, so every settlement failed
+/// to lock its batch: the job was never acknowledged, ran again after each
+/// visibility timeout, and the batch callbacks never fired. SQLite's
+/// `INTEGER` is 64-bit, which is why the suite above could not see it. The
+/// `BIGINT` pass is the schema the manual documents now; the `INTEGER` pass is
+/// the one tables created from the earlier manual still have.
+///
+/// ```text
+/// PG_TEST_URL=postgres://... cargo test -p suprnova --test queue -- \
+///   --ignored --test-threads=1 batch_repository::postgres_
+/// ```
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
+async fn postgres_the_documented_schema_settles_and_reads_back() {
+    let url = std::env::var("PG_TEST_URL").expect("set PG_TEST_URL to a disposable Postgres");
+    let db = Database::connect(url).await.expect("connect Postgres");
+    for (label, int, epoch) in [
+        ("int4", "INTEGER", "INTEGER"),
+        ("int8", "INTEGER", "BIGINT"),
+    ] {
+        let batches = format!("pg_job_batches_{label}");
+        let settlements = format!("pg_job_batch_settlements_{label}");
+        db.execute_unprepared(&format!(
+            "DROP TABLE IF EXISTS {settlements}; DROP TABLE IF EXISTS {batches};
+             CREATE TABLE {batches} (
+                 id            TEXT PRIMARY KEY,
+                 name          TEXT NOT NULL,
+                 total_jobs    {int} NOT NULL,
+                 options_json  TEXT NOT NULL,
+                 created_at    {epoch} NOT NULL,
+                 cancelled_at  {epoch} NULL,
+                 finished_at   {epoch} NULL
+             );
+             CREATE TABLE {settlements} (
+                 batch_id   TEXT NOT NULL,
+                 job_id     TEXT NOT NULL,
+                 failed     {int} NOT NULL,
+                 settled_at {epoch} NOT NULL,
+                 PRIMARY KEY (batch_id, job_id)
+             );"
+        ))
+        .await
+        .expect("create the documented tables");
+        let repo = DatabaseBatchRepository::with_tables(db.clone(), batches, settlements)
+            .expect("valid table names");
+
+        let b = fresh("pg", 2);
+        let id = b.id.clone();
+        repo.store(b).await.expect("store");
+        let u = repo
+            .record_successful_job(&id, Uuid::new_v4())
+            .await
+            .unwrap_or_else(|e| panic!("{label}: settle a success: {e}"));
+        assert_eq!(u.pending_jobs, 1, "{label}");
+        let failed = Uuid::new_v4();
+        let u = repo
+            .record_failed_job(&id, failed)
+            .await
+            .unwrap_or_else(|e| panic!("{label}: settle a failure: {e}"));
+        assert_eq!((u.pending_jobs, u.failed_jobs), (0, 1), "{label}");
+
+        repo.cancel(&id).await.expect("cancel");
+        assert!(
+            repo.is_cancelled(&id).await.expect("is_cancelled"),
+            "{label}"
+        );
+        repo.mark_finished(&id).await.expect("mark_finished");
+        let snap = repo
+            .find(&id)
+            .await
+            .unwrap_or_else(|e| panic!("{label}: find: {e}"))
+            .expect("the batch exists");
+        assert_eq!(snap.total_jobs, 2, "{label}");
+        assert_eq!(snap.pending_jobs, 0, "{label}");
+        assert_eq!(snap.failed_job_ids, vec![failed], "{label}");
+        assert!(snap.cancelled() && snap.finished_at.is_some(), "{label}");
+    }
+}
