@@ -414,6 +414,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **The broadcast fanout no longer uses sea-streamer.**
+  `SeaStreamerBroadcastHub` keeps its name and runs on the framework's own
+  Redis client, and `sea-streamer` and `sea-streamer-redis` left the
+  dependency tree. It supports `redis://`, `rediss://` and `memory://`, a
+  stream shared by hubs in one process; `stdio://` is an alias for
+  `memory://` and no longer reads or writes stdin and stdout. `kafka://`
+  and `file://`, which were never compiled in, now give a clear error, and
+  `new_loopback` behaves like `new`. An event published after the
+  constructor returns always arrives. Stream entries keep their `msg`
+  field, so hubs of the earlier version on the same stream interoperate
+  during a rolling deploy. This landed after the `v3.1.0` tag.
 - **New applications' session, remember-me and auth-flow token tables use
   `DATETIME` on MySQL**, so these columns stay writable past 2038-01-19.
   Postgres and SQLite are unchanged. This landed after the `v3.1.0` tag.
@@ -631,7 +642,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   region; payloads written before still read, but `clear` no longer sweeps
   them. Qdrant ids `"01"`, `"+1"` and non-canonical UUID spellings no longer
   map to the point of `"1"` or the canonical UUID, so items stored under
-  such ids must be written again. Resend tags go out as `tag_<i>` name and
+  such ids must be written again. A caller's version 5 UUID id is hashed
+  like any other string, so it can never name a point a derived id holds;
+  items stored under v5 UUID ids must be written again too. Resend tags go out as `tag_<i>` name and
   value pairs, and a tag Resend cannot carry is refused before sending.
   `DynNotification` gains `as_any`, with a default. This landed after the
   `v3.1.0` tag.
@@ -814,10 +827,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   mail is accepted by Resend. Notification mail renders from the
   notification itself, so `data()` no longer has to hold every field
   `to_mail` reads. An SQS overflow job whose first send went unanswered
-  keeps its payload when the retries are refused. The Redis queue works
-  with `redis://user:password@...` and `rediss://` URLs, and the broadcast
-  fanout authenticates with the URL's credentials. This landed after the
-  `v3.1.0` tag.
+  keeps its payload when the retries are refused, and when SQS took both
+  an unanswered send and its retry, each message now carries its own
+  payload copy, so acknowledging one no longer leaves the other unreadable.
+  The Redis queue and the broadcast fanout work with
+  `redis://user:password@...` and `rediss://` URLs, taking credentials,
+  database and TLS from the URL. This landed after the `v3.1.0` tag.
 - **Middleware, sessions, uploads and test helpers.** A middleware group
   reused by two sibling groups no longer fails with `CycleDetected`. A
   `RateLimiter` counter that expired in the middle of a hit gets its expiry
