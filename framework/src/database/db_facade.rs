@@ -1415,12 +1415,11 @@ impl DbTableBuilder {
             sql.push_str(&order.join(", "));
         }
 
-        if let Some(n) = self.limit_value {
-            sql.push_str(&format!(" LIMIT {n}"));
-        }
-        if let Some(n) = self.offset_value {
-            sql.push_str(&format!(" OFFSET {n}"));
-        }
+        sql.push_str(&super::clauses::render_limit_offset(
+            backend,
+            self.limit_value,
+            self.offset_value,
+        ));
 
         Ok(sql)
     }

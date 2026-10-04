@@ -748,6 +748,9 @@ println!("{}", query.to_raw_sql());
 
 The substitution is **debug-format** (not SQL-safe escaping) and is
 intended for log output only. Never feed the result back into a query.
+When the bindings do not match the placeholders - one is missing, or
+one is left over - `to_raw_sql()` returns the SQL unchanged rather than
+a half-substituted statement.
 
 ### Coverage scope
 

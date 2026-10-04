@@ -71,6 +71,7 @@ pub mod http;
 pub mod http_client;
 pub mod idempotency;
 pub mod inertia;
+pub(crate) mod json_number;
 /// Server-driven interactive components and their application-facing contracts.
 pub mod live;
 #[cfg(feature = "localization")]

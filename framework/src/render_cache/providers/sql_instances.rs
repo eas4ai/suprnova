@@ -79,6 +79,10 @@ use crate::{DB, FrameworkError, PRIMARY_CONNECTION_NAME, Transaction};
 /// whose previous record elapsed starts here again.
 const FIRST_VERSION: u64 = 1;
 
+/// The savepoint a creating insert runs under on PostgreSQL, so a lost
+/// race on the unique key leaves the transaction usable.
+const INSERT_SAVEPOINT: &str = "suprnova_live_record_insert";
+
 /// Elapsed records one creating operation reclaims.
 ///
 /// Bounded for the reason the in-memory reference store bounds it: a store
@@ -144,8 +148,16 @@ impl SqlInstanceRecordStore {
     /// its write, and a peer's record is the one that stands. On PostgreSQL,
     /// where the read locks nothing when the row is absent, the unique key
     /// is the only thing that can decide that race.
+    ///
+    /// On PostgreSQL that insert runs under a savepoint of `tx`. A lost
+    /// race is an expected outcome, and there a failed statement aborts
+    /// the whole transaction - the host's own when the store joined one -
+    /// so the loss is rolled back to the savepoint and the transaction
+    /// goes on, as the lease store rolls its own collision back. SQLite
+    /// and MySQL undo a failed statement alone.
     async fn create_through(
         &self,
+        tx: &Transaction,
         exec: &ExecutorChoice,
         table: RecordTable,
         key: RecordAddress,
@@ -184,6 +196,10 @@ impl SqlInstanceRecordStore {
         .await
         .map_err(|error| ledger_db_error(&error))?;
 
+        let guarded = backend == DbBackend::Postgres;
+        if guarded {
+            tx.savepoint(INSERT_SAVEPOINT).await.map_err(ledger_error)?;
+        }
         match exec
             .run(sea_orm::Statement::from_sql_and_values(
                 backend,
@@ -198,7 +214,14 @@ impl SqlInstanceRecordStore {
             .await
         {
             Ok(_) => Ok(true),
-            Err(error) if is_unique_violation(&error.to_string(), table.name()) => Ok(false),
+            Err(error) if is_unique_violation(&error.to_string(), table.name()) => {
+                if guarded {
+                    tx.rollback_to(INSERT_SAVEPOINT)
+                        .await
+                        .map_err(ledger_error)?;
+                }
+                Ok(false)
+            }
             Err(error) => Err(ledger_db_error(&error)),
         }
     }
@@ -425,8 +448,15 @@ impl SqlInstanceRecordStore {
             // Dropped before the commit below: `Transaction::commit` unwraps
             // the shared handle and refuses while a clone is still alive.
             let exec = transaction.executor();
-            self.create_through(&exec, table, key, bytes, expires_at)
-                .await
+            self.create_through(
+                transaction.transaction(),
+                &exec,
+                table,
+                key,
+                bytes,
+                expires_at,
+            )
+            .await
         };
         transaction.finish(created).await
     }
@@ -514,8 +544,14 @@ impl OperationTransaction {
     }
 
     fn executor(&self) -> ExecutorChoice {
+        ExecutorChoice::from_tx(self.transaction())
+    }
+
+    /// The transaction itself, for a savepoint around a statement that may
+    /// fail as an expected outcome.
+    fn transaction(&self) -> &Transaction {
         match self {
-            Self::Ambient(tx) | Self::Owned(tx) => ExecutorChoice::from_tx(tx),
+            Self::Ambient(tx) | Self::Owned(tx) => tx,
         }
     }
 

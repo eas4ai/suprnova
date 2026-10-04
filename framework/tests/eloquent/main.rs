@@ -51,6 +51,7 @@ pub mod pagination;
 pub mod pivot_timestamps_engines;
 pub mod prunable_relations;
 pub mod query_helpers_model;
+pub mod query_shapes_engines;
 pub mod read_instrumentation;
 pub mod registry;
 pub mod relation_registry;

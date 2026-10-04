@@ -3,6 +3,8 @@
 
 #[path = "../support/common.rs"]
 mod common;
+// The application convention `test_database!()` resolves against.
+mod migrations;
 
 pub mod assertable_inertia;
 pub mod clock;

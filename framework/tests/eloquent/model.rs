@@ -442,6 +442,120 @@ async fn decrement_atomic_update() {
     assert_eq!(reread.hits, 6);
 }
 
+/// DATA-038: decrementing by `i64::MIN` subtracts it. It used to negate
+/// the amount and add, which overflows for the one value with no
+/// negation.
+#[tokio::test]
+#[serial]
+async fn decrement_by_the_minimum_signed_value_subtracts_it() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    db.execute_unprepared(
+        "CREATE TABLE t4_counters (id INTEGER PRIMARY KEY AUTOINCREMENT, hits INTEGER NOT NULL DEFAULT 0)",
+    )
+    .await
+    .unwrap();
+
+    let counter = T4Counter::create(attrs! { hits: -1 }).await.unwrap();
+    counter
+        .decrement("hits", i64::MIN)
+        .await
+        .expect("decrement by i64::MIN");
+    let reread = T4Counter::find(counter.id).await.unwrap().unwrap();
+    assert_eq!(reread.hits, i64::MAX, "-1 - i64::MIN is i64::MAX");
+}
+
+/// DATA-009: a model built in the process - a replica, or what
+/// `first_or_new` returns when nothing matches - has no row yet, and its
+/// key holds the reset value. `save` used to UPDATE the row with that key,
+/// which overwrote an unrelated row 0. It refuses now and names
+/// `persist`, which inserts the model and returns it with its key.
+#[tokio::test]
+#[serial]
+async fn save_refuses_a_model_never_inserted_and_persist_inserts_it() {
+    use suprnova::Persistable;
+
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate(&db).await;
+    db.execute_unprepared(
+        "INSERT INTO t4_users (id, name, email) VALUES (0, 'Zero', 'zero@x.com')",
+    )
+    .await
+    .unwrap();
+    let alice = T4User::create(attrs! { name: "Alice", email: "alice@x.com" })
+        .await
+        .unwrap();
+
+    let mut replica = alice.replicate().await.unwrap();
+    replica.email = "copy@x.com".to_string();
+    let err = replica
+        .save()
+        .await
+        .expect_err("save refuses a model that was never inserted");
+    assert!(
+        err.to_string().contains("persist"),
+        "the error names persist(): {err}"
+    );
+    let zero = T4User::find(0i64)
+        .await
+        .unwrap()
+        .expect("row 0 is still there");
+    assert_eq!(
+        (zero.name.as_str(), zero.email.as_str()),
+        ("Zero", "zero@x.com"),
+        "the row holding the reset key is untouched"
+    );
+
+    let fresh = T4User::first_or_new(attrs! { email: "new@x.com" })
+        .await
+        .unwrap();
+    assert!(fresh.save().await.is_err(), "first_or_new's new model too");
+    assert!(
+        fresh.update(attrs! { name: "Fresh" }).await.is_err(),
+        "update refuses it as save does"
+    );
+
+    let saved = replica
+        .persist()
+        .await
+        .expect("persist inserts the replica");
+    assert!(saved.id > alice.id, "the database assigned a new key");
+    assert_eq!(saved.email, "copy@x.com");
+    let mut renamed = saved.clone();
+    renamed.name = "Alice copy".to_string();
+    renamed
+        .save()
+        .await
+        .expect("the persisted model saves as an update");
+    assert_eq!(
+        T4User::find(saved.id).await.unwrap().unwrap().name,
+        "Alice copy"
+    );
+    assert_eq!(T4User::query().count().await.unwrap(), 3);
+}
+
+/// DATA-008: `Collection::sort_by` orders integers exactly. Above 2^53
+/// two integers can share one `f64`, and the comparison used to call
+/// them equal and leave them unsorted.
+#[tokio::test]
+#[serial]
+async fn sort_by_orders_integers_above_two_to_the_53_exactly() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    db.execute_unprepared(
+        "CREATE TABLE t4_counters (id INTEGER PRIMARY KEY AUTOINCREMENT, hits INTEGER NOT NULL DEFAULT 0)",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "INSERT INTO t4_counters (id, hits) VALUES (1, 9007199254740993), (2, 9007199254740992)",
+    )
+    .await
+    .unwrap();
+
+    let rows = T4Counter::query().order_by_asc("id").get().await.unwrap();
+    let ids: Vec<i64> = rows.sort_by("hits").iter().map(|c| c.id).collect();
+    assert_eq!(ids, vec![2, 1]);
+}
+
 #[tokio::test]
 #[serial]
 async fn force_delete_alias_calls_hard_delete() {

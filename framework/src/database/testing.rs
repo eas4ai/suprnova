@@ -387,8 +387,18 @@ impl StatementCounter {
 /// ```
 #[macro_export]
 macro_rules! test_database {
+    // The migrator lives in the calling crate, the application's
+    // `src/migrations/mod.rs`, so the path starts at that crate's root:
+    // `crate`, which a `macro_rules!` body resolves where the macro is
+    // called. `$crate` would name suprnova, which has no migrations. The
+    // root is handed to the arm below as a token so the path is written
+    // once, from a fragment.
     () => {
-        $crate::testing::TestDatabase::fresh::<$crate::migrations::Migrator>()
+        $crate::test_database!(@root crate)
+    };
+    // Internal: the no-argument form, with the calling crate's root.
+    (@root $root:ident) => {
+        $crate::testing::TestDatabase::fresh::<$root::migrations::Migrator>()
             .await
             .expect("Failed to set up test database")
     };

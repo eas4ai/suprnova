@@ -112,9 +112,30 @@ fn check_name_length(table: &str, name: &str, what: &str) -> Result<(), DbErr> {
     Ok(())
 }
 
-fn index_statement(table: &str, name: &str, spec: &IndexSpec) -> IndexCreateStatement {
+/// `name` as sea-query must be handed an index or foreign key name for
+/// `backend`. sea-query writes such a name between the backend's quotes
+/// without escaping it, so the quote character inside the name is doubled
+/// here, the way [`quote_ident`] doubles it in the statements the builder
+/// writes itself and sea-query doubles it in table and column names.
+fn constraint_name(backend: DbBackend, name: &str) -> String {
+    let quote = if backend == DbBackend::MySql {
+        '`'
+    } else {
+        '"'
+    };
+    name.replace(quote, &format!("{quote}{quote}"))
+}
+
+fn index_statement(
+    backend: DbBackend,
+    table: &str,
+    name: &str,
+    spec: &IndexSpec,
+) -> IndexCreateStatement {
     let mut statement = Index::create();
-    statement.name(name).table(sea_ident(table));
+    statement
+        .name(constraint_name(backend, name))
+        .table(sea_ident(table));
     for column in &spec.columns {
         statement.col(sea_ident(column));
     }
@@ -162,6 +183,7 @@ fn referenced_table<'a>(table: &str, foreign: &'a ForeignSpec) -> Result<Option<
 }
 
 fn foreign_statement(
+    backend: DbBackend,
     table: &str,
     name: &str,
     foreign: &ForeignSpec,
@@ -169,7 +191,7 @@ fn foreign_statement(
 ) -> ForeignKeyCreateStatement {
     let mut statement = ForeignKeyCreateStatement::new();
     statement
-        .name(name)
+        .name(constraint_name(backend, name))
         .from(sea_ident(table), sea_ident(&foreign.column))
         .to(sea_ident(ref_table), sea_ident(&foreign.ref_column));
     if let Some(action) = foreign.on_delete {
@@ -289,7 +311,7 @@ pub(crate) fn plan_create(blueprint: &Blueprint, backend: DbBackend) -> Result<V
             }
             Command::AddIndex(spec) => {
                 let name = check_index(table, spec, &mut seen_names)?;
-                indexes.push(index_statement(table, &name, spec));
+                indexes.push(index_statement(backend, table, &name, spec));
             }
             Command::AddForeign(position) => {
                 let Some(foreign) = blueprint.foreigns().get(*position) else {
@@ -303,7 +325,9 @@ pub(crate) fn plan_create(blueprint: &Blueprint, backend: DbBackend) -> Result<V
                 if foreign.explicit {
                     explicit_foreign_columns.push((name.clone(), foreign.column.clone()));
                 }
-                create.foreign_key(&mut foreign_statement(table, &name, foreign, ref_table));
+                create.foreign_key(&mut foreign_statement(
+                    backend, table, &name, foreign, ref_table,
+                ));
             }
             Command::AddPrimary(columns) => {
                 check_primary_columns(table, columns)?;
@@ -495,7 +519,9 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
             }
             Command::AddIndex(spec) => {
                 let name = check_index(table, spec, &mut seen_names)?;
-                steps.push(Step::CreateIndex(index_statement(table, &name, spec)));
+                steps.push(Step::CreateIndex(index_statement(
+                    backend, table, &name, spec,
+                )));
             }
             Command::DropIndex(name) => {
                 if name.is_empty() {
@@ -504,7 +530,9 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
                     )));
                 }
                 let mut statement = Index::drop();
-                statement.name(name.as_str()).table(sea_ident(table));
+                statement
+                    .name(constraint_name(backend, name))
+                    .table(sea_ident(table));
                 steps.push(Step::DropIndex(statement));
             }
             Command::AddForeign(position) => {
@@ -517,7 +545,7 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
                 check_null_action(blueprint, foreign)?;
                 let name = check_foreign_name(table, foreign, &mut seen_names)?;
                 steps.push(Step::CreateForeignKey(foreign_statement(
-                    table, &name, foreign, ref_table,
+                    backend, table, &name, foreign, ref_table,
                 )));
             }
             Command::AddPrimary(columns) => {
@@ -538,7 +566,9 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
             }
             Command::DropForeign(name) => {
                 let mut statement = ForeignKey::drop();
-                statement.name(name.as_str()).table(sea_ident(table));
+                statement
+                    .name(constraint_name(backend, name))
+                    .table(sea_ident(table));
                 steps.push(Step::DropForeignKey(statement));
             }
         }

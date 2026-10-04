@@ -983,17 +983,16 @@ fn json_to_string_key(v: &Value) -> String {
 /// column name. Comparable JSON shapes (Number vs Number, String vs
 /// String, Bool vs Bool) sort within their kind; heterogeneous mixes
 /// fall back to `Ordering::Equal`. `None` sorts before any present
-/// value (matches Postgres's default NULL FIRST for ASC).
+/// value (matches Postgres's default NULL FIRST for ASC). Numbers
+/// compare exactly, so two integers above 2^53 that share one `f64`
+/// still sort apart.
 fn compare_json(a: &Option<Value>, b: &Option<Value>) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (a, b) {
         (None, None) => Ordering::Equal,
         (None, _) => Ordering::Less,
         (_, None) => Ordering::Greater,
-        (Some(Value::Number(x)), Some(Value::Number(y))) => x
-            .as_f64()
-            .partial_cmp(&y.as_f64())
-            .unwrap_or(Ordering::Equal),
+        (Some(Value::Number(x)), Some(Value::Number(y))) => crate::json_number::compare(x, y),
         (Some(Value::String(x)), Some(Value::String(y))) => x.cmp(y),
         (Some(Value::Bool(x)), Some(Value::Bool(y))) => x.cmp(y),
         _ => Ordering::Equal,

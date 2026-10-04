@@ -64,7 +64,7 @@ use serde_json::Value;
 
 use crate::database::clauses::{
     IntoWhereIn, JoinClause, JoinKind, JoinTarget, ReadSet, WhereIn, join_tables, quote_identifier,
-    raw_select_may_read, render_join, validate_join, validate_select_column,
+    raw_select_may_read, render_join, render_limit_offset, validate_join, validate_select_column,
 };
 use crate::database::{DB, DbTableBuilder};
 use crate::eloquent::EloquentModel;
@@ -333,6 +333,34 @@ pub(crate) enum OrderTerm {
     InOrderOf(String, Vec<Value>),
 }
 
+/// What the first query of a union keeps for itself: the ordering, limit
+/// and offset set before its first [`Builder::union`]. As in Laravel, those
+/// order and limit that query alone, and the ones set after `union` - by
+/// the caller, or by `paginate` and `first` - order and limit the whole
+/// union.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct UnionHead {
+    orders: Vec<OrderTerm>,
+    limit: Option<u64>,
+    offset: Option<u64>,
+}
+
+impl UnionHead {
+    /// Whether the first query carries an ordering, a limit or an offset of
+    /// its own, which only a derived table can hold inside a union.
+    fn is_bounded(&self) -> bool {
+        !self.orders.is_empty() || self.limit.is_some() || self.offset.is_some()
+    }
+}
+
+/// The alias of a union operand written as a derived table. Each operand
+/// is its own query block, so one name serves them all.
+const UNION_ARM_ALIAS: &str = "__suprnova_union_arm";
+
+/// The alias of a whole union written as a derived table, so that its
+/// ordering, limit and offset apply to its rows.
+const UNION_ALIAS: &str = "__suprnova_union";
+
 /// Row-locking hint applied to a SELECT.
 ///
 /// Set via [`Builder::lock_for_update`] / [`Builder::shared_lock`] and
@@ -465,6 +493,10 @@ pub struct Builder<M> {
     pub(crate) offset: Option<u64>,
     pub(crate) distinct: bool,
     pub(crate) unions: Vec<(Box<Builder<M>>, bool)>, // (other, is_union_all)
+    /// The ordering, limit and offset of this query alone once it has a
+    /// union; `orders`, `limit` and `offset` then belong to the whole
+    /// union. See [`UnionHead`].
+    pub(crate) union_head: UnionHead,
     pub(crate) runtime_casts:
         HashMap<&'static str, std::sync::Arc<dyn crate::eloquent::casts::DynCast>>,
     pub(crate) global_scopes_disabled: Vec<&'static str>,
@@ -565,6 +597,7 @@ impl<M> Clone for Builder<M> {
             offset: self.offset,
             distinct: self.distinct,
             unions: self.unions.clone(),
+            union_head: self.union_head.clone(),
             runtime_casts: self.runtime_casts.clone(),
             global_scopes_disabled: self.global_scopes_disabled.clone(),
             excluded_scopes: self.excluded_scopes.clone(),
@@ -1031,7 +1064,7 @@ impl<M> Builder<M> {
         for term in self.where_terms.iter().chain(self.having_terms.iter()) {
             validate_where_term(term)?;
         }
-        for o in &self.orders {
+        for o in self.orders.iter().chain(&self.union_head.orders) {
             match o {
                 OrderTerm::Col(c, _) => {
                     validate_identifier(c)?;
@@ -1066,6 +1099,7 @@ impl<M> Builder<M> {
             offset: None,
             distinct: false,
             unions: Vec::new(),
+            union_head: UnionHead::default(),
             runtime_casts: HashMap::new(),
             global_scopes_disabled: Vec::new(),
             excluded_scopes: Vec::new(),
@@ -1796,9 +1830,11 @@ impl<M> Builder<M> {
 
     // ---- JSON ------------------------------------------------------------
 
-    /// JSON containment - backend-specific: Postgres `col @> val`,
+    /// JSON containment - backend-specific: Postgres `col::jsonb @> val`,
     /// MySQL `JSON_CONTAINS(col, val)`, SQLite falls back to substring
-    /// search via `instr`.
+    /// search via `instr`. On Postgres and MySQL `val` is bound as a JSON
+    /// document, so `"admin"` finds the string `"admin"` in an array and
+    /// `json!({"active": true})` finds an object holding that pair.
     #[doc(alias = "where_json_contains")]
     pub fn filter_json_contains(mut self, col: impl IntoColumn, val: impl IntoVal) -> Self {
         self.where_terms
@@ -2314,6 +2350,7 @@ impl<M> Builder<M> {
             || self
                 .orders
                 .iter()
+                .chain(&self.union_head.orders)
                 .any(|order| matches!(order, OrderTerm::Raw(_)))
         {
             out.raw_fragment = true;
@@ -2363,17 +2400,18 @@ impl<M> Builder<M> {
     /// Drop every ordering set so far. Laravel's `reorder()`: use it on a
     /// base query before reusing it as a subquery, or before ordering it
     /// another way. Orderings a global scope adds when the query runs are
-    /// not dropped, as in Laravel.
+    /// not dropped, as in Laravel. On a union it drops the ordering of the
+    /// first query too, as Laravel's does.
     pub fn reorder(mut self) -> Self {
         self.orders.clear();
+        self.union_head.orders.clear();
         self
     }
 
     /// Drop every ordering set so far and order by `col` instead.
     /// Laravel's `reorder($column, $direction)`.
-    pub fn reorder_by(mut self, col: impl IntoColumn, dir: Direction) -> Self {
-        self.orders.clear();
-        self.order_by(col, dir)
+    pub fn reorder_by(self, col: impl IntoColumn, dir: Direction) -> Self {
+        self.reorder().order_by(col, dir)
     }
 
     /// `ORDER BY <raw>` - pass through arbitrary expressions
@@ -2391,9 +2429,8 @@ impl<M> Builder<M> {
         self
     }
 
-    /// `ORDER BY RANDOM()` - useful for sampling. Each backend emits
-    /// its own randomisation function via the internal `render_orders`
-    /// helper.
+    /// Order the rows randomly - useful for sampling. Postgres and
+    /// SQLite order by `RANDOM()`, MySQL by `RAND()`.
     pub fn in_random_order(mut self) -> Self {
         self.orders.push(OrderTerm::Random);
         self
@@ -2467,7 +2504,8 @@ impl<M> Builder<M> {
         self
     }
 
-    /// `OFFSET n`.
+    /// `OFFSET n`. Without a [`Self::limit`], SQLite and MySQL get the
+    /// unlimited `LIMIT` their grammar needs before an `OFFSET`.
     pub fn offset(mut self, n: u64) -> Self {
         self.offset = Some(n);
         self
@@ -2525,14 +2563,33 @@ impl<M> Builder<M> {
 
     /// Append a `UNION` arm. The placeholder counter is threaded across
     /// arms so Postgres `$N` numbering stays monotonic.
-    pub fn union(mut self, other: Self) -> Self {
-        self.unions.push((Box::new(other), false));
-        self
+    ///
+    /// As in Laravel, an ordering, limit or offset set before the first
+    /// `union` belongs to this query alone, and one set after it - by the
+    /// caller, or by `paginate`, `simple_paginate` and `first` - belongs to
+    /// the whole union. An arm keeps its own. The union is then written as
+    /// a derived table, so order it by the bare names of its columns.
+    pub fn union(self, other: Self) -> Self {
+        self.push_union(other, false)
     }
 
-    /// Append a `UNION ALL` arm (duplicates retained).
-    pub fn union_all(mut self, other: Self) -> Self {
-        self.unions.push((Box::new(other), true));
+    /// Append a `UNION ALL` arm (duplicates retained). Orderings and
+    /// limits follow the rule of [`Self::union`].
+    pub fn union_all(self, other: Self) -> Self {
+        self.push_union(other, true)
+    }
+
+    /// Append a union arm. The first one takes over the ordering, limit and
+    /// offset set so far, which from then on belong to this query alone.
+    fn push_union(mut self, other: Self, all: bool) -> Self {
+        if self.unions.is_empty() {
+            self.union_head = UnionHead {
+                orders: std::mem::take(&mut self.orders),
+                limit: self.limit.take(),
+                offset: self.offset.take(),
+            };
+        }
+        self.unions.push((Box::new(other), all));
         self
     }
 
@@ -3303,7 +3360,7 @@ pub(crate) fn render_subquery_term(
         WhereTerm::JsonContains(col, v) => {
             *n += 1;
             let ph = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(v));
+            values.push(json_contains_value(backend, v));
             render_json_contains(backend, &q(col), &ph)?
         }
         WhereTerm::JsonLength(col, op, len) => render_json_length(backend, &q(col), op, *len)?,
@@ -3403,9 +3460,12 @@ fn render_binary(
     }
 }
 
+/// JSON containment of `col` over the candidate bound at `ph`. Postgres
+/// casts both sides to `jsonb`, the type `@>` is defined on, so a `json`
+/// or text column holding JSON works too, as in Laravel.
 fn render_json_contains(backend: DbBackend, col: &str, ph: &str) -> Result<String, FrameworkError> {
     Ok(match backend {
-        DbBackend::Postgres => format!("{col} @> {ph}"),
+        DbBackend::Postgres => format!("({col})::jsonb @> CAST({ph} AS jsonb)"),
         DbBackend::MySql => format!("JSON_CONTAINS({col}, {ph})"),
         DbBackend::Sqlite => format!("instr({col}, {ph}) > 0"),
         _ => return Err(crate::database::unsupported_database_backend(backend)),
@@ -3424,6 +3484,19 @@ fn render_json_length(
         DbBackend::Sqlite => format!("json_array_length({col}) {op} {len}"),
         _ => return Err(crate::database::unsupported_database_backend(backend)),
     })
+}
+
+/// The candidate of a JSON containment, bound for `backend`. Postgres and
+/// MySQL compare JSON documents, so the candidate is bound as its JSON
+/// text: a string as `"admin"`, quotes included, an object or an array as
+/// itself, a number and a boolean as JSON. SQLite's containment is the
+/// documented substring search over the stored text, which binds the value
+/// as it is.
+fn json_contains_value(backend: DbBackend, value: &Value) -> SeaValue {
+    match backend {
+        DbBackend::Postgres | DbBackend::MySql => SeaValue::String(Some(value.to_string())),
+        _ => json_value_to_sea_value(value),
+    }
 }
 
 /// Phase 10C T9 - log a single `warn!` per process the first time a
@@ -3566,7 +3639,7 @@ impl<M> Builder<M> {
             WhereTerm::JsonContains(col, v) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(v));
+                values.push(json_contains_value(backend, v));
                 render_json_contains(backend, col, &ph)?
             }
             WhereTerm::JsonLength(col, op, len) => render_json_length(backend, col, op, *len)?,
@@ -3641,14 +3714,29 @@ impl<M> Builder<M> {
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<String, FrameworkError> {
-        if self.orders.is_empty() {
+        self.render_order_terms(&self.orders, backend, values, n)
+    }
+
+    /// Render `orders` as an ORDER BY list, the shared body of
+    /// [`Self::render_orders`] and of the first query of a union, which
+    /// keeps its own list in [`UnionHead`].
+    fn render_order_terms(
+        &self,
+        orders: &[OrderTerm],
+        backend: DbBackend,
+        values: &mut Vec<SeaValue>,
+        n: &mut usize,
+    ) -> Result<String, FrameworkError> {
+        if orders.is_empty() {
             return Ok(String::new());
         }
-        let mut parts: Vec<String> = Vec::with_capacity(self.orders.len());
-        for o in &self.orders {
+        let mut parts: Vec<String> = Vec::with_capacity(orders.len());
+        for o in orders {
             let rendered = match o {
                 OrderTerm::Col(col, dir) => format!("{col} {}", dir.sql()),
                 OrderTerm::Raw(sql) => sql.clone(),
+                // MySQL has no `RANDOM()`; its random function is `RAND()`.
+                OrderTerm::Random if backend == DbBackend::MySql => "RAND()".to_string(),
                 OrderTerm::Random => "RANDOM()".to_string(),
                 OrderTerm::InOrderOf(col, vs) => {
                     let mut cases = String::new();
@@ -3724,20 +3812,44 @@ impl<M> Builder<M> {
         // ORDER BY / LIMIT / OFFSET. The lock applies to the outer
         // SELECT, so emitting it inside `render_select_into` would
         // place it mid-statement on union arms - wrong shape.
-        let lock_clause: &str = match (backend, this.lock_mode) {
-            (_, LockMode::None) => "",
-            (DbBackend::Postgres, LockMode::ForUpdate) => " FOR UPDATE",
-            (DbBackend::Postgres, LockMode::Shared) => " FOR SHARE",
-            (DbBackend::MySql, LockMode::ForUpdate) => " FOR UPDATE",
-            (DbBackend::MySql, LockMode::Shared) => " LOCK IN SHARE MODE",
-            (DbBackend::Sqlite, LockMode::ForUpdate | LockMode::Shared) => {
-                warn_sqlite_lock_once();
-                ""
-            }
-            _ => return Err(crate::database::unsupported_database_backend(backend)),
-        };
-        sql.push_str(lock_clause);
+        sql.push_str(lock_clause(backend, this.lock_mode)?);
         Ok((sql, values))
+    }
+
+    /// Render an aggregate terminal: `expr` over the rows this query
+    /// selects, aliased so the terminal can read it back.
+    ///
+    /// A query with a union or a `HAVING` is aggregated as a derived
+    /// table with its projection kept, so the aggregate reads the rows the
+    /// query returns - one per union row, one per group that passes the
+    /// `HAVING` - as Laravel's `aggregate` does. Any other query has its
+    /// projection replaced by the aggregate: `select(...)` chooses what a
+    /// row returns, and an aggregate returns one value. Its ordering is
+    /// dropped too unless it is grouped, since an ordering cannot change
+    /// the value and Postgres and MySQL refuse one over a column that is
+    /// neither grouped nor aggregated.
+    pub(crate) fn render_aggregate_for(
+        &self,
+        backend: DbBackend,
+        table: &str,
+        expr: &str,
+    ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
+        let aliased = format!("{expr} AS {AGGREGATE_RESULT_ALIAS}");
+        let this = self.effective();
+        if this.unions.is_empty() && this.having_terms.is_empty() {
+            let mut flat = this.into_owned();
+            flat.select_cols = None;
+            flat.select_raw = None;
+            if flat.group_by.is_empty() {
+                flat.orders.clear();
+            }
+            return flat.render_select_for(backend, table, &aliased);
+        }
+        let (inner, values) = this.render_select_for(backend, table, "*")?;
+        Ok((
+            format!("SELECT {aliased} FROM ({inner}) AS __suprnova_aggregate_subquery"),
+            values,
+        ))
     }
 
     /// Render a COUNT-shaped SELECT against this builder.
@@ -3752,13 +3864,16 @@ impl<M> Builder<M> {
     /// the count and `ORDER BY` over a bare aggregate is a SQL error
     /// in some dialects.
     ///
-    /// **Grouped or union case** - `GROUP BY` non-empty OR unions present:
+    /// **Grouped case** - `GROUP BY` non-empty:
     /// ```sql
     /// SELECT COUNT(*) AS count FROM (
     ///     SELECT 1 FROM t WHERE ... GROUP BY ... HAVING ...
-    ///     UNION ...
     /// ) AS __suprnova_paginate_subquery
     /// ```
+    ///
+    /// **Union case** - the whole union, under the page's projection and
+    /// without the ordering, limit and offset set after `union`, counted
+    /// as a derived table.
     /// The subquery wrap is necessary because `SELECT COUNT(*) ...
     /// GROUP BY` returns one row per group (each row reporting the
     /// group's size), not the number of groups. Same fix Laravel
@@ -3782,28 +3897,29 @@ impl<M> Builder<M> {
         let mut n = 0;
         let mut sql = String::new();
 
-        let needs_subquery_wrap = !this.group_by.is_empty() || !this.unions.is_empty();
-
-        if needs_subquery_wrap {
+        if !this.unions.is_empty() {
+            // A union is counted as the rows a page of it is cut from: the
+            // whole union under the projection the page uses, so `UNION`
+            // removes the same duplicates from both, without the ordering,
+            // limit and offset the page adds after it. A constant
+            // projection would collapse every arm to one row.
+            let mut whole = this.clone();
+            whole.orders.clear();
+            whole.limit = None;
+            whole.offset = None;
+            let inner = whole.render_select_into(backend, table, "*", &mut values, &mut n)?;
+            sql.push_str("SELECT COUNT(*) AS count FROM (");
+            sql.push_str(&inner);
+            sql.push_str(") AS __suprnova_paginate_subquery");
+        } else if !this.group_by.is_empty() {
             // Wrap: SELECT COUNT(*) AS count FROM (<inner>) AS sub.
             // The inner SELECT keeps every shape that affects which
-            // rows the page-fetch will see (where / group / having /
-            // unions) but projects a constant column so the wrapper's
-            // COUNT counts distinct grouped/unioned rows.
+            // rows the page-fetch will see (where / group / having) but
+            // projects a constant column so the wrapper's COUNT counts
+            // the groups.
             sql.push_str("SELECT COUNT(*) AS count FROM (");
             sql.push_str("SELECT 1 AS __paginate_marker FROM ");
             this.render_count_body(backend, table, &mut sql, &mut values, &mut n)?;
-
-            // Union arms - recurse with the same placeholder counter
-            // so Postgres `$N` stays monotonic. Each arm projects the
-            // same `1 AS __paginate_marker` column.
-            for (other, all) in &this.unions {
-                let connector = if *all { " UNION ALL " } else { " UNION " };
-                sql.push_str(connector);
-                sql.push_str("SELECT 1 AS __paginate_marker FROM ");
-                other.render_count_body(backend, table, &mut sql, &mut values, &mut n)?;
-            }
-
             sql.push_str(") AS __suprnova_paginate_subquery");
         } else {
             sql.push_str("SELECT COUNT(*) AS count FROM ");
@@ -3859,6 +3975,15 @@ impl<M> Builder<M> {
     /// across the combined statement. Without this, the inner SELECT's
     /// `$N` would restart at `$1` and collide with the outer's bound
     /// parameters.
+    ///
+    /// A union is written so every engine accepts it and its clauses
+    /// mean what [`Self::union`] says. No engine takes `ORDER BY` or
+    /// `LIMIT` on a union operand other than the last, and on the last
+    /// they bind to the whole union, so an operand that carries its own
+    /// is written as a derived table. The ordering, limit and offset of
+    /// the whole union are applied to it written as a derived table too,
+    /// so an ordering may be any expression over its columns, which a bare
+    /// compound refuses on Postgres and SQLite.
     fn render_select_into(
         &self,
         backend: DbBackend,
@@ -3870,17 +3995,92 @@ impl<M> Builder<M> {
         // A union arm arrives here directly, so it resolves its own scopes.
         let this = self.effective();
         let this = &*this;
-        let from = this.own_table(backend, table);
-        let joined = this.joined_table(table, &from);
+        let mut sql = this.render_select_core(backend, table, column_expr, values, n)?;
+        if this.unions.is_empty() {
+            sql.push_str(&this.render_orders(backend, values, n)?);
+            sql.push_str(&render_limit_offset(backend, this.limit, this.offset));
+            return Ok(sql);
+        }
+
+        let head = &this.union_head;
+        if head.is_bounded() {
+            sql.push_str(&this.render_order_terms(&head.orders, backend, values, n)?);
+            sql.push_str(&render_limit_offset(backend, head.limit, head.offset));
+            sql = format!("SELECT * FROM ({sql}) AS {UNION_ARM_ALIAS}");
+        }
+
+        // Unions - recurse into the same `values` / `n` so placeholder
+        // numbers stay monotonic across the combined statement.
+        // Without this, Postgres `$N` placeholders would restart at $1
+        // on the inner SELECT, colliding with the outer's bound
+        // parameters and silently corrupting query results.
+        //
+        // A plain arm is appended verbatim (no parens) because SQLite
+        // rejects `UNION (SELECT ...)` while Postgres / MySQL accept
+        // either form. Standard SQL doesn't require the parens.
+        for (other, all) in &this.unions {
+            let connector = if *all { " UNION ALL " } else { " UNION " };
+            sql.push_str(connector);
+            sql.push_str(&other.render_union_arm(backend, table, column_expr, values, n)?);
+        }
+
+        if this.orders.is_empty() && this.limit.is_none() && this.offset.is_none() {
+            return Ok(sql);
+        }
+        let mut whole = format!("SELECT * FROM ({sql}) AS {UNION_ALIAS}");
+        whole.push_str(&this.render_orders(backend, values, n)?);
+        whole.push_str(&render_limit_offset(backend, this.limit, this.offset));
+        Ok(whole)
+    }
+
+    /// One operand after `UNION`: as it is when it is a plain SELECT, and
+    /// as a derived table when it carries an ordering, a limit, an offset
+    /// or unions of its own, which a bare operand cannot hold or would
+    /// lose to the surrounding union's precedence.
+    fn render_union_arm(
+        &self,
+        backend: DbBackend,
+        table: &str,
+        column_expr: &str,
+        values: &mut Vec<SeaValue>,
+        n: &mut usize,
+    ) -> Result<String, FrameworkError> {
+        let arm = self.effective();
+        let sql = arm.render_select_into(backend, table, column_expr, values, n)?;
+        let bare = arm.unions.is_empty()
+            && arm.orders.is_empty()
+            && arm.limit.is_none()
+            && arm.offset.is_none();
+        Ok(if bare {
+            sql
+        } else {
+            format!("SELECT * FROM ({sql}) AS {UNION_ARM_ALIAS}")
+        })
+    }
+
+    /// The part of a SELECT every shape shares: the projection, `FROM`,
+    /// the joins, `WHERE`, `GROUP BY` and `HAVING`. What follows it - the
+    /// ordering, the limit, the union arms - depends on the shape, so
+    /// [`Self::render_select_into`] adds it.
+    fn render_select_core(
+        &self,
+        backend: DbBackend,
+        table: &str,
+        column_expr: &str,
+        values: &mut Vec<SeaValue>,
+        n: &mut usize,
+    ) -> Result<String, FrameworkError> {
+        let from = self.own_table(backend, table);
+        let joined = self.joined_table(table, &from);
         let mut sql = String::new();
 
         sql.push_str("SELECT ");
-        if this.distinct {
+        if self.distinct {
             sql.push_str("DISTINCT ");
         }
-        if let Some(raw) = &this.select_raw {
+        if let Some(raw) = &self.select_raw {
             sql.push_str(raw);
-        } else if let Some(cols) = &this.select_cols {
+        } else if let Some(cols) = &self.select_cols {
             sql.push_str(&cols.join(", "));
         } else if column_expr == "*" && joined.is_some() {
             // A joined table may carry columns of the same name, `id`
@@ -3893,54 +4093,49 @@ impl<M> Builder<M> {
         }
         sql.push_str(" FROM ");
         sql.push_str(&from);
-        sql.push_str(&this.render_joins(backend, values, n)?);
+        sql.push_str(&self.render_joins(backend, values, n)?);
 
-        // `this`, not `self`: a union arm arrives here with its scope
-        // resolver still set, and its soft-delete filter and global scopes
-        // exist only on the resolved copy.
-        if !this.where_terms.is_empty() {
+        // The resolved builder, not the unresolved one: a union arm
+        // arrives with its scope resolver still set, and its soft-delete
+        // filter and global scopes exist only on the resolved copy, which
+        // is what `render_select_into` hands in here.
+        if !self.where_terms.is_empty() {
             sql.push_str(" WHERE ");
-            let parts: Vec<String> = this
+            let parts: Vec<String> = self
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, values, n, this.binder, joined))
+                .map(|t| Self::render_where_term(backend, t, values, n, self.binder, joined))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
 
-        if !this.group_by.is_empty() {
+        if !self.group_by.is_empty() {
             sql.push_str(" GROUP BY ");
-            sql.push_str(&this.group_by.join(", "));
+            sql.push_str(&self.group_by.join(", "));
         }
 
-        sql.push_str(&this.render_having(backend, values, n, joined)?);
-        sql.push_str(&this.render_orders(backend, values, n)?);
-
-        if let Some(l) = this.limit {
-            sql.push_str(&format!(" LIMIT {l}"));
-        }
-        if let Some(o) = this.offset {
-            sql.push_str(&format!(" OFFSET {o}"));
-        }
-
-        // Unions - recurse into the same `values` / `n` so placeholder
-        // numbers stay monotonic across the combined statement.
-        // Without this, Postgres `$N` placeholders would restart at $1
-        // on the inner SELECT, colliding with the outer's bound
-        // parameters and silently corrupting query results.
-        //
-        // The inner SELECT is appended verbatim (no parens) because
-        // SQLite rejects `UNION (SELECT ...)` while Postgres / MySQL
-        // accept either form. Standard SQL doesn't require the parens.
-        for (other, all) in &this.unions {
-            let connector = if *all { " UNION ALL " } else { " UNION " };
-            sql.push_str(connector);
-            let other_sql = other.render_select_into(backend, table, column_expr, values, n)?;
-            sql.push_str(&other_sql);
-        }
-
+        sql.push_str(&self.render_having(backend, values, n, joined)?);
         Ok(sql)
     }
+}
+
+/// The row-lock clause for `mode` on `backend`, empty when there is none.
+/// It goes at the very end of the statement, after every union arm and
+/// every ORDER BY / LIMIT / OFFSET, because the lock applies to the
+/// outer SELECT.
+fn lock_clause(backend: DbBackend, mode: LockMode) -> Result<&'static str, FrameworkError> {
+    Ok(match (backend, mode) {
+        (_, LockMode::None) => "",
+        (DbBackend::Postgres, LockMode::ForUpdate) => " FOR UPDATE",
+        (DbBackend::Postgres, LockMode::Shared) => " FOR SHARE",
+        (DbBackend::MySql, LockMode::ForUpdate) => " FOR UPDATE",
+        (DbBackend::MySql, LockMode::Shared) => " LOCK IN SHARE MODE",
+        (DbBackend::Sqlite, LockMode::ForUpdate | LockMode::Shared) => {
+            warn_sqlite_lock_once();
+            ""
+        }
+        _ => return Err(crate::database::unsupported_database_backend(backend)),
+    })
 }
 
 // The `M: Model` bound re-elaborates Model's own where-clause bounds
@@ -5126,7 +5321,10 @@ where
     /// via `CursorPaginator::encode_value` so they can't be forged.
     ///
     /// Any existing `ORDER BY` on the builder is replaced - cursor
-    /// pagination requires a stable total order over the PK.
+    /// pagination requires a stable total order over the PK. An `OFFSET`
+    /// positions the first page only, the one requested without a
+    /// cursor; every later page starts at its cursor, so the offset
+    /// never skips rows between two pages.
     ///
     /// ## Errors
     ///
@@ -5145,13 +5343,18 @@ where
             Some(c) => Some(crate::pagination::CursorPaginator::<M>::decode_value(&c)?),
             None => None,
         };
+        let from_cursor = decoded.is_some();
         let plan = crate::pagination::cursor::plan_scan(decoded);
 
         // Replace any existing ORDER BY with a stable PK sort in the
         // plan's direction - cursor pagination requires a total order
-        // over the keyset column.
-        let mut q = self;
-        q.orders.clear();
+        // over the keyset column. A page reached by a cursor starts at
+        // the cursor alone: an offset kept there would skip rows again
+        // on every page.
+        let mut q = self.reorder();
+        if from_cursor {
+            q.offset = None;
+        }
         let mut q = if plan.order_asc {
             q.order_by_asc(pk)
         } else {
@@ -5287,6 +5490,11 @@ where
     /// later batch (rather than skipping or duplicating, which
     /// [`Self::chunk`]'s OFFSET form is vulnerable to).
     ///
+    /// The walk sets its own order: an `ORDER BY` already on the query is
+    /// dropped, since any other order would make the cursor skip some
+    /// rows and repeat others. An `OFFSET` skips that many rows once,
+    /// before the first batch; every later batch starts at the cursor.
+    ///
     /// ## Key types
     ///
     /// The cursor is the primary key's own value, as
@@ -5362,11 +5570,14 @@ where
         }
         let pk = M::primary_key_name();
         let kind = Self::refuse_keyset_key_by_metadata("chunk_by_id", pk)?;
+        let mut walk = self.reorder_by(pk, Direction::Asc);
+        let mut first_offset = walk.offset.take();
         let mut cursor: Option<Value> = None;
         loop {
-            let mut q = self.clone().order_by_asc(pk).limit(n);
-            if let Some(after) = cursor.take() {
-                q = q.filter_op(pk, ">", after);
+            let mut q = walk.clone().limit(n);
+            match cursor.take() {
+                Some(after) => q = q.filter_op(pk, ">", after),
+                None => q.offset = first_offset.take(),
             }
             let batch = q.get().await?;
             // The next cursor is read, and checked, before `f` sees the
@@ -5544,9 +5755,10 @@ where
     ///
     /// The batches are keyset batches, `pk > cursor ORDER BY pk ASC`,
     /// with the primary key's own value as the cursor, exactly as in
-    /// [`Self::chunk_by_id`]. A single integer key works, and so does a
-    /// single string key, including the UUID and ULID keys of
-    /// `#[model(unique_id = "...")]`.
+    /// [`Self::chunk_by_id`], which also says how an `ORDER BY` or an
+    /// `OFFSET` already on the query is treated. A single integer key
+    /// works, and so does a single string key, including the UUID and ULID
+    /// keys of `#[model(unique_id = "...")]`.
     ///
     /// A key that cannot carry the cursor is refused with
     /// `FrameworkError::internal`, which names the model and the column
@@ -5578,11 +5790,14 @@ where
             }
             let pk = M::primary_key_name();
             let kind = Self::refuse_keyset_key_by_metadata("lazy_by_id", pk)?;
+            let mut walk = builder.reorder_by(pk, Direction::Asc);
+            let mut first_offset = walk.offset.take();
             let mut cursor: Option<Value> = None;
             loop {
-                let mut q = builder.clone().order_by_asc(pk).limit(batch_size);
-                if let Some(after) = cursor.take() {
-                    q = q.filter_op(pk, ">", after);
+                let mut q = walk.clone().limit(batch_size);
+                match cursor.take() {
+                    Some(after) => q = q.filter_op(pk, ">", after),
+                    None => q.offset = first_offset.take(),
                 }
                 let batch = q.get().await?;
                 // The next cursor is read, and checked, before the first
@@ -5933,8 +6148,7 @@ where
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
-        let aliased_expr = format!("{expr} AS {AGGREGATE_RESULT_ALIAS}");
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, &aliased_expr)?;
+        let (sql, vals) = self.render_aggregate_for(backend, M::TABLE, expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
             .query_one(stmt)
@@ -5955,8 +6169,7 @@ where
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
-        let aliased_expr = format!("{expr} AS {AGGREGATE_RESULT_ALIAS}");
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, &aliased_expr)?;
+        let (sql, vals) = self.render_aggregate_for(backend, M::TABLE, expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
             .query_one(stmt)

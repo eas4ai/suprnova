@@ -172,6 +172,41 @@ async fn chunk_by_id_short_last_batch_terminates() {
     assert_eq!(sizes, vec![5, 5, 2]);
 }
 
+/// DATA-006: an ordering already on the query does not reorder the walk.
+/// Ids 1 to 5 ordered by id descending used to come back 5, 4, then
+/// `id > 4` gave 5 again and the walk ended, never reaching 1 to 3.
+#[tokio::test]
+async fn chunk_by_id_walks_every_row_once_whatever_the_query_was_ordered_by() {
+    let _db = fixture(5).await;
+    let mut seen: Vec<i64> = Vec::new();
+    T8Order::query()
+        .order_by_desc("id")
+        .chunk_by_id(2, |batch: Collection<T8Order>| {
+            seen.extend(batch.iter().map(|order| order.id));
+            async move { Ok(()) }
+        })
+        .await
+        .expect("chunk_by_id");
+    assert_eq!(seen, vec![1, 2, 3, 4, 5]);
+}
+
+/// DATA-006 / DATA-019 class: an offset positions the start of the walk
+/// once. Kept on every batch, it skipped two rows after each cursor.
+#[tokio::test]
+async fn chunk_by_id_applies_an_offset_once_before_the_walk() {
+    let _db = fixture(8).await;
+    let mut seen: Vec<i64> = Vec::new();
+    T8Order::query()
+        .offset(2)
+        .chunk_by_id(2, |batch: Collection<T8Order>| {
+            seen.extend(batch.iter().map(|order| order.id));
+            async move { Ok(()) }
+        })
+        .await
+        .expect("chunk_by_id");
+    assert_eq!(seen, vec![3, 4, 5, 6, 7, 8]);
+}
+
 #[tokio::test]
 async fn chunk_zero_n_errors() {
     // `chunk(0)` would issue `LIMIT 0` forever - same hazard
@@ -520,6 +555,32 @@ async fn lazy_by_id_respects_custom_batch_size() {
     }
 
     assert_eq!(amounts, vec![0, 10, 20, 30, 40, 50, 60]);
+}
+
+/// DATA-006: the stream walks the key in order whatever the query was
+/// ordered by.
+#[tokio::test]
+async fn lazy_by_id_streams_every_row_once_whatever_the_query_was_ordered_by() {
+    let _db = fixture(5).await;
+    let mut stream = T8Order::query().order_by_desc("id").lazy_by_id(2);
+    let mut seen: Vec<i64> = Vec::new();
+    while let Some(item) = stream.next().await {
+        seen.push(item.expect("lazy_by_id row").id);
+    }
+    assert_eq!(seen, vec![1, 2, 3, 4, 5]);
+}
+
+/// DATA-006 / DATA-019 class: an offset positions the start of the
+/// stream once.
+#[tokio::test]
+async fn lazy_by_id_applies_an_offset_once_before_the_walk() {
+    let _db = fixture(8).await;
+    let mut stream = T8Order::query().offset(2).lazy_by_id(2);
+    let mut seen: Vec<i64> = Vec::new();
+    while let Some(item) = stream.next().await {
+        seen.push(item.expect("lazy_by_id row").id);
+    }
+    assert_eq!(seen, vec![3, 4, 5, 6, 7, 8]);
 }
 
 #[tokio::test]
