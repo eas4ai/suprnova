@@ -395,8 +395,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 - **Multipart failures answer as validation errors under the field's
   input name.** A missing field, a text part that does not parse as its
-  type, a part of the wrong kind, and a file a validator refuses (too
-  large, not an image, a type `MimeType` does not allow) answer 422 with
+  type or is not UTF-8, a part of the wrong kind, and a file a validator
+  refuses (too large, not an image, a type `MimeType` does not allow)
+  answer 422 with
   `errors` under the form input name, so the second file of a `files[]`
   field is `files.1`, and the Inertia validation middleware shows each
   error under its field. Before, a text part that did not parse answered
@@ -406,14 +407,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `lang/<locale>/validation.ftl` overrides them. A file over `MaxSize`
   stops the body at the chunk that crossed the limit and leaves no
   temporary file. A field's `max_count` answers 413 with the other
-  request-wide limits, instead of 422. An `UploadValidator` returns
+  request-wide limits, instead of 422, and so does a text part longer than
+  the in-memory spill threshold (2 MiB by default), instead of 400, as
+  Laravel answers `post_max_size`. A file validator checks only the file
+  parts its field takes: a text part sent where a file belongs fails as
+  `validation-file`, and a later part for a field that holds one file is
+  ignored without being read into memory or a temporary file. For a field
+  that holds one value, the first part that is not empty decides it, so
+  several failing parts report one error. An `UploadValidator` returns
   `FrameworkError::invalid_upload` for a validation failure, and its other
   errors keep their status. A `bool` field accepts `1`, `0`, `true`,
   `false`, `on` and `off`. An empty part, which Inertia sends for `null`,
   is none for an optional field that is not a `String` and missing for a
   required one, and a part of the wrong kind sent to an optional or list
-  field fails instead of being ignored. This landed after the `v3.1.0` tag
-  (#139).
+  field fails instead of being ignored. `MultipartValue`, which the
+  streaming parsers return, has a new `NonUtf8Text` variant for a text part
+  that is not UTF-8, so a `match` over it needs an arm for it. This landed
+  after the `v3.1.0` tag (#139).
 - **`#[model]` takes the key type from the key field.** Without
   `key_type`, the key type is the type of the field `primary_key` names;
   it was `i64` whatever the field said. A `key_type` that disagrees with
