@@ -232,6 +232,19 @@ fn parse_sdk_disabled(value: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+/// Set while a live [`TelemetryGuard`] owns the global tracer and meter
+/// providers.
+///
+/// `init_telemetry` promises a second call is a no-op. It used to build
+/// providers of its own and install them as the globals before it found
+/// the subscriber already set, so the second guard took over the
+/// `Metrics` facade while the first guard's subscriber kept the spans and
+/// logs; shutting the second guard down then left the facade on a stopped
+/// provider that records nothing. The owner releases this when it drops,
+/// after `shutdown` or without it, and a later init installs again.
+#[cfg(feature = "otel")]
+static OTEL_GLOBALS_OWNED: AtomicBool = AtomicBool::new(false);
+
 /// RAII handle returned from [`init_telemetry`]. Owns the SDK provider
 /// instances so they can be flushed deterministically on shutdown.
 ///
@@ -316,6 +329,12 @@ impl TelemetryGuard {
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
         crate::logging::Log::flush();
+        // A guard with providers is the one `init_telemetry` let install
+        // the globals; whatever it did with them, it no longer holds them.
+        #[cfg(feature = "otel")]
+        if self.owns_providers() {
+            OTEL_GLOBALS_OWNED.store(false, Ordering::SeqCst);
+        }
         // Warn only when we hold providers that were never flushed.
         // Guards with no providers (disabled path, legacy subscriber path,
         // non-`otel` builds) have nothing buffered, so a silent drop is
@@ -365,8 +384,11 @@ fn empty_guard() -> TelemetryGuard {
 ///    - registers the `opentelemetry-appender-tracing` bridge so every
 ///      `tracing::event` is forwarded to the OTel log pipeline as well.
 ///
-/// Idempotent: a second call is a no-op (the subscriber install returns
-/// an error which we silently absorb so tests can call this repeatedly).
+/// Idempotent: a second call while the guard of the first one is alive is
+/// a no-op. It builds no providers, installs none, and returns a guard
+/// with nothing to shut down, so the first guard stays in charge of the
+/// globals and of the subscriber. Once that guard is dropped (after
+/// `shutdown` or not), a call installs providers again.
 pub fn init_telemetry(log_config: LogConfig, otel_config: OtelConfig) -> TelemetryGuard {
     #[cfg(feature = "otel")]
     {
@@ -395,6 +417,18 @@ fn init_telemetry_with_otel(log_config: LogConfig, otel_config: OtelConfig) -> T
     use tracing_subscriber::filter::filter_fn;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+
+    // A live guard already owns the global providers: change nothing.
+    if OTEL_GLOBALS_OWNED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        tracing::debug!(
+            "telemetry is already initialized and its guard is alive; \
+             this init_telemetry call changes nothing"
+        );
+        return empty_guard();
+    }
 
     let endpoints = SignalEndpoints::of(&otel_config);
 
@@ -541,12 +575,17 @@ fn init_telemetry_with_otel(log_config: LogConfig, otel_config: OtelConfig) -> T
         );
     }
 
-    TelemetryGuard {
+    let guard = TelemetryGuard {
         shutdown_called: Arc::new(AtomicBool::new(false)),
         tracer_provider,
         meter_provider,
         logger_provider,
+    };
+    // Nothing was built, so there is nothing to own: the next call may try.
+    if !guard.owns_providers() {
+        OTEL_GLOBALS_OWNED.store(false, Ordering::SeqCst);
     }
+    guard
 }
 
 /// Why an exporter was not built, in words that are safe in a log.
@@ -808,6 +847,76 @@ mod tests {
         assert!(guard.logger_provider.is_none());
         // Acknowledge the guard so Drop doesn't warn.
         guard.mark_shutdown_for_legacy();
+    }
+
+    /// Set in the child process the test below starts.
+    #[cfg(feature = "otel")]
+    const SECOND_INIT_CHILD: &str = "SUPRNOVA_TELEMETRY_SECOND_INIT_CHILD";
+
+    /// The body of the test below, run in a process of its own: it installs
+    /// the global subscriber and the global providers, which would reach
+    /// every test that ran after it in a shared process.
+    #[cfg(feature = "otel")]
+    #[test]
+    fn second_init_child() {
+        if std::env::var_os(SECOND_INIT_CHILD).is_none() {
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let endpoint = config("http://127.0.0.1:9");
+
+        let first = init_telemetry(LogConfig::default(), endpoint.clone());
+        assert!(first.owns_providers(), "the first init installs providers");
+        let second = init_telemetry(LogConfig::default(), endpoint.clone());
+        assert!(
+            !second.owns_providers(),
+            "a second init while the first is live builds and installs nothing"
+        );
+        runtime.block_on(second.shutdown());
+        runtime.block_on(first.shutdown());
+
+        let third = init_telemetry(LogConfig::default(), endpoint);
+        assert!(
+            third.owns_providers(),
+            "once the first guard is gone, an init installs providers again"
+        );
+        runtime.block_on(third.shutdown());
+    }
+
+    /// A second `init_telemetry` while the first one's providers are live
+    /// changes nothing, as its doc promises. It used to build providers of
+    /// its own and install them as the global tracer and meter providers
+    /// before it found the subscriber already set. Shutting that second
+    /// guard down then left the `Metrics` facade on a stopped provider,
+    /// recording nothing, while the first guard and its subscriber lived on.
+    #[cfg(feature = "otel")]
+    #[test]
+    fn a_second_init_leaves_the_first_one_in_charge() {
+        let output =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "telemetry::init::tests::second_init_child",
+                    "--nocapture",
+                ])
+                .env(SECOND_INIT_CHILD, "1")
+                .output()
+                .expect("spawn the child");
+        assert!(
+            output.status.success(),
+            "status: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+            "child filter matched no test; stdout:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+        );
     }
 
     // ---- OTEL_SDK_DISABLED parse (no env mutation needed) -------------

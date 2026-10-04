@@ -65,7 +65,7 @@
 use super::{Container, TASK_CONTAINER, TEST_CONTAINER};
 use std::any::Any;
 use std::future::Future;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::task::JoinHandle;
 
@@ -105,8 +105,13 @@ impl TestContainer {
         TEST_CONTAINER.with(|c| {
             *c.borrow_mut() = Some(Container::new());
         });
+        let live = Arc::new(AtomicBool::new(true));
+        TEST_CONTAINER.own(Arc::clone(&live));
         FAKE_GUARDS.fetch_add(1, Ordering::SeqCst);
-        TestContainerGuard
+        TestContainerGuard {
+            origin: std::thread::current().id(),
+            live,
+        }
     }
 
     /// Run a future with a task-local test container override.
@@ -342,13 +347,39 @@ impl TestContainer {
 ///
 /// This ensures test isolation by automatically cleaning up the thread-local
 /// test container when the guard goes out of scope.
-pub struct TestContainerGuard;
+///
+/// The guard clears the container it installed, wherever it drops. A
+/// test harness may hold it in an `Arc` it shares with spawned tasks, so
+/// the last reference can drop on another thread; it used to clear that
+/// thread's container instead - another test's fakes - and leave its own
+/// installed for whatever test ran next on its thread. Now a drop on
+/// another thread leaves that thread alone, and the container it owned is
+/// gone at its own thread's next lookup.
+///
+/// Only [`TestContainer::fake`] makes one, so every guard that drops
+/// stands for a fake that was installed and counted. A guard made directly
+/// used to take the live-guard count below zero, after which the
+/// last-guard cleanup of the connection registry never ran again:
+///
+/// ```compile_fail,E0423
+/// let _guard = suprnova::testing::TestContainerGuard;
+/// ```
+pub struct TestContainerGuard {
+    /// The thread whose container this guard installed.
+    origin: std::thread::ThreadId,
+    /// Cleared on drop; the installation is dead from then on.
+    live: Arc<AtomicBool>,
+}
 
 impl Drop for TestContainerGuard {
     fn drop(&mut self) {
-        TEST_CONTAINER.with(|c| {
-            *c.borrow_mut() = None;
-        });
+        self.live.store(false, Ordering::Release);
+        // On its own thread the guard clears the container now. On any
+        // other it must not touch that thread's container, which belongs
+        // to another test; its own is emptied at its thread's next lookup.
+        if std::thread::current().id() == self.origin {
+            TEST_CONTAINER.clear();
+        }
         // The thread-local container reset above isolates this test's
         // service bindings. The named-connection registry is a
         // separate, process-global `OnceLock<RwLock<HashMap>>` and so
@@ -377,6 +408,47 @@ impl Drop for TestContainerGuard {
         if FAKE_GUARDS.fetch_sub(1, Ordering::SeqCst) == 1 {
             crate::database::ConnectionRegistry::clear();
         }
+    }
+}
+
+#[cfg(test)]
+mod guard_ownership_tests {
+    use super::*;
+    use crate::container::App;
+    use serial_test::serial;
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct OwnedMarker(u8);
+
+    /// A guard dropped on another thread clears the container it
+    /// installed and nothing else. It used to clear the container of the
+    /// thread it dropped on - another test's fakes - and leave its own
+    /// installed for the next test on its thread.
+    #[test]
+    #[serial]
+    fn a_guard_dropped_on_another_thread_clears_only_its_own_container() {
+        let guard = TestContainer::fake();
+        TestContainer::singleton(OwnedMarker(1));
+
+        let theirs = std::thread::spawn(move || {
+            let _theirs = TestContainer::fake();
+            TestContainer::singleton(OwnedMarker(2));
+            drop(guard);
+            App::get::<OwnedMarker>()
+        })
+        .join()
+        .expect("the other thread does not panic");
+
+        assert_eq!(
+            theirs,
+            Some(OwnedMarker(2)),
+            "the other thread keeps its own fake"
+        );
+        assert_eq!(
+            App::get::<OwnedMarker>(),
+            None,
+            "this thread's fake went with its guard"
+        );
     }
 }
 

@@ -8,9 +8,12 @@ here. There is no service-provider scaffold to assemble.
 
 There are two hooks, not one. `register` is process-wide: every
 subcommand runs it, including `queue:work`, `schedule:work`,
-`workflow:work`, and your console binary, not only the server. Register
-the database connection, container bindings, event listeners, observers,
-supervisors, and worker job registration there. `register_http_stack`,
+`workflow:work`, the `queue:*` commands, `schedule:list`, `down` and
+`up`, and your console binary, not only the server. The migration
+commands are the one exception (see "Where bootstrap sits in the boot
+order" below). Register the database connection, container bindings,
+event listeners, observers, supervisors, and worker job registration
+there. `register_http_stack`,
 wired through `.http_bootstrap`, runs only on the server path (`serve` /
 `web:run`) - global middleware and `Inertia::install` belong there. The
 "Where bootstrap sits in the boot order" section below explains why the
@@ -63,12 +66,15 @@ that starts "fine" under `#[tokio::main]` is precisely the one that
 corrupts an unrelated environment read weeks later.
 
 The framework calls your `bootstrap_fn` once during the boot sequence,
-after the environment is loaded and after the runtime drivers (Cache, Queue,
-RateLimit, Mail) are up but before the router is built. The same call
-runs for background workers (`queue:work`, `workflow:work`,
-`schedule:work`) so an observer or listener registered here fires
-identically for an insert from a queue job and an insert from an HTTP
-handler. `http_bootstrap_fn` runs immediately after `bootstrap_fn`, but
+after the environment is loaded and before the router is built. The
+container's `#[injectable]` and `#[service]` inventory and the runtime
+drivers (Cache, Queue, RateLimit, Mail) come up after it, so a binding
+you install by hand wins over the inventory default, and
+`QUEUE_DRIVER=database` finds the connection your bootstrap opened. The
+same call runs for background workers (`queue:work`, `workflow:work`,
+`schedule:work`) and the console binary, so an observer or listener
+registered here fires identically for an insert from a queue job and an
+insert from an HTTP handler. `http_bootstrap_fn` runs immediately after `bootstrap_fn`, but
 only on the server path - background workers and the console binary
 never call it. [Lifecycle](lifecycle.md) walks the full sequence.
 
@@ -467,13 +473,26 @@ The full sequence (excerpted from [Lifecycle](lifecycle.md)):
 9. Your `booted_fn`s fire
 10. Server begins accepting connections
 
-Background workers (`queue:work`, `workflow:work`, `schedule:work`) and
-the console binary share steps 1-5 and 8 - they run `bootstrap_fn`, but
-never step 6, since only `serve` / `web:run` runs `http_bootstrap_fn`.
-That is what lets a listener or observer you register in `register`
-reach worker code paths exactly as it reaches HTTP handlers, while
-`register_http_stack`'s global middleware and `Inertia::install` stay
-off processes that never serve HTTP.
+Every other subcommand, and the console binary, runs one shared boot
+in place of steps 6 to 10: your `bootstrap_fn`, then the log channels,
+the container's `#[injectable]` and `#[service]` inventory, the
+`#[policy]` gates, and the drivers the command uses. The workers, the
+`queue:*` commands, `schedule:run`, and the console binary boot every
+runtime driver. `down` and `up` boot only the drivers maintenance mode
+reads, so a queue backend that is down cannot stop the command you run
+during that outage. `schedule:list` boots no driver. None of them runs
+step 6, since only `serve` / `web:run` runs `http_bootstrap_fn`. That
+is what lets a listener, an observer, or an injectable action you
+register reach worker code paths exactly as it reaches HTTP handlers,
+while `register_http_stack`'s global middleware and `Inertia::install`
+stay off processes that never serve HTTP.
+
+The migration commands (`migrate`, `migrate:*`, `schema:dump`) run no
+`bootstrap_fn`, the same way `serve` runs its migrations at step 4,
+before it. A fresh database has to be migratable even when your
+bootstrap reads a table the migrations create. Override a path that
+the migrations read (`use_database_path`) in your `config_fn`, which
+every subcommand runs first.
 
 ### Why Suprnova diverges
 

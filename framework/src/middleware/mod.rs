@@ -48,6 +48,7 @@ pub use terminable::{
     Terminable, TerminationSnapshot, dispatch_termination, has_terminable, register_terminable,
     registered_terminables, terminable_count,
 };
+pub(crate) use terminable::{drain_terminations, spawn_termination};
 
 #[doc(hidden)]
 pub use aliases::{
