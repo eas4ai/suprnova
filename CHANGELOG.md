@@ -414,6 +414,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **Empty form fields are null, and a repeated name keeps its last value.**
+  In a `MultipartRequest` and in url-encoded `FormRequest`, `req.form()`
+  and `req.input()`, an empty field now counts as missing, as Laravel's
+  default `ConvertEmptyStringsToNull` makes it: a required `String` fails
+  and an `Option` is `None`, where an empty value used to pass as `""` or
+  fail to parse as a number. A field name sent more than once keeps its
+  last value, where multipart kept the first part (even an empty one) and
+  url-encoded forms answered 422 for a duplicate field; names ending in
+  `[]` still collect every value. The requests manual lists what still
+  differs from Laravel. This landed after the `v3.1.0` tag.
 - **The session, remember-me, auth-flow token and ceremony entities read
   whole rows on every column type.** Their time fields are the new public
   `suprnova::StoredDateTime`, which reads `DATETIME`, `TIMESTAMP`,
