@@ -537,6 +537,11 @@ missing value: an `Option` field is `None`, a required field reports
 field keeps the empty string, as a `FormRequest` does for a JSON `""` or a
 urlencoded `name=`.
 
+A field that holds one value, rather than a `Vec`, is decided by the first
+part of its name that isn't missing in this sense. If that part doesn't
+parse, the field reports that one error, and any later part of the name is
+ignored.
+
 Built-in validators in `suprnova::http::upload::validators`:
 
 - `MaxSize<N>` - stops reading the body at the chunk that takes the file

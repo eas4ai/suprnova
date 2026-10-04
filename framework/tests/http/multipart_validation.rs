@@ -2078,3 +2078,40 @@ async fn a_text_part_over_the_in_memory_limit_answers_413_and_stops_the_read() {
     );
     assert!(!NOTES_HANDLER_RAN.load(Ordering::SeqCst), "the handler ran");
 }
+
+// ── PAR-043: the first part decides a field that holds one value ──
+
+#[tokio::test]
+async fn the_first_part_decides_a_text_field_that_holds_one_value() {
+    // A required field: the second failing part adds nothing.
+    let errors = typed_errors(form(&[
+        text_part("count", "abc"),
+        text_part("count", "xyz"),
+    ]))
+    .await;
+    assert_eq!(key(&errors, "count"), "validation-integer");
+    assert_eq!(errors.errors["count"].len(), 1, "{errors}");
+
+    // A later part that parses does not undo the first part's failure.
+    let errors = typed_errors(form(&[text_part("count", "abc"), text_part("count", "5")])).await;
+    assert_eq!(errors.errors["count"].len(), 1, "{errors}");
+
+    // An optional field, the same.
+    let req = crate::common::request_from_multipart(
+        BOUNDARY,
+        form(&[
+            text_part("count", "abc"),
+            text_part("count", "xyz"),
+            text_part("title", "t"),
+        ])
+        .into(),
+    )
+    .await;
+    let errors = match Nullable::from_request(req).await {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {:?}", other.err()),
+    };
+    assert_eq!(key(&errors, "count"), "validation-integer");
+    assert_eq!(errors.errors["count"].len(), 1, "{errors}");
+    assert_eq!(errors.errors.len(), 1, "{errors}");
+}

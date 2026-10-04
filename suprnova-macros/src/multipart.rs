@@ -208,8 +208,9 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
         // Each part's zero-based index among the parts of this name, which
         // names its error when the input name ends in `[]`.
         let index_ident = quote::format_ident!("__index_{}", ident);
-        // Set when a part of a required field failed, so a field reported
-        // as invalid is not also reported as missing.
+        // Set when a part of a field that holds one value failed: that part
+        // decided the field, so a later part is not read, and a required
+        // field reported as invalid is not also reported as missing.
         let invalid_ident = quote::format_ident!("__invalid_{}", ident);
         field_decls.push(quote! {
             let mut #index_ident: usize = 0;
@@ -233,18 +234,13 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 validator_decls.push(validator_decl);
                 validator_arms.push(validator_arm);
                 single_file_names.push(field_name_str.clone());
-                let on_invalid = if required {
-                    quote! { #invalid_ident = true; }
-                } else {
-                    quote! {}
-                };
                 field_arms.push(quote! {
                     #field_name_str => {
                         #next_index
-                        // First write wins: the parser keeps no part of the
-                        // name after the one the field takes, so a later
-                        // part is neither validated nor kept.
-                        if #ident.is_none() {
+                        // The first part that is not absent decides: the
+                        // parser keeps no part of the name after it, so a
+                        // later part is neither validated nor kept.
+                        if #ident.is_none() && !#invalid_ident {
                             match ::suprnova::http::upload::take_file(
                                 &#v_ident, __value, #field_name_str, __index, &mut __errors,
                             )? {
@@ -252,7 +248,9 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                                     #ident = ::core::option::Option::Some(__file);
                                 }
                                 ::suprnova::http::upload::Taken::Absent => {}
-                                ::suprnova::http::upload::Taken::Invalid => { #on_invalid }
+                                ::suprnova::http::upload::Taken::Invalid => {
+                                    #invalid_ident = true;
+                                }
                             }
                         }
                     }
@@ -303,17 +301,13 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 failure,
                 parse,
             } => {
-                let on_invalid = if required {
-                    quote! { #invalid_ident = true; }
-                } else {
-                    quote! {}
-                };
                 field_arms.push(quote! {
                     #field_name_str => {
                         #next_index
-                        // First write wins; a later part of the name is
-                        // neither parsed nor kept.
-                        if #ident.is_none() {
+                        // The first part that is not absent decides, valid
+                        // or not; a later part of the name is neither
+                        // parsed nor kept.
+                        if #ident.is_none() && !#invalid_ident {
                             match ::suprnova::http::upload::take_text::<#inner_ty>(
                                 __value, #field_name_str, __index, #failure, #parse, &mut __errors,
                             ) {
@@ -321,7 +315,9 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                                     #ident = ::core::option::Option::Some(__parsed);
                                 }
                                 ::suprnova::http::upload::Taken::Absent => {}
-                                ::suprnova::http::upload::Taken::Invalid => { #on_invalid }
+                                ::suprnova::http::upload::Taken::Invalid => {
+                                    #invalid_ident = true;
+                                }
                             }
                         }
                     }
@@ -485,7 +481,8 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
 /// The declarations, the missing-field check and the struct initialiser
 /// of one scalar or optional field. A required field missing with no
 /// failure of its own is reported as `validation-required` under its
-/// input name; an optional one is simply `None`.
+/// input name; an optional one is simply `None`. Both declare the flag a
+/// failing part sets.
 fn push_required(
     required: bool,
     ident: &syn::Ident,
@@ -495,13 +492,13 @@ fn push_required(
     required_checks: &mut Vec<proc_macro2::TokenStream>,
     struct_init: &mut Vec<proc_macro2::TokenStream>,
 ) {
+    field_decls.push(quote! {
+        let mut #invalid_ident = false;
+    });
     if !required {
         struct_init.push(quote! { #ident, });
         return;
     }
-    field_decls.push(quote! {
-        let mut #invalid_ident = false;
-    });
     required_checks.push(quote! {
         if #ident.is_none() && !#invalid_ident {
             ::suprnova::http::upload::add_field_failure(
