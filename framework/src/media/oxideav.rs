@@ -14,11 +14,14 @@
 //! out, and on the encode side the packet an encoder emits *is* the complete
 //! file - which is precisely why those codecs never needed a muxer.
 //!
-//! Decoding takes the registry only for JPEG. PNG, GIF, WebP and BMP have
-//! entry points of their own that return RGBA, and those skip the registry's
-//! two copies of the input (the packet, and the decoder's clone of it) and
-//! the conversion afterwards. Every format's decode is costed before it
-//! runs; see the `peak` module.
+//! Decoding takes the registry only for lossless JPEG. PNG, GIF, WebP and
+//! BMP have entry points of their own that return RGBA, and those skip the
+//! registry's two copies of the input (the packet, and the decoder's clone
+//! of it) and the conversion afterwards. Every other JPEG is decoded by
+//! zune-jpeg (see `decode_jpeg`): oxideav-mjpeg refuses any frame of more
+//! than 64 Mi samples, about 22 megapixels in colour, and decodes
+//! arithmetic-coded colour JPEGs to the wrong pixels. Every format's decode
+//! is costed before it runs; see the `peak` module.
 //!
 //! `oxideav-io` is therefore not a dependency at all: with decode and encode
 //! on the registry and the codecs' own entry points, nothing was left for it
@@ -51,8 +54,11 @@
 //!   the moment the frame is complete.
 //! - **WebP** and **BMP** go through `decode_webp_image` and `decode_bmp`,
 //!   which return one packed RGBA buffer; `Canvas::packed` checks its length.
-//! - **JPEG** has a small, capability-bounded output set, so the remaining
-//!   classification is exact rather than a guess.
+//! - **JPEG** goes through zune-jpeg, which writes RGBA from YCbCr and grey
+//!   and RGB from RGB-coded files, into one buffer the driver allocates. A
+//!   lossless JPEG goes through oxideav-mjpeg, whose lossless output is one
+//!   packed grey or RGB plane, so the classification is exact rather than a
+//!   guess.
 //!
 //! Everything is normalised to packed RGBA before the first filter runs, so
 //! the transformation pipeline only ever deals with one layout.
@@ -73,7 +79,7 @@ use crate::error::FrameworkError;
 
 use super::ImageConfig;
 use super::driver::{ImageDriver, ImagePipeline, OutputFormat, Transformation};
-use super::sniff::{self, InputFormat};
+use super::sniff::{self, InputFormat, JpegColour, JpegLayout, ZuneJpeg};
 
 mod gif;
 mod peak;
@@ -255,7 +261,7 @@ impl OxideAvImageDriver {
                 config.max_alloc_bytes
             )));
         }
-        self.decode(contents, &layout, width, height)
+        self.decode(contents, &layout, width, height, config)
     }
 
     fn decode(
@@ -264,6 +270,7 @@ impl OxideAvImageDriver {
         layout: &Layout,
         width: u32,
         height: u32,
+        config: &ImageConfig,
     ) -> Result<Canvas, FrameworkError> {
         match layout {
             Layout::Png(png) => {
@@ -281,9 +288,12 @@ impl OxideAvImageDriver {
                 Canvas::packed(image.width, image.height, image.rgba)
             }
             Layout::Bmp(_) => decode_bmp(contents),
-            Layout::Jpeg(_) => {
+            Layout::Jpeg(JpegLayout::Zune(zune)) => {
+                decode_jpeg(contents, zune, config.max_dimension)
+            }
+            Layout::Jpeg(JpegLayout::Lossless(_)) => {
                 let frame = self.decode_via_registry(contents, InputFormat::Jpeg)?;
-                let source = jpeg_pixel_format(&frame, width, height)?;
+                let source = jpeg_pixel_format(&frame, width)?;
                 to_rgba(frame, source, width, height)
             }
         }
@@ -586,164 +596,52 @@ fn output_for_input(format: InputFormat) -> Option<OutputFormat> {
     })
 }
 
-/// Determine the layout the JPEG decoder handed back.
+/// Determine the layout oxideav-mjpeg handed back for a lossless JPEG.
 ///
-/// Bounded by the decoder's declared capabilities, so the classification is
-/// exact rather than a guess. JPEG is the one format decoded through the
-/// codec registry; the others come back as RGBA from their own entry points.
-fn jpeg_pixel_format(
-    frame: &VideoFrame,
-    width: u32,
-    height: u32,
-) -> Result<PixelFormat, FrameworkError> {
-    let plane = frame
-        .planes
-        .first()
-        .ok_or_else(|| FrameworkError::param("image decode produced no planes"))?;
-    let width_px = width as usize;
-    let bytes_per_pixel = plane.stride.checked_div(width_px).unwrap_or(0);
-
+/// Its lossless decoder takes only unsubsampled frames and returns one
+/// packed plane, grey or RGB, so the classification is exact rather than a
+/// guess. JPEG is the one format decoded through the codec registry, and
+/// only when it is lossless; see `decode_jpeg` for the rest.
+fn jpeg_pixel_format(frame: &VideoFrame, width: u32) -> Result<PixelFormat, FrameworkError> {
     let unsupported = |detail: &str| {
         FrameworkError::param(format!(
             "image decode produced an unsupported pixel layout ({detail}); convert the source \
              to 8-bit RGB or RGBA and retry"
         ))
     };
-
-    match frame.planes.len() {
-        1 => match bytes_per_pixel {
-            1 => Ok(PixelFormat::Gray8),
-            3 => Ok(PixelFormat::Rgb24),
-            other => Err(unsupported(&format!("{other} bytes per pixel"))),
-        },
-        3 => yuv_layout(frame, width, height)
-            .ok_or_else(|| unsupported("planar chroma geometry matches no known subsampling")),
-        other => Err(unsupported(&format!("{other} planes"))),
+    let [plane] = frame.planes.as_slice() else {
+        return Err(unsupported(&format!("{} planes", frame.planes.len())));
+    };
+    match plane.stride.checked_div(width as usize).unwrap_or(0) {
+        1 => Ok(PixelFormat::Gray8),
+        3 => Ok(PixelFormat::Rgb24),
+        other => Err(unsupported(&format!("{other} bytes per pixel"))),
     }
 }
 
-/// Classify a three-plane frame by comparing the chroma planes' geometry to
-/// the luma dimensions. Unambiguous once we already know the frame is planar.
-fn yuv_layout(frame: &VideoFrame, width: u32, height: u32) -> Option<PixelFormat> {
-    let chroma = frame.planes.get(1)?;
-    if chroma.stride == 0 {
-        return None;
-    }
-    let chroma_width = chroma.stride;
-    let chroma_height = chroma.data.len() / chroma.stride;
-    let half_width = (width as usize).div_ceil(2);
-    let half_height = (height as usize).div_ceil(2);
-    let full_height = height as usize;
-
-    if chroma_width == half_width && chroma_height == half_height {
-        Some(PixelFormat::Yuv420P)
-    } else if chroma_width == half_width && chroma_height == full_height {
-        Some(PixelFormat::Yuv422P)
-    } else if chroma_width == width as usize && chroma_height == full_height {
-        Some(PixelFormat::Yuv444P)
-    } else {
-        None
-    }
-}
-
-/// Convert any decoded layout to packed RGBA with a tight stride.
+/// Convert a decoded layout to packed RGBA with a tight stride.
 ///
 /// Takes the frame by value so its planes can move into the canvas: the
 /// source planes are dropped as soon as the conversion is done, and a plane
 /// that is already tight RGBA is never copied.
-///
-/// The YUV converter only takes sides its chroma subsampling divides, and a
-/// 4:2:0 or 4:2:2 image of odd width or height is ordinary (a crop, a resized
-/// export). Its chroma planes already cover the rounded-up size, so the luma
-/// plane is padded to that size by repeating its last column and row, the
-/// frame converts at the padded size, and the result is cropped back.
 fn to_rgba(
     frame: VideoFrame,
     source: PixelFormat,
     width: u32,
     height: u32,
 ) -> Result<Canvas, FrameworkError> {
-    let (column_step, row_step) = chroma_subsampling(source);
-    let padded_width = width.next_multiple_of(column_step);
-    let padded_height = height.next_multiple_of(row_step);
-    let frame = if (padded_width, padded_height) == (width, height) {
-        frame
-    } else {
-        pad_luma(frame, width, height, padded_width, padded_height)?
-    };
     let converted = if source == PixelFormat::Rgba {
         frame
     } else {
-        let info = FrameInfo::new(source, padded_width, padded_height);
+        let info = FrameInfo::new(source, width, height);
         pix_convert(&frame, info, PixelFormat::Rgba, &ConvertOptions::default())
             .map_err(|e| FrameworkError::param(format!("image pixel conversion failed: {e}")))?
     };
     // `Canvas::packed` is what rejects a plane shorter than the declared
     // height rather than handing it to a filter that would index past the
     // end of it.
-    let mut pixels = pack_tight(converted, padded_width as usize * 4, padded_height as usize)?;
-    if padded_width != width {
-        crop_rows(
-            &mut pixels,
-            padded_width as usize * 4,
-            width as usize * 4,
-            height as usize,
-        );
-    }
+    let pixels = pack_tight(converted, width as usize * 4, height as usize)?;
     Canvas::packed(width, height, pixels)
-}
-
-/// Columns and rows each chroma sample covers in a planar YUV layout.
-fn chroma_subsampling(format: PixelFormat) -> (u32, u32) {
-    match format {
-        PixelFormat::Yuv420P => (2, 2),
-        PixelFormat::Yuv422P => (2, 1),
-        _ => (1, 1),
-    }
-}
-
-/// Replace the luma plane with one `padded_width x padded_height`, repeating
-/// the last column and row into the padding.
-fn pad_luma(
-    frame: VideoFrame,
-    width: u32,
-    height: u32,
-    padded_width: u32,
-    padded_height: u32,
-) -> Result<VideoFrame, FrameworkError> {
-    let short = || FrameworkError::param("image decode produced a short luma plane");
-    let mut planes = frame.planes.into_iter();
-    let luma = planes.next().ok_or_else(short)?;
-    let (width, height) = (width as usize, height as usize);
-    let (padded_width, padded_height) = (padded_width as usize, padded_height as usize);
-    if width == 0 || height == 0 || luma.stride < width {
-        return Err(short());
-    }
-    let mut padded = Vec::with_capacity(padded_width * padded_height);
-    for row in 0..padded_height {
-        let source = row.min(height - 1) * luma.stride;
-        let line = luma.data.get(source..source + width).ok_or_else(short)?;
-        padded.extend_from_slice(line);
-        padded.resize(padded.len() + padded_width - width, line[width - 1]);
-    }
-    let mut out = vec![VideoPlane {
-        stride: padded_width,
-        data: padded,
-    }];
-    out.extend(planes);
-    Ok(VideoFrame {
-        pts: frame.pts,
-        planes: out,
-    })
-}
-
-/// Keep the first `kept` bytes of each of `rows` rows of `stride` bytes,
-/// packing them together in place.
-fn crop_rows(pixels: &mut Vec<u8>, stride: usize, kept: usize, rows: usize) {
-    for row in 1..rows {
-        pixels.copy_within(row * stride..row * stride + kept, row * kept);
-    }
-    pixels.truncate(rows * kept);
 }
 
 /// Strip any per-row padding a conversion left behind. A plane that is
@@ -769,6 +667,63 @@ fn pack_tight(frame: VideoFrame, tight: usize, height: usize) -> Result<Vec<u8>,
         out.extend_from_slice(plane.data.get(start..start + tight).ok_or_else(short)?);
     }
     Ok(out)
+}
+
+/// Decode a JPEG through zune-jpeg into one RGBA buffer.
+///
+/// zune-jpeg converts YCbCr and greyscale to RGBA itself. It has no RGB to
+/// RGBA mapping, so an RGB-coded JPEG decodes as RGB into the front of the
+/// same buffer and is spread to RGBA in place, back to front. The colour
+/// space comes from the header walk the estimate used, and the decoder must
+/// agree with it before anything is allocated. Its size limits are the
+/// framework's: the decode estimate decides what is admitted, not the
+/// crate's own defaults.
+fn decode_jpeg(
+    contents: &[u8],
+    zune: &ZuneJpeg,
+    max_dimension: u32,
+) -> Result<Canvas, FrameworkError> {
+    use zune_jpeg::zune_core::bytestream::ZCursor;
+    use zune_jpeg::zune_core::colorspace::ColorSpace;
+    use zune_jpeg::zune_core::options::DecoderOptions;
+
+    let failed = |e: &dyn std::fmt::Display| {
+        FrameworkError::param(format!("image decode failed: image/jpeg: {e}"))
+    };
+    let (input, output, channels) = match zune.colour {
+        JpegColour::Rgb => (ColorSpace::RGB, ColorSpace::RGB, 3),
+        JpegColour::YCbCr => (ColorSpace::YCbCr, ColorSpace::RGBA, 4),
+        JpegColour::Grey => (ColorSpace::Luma, ColorSpace::RGBA, 4),
+        JpegColour::Other => return Err(failed(&"the colour space is not supported")),
+    };
+    let limit = max_dimension as usize;
+    let options = DecoderOptions::default()
+        .set_max_width(limit)
+        .set_max_height(limit)
+        .jpeg_set_out_colorspace(output);
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(contents), options);
+    decoder.decode_headers().map_err(|e| failed(&e))?;
+    if decoder.input_colorspace() != Some(input) {
+        return Err(failed(&"the decoder read a different colour space"));
+    }
+    let dimensions = decoder.dimensions().map(|(w, h)| (w as u32, h as u32));
+    if dimensions != Some((zune.frame.width, zune.frame.height)) {
+        return Err(failed(&"the decoder read a different frame"));
+    }
+    let (width, height) = (zune.frame.width as usize, zune.frame.height as usize);
+    let pixels = width * height;
+    let mut rgba = vec![0u8; pixels * 4];
+    let decoded = rgba
+        .get_mut(..pixels * channels)
+        .ok_or_else(|| failed(&"the output buffer is short"))?;
+    decoder.decode_into(decoded).map_err(|e| failed(&e))?;
+    if channels == 3 {
+        for pixel in (0..pixels).rev() {
+            rgba.copy_within(pixel * 3..pixel * 3 + 3, pixel * 4);
+            rgba[pixel * 4 + 3] = u8::MAX;
+        }
+    }
+    Canvas::packed(zune.frame.width, zune.frame.height, rgba)
 }
 
 /// Decode a BMP through the crate's own entry point, which always returns

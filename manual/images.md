@@ -281,22 +281,17 @@ bytes:
 | PNG, 8-bit | 1.3 (grey or palette) to 5 (incompressible RGBA) |
 | PNG, 16-bit | 2.5 (grey) to 10 (incompressible RGBA). At the 1 GiB default, 16-bit RGBA tops out at about 27 megapixels and 16-bit RGB at about 36 |
 | GIF | 1.0 to 1.1 |
-| JPEG, grey | 1.3 to 1.7 |
-| JPEG, colour | 2.5 to 4.8 (progressive, arithmetic and 4:4:4 at the top) |
+| JPEG, sequential (baseline, extended, arithmetic) | 1.0 to 1.1 |
+| JPEG, progressive, or one component a scan | 1.5 (grey) to 2.5 (4:4:4) |
+| JPEG, lossless | 1.3 (grey) to 4 (RGB) |
 | WebP | 1.4 to 2.4 |
 | BMP | 1.0 to 2.1 |
 
-So the default 1 GiB admits a 48-megapixel photo (8000x6000) in every
+So the default 1 GiB decodes a 48-megapixel photo (8000x6000) in every
 8-bit format, a progressive 4:4:4 JPEG and a PNG of incompressible RGBA
 included. 16-bit PNG holds more and tops out lower, as the table says.
 Raise `IMAGE_MAX_ALLOC_BYTES` if your users upload larger images, or
 lower it on a small host.
-
-The JPEG decoder has a limit of its own that no variable changes: it
-refuses a frame of more than 67,108,864 samples (width x height x
-components), so the default driver reads colour JPEGs up to about 22
-megapixels and grey ones up to about 67. The `magick` driver reads larger
-JPEGs.
 
 A limit hit is a 4xx-shaped `FrameworkError::param`, because oversized
 input is a client problem, not a server fault.
@@ -337,9 +332,16 @@ Like Laravel, the image surface is two drivers, chosen with
 ### `IMAGE_DRIVER=oxideav`
 
 The default. Pure Rust, built on the [OxideAV](https://github.com/OxideAV)
-codec family: no native library, nothing to install, nothing to
+codec family, with [zune-jpeg](https://github.com/etemesi254/zune-image)
+decoding JPEG: no native library, nothing to install, nothing to
 configure. It is the right choice for almost every application, and it
 is what a scaffolded app gets.
+
+It reads 8-bit JPEGs in every coding: baseline, progressive and
+arithmetic, greyscale, YCbCr at 4:4:4, 4:2:2, 4:2:0, 4:4:0 or 4:1:1, RGB,
+and lossless. CMYK and 12-bit JPEGs need the `magick` driver, and so does a
+lossless JPEG of more than 67,108,864 samples (width x height x
+components), which its decoder, oxideav-mjpeg, refuses.
 
 ### `IMAGE_DRIVER=magick`
 

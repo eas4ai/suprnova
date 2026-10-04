@@ -6,6 +6,8 @@
 //! `#[serial]` for the same reason as `image_processing`: other tests in
 //! this binary install a process-global `ImageConfig` override.
 
+use suprnova::media::ImageDriver;
+
 use crate::image_processing::decoded_rgba;
 
 /// The RGBA of pixel `(x, y)` in a `width`-wide packed buffer.
@@ -262,5 +264,156 @@ async fn a_gif_frame_stops_decoding_when_it_is_complete() {
         started.elapsed() < std::time::Duration::from_secs(10),
         "decoding a 1x1 frame took {:?}",
         started.elapsed()
+    );
+}
+
+/// The JPEG fixtures under `fixtures/jpeg/`, read at run time so a new one
+/// is picked up without listing it. `prefix` selects a set.
+fn jpeg_fixtures(prefix: &str) -> Vec<(String, Vec<u8>)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/media/fixtures/jpeg");
+    let mut found: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir)
+        .expect("the JPEG fixture directory exists")
+        .map(|entry| entry.expect("a directory entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jpg"))
+        .filter_map(|path| {
+            let name = path.file_stem()?.to_string_lossy().into_owned();
+            name.starts_with(prefix)
+                .then(|| (name, std::fs::read(&path).expect("the fixture reads")))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// RGBA decoded by the built-in driver, without the facade.
+fn driver_rgba(jpeg: &[u8]) -> Result<Vec<u8>, String> {
+    let bmp = suprnova::OxideAvImageDriver::new()
+        .process(
+            jpeg,
+            &suprnova::media::ImagePipeline {
+                format: Some(suprnova::media::OutputFormat::Bmp),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(crate::image_processing::bmp_rgba_pixels(&bmp))
+}
+
+/// Every coding the driver reads decodes to the pixels libjpeg-turbo's
+/// `djpeg` produces: baseline, progressive and arithmetic coding, every
+/// sampling the standard allows at 8 bits, greyscale, RGB-coded, one
+/// component a scan, and lossless. Each fixture is 35x21 (both sides odd),
+/// written by `cjpeg` at quality 85, next to `djpeg`'s RGB of it. Decoders
+/// may round the inverse DCT and upsampling differently by a few levels;
+/// lossless files must match exactly.
+#[tokio::test]
+#[serial_test::serial]
+async fn jpegs_decode_to_libjpeg_turbos_pixels_in_every_coding() {
+    let fixtures = jpeg_fixtures("photo-");
+    assert_eq!(fixtures.len(), 20, "the accuracy fixtures");
+    let mut failures = Vec::new();
+    for (name, jpeg) in fixtures {
+        let reference = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("tests/media/fixtures/jpeg/{name}.rgb")),
+        )
+        .expect("each fixture has a reference");
+        let rgba = match driver_rgba(&jpeg) {
+            Ok(rgba) => rgba,
+            Err(e) => {
+                failures.push(format!("{name}: {e}"));
+                continue;
+            }
+        };
+        if rgba.len() / 4 != reference.len() / 3 {
+            failures.push(format!(
+                "{name}: {} pixels, expected {}",
+                rgba.len() / 4,
+                reference.len() / 3
+            ));
+            continue;
+        }
+        let (mut worst, mut total) = (0u8, 0u64);
+        for (got, want) in rgba.chunks(4).zip(reference.chunks(3)) {
+            for channel in 0..3 {
+                let difference = got[channel].abs_diff(want[channel]);
+                worst = worst.max(difference);
+                total += u64::from(difference);
+            }
+        }
+        let mean = total as f64 / reference.len() as f64;
+        let lossless = name.contains("lossless");
+        if (lossless && worst != 0) || worst > 8 || mean > 1.0 {
+            failures.push(format!(
+                "{name}: off by up to {worst}, {mean:.2} on average"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "JPEGs that decode wrong:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// A progressive JPEG whose only scan is the DC scan, every block's DC
+/// difference zero: a mid-grey image of `width x height` in a few hundred
+/// KiB, sampled 4:4:4.
+fn dc_only_progressive_jpeg(width: u16, height: u16) -> Vec<u8> {
+    fn segment(jpeg: &mut Vec<u8>, marker: u8, body: &[u8]) {
+        jpeg.extend_from_slice(&[0xFF, marker]);
+        jpeg.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes());
+        jpeg.extend_from_slice(body);
+    }
+    let mut jpeg = vec![0xFF, 0xD8];
+    let mut quantization = vec![0x00];
+    quantization.extend_from_slice(&[1; 64]);
+    segment(&mut jpeg, 0xDB, &quantization);
+    let mut frame = vec![8];
+    frame.extend_from_slice(&height.to_be_bytes());
+    frame.extend_from_slice(&width.to_be_bytes());
+    frame.extend_from_slice(&[3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0]);
+    segment(&mut jpeg, 0xC2, &frame);
+    // One DC code, one bit long, for difference category 0.
+    let mut huffman = vec![0x00, 1];
+    huffman.extend_from_slice(&[0; 15]);
+    huffman.push(0);
+    segment(&mut jpeg, 0xC4, &huffman);
+    segment(&mut jpeg, 0xDA, &[3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 0, 0]);
+    let blocks = usize::from(width).div_ceil(8) * usize::from(height).div_ceil(8) * 3;
+    jpeg.resize(jpeg.len() + blocks / 8, 0);
+    if blocks % 8 != 0 {
+        jpeg.push((1u8 << (8 - blocks % 8)) - 1);
+    }
+    jpeg.extend_from_slice(&[0xFF, 0xD9]);
+    jpeg
+}
+
+/// A 48-megapixel photo, 8000x6000 in progressive 4:4:4 (the costliest
+/// layout to decode), decodes under the default IMAGE_MAX_ALLOC_BYTES.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_48_megapixel_progressive_jpeg_decodes_at_the_default_budget() {
+    suprnova::media::set_config_for_tests(None);
+    let jpeg = dc_only_progressive_jpeg(8000, 6000);
+    let png = suprnova::OxideAvImageDriver::new()
+        .process(
+            &jpeg,
+            &suprnova::media::ImagePipeline {
+                transformations: vec![suprnova::media::Transformation::Resize {
+                    width: 80,
+                    height: 60,
+                }],
+                format: Some(suprnova::media::OutputFormat::Bmp),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("a 48-megapixel progressive JPEG must decode: {e}"));
+    let rgba = crate::image_processing::bmp_rgba_pixels(&png);
+    assert_eq!(rgba.len(), 80 * 60 * 4);
+    assert!(
+        rgba.chunks(4)
+            .all(|px| close([px[0], px[1], px[2], px[3]], [128, 128, 128, 255], 1)),
+        "the image is mid-grey"
     );
 }

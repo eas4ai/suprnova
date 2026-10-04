@@ -281,7 +281,266 @@ fn jpeg_segment(bytes: &[u8], pos: usize) -> Option<(&[u8], usize)> {
 
 /// Read a JPEG's dimensions from the frame header its decoder uses.
 fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    jpeg_frame(bytes).map(|frame| (frame.width, frame.height))
+    let frame = match jpeg_layout(bytes)? {
+        JpegLayout::Zune(zune) => zune.frame,
+        JpegLayout::Lossless(frame) => frame,
+    };
+    Some((frame.width, frame.height))
+}
+
+/// Which decoder reads a JPEG, and what it reads before it decodes a pixel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JpegLayout {
+    /// zune-jpeg decodes every DCT coding, Huffman or arithmetic.
+    Zune(ZuneJpeg),
+    /// oxideav-mjpeg decodes lossless frames, which zune-jpeg reads but
+    /// cannot decode. The frame is the one oxideav-mjpeg's own walk reaches.
+    Lossless(JpegFrame),
+}
+
+/// Pick a JPEG's decoder and read its headers the way that decoder will.
+///
+/// zune-jpeg's walk decides: a lossless frame there goes to oxideav-mjpeg,
+/// whose own walk must then reach a lossless frame too, so that the frame
+/// costed and the frame decoded are always read by the same walk.
+pub(crate) fn jpeg_layout(bytes: &[u8]) -> Option<JpegLayout> {
+    let zune = jpeg_zune(bytes)?;
+    if matches!(zune.frame.marker, 0xC3 | 0xCB) {
+        let frame = jpeg_frame(bytes)?;
+        return matches!(frame.marker, 0xC3 | 0xCB).then_some(JpegLayout::Lossless(frame));
+    }
+    Some(JpegLayout::Zune(zune))
+}
+
+/// The colour space zune-jpeg decodes a frame from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JpegColour {
+    Grey,
+    YCbCr,
+    Rgb,
+    /// CMYK, YCCK, or a component count that matches no colour space.
+    Other,
+}
+
+/// What zune-jpeg reads from a JPEG before it decodes a pixel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ZuneJpeg {
+    pub(crate) frame: JpegFrame,
+    pub(crate) colour: JpegColour,
+    /// Bytes zune-jpeg copies out of APP1, APP2 and APP13 segments (Exif,
+    /// XMP, ICC profile chunks, gain maps, MPF, IPTC), with the share of the
+    /// lists that hold them.
+    pub(crate) metadata: u64,
+}
+
+/// Read a JPEG's headers the way zune-jpeg 0.5.16-rc2's
+/// `decode_headers_internal` does, up to its first scan header.
+///
+/// zune-jpeg reads a byte at a time, takes a marker after `0xFF` (skipping
+/// fill bytes and stuffed zeros), and reads every marker's segment by its
+/// length, the restart markers and a second start-of-image included, where
+/// oxideav-mjpeg takes those as standalone. A second frame header, a
+/// hierarchical one, or the image ending before a scan are errors, and so
+/// are segments that do not read. `None` wherever zune-jpeg errors.
+pub(crate) fn jpeg_zune(bytes: &[u8]) -> Option<ZuneJpeg> {
+    if bytes.get(..2)? != [0xFF, 0xD8] {
+        return None;
+    }
+    let mut pos = 2;
+    let mut last = 0u8;
+    let mut frame: Option<JpegFrame> = None;
+    let mut adobe: Option<u8> = None;
+    let mut metadata = 0u64;
+    loop {
+        let mut marker = *bytes.get(pos)?;
+        pos += 1;
+        if (marker == 0xFF || marker == 0) && last == 0xFF {
+            while marker == 0xFF || marker == 0 {
+                last = marker;
+                marker = *bytes.get(pos)?;
+                pos += 1;
+            }
+        }
+        if last == 0xFF {
+            // End of image before a scan, or a hierarchical frame header.
+            if matches!(marker, 0xD9 | 0xC5..=0xC7 | 0xCD..=0xCF) {
+                return None;
+            }
+            let (body, next) = jpeg_segment(bytes, pos)?;
+            pos = next;
+            match marker {
+                0xC0..=0xC3 | 0xC9..=0xCB => {
+                    if frame.is_some() {
+                        return None;
+                    }
+                    frame = Some(zune_frame_header(marker, body)?);
+                }
+                0xDA => {
+                    let mut frame = frame?;
+                    let components = *body.first()?;
+                    if components == 0 || body.len() < 1 + usize::from(components) * 2 + 3 {
+                        return None;
+                    }
+                    frame.first_scan = components;
+                    let colour = zune_colour(&frame, adobe);
+                    let metadata = metadata.saturating_add(zune_metadata_after(bytes, pos));
+                    return Some(ZuneJpeg {
+                        frame,
+                        colour,
+                        metadata,
+                    });
+                }
+                0xE1 | 0xE2 | 0xED => {
+                    metadata = metadata.saturating_add(zune_metadata(marker, body)?);
+                }
+                0xEE if body.starts_with(b"Adobe") => {
+                    let transform = *body.get(11)?;
+                    if transform > 2 {
+                        return None;
+                    }
+                    adobe = Some(transform);
+                }
+                // DRI and DNL carry exactly two bytes.
+                0xDD | 0xDC if body.len() != 2 => return None,
+                _ => {}
+            }
+        }
+        last = marker;
+    }
+}
+
+/// Parse and validate a frame header payload as zune-jpeg's
+/// `parse_start_of_frame` does. A height of zero is kept: zune-jpeg reads
+/// the height from a later DNL segment, and the header gate refuses it.
+fn zune_frame_header(marker: u8, payload: &[u8]) -> Option<JpegFrame> {
+    let precision = *payload.first()?;
+    let precision_reads = match marker {
+        0xC3 | 0xCB => (2..=16).contains(&precision),
+        0xC1 | 0xC2 => precision == 8 || precision == 12,
+        _ => precision == 8,
+    };
+    let width = be_u16(payload, 3)?;
+    let components = *payload.get(5)?;
+    if !precision_reads
+        || width == 0
+        || components == 0
+        || components > 4
+        || payload.len() != 6 + 3 * usize::from(components)
+    {
+        return None;
+    }
+    let mut sampling = [(0u8, 0u8); 4];
+    let mut ids = [0u8; 4];
+    for index in 0..usize::from(components) {
+        let at = 6 + 3 * index;
+        let factors = (payload[at + 1] >> 4, payload[at + 1] & 0x0F);
+        // Sampling factors 1, 2 or 4; quantization tables 0 to 3.
+        let valid = |factor: u8| matches!(factor, 1 | 2 | 4);
+        if !valid(factors.0) || !valid(factors.1) || payload[at + 2] >= 4 {
+            return None;
+        }
+        ids[index] = payload[at];
+        sampling[index] = factors;
+    }
+    Some(JpegFrame {
+        marker,
+        precision,
+        width: u32::from(width),
+        height: u32::from(be_u16(payload, 1)?),
+        components,
+        sampling,
+        ids,
+        first_scan: 0,
+    })
+}
+
+/// zune-jpeg's `resolve_input_colorspace`: an Adobe APP14 transform first,
+/// then the component count, then components named `R`, `G`, `B`.
+fn zune_colour(frame: &JpegFrame, adobe: Option<u8>) -> JpegColour {
+    match (adobe, frame.components) {
+        (Some(0), 3) => JpegColour::Rgb,
+        // YCCK with three components reads as YCbCr.
+        (Some(1 | 2), 3) => JpegColour::YCbCr,
+        (Some(_), _) => JpegColour::Other,
+        (None, 1) => JpegColour::Grey,
+        (None, 3) if frame.ids[..3] == *b"RGB" => JpegColour::Rgb,
+        (None, 3) => JpegColour::YCbCr,
+        (None, _) => JpegColour::Other,
+    }
+}
+
+/// The lists zune-jpeg pushes metadata onto, each entry's size: an ICC
+/// chunk, a gain map, an extended XMP segment. They grow by doubling, so an
+/// entry can hold twice its size.
+const ZUNE_ICC_CHUNK: u64 = 32;
+const ZUNE_GAIN_MAP: u64 = 24;
+const ZUNE_EXTENDED_XMP: u64 = 56;
+
+/// The four entries each list reserves on its first push.
+pub(crate) const ZUNE_METADATA_LISTS: u64 =
+    4 * (ZUNE_ICC_CHUNK + ZUNE_GAIN_MAP + ZUNE_EXTENDED_XMP);
+
+/// What zune-jpeg copies out of one APP1, APP2 or APP13 segment, as its
+/// `parse_app1`, `parse_app2` and `parse_app13` classify it. `None` where
+/// zune-jpeg errors on the segment.
+fn zune_metadata(marker: u8, body: &[u8]) -> Option<u64> {
+    const EXIF: &[u8] = b"Exif\0\0";
+    const XMP: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+    const EXTENDED_XMP: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
+    const ICC: &[u8] = b"ICC_PROFILE\0";
+    const GAIN_MAP: &[u8] = b"urn:iso:std:iso:ts:21496:-1\0";
+    const MPF: &[u8] = b"MPF\0";
+    const IPTC: &[u8] = b"Photoshop 3.0\0";
+    let length = body.len() as u64;
+    let after = |prefix: &[u8]| length - prefix.len() as u64;
+    let tagged = |prefix: &[u8]| body.len() > prefix.len() && body.starts_with(prefix);
+    Some(match marker {
+        0xE1 if tagged(EXIF) => after(EXIF),
+        0xE1 if tagged(XMP) => after(XMP),
+        0xE1 if tagged(EXTENDED_XMP) => {
+            // A 40-byte header (GUID, total size, offset), then the data,
+            // which is copied again when every segment is in.
+            let data = after(EXTENDED_XMP).checked_sub(40)?;
+            32 + 2 * data + 2 * ZUNE_EXTENDED_XMP
+        }
+        0xE2 if body.len() > ICC.len() + 2 && body.starts_with(ICC) => {
+            let (sequence, count) = (body[ICC.len()], body[ICC.len() + 1]);
+            if count == 0 || sequence == 0 || sequence > count {
+                return None;
+            }
+            after(ICC) - 2 + 2 * ZUNE_ICC_CHUNK
+        }
+        0xE2 if tagged(GAIN_MAP) => match after(GAIN_MAP) {
+            4 => 2 * ZUNE_GAIN_MAP,
+            rest if rest > 4 => rest + 2 * ZUNE_GAIN_MAP,
+            _ => 0,
+        },
+        0xE2 if tagged(MPF) => after(MPF),
+        0xED if tagged(IPTC) => after(IPTC),
+        _ => 0,
+    })
+}
+
+/// What zune-jpeg can copy out of metadata segments after the first scan
+/// header: a progressive or multi-scan image reads segments between its
+/// scans. Every `0xFF 0xE1`, `0xFF 0xE2` or `0xFF 0xED` from `pos` on is
+/// counted as a segment, aligned or not, so the count is never short of
+/// what the decoder reads.
+fn zune_metadata_after(bytes: &[u8], pos: usize) -> u64 {
+    let mut total = 0u64;
+    for at in pos..bytes.len().saturating_sub(3) {
+        if bytes[at] != 0xFF || !matches!(bytes[at + 1], 0xE1 | 0xE2 | 0xED) {
+            continue;
+        }
+        let Some(length) = be_u16(bytes, at + 2) else {
+            continue;
+        };
+        let end = (at + 2 + usize::from(length)).min(bytes.len());
+        if let Some(body) = bytes.get(at + 4..end) {
+            total = total.saturating_add(zune_metadata(bytes[at + 1], body).unwrap_or(0));
+        }
+    }
+    total
 }
 
 /// What a JPEG's frame header and first scan header declare: everything that
@@ -1191,6 +1450,128 @@ mod tests {
         zero[2 + 11] = 0x01;
         assert_eq!(jpeg_frame(&zero), None);
         assert_eq!(jpeg_frame(&with(&[0xFF, 0xD9])), None);
+    }
+
+    /// A segment: marker, length, body.
+    fn segment(marker: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![0xFF, marker];
+        out.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// A three-component frame header with the given component names and
+    /// sampling factors.
+    fn colour_frame_header(marker: u8, ids: [u8; 3], factors: [u8; 3]) -> Vec<u8> {
+        let mut body = vec![8, 0, 16, 0, 32, 3];
+        for (id, factor) in ids.iter().zip(factors) {
+            body.extend_from_slice(&[*id, factor, 0]);
+        }
+        segment(marker, &body)
+    }
+
+    #[test]
+    fn the_zune_walk_reads_every_marker_by_its_length() {
+        // A restart marker among the headers is read with a length, as
+        // zune-jpeg reads it: the 8x8 frame header inside that length is
+        // skipped, and the 32x16 one after it is the frame. oxideav-mjpeg's
+        // walk takes the restart marker as standalone, so it meets two frame
+        // headers and refuses.
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xD0, 0x00, 0x0F];
+        jpeg.extend_from_slice(&grey_frame_header(0xC0, 8, 8)[..13]);
+        jpeg.extend_from_slice(&grey_frame_header(0xC0, 32, 16));
+        jpeg.extend_from_slice(&scan_header(1));
+        let zune = jpeg_zune(&jpeg).expect("zune-jpeg reads it");
+        assert_eq!((zune.frame.width, zune.frame.height), (32, 16));
+        assert_eq!(jpeg_frame(&jpeg), None);
+        assert_eq!(
+            header_dimensions(InputFormat::Jpeg, &jpeg).expect("dims"),
+            (32, 16)
+        );
+    }
+
+    #[test]
+    fn the_zune_walk_refuses_where_zune_jpeg_errors() {
+        let with = |prefix: &[u8], frame: Vec<u8>| {
+            let mut jpeg = vec![0xFF, 0xD8];
+            jpeg.extend_from_slice(prefix);
+            jpeg.extend_from_slice(&frame);
+            jpeg.extend_from_slice(&scan_header(1));
+            jpeg
+        };
+        let grey = || grey_frame_header(0xC0, 7, 5);
+        assert!(jpeg_zune(&with(&[], grey())).is_some());
+        // A second frame header.
+        let mut two = grey();
+        two.extend_from_slice(&grey_frame_header(0xC2, 9, 9));
+        assert_eq!(jpeg_zune(&with(&[], two)), None);
+        // A hierarchical frame header.
+        assert_eq!(jpeg_zune(&with(&[], grey_frame_header(0xC5, 7, 5))), None);
+        // A sampling factor that is not 1, 2 or 4.
+        let mut three = grey();
+        three[11] = 0x31;
+        assert_eq!(jpeg_zune(&with(&[], three)), None);
+        // The image ending before a scan.
+        assert_eq!(jpeg_zune(&with(&[0xFF, 0xD9], grey())), None);
+        // An ICC chunk numbered 0, and an Adobe segment of an unknown
+        // transform.
+        let icc = segment(0xE2, b"ICC_PROFILE\0\x00\x01data");
+        assert_eq!(jpeg_zune(&with(&icc, grey())), None);
+        let adobe = segment(0xEE, b"Adobe\0\x64\0\0\0\0\x07");
+        assert_eq!(jpeg_zune(&with(&adobe, grey())), None);
+    }
+
+    #[test]
+    fn the_zune_walk_reads_the_colour_space_zune_jpeg_decodes_from() {
+        let colour = |prefix: &[u8], frame: Vec<u8>| {
+            let mut jpeg = vec![0xFF, 0xD8];
+            jpeg.extend_from_slice(prefix);
+            jpeg.extend_from_slice(&frame);
+            jpeg.extend_from_slice(&scan_header(3));
+            jpeg_zune(&jpeg).expect("zune-jpeg reads it").colour
+        };
+        let ycbcr = || colour_frame_header(0xC0, [1, 2, 3], [0x22, 0x11, 0x11]);
+        assert_eq!(colour(&[], ycbcr()), JpegColour::YCbCr);
+        assert_eq!(
+            colour(&[], colour_frame_header(0xC0, *b"RGB", [0x11; 3])),
+            JpegColour::Rgb
+        );
+        let adobe = |transform: u8| {
+            segment(
+                0xEE,
+                &[b'A', b'd', b'o', b'b', b'e', 0, 100, 0, 0, 0, 0, transform],
+            )
+        };
+        assert_eq!(colour(&adobe(0), ycbcr()), JpegColour::Rgb);
+        assert_eq!(colour(&adobe(1), ycbcr()), JpegColour::YCbCr);
+        let mut grey = vec![0xFF, 0xD8];
+        grey.extend_from_slice(&grey_frame_header(0xC0, 7, 5));
+        grey.extend_from_slice(&scan_header(1));
+        assert_eq!(jpeg_zune(&grey).map(|z| z.colour), Some(JpegColour::Grey));
+    }
+
+    #[test]
+    fn the_zune_walk_counts_the_metadata_zune_jpeg_copies() {
+        let mut exif = b"Exif\0\0".to_vec();
+        exif.extend_from_slice(&[7; 100]);
+        let mut icc = b"ICC_PROFILE\0\x01\x01".to_vec();
+        icc.extend_from_slice(&[7; 50]);
+        let mut iptc = b"Photoshop 3.0\0".to_vec();
+        iptc.extend_from_slice(&[7; 30]);
+        let mut jpeg = vec![0xFF, 0xD8];
+        jpeg.extend_from_slice(&segment(0xE1, &exif));
+        jpeg.extend_from_slice(&segment(0xE2, &icc));
+        jpeg.extend_from_slice(&segment(0xED, &iptc));
+        // An APP1 segment zune-jpeg does not recognise is not copied.
+        jpeg.extend_from_slice(&segment(0xE1, &[7; 40]));
+        jpeg.extend_from_slice(&grey_frame_header(0xC2, 7, 5));
+        jpeg.extend_from_slice(&scan_header(1));
+        // A progressive image reads segments between its scans too.
+        jpeg.extend_from_slice(&[0x12, 0x34]);
+        jpeg.extend_from_slice(&segment(0xE2, &icc));
+        let zune = jpeg_zune(&jpeg).expect("zune-jpeg reads it");
+        let chunk = 50 + 2 * ZUNE_ICC_CHUNK;
+        assert_eq!(zune.metadata, 100 + chunk + 30 + chunk);
     }
 
     #[test]

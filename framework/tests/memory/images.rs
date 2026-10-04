@@ -678,3 +678,102 @@ async fn mem_audit_lossless_webps_from_libwebp_decode_within_the_budget() {
         assert_the_budget_holds(&format!("libwebp: {name}"), webp, 128, 86);
     }
 }
+
+/// The JPEG fixtures that `media`'s tests check for their pixels, here
+/// measured for their memory: 400x301 in every coding the driver reads.
+fn jpeg_budget_fixtures() -> Vec<(String, Vec<u8>, u32, u32)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/media/fixtures/jpeg");
+    let mut found: Vec<(String, Vec<u8>, u32, u32)> = std::fs::read_dir(&dir)
+        .expect("the JPEG fixture directory exists")
+        .map(|entry| entry.expect("a directory entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jpg"))
+        .filter_map(|path| {
+            let name = path.file_stem()?.to_string_lossy().into_owned();
+            let size = name.strip_prefix("smooth-")?.rsplit('-').next()?.to_owned();
+            let (width, height) = size.split_once('x')?;
+            Some((
+                name,
+                std::fs::read(&path).expect("the fixture reads"),
+                width.parse().ok()?,
+                height.parse().ok()?,
+            ))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Every JPEG coding is costed before it decodes: baseline and progressive
+/// at every sampling, greyscale, RGB-coded, arithmetic coding, one component
+/// a scan, and lossless.
+#[tokio::test]
+async fn mem_audit_jpegs_decode_within_the_budget_in_every_coding() {
+    let _lock = exclusive().await;
+    let fixtures = jpeg_budget_fixtures();
+    assert_eq!(fixtures.len(), 19, "the budget fixtures");
+    for (name, jpeg, width, height) in fixtures {
+        assert_the_budget_holds(&name, &jpeg, width, height);
+    }
+}
+
+/// A JPEG whose first frame and scan headers, as oxideav-mjpeg's marker walk
+/// reads them, describe an 8x8 image, while zune-jpeg reads a length after a
+/// restart marker (0xFFD0) found among the headers and skips over both to
+/// the large JPEG behind them.
+fn jpeg_hiding_its_frame_behind_a_restart_marker(large: &[u8]) -> Vec<u8> {
+    let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xD0];
+    let length_at = jpeg.len();
+    jpeg.extend_from_slice(&[
+        0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x08, 0x00, 0x08, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11,
+        0x00, 0x03, 0x11, 0x00,
+    ]);
+    jpeg.extend_from_slice(&[
+        0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
+    ]);
+    jpeg.resize(length_at + 0xFFC0, 0);
+    jpeg.extend_from_slice(&large[2..]);
+    jpeg
+}
+
+/// The estimate measures the frame zune-jpeg decodes.
+#[tokio::test]
+async fn mem_audit_a_jpeg_is_measured_at_the_frame_zune_jpeg_reads() {
+    let _lock = exclusive().await;
+    let large = convert(
+        &encode_png(512, 512, PngPixelFormat::Rgba, 4, false),
+        OutputFormat::Jpeg,
+    );
+    assert_the_budget_holds(
+        "JPEG with a frame behind a restart marker",
+        &jpeg_hiding_its_frame_behind_a_restart_marker(&large),
+        512,
+        512,
+    );
+}
+
+/// A JPEG preceded by `chunks` ICC profile chunks of one byte each. zune-jpeg
+/// keeps every chunk, in a list it grows by doubling: 19 bytes of input
+/// each become 33 bytes or more of heap.
+fn jpeg_with_icc_chunks(jpeg: &[u8], chunks: usize) -> Vec<u8> {
+    let mut out = vec![0xFF, 0xD8];
+    for _ in 0..chunks {
+        out.extend_from_slice(&[0xFF, 0xE2, 0x00, 0x11]);
+        out.extend_from_slice(b"ICC_PROFILE\0");
+        out.extend_from_slice(&[1, 1, 0]);
+    }
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+/// What a JPEG decoder copies out of its metadata segments is costed too.
+#[tokio::test]
+async fn mem_audit_a_jpegs_metadata_copies_are_counted() {
+    let _lock = exclusive().await;
+    let small = include_bytes!("../media/fixtures/jpeg/photo-base-420-35x21.jpg");
+    assert_the_budget_holds(
+        "JPEG with 100,000 ICC chunks",
+        &jpeg_with_icc_chunks(small, 100_000),
+        35,
+        21,
+    );
+}

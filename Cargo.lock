@@ -7666,6 +7666,7 @@ dependencies = [
  "wiremock",
  "writeable 0.6.3",
  "zeroize",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -9729,3 +9730,18 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zune-core"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.5.16-rc2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b554da611136df9905629a243ee2e9a92453e0c4476d91185133d9b9c058af15"
+dependencies = [
+ "zune-core",
+]

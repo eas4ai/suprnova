@@ -4,10 +4,9 @@
 //! The header gate counts the declared pixels at four bytes each, but the
 //! decoders allocate more than the RGBA they return. oxideav-png keeps its
 //! inflated data, the unfiltered rows and a copy of them while it builds its
-//! output; the JPEG
-//! decoder keeps four bytes of coefficients for every sample of a progressive
-//! image. `IMAGE_MAX_ALLOC_BYTES` is the most one decode may allocate, so the
-//! driver refuses an image whose estimate is larger.
+//! output; zune-jpeg keeps two bytes of coefficients for every sample of a
+//! progressive image. `IMAGE_MAX_ALLOC_BYTES` is the most one decode may
+//! allocate, so the driver refuses an image whose estimate is larger.
 //!
 //! # How the numbers are derived
 //!
@@ -25,14 +24,19 @@
 //! The input itself is not counted: it is already in memory, under the
 //! separate source-size check. Copies of it are counted.
 //!
-//! A lossless WebP's prefix-code tables are the one cost no header declares;
-//! [`webp`](super::webp) reads them from the bitstream before it decodes.
+//! Two costs come from the data rather than from a header: a lossless
+//! WebP's prefix-code tables, which [`webp`](super::webp) reads from the
+//! bitstream before it decodes, and what a JPEG decoder copies out of
+//! metadata segments, which the JPEG header walk counts (see
+//! [`sniff::jpeg_zune`](crate::media::sniff::jpeg_zune)).
 
 use crate::error::FrameworkError;
 
 use super::webp::{self, WebpPlan};
 use super::{png_error, png_inflated_len};
-use crate::media::sniff::{self, BmpLayout, GifFrame, InputFormat, JpegFrame};
+use crate::media::sniff::{
+    self, BmpLayout, GifFrame, InputFormat, JpegColour, JpegFrame, JpegLayout, ZuneJpeg,
+};
 
 /// Small allocations no estimate tracks one by one: frame and plane headers,
 /// per-component vectors, Huffman and quantization tables, error strings.
@@ -63,7 +67,7 @@ const BMP_LUT_16: u64 = 65_536 * 4;
 pub(super) enum Layout {
     Png(PngLayout),
     Gif(GifFrame),
-    Jpeg(JpegFrame),
+    Jpeg(JpegLayout),
     WebP(WebpPlan),
     Bmp(BmpLayout),
 }
@@ -154,7 +158,7 @@ pub(super) fn layout(
             }
             Layout::Gif(first)
         }
-        InputFormat::Jpeg => Layout::Jpeg(sniff::jpeg_frame(contents).ok_or_else(malformed)?),
+        InputFormat::Jpeg => Layout::Jpeg(sniff::jpeg_layout(contents).ok_or_else(malformed)?),
         InputFormat::WebP => Layout::WebP(webp::plan(contents)?),
         InputFormat::Bmp => Layout::Bmp(sniff::bmp_layout(contents).ok_or_else(malformed)?),
     })
@@ -173,7 +177,8 @@ pub(super) fn estimate(
     let peak = match layout {
         Layout::Png(png) => png_peak(png)?,
         Layout::Gif(_) => gif_peak(width, height),
-        Layout::Jpeg(frame) => jpeg_peak(frame, input_len)?,
+        Layout::Jpeg(JpegLayout::Zune(zune)) => zune_peak(zune)?,
+        Layout::Jpeg(JpegLayout::Lossless(frame)) => lossless_peak(frame, input_len)?,
         Layout::WebP(plan) => webp_peak(width, height, plan),
         Layout::Bmp(bmp) => bmp_peak(width, height, *bmp, input_len),
     };
@@ -300,81 +305,123 @@ fn gif_peak(screen_width: u64, screen_height: u64) -> u64 {
     )
 }
 
-/// oxideav-mjpeg through the codec registry, then the conversion to RGBA.
+/// The JPEG decode the driver refuses before it runs, in the words of its
+/// refusal.
+fn unsupported_jpeg(what: &str) -> FrameworkError {
+    FrameworkError::param(format!(
+        "image format is not supported: {what} JPEG. The oxideav driver reads 8-bit \
+         greyscale, YCbCr and RGB JPEGs; convert the image, or set IMAGE_DRIVER=magick"
+    ))
+}
+
+/// The JPEG coding the driver reads: 8 bits a sample, one or three
+/// components.
+fn check_jpeg(frame: &JpegFrame) -> Result<(), FrameworkError> {
+    if frame.precision != 8 {
+        return Err(unsupported_jpeg(&format!("a {}-bit", frame.precision)));
+    }
+    if frame.components != 1 && frame.components != 3 {
+        return Err(unsupported_jpeg(&format!(
+            "a {}-component",
+            frame.components
+        )));
+    }
+    Ok(())
+}
+
+/// zune-jpeg's marker scratch: one segment body at a time, grown by doubling
+/// up to the largest segment, 65,533 bytes.
+const ZUNE_MARKER_SCRATCH: u64 = 2 * 65_536;
+
+/// zune-jpeg, decoding into one RGBA buffer the driver allocates.
+///
+/// Alive together: the RGBA buffer (an RGB-coded image decodes into its
+/// front and is spread in place), what zune-jpeg copied out of metadata
+/// segments, and the decoder's own buffers, all `i16`. A progressive frame,
+/// or a sequential one whose first scan does not carry every component,
+/// keeps every coefficient of every component, padded to whole MCUs, until
+/// the last scan. Every frame keeps eight rows of each component's samples
+/// (its `raw_coeff`), and a subsampled frame also keeps, a component, the
+/// rows above and below, a first upsampled row and an upsampling buffer of
+/// up to sixteen rows at the upsampled width, plus an eight-row scratch at
+/// the widest component.
+fn zune_peak(zune: &ZuneJpeg) -> Result<u64, FrameworkError> {
+    let frame = &zune.frame;
+    check_jpeg(frame)?;
+    if zune.colour == JpegColour::Other {
+        return Err(unsupported_jpeg("a CMYK, YCCK or multi-band"));
+    }
+    let used = &frame.sampling[..usize::from(frame.components)];
+    let h_max = u64::from(used.iter().map(|f| f.0).max().unwrap_or(1));
+    let v_max = u64::from(used.iter().map(|f| f.1).max().unwrap_or(1));
+    let (width, height) = (u64::from(frame.width), u64::from(frame.height));
+    let mcus_x = width.div_ceil(8 * h_max);
+    let mcus_y = height.div_ceil(8 * v_max);
+    let subsampled = h_max != 1 || v_max != 1;
+    let keeps_coefficients =
+        matches!(frame.marker, 0xC2 | 0xCA) || frame.first_scan < frame.components;
+    let mut coefficients = 0u64;
+    let mut rows = 0u64;
+    let mut widest = 0u64;
+    for &(h, v) in used {
+        let (h, v) = (u64::from(h), u64::from(v));
+        // `width_stride`: the component's samples across all MCUs.
+        let stride = mul(mul(h, mcus_x), 8);
+        widest = widest.max(stride);
+        if keeps_coefficients {
+            coefficients = add(coefficients, mul(stride, mul(mul(v, mcus_y), 8)));
+        }
+        let mut samples = mul(stride, mul(v, 8));
+        if subsampled {
+            let ratio = (h_max / h) * (v_max / v);
+            samples = add(
+                samples,
+                mul(
+                    stride,
+                    add(add(mul(v, 2), mul(v, ratio)), mul(16, ratio.max(v))),
+                ),
+            );
+        }
+        rows = add(rows, samples);
+    }
+    if subsampled {
+        rows = add(rows, mul(widest, 8));
+    }
+    let rgba = mul(mul(width, height), 4);
+    let decoder = mul(add(coefficients, rows), 2);
+    Ok(add(
+        add(add(rgba, decoder), zune.metadata),
+        sniff::ZUNE_METADATA_LISTS + ZUNE_MARKER_SCRATCH,
+    ))
+}
+
+/// oxideav-mjpeg 0.1.8 refuses a frame of more samples than this, whatever
+/// the caller allows.
+const OXIDEAV_MJPEG_SAMPLES: u64 = 64 * 1024 * 1024;
+
+/// A lossless JPEG, through oxideav-mjpeg and the codec registry, then the
+/// conversion to RGBA.
 ///
 /// The driver hands the decoder a copy of the input, and the decoder keeps a
-/// clone of that packet until it decodes. Each component decodes into a
-/// sample buffer padded to whole MCUs. A sequential frame whose first scan
-/// carries every component goes straight to the output planes; any other
-/// (progressive, arithmetic, or one component a scan) first fills a
-/// coefficient buffer of four bytes a padded sample and renders from it at
-/// the end. Lossless frames keep a `u32` a sample. Converting YCbCr planes
-/// to RGBA copies them (`gather_tight`), builds packed RGB, then RGBA; grey
-/// and packed RGB convert directly. An odd-sized subsampled image converts
-/// at its padded size; see `to_rgba`.
-fn jpeg_peak(frame: &JpegFrame, input_len: u64) -> Result<u64, FrameworkError> {
-    let unsupported = |what: &str| {
-        Err(FrameworkError::param(format!(
-            "image format is not supported: {what} JPEG. The oxideav driver reads 8-bit \
-             greyscale and colour JPEGs; convert the image, or set IMAGE_DRIVER=magick"
-        )))
-    };
-    match frame.marker {
-        0xC5..=0xC7 | 0xCD..=0xCF => return unsupported("hierarchical"),
-        _ => {}
+/// clone of that packet until it decodes. Lossless frames keep a `u32` a
+/// sample, then the samples as packed grey or RGB, which convert to RGBA
+/// beside them. oxideav-mjpeg takes no frame of more than 64 Mi samples, so
+/// a larger one is refused here, with a message that says why.
+fn lossless_peak(frame: &JpegFrame, input_len: u64) -> Result<u64, FrameworkError> {
+    check_jpeg(frame)?;
+    let components = u64::from(frame.components);
+    let pixels = mul(u64::from(frame.width), u64::from(frame.height));
+    if mul(pixels, components) > OXIDEAV_MJPEG_SAMPLES {
+        return Err(FrameworkError::param(format!(
+            "image format is not supported: a lossless JPEG of more than \
+             {OXIDEAV_MJPEG_SAMPLES} samples (width x height x components). The oxideav driver \
+             decodes lossless JPEGs with oxideav-mjpeg, which refuses larger frames; convert \
+             the image, or set IMAGE_DRIVER=magick"
+        )));
     }
-    if frame.precision != 8 {
-        return unsupported(&format!("{}-bit", frame.precision));
-    }
-    let components = frame.components;
-    if components != 1 && components != 3 {
-        return unsupported(&format!("{components}-component"));
-    }
-    let used = &frame.sampling[..usize::from(components)];
-    let max_h = u64::from(used.iter().map(|f| f.0).max().unwrap_or(1).max(1));
-    let max_v = u64::from(used.iter().map(|f| f.1).max().unwrap_or(1).max(1));
-    let (width, height) = (u64::from(frame.width), u64::from(frame.height));
-    let mcus_x = width.div_ceil(8 * max_h);
-    let mcus_y = height.div_ceil(8 * max_v);
-    let padded: u64 = used
-        .iter()
-        .map(|&(h, v)| mul(mul(mcus_x, 8 * u64::from(h)), mul(mcus_y, 8 * u64::from(v))))
-        .fold(0, add);
-    let pixels = mul(width, height);
-    // The output planes are never larger than the padded sample buffers.
-    let planes = padded;
-    let decoding = match frame.marker {
-        0xC3 | 0xCB => add(
-            mul(mul(pixels, 4), u64::from(components)),
-            mul(pixels, u64::from(components)),
-        ),
-        0xC0 | 0xC1 if frame.first_scan == components => add(padded, planes),
-        _ => add(add(mul(padded, 4), padded), planes),
-    };
-    // Samples stored as RGB (components named R, G, B at full resolution)
-    // decode to packed RGB, which converts straight to RGBA.
-    let packed_rgb = components == 3
-        && frame.ids[..3] == *b"RGB"
-        && used.iter().all(|&factors| factors == (1, 1));
-    let converting = if components == 1 || packed_rgb {
-        add(planes, mul(pixels, 4))
-    } else {
-        // An odd side under 4:2:0 or 4:2:2 converts at the size the chroma
-        // covers: the driver first copies the luma plane at that size beside
-        // the planes, then converts the padded frame.
-        let min_h = u64::from(used.iter().map(|f| f.0).min().unwrap_or(1).max(1));
-        let min_v = u64::from(used.iter().map(|f| f.1).min().unwrap_or(1).max(1));
-        let padded_pixels = mul(
-            width.next_multiple_of(max_h / min_h),
-            height.next_multiple_of(max_v / min_v),
-        );
-        if padded_pixels == pixels {
-            add(mul(planes, 2), mul(pixels, 7))
-        } else {
-            let padded_planes = add(planes, padded_pixels - pixels);
-            add(planes, padded_pixels).max(add(mul(padded_planes, 2), mul(padded_pixels, 7)))
-        }
-    };
+    let planes = mul(pixels, components);
+    let decoding = add(mul(planes, 4), planes);
+    let converting = add(planes, mul(pixels, 4));
     let sending = mul(input_len, 2);
     Ok(sending.max(add(input_len, decoding)).max(converting))
 }
@@ -534,5 +581,45 @@ mod tests {
                 "{width}x{height}, colour type {colour_type}, needs only {needed} bytes"
             );
         }
+    }
+
+    /// oxideav-mjpeg decodes lossless JPEGs and takes no frame of more than
+    /// 64 Mi samples; the estimate refuses a larger one by name, before the
+    /// decoder is reached.
+    #[test]
+    fn a_lossless_jpeg_past_oxideav_mjpegs_frame_limit_is_refused_by_name() {
+        let lossless = |width: u16, height: u16| {
+            let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xC3, 0x00, 0x11, 0x08];
+            jpeg.extend_from_slice(&height.to_be_bytes());
+            jpeg.extend_from_slice(&width.to_be_bytes());
+            jpeg.extend_from_slice(&[3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0]);
+            jpeg.extend_from_slice(&[
+                0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00,
+            ]);
+            let layout = layout(
+                InputFormat::Jpeg,
+                &jpeg,
+                u32::from(width),
+                u32::from(height),
+            )
+            .expect("the headers read");
+            assert!(matches!(layout, Layout::Jpeg(JpegLayout::Lossless(_))));
+            estimate(
+                &layout,
+                jpeg.len() as u64,
+                u32::from(width),
+                u32::from(height),
+            )
+        };
+        // 4729 x 4729 x 3 is 67,092,123 samples; 4730 x 4730 x 3 is
+        // 67,120,700.
+        assert!(lossless(4729, 4729).is_ok());
+        let refusal = lossless(4730, 4730).expect_err("past the frame limit");
+        assert!(
+            refusal
+                .to_string()
+                .contains("a lossless JPEG of more than 67108864 samples"),
+            "{refusal}"
+        );
     }
 }
