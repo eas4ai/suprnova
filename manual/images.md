@@ -248,6 +248,11 @@ more, and the default driver bounds that too:
   pipeline only uses the first frame, and decoding stops the moment that
   frame is complete. A first frame larger than the GIF's logical screen
   is refused before it is decoded.
+- A lossless WebP, or a WebP's lossless alpha plane, is read as far as
+  its last prefix code before it decodes, and the tables those codes build
+  count toward the limit. How many tables there are is written in the
+  compressed data, not in a header: 160 KiB of codes can ask for 250 MB
+  of tables for a 4x4 image. The read keeps no pixels and holds a few KiB.
 - A file or stored source is read no further than
   `IMAGE_MAX_ALLOC_BYTES`, even when the size its storage reports is
   wrong or missing, as it is for a pipe.
@@ -285,10 +290,6 @@ So the default 256 MiB decodes a 12-megapixel photo in every format but
 16-bit PNG, and not every 24-megapixel one: a progressive 4:4:4 JPEG at
 6000x4000 needs about 440 MB. Raise `IMAGE_MAX_ALLOC_BYTES` if your users
 upload images that large.
-
-One cost is not in the estimate: the prefix-code tables of a lossless
-WebP. Their number comes from the compressed data rather than from any
-header, so only the decode itself can count them.
 
 A limit hit is a 4xx-shaped `FrameworkError::param`, because oversized
 input is a client problem, not a server fault.

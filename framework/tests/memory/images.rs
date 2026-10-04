@@ -502,3 +502,179 @@ async fn mem_audit_a_jpeg_is_measured_at_the_frame_the_decoder_reads() {
         256,
     );
 }
+
+/// Bits packed least-significant first, the order VP8L reads them in.
+#[derive(Default)]
+struct Bits {
+    bytes: Vec<u8>,
+    used: usize,
+}
+
+impl Bits {
+    fn put(&mut self, value: u32, count: usize) {
+        for bit in 0..count {
+            if self.used.is_multiple_of(8) {
+                self.bytes.push(0);
+            }
+            if (value >> bit) & 1 == 1 {
+                *self.bytes.last_mut().expect("a byte was pushed") |= 1 << (self.used % 8);
+            }
+            self.used += 1;
+        }
+    }
+
+    /// A simple prefix code with one symbol, which reads no bits per use.
+    fn single_symbol(&mut self, symbol: u32) {
+        self.put(1, 1);
+        self.put(0, 1);
+        if symbol < 2 {
+            self.put(0, 1);
+            self.put(symbol, 1);
+        } else {
+            self.put(1, 1);
+            self.put(symbol, 8);
+        }
+    }
+
+    /// An entropy-coded image whose pixels are all `0xAARRGGBB` with
+    /// red 0xFF and green 0xFF: a meta prefix code of 0xFFFF. No color
+    /// cache, and each of the five codes has one symbol.
+    fn meta_code_ffff_image(&mut self) {
+        self.put(0, 1);
+        for symbol in [0xFF, 0xFF, 0, 0, 0] {
+            self.single_symbol(symbol);
+        }
+    }
+
+    /// The image data of a 4x4 VP8L image with an 11-bit color cache and a
+    /// 1x1 entropy image naming meta prefix code 0xFFFF: the decoder reads
+    /// 65,536 prefix-code groups, each with a 2,328-symbol green alphabet,
+    /// for sixteen pixels. Every group's codes have one symbol, so the
+    /// sixteen pixels then decode from no further bits.
+    fn many_groups(&mut self) {
+        // No transform.
+        self.put(0, 1);
+        // An 11-bit color cache.
+        self.put(1, 1);
+        self.put(11, 4);
+        // A meta prefix image of 4x4 blocks: 1x1 for a 4x4 image.
+        self.put(1, 1);
+        self.put(0, 3);
+        self.meta_code_ffff_image();
+        for _ in 0..=0xFFFF {
+            for _ in 0..5 {
+                self.single_symbol(0);
+            }
+        }
+    }
+}
+
+/// A RIFF/WEBP file of `chunks`, in order.
+fn webp_of(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+    let mut body = b"WEBP".to_vec();
+    for (fourcc, payload) in chunks {
+        body.extend_from_slice(*fourcc);
+        body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        body.extend_from_slice(payload);
+        if payload.len() % 2 == 1 {
+            body.push(0);
+        }
+    }
+    let mut webp = b"RIFF".to_vec();
+    webp.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    webp.extend_from_slice(&body);
+    webp
+}
+
+/// A 4x4 lossless WebP whose 160 KiB of prefix codes decode into 65,536
+/// prefix-code groups: about 250 MB of tables for sixteen pixels.
+fn lossless_webp_with_many_groups() -> Vec<u8> {
+    let mut bits = Bits::default();
+    bits.put(0x2F, 8);
+    bits.put(3, 14);
+    bits.put(3, 14);
+    bits.put(0, 4);
+    bits.many_groups();
+    webp_of(&[(b"VP8L", &bits.bytes)])
+}
+
+/// A 4x4 lossy WebP whose alpha plane is a lossless image of 65,536
+/// prefix-code groups.
+fn lossy_webp_with_a_many_group_alpha_plane() -> Vec<u8> {
+    let opaque: Vec<u8> = noise(4, 4, 3)
+        .chunks(3)
+        .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
+        .collect();
+    let lossy = convert(
+        &oxideav_png::encode_png_image(&PngImage {
+            width: 4,
+            height: 4,
+            pixel_format: PngPixelFormat::Rgba,
+            stride: 4 * 4,
+            data: opaque,
+            palette: Vec::new(),
+        })
+        .expect("the PNG encodes"),
+        OutputFormat::WebP,
+    );
+    assert_eq!(lossy.get(12..16), Some(&b"VP8 "[..]), "a simple lossy WebP");
+    let vp8_len = u32::from_le_bytes(lossy[16..20].try_into().expect("four bytes")) as usize;
+    let vp8 = &lossy[20..20 + vp8_len];
+    // The ALPH info byte: lossless compression, no filtering.
+    let mut alpha = Bits::default();
+    alpha.put(1, 8);
+    alpha.many_groups();
+    webp_of(&[(b"VP8 ", vp8), (b"ALPH", &alpha.bytes)])
+}
+
+/// A lossless WebP's prefix-code tables are counted before it decodes. How
+/// many groups of them the decoder reads comes from the entropy image inside
+/// the compressed data, so the header alone cannot bound them.
+#[tokio::test]
+async fn mem_audit_a_lossless_webp_with_many_prefix_groups_decodes_within_the_budget() {
+    let _lock = exclusive().await;
+    assert_the_budget_holds(
+        "lossless WebP of 65,536 prefix-code groups",
+        &lossless_webp_with_many_groups(),
+        4,
+        4,
+    );
+    assert_the_budget_holds(
+        "lossy WebP with a 65,536-group lossless alpha plane",
+        &lossy_webp_with_a_many_group_alpha_plane(),
+        4,
+        4,
+    );
+}
+
+/// The bitstream walk reads files libwebp writes to the end of their
+/// prefix codes, and their estimates hold. Between them they use every
+/// transform, an entropy image, a color cache and a lossless alpha plane.
+#[tokio::test]
+async fn mem_audit_lossless_webps_from_libwebp_decode_within_the_budget() {
+    let _lock = exclusive().await;
+    for (name, webp) in [
+        (
+            "predictor, color transform and entropy image",
+            &include_bytes!("../media/fixtures/webp-libwebp-entropy-image-128x86.webp")[..],
+        ),
+        (
+            "predictor and subtract green",
+            &include_bytes!("../media/fixtures/webp-libwebp-subtract-green-128x86.webp")[..],
+        ),
+        (
+            "color indexing and a color cache",
+            &include_bytes!("../media/fixtures/webp-libwebp-color-indexing-128x86.webp")[..],
+        ),
+        (
+            "a 64-entry color cache",
+            &include_bytes!("../media/fixtures/webp-libwebp-color-cache-128x86.webp")[..],
+        ),
+        (
+            "lossy with a lossless alpha plane",
+            &include_bytes!("../media/fixtures/webp-libwebp-lossy-alpha-128x86.webp")[..],
+        ),
+    ] {
+        assert_the_budget_holds(&format!("libwebp: {name}"), webp, 128, 86);
+    }
+}

@@ -25,15 +25,14 @@
 //! The input itself is not counted: it is already in memory, under the
 //! separate source-size check. Copies of it are counted.
 //!
-//! One allocation is not covered: the prefix-code tables of a lossless WebP
-//! (and of a lossless-coded alpha plane). How many there are comes from the
-//! compressed data, not from a header, so only the decode itself can count
-//! them.
+//! A lossless WebP's prefix-code tables are the one cost no header declares;
+//! [`webp`](super::webp) reads them from the bitstream before it decodes.
 
 use crate::error::FrameworkError;
 
+use super::webp::{self, WebpPlan};
 use super::{png_error, png_inflated_len};
-use crate::media::sniff::{self, BmpLayout, GifFrame, InputFormat, JpegFrame, WebpLayout};
+use crate::media::sniff::{self, BmpLayout, GifFrame, InputFormat, JpegFrame};
 
 /// Small allocations no estimate tracks one by one: frame and plane headers,
 /// per-component vectors, Huffman and quantization tables, error strings.
@@ -53,13 +52,6 @@ const PNG_CHUNK_REF: u64 = 24;
 /// prediction modes, rounded up.
 const VP8_PER_MACROBLOCK: u64 = 800 + 384 + 24;
 
-/// oxideav-webp's lossless color cache: at most 2^11 `u32` entries.
-const VP8L_COLOR_CACHE: u64 = (1 << 11) * 4;
-
-/// oxideav-webp reserves a lossless image's pixels up front only to this
-/// many; a larger image grows its buffer by doubling.
-const VP8L_EAGER_PIXELS: u64 = 1 << 22;
-
 /// oxideav-webp's chunk list: 24 bytes a top-level chunk, and the gate
 /// refuses a file with more than 4096 of them.
 const WEBP_CHUNK_LIST: u64 = 24 * 4096;
@@ -72,7 +64,7 @@ pub(super) enum Layout {
     Png(PngLayout),
     Gif(GifFrame),
     Jpeg(JpegFrame),
-    WebP(WebpLayout),
+    WebP(WebpPlan),
     Bmp(BmpLayout),
 }
 
@@ -163,7 +155,7 @@ pub(super) fn layout(
             Layout::Gif(first)
         }
         InputFormat::Jpeg => Layout::Jpeg(sniff::jpeg_frame(contents).ok_or_else(malformed)?),
-        InputFormat::WebP => Layout::WebP(sniff::webp_layout(contents)),
+        InputFormat::WebP => Layout::WebP(webp::plan(contents)?),
         InputFormat::Bmp => Layout::Bmp(sniff::bmp_layout(contents).ok_or_else(malformed)?),
     })
 }
@@ -182,7 +174,7 @@ pub(super) fn estimate(
         Layout::Png(png) => png_peak(png)?,
         Layout::Gif(_) => gif_peak(width, height),
         Layout::Jpeg(frame) => jpeg_peak(frame, input_len)?,
-        Layout::WebP(webp) => webp_peak(width, height, *webp),
+        Layout::WebP(plan) => webp_peak(width, height, plan),
         Layout::Bmp(bmp) => bmp_peak(width, height, *bmp, input_len),
     };
     Ok(peak.saturating_add(FIXED))
@@ -387,48 +379,39 @@ fn jpeg_peak(frame: &JpegFrame, input_len: u64) -> Result<u64, FrameworkError> {
     Ok(sending.max(add(input_len, decoding)).max(converting))
 }
 
-/// oxideav-webp's `decode_webp_image`, which returns RGBA directly.
+/// oxideav-webp's `decode_webp_image`, which returns RGBA directly, beside
+/// its chunk list.
 ///
-/// Lossless: the ARGB image (reserved exactly up to 2^22 pixels, doubling
-/// past that), the RGBA conversion beside it, and up to three sub-images at
-/// a quarter of each dimension (predictor, color transform, entropy image),
-/// plus the color cache. A color-indexing transform expands into a new
-/// full-size buffer while the packed one is alive, which the same total
-/// covers. Lossy: oxideav-vp8 holds every macroblock's coefficients, the
-/// padded planes and the cropped copy together; the RGBA conversion follows,
-/// and an alpha plane decodes beside the finished RGBA.
-fn webp_peak(width: u64, height: u64, webp: WebpLayout) -> u64 {
-    let pixels = mul(width, height);
-    let rgba = mul(pixels, 4);
-    let lossless_core = || {
-        let argb = if pixels <= VP8L_EAGER_PIXELS {
-            pixels
-        } else {
-            pixels.checked_next_power_of_two().unwrap_or(u64::MAX)
-        };
-        let sub_image = mul(mul(width.div_ceil(4), height.div_ceil(4)), 4);
-        add(add(mul(argb, 4), mul(sub_image, 3)), VP8L_COLOR_CACHE)
+/// Lossless: what [`webp::plan`] read from the bitstream, then, while the
+/// decoded image is alive, the alpha plane if there is one, and after it
+/// the RGBA conversion. Lossy: oxideav-vp8 holds every macroblock's
+/// coefficients, the padded planes and the cropped copy together; the RGBA
+/// conversion follows, and an alpha plane decodes beside the finished RGBA.
+fn webp_peak(width: u64, height: u64, plan: &WebpPlan) -> u64 {
+    let peak = match *plan {
+        WebpPlan::Lossless {
+            width: image_width,
+            height: image_height,
+            image,
+            alpha,
+        } => {
+            let rgba = mul(mul(u64::from(image_width), u64::from(image_height)), 4);
+            image
+                .peak
+                .max(add(image.image, alpha.unwrap_or(0).max(rgba)))
+        }
+        WebpPlan::Lossy { alpha } => {
+            let pixels = mul(width, height);
+            let rgba = mul(pixels, 4);
+            let macroblocks = mul(width.div_ceil(16), height.div_ceil(16));
+            let cropped = add(pixels, mul(mul(width.div_ceil(2), height.div_ceil(2)), 2));
+            let decoding = add(mul(macroblocks, VP8_PER_MACROBLOCK), cropped);
+            let converting = add(cropped, rgba);
+            decoding.max(converting).max(add(rgba, alpha.unwrap_or(0)))
+        }
+        WebpPlan::Neither => 0,
     };
-    let lossless = if webp.lossless {
-        add(lossless_core(), rgba)
-    } else {
-        0
-    };
-    let lossy = if webp.lossy {
-        let macroblocks = mul(width.div_ceil(16), height.div_ceil(16));
-        let cropped = add(pixels, mul(mul(width.div_ceil(2), height.div_ceil(2)), 2));
-        let decoding = add(mul(macroblocks, VP8_PER_MACROBLOCK), cropped);
-        let converting = add(cropped, rgba);
-        let alpha = if webp.alpha {
-            add(add(rgba, lossless_core()), pixels)
-        } else {
-            0
-        };
-        decoding.max(converting).max(alpha)
-    } else {
-        0
-    };
-    add(lossless.max(lossy), WEBP_CHUNK_LIST)
+    add(peak, WEBP_CHUNK_LIST)
 }
 
 /// oxideav-bmp's `decode_bmp`, which writes one RGBA plane.

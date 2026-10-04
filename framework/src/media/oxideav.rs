@@ -77,6 +77,7 @@ use super::sniff::{self, InputFormat};
 
 mod gif;
 mod peak;
+mod webp;
 
 use peak::{Layout, PngLayout};
 

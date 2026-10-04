@@ -584,27 +584,6 @@ pub(crate) fn bmp_layout(bytes: &[u8]) -> Option<BmpLayout> {
     })
 }
 
-/// Which bitstreams a WebP carries, anywhere in its container: what decides
-/// which of the decoder's paths runs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct WebpLayout {
-    /// A `VP8L` chunk: the decoder takes the lossless path.
-    pub(crate) lossless: bool,
-    /// A `VP8 ` chunk: the lossy path, when there is no `VP8L`.
-    pub(crate) lossy: bool,
-    /// An `ALPH` chunk: a separate alpha plane next to a lossy image.
-    pub(crate) alpha: bool,
-}
-
-/// Walk a WebP's chunks for the bitstreams it carries. Same walk, and same
-/// bounds, as the dimension gate; a walk that gives up reports what it saw,
-/// and the gate has already refused such a file.
-pub(crate) fn webp_layout(bytes: &[u8]) -> WebpLayout {
-    let mut walk = Walk::default();
-    walk_riff_chunks(bytes, 12, 0, &mut walk);
-    walk.layout
-}
-
 /// WebP declares its size in up to three different places, and the gate has to
 /// account for all of them.
 ///
@@ -676,7 +655,7 @@ fn webp_dimensions(bytes: &[u8]) -> Result<(u32, u32), FrameworkError> {
 }
 
 /// Lossy `VP8 `: 3-byte frame tag, 3-byte sync code, two 14-bit dimensions.
-fn vp8_dimensions(bytes: &[u8], data: usize) -> Option<(u32, u32)> {
+pub(crate) fn vp8_dimensions(bytes: &[u8], data: usize) -> Option<(u32, u32)> {
     if bytes.get(data + 3..data + 6)? != [0x9D, 0x01, 0x2A] {
         return None;
     }
@@ -730,8 +709,6 @@ struct Walk {
     /// True when the walk stopped at one of its own bounds rather than at the
     /// end of the data, so nothing can be concluded about what lies beyond.
     gave_up: bool,
-    /// The bitstream kinds seen so far.
-    layout: WebpLayout,
 }
 
 impl Walk {
@@ -778,15 +755,8 @@ fn walk_riff_chunks(bytes: &[u8], mut pos: usize, depth: u32, walk: &mut Walk) {
         let chunk_end = payload.saturating_add(size as usize).min(bytes.len());
         let chunk = bytes.get(..chunk_end).unwrap_or(bytes);
         match fourcc {
-            b"VP8 " => {
-                walk.layout.lossy = true;
-                walk.widen(vp8_dimensions(chunk, payload));
-            }
-            b"VP8L" => {
-                walk.layout.lossless = true;
-                walk.widen(vp8l_dimensions(chunk, payload));
-            }
-            b"ALPH" => walk.layout.alpha = true,
+            b"VP8 " => walk.widen(vp8_dimensions(chunk, payload)),
+            b"VP8L" => walk.widen(vp8l_dimensions(chunk, payload)),
             // Bound the descent to this frame's payload too, so a sub-walk
             // cannot run on into its siblings and spend their budget.
             b"ANMF" => walk_riff_chunks(chunk, payload + 16, depth + 1, walk),
@@ -1270,32 +1240,6 @@ mod tests {
                 palette_entries: 16,
                 palette_entry_bytes: 3,
             })
-        );
-    }
-
-    #[test]
-    fn a_webp_layout_names_its_bitstreams() {
-        let lossless = webp(&[chunk(b"VP8L", &vp8l_payload(3, 2))]);
-        assert_eq!(
-            webp_layout(&lossless),
-            WebpLayout {
-                lossless: true,
-                lossy: false,
-                alpha: false,
-            }
-        );
-        let lossy_with_alpha = webp(&[
-            chunk(b"VP8X", &vp8x_payload(6, 8)),
-            chunk(b"ALPH", &[0]),
-            chunk(b"VP8 ", &vp8_payload(6, 8)),
-        ]);
-        assert_eq!(
-            webp_layout(&lossy_with_alpha),
-            WebpLayout {
-                lossless: false,
-                lossy: true,
-                alpha: true,
-            }
         );
     }
 
