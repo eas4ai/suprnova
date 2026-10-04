@@ -1,7 +1,7 @@
 # Suprnova Live -- 17 Dependency Tracking and Generations
 
 Status: Normative design specification
-Last revised: 2026-09-13
+Last revised: 2026-10-04
 
 ## Scope
 
