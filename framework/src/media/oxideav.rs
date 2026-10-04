@@ -39,9 +39,13 @@
 //! - **PNG** goes through `oxideav_png::decode_png_to_rgba`, the crate's own
 //!   entry point that resolves every colour type and bit depth (palette via
 //!   `PLTE`/`tRNS`, 16-bit, grey+alpha) to RGBA. No inference at all.
-//! - **WebP and GIF** decoders declare RGBA as their only output format, so
-//!   the layout is known; the driver still checks the stride and errors
-//!   rather than trusting it blindly.
+//! - **GIF** goes through `oxideav_gif::decode_first_frame` and `compose`,
+//!   which produce the first frame as RGBA. The registry's GIF decoder would
+//!   compose and keep every frame of an animation, and the pipeline uses
+//!   only the first.
+//! - **WebP** declares RGBA as its only output format, so the layout is
+//!   known; the driver still checks the stride and errors rather than
+//!   trusting it blindly.
 //! - **BMP and JPEG** have small, capability-bounded output sets, so the
 //!   remaining classification is exact rather than a guess.
 //!
@@ -239,9 +243,12 @@ impl OxideAvImageDriver {
         if format == InputFormat::Png {
             // The crate's own all-colour-types entry point. See module docs
             // for why PNG does not go through the registry.
-            let bitmap = oxideav_png::decode_png_to_rgba(contents)
-                .map_err(|e| FrameworkError::param(format!("image decode failed: png: {e}")))?;
+            check_png_inflate(contents)?;
+            let bitmap = oxideav_png::decode_png_to_rgba(contents).map_err(png_error)?;
             return Canvas::packed(bitmap.width, bitmap.height, bitmap.data);
+        }
+        if format == InputFormat::Gif {
+            return decode_gif_first_frame(contents, width, height);
         }
 
         let frame = self.decode_via_registry(contents, format)?;
@@ -396,6 +403,199 @@ impl ImageDriver for OxideAvImageDriver {
 
 // ───────────────────────── decode helpers ─────────────────────────
 
+fn png_error(error: oxideav_png::PngError) -> FrameworkError {
+    FrameworkError::param(format!("image decode failed: png: {error}"))
+}
+
+/// Refuse PNG pixel data that inflates past the size its header declares.
+///
+/// The header gate measures the IHDR dimensions, and `oxideav-png` then
+/// inflates every IDAT byte with an inflater that has no output limit, and
+/// only afterwards compares the result with those dimensions. A few
+/// kilobytes of zlib can expand to gigabytes, so a file that declares one
+/// pixel could make the decoder allocate that much before refusing it.
+/// Inflating once here, capped at the exact length the header implies, stops
+/// at that bound instead. A valid file never reaches the cap: the decoder
+/// rejects any other length.
+///
+/// The chunk walk (`read_chunk`) and the inflater (`compcol`'s zlib) are the
+/// ones `oxideav-png` uses, so both passes see the same bytes. This pass
+/// keeps none of what it inflates, so it costs one scratch buffer rather
+/// than a second copy of the pixel data.
+fn check_png_inflate(contents: &[u8]) -> Result<(), FrameworkError> {
+    let mut ihdr = None;
+    let mut idat = Vec::new();
+    // Past the 8-byte signature, chunk by chunk to IEND.
+    let mut pos = 8;
+    loop {
+        let (chunk, next) = oxideav_png::chunk::read_chunk(contents, pos).map_err(png_error)?;
+        if chunk.is_type(b"IHDR") && ihdr.is_none() {
+            ihdr = Some(oxideav_png::Ihdr::parse(chunk.data).map_err(png_error)?);
+        } else if chunk.is_type(b"IDAT") {
+            idat.extend_from_slice(chunk.data);
+        }
+        pos = next;
+        if chunk.is_type(b"IEND") {
+            break;
+        }
+        if pos >= contents.len() {
+            return Err(FrameworkError::param(
+                "image decode failed: png: the stream ends before its IEND chunk",
+            ));
+        }
+    }
+    let ihdr =
+        ihdr.ok_or_else(|| FrameworkError::param("image decode failed: png: no IHDR chunk"))?;
+    let declared = png_inflated_len(&ihdr).ok_or_else(|| {
+        FrameworkError::param(format!(
+            "image decode failed: png: colour type {} at bit depth {} with interlace method {} \
+             is not a PNG pixel format, or is too large to decode",
+            ihdr.colour_type, ihdr.bit_depth, ihdr.interlace
+        ))
+    })?;
+    match inflate_within(&idat, declared) {
+        Ok(()) => Ok(()),
+        Err(compcol::Error::OutputLimitExceeded) => Err(FrameworkError::param(format!(
+            "image is malformed: its PNG pixel data inflates past the {declared} bytes its \
+             {}x{} header allows",
+            ihdr.width, ihdr.height
+        ))),
+        Err(e) => Err(FrameworkError::param(format!(
+            "image decode failed: png: the pixel data does not inflate: {e}"
+        ))),
+    }
+}
+
+/// Inflate a zlib stream without keeping its output, failing with
+/// `OutputLimitExceeded` once it produces more than `limit` bytes.
+///
+/// The loop is `compcol::vec::decompress_to_vec_capped`'s, including its
+/// guard against a decoder that stops making progress, with the output
+/// written into one scratch buffer and dropped.
+fn inflate_within(data: &[u8], limit: u64) -> Result<(), compcol::Error> {
+    use compcol::{Algorithm, Decoder, Status};
+
+    let mut decoder = compcol::limit::LimitedDecoder::new(compcol::zlib::Zlib::decoder(), limit);
+    let mut scratch = vec![0u8; 64 * 1024];
+    let mut consumed = 0;
+    while consumed < data.len() {
+        let (progress, status) = decoder.decode(&data[consumed..], &mut scratch)?;
+        consumed += progress.consumed;
+        match status {
+            Status::StreamEnd => return Ok(()),
+            Status::InputEmpty => break,
+            Status::OutputFull => {
+                if progress.consumed == 0 && progress.written == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    loop {
+        let (progress, status) = decoder.finish(&mut scratch)?;
+        if status == Status::StreamEnd {
+            return Ok(());
+        }
+        if progress.written == 0 {
+            return Err(compcol::Error::Corrupt);
+        }
+    }
+}
+
+/// Adam7's seven passes, as (first row, first column, row step, column step).
+const ADAM7_PASSES: [(u64, u64, u64, u64); 7] = [
+    (0, 0, 8, 8),
+    (0, 4, 8, 8),
+    (4, 0, 8, 4),
+    (0, 2, 4, 4),
+    (2, 0, 4, 2),
+    (0, 1, 2, 2),
+    (1, 0, 2, 1),
+];
+
+/// The exact length a PNG's pixel data inflates to, from its header alone.
+///
+/// Every scanline is one filter byte plus its packed samples, and an
+/// interlaced image is seven smaller images, one per Adam7 pass. `None` for
+/// a colour type, bit depth, or interlace method PNG does not define, which
+/// the decoder refuses as well, and for a length too large for a `u64`.
+fn png_inflated_len(ihdr: &oxideav_png::Ihdr) -> Option<u64> {
+    let channels: u64 = match (ihdr.colour_type, ihdr.bit_depth) {
+        (0, 1 | 2 | 4 | 8 | 16) | (3, 1 | 2 | 4 | 8) => 1,
+        (4, 8 | 16) => 2,
+        (2, 8 | 16) => 3,
+        (6, 8 | 16) => 4,
+        _ => return None,
+    };
+    let bits_per_pixel = channels * u64::from(ihdr.bit_depth);
+    let scanlines = |width: u64, height: u64| -> Option<u64> {
+        if width == 0 || height == 0 {
+            return Some(0);
+        }
+        let row = width.checked_mul(bits_per_pixel)?.div_ceil(8);
+        row.checked_add(1)?.checked_mul(height)
+    };
+    let (width, height) = (u64::from(ihdr.width), u64::from(ihdr.height));
+    match ihdr.interlace {
+        0 => scanlines(width, height),
+        1 => ADAM7_PASSES
+            .iter()
+            .try_fold(0u64, |total, &(row, column, row_step, column_step)| {
+                let pass_width = width.saturating_sub(column).div_ceil(column_step);
+                let pass_height = height.saturating_sub(row).div_ceil(row_step);
+                total.checked_add(scanlines(pass_width, pass_height)?)
+            }),
+        _ => None,
+    }
+}
+
+/// Decode a GIF's first frame and nothing else.
+///
+/// The registry's GIF decoder decodes every frame of an animation, composes
+/// each onto the logical screen, and keeps a full-size RGBA copy of every
+/// result, though the pipeline uses only the first. The header gate measures
+/// one screen, so a GIF of a few kilobytes (a large screen and a thousand 1x1
+/// frames) could allocate a thousand screens. `decode_first_frame` stops at
+/// the first image, and composing one image costs one screen.
+///
+/// The first frame's own rectangle is checked against the screen before
+/// decoding, because its pixels are decoded at the size its descriptor
+/// declares, and only composing it onto the screen would reject a frame
+/// larger than the screen, after that allocation.
+fn decode_gif_first_frame(
+    contents: &[u8],
+    screen_width: u32,
+    screen_height: u32,
+) -> Result<Canvas, FrameworkError> {
+    let first = sniff::gif_first_frame(contents).ok_or_else(|| {
+        FrameworkError::param(
+            "image decode failed: image/gif: the stream ends or breaks its block structure \
+             before the first frame",
+        )
+    })?;
+    if !first.fits(screen_width, screen_height) {
+        return Err(FrameworkError::param(format!(
+            "image is malformed: its first GIF frame ({}x{} at {},{}) does not fit its \
+             {screen_width}x{screen_height} logical screen",
+            first.width, first.height, first.left, first.top
+        )));
+    }
+    let gif_error = |e: oxideav_gif::Error| {
+        FrameworkError::param(format!("image decode failed: image/gif: {e}"))
+    };
+    let image = oxideav_gif::decode_first_frame(contents).map_err(gif_error)?;
+    let frame = oxideav_gif::compose(&image)
+        .map_err(gif_error)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| FrameworkError::param("image decode failed: image/gif: no frame"))?;
+    Canvas::packed(
+        u32::from(frame.canvas.width),
+        u32::from(frame.canvas.height),
+        frame.canvas.pixels,
+    )
+}
+
 fn decoder_limits(config: &ImageConfig) -> DecoderLimits {
     let max_pixels =
         u64::from(config.max_dimension).saturating_mul(u64::from(config.max_dimension));
@@ -417,8 +617,8 @@ fn output_for_input(format: InputFormat) -> Option<OutputFormat> {
 
 /// Determine the layout a decoder handed back.
 ///
-/// Exact for WebP and GIF (one declared output format each) and bounded for
-/// BMP and JPEG by their declared capabilities. PNG never reaches here.
+/// Exact for WebP (one declared output format) and bounded for BMP and JPEG
+/// by their declared capabilities. PNG and GIF never reach here.
 fn source_pixel_format(
     frame: &VideoFrame,
     format: InputFormat,
@@ -1025,6 +1225,106 @@ mod tests {
             height,
             pixels: rgba.repeat((width * height) as usize),
         }
+    }
+
+    fn ihdr(
+        width: u32,
+        height: u32,
+        colour_type: u8,
+        bit_depth: u8,
+        interlace: u8,
+    ) -> oxideav_png::Ihdr {
+        oxideav_png::Ihdr {
+            width,
+            height,
+            bit_depth,
+            colour_type,
+            compression: 0,
+            filter: 0,
+            interlace,
+        }
+    }
+
+    /// A PNG with this header and `raw` as its inflated pixel data, and a
+    /// sixteen-entry palette when the header names colour type 3.
+    fn png_with_pixel_data(header: oxideav_png::Ihdr, raw: &[u8]) -> Vec<u8> {
+        let idat = compcol::vec::compress_to_vec::<compcol::zlib::Zlib>(raw).expect("zlib");
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        oxideav_png::chunk::write_chunk(&mut png, b"IHDR", &header.to_bytes());
+        if header.colour_type == 3 {
+            oxideav_png::chunk::write_chunk(&mut png, b"PLTE", &[0u8; 48]);
+        }
+        oxideav_png::chunk::write_chunk(&mut png, b"IDAT", &idat);
+        oxideav_png::chunk::write_chunk(&mut png, b"IEND", &[]);
+        png
+    }
+
+    #[test]
+    fn png_inflated_length_follows_the_header() {
+        // 8-bit RGBA: one filter byte and four bytes a pixel, per row.
+        assert_eq!(png_inflated_len(&ihdr(1, 1, 6, 8, 0)), Some(5));
+        assert_eq!(png_inflated_len(&ihdr(10, 3, 6, 8, 0)), Some(3 * 41));
+        // 16-bit RGB: six bytes a pixel.
+        assert_eq!(png_inflated_len(&ihdr(2, 2, 2, 16, 0)), Some(2 * 13));
+        // 1-bit grey packs eight pixels a byte, rounded up per row.
+        assert_eq!(png_inflated_len(&ihdr(13, 5, 0, 1, 0)), Some(5 * 3));
+        // Adam7 on 3x3 at 1 bit: passes 2 and 3 are empty, pass 6 has two
+        // rows, and every other pass one row of one byte.
+        assert_eq!(png_inflated_len(&ihdr(3, 3, 0, 1, 1)), Some(12));
+        // Combinations PNG does not define.
+        assert_eq!(png_inflated_len(&ihdr(1, 1, 2, 4, 0)), None);
+        assert_eq!(png_inflated_len(&ihdr(1, 1, 3, 16, 0)), None);
+        assert_eq!(png_inflated_len(&ihdr(1, 1, 5, 8, 0)), None);
+        assert_eq!(png_inflated_len(&ihdr(1, 1, 6, 8, 2)), None);
+        // The largest header PNG can declare has no length a `u64` can hold:
+        // an answer of `None`, not an overflow.
+        assert_eq!(png_inflated_len(&ihdr(u32::MAX, u32::MAX, 6, 16, 0)), None);
+        assert_eq!(png_inflated_len(&ihdr(u32::MAX, u32::MAX, 6, 16, 1)), None);
+        assert!(png_inflated_len(&ihdr(u32::MAX, 1, 6, 16, 1)).is_some());
+    }
+
+    #[test]
+    fn png_pixel_data_of_exactly_the_declared_length_decodes() {
+        // The decoder agrees on the length the header implies: interlaced and
+        // sub-byte images, where a wrong pass or row size would show, decode
+        // at exactly that length.
+        let driver = OxideAvImageDriver::new();
+        for header in [
+            ihdr(3, 3, 0, 1, 1),
+            ihdr(13, 5, 3, 4, 0),
+            ihdr(9, 9, 3, 2, 1),
+        ] {
+            let len = png_inflated_len(&header).expect("a defined format") as usize;
+            let png = png_with_pixel_data(header, &vec![0u8; len]);
+            assert_eq!(
+                driver
+                    .dimensions(&png)
+                    .expect("pixel data of the declared length"),
+                (header.width, header.height)
+            );
+        }
+    }
+
+    #[test]
+    fn png_pixel_data_one_byte_past_the_declared_length_is_refused() {
+        let header = ihdr(3, 3, 0, 1, 1);
+        let len = png_inflated_len(&header).expect("a defined format") as usize;
+        let png = png_with_pixel_data(header, &vec![0u8; len + 1]);
+        let err = check_png_inflate(&png).expect_err("one byte too many");
+        assert!(
+            err.to_string().contains("inflates past the 12 bytes"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn png_pixel_data_that_is_not_zlib_is_refused_before_decoding() {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        oxideav_png::chunk::write_chunk(&mut png, b"IHDR", &ihdr(1, 1, 6, 8, 0).to_bytes());
+        oxideav_png::chunk::write_chunk(&mut png, b"IDAT", b"not a zlib stream");
+        oxideav_png::chunk::write_chunk(&mut png, b"IEND", &[]);
+        let err = check_png_inflate(&png).expect_err("not zlib");
+        assert!(err.to_string().contains("does not inflate"), "got: {err}");
     }
 
     #[test]

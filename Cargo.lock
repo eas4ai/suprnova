@@ -7559,6 +7559,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "clap",
+ "compcol",
  "comrak",
  "crypto_secretbox",
  "dashmap 6.2.1",

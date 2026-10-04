@@ -49,6 +49,12 @@
 //! input's own declared header dimensions *before* anything allocates. See
 //! [`ImageConfig`] and the `sniff` module for why the framework does this
 //! itself rather than delegating to a codec.
+//!
+//! A header can declare a small image over data that asks for far more, so
+//! the default driver also bounds what its decoders allocate: PNG pixel data
+//! that inflates past what its header declares is refused at that point,
+//! and only the first frame of a GIF is decoded. Path and disk sources are
+//! read no further than the same `IMAGE_MAX_ALLOC_BYTES` cap.
 
 mod driver;
 mod magick;
@@ -611,8 +617,8 @@ fn resolve_mime(contents: &[u8], pipeline: &ImagePipeline) -> Result<String, Fra
 /// RAM before a single header is parsed. `from_stream` has always counted as
 /// it collected; this gives the path and disk sources the same ceiling instead
 /// of leaving them as the one uncapped way in.
-fn check_source_size(len: usize, cap: u64, source: &str) -> Result<(), FrameworkError> {
-    if len as u64 > cap {
+fn check_source_size(len: u64, cap: u64, source: &str) -> Result<(), FrameworkError> {
+    if len > cap {
         return Err(FrameworkError::param(format!(
             "image exceeds configured decode limits: {source} is {len} bytes, over the \
              IMAGE_MAX_ALLOC_BYTES limit of {cap}"
@@ -621,37 +627,66 @@ fn check_source_size(len: usize, cap: u64, source: &str) -> Result<(), Framework
     Ok(())
 }
 
+/// Read a file, reading no more than one byte past `cap`.
+///
+/// The size the filesystem reports refuses an oversized file before any of
+/// it is read, but it is not the size of what a read returns: a FIFO or a
+/// device reports zero, and a file can grow between the check and the read.
+/// So the read itself stops one byte past the cap, and that byte is what
+/// tells an oversized source from one that fits exactly.
+fn read_file_capped(path: &Path, cap: u64) -> Result<Vec<u8>, FrameworkError> {
+    use std::io::Read;
+
+    let read_failed = |e: std::io::Error| {
+        FrameworkError::internal(format!(
+            "image source read failed for {}: {e}",
+            path.display()
+        ))
+    };
+    let file = std::fs::File::open(path).map_err(read_failed)?;
+    let reported = match file.metadata() {
+        Ok(metadata) => {
+            check_source_size(metadata.len(), cap, "the file")?;
+            metadata.len()
+        }
+        Err(_) => 0,
+    };
+    let mut bytes = Vec::with_capacity(usize::try_from(reported).unwrap_or(0));
+    file.take(cap.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(read_failed)?;
+    check_source_size(bytes.len() as u64, cap, "the file")?;
+    Ok(bytes)
+}
+
 async fn read_source(source: Source) -> Result<Vec<u8>, FrameworkError> {
     let cap = config().max_alloc_bytes;
     match source {
         Source::Bytes(bytes) => {
-            check_source_size(bytes.len(), cap, "the image")?;
+            check_source_size(bytes.len() as u64, cap, "the image")?;
             Ok(bytes.to_vec())
         }
-        Source::Path(path) => {
-            // Ask the filesystem how big it is before reading it, so an
-            // oversized file is refused rather than read and then rejected.
-            if let Ok(metadata) = tokio::fs::metadata(&path).await {
-                check_source_size(metadata.len() as usize, cap, "the file")?;
-            }
-            let bytes = tokio::fs::read(&path).await.map_err(|e| {
-                FrameworkError::internal(format!(
-                    "image source read failed for {}: {e}",
-                    path.display()
-                ))
-            })?;
-            check_source_size(bytes.len(), cap, "the file")?;
-            Ok(bytes)
-        }
+        Source::Path(path) => tokio::task::spawn_blocking(move || read_file_capped(&path, cap))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("image source read panicked: {e}")))?,
         #[cfg(feature = "filesystem")]
         Source::Disk { disk, path } => {
             use crate::DiskExt;
             let handle = crate::Storage::disk(&disk)?;
-            if let Ok(size) = handle.size(&path).await {
-                check_source_size(size as usize, cap, "the stored file")?;
+            // One stat bounds the read: the read asks for exactly the length
+            // the stat reported, so an object that grows or is replaced after
+            // the check cannot make it read more than the cap.
+            let size = handle.size(&path).await?;
+            check_source_size(size, cap, "the stored file")?;
+            if size == 0 {
+                return Ok(Vec::new());
             }
-            let bytes = handle.get(&path).await?;
-            check_source_size(bytes.len(), cap, "the stored file")?;
+            let bytes = handle
+                .read_with(&path)
+                .range(0..size)
+                .await
+                .map_err(|e| FrameworkError::internal(format!("storage read({path}): {e}")))?
+                .to_vec();
             Ok(bytes)
         }
     }

@@ -293,6 +293,98 @@ fn gif_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((u32::from(le_u16(bytes, 6)?), u32::from(le_u16(bytes, 8)?)))
 }
 
+/// Where a GIF's first image sits on its logical screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GifFrame {
+    pub(crate) left: u16,
+    pub(crate) top: u16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+}
+
+impl GifFrame {
+    /// True when the frame lies inside a `width x height` logical screen.
+    pub(crate) fn fits(self, width: u32, height: u32) -> bool {
+        u32::from(self.left) + u32::from(self.width) <= width
+            && u32::from(self.top) + u32::from(self.height) <= height
+    }
+}
+
+/// Find a GIF's first image by walking its block structure, decoding nothing.
+///
+/// The gate measures the logical screen, but a decoder sizes a frame's pixels
+/// from the frame's own Image Descriptor, so the first descriptor has to be
+/// read as well. The walk follows the grammar `oxideav_gif::decode_first_frame`
+/// follows, block for block, including the fixed size it requires of each
+/// extension's first block: wherever that decoder finds the first image, this
+/// finds the same one. `None` when the stream ends, reaches its trailer, or
+/// breaks that grammar first, which are the cases that decoder refuses too.
+pub(crate) fn gif_first_frame(bytes: &[u8]) -> Option<GifFrame> {
+    // The signature and Logical Screen Descriptor take 13 bytes. A Global
+    // Color Table of 3 * 2^(n + 1) bytes follows when the top bit of the
+    // descriptor's packed field is set.
+    let packed = *bytes.get(10)?;
+    let mut pos = 13usize;
+    if packed & 0x80 != 0 {
+        pos += 3 << ((packed & 0x07) + 1);
+    }
+    loop {
+        match *bytes.get(pos)? {
+            // Image Descriptor: left, top, width, height.
+            0x2C => {
+                return Some(GifFrame {
+                    left: le_u16(bytes, pos + 1)?,
+                    top: le_u16(bytes, pos + 3)?,
+                    width: le_u16(bytes, pos + 5)?,
+                    height: le_u16(bytes, pos + 7)?,
+                });
+            }
+            // Extension introducer, then a label byte.
+            0x21 => {
+                let label = *bytes.get(pos + 1)?;
+                pos += 2;
+                match label {
+                    // Graphic Control: one 4-byte block, then the terminator.
+                    0xF9 => {
+                        if *bytes.get(pos)? != 4 || *bytes.get(pos + 5)? != 0 {
+                            return None;
+                        }
+                        pos += 6;
+                    }
+                    // Plain Text opens with a 12-byte block and Application
+                    // with an 11-byte one; data sub-blocks follow both.
+                    0x01 | 0xFF => {
+                        let fixed = if label == 0x01 { 12 } else { 11 };
+                        if *bytes.get(pos)? != fixed {
+                            return None;
+                        }
+                        pos = skip_sub_blocks(bytes, pos)?;
+                    }
+                    // Comment: data sub-blocks only.
+                    0xFE => pos = skip_sub_blocks(bytes, pos)?,
+                    _ => return None,
+                }
+            }
+            // The trailer, or a byte that introduces no block at all.
+            _ => return None,
+        }
+    }
+}
+
+/// Skip a run of GIF data sub-blocks and the zero-length block that ends it,
+/// returning the position after the terminator.
+fn skip_sub_blocks(bytes: &[u8], mut pos: usize) -> Option<usize> {
+    loop {
+        let len = usize::from(*bytes.get(pos)?);
+        pos += 1;
+        if len == 0 {
+            return Some(pos);
+        }
+        bytes.get(pos..pos + len)?;
+        pos += len;
+    }
+}
+
 /// BMP carries its size in the DIB header, whose layout depends on its own
 /// declared length. The legacy 12-byte BITMAPCOREHEADER uses `u16` fields;
 /// every later version uses `i32`, where a negative height means the rows are
@@ -562,6 +654,112 @@ mod tests {
             header_dimensions(InputFormat::Gif, gif).expect("dims"),
             (4, 2)
         );
+    }
+
+    /// A GIF89a head: a 16x16 logical screen with a four-entry Global Color
+    /// Table.
+    fn gif_head() -> Vec<u8> {
+        let mut gif = Vec::from(*b"GIF89a");
+        gif.extend_from_slice(&16u16.to_le_bytes());
+        gif.extend_from_slice(&16u16.to_le_bytes());
+        // Global Color Table present, 2^(1 + 1) = 4 entries.
+        gif.extend_from_slice(&[0x81, 0, 0]);
+        gif.extend_from_slice(&[0u8; 12]);
+        gif
+    }
+
+    /// An Image Descriptor for `width x height` at `left, top`.
+    fn image_descriptor(left: u16, top: u16, width: u16, height: u16) -> Vec<u8> {
+        let mut block = vec![0x2C];
+        for value in [left, top, width, height] {
+            block.extend_from_slice(&value.to_le_bytes());
+        }
+        block.push(0);
+        block
+    }
+
+    #[test]
+    fn the_first_gif_frame_is_found_behind_every_extension_kind() {
+        let mut gif = gif_head();
+        // Graphic Control.
+        gif.extend_from_slice(&[0x21, 0xF9, 4, 0, 10, 0, 0, 0]);
+        // Comment, two sub-blocks.
+        gif.extend_from_slice(&[0x21, 0xFE, 3, b'a', b'b', b'c', 1, b'd', 0]);
+        // Application: an 11-byte block, then one data sub-block.
+        gif.extend_from_slice(&[0x21, 0xFF, 11]);
+        gif.extend_from_slice(b"NETSCAPE2.0");
+        gif.extend_from_slice(&[3, 1, 0, 0, 0]);
+        // Plain Text: a 12-byte block, then one data sub-block.
+        gif.extend_from_slice(&[0x21, 0x01, 12]);
+        gif.extend_from_slice(&[0u8; 12]);
+        gif.extend_from_slice(&[2, b'h', b'i', 0]);
+        gif.extend_from_slice(&image_descriptor(2, 3, 8, 9));
+        // A second, larger frame the walk must never report.
+        gif.extend_from_slice(&image_descriptor(0, 0, 900, 900));
+
+        let frame = gif_first_frame(&gif).expect("the first frame");
+        assert_eq!(
+            frame,
+            GifFrame {
+                left: 2,
+                top: 3,
+                width: 8,
+                height: 9,
+            }
+        );
+        assert!(frame.fits(16, 16));
+        assert!(!frame.fits(9, 16), "2 + 8 overruns a 9-wide screen");
+        assert!(!frame.fits(16, 11), "3 + 9 overruns an 11-high screen");
+    }
+
+    #[test]
+    fn a_gif_without_a_global_color_table_starts_its_blocks_at_byte_13() {
+        let mut gif = Vec::from(*b"GIF87a");
+        gif.extend_from_slice(&[4, 0, 2, 0, 0, 0, 0]);
+        gif.extend_from_slice(&image_descriptor(0, 0, 4, 2));
+        assert_eq!(
+            gif_first_frame(&gif).map(|frame| (frame.width, frame.height)),
+            Some((4, 2))
+        );
+    }
+
+    #[test]
+    fn a_gif_walk_refuses_what_the_decoder_refuses() {
+        let with = |blocks: &[u8]| {
+            let mut gif = gif_head();
+            gif.extend_from_slice(blocks);
+            gif.extend_from_slice(&image_descriptor(0, 0, 4, 4));
+            gif
+        };
+        // The trailer before any image.
+        assert_eq!(gif_first_frame(&with(&[0x3B])), None);
+        // A byte that is no block introducer.
+        assert_eq!(gif_first_frame(&with(&[0x00])), None);
+        // An unknown extension label.
+        assert_eq!(gif_first_frame(&with(&[0x21, 0x42, 0])), None);
+        // A Graphic Control block of the wrong size, or without its
+        // terminator.
+        assert_eq!(
+            gif_first_frame(&with(&[0x21, 0xF9, 5, 0, 0, 0, 0, 0, 0])),
+            None
+        );
+        assert_eq!(
+            gif_first_frame(&with(&[0x21, 0xF9, 4, 0, 0, 0, 0, 7])),
+            None
+        );
+        // Application and Plain Text blocks of the wrong size.
+        assert_eq!(gif_first_frame(&with(&[0x21, 0xFF, 10])), None);
+        assert_eq!(gif_first_frame(&with(&[0x21, 0x01, 11])), None);
+        // A sub-block that runs past the end of the data.
+        let mut truncated = gif_head();
+        truncated.extend_from_slice(&[0x21, 0xFE, 200, 1, 2, 3]);
+        assert_eq!(gif_first_frame(&truncated), None);
+        // A descriptor cut short.
+        let mut short = gif_head();
+        short.extend_from_slice(&[0x2C, 0, 0, 0, 0, 4]);
+        assert_eq!(gif_first_frame(&short), None);
+        // A Global Color Table longer than the data.
+        assert_eq!(gif_first_frame(b"GIF89a\x10\x00\x10\x00\x87\x00\x00"), None);
     }
 
     #[test]

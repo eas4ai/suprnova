@@ -232,6 +232,11 @@ oxideav-png = { version = "=0.1.8", optional = true }
 oxideav-webp = { version = "=0.2.3", optional = true }
 oxideav-gif = { version = "=0.0.11", optional = true }
 oxideav-bmp = { version = "=0.1.6", optional = true }
+# The zlib inflater `oxideav-png` itself uses. The PNG decode inflates the
+# pixel data once first with a cap at the size the header declares, because
+# `oxideav-png` inflates without one. Pinned to the exact version
+# `oxideav-png` resolves to, so both passes run the same decoder.
+compcol = { version = "=0.6.10", optional = true, default-features = false, features = ["zlib"] }
 crypto_secretbox = "0.1.1"
 # Heap profiling behind `heap-profiling`; see `src/profiling.rs`. The
 # allocation tests also use it as a dev-dependency.
@@ -314,9 +319,10 @@ filesystem-gcs = ["filesystem", "opendal/services-gcs"]
 # A feature at all, rather than an unconditional dependency, because a
 # minimal profile (an API-only service that never touches pixels) otherwise
 # pays for five codec compiles it will never call. Turning `media` off
-# removes all eight crates from the tree; `scripts/check-feature-matrix.sh`
-# asserts exactly that.
+# removes the eight OxideAV crates and `compcol` from the tree;
+# `scripts/check-feature-matrix.sh` asserts exactly that.
 media = [
+    "dep:compcol",
     "dep:oxideav-core",
     "dep:oxideav-image-filter",
     "dep:oxideav-pixfmt",

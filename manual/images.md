@@ -238,6 +238,19 @@ before a decoder is constructed. The same caps apply to resize targets,
 because `resize(50_000, 50_000)` allocates just as much whether the
 numbers came from an attacker or a typo.
 
+A header can also declare a small image over data that asks for far
+more, and the default driver bounds that too:
+
+- PNG pixel data that inflates past the size its header declares is
+  refused when the inflate reaches that size. A few kilobytes of
+  compressed data can expand to gigabytes.
+- Only the first frame of an animated GIF is decoded, because the
+  pipeline only uses the first frame. A first frame larger than the
+  GIF's logical screen is refused before it is decoded.
+- A file or stored source is read no further than
+  `IMAGE_MAX_ALLOC_BYTES`, even when the size its filesystem reports is
+  wrong, as it is for a pipe.
+
 A limit hit is a 4xx-shaped `FrameworkError::param`, because oversized
 input is a client problem, not a server fault.
 

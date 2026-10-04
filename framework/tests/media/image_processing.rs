@@ -39,10 +39,10 @@ async fn red_png_4x2() -> Vec<u8> {
 /// The override is process-global. Clearing it on the happy path only means a
 /// single failed assertion leaks a tightened cap into every test that runs
 /// after it, turning one red test into a cascade that hides its own cause.
-struct ConfigGuard;
+pub(crate) struct ConfigGuard;
 
 impl ConfigGuard {
-    fn set(config: ImageConfig) -> Self {
+    pub(crate) fn set(config: ImageConfig) -> Self {
         suprnova::media::set_config_for_tests(Some(config));
         Self
     }
