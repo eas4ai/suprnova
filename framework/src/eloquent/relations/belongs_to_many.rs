@@ -340,6 +340,13 @@ where
     /// when `with_timestamps()` is on). Mirrors Laravel's
     /// `->attach($id, ['note' => '...'])`.
     ///
+    /// Each extra the pivot model `P` declares is written through `P`'s
+    /// cast and mutator, as `Model::create` writes it: a column `P`
+    /// casts `AsEncrypted` is stored encrypted, and reads back through
+    /// `r.pivot::<P>()` as the plain value. A value that does not decode
+    /// into the field's type is a validation error. A key `P` does not
+    /// declare is written as it is, and an explicit `null` as SQL `NULL`.
+    ///
     /// # Security
     ///
     /// Keys of `extra` are pivot column names - they interpolate
