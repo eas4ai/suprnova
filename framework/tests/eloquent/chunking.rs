@@ -207,6 +207,102 @@ async fn chunk_by_id_applies_an_offset_once_before_the_walk() {
     assert_eq!(seen, vec![3, 4, 5, 6, 7, 8]);
 }
 
+/// A `LIMIT` on the query caps the rows the whole walk visits, as in
+/// Laravel's `chunkById`. The batch size used to replace it, so
+/// `.limit(5).chunk_by_id(2, ..)` walked all ten rows.
+#[tokio::test]
+async fn chunk_by_id_stops_at_the_querys_limit() {
+    let _db = fixture(10).await;
+    let mut sizes = Vec::new();
+    let mut seen: Vec<i64> = Vec::new();
+    T8Order::query()
+        .limit(5)
+        .chunk_by_id(2, |batch: Collection<T8Order>| {
+            sizes.push(batch.len());
+            seen.extend(batch.iter().map(|order| order.id));
+            async move { Ok(()) }
+        })
+        .await
+        .expect("chunk_by_id");
+    assert_eq!(seen, vec![1, 2, 3, 4, 5]);
+    assert_eq!(
+        sizes,
+        vec![2, 2, 1],
+        "the last batch takes what the limit leaves"
+    );
+
+    let mut seen: Vec<i64> = Vec::new();
+    T8Order::query()
+        .offset(2)
+        .limit(3)
+        .chunk_by_id(2, |batch: Collection<T8Order>| {
+            seen.extend(batch.iter().map(|order| order.id));
+            async move { Ok(()) }
+        })
+        .await
+        .expect("chunk_by_id");
+    assert_eq!(
+        seen,
+        vec![3, 4, 5],
+        "the offset skips first, the limit counts after it"
+    );
+
+    let mut batches = 0;
+    T8Order::query()
+        .limit(0)
+        .chunk_by_id(2, |_batch: Collection<T8Order>| {
+            batches += 1;
+            async move { Ok(()) }
+        })
+        .await
+        .expect("chunk_by_id");
+    assert_eq!(batches, 0, "a limit of 0 visits nothing");
+}
+
+/// The OFFSET walks keep the query's own `OFFSET` and `LIMIT` too, as
+/// Laravel's `chunk` does. They used to replace both with their own
+/// window, walking every row whatever the query skipped or capped.
+#[tokio::test]
+async fn offset_walks_keep_the_querys_offset_and_limit() {
+    let _db = fixture(10).await;
+    let mut seen: Vec<i64> = Vec::new();
+    T8Order::query()
+        .order_by_asc("id")
+        .offset(2)
+        .limit(5)
+        .chunk(2, |batch: Collection<T8Order>| {
+            seen.extend(batch.iter().map(|order| order.id));
+            async move { Ok(()) }
+        })
+        .await
+        .expect("chunk");
+    assert_eq!(seen, vec![3, 4, 5, 6, 7]);
+
+    let mapped = T8Order::query()
+        .order_by_asc("id")
+        .limit(3)
+        .chunk_map(2, |batch: Collection<T8Order>| async move {
+            Ok(Collection::from_vec(
+                batch.iter().map(|order| order.id).collect::<Vec<i64>>(),
+            ))
+        })
+        .await
+        .expect("chunk_map");
+    assert_eq!(mapped.into_vec(), vec![1, 2, 3]);
+
+    let mut seen: Vec<i64> = Vec::new();
+    T8Order::query()
+        .order_by_asc("id")
+        .offset(8)
+        .each(|order| {
+            seen.push(order.id);
+            async move { Ok(()) }
+        })
+        .await
+        .expect("each");
+    assert_eq!(seen, vec![9, 10]);
+}
+
 #[tokio::test]
 async fn chunk_zero_n_errors() {
     // `chunk(0)` would issue `LIMIT 0` forever - same hazard
@@ -581,6 +677,19 @@ async fn lazy_by_id_applies_an_offset_once_before_the_walk() {
         seen.push(item.expect("lazy_by_id row").id);
     }
     assert_eq!(seen, vec![3, 4, 5, 6, 7, 8]);
+}
+
+/// A `LIMIT` on the query caps the rows the stream yields, as in
+/// Laravel's `lazyById`.
+#[tokio::test]
+async fn lazy_by_id_stops_at_the_querys_limit() {
+    let _db = fixture(10).await;
+    let mut stream = T8Order::query().offset(1).limit(4).lazy_by_id(3);
+    let mut seen: Vec<i64> = Vec::new();
+    while let Some(item) = stream.next().await {
+        seen.push(item.expect("lazy_by_id row").id);
+    }
+    assert_eq!(seen, vec![2, 3, 4, 5]);
 }
 
 #[tokio::test]

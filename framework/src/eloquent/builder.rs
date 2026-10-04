@@ -333,6 +333,47 @@ pub(crate) enum OrderTerm {
     InOrderOf(String, Vec<Value>),
 }
 
+/// The rows a chunked walk may visit: the query's own `OFFSET` and
+/// `LIMIT`, which the walks keep as Laravel's `chunk` and `chunkById` do.
+/// The offset skips rows once, at the start of the walk, and the limit
+/// caps the rows the whole walk visits rather than one batch, which takes
+/// its own `LIMIT`.
+#[derive(Debug, Clone, Copy)]
+struct WalkBounds {
+    skip: u64,
+    remaining: Option<u64>,
+}
+
+impl WalkBounds {
+    /// Take the bounds off `builder`, so the walk sets each batch's own.
+    fn take<M>(builder: &mut Builder<M>) -> Self {
+        Self {
+            skip: builder.offset.take().unwrap_or(0),
+            remaining: builder.limit.take(),
+        }
+    }
+
+    /// The size of the next batch: `n`, or what the limit leaves when
+    /// that is less; 0 once the limit is spent.
+    fn batch(&self, n: u64) -> u64 {
+        self.remaining.map_or(n, |left| left.min(n))
+    }
+
+    /// Count `rows` against the limit.
+    fn visited(&mut self, rows: u64) {
+        if let Some(left) = self.remaining.as_mut() {
+            *left = left.saturating_sub(rows);
+        }
+    }
+
+    /// The rows a walk over `total` matching rows visits.
+    fn rows_of(&self, total: u64) -> u64 {
+        let after_skip = total.saturating_sub(self.skip);
+        self.remaining
+            .map_or(after_skip, |left| left.min(after_skip))
+    }
+}
+
 /// What the first query of a union keeps for itself: the ordering, limit
 /// and offset set before its first [`Builder::union`]. As in Laravel, those
 /// order and limit that query alone, and the ones set after `union` - by
@@ -5421,6 +5462,10 @@ where
     /// bulk processing - it filters on `id > last_id` and is
     /// concurrent-safe by construction.
     ///
+    /// The query's own `OFFSET` and `LIMIT` bound the walk, as in
+    /// Laravel's `chunk`: the offset skips rows once, at the start, and
+    /// the limit caps the rows the whole walk visits.
+    ///
     /// `chunk()` exists as the simple form for read-only workloads
     /// against stable tables, and for models whose primary key cannot
     /// carry the keyset cursor of `chunk_by_id`: a composite key, or a
@@ -5465,14 +5510,21 @@ where
                 "Builder::chunk does not support eager loading (`.with(...)`); apply `.with(...)` inside the per-chunk closure instead",
             ));
         }
-        let mut offset: u64 = 0;
+        let mut walk = self;
+        let mut bounds = WalkBounds::take(&mut walk);
+        let mut offset = bounds.skip;
         loop {
-            let q = self.clone().limit(n).offset(offset);
+            let size = bounds.batch(n);
+            if size == 0 {
+                break;
+            }
+            let q = walk.clone().limit(size).offset(offset);
             let batch = q.get().await?;
             if batch.is_empty() {
                 break;
             }
             let count = batch.len() as u64;
+            bounds.visited(count);
             f(batch).await?;
             if count < n {
                 break;
@@ -5493,7 +5545,9 @@ where
     /// The walk sets its own order: an `ORDER BY` already on the query is
     /// dropped, since any other order would make the cursor skip some
     /// rows and repeat others. An `OFFSET` skips that many rows once,
-    /// before the first batch; every later batch starts at the cursor.
+    /// before the first batch; every later batch starts at the cursor. A
+    /// `LIMIT` caps the rows the whole walk visits, as in Laravel's
+    /// `chunkById`; each batch takes `n` or what the limit leaves.
     ///
     /// ## Key types
     ///
@@ -5571,13 +5625,18 @@ where
         let pk = M::primary_key_name();
         let kind = Self::refuse_keyset_key_by_metadata("chunk_by_id", pk)?;
         let mut walk = self.reorder_by(pk, Direction::Asc);
-        let mut first_offset = walk.offset.take();
+        let mut bounds = WalkBounds::take(&mut walk);
         let mut cursor: Option<Value> = None;
         loop {
-            let mut q = walk.clone().limit(n);
+            let size = bounds.batch(n);
+            if size == 0 {
+                break;
+            }
+            let mut q = walk.clone().limit(size);
             match cursor.take() {
                 Some(after) => q = q.filter_op(pk, ">", after),
-                None => q.offset = first_offset.take(),
+                None if bounds.skip > 0 => q.offset = Some(bounds.skip),
+                None => {}
             }
             let batch = q.get().await?;
             // The next cursor is read, and checked, before `f` sees the
@@ -5587,6 +5646,7 @@ where
                 None => break,
             };
             let count = batch.len() as u64;
+            bounds.visited(count);
             f(batch).await?;
             if count < n {
                 break;
@@ -5639,14 +5699,21 @@ where
             ));
         }
         let mut out: Vec<U> = Vec::new();
-        let mut offset: u64 = 0;
+        let mut walk = self;
+        let mut bounds = WalkBounds::take(&mut walk);
+        let mut offset = bounds.skip;
         loop {
-            let q = self.clone().limit(n).offset(offset);
+            let size = bounds.batch(n);
+            if size == 0 {
+                break;
+            }
+            let q = walk.clone().limit(size).offset(offset);
             let batch = q.get().await?;
             if batch.is_empty() {
                 break;
             }
             let count = batch.len() as u64;
+            bounds.visited(count);
             let mapped = f(batch).await?;
             out.extend(mapped.into_vec());
             if count < n {
@@ -5691,16 +5758,22 @@ where
         // multi-row read, and this walk is one query per row. The row
         // count is asked once, and only while the switch is on, so a walk
         // with the switch off runs the queries it always ran.
-        let mark_rows =
-            crate::eloquent::preventing_lazy_loading() && self.clone().count().await? > 1;
-        let mut offset: u64 = 0;
+        let mut walk = self;
+        let mut bounds = WalkBounds::take(&mut walk);
+        let mark_rows = crate::eloquent::preventing_lazy_loading()
+            && bounds.rows_of(u64::try_from(walk.clone().count().await?).unwrap_or(0)) > 1;
+        let mut offset = bounds.skip;
         loop {
-            let q = self.clone().limit(1).offset(offset);
+            if bounds.batch(1) == 0 {
+                break;
+            }
+            let q = walk.clone().limit(1).offset(offset);
             let batch = q.get().await?;
             if batch.is_empty() {
                 break;
             }
             let count = batch.len() as u64;
+            bounds.visited(count);
             for mut row in batch.into_vec() {
                 if mark_rows {
                     row.__mark_from_multi_row_query();
@@ -5791,13 +5864,18 @@ where
             let pk = M::primary_key_name();
             let kind = Self::refuse_keyset_key_by_metadata("lazy_by_id", pk)?;
             let mut walk = builder.reorder_by(pk, Direction::Asc);
-            let mut first_offset = walk.offset.take();
+            let mut bounds = WalkBounds::take(&mut walk);
             let mut cursor: Option<Value> = None;
             loop {
-                let mut q = walk.clone().limit(batch_size);
+                let size = bounds.batch(batch_size);
+                if size == 0 {
+                    break;
+                }
+                let mut q = walk.clone().limit(size);
                 match cursor.take() {
                     Some(after) => q = q.filter_op(pk, ">", after),
-                    None => q.offset = first_offset.take(),
+                    None if bounds.skip > 0 => q.offset = Some(bounds.skip),
+                    None => {}
                 }
                 let batch = q.get().await?;
                 // The next cursor is read, and checked, before the first
@@ -5807,6 +5885,7 @@ where
                     None => break,
                 };
                 let count = batch.len() as u64;
+                bounds.visited(count);
                 for row in batch.into_vec() {
                     yield row;
                 }

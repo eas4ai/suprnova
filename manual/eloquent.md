@@ -2704,6 +2704,10 @@ User::query().chunk(100, |batch: Collection<User>| async move {
 The closure receives a `Collection<M>` per batch - slice-shape access
 (`.iter()`, indexing) works directly via `Deref`.
 
+`chunk`, `chunk_map`, and `each` keep the query's own `OFFSET` and
+`LIMIT`, as Laravel's `chunk` does: the offset skips rows once, at the
+start of the walk, and the limit caps the rows the whole walk visits.
+
 `chunk` is OFFSET-paginated and **not safe under concurrent inserts**:
 rows inserted before the next batch's offset get skipped; rows deleted
 before the offset get processed twice (whatever shifted into their
@@ -2729,7 +2733,10 @@ an original row to skip or duplicate.
 The walk sets its own order. An `ORDER BY` already on the query is
 dropped, because any other order would make the cursor skip some rows
 and repeat others. An `OFFSET` on the query skips that many rows once,
-before the first batch; every later batch starts at the cursor.
+before the first batch; every later batch starts at the cursor. A
+`LIMIT` on the query caps the rows the whole walk visits, as in
+Laravel's `chunkById`: `.limit(10).chunk_by_id(3, ..)` hands over 3, 3,
+3 and 1 rows.
 
 The cursor is the value of the primary key, in the order of the key.
 These keys work:
