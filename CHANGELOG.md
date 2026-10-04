@@ -414,6 +414,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **Magnetar rotations and second-factor lockouts.** Magnetar's
+  `re_enroll` keeps the confirmed second factor gating sign-in until a code
+  from the new secret confirms the rotation; the rotation waits in new
+  `auth_two_factor` columns, `pending_secret` and `pending_recovery_codes`,
+  which `default_schema::migrate` adds. `TwoFactorRow` gains those two
+  fields, and a custom `TwoFactorStore` implements the new
+  `confirm_rotation`. A second-factor lock or unlock never touches an
+  `app_users` row (`LockoutFields::IDENTITY_IS_EMAIL`,
+  `LockoutService::without_user_lock`), so an account registered as
+  `two-factor:{id}` is never locked or unlocked by it. An account holds the
+  framework's TOTP or a Magnetar second factor, never both: enrolling or
+  confirming either answers 409 while the other exists, and disabling
+  either one recovers an account that already has both. A custom host
+  attaches `FrameworkTotpEnrollment` to its `TwoFactorService` through
+  `with_other_second_factor`. This landed after the `v3.1.0` tag.
 - **Live field and argument names must be ASCII and at most 128 bytes**,
   and a view-visible field named `component` is a compile error. Such
   names used to panic at registration or fail later. This landed after the
