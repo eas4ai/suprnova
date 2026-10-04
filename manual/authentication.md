@@ -399,12 +399,12 @@ that uses it. `GuardDriver` has three variants: `Session`, `Token`, and
 `.clone()` where you copied it, and give a `match` that names every
 variant a `GuardDriver::Custom(_)` arm.
 
-The name of a guard of your application cannot contain `:`. The manager
-returns an error when you resolve such a guard, and `via_request` refuses
-to register a resolver for it, before either changes anything. The rule
-keeps two guards from attesting the same principal (see [Guards and
-Live](#guards-and-live)). A session or token guard may have a `:` in its
-name.
+The name of a guard of your application cannot contain `:`, and neither
+can the name of any other guard except the default session or token guard.
+The manager returns an error when you resolve such a guard, and
+`via_request` refuses to register a resolver for it, before either changes
+anything. The rule keeps two guards from attesting the same principal (see
+[Guards and Live](#guards-and-live)).
 
 ### `Auth::extend`
 
@@ -551,15 +551,25 @@ middleware.
 
 ### Guards and Live
 
-The principal that `AuthMiddleware` attests for a Live component is
-`<guard>:<id>` for a guard of your application, and the bare id for a
-session user. The same id under two guards of your application is two
-principals, and web user `7` differs from partner `7`.
+The principal that `AuthMiddleware` attests for a Live component is the
+user of the guard it checked. For the default session or token guard, it is
+the bare id. For any other guard - a second session guard such as `admin`, a
+second token guard, or a guard of your application - it is `<guard>:<id>`.
+The same id under two guards is two principals: web user `7` differs from
+admin `7` and from partner `7`, even when both guards read one table. A user
+of another guard in the same session never stands in for the guard's own
+user.
 
-Because a session user attests its bare id, a session user id that has the
+Because the default guard's user attests its bare id, a user id that has the
 form `<guard>:<id>` attests the same principal as that guard's user. If the
-session ids of your application can contain `:`, name your guards so that no
+user ids of your application can contain `:`, name your guards so that no
 id starts with `<guard>:`.
+
+The render cache keys a page by the default guard's identity. An identity
+read through any other guard is recorded as `<guard>:<id>`, so a page built
+from it is never stored under the default guard's key and never served to a
+visitor who lacks that guard's sign-in. See [Render
+cache](render-cache.md).
 
 Live's gated actions read the session identity, not the guard. See
 [Live](live.md#security-boundaries).

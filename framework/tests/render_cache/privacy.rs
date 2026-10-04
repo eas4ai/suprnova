@@ -379,17 +379,19 @@ async fn a_tenant_keyed_route_never_crosses_users_inside_one_tenant() {
 #[serial_test::serial]
 async fn an_identity_taken_through_a_non_default_guard_never_crosses_visitors() {
     let harness = boot_with_render_cache().await;
-    // R103 positive control, on the attacked route itself: a visitor signed
-    // in on *both* guards under one identity derives a key the render's own
-    // observation matches, so this route does cache when nothing crosses.
-    // Parameter 1 here, parameter 2 for the attack, so the control's entry
-    // can never be what the attack hits.
-    let base = same_visitor_twice_is_a_hit(
-        &harness,
-        "/privacy/named-guard-only/1",
-        &[("x-test-login", "carol"), ("x-test-named-login", "carol")],
-    )
-    .await;
+    // R103 positive control, sibling shape: a page built from another
+    // guard's identity is never stored under the default guard's key, even
+    // when both guards name one id (IDENTITY-034), so the attacked route has
+    // no storable visitor. The control is a route that declares `Principal`
+    // and reads the default guard, and the attacked route must still be
+    // attached to a policy.
+    let base =
+        same_visitor_twice_is_a_hit(&harness, "/privacy/private/5", &[("x-test-login", "carol")])
+            .await;
+    assert!(
+        route_is_under_a_policy(&harness, NAMED_GUARD_ONLY_ROUTE),
+        "the attacked route must still be attached to a policy"
+    );
 
     let carol = dispatch_get(
         &harness,
@@ -421,6 +423,67 @@ async fn an_identity_taken_through_a_non_default_guard_never_crosses_visitors() 
          observed value must be compared against it and both renders declined"
     );
     assert_eq!(NAMED_GUARD_ONLY_ROUTE, "/privacy/named-guard-only/{id}");
+}
+
+// ── IDENTITY-034 ───────────────────────────────────────────────────────
+
+/// A body built from a second guard's identity is never served to a visitor
+/// who lacks that identity. The key's `Principal` dimension is the default
+/// guard's identity. A visitor signed in as carol on both guards rendered
+/// the admin body, and it was stored under carol's default-guard key. A
+/// later visitor signed in as carol on the default guard alone - after an
+/// admin logout, or from a device without the admin session - hit that
+/// entry and received the admin body. A hit skips the route's own guard
+/// middleware, so nothing checked the admin identity again.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_body_read_through_a_second_guard_never_reaches_a_visitor_without_that_guard() {
+    let harness = boot_with_render_cache().await;
+    // R103 positive control, sibling shape: the same visitor on a route that
+    // reads only the default guard is stored.
+    let base = same_visitor_twice_is_a_hit(
+        &harness,
+        "/privacy/private/34",
+        &[("x-test-login", "carol")],
+    )
+    .await;
+    assert!(
+        route_is_under_a_policy(&harness, NAMED_GUARD_ONLY_ROUTE),
+        "the attacked route must still be attached to a policy"
+    );
+
+    let both = dispatch_get(
+        &harness,
+        "/privacy/named-guard-only/34",
+        &[("x-test-login", "carol"), ("x-test-named-login", "carol")],
+    )
+    .await;
+    assert_eq!(both.status, StatusCode::OK);
+    assert!(both.text().contains("for carol"), "got {}", both.text());
+
+    let default_only = dispatch_get(
+        &harness,
+        "/privacy/named-guard-only/34",
+        &[("x-test-login", "carol")],
+    )
+    .await;
+    assert!(
+        !default_only.text().contains("for carol"),
+        "the body came from the second guard's identity, which this visitor does not \
+         hold; it must never be served to them - got {}",
+        default_only.text()
+    );
+    assert!(
+        default_only.text().contains("for anonymous"),
+        "got {}",
+        default_only.text()
+    );
+    assert_eq!(
+        counting_route::renders(),
+        base + 2,
+        "the second-guard render must not be stored under the default guard's key, so \
+         the second request runs the handler"
+    );
 }
 
 // ── R82, attack 6 ──────────────────────────────────────────────────────
@@ -752,18 +815,21 @@ async fn a_locale_middleware_installed_after_the_cache_never_publishes_under_the
 #[serial_test::serial]
 async fn a_second_identity_touch_never_overwrites_the_first_the_body_was_built_from() {
     let harness = boot_with_render_cache().await;
-    // R103 positive control, on the attacked route itself: when both
-    // accessors resolve to one identity there is only one observed value and
-    // it is the key's, so this route caches. That is also the sharpest form
-    // of the control here, because it shows the guard comparing values
-    // rather than declining whenever two accessors are touched. Parameter 1
-    // for the control, parameter 2 for the attack.
+    // R103 positive control, sibling shape: the attacked route reads another
+    // guard's identity, which is never the default guard's key (IDENTITY-034),
+    // so it has no storable visitor. The control is a route that declares
+    // `Principal` and reads the default guard, and the attacked route must
+    // still be attached to a policy.
     let base = same_visitor_twice_is_a_hit(
         &harness,
-        "/privacy/named-then-default/1",
-        &[("x-test-login", "alice"), ("x-test-named-login", "alice")],
+        "/privacy/private/12",
+        &[("x-test-login", "alice")],
     )
     .await;
+    assert!(
+        route_is_under_a_policy(&harness, NAMED_THEN_DEFAULT_ROUTE),
+        "the attacked route must still be attached to a policy"
+    );
 
     let carol = dispatch_get(
         &harness,

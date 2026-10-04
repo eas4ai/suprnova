@@ -105,10 +105,15 @@ impl AuthMiddleware {
     /// with the request, once per request, and a resolver error fails the
     /// request the same way.
     ///
-    /// `#[authorize]` on the route's handler asks this guard for the user,
-    /// so it checks the user this middleware authenticated. When several
-    /// `AuthMiddleware` run, the last one that passed the request on names
-    /// the guard.
+    /// The route checks after it - `#[authorize]` on the route's handler,
+    /// `EnsureEmailVerifiedMiddleware`, `RoleMiddleware` and
+    /// `PermissionMiddleware` - ask this guard for the user, so they check
+    /// the user this middleware authenticated. When several `AuthMiddleware`
+    /// run, the last one that passed the request on names the guard.
+    ///
+    /// For a Live request, the middleware attests the guard's user as the
+    /// principal: the bare id for the default guard, `<guard>:<id>` for any
+    /// other guard.
     pub fn for_guard(mut self, name: impl Into<String>) -> Self {
         self.guard = Some(name.into());
         self
@@ -130,10 +135,12 @@ impl Middleware for AuthMiddleware {
         // identity. A provider miss clears the stale slot so the next
         // request does not carry it.
         //
-        // A custom guard keeps its identity outside the session and the
-        // default guard's request user, so its principal is the user it
-        // resolved, and it has no session slot to clear. A guard of
-        // `Auth::via_request` gets its resolver's answer bound first.
+        // A named guard's principal is the user that guard resolved, never
+        // the default guard's request user or another guard's: the route
+        // authenticated this user, and only this user may be attested. A
+        // custom guard keeps its identity outside the session, so it has no
+        // session slot to clear. A guard of `Auth::via_request` gets its
+        // resolver's answer bound first.
         //
         // Without a guard name, a custom default guard is asked the same
         // way: the session fast path below would decide from an identity
@@ -142,35 +149,32 @@ impl Middleware for AuthMiddleware {
             Some(_) => None,
             None => Auth::custom_default_guard(),
         };
-        let mut custom_principal = None;
+        let mut guard_principal = None;
         let authenticated = match self.guard.as_deref().or(custom_default.as_deref()) {
             Some(name) => {
                 let manager = Auth::manager()?;
                 manager.resolve_request_guard(name, &request).await?;
                 let guard = manager.guard(name)?;
-                let custom = manager.is_custom_guard(name);
                 match guard.user().await? {
                     Some(user) => {
-                        if custom {
-                            // A guard of the application has an id space of
-                            // its own. Its name keeps its user `7` apart
-                            // from web user `7`.
-                            //
-                            // A session user attests its bare id, so a
-                            // session user id of the form `<guard>:<id>`
-                            // would attest the same principal as that guard's
-                            // user. The manager refuses a guard name that
-                            // contains `:`, which keeps two guards of the
-                            // application apart; an application whose
-                            // session user ids can contain `:` names its
-                            // guards so that no id starts with `<guard>:`.
-                            let id = user.get_auth_identifier();
-                            custom_principal = Some(format!("{name}:{id}"));
-                        }
+                        // Every guard but the default session or token guard
+                        // has an id space of its own, so its name keeps its
+                        // user `7` apart from web user `7`.
+                        //
+                        // The default guard's user attests its bare id, so a
+                        // user id of the form `<guard>:<id>` would attest the
+                        // same principal as that guard's user. The manager
+                        // refuses a `:` in the name of every guard that
+                        // attests its name, which keeps two such guards
+                        // apart; an application whose user ids can contain
+                        // `:` names its guards so that no id starts with
+                        // `<guard>:`.
+                        let id = user.get_auth_identifier();
+                        guard_principal = Some(Auth::guard_principal(name, &id));
                         true
                     }
                     None => {
-                        if !custom && guard.id().await?.is_some() {
+                        if !manager.is_custom_guard(name) && guard.id().await?.is_some() {
                             crate::session::middleware::clear_guard_auth_user(name);
                         }
                         false
@@ -202,7 +206,7 @@ impl Middleware for AuthMiddleware {
             // Authentication proof belongs to this middleware's successful
             // branch. Merely carrying a session value or Authorization header
             // never mints principal evidence.
-            if let Some(principal_id) = custom_principal
+            if let Some(principal_id) = guard_principal
                 .or_else(crate::auth::request_state::current_user_id)
                 .or_else(Auth::id)
             {
@@ -711,6 +715,64 @@ mod custom_guard_principal_tests {
         })
         .await;
         *seen.lock().unwrap()
+    }
+
+    /// Installs a manager with the session guards `web` (the default) and
+    /// `admin`, over two providers.
+    fn install_session_guards() {
+        let config = AuthConfig::new("web").guard("admin", GuardConfig::session("admins"));
+        TestContainer::singleton(AuthManager::new(config));
+        Auth::register_provider("users", Arc::new(NoUsers)).unwrap();
+        Auth::register_provider("admins", Arc::new(NoUsers)).unwrap();
+    }
+
+    /// Runs `middleware` on a Live request after signing in each
+    /// `(guard, id)` of `signed_in` on its guard, and returns the principal
+    /// evidence the middleware attested: `None` when it refused the request
+    /// or attested nothing.
+    async fn attested_with_guards(
+        middleware: AuthMiddleware,
+        signed_in: &[(&'static str, &'static str)],
+    ) -> Option<[u8; 32]> {
+        let seen = Arc::new(Mutex::new(None));
+        let recorded = seen.clone();
+        let next: Next = Arc::new(move |request| {
+            *recorded.lock().unwrap() = principal_fingerprint(&request);
+            Box::pin(async { Ok(HttpResponse::text("reached")) })
+        });
+        crate::auth::request_state::scope(async {
+            for &(guard, id) in signed_in {
+                let user: Arc<dyn Authenticatable> = Arc::new(Named(id));
+                Auth::guard(guard).unwrap().set_user(user).await;
+            }
+            let _ = middleware.handle(live_request(), next).await;
+        })
+        .await;
+        *seen.lock().unwrap()
+    }
+
+    // IDENTITY-002: a route behind a second session guard attests the user
+    // that guard authenticated, under the guard's name. It never attests the
+    // default guard's user, and it attests its own user when the default
+    // guard has none.
+    #[tokio::test]
+    async fn a_second_session_guard_attests_its_own_user_under_its_name() {
+        let _scope = TestContainer::fake();
+        install_session_guards();
+        let admin = || AuthMiddleware::new().for_guard("admin");
+        assert!(attested("admin:9").is_some());
+
+        let both = attested_with_guards(admin(), &[("web", "7"), ("admin", "9")]).await;
+        assert_eq!(both, attested("admin:9"));
+        assert_ne!(both, attested("7"));
+
+        let admin_alone = attested_with_guards(admin(), &[("admin", "9")]).await;
+        assert_eq!(admin_alone, attested("admin:9"));
+
+        // The default guard, named or not, keeps the bare id.
+        let web = AuthMiddleware::new().for_guard("web");
+        let named_default = attested_with_guards(web, &[("web", "7"), ("admin", "9")]).await;
+        assert_eq!(named_default, attested("7"));
     }
 
     // The default guard's user sits in the request's generic slot. A route

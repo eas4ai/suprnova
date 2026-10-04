@@ -2395,6 +2395,7 @@ pub fn is_authenticated() -> bool {
 /// these two variants, and adding a third means editing this enum and the
 /// match below, where the reclassification is exactly what a reviewer is
 /// looking at.
+#[derive(Clone, Copy)]
 enum SessionIdentityField<'a> {
     /// The default guard's `SessionData::user_id`.
     DefaultGuardUser,
@@ -2459,7 +2460,19 @@ fn session_identity(field: SessionIdentityField<'_>) -> Option<String> {
         .ok()
         .flatten();
     if let Some(identity) = &identity {
-        crate::render_cache::collector::observe_principal_value(identity);
+        match field {
+            SessionIdentityField::DefaultGuardUser => {
+                crate::render_cache::collector::observe_principal_value(identity);
+            }
+            // Another guard's identifier is that guard's principal, not the
+            // default guard's: the key is built from the default guard, so
+            // a page built from another guard's user must never match it.
+            SessionIdentityField::Guard(guard_name) => {
+                crate::render_cache::collector::observe_principal_value(
+                    &crate::auth::Auth::guard_principal(guard_name, identity),
+                );
+            }
+        }
     }
     identity
 }

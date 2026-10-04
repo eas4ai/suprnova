@@ -327,6 +327,13 @@ user's `email_verified_at`. Compose it after `AuthMiddleware` and the
 chain blocks any request whose user has not yet completed the verify
 step.
 
+The user it checks is the user of the route's guard: the guard the last
+`AuthMiddleware` to pass the request on checked, or the default guard when
+none names one. It asks that guard's provider. Behind
+`AuthMiddleware::new().for_guard("admin")`, the gate checks the admin user
+through the `admin` guard's provider, and a verified default-guard user
+signed in on the same session does not pass it.
+
 The choice between **403 JSON** and **302 HTML redirect** is made at
 route-registration time via the constructor - there is no
 request-content sniffing, matching the pattern set by

@@ -928,6 +928,65 @@ impl Auth {
         }
     }
 
+    /// The identifier of the route's user, by the rule of
+    /// [`route_user`](Self::route_user), without a provider lookup: the
+    /// route's guard reports it, or [`id`](Self::id) when the route names no
+    /// guard.
+    pub(crate) async fn route_user_id() -> Result<Option<String>, crate::error::FrameworkError> {
+        match request_state::route_guard() {
+            Some(guard) => Self::guard(&guard)?.id().await,
+            None => Ok(Self::id()),
+        }
+    }
+
+    /// The provider of the route's guard: the provider its configuration
+    /// names, or the default guard's provider when the route names no guard.
+    ///
+    /// A route check asks this provider about the route's user. The default
+    /// provider knows the default guard's users, which are not the users of
+    /// another guard.
+    pub(crate) fn route_user_provider()
+    -> Result<Arc<dyn UserProvider>, crate::error::FrameworkError> {
+        match request_state::route_guard() {
+            Some(guard) => Self::manager()?.guard_provider(&guard),
+            None => super::active_user_provider(),
+        }
+    }
+
+    /// The route's guard, by name, when it is not the default guard: the
+    /// guard the last `AuthMiddleware` that passed the request on checked.
+    /// `None` when that is the default guard, named or not, or when no such
+    /// middleware ran.
+    pub(crate) fn route_guard_other_than_default() -> Option<String> {
+        request_state::route_guard().filter(|guard| *guard != Self::default_guard_name())
+    }
+
+    /// The principal that the user `id` of the guard `guard_name` stands
+    /// for, wherever an identity is recorded: the Live principal attestation
+    /// and the identity material of the render cache.
+    ///
+    /// The default guard keeps the bare id, the value [`id`](Self::id)
+    /// reports, so attestations and render-cache keys built from the default
+    /// guard keep their value. Every other guard, and a guard of the
+    /// application even as the default, gives `<guard>:<id>`. User 7 of an
+    /// `admin` guard is not user 7 of the default guard, even when both
+    /// guards read one table, and a body built for one is never served as
+    /// the other's. The manager refuses a `:` in the name of every guard
+    /// that gives `<guard>:<id>`, so two guards never give one principal.
+    pub(crate) fn guard_principal(guard_name: &str, id: &str) -> String {
+        let bare = match App::get::<AuthManager>() {
+            Some(manager) => {
+                guard_name == manager.default_guard_name() && !manager.is_custom_guard(guard_name)
+            }
+            None => guard_name == "web",
+        };
+        if bare {
+            id.to_owned()
+        } else {
+            format!("{guard_name}:{id}")
+        }
+    }
+
     // ── Named guards (AuthManager) ──────────────────────────────────────────────
 
     /// Resolve the [`AuthManager`] from the container, with a remediation

@@ -5,18 +5,20 @@
 //! (the `verified` route alias). Composes naturally after
 //! [`crate::AuthMiddleware`]: this middleware does not authenticate, it
 //! only checks the verification flag on the user that auth already
-//! resolved. The check goes through the application's configured
-//! [`UserProvider`](crate::auth::UserProvider) - the same provider
-//! [`Auth::user`](crate::auth::Auth::user) resolves against - so it is
-//! backend-agnostic (Eloquent today; any registered provider tomorrow)
-//! and carries no coupling to a specific auth store. If no user is
-//! currently authenticated, it falls into the same response branch as
-//! "user authed but not verified" - matching Laravel's
-//! `! $request->user() || ! hasVerifiedEmail()` shape.
+//! resolved. That user is the route's: the user of the guard the last
+//! `AuthMiddleware` checked, or of the default guard when none names one,
+//! as Laravel's `verified` checks the user of the guard `auth:<guard>`
+//! selected. The check goes through that guard's
+//! [`UserProvider`](crate::auth::UserProvider), so it is backend-agnostic
+//! (Eloquent today; any registered provider tomorrow) and carries no
+//! coupling to a specific auth store. If the route's guard has no user,
+//! it falls into the same response branch as "user authed but not
+//! verified" - matching Laravel's `! $request->user() ||
+//! ! hasVerifiedEmail()` shape.
 
 use async_trait::async_trait;
 
-use crate::auth::{Auth, active_user_provider};
+use crate::auth::Auth;
 use crate::http::{HttpResponse, Request, Response};
 use crate::middleware::{Middleware, Next};
 
@@ -114,15 +116,17 @@ impl Default for EnsureEmailVerifiedMiddleware {
 #[async_trait]
 impl Middleware for EnsureEmailVerifiedMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
-        // 1. Pull the auth id from the request state (sync; no DB call).
-        let Some(user_id) = Auth::id() else {
+        // 1. The id of the route's user, from the route's guard (no DB
+        //    call). The default guard's user never stands in for the user
+        //    of a named route guard.
+        let Some(user_id) = Auth::route_user_id().await? else {
             // No authenticated user - same response branch as "authed
             // but unverified" (mirrors Laravel's `! user() || ! verified`).
             return Err(self.unverified_response(&request));
         };
 
-        // 2. Ask the application's configured `UserProvider` whether this
-        //    user has verified their email. A `?` here propagates a
+        // 2. Ask the route guard's `UserProvider` whether this user has
+        //    verified their email. A `?` here propagates a
         //    `FrameworkError` - e.g. the storage layer is down, or the
         //    active provider is token-only and doesn't support the check
         //    (its default impl returns an unsupported error) - as the
@@ -135,7 +139,9 @@ impl Middleware for EnsureEmailVerifiedMiddleware {
         //    (the user was deleted after auth resolved it), so a missing
         //    user collapses into the unverified branch below - preserving
         //    the prior "user since deleted → unverified" behaviour.
-        let verified = active_user_provider()?.is_email_verified(&user_id).await?;
+        let verified = Auth::route_user_provider()?
+            .is_email_verified(&user_id)
+            .await?;
 
         if verified {
             next(request).await
