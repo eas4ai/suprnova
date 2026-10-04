@@ -268,6 +268,15 @@ where
         }))
     }
 
+    async fn verification_email(&self, id: &str) -> Result<Option<String>, FrameworkError> {
+        // The `MustVerifyEmail` address, the one `send_link` mails, not the
+        // reset address `flow_user_by_id` reports.
+        Ok(self
+            .find_by_identifier(id)
+            .await?
+            .map(|user| MustVerifyEmail::email(&user).to_owned()))
+    }
+
     async fn mark_email_verified(&self, id: &str) -> Result<(), FrameworkError> {
         // load → mutate → `Model::save`: this (a) fires the full model
         // lifecycle (Saving/Updating/Updated/Saved) so observers and audit see

@@ -320,6 +320,17 @@ token belonging to another account returns the same invalid-token response and
 remains unused. On success, the provider marks the authenticated owner verified
 and the facade fires `EmailVerified`.
 
+A link proves the mailbox it was sent to, and no other. The token carries a
+digest of that address, and `verify` compares it with the account's current
+verification address, which the provider's `verification_email` reports.
+When the account changed its address after the link was sent, `verify`
+returns the same invalid-token response, leaves the token unused, and marks
+nothing verified. A link sent before an upgrade to this behavior carries no
+address and is refused the same way, so the user asks for a new one.
+`EloquentUserProvider` reports the `MustVerifyEmail` address. A custom
+provider reports the email of `flow_user_by_id` unless it implements
+`verification_email`.
+
 ### Verified-only routes: `EnsureEmailVerifiedMiddleware`
 
 `EnsureEmailVerifiedMiddleware` gates routes on the authenticated
