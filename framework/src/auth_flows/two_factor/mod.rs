@@ -29,7 +29,9 @@ pub mod lockout;
 pub mod migration;
 pub mod migration_attempts;
 pub mod migration_replay;
+pub mod migration_rotation;
 pub mod recovery;
+mod rotation;
 
 #[cfg(any(
     feature = "database-sqlite",
@@ -149,17 +151,24 @@ impl TwoFactor {
         // No separate "already enabled?" read: the write refuses a
         // confirmed row in the same statement that replaces a pending one,
         // so a confirmation cannot land between a check and the write.
-        Self::write_new_enrollment(user, EnrollmentWrite::Fresh).await
+        let (response, encrypted_secret, encrypted_recovery) = Self::new_secret(user)?;
+        write_enrollment_row(user.user_id(), encrypted_secret, encrypted_recovery).await?;
+        Ok(response)
     }
 
     /// Rotate the secret for an existing confirmed 2FA enrollment.
     /// Requires either a valid current TOTP code or an unused
     /// recovery code as proof of possession.
     ///
-    /// On success, the row is overwritten with a fresh secret + 10
-    /// fresh recovery codes; `confirmed_at` is reset to NULL so the
-    /// user must call [`Self::confirm`] with a code from the new
-    /// secret before 2FA is active again.
+    /// On success, a fresh secret + 10 fresh recovery codes wait as a
+    /// pending rotation until [`Self::confirm`] proves a code from the new
+    /// secret. Until then the confirmed secret and its recovery codes keep
+    /// gating sign-in, so a rotation nobody finishes never leaves the
+    /// account without a second factor, and [`Self::enroll`], which takes
+    /// no proof, cannot replace the pending secret. A second `re_enroll`
+    /// replaces the pending rotation. The rotation waits in
+    /// `two_factor_rotations`, which
+    /// [`migration_rotation::Migration`] creates.
     ///
     /// # Errors
     ///
@@ -170,7 +179,7 @@ impl TwoFactor {
     ///   enrollment exists - call [`Self::enroll`] instead.
     /// - `FrameworkError::domain(.., 429)` while wrong codes have locked
     ///   the second factor (see [`Self::verify`]), and `.., 503` when the
-    ///   attempt store fails.
+    ///   attempt store or the rotation store fails.
     pub async fn re_enroll<U: TwoFactorUser>(
         user: &U,
         proof: &str,
@@ -196,18 +205,17 @@ impl TwoFactor {
             ));
         }
 
-        Self::write_new_enrollment(user, EnrollmentWrite::Rotation).await
+        let (response, encrypted_secret, encrypted_recovery) = Self::new_secret(user)?;
+        rotation::store(user.user_id(), encrypted_secret, encrypted_recovery).await?;
+        Ok(response)
     }
 
-    /// Internal helper - generate + persist a fresh secret. Used by
-    /// [`Self::enroll`] (no prior state) and [`Self::re_enroll`]
-    /// (after proof). Overwrites any existing row's secret, recovery
-    /// codes, and `confirmed_at` (re-confirmation required against
-    /// the new secret).
-    async fn write_new_enrollment<U: TwoFactorUser>(
+    /// Internal helper - mint a fresh secret and recovery codes. Returns the
+    /// one-time artifacts and their encrypted forms, for [`Self::enroll`]
+    /// (a pending enrollment) and [`Self::re_enroll`] (a pending rotation).
+    fn new_secret<U: TwoFactorUser>(
         user: &U,
-        write: EnrollmentWrite,
-    ) -> Result<EnrollmentResponse, FrameworkError> {
+    ) -> Result<(EnrollmentResponse, String, String), FrameworkError> {
         let secret_bytes = Secret::generate_secret()
             .to_bytes()
             .map_err(|e| FrameworkError::internal(format!("totp secret bytes: {e}")))?;
@@ -242,13 +250,15 @@ impl TwoFactor {
             &recovery_codes.join("\n"),
         )?;
 
-        write_enrollment_row(user.user_id(), encrypted_secret, encrypted_recovery, write).await?;
-
-        Ok(EnrollmentResponse {
-            otpauth_url,
-            qr_code_svg,
-            recovery_codes,
-        })
+        Ok((
+            EnrollmentResponse {
+                otpauth_url,
+                qr_code_svg,
+                recovery_codes,
+            },
+            encrypted_secret,
+            encrypted_recovery,
+        ))
     }
 
     /// Confirm a pending enrollment with a TOTP code from the user's
@@ -276,12 +286,26 @@ impl TwoFactor {
         let enrollment = load_secret(user.user_id())
             .await?
             .ok_or_else(|| FrameworkError::domain("no pending 2FA enrollment", 401))?;
-        if enrollment.confirmed {
-            return Err(FrameworkError::domain(
-                "2FA is already confirmed for this account",
-                409,
-            ));
-        }
+        // A confirmed row has nothing to confirm unless a proven rotation
+        // waits; the code is then checked against the rotation's secret.
+        let pending_rotation = if enrollment.confirmed {
+            match rotation::find(user.user_id()).await? {
+                Some(rotation) => Some(rotation),
+                None => {
+                    return Err(FrameworkError::domain(
+                        "2FA is already confirmed for this account",
+                        409,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let checked_secret = pending_rotation
+            .as_ref()
+            .map_or(enrollment.secret_b32.as_str(), |rotation| {
+                rotation.secret_b32.as_str()
+            });
 
         // Confirmation is throttled like every other code-checking path:
         // without it the 6-digit TOTP of a pending enrollment could be
@@ -289,17 +313,27 @@ impl TwoFactor {
         let attempt = ProofAttempt::admit(user.user_id(), user.email()).await?;
         let stamped = async {
             let now = crate::clock::now();
-            if !check_code(&enrollment.secret_b32, code, now.timestamp())? {
+            if !check_code(checked_secret, code, now.timestamp())? {
                 return Ok(false);
             }
-            if !stamp_confirmation(
-                user.user_id(),
-                &enrollment.ciphertext,
-                totp_timestep_at(now.timestamp()),
-                now,
-            )
-            .await?
-            {
+            let timestep = totp_timestep_at(now.timestamp());
+            let committed = match &pending_rotation {
+                None => {
+                    stamp_confirmation(user.user_id(), &enrollment.ciphertext, timestep, now)
+                        .await?
+                }
+                Some(rotation) => {
+                    rotation::promote(
+                        user.user_id(),
+                        &enrollment.ciphertext,
+                        &rotation.ciphertext,
+                        timestep,
+                        now,
+                    )
+                    .await?
+                }
+            };
+            if !committed {
                 return Err(FrameworkError::domain(
                     "the 2FA enrollment changed while it was being confirmed; confirm a code from the current enrollment",
                     409,
@@ -1030,6 +1064,9 @@ impl TwoFactor {
     /// audit listeners see one entry per actual disable, not one per
     /// click on a no-op button.
     pub async fn disable<U: TwoFactorUser>(user: &U) -> Result<(), FrameworkError> {
+        // A pending rotation goes first: left behind, it could later be
+        // confirmed over a new enrollment by whoever saw its secret.
+        rotation::discard(user.user_id()).await?;
         let db = DB::connection()?;
         let result = entity::Entity::delete_by_id(user.user_id().to_string())
             .exec(db.inner())
@@ -1049,38 +1086,26 @@ impl TwoFactor {
     }
 }
 
-/// Which enrollment a fresh secret may replace.
-#[derive(Clone, Copy)]
-enum EnrollmentWrite {
-    /// [`TwoFactor::enroll`]: no proof of an existing secret was given.
-    Fresh,
-    /// [`TwoFactor::re_enroll`]: the caller proved the current secret.
-    Rotation,
-}
-
-/// Persist a fresh secret and recovery codes, clearing `confirmed_at` and
-/// the replay stamp so the new secret must be confirmed.
+/// Persist the secret and recovery codes of a new, unconfirmed enrollment.
 ///
-/// The write is conditional, not a read-modify-write. [`TwoFactor::enroll`]
-/// checks `is_enabled` before it calls this, but a confirmation can land
-/// between that read and this write; for [`EnrollmentWrite::Fresh`] the
-/// `confirmed_at IS NULL` condition makes the check part of the write, so a
-/// confirmed secret is never replaced without the proof `re_enroll` takes.
+/// The write is conditional, not a read-modify-write: the
+/// `confirmed_at IS NULL` condition makes "not yet confirmed" part of the
+/// write, so a confirmed secret - including one with a rotation pending -
+/// is never replaced without the proof `re_enroll` takes, even when the
+/// confirmation lands while `enroll` runs.
 ///
 /// # Errors
 ///
-/// `FrameworkError::domain(.., 409)` when a fresh enrollment finds the row
-/// already confirmed.
+/// `FrameworkError::domain(.., 409)` when the row is already confirmed.
 async fn write_enrollment_row(
     user_id: &str,
     encrypted_secret: String,
     encrypted_recovery: String,
-    write: EnrollmentWrite,
 ) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
     let conn = db.inner();
     let now = crate::clock::now();
-    let mut update = entity::Entity::update_many()
+    let update = entity::Entity::update_many()
         .set(entity::ActiveModel {
             user_id: sea_orm::ActiveValue::NotSet,
             secret: Set(encrypted_secret.clone()),
@@ -1092,10 +1117,8 @@ async fn write_enrollment_row(
             created_at: sea_orm::ActiveValue::NotSet,
             updated_at: Set(now),
         })
-        .filter(entity::Column::UserId.eq(user_id));
-    if matches!(write, EnrollmentWrite::Fresh) {
-        update = update.filter(entity::Column::ConfirmedAt.is_null());
-    }
+        .filter(entity::Column::UserId.eq(user_id))
+        .filter(entity::Column::ConfirmedAt.is_null());
     let replaced = update
         .exec(conn)
         .await
@@ -1116,6 +1139,9 @@ async fn write_enrollment_row(
             409,
         ));
     }
+    // No enrollment at all: drop any rotation a deleted enrollment left
+    // behind, so it cannot be confirmed over this one later.
+    rotation::discard(user_id).await?;
     entity::ActiveModel {
         user_id: Set(user_id.to_string()),
         secret: Set(encrypted_secret),
@@ -1413,6 +1439,7 @@ mod tests {
                 Box::new(migration::Migration),
                 Box::new(migration_replay::Migration),
                 Box::new(migration_attempts::Migration),
+                Box::new(migration_rotation::Migration),
             ]
         }
     }

@@ -204,14 +204,17 @@ impl MigratorTrait for Migrator {
             // Creates `two_factor_attempts`, the second-factor
             // brute-force counter.
             Box::new(suprnova::auth_flows::two_factor::migration_attempts::Migration),
+            // Creates `two_factor_rotations`, where a rotation waits for
+            // its new secret to be confirmed.
+            Box::new(suprnova::auth_flows::two_factor::migration_rotation::Migration),
         ]
     }
 }
 ```
 
 The migrations are idempotent against an already-applied database (the
-v1 and the attempt table use `CREATE TABLE IF NOT EXISTS`; the v2 is a
-column add). Re-running `suprnova migrate` against a production database
+v1, the attempt table and the rotation table use `CREATE TABLE IF NOT
+EXISTS`; the v2 is a column add). Re-running `suprnova migrate` against a production database
 that already has the schema is a no-op.
 
 An application that upgrades from a release without the attempt counter
@@ -651,7 +654,7 @@ impl TwoFactorUser for AppUser2fa<'_> {
 2FA state lives in the framework-owned `two_factor_credentials` table.
 Secrets and recovery codes are encrypted at rest with
 `crate::crypto::Crypt::encrypt_string`, which requires a process-global
-`EncryptionKey`. Apps opt into the schema by listing the three migrations
+`EncryptionKey`. Apps opt into the schema by listing the four migrations
 in their `Migrator::migrations()` - see [Bootstrapping](#bootstrapping).
 The table is keyed by `user_id`, a `TEXT` column on PostgreSQL and SQLite.
 MySQL and MariaDB can't index a `TEXT` key, so there the column is
@@ -811,10 +814,13 @@ To rotate the **secret** (re-pair to a new device) without disabling
 let response = TwoFactor::re_enroll(&user_2fa, &proof).await?;
 ```
 
-Same proof model as `regenerate_recovery_codes`. The row is rewritten
-with a fresh secret + 10 fresh recovery codes; `confirmed_at` resets to
-NULL so the user must `confirm` with a code from the new authenticator
-before 2FA is active again.
+Same proof model as `regenerate_recovery_codes`. A fresh secret + 10
+fresh recovery codes wait as a pending rotation in `two_factor_rotations`
+until the user calls `confirm` with a code from the new authenticator.
+Until then the confirmed secret and its recovery codes keep gating
+sign-in, so a rotation nobody finishes never turns 2FA off, and `enroll`,
+which takes no proof, can't replace the pending secret. Confirming the
+rotation swaps in the new secret and recovery codes in one transaction.
 
 ### Disable
 

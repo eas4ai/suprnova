@@ -37,6 +37,7 @@ impl sea_orm_migration::MigratorTrait for TestMigrator {
             Box::new(TwoFactorMigration),
             Box::new(TwoFactorReplayMigration),
             Box::new(TwoFactorAttemptsMigration),
+            Box::new(suprnova::auth_flows::two_factor::migration_rotation::Migration),
             Box::new(CreateRememberTokensTable),
         ]
     }
@@ -499,7 +500,7 @@ async fn recovery_code_consume_is_single_use() {
 }
 
 #[tokio::test]
-async fn re_enroll_invalidates_old_recovery_codes_and_resets_confirmed() {
+async fn re_enroll_invalidates_old_recovery_codes_once_confirmed() {
     ensure_crypt();
     let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
 
@@ -514,11 +515,11 @@ async fn re_enroll_invalidates_old_recovery_codes_and_resets_confirmed() {
 
     // Re-enroll: proof required because the existing enrollment is
     // confirmed. A live TOTP code from the current secret satisfies
-    // the proof check; the prior row is then overwritten and
-    // confirmed_at cleared.
+    // the proof check; the new secret then waits as a pending rotation
+    // while the confirmed one keeps gating.
     let proof = totp_code_for(&first.otpauth_url);
     let second = TwoFactor::re_enroll(&user, &proof).await.unwrap();
-    assert!(!TwoFactor::is_enabled(&user).await.unwrap());
+    assert!(TwoFactor::is_enabled(&user).await.unwrap());
 
     // Sanity: the new enrollment must produce a different secret /
     // codes than the first.
@@ -850,8 +851,9 @@ async fn re_enroll_with_valid_recovery_code_succeeds() {
     let recovery_proof = resp1.recovery_codes[0].clone();
     let resp2 = TwoFactor::re_enroll(&user, &recovery_proof).await.unwrap();
 
-    // New enrollment is pending; old enrollment cleared.
-    assert!(!TwoFactor::is_enabled(&user).await.unwrap());
+    // The new secret waits as a pending rotation; the confirmed one
+    // keeps gating until it is confirmed.
+    assert!(TwoFactor::is_enabled(&user).await.unwrap());
     assert_ne!(resp1.otpauth_url, resp2.otpauth_url);
 
     // Same recovery code can't be reused (consumed during re_enroll +
@@ -1398,5 +1400,94 @@ async fn a_committed_confirmation_survives_a_failed_attempt_settle() {
             suprnova::auth_flows::events::TwoFactorEnrolled,
         >(|enrolled| enrolled.user_id == user.id),
         1
+    );
+}
+
+// ---- A rotation keeps the confirmed secret until the new one is confirmed ---
+
+/// `re_enroll` with proof starts a rotation. Until the new secret is
+/// confirmed, the confirmed one keeps gating sign-in: a rotation nobody
+/// finishes must not leave the account without a second factor.
+#[tokio::test]
+async fn a_rotation_keeps_the_confirmed_secret_gating_until_it_is_confirmed() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let user = FakeUser {
+        id: "rotation-gates".into(),
+        email: "rotation-gates@example.com".into(),
+    };
+    let first = TwoFactor::enroll(&user).await.expect("enroll");
+    confirm_earlier(&user, &first.otpauth_url).await;
+
+    let second = TwoFactor::re_enroll(&user, &first.recovery_codes[0])
+        .await
+        .expect("rotate with a recovery code as proof");
+
+    assert!(
+        TwoFactor::is_enabled(&user).await.unwrap(),
+        "the confirmed secret still gates sign-in"
+    );
+    assert!(
+        !TwoFactor::verify(&user, &totp_code_for(&second.otpauth_url))
+            .await
+            .unwrap(),
+        "the unconfirmed secret proves nothing yet"
+    );
+    assert!(
+        TwoFactor::verify(&user, &totp_code_for(&first.otpauth_url))
+            .await
+            .unwrap(),
+        "the confirmed secret still signs in"
+    );
+
+    // Confirming the new secret finishes the rotation: it gates from now
+    // on, and the old secret and its recovery codes are gone.
+    confirm_earlier(&user, &second.otpauth_url).await;
+    assert!(TwoFactor::is_enabled(&user).await.unwrap());
+    assert!(
+        TwoFactor::verify(&user, &totp_code_for(&second.otpauth_url))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !TwoFactor::consume_recovery_code(&user, &first.recovery_codes[1])
+            .await
+            .unwrap(),
+        "the old recovery codes went with the old secret"
+    );
+    assert!(
+        TwoFactor::consume_recovery_code(&user, &second.recovery_codes[0])
+            .await
+            .unwrap()
+    );
+}
+
+/// `enroll` takes no proof, so it must not replace a pending rotation: that
+/// would hand the second factor to whoever holds the session.
+#[tokio::test]
+async fn enroll_cannot_overwrite_a_pending_rotation() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let user = FakeUser {
+        id: "rotation-kept".into(),
+        email: "rotation-kept@example.com".into(),
+    };
+    let first = TwoFactor::enroll(&user).await.expect("enroll");
+    confirm_earlier(&user, &first.otpauth_url).await;
+    let second = TwoFactor::re_enroll(&user, &first.recovery_codes[0])
+        .await
+        .expect("rotate");
+
+    let error = TwoFactor::enroll(&user)
+        .await
+        .expect_err("no proof, no new enrollment");
+    assert_eq!(error.status_code(), 409);
+
+    // The rotation the proof started is the one that confirms.
+    confirm_earlier(&user, &second.otpauth_url).await;
+    assert!(
+        TwoFactor::verify(&user, &totp_code_for(&second.otpauth_url))
+            .await
+            .unwrap()
     );
 }

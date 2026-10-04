@@ -39,6 +39,9 @@ impl MigratorTrait for Migrator {
             Box::new(suprnova::auth_flows::two_factor::migration_replay::Migration),
             // Second-factor attempt counter for the TwoFactor facade.
             Box::new(suprnova::auth_flows::two_factor::migration_attempts::Migration),
+            // Pending rotations, so a rotation keeps the confirmed secret
+            // gating until the new one is confirmed.
+            Box::new(suprnova::auth_flows::two_factor::migration_rotation::Migration),
             // Phase 13 - framework-owned features table. Powers
             // DatabaseEvaluator + admin CRUD. The app's Migrator
             // includes it so `suprnova migrate` provisions the table

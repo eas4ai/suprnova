@@ -103,6 +103,10 @@ async fn create_tables(conn: &DatabaseConnection) {
         .up(&manager)
         .await
         .expect("attempt table");
+    suprnova::auth_flows::two_factor::migration_rotation::Migration
+        .up(&manager)
+        .await
+        .expect("rotation table");
 }
 
 /// Install the engine for this test, and an enrolled, confirmed user with an

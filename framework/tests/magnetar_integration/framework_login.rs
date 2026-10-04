@@ -91,6 +91,7 @@ impl MigratorTrait for TwoFactorMigrator {
             Box::new(TwoFactorMigration),
             Box::new(TwoFactorReplayMigration),
             Box::new(TwoFactorAttemptsMigration),
+            Box::new(suprnova::auth_flows::two_factor::migration_rotation::Migration),
         ]
     }
 }
