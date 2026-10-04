@@ -606,6 +606,69 @@ async fn renewal_replays_the_bounded_log_tail_and_reissues_authority() {
     assert_eq!(superseded.error_code(), "async_subscription_unknown");
 }
 
+/// ROOT-37: a renewal whose needed tail the log has already evicted is
+/// refused, never answered with an authoritative no-tail proof at the
+/// browser's own position. That proof told the browser nothing had happened
+/// since the position it held, when the events after it were only gone from
+/// the log; the browser accepted it, kept its stale island current, and met
+/// the gap later instead of recovering now. Refused, the membership degrades,
+/// so the island never claims to be current on a position the server could
+/// not prove, as spec 14 requires. A position the log still covers keeps
+/// replaying exactly as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn renewal_from_a_position_the_log_evicted_is_refused_rather_than_proven() {
+    let (router, _runtime) = router_and_runtime();
+    let server = spawn_server(router).await;
+    let alice = Identity::alice();
+    let issued = issue(
+        server.port,
+        &alice,
+        orders_issue_body("sse", "doc-instance-0001"),
+    )
+    .await;
+    let streams = LiveStreams::resolve().expect("Live streams publisher");
+    // One past what the subscription's log retains, so the entry right
+    // after the issued baseline is evicted.
+    let retained = suprnova::live::LiveConfig::default().async_max_replay_events();
+    for index in 0..=retained {
+        streams
+            .event::<OrdersUpdated>(
+                "orders",
+                LiveEventTarget::Document,
+                CanonicalValue::String(format!("event-{index}")),
+            )
+            .await
+            .expect("publish");
+    }
+
+    let renewal = json!({
+        "protocol_version": 1,
+        "operation": "renew",
+        "transport": "sse",
+        "stream": "orders",
+        "island": {
+            "component": ORDERS_COMPONENT,
+            "slot": "orders-slot",
+            "document_key": "orders-document",
+        },
+        "document_instance": "doc-instance-0001",
+        "prior": {
+            "subscription_id": issued.subscription_id,
+            "descriptor_binding": issued.descriptor_binding,
+        },
+        "position": { "epoch": issued.baseline.0, "sequence": "0" },
+    });
+    let reply = post_control(server.port, &alice, SUBSCRIPTION_PATH, None, renewal).await;
+    assert_eq!(
+        reply.status,
+        StatusCode::BAD_REQUEST,
+        "an evicted tail proves nothing about what the browser missed: {}",
+        String::from_utf8_lossy(&reply.body)
+    );
+    assert_eq!(reply.error_code(), "async_position_invalid");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn websocket_transport_authenticates_memberships_and_delivers_envelopes() {

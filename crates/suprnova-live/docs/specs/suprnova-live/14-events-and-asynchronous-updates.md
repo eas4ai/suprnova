@@ -630,6 +630,15 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-04 -- A renewal from a position whose tail the subscription's log
+  has already evicted is refused with `async_position_invalid`, before any
+  authority rotates. The framework host used to answer it with an
+  authoritative no-tail proof at the browser's own position, which claimed
+  continuity it could not prove: the browser kept the island current over the
+  missed events (audit ROOT-37). Refused, the membership degrades, so the
+  island never claims current status on an unproven position, per "Resume
+  tokens or sequence positions are used only when the backend proves
+  continuity" above.
 - 2026-10-04 -- Replay memory is bounded per subscription and per process:
   `LIVE_ASYNC_MAX_REPLAY_BYTES` (4 MiB) bounds one subscription's log, which
   shared the 16 MiB per-document queue limit before, and
