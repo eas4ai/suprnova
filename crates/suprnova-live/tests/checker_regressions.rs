@@ -835,3 +835,88 @@ fn a_tag_start_inside_an_attribute_value_and_an_unclosed_loop_report_their_own_p
         report.diagnostics()
     );
 }
+fn unproved_at(report: &suprnova_live::checker::CheckReport) -> Vec<(u32, u32)> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.code() == DiagnosticCode::DynamicStructureUnproved
+                && diagnostic.severity() == DiagnosticSeverity::Unproved
+        })
+        .map(|diagnostic| (diagnostic.line(), diagnostic.column()))
+        .collect()
+}
+
+/// Askama escapes `"&'<>`: enough between tags and inside a quoted
+/// attribute value, not in an unquoted value, an event-handler attribute, or
+/// `script` and `style` text. A dynamic value there is unproved.
+#[test]
+fn a_dynamic_value_where_html_escaping_does_not_hold_is_unproved() {
+    for (line, location) in [
+        ("<div title={{ name }}>x</div>", (2, 6)),
+        (
+            "<button type=\"button\" onclick=\"go('{{ name }}')\">x</button>",
+            (2, 23),
+        ),
+        ("<script>let x = '{{ name }}';</script>", (2, 21)),
+        ("<style>.a { color: {{ color }}; }</style>", (2, 23)),
+    ] {
+        let report = check(
+            &format!("<section>\n{line}</section>"),
+            CheckerLimits::default(),
+        );
+        assert_eq!(
+            unproved_at(&report),
+            vec![location],
+            "{line}: {:?}",
+            report.diagnostics()
+        );
+    }
+    for line in [
+        "<div title=\"{{ name }}\">x</div>",
+        "<div title='{{ name }}'>x</div>",
+        "<p>{{ name }}</p>",
+        "<script>let x = 1;</script><style>.a { color: red; }</style>",
+        "<button type=\"button\" onclick=\"go()\">x</button>",
+    ] {
+        let report = check(
+            &format!("<section>{line}</section>"),
+            CheckerLimits::default(),
+        );
+        assert!(report.is_proved(), "{line}: {:?}", report.diagnostics());
+    }
+}
+
+/// `linebreaks` and `paragraphbreaks` write `<p>` elements and
+/// `linebreaksbr` writes `<br/>`; inside an element that cannot hold them,
+/// the browser builds a different tree than the one checked.
+#[test]
+fn line_break_filters_are_unproved_where_their_markup_cannot_stand() {
+    for (line, location) in [
+        ("<p>{{ notes|linebreaks }}</p>", (2, 7)),
+        ("<span>{{ notes|paragraphbreaks }}</span>", (2, 10)),
+        ("<ul>{{ notes|linebreaksbr }}</ul>", (2, 8)),
+    ] {
+        let report = check(
+            &format!("<section>\n{line}</section>"),
+            CheckerLimits::default(),
+        );
+        assert_eq!(
+            unproved_at(&report),
+            vec![location],
+            "{line}: {:?}",
+            report.diagnostics()
+        );
+    }
+    for line in [
+        "<div>{{ notes|linebreaks }}</div>",
+        "<article>{{ notes|paragraphbreaks }}</article>",
+        "<p>{{ notes|linebreaksbr }}</p>",
+    ] {
+        let report = check(
+            &format!("<section>{line}</section>"),
+            CheckerLimits::default(),
+        );
+        assert!(report.is_proved(), "{line}: {:?}", report.diagnostics());
+    }
+}

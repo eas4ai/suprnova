@@ -30,6 +30,10 @@ pub(crate) const CHECKED_DIGEST_MARKER: &str = "suprnova-checker-digest-7f3e-000
 const _: () = assert!(CHECKED_DIGEST_MARKER.len() == crate::view::DIGEST_KEY_BYTES);
 
 pub(crate) const LOOP_START_MARKER: &str = "suprnova-checker-loop-start-7f3e";
+/// Marks where `linebreaks` or `paragraphbreaks` writes `<p>` elements, and
+/// `linebreaksbr` writes `<br/>`, so the HTML check can judge the parent.
+pub(crate) const PARAGRAPHS_MARKER: &str = "suprnova-checker-paragraphs-7f3e";
+pub(crate) const LINE_BREAKS_MARKER: &str = "suprnova-checker-line-breaks-7f3e";
 pub(crate) const LOOP_END_MARKER: &str = "suprnova-checker-loop-end-7f3e";
 
 /// Where a piece of rendered text came from: a template the checker read and
@@ -736,13 +740,17 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     }
                     let marker =
                         if expression_uses_filter(source, expression.span(), "live_key_digest") {
-                            CHECKED_DIGEST_MARKER
+                            Cow::Borrowed(CHECKED_DIGEST_MARKER)
                         } else if expression_uses_filter(source, expression.span(), "live_key") {
-                            CHECKED_KEY_MARKER
+                            Cow::Borrowed(CHECKED_KEY_MARKER)
+                        } else if let Some(breaks) = line_break_marker(expression) {
+                            // Still dynamic text, followed by the markup the
+                            // filter inserts.
+                            Cow::Owned(format!("{DYNAMIC_MARKER}<!--{breaks}-->"))
                         } else {
-                            DYNAMIC_MARKER
+                            Cow::Borrowed(DYNAMIC_MARKER)
                         };
-                    self.push_text(out, Cow::Borrowed(marker), origin, view)?;
+                    self.push_text(out, marker, origin, view)?;
                 }
                 Node::If(node) => {
                     for cond in node
@@ -1524,6 +1532,24 @@ fn expression_is_unclassified(expression: &Expr<'_>) -> bool {
         other => sub_expressions(other)
             .into_iter()
             .any(|inner| expression_is_unclassified(inner)),
+    }
+}
+
+/// The marker for markup a line-break filter in the output's filter chain
+/// inserts: `<p>` elements for `linebreaks` and `paragraphbreaks`, `<br/>`
+/// for `linebreaksbr`.
+fn line_break_marker(expression: &Expr<'_>) -> Option<&'static str> {
+    let Expr::Filter(filter) = strip_groups(expression) else {
+        return None;
+    };
+    let inner = filter
+        .arguments
+        .first()
+        .and_then(|value| line_break_marker(value));
+    match filter_name(filter) {
+        "linebreaks" | "paragraphbreaks" => Some(PARAGRAPHS_MARKER),
+        "linebreaksbr" => inner.or(Some(LINE_BREAKS_MARKER)),
+        _ => inner,
     }
 }
 
