@@ -942,16 +942,34 @@ impl Router {
     }
 
     /// Register middleware for a `(method, path)` pair (internal use).
+    ///
+    /// A route keeps each named middleware once, at its first occurrence,
+    /// as Laravel's `Router::uniqueMiddleware` does across group and route
+    /// middleware. Every builder attaches middleware through here, group
+    /// middleware before the route's own, so the first one added is the
+    /// first in the chain. Without this, a route that named `auth` both
+    /// through a group and on its own ran it twice, and a throttle it named
+    /// twice counted every request twice. A middleware is identified by
+    /// the alias and arguments it was resolved from; one added by type or
+    /// by hand has no alias and is always kept.
     pub(crate) fn add_middleware(
         &mut self,
         method: Method,
         path: &str,
         middleware: BoxedMiddleware,
     ) {
-        self.route_middleware
+        let chain = self
+            .route_middleware
             .entry((method, path.to_string()))
-            .or_default()
-            .push(middleware);
+            .or_default();
+        if let Some(alias) = crate::middleware::alias_of(&middleware)
+            && chain
+                .iter()
+                .any(|added| crate::middleware::alias_of(added).as_deref() == Some(alias.as_str()))
+        {
+            return;
+        }
+        chain.push(middleware);
     }
 
     /// Hold the parameter `param` of the route `(method, pattern)` to
