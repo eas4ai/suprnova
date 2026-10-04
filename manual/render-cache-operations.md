@@ -241,8 +241,11 @@ uses, so a private entry's file is retired earlier than a public one's and a
 sweep can never disagree with a freshness check about whether an entry is
 truly dead.
 
-`sweep` removes at most 64 entries per call, oldest publication first, and
-returns whether more remain. It runs automatically on every 256th
+`sweep` removes at most 64 entries per call, and returns whether more
+remain. It takes entries whose retention has run out, in the order it ran
+out, then entries from an older epoch, and it finds them through indexes
+kept in that order, so the work of one call does not grow with the number
+of live entries in the directory. It runs automatically on every 256th
 publication, so a healthy directory needs no attention. `RenderCache::sweep()`
 drives it explicitly when you want to, and a backlog larger than one call's
 limit drains across later triggers rather than blocking on one long scan.
