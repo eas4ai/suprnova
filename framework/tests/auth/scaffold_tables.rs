@@ -532,6 +532,24 @@ async fn login_session_and_remember_restore(url: &str, schema: Schema) {
         .expect("verify the long-lived token");
     assert_eq!(verified.map(|(owner, _)| owner), Some(user_id.clone()));
 
+    // Whole rows read through the public entities, whatever type the
+    // migration gave the time columns.
+    let sessions = suprnova::session::driver::database::sessions::Entity::find()
+        .all(database.inner())
+        .await;
+    let tokens = suprnova::auth::remember::entity::Entity::find()
+        .all(database.inner())
+        .await;
+    assert_eq!(
+        format!(
+            "{:?} {:?}",
+            sessions.as_ref().map(|rows| !rows.is_empty()),
+            tokens.as_ref().map(|rows| !rows.is_empty()),
+        ),
+        "Ok(true) Ok(true)",
+        "{schema:?}: whole rows through sessions::Entity and remember::entity::Entity"
+    );
+
     drop_scaffold_tables(&database).await;
     database.inner().clone().close().await.unwrap();
 }

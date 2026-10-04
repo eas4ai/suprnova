@@ -749,8 +749,8 @@ async fn insert_raw_token(
         user_id: Set(user_id.to_string()),
         selector: Set(selector.to_string()),
         token_hash: Set(token_hash.to_string()),
-        expires_at: Set(expires_at.naive_utc()),
-        created_at: Set(now.naive_utc()),
+        expires_at: Set(expires_at.into()),
+        created_at: Set(now.into()),
         last_used_at: Set(None),
         ..Default::default()
     };

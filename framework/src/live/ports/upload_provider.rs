@@ -1,6 +1,6 @@
 //! Bounded asynchronous quarantine I/O and explicit upload-provider adapters.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -91,6 +91,9 @@ struct UploadCreateMetadataState {
     entries: HashMap<UploadHandle, UploadCreateMetadata>,
     retained_bytes: usize,
     scopes: HashMap<ScopeFingerprint, MetadataUsage>,
+    /// Entries of finalized uploads: still readable until they expire or
+    /// cleanup removes them, but no longer counted against any bound.
+    released: HashSet<UploadHandle>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -136,6 +139,7 @@ impl UploadCreateMetadataMemo {
                 entries: HashMap::new(),
                 retained_bytes: 0,
                 scopes: HashMap::new(),
+                released: HashSet::new(),
             }),
         })
     }
@@ -166,7 +170,7 @@ impl UploadCreateMetadataMemo {
             .get(&metadata.scope)
             .copied()
             .unwrap_or_default();
-        if state.entries.len() >= self.maximum_entries
+        if state.entries.len() - state.released.len() >= self.maximum_entries
             || state
                 .retained_bytes
                 .checked_add(retained)
@@ -205,6 +209,21 @@ impl UploadCreateMetadataMemo {
         let mut state = lock_metadata(&self.state);
         remove_metadata_entry(&mut state, handle);
     }
+
+    /// Stops counting a finalized upload's entry against the bounds, and
+    /// keeps it readable until it expires or cleanup removes it (ROOT-16).
+    pub(crate) fn release(&self, handle: &UploadHandle) {
+        let mut state = lock_metadata(&self.state);
+        let Some(metadata) = state.entries.get(handle) else {
+            return;
+        };
+        let scope = metadata.scope.clone();
+        let retained = metadata.retained_bytes().unwrap_or(0);
+        if !state.released.insert(handle.clone()) {
+            return;
+        }
+        release_usage(&mut state, &scope, retained);
+    }
 }
 
 impl fmt::Debug for UploadCreateMetadataMemo {
@@ -234,15 +253,23 @@ fn remove_metadata_entry(state: &mut UploadCreateMetadataState, handle: &UploadH
     let Some(metadata) = state.entries.remove(handle) else {
         return;
     };
+    if state.released.remove(handle) {
+        return;
+    }
     let retained = metadata.retained_bytes().unwrap_or(0);
+    release_usage(state, &metadata.scope, retained);
+}
+
+/// Takes one entry of `retained` bytes in `scope` off the counted usage.
+fn release_usage(state: &mut UploadCreateMetadataState, scope: &ScopeFingerprint, retained: usize) {
     state.retained_bytes = state.retained_bytes.saturating_sub(retained);
-    let remove_scope = state.scopes.get_mut(&metadata.scope).is_some_and(|usage| {
+    let remove_scope = state.scopes.get_mut(scope).is_some_and(|usage| {
         usage.entries = usage.entries.saturating_sub(1);
         usage.retained_bytes = usage.retained_bytes.saturating_sub(retained);
         usage.entries == 0
     });
     if remove_scope {
-        state.scopes.remove(&metadata.scope);
+        state.scopes.remove(scope);
     }
 }
 
@@ -512,6 +539,13 @@ impl SuprnovaReverseProxyUploadProvider {
         self.create_metadata.remove(handle);
     }
 
+    /// Releases a finalized upload's create-metadata slot and deletes its
+    /// quarantined bytes, which finalization never adopts (ROOT-16).
+    async fn release_after_finalization(&self, handle: &UploadHandle) -> Result<(), UploadError> {
+        self.create_metadata.release(handle);
+        self.inner.cleanup(handle).await
+    }
+
     pub(crate) fn progress(
         &self,
         handle: &UploadHandle,
@@ -574,6 +608,15 @@ impl UploadProvider for SuprnovaReverseProxyUploadProvider {
             Ok(())
         })
     }
+
+    /// Quarantine is temporary by contract, so its bytes go exactly as
+    /// [`Self::cleanup`] removes them (ROOT-16).
+    fn retire_after_finalization<'a>(
+        &'a self,
+        handle: &'a UploadHandle,
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        self.cleanup(handle)
+    }
 }
 
 impl ReverseProxyUploadProvider for SuprnovaReverseProxyUploadProvider {
@@ -603,12 +646,19 @@ struct ProviderBinding {
     scope: ScopeFingerprint,
     mode: UploadProviderMode,
     direct: Option<DirectProgress>,
+    /// The transfer progress frozen when finalization committed. A finalized
+    /// binding no longer counts against any bound, and stays only so the
+    /// upload's status reads the same until cleanup reclaims it (ROOT-16).
+    finalized: Option<UploadTransferProgress>,
 }
 
 #[derive(Default)]
 struct ProviderRouterState {
     bindings: HashMap<UploadHandle, ProviderBinding>,
     scope_entries: HashMap<ScopeFingerprint, usize>,
+    /// Bindings counted against `maximum_entries`: every binding but the
+    /// finalized ones.
+    active: usize,
 }
 
 /// Routes provider-neutral lifecycle operations to the mode bound at create.
@@ -737,6 +787,9 @@ impl SuprnovaUploadProviderRouter {
             .bindings
             .get(handle)
             .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
+        if let Some(progress) = binding.finalized {
+            return Ok(progress);
+        }
         match &binding.direct {
             Some(progress) if binding.mode == UploadProviderMode::Direct => {
                 Ok(UploadTransferProgress {
@@ -866,7 +919,9 @@ impl SuprnovaUploadProviderRouter {
     ) -> Result<(), UploadError> {
         let mut state = lock(&self.state);
         if let Some(existing) = state.bindings.get(handle) {
-            let exact = existing.scope == *scope
+            // A finalized upload never transfers again.
+            let exact = existing.finalized.is_none()
+                && existing.scope == *scope
                 && existing.mode == mode
                 && existing
                     .direct
@@ -879,8 +934,7 @@ impl SuprnovaUploadProviderRouter {
             };
         }
         let scoped_entries = state.scope_entries.get(scope).copied().unwrap_or_default();
-        if state.bindings.len() >= self.maximum_entries
-            || scoped_entries >= self.maximum_entries_per_scope
+        if state.active >= self.maximum_entries || scoped_entries >= self.maximum_entries_per_scope
         {
             return Err(UploadError::new(UploadErrorKind::ResourceExhausted));
         }
@@ -895,9 +949,11 @@ impl SuprnovaUploadProviderRouter {
                     next_part: 0,
                     instructions: HashMap::new(),
                 }),
+                finalized: None,
             },
         );
         *state.scope_entries.entry(scope.clone()).or_default() += 1;
+        state.active += 1;
         Ok(())
     }
 
@@ -906,16 +962,57 @@ impl SuprnovaUploadProviderRouter {
         let Some(binding) = state.bindings.remove(handle) else {
             return;
         };
-        let remove_scope = state
-            .scope_entries
-            .get_mut(&binding.scope)
-            .is_some_and(|entries| {
-                *entries = entries.saturating_sub(1);
-                *entries == 0
-            });
-        if remove_scope {
-            state.scope_entries.remove(&binding.scope);
+        if binding.finalized.is_none() {
+            release_slot(&mut state, &binding.scope);
         }
+    }
+
+    /// Releases a finalized upload's slots as soon as finalization commits
+    /// (ROOT-16), so a scope that keeps finishing uploads never runs out of
+    /// them. The binding stays, uncounted, with its progress frozen, until
+    /// cleanup reclaims the record. Quarantined bytes are deleted now; they
+    /// are temporary by contract, and finalization has copied what it keeps.
+    /// Direct-storage bytes are kept: a finalizer may have adopted them as
+    /// its output, and nothing here can tell.
+    pub(crate) async fn release_after_finalization(
+        &self,
+        handle: &UploadHandle,
+    ) -> Result<(), UploadError> {
+        let progress = self.progress(handle)?;
+        let mode = {
+            let mut state = lock(&self.state);
+            let Some(binding) = state.bindings.get_mut(handle) else {
+                return Ok(());
+            };
+            if binding.finalized.is_some() {
+                return Ok(());
+            }
+            binding.finalized = Some(progress);
+            binding.direct = None;
+            let scope = binding.scope.clone();
+            let mode = binding.mode;
+            release_slot(&mut state, &scope);
+            mode
+        };
+        match mode {
+            UploadProviderMode::ReverseProxy => {
+                self.reverse.release_after_finalization(handle).await
+            }
+            UploadProviderMode::Direct => {
+                self.reverse.create_metadata.release(handle);
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether finalization committed for `handle`, so its binding must
+    /// survive the cancellation and expiry paths, which are for pending
+    /// uploads only.
+    fn is_finalized(&self, handle: &UploadHandle) -> bool {
+        lock(&self.state)
+            .bindings
+            .get(handle)
+            .is_some_and(|binding| binding.finalized.is_some())
     }
 
     fn provider_for(&self, handle: &UploadHandle) -> UploadProviderMode {
@@ -965,6 +1062,9 @@ impl UploadProvider for SuprnovaUploadProviderRouter {
 
     fn cancel<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>> {
         Box::pin(async move {
+            if self.is_finalized(handle) {
+                return Ok(());
+            }
             match self.provider_for(handle) {
                 UploadProviderMode::ReverseProxy => self.reverse.cancel(handle).await?,
                 UploadProviderMode::Direct => self.direct.cancel(handle).await?,
@@ -977,6 +1077,9 @@ impl UploadProvider for SuprnovaUploadProviderRouter {
 
     fn expire<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>> {
         Box::pin(async move {
+            if self.is_finalized(handle) {
+                return Ok(());
+            }
             match self.provider_for(handle) {
                 UploadProviderMode::ReverseProxy => self.reverse.expire(handle).await?,
                 UploadProviderMode::Direct => self.direct.expire(handle).await?,
@@ -995,6 +1098,23 @@ impl UploadProvider for SuprnovaUploadProviderRouter {
             match self.provider_for(handle) {
                 UploadProviderMode::ReverseProxy => self.reverse.cleanup(handle).await?,
                 UploadProviderMode::Direct => self.direct.cleanup(handle).await?,
+            }
+            self.reverse.remove_create_metadata(handle);
+            self.remove_binding(handle);
+            Ok(())
+        })
+    }
+
+    /// Deletes quarantined bytes, which are temporary by contract, and keeps
+    /// direct-storage bytes, which a finalizer may have adopted as its
+    /// output (ROOT-16). Either way the binding and its create metadata go.
+    fn retire_after_finalization<'a>(
+        &'a self,
+        handle: &'a UploadHandle,
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        Box::pin(async move {
+            if self.provider_for(handle) == UploadProviderMode::ReverseProxy {
+                self.reverse.cleanup(handle).await?;
             }
             self.reverse.remove_create_metadata(handle);
             self.remove_binding(handle);
@@ -1057,6 +1177,18 @@ impl DirectUploadProvider for UnavailableDirectUploadProvider {
         _request: ReportDirectPart<'a>,
     ) -> UploadFuture<'a, Result<ChunkReceipt, UploadError>> {
         unavailable()
+    }
+}
+
+/// Takes one binding in `scope` off the counted slots.
+fn release_slot(state: &mut ProviderRouterState, scope: &ScopeFingerprint) {
+    state.active = state.active.saturating_sub(1);
+    let remove_scope = state.scope_entries.get_mut(scope).is_some_and(|entries| {
+        *entries = entries.saturating_sub(1);
+        *entries == 0
+    });
+    if remove_scope {
+        state.scope_entries.remove(scope);
     }
 }
 

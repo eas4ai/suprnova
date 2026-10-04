@@ -1576,6 +1576,34 @@ async fn assert_a_raced_creation_leaves_the_host_transaction_usable() {
     let key = instance_key(0x51);
     let expires_at = store_deadline(60_000).await;
     let (inserted, wait_for_insert) = tokio::sync::oneshot::channel::<()>();
+    let (winner_backend, watch_for) = tokio::sync::oneshot::channel::<i64>();
+    let (release, wait_for_release) = tokio::sync::oneshot::channel::<()>();
+
+    // Releases the winner once the host's insert is waiting on its row: once
+    // the winner's backend is the one blocking another. On its own pooled
+    // connection, outside both transactions; the budget only bounds a hang,
+    // and dropping `release` on the way out unblocks the winner either way.
+    let watcher = tokio::spawn(async move {
+        let winner_pid = watch_for.await.map_err(|_| "the winner never inserted")?;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let blocked = DB::select(
+                    "SELECT pid FROM pg_stat_activity \
+                     WHERE $1::int = ANY(pg_blocking_pids(pid))",
+                    vec![sea_orm::Value::from(winner_pid)],
+                )
+                .await
+                .map_err(|_| "reading pg_stat_activity failed")?;
+                if !blocked.is_empty() {
+                    return Ok::<(), &'static str>(());
+                }
+            }
+        })
+        .await
+        .map_err(|_| "the host's insert never waited on the winner's row")??;
+        let _ = release.send(());
+        Ok::<(), &'static str>(())
+    });
 
     let winner = DB::transaction({
         let store = Arc::clone(&store);
@@ -1586,9 +1614,17 @@ async fn assert_a_raced_creation_leaves_the_host_transaction_usable() {
                     .insert_if_absent(&key, b"winner", expires_at)
                     .await
                     .map_err(|e| FrameworkError::internal(format!("winner insert: {e}")))?;
+                let backend = DB::select_one(
+                    "SELECT pg_backend_pid() AS pid",
+                    Vec::<sea_orm::Value>::new(),
+                )
+                .await?
+                .ok_or_else(|| FrameworkError::internal("no backend pid"))?
+                .get_int("pid")?;
+                let _ = winner_backend.send(backend);
                 let _ = inserted.send(());
-                // Hold the row uncommitted while the host's insert waits on it.
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                // Hold the row uncommitted until the host's insert waits on it.
+                let _ = wait_for_release.await;
                 Ok::<bool, FrameworkError>(created)
             })
         }
@@ -1609,6 +1645,10 @@ async fn assert_a_raced_creation_leaves_the_host_transaction_usable() {
         }
     });
     let (winner, host) = tokio::join!(winner, host);
+    watcher
+        .await
+        .expect("join the watcher")
+        .expect("the host's insert waited on the winner's uncommitted row");
 
     assert!(
         winner.expect("the winner commits"),

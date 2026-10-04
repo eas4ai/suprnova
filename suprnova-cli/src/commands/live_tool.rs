@@ -855,9 +855,18 @@ fn exchange(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    // Its own process group, so a timeout reaches every process the helper
+    // starts (ROOT-38): the helper is `cargo run`, and the console binary
+    // it runs is a process of its own.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let mut child = command
         .spawn()
         .map_err(|error| ToolFailure::Spawn(error.to_string()))?;
+    // The group no longer receives the terminal's Ctrl+C, so it is
+    // forwarded for as long as the helper runs.
+    #[cfg(unix)]
+    let _interrupts = interrupt::forward_to(child.id());
     let stdout = child
         .stdout
         .take()
@@ -870,7 +879,7 @@ fn exchange(
     let parsed = match receiver.recv_timeout(timeout) {
         Ok(result) => result,
         Err(_) => {
-            let _ = child.kill();
+            kill_helper(&mut child);
             let _ = child.wait();
             // Never joined (ROOT-38). A process the helper started can
             // still hold the stdout pipe after the helper itself is killed,
@@ -884,7 +893,7 @@ fn exchange(
     if parsed.is_err() {
         // The exchange is already void; never wait on a child that may keep
         // writing into a closed pipe or otherwise refuse to exit.
-        let _ = child.kill();
+        kill_helper(&mut child);
     }
     let status = child
         .wait()
@@ -904,9 +913,124 @@ fn exchange(
     }
 }
 
+/// Kills the helper and, on Unix, every process in its group (ROOT-38).
+/// Killing the helper alone left the console binary `cargo run` started
+/// running after the call had returned.
+fn kill_helper(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Ok(group) = i32::try_from(child.id()) {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(group),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    let _ = child.kill();
+}
+
+/// Forwards the terminal's Ctrl+C to the helper groups that are running.
+///
+/// A helper in its own process group is outside the terminal's foreground
+/// group, so Ctrl+C reaches only this process. The handler forwards SIGINT
+/// to every running helper group, then exits with the interrupt status,
+/// as the default disposition would have. It is installed once and stays
+/// for the life of the process; with no helper running it only exits. A
+/// process that already installed its own handler keeps it, and its helpers
+/// then get no forwarded interrupt.
+#[cfg(unix)]
+mod interrupt {
+    use std::collections::BTreeSet;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+
+    static GROUPS: Mutex<BTreeSet<i32>> = Mutex::new(BTreeSet::new());
+    static INSTALLED: OnceLock<bool> = OnceLock::new();
+
+    /// Keeps one helper group registered for forwarding until dropped.
+    pub(super) struct Forwarding(Option<i32>);
+
+    /// Registers the group `pid` leads, installing the handler on first use.
+    pub(super) fn forward_to(pid: u32) -> Forwarding {
+        INSTALLED.get_or_init(|| {
+            ctrlc::set_handler(|| {
+                forward_interrupt();
+                std::process::exit(130);
+            })
+            .is_ok()
+        });
+        let group = i32::try_from(pid).ok();
+        if let Some(group) = group {
+            groups().insert(group);
+        }
+        Forwarding(group)
+    }
+
+    impl Drop for Forwarding {
+        fn drop(&mut self) {
+            if let Some(group) = self.0 {
+                groups().remove(&group);
+            }
+        }
+    }
+
+    /// Sends SIGINT to every registered helper group.
+    fn forward_interrupt() {
+        interrupt_groups(&groups());
+    }
+
+    /// Sends SIGINT to each group in `targets`.
+    pub(super) fn interrupt_groups(targets: &BTreeSet<i32>) {
+        for group in targets {
+            let _ = killpg(Pid::from_raw(*group), Signal::SIGINT);
+        }
+    }
+
+    /// Whether the group `pid` leads is registered for forwarding.
+    #[cfg(test)]
+    pub(super) fn is_registered(pid: u32) -> bool {
+        i32::try_from(pid).is_ok_and(|group| groups().contains(&group))
+    }
+
+    fn groups() -> MutexGuard<'static, BTreeSet<i32>> {
+        GROUPS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ROOT-38: the helper runs in its own process group, so the terminal's
+    /// Ctrl+C no longer reaches it directly. A running helper's group is
+    /// registered for the forwarder, which sends it SIGINT, and is dropped
+    /// from it when the helper is done. The signal goes only to this test's
+    /// own group, so helpers other tests run at the same time are untouched.
+    #[cfg(unix)]
+    #[test]
+    fn an_interrupt_is_forwarded_to_the_helper_group_while_it_runs() {
+        use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30").process_group(0);
+        let mut child = command.spawn().expect("spawn a helper stand-in");
+        let forwarding = interrupt::forward_to(child.id());
+        assert!(interrupt::is_registered(child.id()));
+
+        let group = i32::try_from(child.id()).expect("a process id");
+        interrupt::interrupt_groups(&std::collections::BTreeSet::from([group]));
+        // Unregistered before the stand-in is reaped, so its process id
+        // cannot have been reused by another test's helper yet.
+        drop(forwarding);
+        assert!(
+            !interrupt::is_registered(child.id()),
+            "a finished helper is no longer forwarded to"
+        );
+        let status = child.wait().expect("wait for the helper stand-in");
+        assert_eq!(status.signal(), Some(nix::libc::SIGINT));
+    }
 
     /// ROOT-38: the helper timeout bounds the call even when a process the
     /// helper started still holds the stdout pipe after the helper itself is
@@ -933,6 +1057,42 @@ mod tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("the call returns within its own timeout, not when the stray process exits");
         assert!(timed_out, "the call reports the helper timeout");
+    }
+
+    /// ROOT-38: a helper timeout kills every process the helper started,
+    /// not only the helper itself. A process the helper left behind kept
+    /// running after the call had returned, holding the stdout pipe and
+    /// whatever work it was blocked in. The shell records the sleeper it
+    /// starts, then becomes a sleeper itself and never answers.
+    #[cfg(unix)]
+    #[test]
+    fn the_helper_timeout_kills_every_process_the_helper_started() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("sleeper.pid");
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 30 & echo $! > \"$1\"; exec sleep 30", "sh"]);
+        command.arg(&pid_file);
+        let result = exchange(
+            command,
+            Operation::Check,
+            PROTOCOL_VERSION,
+            Duration::from_millis(300),
+        );
+        assert!(matches!(result, Err(ToolFailure::Timeout(_))));
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .expect("the helper recorded the process it started")
+            .trim()
+            .parse()
+            .expect("a process id");
+        let pid = nix::unistd::Pid::from_raw(pid);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while nix::sys::signal::kill(pid, None).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the process the helper started is still running after the timeout"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

@@ -372,6 +372,11 @@ The cost is one extra struct per pivot table. The benefit is that the
 pivot can carry behaviour - domain logic, validation rules, audit
 columns - without escaping into raw SQL.
 
+A relation reads its pivot table directly, as Laravel's `using(Pivot)`
+relation does, so the pivot model's own global scopes and soft-delete
+filter apply when you query `RoleUser::query()`, not to the attachments
+`user.roles()` returns. Narrow the attachments with `where_pivot`.
+
 ## `HasOneThrough` and `HasManyThrough`
 
 Two-hop relations: `A → B → C` where `B` is an intermediate model whose
@@ -406,8 +411,10 @@ across the join, fall back to two explicit relation hops.
 Through relations filter both the intermediate and the target by their
 soft-delete column when those models declare `#[model(soft_deletes)]`,
 matching Laravel's `hasManyThrough`: trashed rows on either side stay
-out of the join. Eager loads (`with(["posts"])`), counts and aggregates
-of a Through relation leave out the same rows.
+out of the join. The target's global scopes apply too, as they do to
+`Post::query()`; the intermediate is filtered by its soft-delete column
+only. Eager loads (`with(["posts"])`), counts and aggregates of a
+Through relation leave out the same rows.
 
 To include trashed rows, query the two hops yourself: load the
 intermediate models through their own relation, then query the target

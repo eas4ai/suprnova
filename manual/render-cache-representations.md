@@ -115,7 +115,7 @@ they are defined; the other chapters use them without restating them.
 | Field | What it says |
 |---|---|
 | `ETag` | A strong validator over exactly the bytes sent. A client may send it back as `If-None-Match`. |
-| `Cache-Control` | `private` for every class by default. A `PublicShared` route that sets `SharedCachePolicy::SMaxAge` also gets `public` and `s-maxage`, which is the only way a shared proxy is ever invited to keep the bytes. A `PrivateCached` response is `private, no-cache`: the browser may keep it but asks the server before every reuse, because its own cache keys a response by URL alone and would otherwise show one account's page to the next account signed in on the same browser. A `Composite` document with at least one island is `private, no-store`, whether it was assembled on a hit or rendered by the leader that published the shell. |
+| `Cache-Control` | `private, no-cache` for every class by default: the browser may keep the bytes but asks the server before every reuse, so a write that invalidates the stored entry reaches the next view instead of waiting out a `max-age` in the browser. The question is cheap, because an unchanged entry answers the browser's `If-None-Match` with a `304`. For a `PrivateCached` response it is also what keeps accounts apart: the browser's own cache keys a response by URL alone and would otherwise show one account's page to the next account signed in on the same browser. A `PublicShared` route that sets `SharedCachePolicy::SMaxAge` gets `public`, `max-age` and `s-maxage` instead, which is the only way a shared proxy is ever invited to keep the bytes. A `Composite` document with at least one island is `private, no-store`, whether it was assembled on a hit or rendered by the leader that published the shell. |
 | `Vary` | Derived from the declared variance dimensions that imply a request header: `Locale` implies `Accept-Language`, `Media` implies `Accept`, `Encoding` implies `Accept-Encoding`. A dimension that implies none adds nothing. The names are emitted sorted by header name, not in the order you declared the dimensions. |
 | `Age` | Whole seconds since the representation was published. Its presence is the simplest local proof that a response came out of the store. |
 | `Warning` | `110 - "Response is Stale"`, and only on a response served past its fresh interval. |
@@ -134,7 +134,7 @@ is documented from the code; no test here pairs it.
 
 Three of the response values are asserted against the running application:
 `the_public_document_is_a_hit_whose_seed_still_promotes` reads
-`private, max-age=300` off `/live/public` and requires an `Age` header on
+`private, no-cache` off `/live/public` and requires an `Age` header on
 the second request;
 `the_private_document_is_cached_per_principal_and_never_crosses` reads
 `private, no-cache` off `/live/me`;
@@ -318,8 +318,8 @@ much as on every assembly after it. It holds one principal's islands under
 authority re-derived for one request, and a `max-age` would let a shared
 browser profile replay them to whoever sits down next; which path produced the
 bytes does not change what is in them. A zero-slot `Composite`
-carries no per-principal bytes at all, only a per-request nonce, so it keeps
-the class's private `max-age` like any other private representation;
+carries no per-principal bytes at all, only a per-request nonce, so it is
+sent `private, no-cache` like any other private representation;
 `a_zero_slot_composite_is_assembled_with_a_fresh_nonce_on_every_hit` in
 `framework/tests/render_cache/stitch.rs` asserts that. Either way the class
 refuses `SharedCachePolicy::SMaxAge` at policy build time, so no shared

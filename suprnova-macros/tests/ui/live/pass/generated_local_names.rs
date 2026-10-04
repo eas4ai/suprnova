@@ -32,13 +32,11 @@ impl Locals {
         self.count = target;
     }
 
-    #[action(validate = "all")]
+    // Argument validation alone, with no component `#[validate]` hook.
+    #[action(validate = "arguments")]
     pub fn checked(&mut self, target: u64, request: u64, issues: u64) {
         self.count = target + request + issues;
     }
-
-    #[validate]
-    pub fn validate_locals(&self) {}
 
     #[validate(action = "checked")]
     pub fn validate_checked(&self, target: u64, request: u64, issues: u64) {
@@ -50,4 +48,9 @@ fn main() {
     let descriptor = <Locals as ::suprnova::live::__private::metadata::LiveComponentContract>::descriptor()
         .expect("generated metadata must be valid");
     assert_eq!(descriptor.metadata().actions().len(), 3);
+    assert!(
+        <Locals as ::suprnova::live::__private::metadata::LiveComponentContract>::validation_port()
+            .is_some(),
+        "the typed argument hook gets a validation port"
+    );
 }

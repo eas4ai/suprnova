@@ -82,6 +82,14 @@ impl MagnetarOAuthAuthEngine for ExistingOAuthEngine {
 
 #[tokio::test]
 async fn oauth_conflict_publishes_no_default_engine_or_schema() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "oauth_conflict_publishes_no_default_engine_or_schema",
+    )
+    .await
+    {
+        return;
+    }
     Crypt::init(EncryptionKey::generate());
     suprnova::App::bind::<dyn RateLimiterDriver>(Arc::new(AllowingLimiter));
     let existing_oauth = Arc::new(ExistingOAuthEngine::default());

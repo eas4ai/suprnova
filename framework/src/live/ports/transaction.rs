@@ -180,6 +180,50 @@ mod tests {
         }
     }
 
+    /// Set in the child process that `run_alone` starts.
+    const CHILD: &str = "SUPRNOVA_LIVE_TRANSACTION_PORT_TEST_CHILD";
+
+    /// Runs the test `name` of this module alone in a child of this test
+    /// binary, and fails unless it ran there and passed.
+    ///
+    /// The tests that use it mark RenderCache installed, and that mark is
+    /// process-wide by design: it says this process serves a RenderCache
+    /// runtime, so every ORM write in the process advances generations from
+    /// then on. The other tests of this binary write to databases that have
+    /// no RenderCache tables, and while the mark is set those writes fail
+    /// with the advance they cannot make. The failed advance also suspends
+    /// serving for the whole process, which the RenderCache lookup tests
+    /// then see as a miss.
+    fn run_alone(name: &str) {
+        let test = format!("live::ports::transaction::tests::{name}");
+        let output =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"))
+                .args(["--exact", &test, "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .expect("spawn the child process");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("running 1 test"),
+            "{test} in its own process: {}\nstdout:\n{stdout}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    /// True in the child process `run_alone` starts.
+    fn is_child() -> bool {
+        std::env::var_os(CHILD).is_some()
+    }
+
+    /// The R76 test below, run alone in a child process.
+    #[test]
+    fn a_required_transaction_write_advances_once_and_does_not_hang_on_a_single_connection_pool() {
+        run_alone(
+            "a_required_transaction_write_advances_once_and_does_not_hang_on_a_single_connection_pool_child",
+        );
+    }
+
     /// R76: on the project's own single-connection SQLite pool
     /// (`TestDatabase::fresh`), a `SuprnovaTransactionPort::begin()` that
     /// held its transaction open (the pre-fix behavior) starves
@@ -193,9 +237,14 @@ mod tests {
     /// With this fix, `begin()` releases its probe transaction before
     /// returning, so the write proceeds immediately and the table's
     /// generation advances exactly once.
+    ///
+    /// Runs alone in a child process; see `run_alone`.
     #[tokio::test]
-    async fn a_required_transaction_write_advances_once_and_does_not_hang_on_a_single_connection_pool()
+    async fn a_required_transaction_write_advances_once_and_does_not_hang_on_a_single_connection_pool_child()
      {
+        if !is_child() {
+            return;
+        }
         let _db = TestDatabase::fresh::<Migrator>()
             .await
             .expect("render cache migration applies to a fresh single-connection sqlite pool");
@@ -244,8 +293,18 @@ mod tests {
     /// must not itself advance anything: `begin`'s probe transaction issues
     /// no statement other than its own rollback, so it must not trip
     /// `after_unknown_write`'s broad-authority advance or any other one.
+    #[test]
+    fn a_begin_with_no_write_and_then_rollback_advances_nothing() {
+        run_alone("a_begin_with_no_write_and_then_rollback_advances_nothing_child");
+    }
+
+    /// The body of the test above. Runs alone in a child process; see
+    /// `run_alone`.
     #[tokio::test]
-    async fn a_begin_with_no_write_and_then_rollback_advances_nothing() {
+    async fn a_begin_with_no_write_and_then_rollback_advances_nothing_child() {
+        if !is_child() {
+            return;
+        }
         let _db = TestDatabase::fresh::<Migrator>()
             .await
             .expect("render cache migration applies");

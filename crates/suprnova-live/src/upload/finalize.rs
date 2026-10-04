@@ -285,6 +285,16 @@ pub trait UploadFinalizer: Send + Sync {
         &'a self,
         request: FinalizeRequest<'a>,
     ) -> UploadFuture<'a, Result<Option<DurableUpload>, UploadError>>;
+
+    /// Returns whether this finalizer can make any upload durable.
+    ///
+    /// A placeholder that refuses every request answers `false`, and
+    /// finalization then fails before the upload enters `Finalizing`: the
+    /// upload stays `Ready` and expires like any unfinalized upload, instead
+    /// of waiting in `Finalizing` for durable work that can never happen.
+    fn can_finalize(&self) -> bool {
+        true
+    }
 }
 
 /// Trusted request from one already authorized registered action invocation.
@@ -451,6 +461,11 @@ impl UploadFinalizationService {
             || request.action.action() != request.policy.finalize_action()
         {
             return Err(UploadError::new(UploadErrorKind::AuthorizationDenied));
+        }
+        // Before `Finalizing` is entered: nothing could ever complete it, so
+        // the upload stays `Ready` and expires (ROOT-16).
+        if !self.finalizer.can_finalize() {
+            return Err(UploadError::new(UploadErrorKind::FinalizationFailed));
         }
         let finalizing_revision = request.ready_revision.checked_next()?;
         let finalized_revision = finalizing_revision.checked_next()?;

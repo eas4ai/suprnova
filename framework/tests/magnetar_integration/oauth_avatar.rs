@@ -11,7 +11,8 @@
 //! request proves which fields Facebook and X ask for.
 //!
 //! The OAuth engine is a process-wide install, so each test installs its
-//! own; nextest runs every test in its own process.
+//! own and runs alone in a child process (`own_process_async::delegate`);
+//! nextest already gives every test a process of its own.
 
 #![cfg(all(feature = "magnetar-oauth", feature = "testing"))]
 
@@ -410,6 +411,11 @@ const GOOGLE_PICTURE: &str = "https://lh3.googleusercontent.com/a/ada=s96-c";
 
 #[tokio::test]
 async fn google_picture_reaches_oauth_identity() {
+    if crate::own_process_async::delegate(module_path!(), "google_picture_reaches_oauth_identity")
+        .await
+    {
+        return;
+    }
     callback(
         google(),
         "g-1",
@@ -421,11 +427,24 @@ async fn google_picture_reaches_oauth_identity() {
 
 #[tokio::test]
 async fn google_without_picture_signs_in_with_none() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "google_without_picture_signs_in_with_none",
+    )
+    .await
+    {
+        return;
+    }
     callback(google(), "g-1", r#"{"sub":"g-1","name":"Ada"}"#, None).await;
 }
 
 #[tokio::test]
 async fn google_empty_picture_signs_in_with_none() {
+    if crate::own_process_async::delegate(module_path!(), "google_empty_picture_signs_in_with_none")
+        .await
+    {
+        return;
+    }
     callback(
         google(),
         "g-1",
@@ -437,6 +456,14 @@ async fn google_empty_picture_signs_in_with_none() {
 
 #[tokio::test]
 async fn google_picture_of_an_unexpected_shape_signs_in_with_none() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "google_picture_of_an_unexpected_shape_signs_in_with_none",
+    )
+    .await
+    {
+        return;
+    }
     callback(
         google(),
         "g-1",
@@ -452,6 +479,14 @@ const TIKTOK_PICTURE: &str = "https://p16-sign.tiktokcdn.com/ada.jpeg";
 
 #[tokio::test]
 async fn tiktok_avatar_url_reaches_oauth_identity() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "tiktok_avatar_url_reaches_oauth_identity",
+    )
+    .await
+    {
+        return;
+    }
     callback(
         tiktok(),
         "t-1",
@@ -465,6 +500,14 @@ async fn tiktok_avatar_url_reaches_oauth_identity() {
 
 #[tokio::test]
 async fn tiktok_without_picture_signs_in_with_none() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "tiktok_without_picture_signs_in_with_none",
+    )
+    .await
+    {
+        return;
+    }
     callback(
         tiktok(),
         "t-1",
@@ -476,6 +519,11 @@ async fn tiktok_without_picture_signs_in_with_none() {
 
 #[tokio::test]
 async fn tiktok_empty_picture_signs_in_with_none() {
+    if crate::own_process_async::delegate(module_path!(), "tiktok_empty_picture_signs_in_with_none")
+        .await
+    {
+        return;
+    }
     callback(
         tiktok(),
         "t-1",
@@ -487,6 +535,14 @@ async fn tiktok_empty_picture_signs_in_with_none() {
 
 #[tokio::test]
 async fn tiktok_picture_of_an_unexpected_shape_signs_in_with_none() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "tiktok_picture_of_an_unexpected_shape_signs_in_with_none",
+    )
+    .await
+    {
+        return;
+    }
     callback(
         tiktok(),
         "t-1",
@@ -502,6 +558,11 @@ const FACEBOOK_PICTURE: &str = "https://platform-lookaside.fbsbx.com/ada.jpg";
 
 #[tokio::test]
 async fn facebook_picture_reaches_oauth_identity() {
+    if crate::own_process_async::delegate(module_path!(), "facebook_picture_reaches_oauth_identity")
+        .await
+    {
+        return;
+    }
     callback(
         facebook(),
         "f-1",
@@ -515,11 +576,27 @@ async fn facebook_picture_reaches_oauth_identity() {
 
 #[tokio::test]
 async fn facebook_without_picture_signs_in_with_none() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "facebook_without_picture_signs_in_with_none",
+    )
+    .await
+    {
+        return;
+    }
     callback(facebook(), "f-1", r#"{"id":"f-1","name":"Ada"}"#, None).await;
 }
 
 #[tokio::test]
 async fn facebook_empty_picture_signs_in_with_none() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "facebook_empty_picture_signs_in_with_none",
+    )
+    .await
+    {
+        return;
+    }
     callback(
         facebook(),
         "f-1",
@@ -531,6 +608,14 @@ async fn facebook_empty_picture_signs_in_with_none() {
 
 #[tokio::test]
 async fn facebook_picture_of_an_unexpected_shape_signs_in_with_none() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "facebook_picture_of_an_unexpected_shape_signs_in_with_none",
+    )
+    .await
+    {
+        return;
+    }
     // The URL itself where Graph's `{"data":{"url":...}}` belongs.
     callback(
         facebook(),
@@ -543,6 +628,14 @@ async fn facebook_picture_of_an_unexpected_shape_signs_in_with_none() {
 
 #[tokio::test]
 async fn facebook_profile_request_names_email_and_picture() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "facebook_profile_request_names_email_and_picture",
+    )
+    .await
+    {
+        return;
+    }
     let transport = callback(
         facebook(),
         "f-1",
@@ -573,6 +666,14 @@ const X_PICTURE: &str = "https://pbs.twimg.com/profile_images/1/ada_normal.jpg";
 
 #[tokio::test]
 async fn x_profile_image_url_reaches_oauth_identity() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "x_profile_image_url_reaches_oauth_identity",
+    )
+    .await
+    {
+        return;
+    }
     callback(
         x(),
         "x-1",
@@ -586,6 +687,11 @@ async fn x_profile_image_url_reaches_oauth_identity() {
 
 #[tokio::test]
 async fn x_without_picture_signs_in_with_none() {
+    if crate::own_process_async::delegate(module_path!(), "x_without_picture_signs_in_with_none")
+        .await
+    {
+        return;
+    }
     callback(
         x(),
         "x-1",
@@ -597,6 +703,11 @@ async fn x_without_picture_signs_in_with_none() {
 
 #[tokio::test]
 async fn x_empty_picture_signs_in_with_none() {
+    if crate::own_process_async::delegate(module_path!(), "x_empty_picture_signs_in_with_none")
+        .await
+    {
+        return;
+    }
     callback(
         x(),
         "x-1",
@@ -608,6 +719,14 @@ async fn x_empty_picture_signs_in_with_none() {
 
 #[tokio::test]
 async fn x_picture_of_an_unexpected_shape_signs_in_with_none() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "x_picture_of_an_unexpected_shape_signs_in_with_none",
+    )
+    .await
+    {
+        return;
+    }
     callback(
         x(),
         "x-1",
@@ -621,6 +740,14 @@ async fn x_picture_of_an_unexpected_shape_signs_in_with_none() {
 
 #[tokio::test]
 async fn x_profile_request_names_profile_image_url() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "x_profile_request_names_profile_image_url",
+    )
+    .await
+    {
+        return;
+    }
     let transport = callback(
         x(),
         "x-1",
@@ -647,6 +774,14 @@ async fn x_profile_request_names_profile_image_url() {
 
 #[tokio::test]
 async fn a_provider_without_avatar_url_signs_in_with_none() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_provider_without_avatar_url_signs_in_with_none",
+    )
+    .await
+    {
+        return;
+    }
     callback(
         Arc::new(CommunityProvider),
         "community-subject",
@@ -660,6 +795,14 @@ async fn a_provider_without_avatar_url_signs_in_with_none() {
 
 #[tokio::test]
 async fn a_community_provider_avatar_url_reaches_oauth_identity() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_community_provider_avatar_url_reaches_oauth_identity",
+    )
+    .await
+    {
+        return;
+    }
     callback(
         Arc::new(PictureCommunityProvider(CommunityProvider)),
         "community-subject",
@@ -671,6 +814,14 @@ async fn a_community_provider_avatar_url_reaches_oauth_identity() {
 
 #[tokio::test]
 async fn an_empty_url_from_a_community_provider_reports_none() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "an_empty_url_from_a_community_provider_reports_none",
+    )
+    .await
+    {
+        return;
+    }
     callback(
         Arc::new(PictureCommunityProvider(CommunityProvider)),
         "community-subject",

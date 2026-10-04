@@ -598,6 +598,134 @@ async fn a_second_guard_route_subscribes_and_delivers_as_its_own_principal_child
     );
 }
 
+/// Resolves admin 9 and nobody else.
+struct AdminNine;
+
+#[suprnova::async_trait]
+impl suprnova::UserProvider for AdminNine {
+    async fn retrieve_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<Arc<dyn suprnova::Authenticatable>>, suprnova::FrameworkError> {
+        Ok((id == "9").then(|| Arc::new(GuardUser("9")) as Arc<dyn suprnova::Authenticatable>))
+    }
+}
+
+/// A session signed in on the `admin` guard alone, whose Magnetar binding
+/// stops validating once an engine that owns session authority is
+/// installed, loses that guard on its next request. The memberships the
+/// guard's route opened for `admin:9` end with it on this node, as on the
+/// guard's logout (LIVE-021). The session row survives, so only the
+/// revocation can end the stream.
+///
+/// Runs in its own process: it registers a process-wide `AuthManager` and
+/// installs the Magnetar engine.
+#[cfg(feature = "testing")]
+#[test]
+fn a_named_guard_that_fails_its_magnetar_check_ends_its_memberships() {
+    crate::own_process::run_alone(
+        "hardening::a_named_guard_that_fails_its_magnetar_check_ends_its_memberships_child",
+    );
+}
+
+#[cfg(feature = "testing")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_named_guard_that_fails_its_magnetar_check_ends_its_memberships_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let (router, _runtime) = router_and_runtime();
+    let config =
+        suprnova::AuthConfig::new("web").guard("admin", suprnova::GuardConfig::session("admins"));
+    suprnova::App::singleton(suprnova::AuthManager::new(config));
+    suprnova::Auth::register_provider("users", Arc::new(NoLookups)).expect("users provider");
+    suprnova::Auth::register_provider("admins", Arc::new(AdminNine)).expect("admins provider");
+    Gate::define::<String, String>(
+        "live:tests.async-inventory.stream.inventory",
+        |principal, _| principal == "admin:9",
+    );
+    let store = Arc::new(MemorySessionStore::default());
+    let session_id = "livesessionadminbinding0000000000000000a".to_owned();
+    assert_eq!(session_id.len(), 40, "a store-shaped session id");
+    let mut session = SessionData::new(session_id.clone(), "csrf-token".to_owned());
+    session.set_auth_guard_for_test(
+        "admin",
+        "9",
+        Some(magnetar::sessions::WebSessionBinding {
+            session_id: "admin-opaque-session".to_owned(),
+            token_digest: [7; 32],
+        }),
+    );
+    store.seed(session);
+    let shared: Arc<dyn SessionStore> = Arc::clone(&store) as Arc<dyn SessionStore>;
+    let registry = suprnova::MiddlewareRegistry::new()
+        .append(suprnova::session::SessionMiddleware::with_store(
+            suprnova::session::SessionConfig::default(),
+            shared,
+        ))
+        .append(OriginAndCsrf)
+        .append(suprnova::AuthMiddleware::optional().for_guard("admin"))
+        .append(StrictAsyncFacts);
+    let server = spawn_server_with(router, registry).await;
+    let cookie_name = suprnova::session::SessionConfig::default().cookie_name;
+    let cookie = suprnova::http::cookie::Cookie::encrypted(&cookie_name, &session_id)
+        .expect("encrypt the session cookie");
+    let admin = Identity::alice()
+        .with_principal("admin-session")
+        .anonymous()
+        .with_cookie(&format!("{cookie_name}={}", cookie.value()));
+
+    let issued = issue(
+        server.port,
+        &admin,
+        inventory_issue_body("sse", "doc-instance-0001"),
+    )
+    .await;
+    let credential = issued.credential.clone().expect("an SSE credential");
+    let mut stream = SseClient::open(server.port, &admin, &credential, 1, &[]).await;
+    assert_eq!(stream.status.as_u16(), 200);
+    let ack = subscribe(
+        server.port,
+        &admin,
+        &credential,
+        &issued,
+        "nonce-subscribe-0001",
+        1,
+    )
+    .await;
+    assert_eq!(ack.status.as_u16(), 200);
+
+    crate::magnetar_auth::install().await;
+    let touch = send(
+        server.port,
+        &admin,
+        Method::GET,
+        "/session/touch",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(touch.status.as_u16(), 200);
+    assert!(
+        store.contains(&session_id),
+        "the session row survives; only the admin guard is cleared"
+    );
+
+    LiveStreams::resolve()
+        .expect("the Live streams facade resolves")
+        .event::<StockChanged>(
+            "inventory",
+            LiveEventTarget::Island,
+            CanonicalValue::String("after-admin-binding-loss".into()),
+        )
+        .await
+        .expect("publishing to a topic with no live member is not an error");
+    assert!(
+        !stream_carries(&mut stream, "after-admin-binding-loss").await,
+        "an event published after the admin guard lost its Magnetar session reached its stream"
+    );
+}
+
 /// LIVE-020: a session destroyed behind the runtime, as another node's
 /// logout does, stops delivery within the re-verification interval. The
 /// session row is removed from the shared store directly, the clock passes

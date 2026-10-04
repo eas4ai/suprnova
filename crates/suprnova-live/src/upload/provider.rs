@@ -414,6 +414,23 @@ pub trait UploadProvider: Send + Sync {
     /// Reclaims one quarantine object idempotently.
     fn cleanup<'a>(&'a self, handle: &'a UploadHandle)
     -> UploadFuture<'a, Result<(), UploadError>>;
+
+    /// Retires one upload whose finalization began, once cleanup reclaims its
+    /// record, idempotently.
+    ///
+    /// Finalization may have committed this provider's bytes as durable
+    /// output, and only the provider can tell. The default therefore keeps
+    /// the bytes and reports success: cleanup never deletes what finalization
+    /// may have committed. A provider whose objects are only ever temporary,
+    /// as a quarantine is, deletes them here exactly as [`Self::cleanup`]
+    /// does.
+    fn retire_after_finalization<'a>(
+        &'a self,
+        handle: &'a UploadHandle,
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        let _ = handle;
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Reverse-proxy capability for streaming authenticated request bodies into quarantine.
@@ -2008,6 +2025,16 @@ impl<S: QuarantineStore> UploadProvider for QuarantinedFileProvider<S> {
     }
 
     fn cleanup<'a>(
+        &'a self,
+        handle: &'a UploadHandle,
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        QuarantinedFileProvider::cleanup(self, handle)
+    }
+
+    /// Deletes the quarantine object. Quarantine is temporary storage by
+    /// contract: durable output lives under the finalizer's own storage
+    /// policy, never in the quarantine object.
+    fn retire_after_finalization<'a>(
         &'a self,
         handle: &'a UploadHandle,
     ) -> UploadFuture<'a, Result<(), UploadError>> {

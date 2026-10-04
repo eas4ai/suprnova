@@ -414,6 +414,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **The session, remember-me, auth-flow token and ceremony entities read
+  whole rows on every column type.** Their time fields are the new public
+  `suprnova::StoredDateTime`, which reads `DATETIME`, `TIMESTAMP`,
+  `timestamp`, `timestamptz` and SQLite text, instead of `NaiveDateTime`,
+  which failed on `TIMESTAMP` and `timestamptz`. Set them with `.into()`
+  and read them with `.naive_utc()` or `.and_utc()`. This landed after the
+  `v3.1.0` tag.
 - **Magnetar rotations and second-factor lockouts.** Magnetar's
   `re_enroll` keeps the confirmed second factor gating sign-in until a code
   from the new secret confirms the rotation; the rotation waits in new
@@ -721,6 +728,44 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **A refused cookieless request stores no session.** `CsrfMiddleware`
+  marks a new session for storage only when the response succeeds or
+  redirects. An anonymous request that an auth gate refuses with 401, or
+  any other 4xx or 5xx, gets no `XSRF-TOKEN` and writes no session row, so
+  it no longer turns into a 500 when the session store is unavailable. A
+  cookieless JSON or `HEAD` bootstrap that succeeds still gets its token
+  with its session. This landed after the `v3.1.0` tag.
+- **Live uploads, private responses and tooling.** Finalized uploads free
+  their pending slots when finalization commits, so a session no longer
+  runs out of upload capacity until restart, and are reclaimed when they
+  expire. A finalization that failed or stalled is reclaimed at expiry,
+  and an app without a finalizer leaves uploads Ready instead of stuck in
+  Finalizing. Cleanup deletes only temporary and uncommitted bytes; bytes
+  finalization committed as output are never deleted. Every RenderCache
+  response without shared-cache permission, public pages without
+  `s-maxage` and zero-slot composites included, is `private, no-cache`.
+  Making room for a file-store publication reads only the entries it
+  evicts. A Live tooling timeout kills every process the helper started,
+  and Ctrl+C still reaches the helper. A Live action with `validate =
+  "arguments"` and a typed `#[validate(action = ...)]` hook compiles
+  without a component-level `#[validate]` hook. Generated route helpers
+  handle optional parameters (`{id?}`) as `route()` does, leaving an empty
+  one out of the URL. Schema dump and load reach Postgres over a Unix
+  socket named in the URL host (`postgres://%2Frun%2Fpostgresql/db`). This
+  landed after the `v3.1.0` tag.
+- **Scaffolded apps on MySQL 8.4 and Postgres, and dates past 2038.** The
+  auth-flow token table's hash is `VARCHAR(64)`; MySQL 8.4 refused the
+  UNIQUE key on the old `TEXT` column (error 1170), so a new app's
+  migration stopped at the fourth step and the app could not boot. Run
+  `migrate` again on an app that stopped there. The `--api` starter's
+  `app_users` time columns are `timestamp with time zone` on Postgres and
+  `DATETIME` on MySQL, which its `User` model and Magnetar read; an
+  existing API app on Postgres converts them with the `ALTER TABLE` in the
+  CLI chapter. The notifications and RenderCache ledger migrations create
+  `DATETIME`, so writes keep working after 2038-01-19 on MySQL; tables
+  created before keep `TIMESTAMP` and still work. A remember-me, auth-flow
+  token or ceremony lifetime too large for a date is an error instead of a
+  panic. This landed after the `v3.1.0` tag.
 - **Generated routes and types, Inertia props and JSON:API.**
   `generate-types --routes` applies `group!` path and name prefixes, gives
   each repeated-handler alias its own helper, percent-encodes path values
@@ -756,7 +801,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   resolves an action no longer fails with `ServiceNotFound`. The console
   also boots the runtime drivers and `#[policy]` gates, warns on stderr and
   goes on when a driver cannot boot, and waits for queued listeners before
-  it exits; `down`, `up` and `schedule:list` run the application's
+  it exits. Workers, the queue and maintenance commands and console
+  commands cancel and drain the supervisors the bootstrap started before
+  they exit, with the same 5-second grace as `serve`; `down`, `up` and `schedule:list` run the application's
   bootstrap hook. `schedule:work` stops on SIGTERM while an inline task
   runs, stopping a task still running after the 30-second grace. A
   panicking `Terminable` hook no longer skips the hooks after it, and a
@@ -790,8 +837,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `with_tx(&tx)` or `on(name)` query run on that transaction or connection,
   `MassPrunable` deletes on the connection its dry run counted, and factory
   inserts of plain SeaORM rows join the surrounding `DB::transaction`.
-  `with_min` and `with_max` of an integer column read on Postgres. This
-  landed after the `v3.1.0` tag.
+  `with_min` and `with_max` of an integer column read on Postgres. `has`,
+  `where_has` and `doesnt_have` work on models whose primary key is not
+  `id`, and join a many-to-many on its declared `related_key`. Lazy
+  `HasManyThrough` and `HasOneThrough` `get` and `count` apply the target
+  model's global scopes, as eager loads do. A pivot model's own global
+  scopes and soft-delete filter no longer drop attachments from
+  many-to-many reads; as in Laravel, they apply when the pivot model is
+  queried on its own. A soft `delete()` sets `updated_at` along with
+  `deleted_at`, and `delete_or_fail` touches the owners named in
+  `touches`, as `delete()` does. This landed after the `v3.1.0` tag.
 - **Magnetar hashing and sign-up races.** Magnetar password hashing runs on
   Tokio's blocking pool instead of stalling async workers. A magic-link or
   passkey sign-up that loses a race for a new email address answers as the

@@ -13,6 +13,12 @@
 //! default is 1020 bytes, which runs into MySQL's index key length limit on
 //! a primary key column.
 //!
+//! `updated_at` and `committed_at` are `.date_time()`: `DATETIME` on MySQL
+//! (`timestamp` on Postgres), which holds the times the ledger stamps after
+//! 2038-01-19, where MySQL's `TIMESTAMP` stops. Tables this migration
+//! created before have `TIMESTAMP` there; the ledger only writes these
+//! columns, so they keep working until that date.
+//!
 //! Consumer apps include this migration in their `Migrator`'s
 //! `migrations()` list - the framework owns the schema, the app owns when
 //! to apply it.
@@ -58,7 +64,7 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Generations::Epoch).big_integer().not_null())
                     .col(
                         ColumnDef::new(Generations::UpdatedAt)
-                            .timestamp()
+                            .date_time()
                             .not_null(),
                     )
                     .to_owned(),
@@ -94,7 +100,7 @@ impl MigrationTrait for Migration {
                     )
                     .col(
                         ColumnDef::new(GenerationLog::CommittedAt)
-                            .timestamp()
+                            .date_time()
                             .not_null(),
                     )
                     .to_owned(),

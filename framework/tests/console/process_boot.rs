@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use suprnova::supervisor::{RestartPolicy, Supervisor, SupervisorRegistry};
 use suprnova::{App, Cache, EventFacade, FrameworkError, command, console, injectable};
 
 /// An `#[injectable]` with nothing to inject: it resolves once the
@@ -139,5 +140,60 @@ async fn a_queued_listener_finishes_before_the_console_returns() {
     assert!(
         REPORT_RECORDED.load(Ordering::SeqCst),
         "the queued listener was still running when the console returned"
+    );
+}
+
+/// Set while the console's supervisor runs.
+static CONSOLE_SUPERVISOR_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// A supervisor the console's bootstrap starts: it runs until its token is
+/// cancelled.
+struct ConsoleSupervisor;
+
+#[suprnova::async_trait]
+impl Supervisor for ConsoleSupervisor {
+    fn name(&self) -> &'static str {
+        "console_supervisor"
+    }
+
+    async fn run(&self, cancel: tokio_util::sync::CancellationToken) -> Result<(), FrameworkError> {
+        CONSOLE_SUPERVISOR_RUNNING.store(true, Ordering::SeqCst);
+        cancel.cancelled().await;
+        CONSOLE_SUPERVISOR_RUNNING.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn restart_policy(&self) -> RestartPolicy {
+        RestartPolicy::Never
+    }
+}
+
+#[command(name = "process-boot:noop", description = "Does nothing")]
+async fn does_nothing(_args: Vec<String>) -> Result<(), FrameworkError> {
+    Ok(())
+}
+
+/// The console stops and drains the supervisors its bootstrap started
+/// before it returns. It used to return with them still running, and the
+/// end of `main` cut them off mid-work.
+///
+/// In a process where an earlier test already shut the supervisors down,
+/// the spawn is refused and nothing runs; the assertion still holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_console_command_drains_the_supervisors_its_bootstrap_started() {
+    console::dispatch_argv_with_init(argv("process-boot:noop"), || async {
+        SupervisorRegistry::spawn(Arc::new(ConsoleSupervisor)).await;
+        for _ in 0..100 {
+            if CONSOLE_SUPERVISOR_RUNNING.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the command runs");
+    assert!(
+        !CONSOLE_SUPERVISOR_RUNNING.load(Ordering::SeqCst),
+        "the console returned with its bootstrap's supervisor still running"
     );
 }

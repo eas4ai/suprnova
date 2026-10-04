@@ -420,8 +420,9 @@ Each figure is the maximum over 100 armed single requests, and all 100
 recorded that same count in every row; the counts are identical in debug and
 release. Two of the three are `HeaderMap::with_capacity` (its index table and
 its entry table), one is the `Age` value, and the fourth appears only for a
-body that embeds a public seed deadline, whose `Cache-Control` shrinks with
-the clock and therefore cannot be precomputed.
+body that embeds a public seed deadline, whose `Cache-Control` the hit forms
+per request because a shared lifetime would shrink with the clock. A private
+entry's value is the constant `private, no-cache`, formed the same way.
 
 Those last two values are formatted into a fixed stack buffer through a small
 `core::fmt::Write` cursor and lifted with `HeaderValue::from_bytes`, which
@@ -1019,9 +1020,9 @@ class, and both follow from the bytes being new:
   `middleware::finish_fresh_render` for the leader's own rendered document,
   which holds that leader's islands and is published as the shell everyone
   else is assembled from. A zero-slot Composite has no per-principal bytes
-  in it, only a per-request nonce, so it keeps the class's private
-  `max-age` like any other private representation, on the leader's render
-  and on every hit alike.
+  in it, only a per-request nonce, so it is sent `private, no-cache` like
+  any other private representation, on the leader's render and on every hit
+  alike.
 
 The class refuses `SharedCachePolicy::SMaxAge` at policy build time, so no
 shared proxy is ever told to keep bytes the server never cached.
@@ -1094,7 +1095,7 @@ Each of these is ruled behaviour, not a defect.
 - A stitched document with at least one private island is sent
   `Cache-Control: private, no-store`, whether it was assembled on a hit or
   rendered by the leader that published the shell; a zero-island Composite
-  keeps the class's private `max-age` in both cases.
+  is sent `private, no-cache` in both cases.
 - Composite responses never answer 304, so `If-None-Match` is ignored and the
   emitted `ETag` serves `HEAD` and same-response validation only.
 - A stitched hit whose route chain refuses it (authorization, tenant) has

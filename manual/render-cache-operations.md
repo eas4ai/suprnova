@@ -327,8 +327,8 @@ The response also carries `Cache-Control: private, no-store`, but read that
 for what it is: the directive a slotted route in this class carries, pinned
 on the render that publishes the shell as much as on every assembly after
 it, because it follows what the bytes hold and not which path produced them.
-Slotted is the operative word: a zero-slot `Composite` keeps the class's
-private `max-age` instead, so the directive says something about a route
+Slotted is the operative word: a zero-slot `Composite` is sent
+`private, no-cache` instead, so the directive says something about a route
 with islands in it and nothing about one without. That test asserts
 `renders() == before + 1` on a hit, and says in its own note why that is the
 honest reading rather than a failure.

@@ -110,21 +110,23 @@ impl Cache {
             Some(c) => c,
             None => CacheConfig::from_env()?,
         };
-
-        match config.driver {
-            CacheDriver::Memory => {
-                let memory_cache = InMemoryCache::with_periodic_sweep(
-                    &config,
-                    Duration::from_secs(config.sweep_interval),
-                );
-                App::bind::<dyn CacheStore>(memory_cache);
-            }
-            CacheDriver::Redis => {
-                let redis_cache = Self::connect_redis(&config).await?;
-                App::bind::<dyn CacheStore>(Arc::new(redis_cache));
-            }
-        }
+        App::bind::<dyn CacheStore>(Self::store_for(&config).await?);
         Ok(())
+    }
+
+    /// The store [`Self::bootstrap`] binds for `config`.
+    ///
+    /// Kept apart from the binding so a test can check the store itself:
+    /// the container binding is process-wide, so a test that bootstraps
+    /// finds whatever store an earlier test in the same process left bound.
+    async fn store_for(config: &CacheConfig) -> Result<Arc<dyn CacheStore>, FrameworkError> {
+        match config.driver {
+            CacheDriver::Memory => Ok(InMemoryCache::with_periodic_sweep(
+                config,
+                Duration::from_secs(config.sweep_interval),
+            )),
+            CacheDriver::Redis => Ok(Arc::new(Self::connect_redis(config).await?)),
+        }
     }
 
     /// Connect the Redis store the bootstrap binds.
@@ -734,12 +736,16 @@ mod mem_audit {
 
     /// MEM-001: the memory cache the framework binds has its sweep task,
     /// which holds the one weak reference.
+    ///
+    /// Checks the store the bootstrap binds rather than resolving it after
+    /// a bootstrap: the binding is process-wide, and the bootstrap keeps one
+    /// that an earlier test left, such as the unswept store of the test
+    /// below or a store whose sweep task ended with an earlier test's
+    /// runtime.
     #[tokio::test]
-    #[serial]
     async fn mem_audit_the_bound_memory_cache_is_swept() {
-        let _container = TestContainer::fake();
-        Cache::bootstrap().await.unwrap();
-        let store = App::resolve_make::<dyn CacheStore>().unwrap();
+        let config = CacheConfig::builder().driver(CacheDriver::Memory).build();
+        let store = Cache::store_for(&config).await.unwrap();
         assert_eq!(
             Arc::weak_count(&store),
             1,

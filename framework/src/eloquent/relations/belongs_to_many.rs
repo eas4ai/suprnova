@@ -340,6 +340,13 @@ where
     /// when `with_timestamps()` is on). Mirrors Laravel's
     /// `->attach($id, ['note' => '...'])`.
     ///
+    /// Each extra the pivot model `P` declares is written through `P`'s
+    /// cast and mutator, as `Model::create` writes it: a column `P`
+    /// casts `AsEncrypted` is stored encrypted, and reads back through
+    /// `r.pivot::<P>()` as the plain value. A value that does not decode
+    /// into the field's type is a validation error. A key `P` does not
+    /// declare is written as it is, and an explicit `null` as SQL `NULL`.
+    ///
     /// # Security
     ///
     /// Keys of `extra` are pivot column names - they interpolate
@@ -1093,10 +1100,14 @@ pub(crate) enum PivotMatch {
 /// is declared over. The relation's id scan, `count`, and pivot writes
 /// all use `table`; reading the pivot context from `P`'s own table
 /// instead stamped rows from another table onto the related models.
-/// When the two tables are the same, the read is `P::query()`, as it
-/// always was, so `P`'s own scopes still apply there. Otherwise the
-/// rows are read from `table` on `connection` (the parent's, where the
-/// pivot writes go) and hydrated through `P`'s casts.
+///
+/// The read is the pivot table itself, on `connection` (the parent's,
+/// where the pivot writes go), hydrated through `P`'s casts. `P`'s own
+/// global scopes and soft-delete filter do not apply: they govern `P`
+/// queried as a model of its own, as Laravel's `using(Pivot)` relation
+/// reads the pivot table through a plain query. Applying them here
+/// dropped attachments the relation's id scan and `count` still saw,
+/// so a related row came back with no pivot context, or not at all.
 pub(crate) async fn load_pivot_rows<P>(
     table: &str,
     connection: Option<&'static str>,
@@ -1119,17 +1130,6 @@ where
     <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
-    if table == P::TABLE {
-        let mut query = P::query();
-        for (column, matched) in conditions {
-            query = match matched {
-                PivotMatch::Eq(value) => query.filter(column.as_str(), value),
-                PivotMatch::In(values) => query.filter_in(column.as_str(), values),
-            };
-        }
-        return Ok(filters.apply(query).get().await?.into_vec());
-    }
-
     crate::database::validate_identifier(table)?;
     let exec = ExecutorChoice::resolve_read(None, None, connection).await?;
     let backend = exec.backend();

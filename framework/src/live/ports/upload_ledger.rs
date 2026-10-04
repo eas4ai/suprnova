@@ -33,6 +33,9 @@ struct StoredUpload {
     cleanup_retries: u32,
     cleanup_orphaned: bool,
     cleanup_at: Option<UnixMillis>,
+    /// The record entered `Finalizing` at some point, so cleanup retires its
+    /// bytes through the provider rather than deleting them (ROOT-16).
+    finalization_began: bool,
 }
 
 struct CreationEvent {
@@ -266,6 +269,7 @@ impl UploadLedger for SuprnovaUploadLedger {
                     cleanup_retries: 0,
                     cleanup_orphaned: false,
                     cleanup_at: None,
+                    finalization_began: false,
                 },
             );
             state.schedule(&handle, record.expires_at());
@@ -330,6 +334,7 @@ impl UploadLedger for SuprnovaUploadLedger {
                     if let Some(retained) = retained {
                         stored.retained_bytes = retained;
                     }
+                    stored.finalization_began |= outcome.state() == UploadState::Finalizing;
                     stored
                         .transition_keys
                         .insert(request.transition().idempotency_key().clone());
@@ -415,20 +420,34 @@ impl UploadCleanupLedger for SuprnovaUploadLedger {
                     .records
                     .get_mut(&handle)
                     .ok_or_else(|| UploadError::new(UploadErrorKind::LedgerUnavailable))?;
-                if !stored.record.state().is_terminal() {
+                if stored.record.state() == UploadState::Finalizing {
+                    let failed = stored.machine.fail_for_cleanup(stored.record.revision())?;
+                    stored.record = stored.record.with_outcome(failed)?;
+                } else if !stored.record.state().is_terminal() {
                     let expired = stored
                         .machine
                         .expire_for_cleanup(stored.record.revision())?;
                     stored.record = stored.record.with_outcome(expired)?;
                 }
-                let claim = CleanupClaim::from_store(
-                    &stored.record,
-                    stored.retained_bytes,
-                    request.lease_id().clone(),
-                    request.lease_expires_at(),
-                    stored.cleanup_retries,
-                    stored.cleanup_orphaned,
-                )?;
+                let claim = if stored.finalization_began {
+                    CleanupClaim::from_store_after_finalization(
+                        &stored.record,
+                        stored.retained_bytes,
+                        request.lease_id().clone(),
+                        request.lease_expires_at(),
+                        stored.cleanup_retries,
+                        stored.cleanup_orphaned,
+                    )?
+                } else {
+                    CleanupClaim::from_store(
+                        &stored.record,
+                        stored.retained_bytes,
+                        request.lease_id().clone(),
+                        request.lease_expires_at(),
+                        stored.cleanup_retries,
+                        stored.cleanup_orphaned,
+                    )?
+                };
                 stored.cleanup_lease = Some((
                     request.lease_id().clone(),
                     stored.record.revision(),
@@ -500,8 +519,24 @@ fn machine_for(
     )
 }
 
+/// Whether `record` may be claimed at `now`. A `Finalizing` record waits for
+/// its upload to expire, after which its finalization can no longer commit,
+/// and a `Finalized` record waits out the same expiry as its idempotency
+/// window (ROOT-16).
 fn cleanup_eligible(record: &UploadRecord, now: UnixMillis) -> bool {
-    record.state().is_terminal() || record.expires_at() <= now
+    match record.state() {
+        UploadState::Rejected
+        | UploadState::Canceled
+        | UploadState::Expired
+        | UploadState::Failed => true,
+        UploadState::Created
+        | UploadState::Queued
+        | UploadState::Transferring
+        | UploadState::Verifying
+        | UploadState::Ready
+        | UploadState::Finalizing
+        | UploadState::Finalized => record.expires_at() <= now,
+    }
 }
 
 fn cleanup_deadline(record: &UploadRecord, now: UnixMillis) -> Option<UnixMillis> {
@@ -510,12 +545,13 @@ fn cleanup_deadline(record: &UploadRecord, now: UnixMillis) -> Option<UnixMillis
         | UploadState::Queued
         | UploadState::Transferring
         | UploadState::Verifying
-        | UploadState::Ready => Some(record.expires_at()),
+        | UploadState::Ready
+        | UploadState::Finalizing
+        | UploadState::Finalized => Some(record.expires_at()),
         UploadState::Rejected
         | UploadState::Canceled
         | UploadState::Expired
         | UploadState::Failed => Some(now),
-        UploadState::Finalizing | UploadState::Finalized => None,
     }
 }
 

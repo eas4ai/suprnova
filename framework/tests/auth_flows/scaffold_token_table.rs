@@ -10,6 +10,10 @@
 //! now creates them with `.date_time()`, `DATETIME` on MySQL; tables an
 //! older migration created keep `TIMESTAMP`.
 //!
+//! The builder's `TEXT` hash with a UNIQUE key failed on MySQL 8.4 (error
+//! 1170), so a scaffolded app stopped at its fourth migration there. The
+//! hash is now `VARCHAR(64)`, the length of a SHA-256 hex digest.
+//!
 //! ```bash
 //! MYSQL_TEST_URL=mysql://... cargo test -p suprnova --test auth_flows -- --ignored scaffold_token_table::mysql_
 //! PG_TEST_URL=postgres://... cargo test -p suprnova --test auth_flows -- --ignored scaffold_token_table::postgres_
@@ -22,7 +26,7 @@
 mod scaffold_auth_flow_tokens;
 
 use sea_orm::sea_query::{ColumnDef, Table, TableCreateStatement};
-use sea_orm::{ConnectionTrait, DatabaseBackend, DbErr, DeriveIden};
+use sea_orm::{ConnectionTrait, DatabaseBackend, DbErr, DeriveIden, EntityTrait, Statement};
 use sea_orm_migration::{MigrationTrait, SchemaManager};
 
 use suprnova::auth_flows::token_store::{TokenPurpose, TokenStore};
@@ -58,16 +62,13 @@ enum AuthFlowTokens {
 enum Shape {
     /// The scaffold's migration, which applies the framework's builder.
     Current,
-    /// The table older builders created: every time column `.timestamp()`.
+    /// The table older builders created: a `TEXT` hash and every time
+    /// column `.timestamp()`.
     Legacy,
 }
 
-/// `auth_flow_tokens` with a `VARCHAR(64)` hash and the given time columns.
-///
-/// MySQL 8.4 refuses the builder's UNIQUE key on a `TEXT` hash (error
-/// 1170, a separate defect), so the legacy shape, and the current one on
-/// MySQL 8.4, use this copy. Only the hash column differs.
-fn varchar_hash_table(time: fn(&mut ColumnDef) -> &mut ColumnDef) -> TableCreateStatement {
+/// The table older builders created, column for column.
+fn legacy_table() -> TableCreateStatement {
     Table::create()
         .table(AuthFlowTokens::Table)
         .col(
@@ -80,14 +81,22 @@ fn varchar_hash_table(time: fn(&mut ColumnDef) -> &mut ColumnDef) -> TableCreate
         .col(ColumnDef::new(AuthFlowTokens::UserId).text().not_null())
         .col(
             ColumnDef::new(AuthFlowTokens::TokenHash)
-                .string_len(64)
+                .text()
                 .not_null()
                 .unique_key(),
         )
         .col(ColumnDef::new(AuthFlowTokens::Purpose).text().not_null())
-        .col(time(&mut ColumnDef::new(AuthFlowTokens::ExpiresAt)).not_null())
-        .col(time(&mut ColumnDef::new(AuthFlowTokens::UsedAt)).null())
-        .col(time(&mut ColumnDef::new(AuthFlowTokens::CreatedAt)).not_null())
+        .col(
+            ColumnDef::new(AuthFlowTokens::ExpiresAt)
+                .timestamp()
+                .not_null(),
+        )
+        .col(ColumnDef::new(AuthFlowTokens::UsedAt).timestamp().null())
+        .col(
+            ColumnDef::new(AuthFlowTokens::CreatedAt)
+                .timestamp()
+                .not_null(),
+        )
         .to_owned()
 }
 
@@ -95,30 +104,31 @@ async fn create_table(database: &DbConnection, shape: Shape) {
     let manager = SchemaManager::new(database.inner());
     let created: Result<(), DbErr> = match shape {
         Shape::Current => scaffold_auth_flow_tokens::Migration.up(&manager).await,
-        Shape::Legacy => {
-            manager
-                .create_table(varchar_hash_table(ColumnDef::timestamp))
-                .await
-        }
+        Shape::Legacy => manager.create_table(legacy_table()).await,
     };
-    match created {
-        Ok(()) => {}
-        Err(error)
-            if database.inner().get_database_backend() == DatabaseBackend::MySql
-                && error.to_string().contains("1170") =>
-        {
-            database
-                .inner()
-                .execute_unprepared("DROP TABLE IF EXISTS auth_flow_tokens")
-                .await
-                .expect("drop partial table");
-            manager
-                .create_table(varchar_hash_table(ColumnDef::date_time))
-                .await
-                .expect("create auth_flow_tokens with a VARCHAR hash");
-        }
-        Err(error) => panic!("{shape:?} auth_flow_tokens: {error}"),
+    if let Err(error) = created {
+        panic!("{shape:?} auth_flow_tokens: {error}");
     }
+}
+
+/// Whether `database` is MySQL rather than MariaDB. MySQL refuses the
+/// legacy table's UNIQUE key on a `TEXT` column (error 1170), so no older
+/// migration ever created that table there.
+async fn is_mysql_proper(database: &DbConnection) -> bool {
+    if database.inner().get_database_backend() != DatabaseBackend::MySql {
+        return false;
+    }
+    let row = database
+        .inner()
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::MySql,
+            "SELECT VERSION() AS version",
+        ))
+        .await
+        .expect("read the server version")
+        .expect("a version row");
+    let version: String = row.try_get("", "version").expect("version text");
+    !version.contains("MariaDB")
 }
 
 async fn issue_check_consume_and_prune(url: &str, shape: Shape) {
@@ -167,6 +177,18 @@ async fn issue_check_consume_and_prune(url: &str, shape: Shape) {
             .expect("check the long-lived token")
     );
 
+    // Whole rows read through the public entity, whatever type the
+    // migration gave the time columns.
+    let rows = suprnova::auth_flows::token_store::entity::Entity::find()
+        .all(database.inner())
+        .await
+        .map(|rows| rows.len());
+    assert_eq!(
+        format!("{rows:?}"),
+        "Ok(3)",
+        "{shape:?}: whole rows through token_store::entity::Entity"
+    );
+
     // An already-expired token is pruned; the live ones stay.
     TokenStore::issue("9", verification, chrono::Duration::minutes(-5))
         .await
@@ -192,7 +214,11 @@ async fn sqlite_scaffold_token_table_issues_checks_and_consumes() {
 async fn mysql_scaffold_token_table_issues_checks_and_consumes() {
     let url = std::env::var("MYSQL_TEST_URL").expect("set MYSQL_TEST_URL");
     issue_check_consume_and_prune(&url, Shape::Current).await;
-    issue_check_consume_and_prune(&url, Shape::Legacy).await;
+    // MySQL never had a legacy table: the older builder's migration failed
+    // there with error 1170, so only MariaDB carries one.
+    if !is_mysql_proper(&connect(&url).await).await {
+        issue_check_consume_and_prune(&url, Shape::Legacy).await;
+    }
 }
 
 #[tokio::test]

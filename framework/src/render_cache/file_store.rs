@@ -112,8 +112,11 @@ struct TrackedEntry {
 /// [`FileRenderStore::sweep`] reaches its dead entries in order without
 /// looking at the live ones: `by_deadline` orders entries by the instant
 /// their retention elapses, and `by_epoch` by the fence epoch an epoch
-/// advance retires. [`Self::insert`] and [`Self::remove`] are the only
-/// writers, so the indexes and the byte total cannot drift from `entries`.
+/// advance retires. A third index, `by_published`, orders them oldest
+/// first, so a publication that must make room evicts from its front
+/// without sorting the whole store. [`Self::insert`] and [`Self::remove`]
+/// are the only writers, so the indexes and the byte total cannot drift
+/// from `entries`.
 #[derive(Default)]
 struct TallyState {
     /// Keyed by `key.to_base64url()`, which is also the file stem.
@@ -121,6 +124,7 @@ struct TallyState {
     total_bytes: u64,
     by_deadline: BTreeSet<(u64, String)>,
     by_epoch: BTreeSet<(u64, String)>,
+    by_published: BTreeSet<(u64, String)>,
 }
 
 impl TallyState {
@@ -132,6 +136,8 @@ impl TallyState {
         self.by_deadline
             .insert((retention_deadline(&entry), name.clone()));
         self.by_epoch.insert((entry.fence.epoch, name.clone()));
+        self.by_published
+            .insert((entry.published_at_ms, name.clone()));
         self.entries.insert(name, entry);
         previous
     }
@@ -144,6 +150,8 @@ impl TallyState {
             .remove(&(retention_deadline(&removed), name.to_owned()));
         self.by_epoch
             .remove(&(removed.fence.epoch, name.to_owned()));
+        self.by_published
+            .remove(&(removed.published_at_ms, name.to_owned()));
         Some(removed)
     }
 }
@@ -186,6 +194,9 @@ pub struct FileRenderStore {
     /// Tracked entries [`Self::sweep`] has looked at, for the test that
     /// bounds its work. See `take_sweep_examined_for_test`.
     sweep_examined: std::sync::atomic::AtomicU64,
+    /// Tracked entries a publication's eviction has looked at, for the
+    /// test that bounds its work. See `take_eviction_examined_for_test`.
+    eviction_examined: std::sync::atomic::AtomicU64,
 }
 
 /// A point inside one publication's blocking file work, where a test hook
@@ -279,6 +290,7 @@ impl FileRenderStore {
             publish_count: std::sync::atomic::AtomicU64::new(0),
             publish_io_hook: std::sync::Mutex::new(None),
             sweep_examined: std::sync::atomic::AtomicU64::new(0),
+            eviction_examined: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -312,6 +324,36 @@ impl FileRenderStore {
     pub fn take_sweep_examined_for_test(&self) -> u64 {
         self.sweep_examined
             .swap(0, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Test-only: how many tracked entries a publication's eviction has
+    /// looked at since the last call, and resets the count. Making room for
+    /// one entry is bounded by the entries it evicts, not by the size of the
+    /// store, and this is what a test measures that by.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn take_eviction_examined_for_test(&self) -> u64 {
+        self.eviction_examined
+            .swap(0, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Test-only: whether something holds the lock every publication,
+    /// eviction, sweep and read of this store takes. How a test proves a
+    /// canceled publication's file work still owns it (DATA-024) without
+    /// waiting on a timer to see whether another operation gets through.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn publication_lock_is_held_for_test(&self) -> bool {
+        self.state.try_lock().is_err()
+    }
+
+    /// Counts `examined` tracked entries toward the test-only
+    /// `take_eviction_examined_for_test`.
+    fn note_eviction_examined(&self, examined: usize) {
+        self.eviction_examined.fetch_add(
+            u64::try_from(examined).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     /// Counts `examined` tracked entries toward the test-only
@@ -452,43 +494,49 @@ impl RenderStore for FileRenderStore {
             .get(&name)
             .map_or(0, |entry| entry.payload_bytes);
         if state.total_bytes - existing_len + payload_len > self.max_bytes {
-            let mut others: Vec<(String, u64, u64)> = state
-                .entries
-                .iter()
-                .filter(|(candidate, _)| **candidate != name)
-                .map(|(candidate, entry)| {
-                    (
-                        candidate.clone(),
-                        entry.published_at_ms,
-                        entry.payload_bytes,
-                    )
-                })
-                .collect();
-            others.sort_by_key(|&(_, published_at_ms, _)| published_at_ms);
-
             // A cheap pre-check before touching anything: if evicting
             // every eligible candidate still could not free enough room,
             // no combination can, so decline immediately rather than
             // deleting real files only to discover the same thing
-            // afterwards. `total_evictable` is exactly
-            // `state.total_bytes - existing_len` by construction (it sums
-            // every entry this method just excluded from that
-            // subtraction), so this condition reduces to `payload_len >
-            // self.max_bytes`, already ruled out by the guard at the top
-            // of this method - unreachable today, but cheap, and it keeps
-            // the "a bound too small for the entry regardless of what is
-            // evicted" invariant explicit at the point where eviction
-            // actually happens rather than resting on a proof tied to a
-            // guard many lines away that could silently stop holding if
-            // that guard's arithmetic ever changes.
-            let total_evictable: u64 = others.iter().map(|&(_, _, bytes)| bytes).sum();
+            // afterwards. Every entry but this key's is a candidate, so
+            // `total_evictable` is `state.total_bytes - existing_len` and
+            // this condition reduces to `payload_len > self.max_bytes`,
+            // already ruled out by the guard at the top of this method -
+            // unreachable today, but cheap, and it keeps the "a bound too
+            // small for the entry regardless of what is evicted" invariant
+            // explicit at the point where eviction actually happens rather
+            // than resting on a proof tied to a guard many lines away that
+            // could silently stop holding if that guard's arithmetic ever
+            // changes.
+            let total_evictable = state.total_bytes - existing_len;
             if state.total_bytes - existing_len + payload_len - total_evictable > self.max_bytes {
                 return Ok(PublishOutcome::Rejected);
             }
 
-            for (victim, _, _) in others {
-                if state.total_bytes - existing_len + payload_len <= self.max_bytes {
-                    break;
+            // Oldest first, from the front of `by_published`: the work is
+            // the entries evicted plus any skipped, never the whole store. A
+            // candidate is looked up after the previous one, so evicting it
+            // from the index does not disturb the walk.
+            let mut examined = 0_usize;
+            let mut cursor: Option<(u64, String)> = None;
+            while state.total_bytes - existing_len + payload_len > self.max_bytes {
+                let next = match &cursor {
+                    None => state.by_published.first().cloned(),
+                    Some(after) => state
+                        .by_published
+                        .range((
+                            std::ops::Bound::Excluded(after.clone()),
+                            std::ops::Bound::Unbounded,
+                        ))
+                        .next()
+                        .cloned(),
+                };
+                let Some(candidate) = next else { break };
+                examined += 1;
+                let victim = candidate.1.clone();
+                cursor = Some(candidate);
+                if victim == name {
+                    continue;
                 }
                 // Mirrors `evict`: remove the file first, and drop the
                 // tally entry only when the removal succeeded or the file
@@ -506,6 +554,7 @@ impl RenderStore for FileRenderStore {
                 }
                 state.remove(&victim);
             }
+            self.note_eviction_examined(examined);
             if state.total_bytes - existing_len + payload_len > self.max_bytes {
                 // The pre-check above found enough room theoretically
                 // achievable, but eviction still could not free it: at
