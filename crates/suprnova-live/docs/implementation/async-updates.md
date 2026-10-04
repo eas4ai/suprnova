@@ -239,7 +239,9 @@ ceiling is 256 and signed registration or deployment policy may lower it. The
 independent replay transcript limit is the configured
 `LIVE_ASYNC_MAX_REPLAY_EVENTS` (4,096 by default, at most the queue depth); it
 is not a fanout allowance. A component declares at most 32 subscriptions, and one server
-document transport owns at most 128 logical memberships. Browser-side logical
+document transport owns at most 128 logical memberships. A session opens at most
+`LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION` transports and the process at most
+`LIVE_ASYNC_MAX_TRANSPORTS`. Browser-side logical
 membership and diagnostic/resource collections have their own closed bounds.
 
 Replaceable refresh and presentation-signal work may coalesce only under the
@@ -309,8 +311,9 @@ Application code publishes through `suprnova::live::LiveStreams`:
 `refresh(topic)` and `event::<T>(topic, LiveEventTarget, CanonicalValue)`
 append to the bounded per-subscription log of every current subscription
 whose signed topics contain `topic`. The log keeps at most
-`LIVE_ASYNC_MAX_REPLAY_EVENTS` envelopes and `LIVE_ASYNC_MAX_BUFFER_BYTES` per
-subscription; heartbeats are appended to idle memberships every
+`LIVE_ASYNC_MAX_REPLAY_EVENTS` envelopes and `LIVE_ASYNC_MAX_REPLAY_BYTES` per
+subscription, and every log together stays inside
+`LIVE_ASYNC_REPLAY_BUDGET_BYTES`, the oldest entries anywhere evicted first; heartbeats are appended to idle memberships every
 five seconds and the browser heartbeat timeout is fifteen seconds. Delivery
 runs through the engine's bounded document transport under the configured
 queue depth, queue bytes and payload size, with 128 memberships per document. A gap or degraded lane is re-baselined at its delivery cursor
