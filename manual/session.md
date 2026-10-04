@@ -420,6 +420,13 @@ let store: Arc<dyn SessionStore> = Arc::new(MyRedisStore::new());
 let mw = SessionMiddleware::with_store(SessionConfig::from_env(), store);
 ```
 
+`read` can build the session it returns with `SessionData::new`.
+`SessionMiddleware` marks every session `read` returns as loaded from the
+store (`SessionData::loaded_from_store`), so a stored session that a request
+does not change is not written again. In `write`, the flag is `true` when the
+row existed at read time; a store can use it to refuse to recreate a row that
+was deleted in between, as the database driver does.
+
 ## Session blocking
 
 Two requests that carry one session cookie load the same row, and without

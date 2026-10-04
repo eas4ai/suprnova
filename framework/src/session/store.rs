@@ -38,6 +38,12 @@ pub struct SessionData {
     /// persisted under the current id (`false` - a brand-new session,
     /// or one whose id was just rotated by [`Self::rotate_id`]).
     ///
+    /// [`crate::session::SessionMiddleware`] sets it on every session that
+    /// [`SessionStore::read`] returns, so a store does not have to: a store
+    /// that builds what it reads with [`Self::new`] would otherwise report
+    /// each stored session as new, and the CSRF middleware would mark it for
+    /// storage on every successful request.
+    ///
     /// # Security - SEC-02(c)
     ///
     /// [`crate::session::driver::DatabaseSessionDriver::write`] uses
@@ -45,9 +51,8 @@ pub struct SessionData {
     /// existing row could conflict) or must be update-only (`true` - a
     /// missing row means someone deleted it, most likely a concurrent
     /// [`crate::session::destroy_all_for_user`] revocation, and the
-    /// write must not resurrect it). A custom [`SessionStore`]
-    /// implementation is free to ignore this field; it is purely
-    /// optional metadata a store may use to prevent the same class of
+    /// write must not resurrect it). A custom [`SessionStore`] may ignore
+    /// it in `write`, or use it there to prevent the same class of
     /// resurrection race in its own backend.
     pub loaded_from_store: bool,
 }
@@ -819,7 +824,10 @@ impl std::error::Error for SessionMigrationError {}
 pub trait SessionStore: Send + Sync {
     /// Read a session by its ID
     ///
-    /// Returns None if the session doesn't exist or has expired.
+    /// Returns None if the session doesn't exist or has expired. The
+    /// session middleware marks a returned session as
+    /// [`SessionData::loaded_from_store`] itself, so an implementation
+    /// need not set that flag.
     async fn read(&self, id: &str) -> Result<Option<SessionData>, FrameworkError>;
 
     /// Write a session to storage
