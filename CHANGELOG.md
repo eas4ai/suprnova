@@ -617,6 +617,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Presence channels and WebSocket upgrades.** A presence channel whose
+  last member left stayed in memory, so parameterized presence channels grew
+  with churn; empty channels are now removed. A connection aborted at
+  shutdown or cancelled during a re-subscribe left its presence member
+  visible and its forwarder tasks running; cleanup, `presence.left`
+  included, now runs on every exit. Headers middleware adds to a successful
+  WebSocket upgrade, such as a session `Set-Cookie`, now reach the client on
+  the 101, and terminable middleware runs for upgrade responses with status
+  101 or the refusing status. WebSocket route parameters are percent-decoded
+  like HTTP ones, subprotocol negotiation echoes the client's own spelling
+  as RFC 6455 requires, and `sse::last_event_id` returns Unicode event ids
+  instead of `None`. This landed after the `v3.1.0` tag.
 - **Each middleware of a group runs once.** A middleware group included by
   two sibling groups, or an alias listed twice, ran twice per request, so a
   throttle there counted each request twice. A resolved group now keeps
@@ -1000,6 +1012,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **Fanout URL errors no longer print credentials.** A broadcasting fanout
+  URL that failed to parse was copied into the error message, password
+  included. The error now names the problem without the URL. This landed
+  after the `v3.1.0` tag.
 - **A JSON login is rate limited by its address.** `identity_key` and
   `names_identity` ignored JSON bodies, so a JSON login was keyed on the
   caller's IP and a `?email=` decoy opened a fresh per-address bucket on
