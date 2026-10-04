@@ -681,6 +681,35 @@ impl App {
         c.singleton_if_absent(instance)
     }
 
+    /// [`Self::singleton_if_absent`] for a value that costs a construction:
+    /// `construct` runs only when no singleton of `T` is registered yet.
+    ///
+    /// `#[injectable]` registers through this. Constructing first and then
+    /// keeping the binding already there ran the generated constructor at
+    /// every boot, so an application that bound a complete instance by
+    /// hand still needed every dependency only that constructor reads, and
+    /// boot failed on one it never registered. Returns whether the value
+    /// was installed, or the constructor's error.
+    #[doc(hidden)]
+    pub fn singleton_if_absent_with<T, E, F>(construct: F) -> Result<bool, E>
+    where
+        T: Any + Send + Sync + 'static,
+        F: FnOnce() -> Result<T, E>,
+    {
+        let present = APP_CONTAINER
+            .get()
+            .map(|c| c.read().unwrap_or_else(|e| e.into_inner()).has::<T>())
+            .unwrap_or(false);
+        if present {
+            return Ok(false);
+        }
+        // Constructed without the lock: the constructor resolves its own
+        // dependencies through the container. `singleton_if_absent` checks
+        // again under the write lock, so a value installed meanwhile wins.
+        let instance = construct()?;
+        Ok(Self::singleton_if_absent(instance))
+    }
+
     /// Bind a trait object to a factory.
     ///
     /// Recovers in place from a poisoned container lock so the binding is

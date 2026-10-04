@@ -286,6 +286,11 @@ App::singleton(MyCustomMailDriver::new());  // wins because it ran later
 return `bool` - `true` if they actually inserted, `false` if there
 was already a binding.
 
+Boot registers every `#[injectable]` this way, so an instance you bind
+by hand in `bootstrap.rs` is kept. Boot doesn't run the generated
+constructor of a type that is already bound, either: a dependency that
+only that constructor reads doesn't have to be registered.
+
 ## Resolving a value
 
 Two read methods, plus their `Result`-returning siblings:
