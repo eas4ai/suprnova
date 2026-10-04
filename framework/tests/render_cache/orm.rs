@@ -168,6 +168,78 @@ async fn bulk_builder_and_unknown_raw_writes_collapse_to_broader_authority() {
     );
 }
 
+/// DATA-055: a raw batch that begins with `SELECT` is still a write when a
+/// later statement in it writes. `DB::unprepared` runs the whole string, and
+/// PostgreSQL's simple-query protocol and SQLite both run every statement in
+/// it, so classifying the batch by its first six bytes let
+/// `SELECT 1; UPDATE ...` commit a write that advanced nothing, and every
+/// page that read the table kept being served until it aged out. Shared with
+/// `ledger::live_postgres_a_raw_batch_that_begins_with_select_still_advances_the_broad_authority`.
+pub(crate) async fn assert_a_raw_batch_that_begins_with_select_still_advances_the_broad_authority()
+{
+    let ledger = SqlGenerationLedger::new();
+    let broad = DependencyIdentity::broad();
+    DB::unprepared("DROP TABLE IF EXISTS data055_rows")
+        .await
+        .expect("drop the scratch table");
+    DB::unprepared("CREATE TABLE data055_rows (id INTEGER PRIMARY KEY, title TEXT NOT NULL)")
+        .await
+        .expect("create the scratch table");
+    DB::unprepared("INSERT INTO data055_rows (id, title) VALUES (7, 'old')")
+        .await
+        .expect("seed the scratch row");
+    let before = ledger
+        .current(&[broad.digest()])
+        .await
+        .expect("current")
+        .get(&broad)
+        .unwrap_or(0);
+
+    DB::unprepared("SELECT 1; UPDATE data055_rows SET title = 'new' WHERE id = 7")
+        .await
+        .expect("the batch runs");
+
+    let title = DB::select_one("SELECT title FROM data055_rows WHERE id = 7", vec![])
+        .await
+        .expect("read the row back")
+        .expect("the row exists")
+        .get_string("title")
+        .expect("a title");
+    assert_eq!(title, "new", "precondition: the batch's write landed");
+    let after = ledger
+        .current(&[broad.digest()])
+        .await
+        .expect("current")
+        .get(&broad)
+        .unwrap_or(0);
+    assert_eq!(
+        after,
+        before + 1,
+        "a batch whose later statement writes advances the broad authority"
+    );
+
+    // A single SELECT, with or without its own terminator, is still a read.
+    DB::unprepared("SELECT COUNT(*) FROM data055_rows;")
+        .await
+        .expect("a lone select");
+    assert_eq!(
+        ledger
+            .current(&[broad.digest()])
+            .await
+            .expect("current")
+            .get(&broad)
+            .unwrap_or(0),
+        after,
+        "a lone SELECT advances nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_raw_batch_that_begins_with_select_still_advances_the_broad_authority() {
+    boot().await;
+    assert_a_raw_batch_that_begins_with_select_still_advances_the_broad_authority().await;
+}
+
 /// Ruling R45: the read side (`observe_record_read_json` /
 /// `record_identity`) encodes a record's primary key as its JSON
 /// `Display` form, quotes included - `"widget-1"` for the string
