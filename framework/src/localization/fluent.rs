@@ -28,7 +28,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 /// The framework's embedded English validation catalog. Sits at the
@@ -74,6 +74,11 @@ pub struct FluentTranslator {
     /// maximum, so a *deleted* file (which can only hold or lower a max,
     /// never raise it) is still detected - see `mtime_snapshot`.
     snapshot: RwLock<BTreeMap<PathBuf, SystemTime>>,
+    /// Held across a whole reload - snapshot, read, publish - so two
+    /// reloads never interleave. Without it, a reload that read the files
+    /// first could publish its older catalogs after a later reload, paired
+    /// with whichever snapshot landed last.
+    reloading: Mutex<()>,
 }
 
 // `fluent_bundle::concurrent::FluentBundle` doesn't implement `Debug`, so
@@ -108,13 +113,17 @@ impl FluentTranslator {
         config: &LocalizationConfig,
     ) -> Result<Self, FrameworkError> {
         let dir = dir.as_ref();
-        let inner = load_all(dir, config)?;
+        // The snapshot is taken before the files are read, never after: an
+        // edit landing between the two must leave the snapshot older than
+        // the file, so the next `reload_if_stale` reads it.
         let snapshot = mtime_snapshot(dir);
+        let inner = load_all(dir, config)?;
         Ok(Self {
             dir: dir.to_path_buf(),
             config: config.clone(),
             inner: RwLock::new(inner),
             snapshot: RwLock::new(snapshot),
+            reloading: Mutex::new(()),
         })
     }
 
@@ -127,16 +136,22 @@ impl FluentTranslator {
     /// Intended for a dev-mode watcher; production deployments call
     /// `reload()` explicitly (e.g. on a deploy hook) instead of polling.
     pub fn reload_if_stale(&self) -> Result<bool, FrameworkError> {
-        let current = mtime_snapshot(&self.dir);
-        let is_stale = {
-            let stored = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
-            current != *stored
-        };
-        if !is_stale {
+        if !self.is_stale(&mtime_snapshot(&self.dir)) {
             return Ok(false);
         }
-        self.reload()?;
+        let _reloading = self.reloading.lock().unwrap_or_else(|e| e.into_inner());
+        // Checked again under the lock: a reload that held it may have read
+        // this change already.
+        let current = mtime_snapshot(&self.dir);
+        if !self.is_stale(&current) {
+            return Ok(false);
+        }
+        self.rebuild(current, || {})?;
         Ok(true)
+    }
+
+    fn is_stale(&self, current: &BTreeMap<PathBuf, SystemTime>) -> bool {
+        *current != *self.snapshot.read().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -208,17 +223,7 @@ impl Translator for FluentTranslator {
     }
 
     fn reload(&self) -> Result<(), FrameworkError> {
-        let rebuilt = load_all(&self.dir, &self.config)?;
-        let snapshot = mtime_snapshot(&self.dir);
-        {
-            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
-            *guard = rebuilt;
-        }
-        {
-            let mut guard = self.snapshot.write().unwrap_or_else(|e| e.into_inner());
-            *guard = snapshot;
-        }
-        Ok(())
+        self.reload_observing(|| {})
     }
 
     /// Delegates to the inherent [`FluentTranslator::reload_if_stale`].
@@ -236,6 +241,36 @@ impl Translator for FluentTranslator {
     /// a bug.
     fn reload_if_stale(&self) -> Result<bool, FrameworkError> {
         self.reload_if_stale()
+    }
+}
+
+impl FluentTranslator {
+    /// [`Translator::reload`], with `after_read` run once the files have
+    /// been read and before the result is published - the window a
+    /// concurrent edit or reload can land in, which the tests drive.
+    fn reload_observing(&self, after_read: impl FnOnce()) -> Result<(), FrameworkError> {
+        let _reloading = self.reloading.lock().unwrap_or_else(|e| e.into_inner());
+        self.rebuild(mtime_snapshot(&self.dir), after_read)
+    }
+
+    /// Read every catalog and publish it with `snapshot`, which the caller
+    /// took before the read, holding `reloading`.
+    fn rebuild(
+        &self,
+        snapshot: BTreeMap<PathBuf, SystemTime>,
+        after_read: impl FnOnce(),
+    ) -> Result<(), FrameworkError> {
+        let rebuilt = load_all(&self.dir, &self.config)?;
+        after_read();
+        {
+            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            *guard = rebuilt;
+        }
+        {
+            let mut guard = self.snapshot.write().unwrap_or_else(|e| e.into_inner());
+            *guard = snapshot;
+        }
+        Ok(())
     }
 }
 
@@ -517,4 +552,108 @@ fn mtime_snapshot(dir: &Path) -> BTreeMap<PathBuf, SystemTime> {
         }
     }
     files
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn config() -> LocalizationConfig {
+        LocalizationConfig {
+            default_locale: Locale::fallback_en(),
+            fallback_locale: Locale::fallback_en(),
+            use_isolating: false,
+            detection: Vec::new(),
+            session_key: "locale".into(),
+            cookie_name: "locale".into(),
+            parents: Default::default(),
+        }
+    }
+
+    /// Write `text` and stamp the file `seconds` past `base`, so two edits
+    /// never share an mtime however coarse the filesystem clock is.
+    fn edit(path: &Path, text: &str, base: SystemTime, seconds: u64) {
+        fs::write(path, text).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(base + Duration::from_secs(seconds))
+            .unwrap();
+    }
+
+    fn greeting(translator: &FluentTranslator) -> String {
+        translator
+            .translate(&Locale::fallback_en(), "greeting", &TranslateArgs::new())
+            .unwrap()
+    }
+
+    /// DRIVERS-025: an edit that lands after a reload has read the files
+    /// but before it records their mtimes must not be acknowledged as
+    /// loaded. The next `reload_if_stale` sees it and picks it up.
+    #[test]
+    fn an_edit_during_a_reload_is_picked_up_by_the_next_stale_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("en");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("app.ftl");
+        let base = SystemTime::now();
+        edit(&file, "greeting = one\n", base, 0);
+        let translator = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
+
+        edit(&file, "greeting = two\n", base, 10);
+        translator
+            .reload_observing(|| edit(&file, "greeting = three\n", base, 20))
+            .unwrap();
+        assert_eq!(
+            greeting(&translator),
+            "two",
+            "the reload read the file before the edit"
+        );
+
+        assert!(
+            translator.reload_if_stale().unwrap(),
+            "the edit made during the reload is still unread, so the catalog is stale"
+        );
+        assert_eq!(greeting(&translator), "three");
+    }
+
+    /// DRIVERS-025, the concurrent form: a second reload that runs while
+    /// the first is between reading and publishing must not leave the
+    /// first one's older catalog paired with the newer snapshot.
+    #[test]
+    fn a_reload_that_overlaps_another_never_pairs_old_content_with_a_new_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("en");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("app.ftl");
+        let base = SystemTime::now();
+        edit(&file, "greeting = one\n", base, 0);
+        let translator = Arc::new(FluentTranslator::from_dir(tmp.path(), &config()).unwrap());
+
+        edit(&file, "greeting = two\n", base, 10);
+        let other = Arc::clone(&translator);
+        let file_for_other = file.clone();
+        translator
+            .reload_observing(move || {
+                // Another reload starts while this one holds the content of
+                // "two" and has not published it yet.
+                std::thread::spawn(move || {
+                    edit(&file_for_other, "greeting = three\n", base, 20);
+                    other.reload().unwrap();
+                });
+                std::thread::sleep(Duration::from_millis(200));
+            })
+            .unwrap();
+        // Let the other reload finish if it was made to wait.
+        std::thread::sleep(Duration::from_millis(200));
+
+        translator.reload_if_stale().unwrap();
+        assert_eq!(
+            greeting(&translator),
+            "three",
+            "whatever order the two reloads finished in, the file's latest content wins"
+        );
+    }
 }
