@@ -7,15 +7,17 @@ use std::sync::{Arc, RwLock};
 use super::Response;
 
 // A sync gate closure, type-erased. Returns a rich `Response` - bool gates are
-// wrapped into a bare allow/deny at registration time.
-type SyncGateFn = Box<dyn Fn(&dyn Any, &dyn Any) -> Response + Send + Sync>;
+// wrapped into a bare allow/deny at registration time. Behind `Arc` so an
+// invocation clones it out of the registry and calls it with no lock held:
+// a gate that defines a gate must not wait on a lock its own call holds.
+type SyncGateFn = Arc<dyn Fn(&dyn Any, &dyn Any) -> Response + Send + Sync>;
 
 // An async gate closure, type-erased.
 // The closure returns an owned, boxed future (no borrowed references in the
 // output) - this sidesteps lifetime issues with `for<'a>` HRTBs on trait
 // objects. Callers clone/copy the user and resource values into the closure.
 type AsyncGateFn =
-    Box<dyn Fn(&dyn Any, &dyn Any) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync>;
+    Arc<dyn Fn(&dyn Any, &dyn Any) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync>;
 
 // A before-hook: receives the (type-erased) user + the action name, returns
 // `Some(decision)` to short-circuit the gate or `None` to continue. Keyed by
@@ -44,6 +46,7 @@ enum BeforeHook {
 // All after hooks still run (so they can log) regardless of the result.
 type AfterFn = dyn Fn(&dyn Any, &str, Option<bool>) -> Option<bool> + Send + Sync;
 
+#[derive(Clone)]
 enum GateEntry {
     Sync(SyncGateFn),
     Async(AsyncGateFn),
@@ -216,7 +219,7 @@ impl GateRegistry {
         action: &str,
         f: impl Fn(&U, &R) -> bool + Send + Sync + 'static,
     ) {
-        let erased: SyncGateFn = Box::new(move |u, r| match downcast_pair::<U, R>(u, r) {
+        let erased: SyncGateFn = Arc::new(move |u, r| match downcast_pair::<U, R>(u, r) {
             Some((u, r)) => bool_to_response(f(u, r)),
             None => Response::deny(),
         });
@@ -231,7 +234,7 @@ impl GateRegistry {
         action: &str,
         f: impl Fn(&U, &R) -> Response + Send + Sync + 'static,
     ) {
-        let erased: SyncGateFn = Box::new(move |u, r| match downcast_pair::<U, R>(u, r) {
+        let erased: SyncGateFn = Arc::new(move |u, r| match downcast_pair::<U, R>(u, r) {
             Some((u, r)) => f(u, r),
             None => Response::deny(),
         });
@@ -251,7 +254,7 @@ impl GateRegistry {
         F: Fn(&U, &R) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = bool> + Send + 'static,
     {
-        let erased: AsyncGateFn = Box::new(move |u, r| {
+        let erased: AsyncGateFn = Arc::new(move |u, r| {
             let out: Pin<Box<dyn Future<Output = Response> + Send>> =
                 match downcast_pair::<U, R>(u, r) {
                     Some((u, r)) => {
@@ -273,7 +276,7 @@ impl GateRegistry {
         F: Fn(&U, &R) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
-        let erased: AsyncGateFn = Box::new(move |u, r| {
+        let erased: AsyncGateFn = Arc::new(move |u, r| {
             let out: Pin<Box<dyn Future<Output = Response> + Send>> =
                 match downcast_pair::<U, R>(u, r) {
                     Some((u, r)) => Box::pin(f(u, r)),
@@ -454,8 +457,11 @@ impl GateRegistry {
         resource: &R,
     ) -> Option<Response> {
         let key = (action.to_string(), TypeId::of::<U>(), TypeId::of::<R>());
-        let gates = match self.gates.read() {
-            Ok(g) => g,
+        // Clone the entry out and release the lock before the callback runs:
+        // a callback that defines a gate takes the write lock, and would wait
+        // forever on a read lock held by its own invocation.
+        let entry = match self.gates.read() {
+            Ok(gates) => gates.get(&key).cloned(),
             Err(_) => {
                 tracing::error!(
                     action = %action,
@@ -468,7 +474,7 @@ impl GateRegistry {
                 return None;
             }
         };
-        match gates.get(&key) {
+        match entry {
             Some(GateEntry::Sync(f)) => Some(f(user as &dyn Any, resource as &dyn Any)),
             Some(GateEntry::Async(_)) => {
                 tracing::warn!(
@@ -499,18 +505,17 @@ impl GateRegistry {
         type EntryResult = Option<Result<Response, AsyncFut>>;
 
         let key = (action.to_string(), user.gate_type_id(), TypeId::of::<R>());
-        // We hold the read lock only long enough to clone the result or start
-        // the async dispatch - we must NOT hold it across an `.await`.
+        // We hold the read lock only long enough to clone the entry out -
+        // never while a callback runs, and never across an `.await`. A sync
+        // gate, or an async gate's future factory, that defines a gate takes
+        // the write lock, and would wait forever on a read lock held by its
+        // own invocation.
         //
         // Degrade to None on poison; `Gate::inspect_async`/`authorize_async`
         // apply the configured default denial response (or Unauthorized when
         // none is set) - see `default_denial` above.
-        let entry_result: EntryResult = match self.gates.read() {
-            Ok(gates) => match gates.get(&key) {
-                Some(GateEntry::Sync(f)) => Some(Ok(f(user.as_gate_any(), resource as &dyn Any))),
-                Some(GateEntry::Async(f)) => Some(Err(f(user.as_gate_any(), resource as &dyn Any))),
-                None => None,
-            },
+        let entry = match self.gates.read() {
+            Ok(gates) => gates.get(&key).cloned(),
             Err(_) => {
                 tracing::error!(
                     action = %action,
@@ -520,6 +525,11 @@ impl GateRegistry {
                 );
                 None
             }
+        };
+        let entry_result: EntryResult = match entry {
+            Some(GateEntry::Sync(f)) => Some(Ok(f(user.as_gate_any(), resource as &dyn Any))),
+            Some(GateEntry::Async(f)) => Some(Err(f(user.as_gate_any(), resource as &dyn Any))),
+            None => None,
         };
 
         match entry_result {
@@ -713,6 +723,86 @@ mod tests {
         );
     }
 
+    /// Runs `check` on another thread and returns its answer, or `None` when
+    /// it has not returned within five seconds. A deadlocked gate leaves its
+    /// thread blocked for good; the test then fails instead of hanging.
+    fn within_five_seconds<T: Send + 'static>(
+        check: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<T> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(check());
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .ok()
+    }
+
+    // IDENTITY-008: a gate callback that defines a gate returns. The
+    // registry used to run the callback under its own read lock, and the
+    // definition waited for the write lock forever.
+    #[test]
+    fn a_sync_gate_that_defines_a_gate_does_not_deadlock() {
+        let registry: &'static GateRegistry = Box::leak(Box::new(GateRegistry::new()));
+        registry.register::<U, R>("defines-a-gate", move |_u, _r| {
+            registry.register::<U, R>("defined-inside", |_u, _r| true);
+            true
+        });
+
+        let allowed = within_five_seconds(move || {
+            registry
+                .invoke::<U, R>("defines-a-gate", &U, &R)
+                .map(|decision| decision.allowed())
+        });
+        assert_eq!(
+            allowed,
+            Some(Some(true)),
+            "a gate that defines a gate must return its decision, not deadlock"
+        );
+        let inner = registry
+            .invoke::<U, R>("defined-inside", &U, &R)
+            .expect("the gate defined inside the callback is registered");
+        assert!(inner.allowed());
+    }
+
+    // IDENTITY-008, the async path: a sync gate and an async gate's future
+    // factory both run before any future is awaited, and neither may hold
+    // the registry lock while it runs.
+    #[test]
+    fn async_invocation_of_a_gate_that_defines_a_gate_does_not_deadlock() {
+        let registry: &'static GateRegistry = Box::leak(Box::new(GateRegistry::new()));
+        registry.register::<U, R>("sync-defines-a-gate", move |_u, _r| {
+            registry.register::<U, R>("defined-by-sync", |_u, _r| true);
+            true
+        });
+        registry.register_async::<U, R, _, _>("async-defines-a-gate", move |_u, _r| {
+            registry.register::<U, R>("defined-by-async", |_u, _r| true);
+            async { true }
+        });
+
+        let allowed = within_five_seconds(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async {
+                let sync = registry
+                    .invoke_async::<U, R>("sync-defines-a-gate", &U, &R)
+                    .await
+                    .map(|decision| decision.allowed());
+                let async_gate = registry
+                    .invoke_async::<U, R>("async-defines-a-gate", &U, &R)
+                    .await
+                    .map(|decision| decision.allowed());
+                (sync, async_gate)
+            })
+        });
+        assert_eq!(
+            allowed,
+            Some((Some(true), Some(true))),
+            "async invocation of a gate that defines a gate must return, not deadlock"
+        );
+    }
+
     #[test]
     fn downcast_pair_returns_none_on_type_mismatch() {
         // The type-erased gate closures call `downcast_pair` to recover the
@@ -736,7 +826,7 @@ mod tests {
         // invoke it with a wrong-typed user. Before the fix this `.expect()`ed
         // and panicked; now it must deny (fail closed) and return without
         // unwinding.
-        let erased: SyncGateFn = Box::new(move |u, r| match downcast_pair::<U, R>(u, r) {
+        let erased: SyncGateFn = Arc::new(move |u, r| match downcast_pair::<U, R>(u, r) {
             Some((_u, _r)) => Response::from(true),
             None => Response::deny(),
         });
