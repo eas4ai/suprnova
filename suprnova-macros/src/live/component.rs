@@ -9,6 +9,7 @@ use syn::{Data, DeriveInput, Fields, ItemStruct, Type, Visibility};
 use super::attrs::{
     ComponentArgs, FieldKind, ModelTimingArgs, StreamModeArgs, StreamReconnectArgs,
     StreamTargetArgs, UrlModeArgs, contains_reference, parse_component_args, parse_field_args,
+    wire_name,
 };
 use super::expand::enforce_runtime_path_contract;
 
@@ -59,7 +60,17 @@ pub(crate) fn derive(input: DeriveInput) -> syn::Result<TokenStream2> {
         }
         let field_args = parse_field_args(&field.attrs)?;
         let ident = field.ident.as_ref().expect("named fields have identifiers");
-        let name = ident.unraw().to_string();
+        let name = wire_name(ident, "Live field")?;
+        // The generated view binds the component itself as `component`, and
+        // templates call its methods through that name. A visible field of
+        // the same name would be a second view field under one name.
+        if name == "component" && field_args.kind != FieldKind::Secret {
+            return Err(syn::Error::new(
+                ident.span(),
+                "a Live field the view sees cannot be named `component`: the view binds the \
+                 component itself under that name; rename the field",
+            ));
+        }
         let category = field_category_tokens(field_args.kind);
         let codec = field_codec_tokens(&field.ty);
         let model_codec = model_codec_tokens(&field.ty);
