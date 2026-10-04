@@ -188,3 +188,150 @@ async fn default_installer_runs_password_session_and_lockout_flows() {
         "rejected initialization must not mutate schema"
     );
 }
+
+/// A user store whose first two email lookups miss, as two concurrent
+/// registrations see before either inserts. Later lookups and every write
+/// reach the real default-schema store.
+struct RacingLookups {
+    store: std::sync::Arc<
+        magnetar::storage::SeaOrmStorage<magnetar::default_schema::DefaultAuthSchema>,
+    >,
+    misses_left: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl magnetar::storage::UserStore for RacingLookups {
+    async fn find_by_email(
+        &self,
+        email: &str,
+    ) -> magnetar::Result<Option<magnetar::storage::UserRecord>> {
+        let missed = self
+            .misses_left
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok();
+        if missed {
+            return Ok(None);
+        }
+        self.store.find_by_email(email).await
+    }
+
+    async fn find_by_id(
+        &self,
+        user_id: &str,
+    ) -> magnetar::Result<Option<magnetar::storage::UserRecord>> {
+        self.store.find_by_id(user_id).await
+    }
+
+    async fn create_user(
+        &self,
+        input: magnetar::storage::NewUser,
+    ) -> magnetar::Result<magnetar::storage::UserRecord> {
+        self.store.create_user(input).await
+    }
+
+    async fn set_password_hash(
+        &self,
+        actor: &magnetar::storage::CredentialActor,
+        password_hash: &str,
+    ) -> magnetar::Result<()> {
+        self.store.set_password_hash(actor, password_hash).await
+    }
+
+    async fn mark_email_verified(
+        &self,
+        user_id: &str,
+        at: suprnova::chrono::DateTime<suprnova::chrono::Utc>,
+    ) -> magnetar::Result<()> {
+        self.store.mark_email_verified(user_id, at).await
+    }
+
+    async fn lock_if_unlocked_by_email(
+        &self,
+        email: &str,
+        locked_at: suprnova::chrono::DateTime<suprnova::chrono::Utc>,
+        window_start: suprnova::chrono::DateTime<suprnova::chrono::Utc>,
+    ) -> magnetar::Result<bool> {
+        self.store
+            .lock_if_unlocked_by_email(email, locked_at, window_start)
+            .await
+    }
+
+    async fn set_locked_at_by_email(
+        &self,
+        email: &str,
+        locked_at: Option<suprnova::chrono::DateTime<suprnova::chrono::Utc>>,
+    ) -> magnetar::Result<()> {
+        self.store.set_locked_at_by_email(email, locked_at).await
+    }
+}
+
+/// IDENTITY-037: the fresh default schema holds one account per email.
+/// Two registrations for one new address both miss the lookup, the way two
+/// concurrent requests do. The second must not create a second account: it
+/// reports the address as already registered, and one row remains.
+#[tokio::test]
+async fn racing_registrations_for_one_email_create_one_account() {
+    use magnetar::password::{PasswordHashConfig, PasswordVerifier, StandardPasswordHashDriver};
+    use magnetar::plugins::password::{
+        PasswordAuthProvider, PasswordAuthService, RegisterInput, RegistrationOutcome,
+    };
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let database = Database::connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory SQLite");
+    magnetar::default_schema::migrate(&database)
+        .await
+        .expect("create the default auth tables");
+    let storage = std::sync::Arc::new(magnetar::storage::SeaOrmStorage::<
+        magnetar::default_schema::DefaultAuthSchema,
+    >::new(database.clone()));
+    let verifier = PasswordVerifier::new(
+        std::sync::Arc::new(StandardPasswordHashDriver),
+        PasswordHashConfig {
+            bcrypt_cost: 4,
+            argon2_memory_kib: 8,
+            argon2_iterations: 1,
+            argon2_parallelism: 1,
+        },
+    )
+    .expect("fast test verifier");
+    let service = PasswordAuthService::new(
+        std::sync::Arc::new(RacingLookups {
+            store: storage.clone(),
+            misses_left: std::sync::atomic::AtomicUsize::new(2),
+        }),
+        storage,
+        std::sync::Arc::new(verifier),
+    );
+    let register = || RegisterInput {
+        email: "racing@example.test".to_owned(),
+        password: secrecy::SecretString::from("correct horse battery staple".to_owned()),
+    };
+
+    let first = service
+        .register(register())
+        .await
+        .expect("first registration");
+    let RegistrationOutcome::Created { user_id, .. } = first else {
+        panic!("the first registration creates the account");
+    };
+    let second = service
+        .register(register())
+        .await
+        .expect("a racing registration answers like any registration of a known address");
+    assert!(
+        matches!(&second, RegistrationOutcome::Existing { user_id: existing } if *existing == user_id),
+        "the racing registration must report the existing account, not create a second one"
+    );
+    let accounts = magnetar::default_schema::users::Entity::find()
+        .filter(magnetar::default_schema::users::Column::Email.eq("racing@example.test"))
+        .all(&database)
+        .await
+        .expect("read accounts");
+    assert_eq!(accounts.len(), 1, "one email, one account");
+}

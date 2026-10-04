@@ -1566,6 +1566,47 @@ fn lockout_identity_index() -> sea_orm::sea_query::IndexCreateStatement {
         .to_owned()
 }
 
+const USER_EMAIL_INDEX: &str = "app_users_email_unique";
+
+/// One account per email address. Registration, magic-link sign-up and
+/// passkey sign-up each look the address up and then insert; two of them
+/// racing for one new address both miss the lookup. Without this index both
+/// inserts succeed, and every later sign-in, reset or verification by email
+/// picks one of the two accounts at random.
+fn user_email_index() -> sea_orm::sea_query::IndexCreateStatement {
+    sea_orm::sea_query::Index::create()
+        .name(USER_EMAIL_INDEX)
+        .table(users::Entity)
+        .col(users::Column::Email)
+        .unique()
+        .to_owned()
+}
+
+/// Refuse to continue when `app_users` already holds two accounts for one
+/// email address: the unique index cannot be created over them, and which
+/// account is the real one is the operator's decision, not the migration's.
+/// The message names no address.
+async fn ensure_unique_user_emails(db: &DatabaseConnection) -> crate::Result<()> {
+    let backend = db.get_database_backend();
+    let duplicate = db
+        .query_one_raw(Statement::from_string(
+            backend,
+            "SELECT email FROM app_users GROUP BY email HAVING COUNT(*) > 1 LIMIT 1",
+        ))
+        .await
+        .map_err(|error| crate::Error::Internal {
+            message: format!("inspect app_users email uniqueness: {error}"),
+        })?;
+    if duplicate.is_some() {
+        return Err(crate::Error::Internal {
+            message: "app_users holds more than one account for one email address; merge or \
+                      remove the duplicate accounts, then run the migration again"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// Create every default auth table and required index.
 ///
 /// # Errors
@@ -1579,8 +1620,8 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
         && column_exists(db, "app_users", "name").await?
         && column_exists(db, "app_users", "password_hash").await?
         && column_exists(db, "app_users", "auth_epoch").await?;
-    let legacy_source_present =
-        users_source_present || (app_users_present && !app_users_is_default);
+    let app_users_is_legacy_source = app_users_present && !app_users_is_default;
+    let legacy_source_present = users_source_present || app_users_is_legacy_source;
     let completed_marker = migration_state_value(db, "schema_version").await?;
     let pending_marker = migration_state_value(db, "source_pending").await?;
     let defer_completion_marker =
@@ -1772,6 +1813,16 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
             .await
             .map_err(|error| crate::Error::Internal {
                 message: format!("create lockout identity index: {error}"),
+            })?;
+    }
+    // A legacy `app_users` is a migration source, not the default table:
+    // the migration engine rebuilds it, and a later run indexes the result.
+    if !app_users_is_legacy_source && !index_exists(db, "app_users", USER_EMAIL_INDEX).await? {
+        ensure_unique_user_emails(db).await?;
+        db.execute(&user_email_index())
+            .await
+            .map_err(|error| crate::Error::Internal {
+                message: format!("create app_users email uniqueness index: {error}"),
             })?;
     }
     if completed_marker.as_deref() != Some("1") {
