@@ -465,9 +465,10 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             }
         }
     };
-    let tokens = quote! {
-        #item
-
+    // The application's own impl is emitted as written and is not checked:
+    // a string in an action body, or a module of its own, is not a path the
+    // macro generated.
+    let generated = quote! {
         #computed_view_impl
 
         impl ::suprnova::live::__private::component::generated::GeneratedComponentRuntime
@@ -558,20 +559,24 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             #validation_port
         }
     };
-    enforce_runtime_path_contract(&tokens)?;
-    Ok(tokens)
+    enforce_runtime_path_contract(&generated)?;
+    Ok(quote! {
+        #item
+
+        #generated
+    })
 }
 
 fn generate_mount_runtime(mount: &Option<RegisteredMount>) -> TokenStream2 {
     let (expected, decodes, invocation) = if let Some(mount) = mount {
         let expected = mount.parameters.len();
-        let decodes = mount.parameters.iter().map(|parameter| {
+        let decoded = generated_locals("__snv_live_mount", mount.parameters.len());
+        let decodes = mount.parameters.iter().zip(&decoded).map(|(parameter, local)| {
             let name = &parameter.name;
-            let ident = &parameter.ident;
             let ty = &parameter.ty;
             let codec = model_codec_tokens(ty);
             quote! {
-                let #ident: #ty =
+                let #local: #ty =
                     ::suprnova::live::__private::component::generated::decode_model_field(
                         parameters.get(#name).ok_or_else(
                             ::suprnova::live::__private::component::ComponentError::contract_failure,
