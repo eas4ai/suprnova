@@ -44,7 +44,7 @@ use super::harness::{
 };
 use super::storage_schema::sql_stores::{SqlRememberStore, SqlSessionStore};
 use super::storage_schema::sql_two_factor::SqlTwoFactorStore;
-use super::storage_schema::{StorageSchema, database};
+use super::storage_schema::{SecondFactorStorageSchema, StorageSchema, database};
 
 /// A host reauth boundary with a test-settable stamp.
 #[derive(Default)]
@@ -68,6 +68,8 @@ pub struct FactorWorld {
     pub sessions: Arc<OpaqueSessionProvider<SqlSessionStore>>,
     pub remember: Arc<RememberService<SqlRememberStore>>,
     pub lockout: Arc<LockoutService>,
+    /// The second factor's own lockout, over its own table.
+    pub second_factor_lockout: Arc<LockoutService>,
     pub two_factor: Arc<TwoFactorService>,
     pub magic: Arc<MagicLinkService>,
     pub passkeys: Arc<PasskeyAuthService>,
@@ -115,10 +117,15 @@ pub async fn factor_world_with(
     let reauth = Arc::new(StubReauth::default());
     let crypto = Arc::new(AeadEncryptor::new([21; 32]));
 
+    let second_factor_lockout = Arc::new(LockoutService::new(
+        Arc::new(SeaOrmStorage::<SecondFactorStorageSchema>::new(db.clone())),
+        storage.clone(),
+        lockout_config,
+    ));
     let two_factor = Arc::new(TwoFactorService::new(
         Arc::new(SqlTwoFactorStore(db.clone())),
         storage.clone(),
-        lockout.clone(),
+        second_factor_lockout.clone(),
         crypto.clone(),
         TwoFactorConfig::default(),
     ));
@@ -232,6 +239,7 @@ pub async fn factor_world_with(
         sessions,
         remember,
         lockout,
+        second_factor_lockout,
         two_factor,
         magic,
         passkeys,

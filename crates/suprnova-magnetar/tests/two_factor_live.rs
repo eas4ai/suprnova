@@ -38,7 +38,7 @@ use magnetar::crypto::AeadEncryptor;
 use magnetar::crypto::{CryptoPurpose, Encryptor};
 use magnetar::default_schema::sql_stores::SqlSessionStore;
 use magnetar::default_schema::sql_two_factor::SqlTwoFactorStore;
-use magnetar::default_schema::{DefaultAuthSchema, two_factor};
+use magnetar::default_schema::{DefaultAuthSchema, DefaultSecondFactorSchema, two_factor};
 use magnetar::password::{
     LockoutConfig, LockoutService, PasswordVerifier, StandardPasswordHashDriver,
 };
@@ -75,6 +75,8 @@ struct LiveWorld {
     storage: Arc<SeaOrmStorage<DefaultAuthSchema>>,
     sessions: Arc<OpaqueSessionProvider<SqlSessionStore>>,
     lockout: Arc<LockoutService>,
+    /// The second factor's own lockout, over `auth_second_factor_lockouts`.
+    second_factor_lockout: Arc<LockoutService>,
     two_factor: Arc<TwoFactorService>,
     gate: Arc<Gate>,
     registry: PluginRegistry<DefaultAuthSchema>,
@@ -109,11 +111,19 @@ async fn live_world(url: &str, max_failed_attempts: u32) -> LiveWorld {
             ..LockoutConfig::default()
         },
     ));
+    let second_factor_lockout = Arc::new(LockoutService::new(
+        Arc::new(SeaOrmStorage::<DefaultSecondFactorSchema>::new(db.clone())),
+        storage.clone(),
+        LockoutConfig {
+            max_failed_attempts,
+            ..LockoutConfig::default()
+        },
+    ));
     let crypto = Arc::new(AeadEncryptor::new([21; 32]));
     let two_factor = Arc::new(TwoFactorService::new(
         Arc::new(SqlTwoFactorStore(db.clone())),
         storage.clone(),
-        lockout.clone(),
+        second_factor_lockout.clone(),
         crypto.clone(),
         TwoFactorConfig::default(),
     ));
@@ -158,6 +168,7 @@ async fn live_world(url: &str, max_failed_attempts: u32) -> LiveWorld {
         storage,
         sessions,
         lockout,
+        second_factor_lockout,
         two_factor,
         gate,
         registry,
@@ -352,7 +363,7 @@ async fn parallel_wrong_proofs_evaluate_at_most_the_threshold(url: &str) {
             .filter(|outcome| is_lockout(outcome))
             .count();
         let counted = world
-            .lockout
+            .second_factor_lockout
             .status(&magnetar::two_factor::lockout_identity(&user.user_id))
             .await
             .expect("lockout status reads")
@@ -463,7 +474,11 @@ async fn a_password_success_does_not_clear_second_factor_failures(url: &str) {
         is_lockout(outcomes.last().expect("four attempts")),
         "the next wrong code is refused: {outcomes:?}"
     );
-    let status = world.lockout.status(&second_factor).await.unwrap();
+    let status = world
+        .second_factor_lockout
+        .status(&second_factor)
+        .await
+        .unwrap();
     assert_eq!(status.failed_attempts, THRESHOLD);
     assert!(status.is_locked);
     let password = world
@@ -605,7 +620,7 @@ async fn a_confirmation_racing_a_replacement_confirms_neither_secret(url: &str) 
         let service = TwoFactorService::new(
             Arc::new(store),
             world.storage.clone(),
-            world.lockout.clone(),
+            world.second_factor_lockout.clone(),
             Arc::new(AeadEncryptor::new([21; 32])),
             TwoFactorConfig::default(),
         );

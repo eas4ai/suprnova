@@ -158,13 +158,16 @@ lockout after five failed attempts for 15 minutes, retains audit rows for seven
 days, and fails closed when the lockout backend is unavailable.
 
 The same policy counts the failed codes of Magnetar's own second-factor
-challenge (`Auth::factor()`), but under a key of their own for each user, not
-the email that password sign-in counts against. A correct password therefore
-does not clear second-factor failures, and wrong codes do not lock password
-sign-in. A password reset proves the mailbox, not the second factor, so it
+challenge (`Auth::factor()`), but in a table of their own,
+`auth_second_factor_lockouts`, which `default_schema::migrate` creates beside
+`auth_lockouts`. Password sign-in counts against any string it's given as an
+address, and anyone can register any string as one, so a shared table would
+let an address reach a user's second-factor counter. A correct password
+therefore doesn't clear second-factor failures, a failed sign-in can't lock a
+second factor, and wrong codes don't lock password sign-in. A password reset proves the mailbox, not the second factor, so it
 leaves a second-factor lock in place until the window passes. Confirming an
 enrollment, rotating the secret, and regenerating recovery codes count their
-wrong codes under the same key. Each of these paths reserves its attempt before
+wrong codes in the same table. Each of these paths reserves its attempt before
 it reads the code, so parallel guesses never get past the limit, and a failure
 the lockout store can't record is returned as an error instead of a wrong code.
 A confirmation confirms only the secret its code was checked against, once, and

@@ -1323,7 +1323,7 @@ async fn a_failed_attempt_that_cannot_be_recorded_refuses_with_the_storage_error
         .db
         .execute_unprepared(
             "CREATE TRIGGER fail_two_factor_attempt_finalize \
-             BEFORE UPDATE ON storage_lockouts \
+             BEFORE UPDATE ON storage_second_factor_lockouts \
              WHEN NEW.reason LIKE '%two-factor confirm' AND NEW.reason <> OLD.reason \
              BEGIN \
                  SELECT RAISE(ABORT, 'injected failed-attempt write failure'); \
@@ -1711,7 +1711,7 @@ async fn rotation_paths_demand_proof_of_possession() {
     ));
     assert_eq!(
         world
-            .lockout
+            .second_factor_lockout
             .status(&second_factor)
             .await
             .unwrap()
@@ -1733,7 +1733,7 @@ async fn rotation_paths_demand_proof_of_possession() {
     assert_eq!(rotated.len(), 10);
     assert_eq!(
         world
-            .lockout
+            .second_factor_lockout
             .status(&second_factor)
             .await
             .unwrap()
@@ -2332,7 +2332,7 @@ async fn confirm_racing_a_replacement(
     let service = TwoFactorService::new(
         Arc::new(store),
         world.storage.clone(),
-        world.lockout.clone(),
+        world.second_factor_lockout.clone(),
         Arc::new(AeadEncryptor::new([21; 32])),
         TwoFactorConfig::default(),
     );

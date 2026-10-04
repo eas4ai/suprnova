@@ -4,9 +4,9 @@
 //! A near-whole adoption of the deployed `auth_flows::two_factor`:
 //! enrollment is inactive until confirmed, secrets and recovery codes are
 //! ciphertext under their distinct purposes, every code-checking path is
-//! gated on 05's lockout accounting under a second-factor identity of its
-//! own ([`lockout_identity`](crate::two_factor::lockout_identity)), and
-//! rotation paths demand proof of possession. The one FLAGGED deviation is
+//! gated on 05's lockout accounting in a lockout store of its own, keyed by
+//! [`lockout_identity`](crate::two_factor::lockout_identity), and rotation
+//! paths demand proof of possession. The one FLAGGED deviation is
 //! replay protection: the verifier records the timestep that actually
 //! matched and rejects `matched_step <= last_used_timestep`, closing the
 //! forward-edge replay the deployed `current + skew` stamp permitted. 2FA
@@ -33,12 +33,13 @@ pub use store::{TwoFactorProofClaim, TwoFactorRow, TwoFactorStore};
 
 /// The lockout identity that counts one user's second-factor failures.
 ///
-/// Second-factor failures have a key of their own rather than the
-/// normalized email that password sign-in counts against. On the shared
-/// key, a successful password check cleared the second-factor failures, so
-/// wrong codes interleaved with correct sign-ins guessed codes forever, and
-/// wrong codes locked password sign-in. The key is the user id: it is
-/// stable when the email changes and cannot collide with an email key.
+/// The key is derived from the user id, so it is stable when the email
+/// changes. It is a key inside the second factor's own lockout store, not a
+/// namespace: password sign-in counts failures against whatever string it
+/// is given as an address, and anyone can register any string as one, so a
+/// key that shared password sign-in's store could be reached by a password
+/// identity. Separation comes from the store, as
+/// [`TwoFactorService::new`] requires.
 #[must_use]
 pub fn lockout_identity(user_id: &str) -> String {
     format!("two-factor:{user_id}")
@@ -159,6 +160,14 @@ pub struct TwoFactorService {
 
 impl TwoFactorService {
     /// Bind the service to its storage, lockout, and encryption boundaries.
+    ///
+    /// `lockout` must count over a store that password sign-in never
+    /// writes, such as `SeaOrmStorage<DefaultSecondFactorSchema>` and its
+    /// `auth_second_factor_lockouts` table, not the store behind password
+    /// sign-in's own lockout service. Password sign-in counts failures
+    /// against any string it is given as an address; sharing its store let
+    /// a registered decoy address equal to [`lockout_identity`] clear the
+    /// second factor's failures, and failed sign-ins as it lock them.
     pub fn new(
         store: Arc<dyn TwoFactorStore>,
         users: Arc<dyn UserStore>,

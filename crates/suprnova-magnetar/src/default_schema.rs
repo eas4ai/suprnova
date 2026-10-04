@@ -97,6 +97,13 @@ entity_common!(lockouts, "auth_lockouts", {
     pub locked_at: Option<ChronoDateTime<ChronoUtc>>,
     pub reason: Option<String>,
 });
+entity_common!(second_factor_lockouts, "auth_second_factor_lockouts", {
+    #[sea_orm(primary_key)] pub id: i64,
+    pub identity: String,
+    pub attempted_at: ChronoDateTime<ChronoUtc>,
+    pub locked_at: Option<ChronoDateTime<ChronoUtc>>,
+    pub reason: Option<String>,
+});
 entity_common!(two_factor, "auth_two_factor", {
     #[sea_orm(primary_key, auto_increment = false)] pub user_id: String,
     pub secret: Vec<u8>,
@@ -173,6 +180,7 @@ bind!(
     tokens,
     ceremonies,
     lockouts,
+    second_factor_lockouts,
     remembers,
     lifecycle_deliveries,
     migration_runs,
@@ -197,6 +205,32 @@ impl AuthSchema for DefaultAuthSchema {
 
 impl BrokerSchema for DefaultAuthSchema {
     type ProviderToken = provider_tokens::Entity;
+}
+
+/// The default schema with second-factor attempts counted in a table of
+/// their own, `auth_second_factor_lockouts`.
+///
+/// Password sign-in counts its failures against whatever address it is
+/// given, and an address is any string a visitor registers. Second-factor
+/// attempts counted in the same table, under a key derived from the user
+/// id, were reachable by password identities: registering the key as an
+/// address and signing in to it cleared the second factor's failures, and
+/// failing a sign-in as it locked the second factor. A separate table gives
+/// the second factor a namespace no password identity can reach. Build the
+/// second factor's [`crate::password::LockoutService`] over
+/// `SeaOrmStorage<DefaultSecondFactorSchema>`; every other role is the
+/// default schema's own.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DefaultSecondFactorSchema;
+impl AuthSchema for DefaultSecondFactorSchema {
+    type User = users::Entity;
+    type Session = sessions::Entity;
+    type LinkedAccount = accounts::Entity;
+    type Passkey = methods::Entity;
+    type Token = tokens::Entity;
+    type Ceremony = ceremonies::Entity;
+    type Lockout = second_factor_lockouts::Entity;
+    type TokenRecord = tokens::Entity;
 }
 
 impl UserFields for users::Entity {
@@ -751,6 +785,48 @@ impl crate::schema::LockoutFields for lockouts::Entity {
     }
     fn attempted_at_column() -> Self::Column {
         lockouts::Column::AttemptedAt
+    }
+    fn write_attempted_at(m: &mut Self::ActiveModel, v: DateTime<Utc>) {
+        m.attempted_at = Set(v);
+    }
+    fn read_locked_at(m: &Self::Model) -> Option<DateTime<Utc>> {
+        m.locked_at
+    }
+    fn read_reason(m: &Self::Model) -> Option<String> {
+        m.reason.clone()
+    }
+    fn write_reason(m: &mut Self::ActiveModel, v: Option<&str>) {
+        m.reason = Set(v.map(ToOwned::to_owned));
+    }
+    fn write_locked_at(m: &mut Self::ActiveModel, v: Option<DateTime<Utc>>) {
+        m.locked_at = Set(v);
+    }
+}
+
+impl crate::schema::LockoutFields for second_factor_lockouts::Entity {
+    fn read_lockout_id(m: &Self::Model) -> String {
+        m.id.to_string()
+    }
+    fn write_lockout_id(m: &mut Self::ActiveModel, v: &str) {
+        // The lockout store mints these ids as integers in i64 range.
+        if let Ok(id) = v.parse() {
+            m.id = Set(id);
+        }
+    }
+    fn read_user_id(m: &Self::Model) -> String {
+        m.identity.clone()
+    }
+    fn user_id_column() -> Self::Column {
+        second_factor_lockouts::Column::Identity
+    }
+    fn write_user_id(m: &mut Self::ActiveModel, v: &str) {
+        m.identity = Set(v.to_owned());
+    }
+    fn read_attempted_at(m: &Self::Model) -> DateTime<Utc> {
+        m.attempted_at
+    }
+    fn attempted_at_column() -> Self::Column {
+        second_factor_lockouts::Column::AttemptedAt
     }
     fn write_attempted_at(m: &mut Self::ActiveModel, v: DateTime<Utc>) {
         m.attempted_at = Set(v);
@@ -1594,6 +1670,15 @@ pub mod sql_two_factor {
 }
 
 const LOCKOUT_IDENTITY_INDEX: &str = "auth_lockouts_identity";
+const SECOND_FACTOR_LOCKOUT_IDENTITY_INDEX: &str = "auth_second_factor_lockouts_identity";
+
+fn second_factor_lockout_identity_index() -> sea_orm::sea_query::IndexCreateStatement {
+    sea_orm::sea_query::Index::create()
+        .name(SECOND_FACTOR_LOCKOUT_IDENTITY_INDEX)
+        .table(second_factor_lockouts::Entity)
+        .col(second_factor_lockouts::Column::Identity)
+        .to_owned()
+}
 
 fn lockout_identity_index() -> sea_orm::sea_query::IndexCreateStatement {
     sea_orm::sea_query::Index::create()
@@ -1651,6 +1736,10 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
             .to_owned(),
         schema
             .create_table_from_entity(lockouts::Entity)
+            .if_not_exists()
+            .to_owned(),
+        schema
+            .create_table_from_entity(second_factor_lockouts::Entity)
             .if_not_exists()
             .to_owned(),
         schema
@@ -1809,6 +1898,19 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
             .await
             .map_err(|error| crate::Error::Internal {
                 message: format!("create lockout identity index: {error}"),
+            })?;
+    }
+    if !index_exists(
+        db,
+        "auth_second_factor_lockouts",
+        SECOND_FACTOR_LOCKOUT_IDENTITY_INDEX,
+    )
+    .await?
+    {
+        db.execute(&second_factor_lockout_identity_index())
+            .await
+            .map_err(|error| crate::Error::Internal {
+                message: format!("create second-factor lockout identity index: {error}"),
             })?;
     }
     if completed_marker.as_deref() != Some("1") {

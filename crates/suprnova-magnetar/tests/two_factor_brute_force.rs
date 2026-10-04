@@ -75,7 +75,7 @@ async fn failed_challenges_lock_the_second_factor_only() {
         assert_eq!(reply.status, 401, "attempt {attempt} fails generically");
         assert_eq!(
             world
-                .lockout
+                .second_factor_lockout
                 .status(&second_factor)
                 .await
                 .unwrap()
@@ -85,7 +85,7 @@ async fn failed_challenges_lock_the_second_factor_only() {
     }
     assert!(
         world
-            .lockout
+            .second_factor_lockout
             .status(&second_factor)
             .await
             .unwrap()
@@ -136,7 +136,7 @@ async fn failed_challenges_lock_the_second_factor_only() {
     assert_eq!(reset.status, 200);
     assert!(
         world
-            .lockout
+            .second_factor_lockout
             .status(&second_factor)
             .await
             .unwrap()
@@ -211,7 +211,7 @@ async fn a_successful_challenge_resets_the_second_factor_counter() {
     }
     assert_eq!(
         world
-            .lockout
+            .second_factor_lockout
             .status(&second_factor)
             .await
             .unwrap()
@@ -234,7 +234,7 @@ async fn a_successful_challenge_resets_the_second_factor_counter() {
     assert_eq!(completed.status, 200);
     assert_eq!(
         world
-            .lockout
+            .second_factor_lockout
             .status(&second_factor)
             .await
             .unwrap()
@@ -305,4 +305,115 @@ async fn a_password_success_does_not_clear_second_factor_failures() {
     );
     let login = send(&world, login_request(EMAIL, PASSWORD)).await;
     assert_eq!(login.status, 200, "password sign-in is not locked");
+}
+
+/// Register the victim with a confirmed second factor under a threshold of
+/// three; returns the world, the second-factor key, and the enrollment.
+async fn victim_with_second_factor() -> (
+    factor::FactorWorld,
+    String,
+    magnetar::two_factor::EnrollmentResponse,
+) {
+    let config = LockoutConfig {
+        max_failed_attempts: 3,
+        ..LockoutConfig::default()
+    };
+    let world = factor_world_with(RegistrationPolicy::Open, config).await;
+    send(&world, register_request(EMAIL, PASSWORD)).await;
+    let user_id = world
+        .storage
+        .find_by_email(EMAIL)
+        .await
+        .unwrap()
+        .unwrap()
+        .user_id;
+    let actor = credential_actor(&world, &user_id).await;
+    let enrollment = world.two_factor.enroll(&actor).await.unwrap();
+    world
+        .two_factor
+        .confirm(&actor, &totp_code_now(&enrollment.otpauth_url))
+        .await
+        .unwrap();
+    let key = magnetar::two_factor::lockout_identity(&user_id);
+    (world, key, enrollment)
+}
+
+/// A password sign-in counts against any string it is given as an address,
+/// and anyone can register any string as one. A visitor who knows the
+/// victim's password registers the second-factor key itself as a decoy
+/// address and signs in to it between wrong codes: the second factor's
+/// failures must still lock at the threshold.
+#[tokio::test]
+async fn a_decoy_account_named_after_the_second_factor_key_cannot_clear_its_failures() {
+    let (world, key, _enrollment) = victim_with_second_factor().await;
+    let decoy = send(&world, register_request(&key, "decoy password 123")).await;
+    assert_eq!(decoy.status, 200);
+
+    let mut evaluated = 0;
+    let mut refused = 0;
+    for _round in 0..4 {
+        let login = send(&world, login_request(EMAIL, PASSWORD)).await;
+        let selector = login.body.unwrap()["challenge_selector"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for _ in 0..2 {
+            let reply = send(
+                &world,
+                post_json(
+                    "/two-factor-challenge",
+                    json!({"challenge_selector": selector, "code": "000000"}),
+                ),
+            )
+            .await;
+            match reply.status {
+                401 => evaluated += 1,
+                429 => refused += 1,
+                status => panic!("unexpected challenge status {status}"),
+            }
+        }
+        let decoy_sign_in = send(&world, login_request(&key, "decoy password 123")).await;
+        assert_eq!(
+            decoy_sign_in.status, 200,
+            "the decoy's own password is right"
+        );
+    }
+
+    assert_eq!(
+        (evaluated, refused),
+        (3, 5),
+        "the decoy's sign-ins clear nothing on the second factor"
+    );
+}
+
+/// Anyone can fail a password sign-in for the second-factor key as an
+/// address, without an account or a password. Those failures must not lock
+/// the victim's second factor.
+#[tokio::test]
+async fn failed_sign_ins_as_the_second_factor_key_do_not_lock_it() {
+    let (world, key, enrollment) = victim_with_second_factor().await;
+    for _ in 0..3 {
+        let reply = send(&world, login_request(&key, "whatever password")).await;
+        assert_eq!(reply.status, 401);
+    }
+
+    let login = send(&world, login_request(EMAIL, PASSWORD)).await;
+    let selector = login.body.unwrap()["challenge_selector"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let code = totp_code_at(
+        &enrollment.otpauth_url,
+        Utc::now().timestamp() + STEP_SECONDS,
+    );
+    let reply = send(
+        &world,
+        post_json(
+            "/two-factor-challenge",
+            json!({"challenge_selector": selector, "code": code}),
+        ),
+    )
+    .await;
+
+    assert_eq!(reply.status, 200, "strangers cannot lock the second factor");
 }
