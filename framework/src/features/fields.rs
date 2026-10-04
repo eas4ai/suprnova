@@ -265,8 +265,11 @@ pub(crate) fn observe_feature_read(
             .iter()
             .find_map(|c| c.extensions().get::<UserIdField>())
         {
+            // The flag's user is the default guard's (`Auth::id` unless the
+            // application extracts another), so it is recorded as that
+            // guard's principal, the value the render-cache key holds.
             Some(field) => {
-                crate::render_cache::collector::observe_principal_value(field.as_str());
+                crate::auth::request_state::observe_default_identity(field.as_str());
             }
             // Fix round 8: the bare read, never nothing. See this
             // function's own doc for why the absent field is still a

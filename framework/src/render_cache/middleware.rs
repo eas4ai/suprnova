@@ -1268,10 +1268,13 @@ fn variance_descriptor(
     for dimension in policy.vary() {
         let value = match dimension {
             VarianceDimension::Locale => DimensionValue::Public(facts.locale()),
+            // The default guard's id, keyed as its bare principal: the value
+            // every default-guard read records, and never the
+            // `<guard>:<id>` another guard's read records.
             VarianceDimension::Principal => match facts.principal() {
                 Some(id) => DimensionValue::Private(PrivateMaterial::principal(
                     &runtime.keys,
-                    &id,
+                    &Auth::bare_principal(&id),
                     FROZEN_PERMISSION_VERSION,
                 )),
                 None => DimensionValue::Anonymous,

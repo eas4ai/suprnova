@@ -60,15 +60,23 @@ type RequestResolver = dyn for<'r> Fn(&'r Request) -> RequestUserFuture<'r> + Se
 /// driver names that start with it, so the two can never collide.
 const VIA_REQUEST_PREFIX: &str = "via_request:";
 
-/// The refusal of a guard name that contains `:`. Every guard but a default
-/// session or token guard attests the principal `<guard>:<id>`, so a `:` in
-/// its name would let two guards attest the same principal. The text names
-/// the rule, never the name.
-fn colon_in_guard_name() -> FrameworkError {
+/// Whether `name` can qualify the principal `<guard>:<id>`. Every guard but
+/// a default session or token guard attests that principal. A `:` in the
+/// name would let two guards attest the same principal, and an empty name
+/// would attest `:<id>`, the principal of a default-guard user whose id
+/// holds a `:` (see `Auth::bare_principal`).
+fn qualifies_a_principal(name: &str) -> bool {
+    !name.is_empty() && !name.contains(':')
+}
+
+/// The refusal of a guard name that cannot qualify a principal (see
+/// [`qualifies_a_principal`]). The text names the rule, never the name.
+fn unqualifying_guard_name() -> FrameworkError {
     FrameworkError::internal(
         "The name of a guard other than the default session or token guard cannot \
-         contain ':': the principal it attests is '<guard>:<id>', and a ':' in the name \
-         would let two guards attest the same principal.",
+         be empty and cannot contain ':': the principal it attests is '<guard>:<id>', \
+         and an empty name or a ':' in the name would let two users attest the same \
+         principal.",
     )
 }
 
@@ -186,15 +194,16 @@ impl AuthManager {
     ///
     /// # Errors
     ///
-    /// Refuses a guard name that contains `:` and registers nothing: the
-    /// principal a guard of the application attests is `<guard>:<id>`.
+    /// Refuses a guard name that is empty or contains `:`, and registers
+    /// nothing: the principal a guard of the application attests is
+    /// `<guard>:<id>`.
     pub fn via_request<F>(&self, name: impl Into<String>, resolver: F) -> Result<(), FrameworkError>
     where
         F: for<'r> Fn(&'r Request) -> RequestUserFuture<'r> + Send + Sync + 'static,
     {
         let name = name.into();
-        if name.contains(':') {
-            return Err(colon_in_guard_name());
+        if !qualifies_a_principal(&name) {
+            return Err(unqualifying_guard_name());
         }
         let resolver: Arc<RequestResolver> = Arc::new(resolver);
         // Recover-in-place on poison, for the same reason as the provider
@@ -411,9 +420,9 @@ impl AuthManager {
     /// The configuration of the guard `name`.
     ///
     /// Every resolution reads it here, so this is where a guard whose name
-    /// contains `:` is refused, before anything is built or attested under
-    /// it: a guard of the application, or any guard but the default guard,
-    /// attests `<guard>:<id>`.
+    /// is empty or contains `:` is refused, before anything is built or
+    /// attested under it: a guard of the application, or any guard but the
+    /// default guard, attests `<guard>:<id>`.
     fn guard_config(&self, name: &str) -> Result<super::config::GuardConfig, FrameworkError> {
         let config = self.config.guard_config(name).cloned().ok_or_else(|| {
             FrameworkError::internal(format!(
@@ -423,8 +432,8 @@ impl AuthManager {
         })?;
         let attests_its_name =
             matches!(config.driver, GuardDriver::Custom(_)) || name != self.config.default_guard;
-        if attests_its_name && name.contains(':') {
-            return Err(colon_in_guard_name());
+        if attests_its_name && !qualifies_a_principal(name) {
+            return Err(unqualifying_guard_name());
         }
         Ok(config)
     }
@@ -956,6 +965,35 @@ mod tests {
                 "the name is not echoed: {message}"
             );
         }
+    }
+
+    // A guard that attests `<guard>:<id>` under an empty name would attest
+    // `:<id>`, the principal a default-guard user whose id holds a `:` stands
+    // for. The empty name is refused with the `:`, for every guard that
+    // attests its name; the default session or token guard keeps any name.
+    #[test]
+    fn an_empty_name_is_refused_in_every_guard_name_but_the_default_built_in_guard() {
+        let entry = GuardConfig::custom("api_key", "partners");
+        let config = AuthConfig::new("web")
+            .guard("", GuardConfig::session("users"))
+            .guard("partner", entry);
+        let m = AuthManager::new(config);
+        m.register_provider("users", Arc::new(FakeProvider));
+        let message = m.guard("").err().expect("expected a refusal").to_string();
+        assert!(message.contains("cannot be empty"), "got: {message}");
+        assert!(m.stateful_guard("").is_err());
+
+        let default_empty =
+            AuthManager::new(AuthConfig::new("").guard("", GuardConfig::session("users")));
+        default_empty.register_provider("users", Arc::new(FakeProvider));
+        assert!(default_empty.guard("").is_ok());
+
+        let resolvers = manager_with_request_guards();
+        let message = resolvers
+            .via_request("", no_one)
+            .expect_err("expected a refusal")
+            .to_string();
+        assert!(message.contains("cannot be empty"), "got: {message}");
     }
 
     #[test]

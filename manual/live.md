@@ -377,7 +377,9 @@ Gated actions, uploads, subscriptions and the principal of an asynchronous
 membership read the route's user: the user of the guard the last
 `AuthMiddleware` on the Live routes checked. The principal string your Live
 gates receive is the bare id for the default guard, as `Auth::id()` reports
-it, so a default-guard application sees the value it always saw. Behind
+it, so a default-guard application sees the value it always saw. The one
+exception is an id that holds a `:`: it gets a leading `:`, so web user
+`admin:9` reaches your gates as `:admin:9` and never as admin `9`. Behind
 `AuthMiddleware::for_guard(..)` naming any other guard - a second session
 guard, a token guard, or a guard of your application (see
 [Authentication](authentication.md)) - it is `<guard>:<id>`, such as

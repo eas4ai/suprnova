@@ -498,11 +498,11 @@ that uses it. `GuardDriver` has three variants: `Session`, `Token`, and
 `.clone()` where you copied it, and give a `match` that names every
 variant a `GuardDriver::Custom(_)` arm.
 
-The name of a guard of your application cannot contain `:`, and neither
-can the name of any other guard except the default session or token guard.
-The manager returns an error when you resolve such a guard, and
-`via_request` refuses to register a resolver for it, before either changes
-anything. The rule keeps two guards from attesting the same principal (see
+The name of a guard of your application cannot be empty or contain `:`,
+and neither can the name of any other guard except the default session or
+token guard. The manager returns an error when you resolve such a guard,
+and `via_request` refuses to register a resolver for it, before either
+changes anything. The rule keeps two guards from attesting the same principal (see
 [Guards and Live](#guards-and-live)).
 
 ### `Auth::extend`
@@ -652,27 +652,32 @@ middleware.
 
 The principal that `AuthMiddleware` attests for a Live component is the
 user of the guard it checked. For the default session or token guard, it is
-the bare id. For any other guard - a second session guard such as `admin`, a
-second token guard, or a guard of your application - it is `<guard>:<id>`.
+the bare id, such as `7`. For any other guard - a second session guard such
+as `admin`, a second token guard, or a guard of your application - it is
+`<guard>:<id>`.
 The same id under two guards is two principals: web user `7` differs from
 admin `7` and from partner `7`, even when both guards read one table. A user
 of another guard in the same session never stands in for the guard's own
 user.
 
-Because the default guard's user attests its bare id, a user id that has the
-form `<guard>:<id>` attests the same principal as that guard's user. If the
-user ids of your application can contain `:`, name your guards so that no
-id starts with `<guard>:`.
+A default-guard id that holds a `:` gets a leading `:`. Web user `admin:9`
+attests `:admin:9`, so it never reads as admin `9`, whose principal is
+`admin:9`. No guard can attest a principal that starts with `:`, because a
+guard name cannot be empty. An id without a `:` is its own principal, so an
+application whose ids are numbers, UUIDs or ULIDs sees the value it always
+saw.
 
-The render cache keys a page by the default guard's identity. An identity
+The render cache keys a page by the default guard's principal. An identity
 read through any other guard is recorded as `<guard>:<id>`, so a page built
 from it is never stored under the default guard's key and never served to a
 visitor who lacks that guard's sign-in. See [Render
 cache](render-cache.md).
 
-Live's gated actions, uploads and subscriptions ask their gates about the
-same principal: the route's user, the bare id for the default guard and
-`<guard>:<id>` for any other. See [Live](live.md#security-boundaries).
+Live's gated actions, uploads, subscriptions and memberships, and the
+Pusher endpoints, use the same principal: the route's user, the bare id for
+the default guard (with the leading `:` above) and `<guard>:<id>` for any
+other. See [Live](live.md#security-boundaries) and
+[Broadcasting](broadcasting.md).
 
 ### Why Suprnova diverges
 

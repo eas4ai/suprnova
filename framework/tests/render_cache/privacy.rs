@@ -46,14 +46,14 @@ use crate::render_cache_privacy_support;
 use render_cache_privacy_support::{
     AUTHZ_DRIVEN_ROUTE, CONSTANT_SCOPED_ROUTE, Harness, IMPERSONATED_ROUTE,
     LOCALE_LATE_MIDDLEWARE_ROUTE, LOCALE_NESTED_SCOPE_ROUTE, LOCALE_SWITCHES_ROUTE,
-    LOCALE_VARIES_ROUTE, NAMED_GUARD_ONLY_ROUTE, NAMED_THEN_DEFAULT_ROUTE, PLAIN_ROUTE,
-    PRINCIPAL_DECLARED_AUTHZ_ROUTE, PRINCIPAL_DECLARED_READS_IDENTITY_ROUTE, PRIVATE_ROUTE,
-    RBAC_GATED_ROUTE, READS_AUTH_ID_ROUTE, READS_COOKIE_ROUTE, READS_CRATE_ROOT_AUTH_USER_ID_ROUTE,
-    READS_GLOBAL_FLAG_ROUTE, READS_OVERRIDE_FLAG_ROUTE, READS_SESSION_MUT_ROUTE,
-    READS_USER_SCOPED_FLAG_ROUTE, REQUEST_AUTH_USER_ID_ROUTE, STITCHED_DOCUMENT_KEY,
-    STITCHED_ROUTE, TENANT_DECLARED_READS_IDENTITY_ROUTE, TENANT_ONLY_GATE_ROUTE,
-    TENANT_ONLY_GATE_UNDECLARED_ROUTE, TENANT_SCOPED_ROUTE, TENANT_SCOPED_UNDECLARED_ROUTE,
-    TENANT_VARIES_ROUTE, UNDECLARED_LOCALE_ROUTE, attribute,
+    LOCALE_VARIES_ROUTE, NAMED_GUARD, NAMED_GUARD_ONLY_ROUTE, NAMED_THEN_DEFAULT_ROUTE,
+    PLAIN_ROUTE, PRINCIPAL_DECLARED_AUTHZ_ROUTE, PRINCIPAL_DECLARED_READS_IDENTITY_ROUTE,
+    PRIVATE_ROUTE, RBAC_GATED_ROUTE, READS_AUTH_ID_ROUTE, READS_COOKIE_ROUTE,
+    READS_CRATE_ROOT_AUTH_USER_ID_ROUTE, READS_GLOBAL_FLAG_ROUTE, READS_OVERRIDE_FLAG_ROUTE,
+    READS_SESSION_MUT_ROUTE, READS_USER_SCOPED_FLAG_ROUTE, REQUEST_AUTH_USER_ID_ROUTE,
+    STITCHED_DOCUMENT_KEY, STITCHED_ROUTE, TENANT_DECLARED_READS_IDENTITY_ROUTE,
+    TENANT_ONLY_GATE_ROUTE, TENANT_ONLY_GATE_UNDECLARED_ROUTE, TENANT_SCOPED_ROUTE,
+    TENANT_SCOPED_UNDECLARED_ROUTE, TENANT_VARIES_ROUTE, UNDECLARED_LOCALE_ROUTE, attribute,
     boot_with_cache_installed_before_the_auth_middleware, boot_with_render_cache, counting_route,
     dispatch_get, ensure_role_gate, ensure_tenant_only_gate, island_tag, route_is_under_a_policy,
     session_cookie, stitched_scope,
@@ -482,6 +482,68 @@ async fn a_body_read_through_a_second_guard_never_reaches_a_visitor_without_that
         counting_route::renders(),
         base + 2,
         "the second-guard render must not be stored under the default guard's key, so \
+         the second request runs the handler"
+    );
+}
+
+/// A default-guard id that reads like a second guard's principal is not that
+/// principal. A second guard's user `carol` is recorded as
+/// `<guard>:carol`. A default-guard user whose id is literally
+/// `<guard>:carol` used to be keyed by that same string, so a page built
+/// from the second guard's user, rendered for a visitor holding both
+/// sign-ins, was stored under the default user's key and served to a later
+/// visitor holding only the default sign-in.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_default_id_shaped_like_a_second_guard_principal_never_receives_that_guard_body() {
+    let harness = boot_with_render_cache().await;
+    let colliding = format!("{NAMED_GUARD}:carol");
+    // R103 positive control, sibling shape: the same visitor on a route that
+    // reads only the default guard is stored, colon and all.
+    let base = same_visitor_twice_is_a_hit(
+        &harness,
+        "/privacy/private/35",
+        &[("x-test-login", colliding.as_str())],
+    )
+    .await;
+    assert!(
+        route_is_under_a_policy(&harness, NAMED_GUARD_ONLY_ROUTE),
+        "the attacked route must still be attached to a policy"
+    );
+
+    let both = dispatch_get(
+        &harness,
+        "/privacy/named-guard-only/35",
+        &[
+            ("x-test-login", colliding.as_str()),
+            ("x-test-named-login", "carol"),
+        ],
+    )
+    .await;
+    assert_eq!(both.status, StatusCode::OK);
+    assert!(both.text().contains("for carol"), "got {}", both.text());
+
+    let default_only = dispatch_get(
+        &harness,
+        "/privacy/named-guard-only/35",
+        &[("x-test-login", colliding.as_str())],
+    )
+    .await;
+    assert!(
+        !default_only.text().contains("for carol"),
+        "the body came from the second guard's user `carol`; a default user whose id \
+         reads `{colliding}` is a different principal and must never receive it - got {}",
+        default_only.text()
+    );
+    assert!(
+        default_only.text().contains("for anonymous"),
+        "got {}",
+        default_only.text()
+    );
+    assert_eq!(
+        counting_route::renders(),
+        base + 2,
+        "the second-guard render must not be stored under the default user's key, so \
          the second request runs the handler"
     );
 }

@@ -542,7 +542,7 @@ impl Auth {
             crate::session::middleware::persisted_guard_auth_user_id(&Self::default_guard_name());
         // The identity and session the Live memberships were issued under,
         // captured before either is cleared (LIVE-021).
-        let live_principal = Self::id();
+        let live_principal = Self::id().map(|id| Self::bare_principal(&id));
         let live_session_id = session().map(|session| session.id);
 
         // STEP 1: Clear session auth + request-scoped cache + 2FA
@@ -998,9 +998,10 @@ impl Auth {
     }
 
     /// The principal of the route's user, by the rule of
-    /// [`guard_principal`](Self::guard_principal): the bare id for the
-    /// default guard, `<guard>:<id>` for any other. Gates that take a
-    /// principal string, such as Live's, are asked about this value.
+    /// [`guard_principal`](Self::guard_principal): the
+    /// [`bare_principal`](Self::bare_principal) of the id for the default
+    /// guard, `<guard>:<id>` for any other. Gates that take a principal
+    /// string, such as Live's, are asked about this value.
     ///
     /// The route's guard is the one the last `AuthMiddleware` that passed
     /// the request on checked. When the route names none, it is the default
@@ -1011,7 +1012,7 @@ impl Auth {
             Some(guard) => guard,
             None => match Self::custom_default_guard() {
                 Some(guard) => guard,
-                None => return Ok(Self::id()),
+                None => return Ok(Self::id().map(|id| Self::bare_principal(&id))),
             },
         };
         let id = Self::guard(&guard)?.id().await?;
@@ -1030,14 +1031,19 @@ impl Auth {
     /// for, wherever an identity is recorded: the Live principal attestation
     /// and the identity material of the render cache.
     ///
-    /// The default guard keeps the bare id, the value [`id`](Self::id)
-    /// reports, so attestations and render-cache keys built from the default
-    /// guard keep their value. Every other guard, and a guard of the
-    /// application even as the default, gives `<guard>:<id>`. User 7 of an
-    /// `admin` guard is not user 7 of the default guard, even when both
-    /// guards read one table, and a body built for one is never served as
-    /// the other's. The manager refuses a `:` in the name of every guard
-    /// that gives `<guard>:<id>`, so two guards never give one principal.
+    /// The default guard gives the [`bare_principal`](Self::bare_principal)
+    /// of the id, which is the id itself unless it holds a `:`, so
+    /// attestations and render-cache keys built from the default guard keep
+    /// their value. Every other guard, and a guard of the application even as
+    /// the default, gives `<guard>:<id>`. User 7 of an `admin` guard is not
+    /// user 7 of the default guard, even when both guards read one table, and
+    /// a body built for one is never served as the other's.
+    ///
+    /// No two users give one principal. The manager refuses an empty name and
+    /// a `:` in the name of every guard that gives `<guard>:<id>`, so such a
+    /// principal holds a `:` and does not start with one, and its first `:`
+    /// ends the guard's name. A bare principal holds no `:` or starts with
+    /// one.
     pub(crate) fn guard_principal(guard_name: &str, id: &str) -> String {
         let bare = match App::get::<AuthManager>() {
             Some(manager) => {
@@ -1046,9 +1052,28 @@ impl Auth {
             None => guard_name == "web",
         };
         if bare {
-            id.to_owned()
+            Self::bare_principal(id)
         } else {
             format!("{guard_name}:{id}")
+        }
+    }
+
+    /// The principal of the user `id` of the default session or token guard:
+    /// the id [`id`](Self::id) reports, as Live gates, Pusher, Live
+    /// memberships and the render-cache key see it.
+    ///
+    /// An id without `:` is its own principal, so an application whose ids
+    /// are numbers, UUIDs or ULIDs sees the value it always saw. An id with a
+    /// `:` reads like the `<guard>:<id>` principal of another guard: the
+    /// default user `admin:9` would be admin 9, and a page built for admin 9
+    /// would be served to that default user. Such an id gets a leading `:`,
+    /// `:admin:9`, which no guard's `<guard>:<id>` can spell, because the
+    /// manager refuses an empty guard name.
+    pub(crate) fn bare_principal(id: &str) -> String {
+        if id.contains(':') {
+            format!(":{id}")
+        } else {
+            id.to_owned()
         }
     }
 
@@ -1141,9 +1166,9 @@ impl Auth {
     /// `AuthMiddleware::new().for_guard(name)` then reach it by name. See
     /// [`AuthManager::extend`] for the rules.
     ///
-    /// The guard's name cannot contain `:`: the principal a guard of the
-    /// application attests is `<guard>:<id>`. Resolving a guard whose
-    /// declaration breaks that rule is an error.
+    /// The guard's name cannot be empty or contain `:`: the principal a
+    /// guard of the application attests is `<guard>:<id>`. Resolving a guard
+    /// whose declaration breaks that rule is an error.
     ///
     /// # As the default guard
     ///
@@ -1206,8 +1231,9 @@ impl Auth {
     ///
     /// # Errors
     ///
-    /// Refuses a guard name that contains `:`, and registers nothing: the
-    /// principal a guard of the application attests is `<guard>:<id>`.
+    /// Refuses a guard name that is empty or contains `:`, and registers
+    /// nothing: the principal a guard of the application attests is
+    /// `<guard>:<id>`.
     ///
     /// # As the default guard
     ///
