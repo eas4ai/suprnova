@@ -67,9 +67,12 @@ impl TokenPurpose {
 ///
 /// - `id`         BIGINT PK auto-increment - matches `Model::id: i64`
 /// - `user_id`    TEXT not null - opaque string id (String-everywhere)
-/// - `token_hash` TEXT not null UNIQUE - SHA-256 hash of the plaintext
-///   token; the UNIQUE constraint gives `check`/`consume` an indexed
-///   equality lookup and backs the single-use guarantee at the DB level
+/// - `token_hash` VARCHAR(64) not null UNIQUE - SHA-256 hex digest of the
+///   plaintext token; the UNIQUE constraint gives `check`/`consume` an
+///   indexed equality lookup and backs the single-use guarantee at the DB
+///   level. A bounded type because MySQL refuses a UNIQUE key on `TEXT`
+///   (error 1170); tables an older builder created with `TEXT` on MariaDB,
+///   Postgres or SQLite work unchanged
 /// - `purpose`    TEXT not null - [`TokenPurpose::as_str`] discriminator
 /// - `expires_at` DATETIME not null - token TTL boundary
 /// - `used_at`    DATETIME null - set atomically on single-use consume
@@ -98,7 +101,7 @@ pub fn create_auth_flow_tokens_table() -> sea_orm::sea_query::TableCreateStateme
         .col(ColumnDef::new(AuthFlowTokens::UserId).text().not_null())
         .col(
             ColumnDef::new(AuthFlowTokens::TokenHash)
-                .text()
+                .string_len(64)
                 .not_null()
                 .unique_key(),
         )
@@ -419,7 +422,7 @@ fn live_token_owner(
 ///
 /// - `id`         BIGINT PK auto-increment
 /// - `user_id`    TEXT not null - opaque string id
-/// - `token_hash` TEXT not null UNIQUE - SHA-256 hash of the plaintext token
+/// - `token_hash` VARCHAR(64) not null UNIQUE - SHA-256 hex digest of the plaintext token
 /// - `purpose`    TEXT not null - [`TokenPurpose::as_str`] discriminator
 /// - `expires_at` DATETIME not null - token TTL boundary
 /// - `used_at`    DATETIME null - set on single-use consume
