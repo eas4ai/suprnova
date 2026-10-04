@@ -481,6 +481,23 @@ impl<S: OffsetRecordStore> InstanceRecordStore for MirroredClockStore<S> {
         self.mirror();
         self.inner.count_instances().await
     }
+
+    async fn soonest_expiring_instances(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(InstanceRecordKey, StoredRecord)>, LedgerError> {
+        self.mirror();
+        self.inner.soonest_expiring_instances(limit).await
+    }
+
+    async fn compare_and_remove(
+        &self,
+        key: &InstanceRecordKey,
+        expected_version: u64,
+    ) -> Result<bool, LedgerError> {
+        self.mirror();
+        self.inner.compare_and_remove(key, expected_version).await
+    }
 }
 
 /// One ledger handle over the database record store, on a node clock the

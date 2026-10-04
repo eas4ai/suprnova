@@ -16,7 +16,8 @@
 //! The adapters answer the same contracts `sql` proves of the database
 //! tier - one accepted publication per fence, an evicted entry answering as
 //! a miss, a tampered hash decoding as a miss, a lease taken over only by
-//! store time, compare-and-store fencing a stale read - and the last
+//! store time, compare-and-store fencing a stale read, eviction reading the
+//! head of the deadline index and removing only the version it read - and the last
 //! section answers the parent module's three two-node proofs with this
 //! tier's handles, so both tiers are held to one contract rather than two
 //! that read alike.
@@ -31,7 +32,10 @@ use suprnova::render_cache::providers::{
     RedisInstanceRecordStore, RedisLeaseStore, RedisProviderConfig, RedisRenderStore,
 };
 use suprnova_live::identity::{InstanceId, ScopeFingerprint, UnixMillis};
-use suprnova_live::ledger::{CasOutcome, InstanceRecordStore, LedgerErrorKind, MAX_RECORD_BYTES};
+use suprnova_live::ledger::{
+    CasOutcome, InstanceRecordKey, InstanceRecordStore, LedgerErrorKind, MAX_RECORD_BYTES,
+    StoredRecord,
+};
 use suprnova_live::render_cache::entry::{EntryKind, EntryLimits, decode};
 use suprnova_live::render_cache::singleflight::{
     LocalCoordinatorLimits, RebuildAdmission, RebuildCoordinator,
@@ -607,6 +611,101 @@ async fn live_redis_records_are_created_once_and_compare_and_store_fences_a_stal
         first.count_instances().await.expect("count"),
         1,
         "and a refused record reaches no command"
+    );
+
+    assert_eviction_reads_the_soonest_and_removes_by_version(&first, &mut conn, &config, &wide)
+        .await;
+}
+
+/// Offers the live instances whose deadlines come first, in that order and
+/// bounded by the limit, and removes one with its index member only at the
+/// version it was read at: the two scripts a full ledger evicts through.
+///
+/// `still_live` is a record the caller left with a deadline a minute away,
+/// so the records made here, seconds away, are the head of the index.
+async fn assert_eviction_reads_the_soonest_and_removes_by_version(
+    store: &RedisInstanceRecordStore,
+    conn: &mut redis::aio::ConnectionManager,
+    config: &RedisProviderConfig,
+    still_live: &InstanceRecordKey,
+) {
+    let keys_of = |records: Vec<(InstanceRecordKey, StoredRecord)>| {
+        records.into_iter().map(|(key, _)| key).collect::<Vec<_>>()
+    };
+    for (tag, after_ms) in [(0x67, 1_000), (0x65, 5_000), (0x66, 6_000)] {
+        let deadline = redis_deadline(conn, after_ms).await;
+        assert!(
+            store
+                .insert_if_absent(&instance_key(tag), b"candidate", deadline)
+                .await
+                .expect("insert")
+        );
+    }
+    // Two seconds on, the first record has elapsed and is no longer counted.
+    store.set_time_offset_for_test(2_000);
+    assert_eq!(
+        keys_of(
+            store
+                .soonest_expiring_instances(2)
+                .await
+                .expect("the soonest records")
+        ),
+        vec![instance_key(0x65), instance_key(0x66)],
+        "deadline order, bounded by the limit, and never an elapsed record"
+    );
+
+    let claimed = instance_key(0x66);
+    let deadline = redis_deadline(conn, 6_000).await;
+    assert_eq!(
+        store
+            .compare_and_store(&claimed, 1, b"claimed", deadline)
+            .await
+            .expect("compare and store"),
+        CasOutcome::Stored { version: 2 }
+    );
+    assert!(
+        !store
+            .compare_and_remove(&claimed, 1)
+            .await
+            .expect("compare and remove"),
+        "a record that moved on since it was read is not removed"
+    );
+    assert!(
+        store
+            .compare_and_remove(&claimed, 2)
+            .await
+            .expect("compare and remove"),
+        "the version that was read is removed"
+    );
+    assert!(store.load(&claimed).await.expect("load").is_none());
+    let member: Option<f64> = redis::cmd("ZSCORE")
+        .arg(format!("{}instances", config.prefix))
+        .arg(format!(
+            "{}instance:{}:{}",
+            config.prefix,
+            hex::encode(claimed.scope.as_bytes()),
+            hex::encode(claimed.instance_id.as_bytes())
+        ))
+        .query_async(conn)
+        .await
+        .expect("read the index member");
+    assert_eq!(member, None, "the index member went with the hash");
+    assert!(
+        !store
+            .compare_and_remove(&claimed, 2)
+            .await
+            .expect("compare and remove"),
+        "a second remover finds nothing to count as its own"
+    );
+    assert_eq!(
+        keys_of(
+            store
+                .soonest_expiring_instances(8)
+                .await
+                .expect("the soonest records")
+        ),
+        vec![instance_key(0x65), still_live.clone()],
+        "the removed record left the order"
     );
 }
 
