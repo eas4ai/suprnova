@@ -145,6 +145,12 @@ the Laravel-Axios convention: the SPA library reads the cookie via
 JavaScript and echoes it as `X-XSRF-TOKEN` on the next state-changing
 request, completing the round-trip without ever touching a meta tag.
 
+The token belongs to the session, so a response that hands it out also
+keeps the session: when the request started a new session, `CsrfMiddleware`
+marks it for storage, and `SessionMiddleware` sends its cookie with the
+response. A cookieless SPA that calls a JSON or `HEAD` endpoint first gets a
+token its next unsafe request can use.
+
 The cookie is **not** `HttpOnly` - it has to be readable from JS. The
 value is therefore stored as plaintext (no encryption round-trip),
 because the JS-side value must match what the middleware compares
