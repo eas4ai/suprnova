@@ -64,7 +64,7 @@ sees a boot failure instead of a half-working app.
 | `CACHE_DRIVER` | `memory` or `redis` | `memory` |
 | `REDIS_URL` | Redis URL (consulted only when `driver=redis`) | `redis://127.0.0.1:6379` |
 | `REDIS_PREFIX` | Key prefix applied to every store operation | `suprnova_cache:` |
-| `CACHE_DEFAULT_TTL` | Default TTL in seconds for `Cache::put(None)`; `0` means no default | `3600` |
+| `CACHE_DEFAULT_TTL` | Default TTL in seconds for `Cache::put`, `Cache::remember`, and `Cache::tags_put` called with `None`; `0` means no default | `3600` |
 | `CACHE_SWEEP_INTERVAL` | Seconds between sweeps of the in-memory cache's expired entries; `0` turns the sweep off | `60` |
 
 Unset `CACHE_DRIVER` parses to `Memory`; any other value (case-
@@ -92,10 +92,12 @@ to `CacheConfig::default()` rather than re-reading env.
 
 ### The `forever` contract holds across backends
 
-`Cache::forever` and `Cache::remember_forever` bypass
-`CACHE_DEFAULT_TTL` entirely; the value never expires regardless of the
-configured default. `Cache::put(key, value, None)` does apply the
-default - that's the point of having one.
+`Cache::forever`, `Cache::remember_forever` (and its alias `Cache::sear`),
+and `Cache::tags_forever` bypass `CACHE_DEFAULT_TTL` entirely; the value
+never expires regardless of the configured default.
+`Cache::put(key, value, None)`, `Cache::remember(key, None, ..)`, and
+`Cache::tags_put(tags, key, value, None)` do apply the default - that's the
+point of having one.
 
 The default-TTL resolution happens at the facade layer. Both `CacheStore`
 backends honour `None` literally at the store boundary (no expiration),
@@ -309,6 +311,13 @@ Cache::tags_put(
 
 // Update path: drop every key tagged `user:1`
 Cache::flush_tags(&["user:1"]).await?;
+```
+
+`tags_put` with a `None` TTL applies `CACHE_DEFAULT_TTL`, like `put`. To
+store a tagged value that never expires, use `Cache::tags_forever`:
+
+```rust
+Cache::tags_forever(&["settings"], "settings:site", &settings).await?;
 ```
 
 Tag membership is **per-entry**: each tagged write installs that
