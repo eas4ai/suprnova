@@ -442,6 +442,28 @@ async fn decrement_atomic_update() {
     assert_eq!(reread.hits, 6);
 }
 
+/// DATA-038: decrementing by `i64::MIN` subtracts it. It used to negate
+/// the amount and add, which overflows for the one value with no
+/// negation.
+#[tokio::test]
+#[serial]
+async fn decrement_by_the_minimum_signed_value_subtracts_it() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    db.execute_unprepared(
+        "CREATE TABLE t4_counters (id INTEGER PRIMARY KEY AUTOINCREMENT, hits INTEGER NOT NULL DEFAULT 0)",
+    )
+    .await
+    .unwrap();
+
+    let counter = T4Counter::create(attrs! { hits: -1 }).await.unwrap();
+    counter
+        .decrement("hits", i64::MIN)
+        .await
+        .expect("decrement by i64::MIN");
+    let reread = T4Counter::find(counter.id).await.unwrap().unwrap();
+    assert_eq!(reread.hits, i64::MAX, "-1 - i64::MIN is i64::MAX");
+}
+
 /// DATA-008: `Collection::sort_by` orders integers exactly. Above 2^53
 /// two integers can share one `f64`, and the comparison used to call
 /// them equal and leave them unsorted.

@@ -71,6 +71,63 @@ pub(crate) fn key_beyond_signed(
         .any(|value| crate::eloquent::casts::unsigned::beyond_signed(backend, value))
 }
 
+/// `UPDATE table SET column = column <operator> by WHERE pk = ?`, the
+/// body of [`Model::increment`] and [`Model::decrement`]. The operator is
+/// written rather than the amount negated, because `i64::MIN` has no
+/// negation.
+async fn step_column<M>(
+    model: &M,
+    column: &str,
+    operator: &str,
+    by: i64,
+) -> Result<(), FrameworkError>
+where
+    M: Model,
+    M: From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    // Audit HIGH `eloquent` #1 - column is interpolated raw into
+    // the SQL string and cannot be parameterised. Validate
+    // against the framework's SQL identifier rules before render.
+    crate::database::validate_identifier(column)?;
+    let table = M::TABLE;
+    let pk_name = M::primary_key_name();
+    let pk_value = model.primary_key_value_json();
+    // T11/T12: route through resolve_write.
+    let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+        None,
+        None,
+        M::default_connection_name(),
+    )
+    .await?;
+    let backend = exec.backend();
+    // Rendered after the executor resolves, because only it knows the
+    // backend - and Postgres rejects `?`, so a hard-coded placeholder
+    // made increment/decrement (and every counter built on them) fail
+    // outright there.
+    let by_ph = crate::database::placeholder::placeholder(backend, 1)?;
+    let pk_ph = crate::database::placeholder::placeholder(backend, 2)?;
+    let sql = format!(
+        "UPDATE {table} SET {column} = {column} {operator} {by_ph} WHERE {pk_name} = {pk_ph}"
+    );
+    exec.run(sea_orm::Statement::from_sql_and_values(
+        backend,
+        &sql,
+        vec![by.into(), json_value_to_sea_value(&pk_value)],
+    ))
+    .await
+    .map_err(|e| FrameworkError::database(e.to_string()))?;
+    crate::render_cache::orm::after_model_write(model).await?;
+    Ok(())
+}
+
 /// The row state a model's relation cache keeps, when it has a cache.
 fn row_state(
     cache: Option<&crate::eloquent::relations::EagerLoadCache>,
@@ -1753,44 +1810,15 @@ where
     /// I/O boundary with [`FrameworkError`]. Same contract as
     /// Laravel's `Model::increment($column, $by)`.
     async fn increment(&self, column: &str, by: i64) -> Result<(), FrameworkError> {
-        // Audit HIGH `eloquent` #1 - column is interpolated raw into
-        // the SQL string and cannot be parameterised. Validate
-        // against the framework's SQL identifier rules before render.
-        crate::database::validate_identifier(column)?;
-        let table = Self::TABLE;
-        let pk_name = Self::primary_key_name();
-        let pk_value = self.primary_key_value_json();
-        // T11/T12: route through resolve_write.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            None,
-            None,
-            Self::default_connection_name(),
-        )
-        .await?;
-        let backend = exec.backend();
-        // Rendered after the executor resolves, because only it knows the
-        // backend - and Postgres rejects `?`, so a hard-coded placeholder
-        // made increment/decrement (and every counter built on them) fail
-        // outright there.
-        let by_ph = crate::database::placeholder::placeholder(backend, 1)?;
-        let pk_ph = crate::database::placeholder::placeholder(backend, 2)?;
-        let sql =
-            format!("UPDATE {table} SET {column} = {column} + {by_ph} WHERE {pk_name} = {pk_ph}");
-        exec.run(sea_orm::Statement::from_sql_and_values(
-            backend,
-            &sql,
-            vec![by.into(), json_value_to_sea_value(&pk_value)],
-        ))
-        .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
-        crate::render_cache::orm::after_model_write(self).await?;
-        Ok(())
+        step_column(self, column, "+", by).await
     }
 
-    /// Atomic `UPDATE table SET col = col - by WHERE pk = ?`. Sugar
-    /// over `increment(column, -by)`.
+    /// Atomic `UPDATE table SET col = col - by WHERE pk = ?`. The
+    /// subtraction is written into the SQL rather than `-by` added, so
+    /// every `i64` amount works, `i64::MIN` included. Same identifier
+    /// validation as [`Self::increment`].
     async fn decrement(&self, column: &str, by: i64) -> Result<(), FrameworkError> {
-        self.increment(column, -by).await
+        step_column(self, column, "-", by).await
     }
 
     // ---- Static destroy / is / is_not (Laravel parity) -----------------
