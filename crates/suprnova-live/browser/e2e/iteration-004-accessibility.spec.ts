@@ -1,10 +1,12 @@
 import { expect, test } from "@playwright/test";
 
 import { expectNoSeriousA11yViolations } from "./support/a11y.js";
+import { resetReferenceUploadsBetweenTests } from "./support/reference-host.js";
 
 const REFERENCE_ORIGIN = "http://127.0.0.1:4175";
 
 test.beforeEach(async ({ request }) => {
+  await resetReferenceUploadsBetweenTests(request);
   await expect
     .poll(async () => {
       const response = await request.get(`${REFERENCE_ORIGIN}/__test/iteration-004/inspection`);

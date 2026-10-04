@@ -1940,6 +1940,13 @@ impl UploadRuntime {
 
     pub(super) async fn reset_creation_window(&self) -> Result<(), &'static str> {
         let _creation_window_guard = self.creation_window_gate.lock().await;
+        self.reset_quiescent_creation_window()
+    }
+
+    /// Resets the creation window only when every upload is terminal, no
+    /// operation holds a slot, and no pause holds authority. Callers hold the
+    /// creation-window gate, so no creation crosses the reset.
+    fn reset_quiescent_creation_window(&self) -> Result<(), &'static str> {
         let uploads = self
             .uploads
             .records
@@ -1955,6 +1962,121 @@ impl UploadRuntime {
         if !self.ledger.reset_creation_window_if_all_terminal() {
             return Err("upload_window_not_quiescent");
         }
+        Ok(())
+    }
+
+    /// The reset the browser suite runs between tests (LIVE-039).
+    ///
+    /// A browser that closes the connection of a request that never answered
+    /// drops its operation mid-await, and the drop restores the upload with
+    /// its active lease, so a retry in the same test can still finish it.
+    /// Nothing else ever ends that upload, because the host's clock is fixed:
+    /// the strict reset would refuse, and every later test would fail on the
+    /// lease. Between tests no page owns an upload, so this reset closes each
+    /// idle unfinished one before it resets the window. It still refuses
+    /// while an operation holds a slot or a pause holds authority. Those end
+    /// on their own, and the suite polls this reset until it answers.
+    pub(super) async fn reset_between_tests(&self) -> Result<(), &'static str> {
+        let _creation_window_guard = self.creation_window_gate.lock().await;
+        if self.operation_pause.has_authority() {
+            return Err("upload_window_not_quiescent");
+        }
+        let mut all_closed = true;
+        for mut operation in self.take_abandoned_uploads()? {
+            if self.close_abandoned(operation.upload_mut()).await.is_err() {
+                all_closed = false;
+            }
+        }
+        if !all_closed {
+            return Err("upload_window_not_quiescent");
+        }
+        self.reset_quiescent_creation_window()
+    }
+
+    /// Takes every idle upload that is unfinished, or that still holds its
+    /// lease because an earlier provider cancel failed, as an operation. It
+    /// refuses while any operation holds a slot: that request is still
+    /// running, and its own completion or drop settles the upload.
+    fn take_abandoned_uploads(&self) -> Result<Vec<UploadOperation>, &'static str> {
+        let mut uploads = self
+            .uploads
+            .records
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.uploads.retired.load(Ordering::Acquire)
+            || uploads
+                .values()
+                .any(|slot| matches!(slot, UploadSlot::Busy { .. }))
+        {
+            return Err("upload_window_not_quiescent");
+        }
+        let keys = uploads
+            .iter()
+            .filter_map(|(key, slot)| match slot {
+                UploadSlot::Ready(upload)
+                    if !upload.state.is_terminal() || upload.active_lease.is_some() =>
+                {
+                    Some(key.clone())
+                }
+                UploadSlot::Ready(_) | UploadSlot::Busy { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let mut abandoned = Vec::with_capacity(keys.len());
+        for key in keys {
+            match uploads.remove(&key) {
+                Some(UploadSlot::Ready(upload)) => {
+                    let upload = *upload;
+                    uploads.insert(
+                        key.clone(),
+                        UploadSlot::Busy {
+                            handle: upload.handle.clone(),
+                            mode: upload.mode,
+                        },
+                    );
+                    abandoned.push(UploadOperation {
+                        slots: Arc::clone(&self.uploads),
+                        key,
+                        upload: Some(upload),
+                    });
+                }
+                Some(busy @ UploadSlot::Busy { .. }) => {
+                    uploads.insert(key, busy);
+                }
+                None => {}
+            }
+        }
+        Ok(abandoned)
+    }
+
+    /// Closes one upload a finished test abandoned.
+    ///
+    /// The slot can trail the ledger: the validation and finalization
+    /// services advance the ledger inside an operation, and a dropped
+    /// operation restores the copy it took. So the ledger's state picks the
+    /// transition, and Finalizing, which has no cancel edge, fails instead.
+    /// The lease goes only once the provider has let go of the transfer; a
+    /// transfer an orphaned store operation still holds keeps it, and the
+    /// next reset retries the cancel.
+    async fn close_abandoned(&self, upload: &mut StoredUpload) -> Result<(), UploadError> {
+        if let Some(current) =
+            suprnova_live::upload::UploadLedger::load(self.ledger.as_ref(), &upload.handle).await?
+        {
+            upload.state = current.state();
+            upload.revision = current.revision();
+        }
+        if !upload.state.is_terminal() {
+            let (closing, key) = if upload.state == UploadState::Finalizing {
+                (UploadTransition::Fail, "abandoned-fail")
+            } else {
+                (UploadTransition::Cancel, "abandoned-cancel")
+            };
+            self.transition(upload, closing, key).await?;
+        }
+        match upload.mode {
+            TransferMode::File => self.file.cancel(&upload.handle).await?,
+            TransferMode::Direct => self.direct.cancel(&upload.handle).await?,
+        }
+        drop(upload.active_lease.take());
         Ok(())
     }
 
@@ -2618,16 +2740,33 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn every_detached_upload_operation_restores_state_when_its_future_is_aborted() {
+    /// Every pause point, in the order the abort tests drive them.
+    const PAUSE_POINTS: [UploadPausePoint; 7] = [
+        UploadPausePoint::Chunk,
+        UploadPausePoint::Status,
+        UploadPausePoint::Complete,
+        UploadPausePoint::Cancel,
+        UploadPausePoint::Reacquire,
+        UploadPausePoint::Finalize,
+        UploadPausePoint::Expire,
+    ];
+
+    /// Opens a runtime over a fresh quarantine root, returning the root, the
+    /// runtime, its active-upload counter, and the shutdown sender that keeps
+    /// the runtime's shutdown channel open.
+    async fn open_test_runtime(
+        prefix: &str,
+    ) -> (
+        std::path::PathBuf,
+        Arc<UploadRuntime>,
+        Arc<ResourceCounter>,
+        watch::Sender<bool>,
+    ) {
         let mut random = [0_u8; 8];
         getrandom::fill(&mut random).expect("test root entropy");
-        let root = std::env::temp_dir().join(format!(
-            "suprnova-live-upload-abort-{}",
-            u64::from_le_bytes(random)
-        ));
+        let root = std::env::temp_dir().join(format!("{prefix}-{}", u64::from_le_bytes(random)));
         tokio::fs::create_dir_all(&root).await.expect("test root");
-        let (_shutdown, shutdown) = watch::channel(false);
+        let (shutdown_sender, shutdown) = watch::channel(false);
         let active = Arc::new(ResourceCounter::default());
         let timers = Arc::new(ResourceCounter::default());
         let runtime = Arc::new(
@@ -2636,129 +2775,167 @@ mod tests {
                 ReferenceFaultSchedule::None,
                 shutdown,
                 Arc::clone(&active),
-                Arc::clone(&timers),
+                timers,
             )
             .await
             .expect("upload runtime"),
         );
+        (root, runtime, active, shutdown_sender)
+    }
 
-        for point in [
-            UploadPausePoint::Chunk,
-            UploadPausePoint::Status,
-            UploadPausePoint::Complete,
-            UploadPausePoint::Cancel,
-            UploadPausePoint::Reacquire,
-            UploadPausePoint::Finalize,
-            UploadPausePoint::Expire,
-        ] {
-            let created = runtime
-                .create(CreateUploadRequest {
-                    field: "serial".to_owned(),
-                    filename: format!("{point:?}.bin"),
-                    content_type: "application/octet-stream".to_owned(),
-                    expected_bytes: 8,
-                    mode: "file".to_owned(),
-                })
+    /// Creates one upload in the state the operation at `point` acts on and
+    /// returns its handle, grant, and current revision. A completion gets its
+    /// bytes first, so a retry of it can finish; finalize and expire act on a
+    /// ready upload.
+    async fn upload_for(runtime: &UploadRuntime, point: UploadPausePoint) -> (String, String, u64) {
+        let created = runtime
+            .create(CreateUploadRequest {
+                field: "serial".to_owned(),
+                filename: format!("{point:?}.bin"),
+                content_type: "application/octet-stream".to_owned(),
+                expected_bytes: 8,
+                mode: "file".to_owned(),
+            })
+            .await
+            .expect("created upload");
+        let handle = created["handle"].as_str().expect("handle").to_owned();
+        let grant = created["grant"].as_str().expect("grant").to_owned();
+        let mut revision = created["revision"].as_u64().expect("revision");
+        if matches!(
+            point,
+            UploadPausePoint::Complete | UploadPausePoint::Finalize | UploadPausePoint::Expire
+        ) {
+            let checksum = hex_digest(Sha256::digest(b"abcdefgh"));
+            let written = runtime
+                .write_chunk(
+                    &handle,
+                    0,
+                    &grant,
+                    &checksum,
+                    Some(8),
+                    Body::from("abcdefgh"),
+                )
                 .await
-                .expect("created upload");
-            let handle = created["handle"].as_str().expect("handle").to_owned();
-            let grant = created["grant"].as_str().expect("grant").to_owned();
-            let revision = if matches!(point, UploadPausePoint::Finalize | UploadPausePoint::Expire)
-            {
-                let checksum = hex_digest(Sha256::digest(b"abcdefgh"));
-                runtime
-                    .write_chunk(
-                        &handle,
-                        0,
-                        &grant,
-                        &checksum,
-                        Some(8),
-                        Body::from("abcdefgh"),
-                    )
-                    .await
-                    .expect("finalization upload chunk");
-                runtime
+                .expect("upload chunk");
+            revision = written["revision"].as_u64().expect("transferring revision");
+        }
+        if matches!(point, UploadPausePoint::Finalize | UploadPausePoint::Expire) {
+            revision = runtime
+                .complete(
+                    &handle,
+                    CompleteUploadRequest {
+                        grant: grant.clone(),
+                    },
+                )
+                .await
+                .expect("finalization upload ready")
+                .status()["revision"]
+                .as_u64()
+                .expect("ready revision");
+        }
+        (handle, grant, revision)
+    }
+
+    /// Starts the operation at `point` on its own task, parks it at that
+    /// point, and aborts it there: the drop a closed browser connection
+    /// causes while the request is mid-await.
+    async fn abandon_operation(
+        runtime: &Arc<UploadRuntime>,
+        point: UploadPausePoint,
+        handle: &str,
+        grant: &str,
+        revision: u64,
+    ) {
+        let pause_generation = runtime
+            .operation_pause
+            .select(point, handle, revision)
+            .expect("scoped pause");
+        let operation_runtime = Arc::clone(runtime);
+        let operation_handle = handle.to_owned();
+        let operation_grant = grant.to_owned();
+        let task = tokio::spawn(async move {
+            match point {
+                UploadPausePoint::Chunk => {
+                    let checksum = hex_digest(Sha256::digest(b"abcdefgh"));
+                    operation_runtime
+                        .write_chunk(
+                            &operation_handle,
+                            0,
+                            &operation_grant,
+                            &checksum,
+                            Some(8),
+                            Body::from("abcdefgh"),
+                        )
+                        .await
+                }
+                UploadPausePoint::Status => {
+                    operation_runtime
+                        .status(&operation_handle, &operation_grant)
+                        .await
+                }
+                UploadPausePoint::Complete => operation_runtime
                     .complete(
-                        &handle,
+                        &operation_handle,
                         CompleteUploadRequest {
-                            grant: grant.clone(),
+                            grant: operation_grant,
                         },
                     )
                     .await
-                    .expect("finalization upload ready")
-                    .status()["revision"]
-                    .as_u64()
-                    .expect("ready revision")
-            } else {
-                created["revision"].as_u64().expect("revision")
-            };
-            let pause_generation = runtime
-                .operation_pause
-                .select(point, &handle, revision)
-                .expect("scoped pause");
-            let operation_runtime = Arc::clone(&runtime);
-            let operation_handle = handle.clone();
-            let operation_grant = grant.clone();
-            let task = tokio::spawn(async move {
-                match point {
-                    UploadPausePoint::Chunk => {
-                        let checksum = hex_digest(Sha256::digest(b"abcdefgh"));
-                        operation_runtime
-                            .write_chunk(
-                                &operation_handle,
-                                0,
-                                &operation_grant,
-                                &checksum,
-                                Some(8),
-                                Body::from("abcdefgh"),
-                            )
-                            .await
-                    }
-                    UploadPausePoint::Status => {
-                        operation_runtime
-                            .status(&operation_handle, &operation_grant)
-                            .await
-                    }
-                    UploadPausePoint::Complete => operation_runtime
-                        .complete(
-                            &operation_handle,
-                            CompleteUploadRequest {
-                                grant: operation_grant,
-                            },
-                        )
+                    .map(|outcome| outcome.status().clone()),
+                UploadPausePoint::Cancel => {
+                    operation_runtime
+                        .cancel(&operation_handle, &operation_grant)
                         .await
-                        .map(|outcome| outcome.status().clone()),
-                    UploadPausePoint::Cancel => {
-                        operation_runtime
-                            .cancel(&operation_handle, &operation_grant)
-                            .await
-                    }
-                    UploadPausePoint::Reacquire => {
-                        operation_runtime.reacquire(&operation_handle).await
-                    }
-                    UploadPausePoint::Finalize => {
-                        operation_runtime
-                            .finalize(FinalizeUploadRequestBody {
-                                handle: operation_handle,
-                                ready_revision: revision,
-                            })
-                            .await
-                    }
-                    UploadPausePoint::Expire => operation_runtime.expire(&operation_handle).await,
                 }
-            });
-            timeout(
-                Duration::from_secs(1),
-                runtime.operation_pause.wait_until_entered(pause_generation),
-            )
+                UploadPausePoint::Reacquire => operation_runtime.reacquire(&operation_handle).await,
+                UploadPausePoint::Finalize => {
+                    operation_runtime
+                        .finalize(FinalizeUploadRequestBody {
+                            handle: operation_handle,
+                            ready_revision: revision,
+                        })
+                        .await
+                }
+                UploadPausePoint::Expire => operation_runtime.expire(&operation_handle).await,
+            }
+        });
+        timeout(
+            Duration::from_secs(1),
+            runtime.operation_pause.wait_until_entered(pause_generation),
+        )
+        .await
+        .expect("operation reached cancellation point");
+        task.abort();
+        assert!(task.await.expect_err("operation aborted").is_cancelled());
+        assert_eq!(
+            runtime.operation_pause.resume(pause_generation),
+            Err("upload_pause_generation_stale")
+        );
+    }
+
+    /// Asserts the quarantine root holds nothing after retirement and removes it.
+    async fn remove_empty_root(root: &std::path::Path) {
+        let mut entries = tokio::fs::read_dir(root).await.expect("quarantine root");
+        assert!(
+            entries
+                .next_entry()
+                .await
+                .expect("quarantine entry")
+                .is_none()
+        );
+        tokio::fs::remove_dir(root)
             .await
-            .expect("operation reached cancellation point");
-            task.abort();
-            assert!(task.await.expect_err("operation aborted").is_cancelled());
-            assert_eq!(
-                runtime.operation_pause.resume(pause_generation),
-                Err("upload_pause_generation_stale")
-            );
+            .expect("remove empty test root");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_detached_upload_operation_restores_state_when_its_future_is_aborted() {
+        let (root, runtime, active, _shutdown) =
+            open_test_runtime("suprnova-live-upload-abort").await;
+
+        for point in PAUSE_POINTS {
+            let (handle, grant, revision) = upload_for(&runtime, point).await;
+            abandon_operation(&runtime, point, &handle, &grant, revision).await;
             if matches!(point, UploadPausePoint::Finalize | UploadPausePoint::Expire) {
                 let parsed_handle = UploadHandle::parse(&handle).expect("stored upload handle");
                 let authoritative = suprnova_live::upload::UploadLedger::load(
@@ -2789,27 +2966,91 @@ mod tests {
             assert_eq!(coherent["handle"], handle);
             assert_eq!(
                 coherent["state"],
-                if matches!(point, UploadPausePoint::Finalize | UploadPausePoint::Expire) {
-                    "ready"
-                } else {
-                    "created"
+                match point {
+                    UploadPausePoint::Finalize | UploadPausePoint::Expire => "ready",
+                    UploadPausePoint::Complete => "transferring",
+                    _ => "created",
                 }
             );
+            if point == UploadPausePoint::Complete {
+                // LIVE-039: the dropped completion kept the upload
+                // recoverable, so the browser's retry in the same test, before
+                // any reset, still completes it.
+                let retried = runtime
+                    .complete(&handle, CompleteUploadRequest { grant })
+                    .await
+                    .expect("retried completion");
+                assert!(
+                    matches!(retried, CompleteUploadOutcome::Ready(_)),
+                    "{}",
+                    retried.status()
+                );
+                assert_eq!(retried.status()["state"], "ready");
+            }
         }
 
         runtime.retire().await.expect("runtime retires");
         assert_eq!(active.current(), 0);
-        let mut entries = tokio::fs::read_dir(&root).await.expect("quarantine root");
-        assert!(
-            entries
-                .next_entry()
-                .await
-                .expect("quarantine entry")
-                .is_none()
+        remove_empty_root(&root).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_cancels_the_uploads_an_abandoned_test_left() {
+        let (root, runtime, active, _shutdown) =
+            open_test_runtime("suprnova-live-upload-abandoned").await;
+
+        // A browser test that ends while its request is mid-await leaves the
+        // upload behind: the operation's drop restores it, with its lease
+        // when it never reached ready, and the host's fixed clock never
+        // expires it. One upload per pause point, all left at once.
+        let mut abandoned = Vec::new();
+        for point in PAUSE_POINTS {
+            let (handle, grant, revision) = upload_for(&runtime, point).await;
+            abandon_operation(&runtime, point, &handle, &grant, revision).await;
+            abandoned.push((point, handle));
+        }
+        assert_eq!(
+            active.current(),
+            PAUSE_POINTS.len() - 2,
+            "every abandoned upload short of ready keeps its lease"
         );
-        tokio::fs::remove_dir(&root)
+        assert_eq!(
+            runtime.reset_creation_window().await,
+            Err("upload_window_not_quiescent"),
+            "the reset a test runs on its own uploads still refuses an unfinished one"
+        );
+
+        runtime
+            .reset_between_tests()
             .await
-            .expect("remove empty test root");
+            .expect("the reset between tests closes every abandoned upload");
+
+        assert_eq!(active.current(), 0);
+        for (point, handle) in abandoned {
+            let parsed_handle = UploadHandle::parse(&handle).expect("stored upload handle");
+            let record =
+                suprnova_live::upload::UploadLedger::load(runtime.ledger.as_ref(), &parsed_handle)
+                    .await
+                    .expect("authoritative upload")
+                    .expect("retained upload");
+            assert_eq!(
+                record.state(),
+                if point == UploadPausePoint::Finalize {
+                    UploadState::Failed
+                } else {
+                    UploadState::Canceled
+                },
+                "{point:?}"
+            );
+        }
+        assert_eq!(
+            runtime.reset_creation_window().await,
+            Ok(()),
+            "the closed uploads leave the host quiescent"
+        );
+
+        runtime.retire().await.expect("runtime retires");
+        remove_empty_root(&root).await;
     }
 
     #[tokio::test]
