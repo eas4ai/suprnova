@@ -247,13 +247,12 @@ fn one_space_per_line_break(value: &str) -> String {
 /// The language whose rules apply: the current locale's.
 fn current_tongue() -> Tongue {
     #[cfg(feature = "localization")]
-    {
-        Tongue::for_language(&crate::Lang::locale().language())
-    }
+    let language = crate::Lang::locale().language();
+    // Without localization there is no locale, so the rules are English's;
+    // they come through the same mapping as every other language.
     #[cfg(not(feature = "localization"))]
-    {
-        Tongue::English
-    }
+    let language = "en";
+    Tongue::for_language(&language)
 }
 
 /// The start and length, in characters, of `mb_substr(value, index,
