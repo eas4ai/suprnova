@@ -12,8 +12,6 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use serde::de::DeserializeOwned;
-use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Default cap on generic (JSON / form-urlencoded / raw) request body size,
@@ -160,11 +158,22 @@ pub async fn collect_body(body: Incoming) -> Result<Bytes, FrameworkError> {
 
 /// Parse bytes as JSON into the target type
 ///
-/// Deserialization errors map to 422 Unprocessable Entity - the client
-/// supplied invalid input (wrong shape, rejected fields, bad types).
+/// A body that is JSON but does not fit a struct `T` answers as a
+/// validation failure, a 422 whose `errors` names every field that failed
+/// under its input name (`address.street`, `items.1`) with a catalog
+/// message: `validation-required` for a missing field or a `null` one, and
+/// `validation-integer`, `validation-numeric`, `validation-boolean`,
+/// `validation-string` or `validation-format` for a value of the wrong
+/// kind. That is what lets the Inertia validation redirect show each one
+/// under its input. Any other failure, a body that is not JSON among them,
+/// is a 422 that words it.
 pub fn parse_json<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, FrameworkError> {
-    serde_json::from_slice(bytes)
-        .map_err(|e| FrameworkError::domain(format!("Failed to parse JSON body: {}", e), 422))
+    serde_json::from_slice(bytes).map_err(|e| {
+        match crate::http::input::json_field_failures::<T>(bytes) {
+            Some(errors) => FrameworkError::Validation(errors),
+            None => FrameworkError::domain(format!("Failed to parse JSON body: {}", e), 422),
+        }
+    })
 }
 
 /// Whether a `Content-Type` value names `application/x-www-form-urlencoded`.
@@ -193,191 +202,22 @@ pub(crate) fn is_form_urlencoded(content_type: &str) -> bool {
 /// `null` before any rule runs. So an empty value is left out, which is how
 /// `null` reaches a typed field: an `Option` is `None` and a required field
 /// is missing, a `String` included. A name sent more than once keeps its
-/// last value, as PHP does, unless it ends in `[]`, PHP's mark for a list.
-/// The multipart extractor reads a form by the same two rules, so a form
-/// gives a handler the same values whichever way it is posted.
+/// last value, as PHP does. A name that ends in `[]`, PHP's mark for a
+/// list, is read as a list under the name without the brackets, with its
+/// empty elements left out. The multipart extractor reads a form by the
+/// same rules, so a form gives a handler the same values whichever way it
+/// is posted.
 ///
-/// Deserialization errors map to 422 Unprocessable Entity - the client
-/// supplied invalid input.
+/// A field that is missing or does not parse answers as a validation
+/// failure, a 422 whose `errors` names every such field under its input
+/// name with a catalog message, as the multipart extractor reports one.
+/// Any other failure, such as a name a struct denies, is a 422 that words
+/// it.
 pub fn parse_form<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, FrameworkError> {
-    serde_urlencoded::from_str(&form_as_laravel_reads_it(bytes, struct_field_names::<T>()))
-        .map_err(|e| FrameworkError::domain(format!("Failed to parse form body: {}", e), 422))
-}
-
-/// `bytes` re-encoded with only the pairs Laravel would read: no empty
-/// value, and for a name that is not a list only its last pair.
-///
-/// `fields` names the only pairs a repeat can matter for, a struct's
-/// fields: any other name a struct ignores, so only these are tracked, and
-/// the lookup holds one entry per field however many names the client
-/// sends. With `None` the target can hold any name, as a map does, and
-/// every name is tracked.
-fn form_as_laravel_reads_it(bytes: &[u8], fields: Option<&[&str]>) -> String {
-    let fields: Option<HashSet<&str>> = fields.map(|names| names.iter().copied().collect());
-    // The position of the last pair of each tracked name.
-    let mut last: HashMap<Cow<'_, str>, usize> = HashMap::new();
-    for (at, (name, _)) in url::form_urlencoded::parse(bytes).enumerate() {
-        let tracked = !name.ends_with("[]")
-            && fields
-                .as_ref()
-                .is_none_or(|fields| fields.contains(name.as_ref()));
-        if tracked {
-            last.insert(name, at);
+    crate::http::input::parse_form_input(bytes).map_err(|error| match error {
+        crate::http::input::InputError::Fields(errors) => FrameworkError::Validation(errors),
+        crate::http::input::InputError::Other(message) => {
+            FrameworkError::domain(format!("Failed to parse form body: {message}"), 422)
         }
-    }
-
-    let mut kept = url::form_urlencoded::Serializer::new(String::with_capacity(bytes.len()));
-    for (at, (name, value)) in url::form_urlencoded::parse(bytes).enumerate() {
-        let replaced = last
-            .get(name.as_ref())
-            .is_some_and(|&last_at| last_at != at);
-        if !value.is_empty() && !replaced {
-            kept.append_pair(&name, &value);
-        }
-    }
-    kept.finish()
-}
-
-/// The names of `T`'s fields when `T` deserializes as a struct; `None`
-/// when it deserializes as anything else, a map or a struct with a
-/// flattened field among them, which can take any name.
-///
-/// A derived `Deserialize` hands its field names to the deserializer
-/// before it reads a byte, so a deserializer that keeps the names and
-/// stops there reads them without any input.
-fn struct_field_names<T: DeserializeOwned>() -> Option<&'static [&'static str]> {
-    match T::deserialize(FieldNames) {
-        Err(FieldNamesRead(fields)) => fields,
-        Ok(_) => None,
-    }
-}
-
-/// The deserializer [`struct_field_names`] runs: it fails at once,
-/// carrying the field names when it was asked for a struct.
-struct FieldNames;
-
-/// The "error" that carries what [`FieldNames`] read.
-#[derive(Debug)]
-struct FieldNamesRead(Option<&'static [&'static str]>);
-
-impl std::fmt::Display for FieldNamesRead {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("read the field names of a struct, not a value")
-    }
-}
-
-impl std::error::Error for FieldNamesRead {}
-
-impl serde::de::Error for FieldNamesRead {
-    fn custom<M: std::fmt::Display>(_message: M) -> Self {
-        Self(None)
-    }
-}
-
-impl<'de> serde::Deserializer<'de> for FieldNames {
-    type Error = FieldNamesRead;
-
-    fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
-        Err(FieldNamesRead(None))
-    }
-
-    fn deserialize_struct<V: serde::de::Visitor<'de>>(
-        self,
-        _name: &'static str,
-        fields: &'static [&'static str],
-        _visitor: V,
-    ) -> Result<V::Value, Self::Error> {
-        Err(FieldNamesRead(Some(fields)))
-    }
-
-    serde::forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
-        bytes byte_buf option unit unit_struct newtype_struct seq tuple
-        tuple_struct map enum identifier ignored_any
-    }
-}
-
-#[cfg(test)]
-mod form_tests {
-    use super::*;
-    use serde::Deserialize;
-    use std::collections::BTreeMap;
-
-    #[derive(Debug, Deserialize)]
-    struct Profile {
-        name: String,
-        #[serde(rename = "about")]
-        bio: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct WithExtra {
-        name: String,
-        #[serde(flatten)]
-        extra: BTreeMap<String, String>,
-    }
-
-    #[test]
-    fn a_struct_hands_over_its_wire_names_and_a_map_none() {
-        assert_eq!(
-            struct_field_names::<Profile>(),
-            Some(&["name", "about"][..])
-        );
-        assert_eq!(struct_field_names::<BTreeMap<String, String>>(), None);
-        assert_eq!(struct_field_names::<WithExtra>(), None);
-    }
-
-    #[test]
-    fn a_struct_reads_a_renamed_field_by_its_wire_name() {
-        let form: Profile =
-            parse_form(&Bytes::from_static(b"name=&name=Ada&about=x&about=Hi")).expect("a struct");
-        assert_eq!(form.name, "Ada");
-        assert_eq!(form.bio.as_deref(), Some("Hi"));
-
-        let form: Profile = parse_form(&Bytes::from_static(b"name=Ada&about=")).expect("a struct");
-        assert_eq!(form.bio, None);
-    }
-
-    #[test]
-    fn a_list_keeps_every_value_and_no_name_keeps_an_empty_one() {
-        assert_eq!(
-            form_as_laravel_reads_it(b"tags[]=a&tags[]=&tags[]=b&name=x&name=y&bio=", None),
-            "tags%5B%5D=a&tags%5B%5D=b&name=y"
-        );
-        // `name=` last is `null`, whatever came before it.
-        assert_eq!(form_as_laravel_reads_it(b"name=x&name=", None), "");
-    }
-
-    #[test]
-    fn only_a_structs_own_names_are_tracked() {
-        // `other` is no field of the struct, so its repeats pass through
-        // for the struct to ignore.
-        assert_eq!(
-            form_as_laravel_reads_it(b"other=1&name=x&other=2&name=y", Some(&["name"])),
-            "other=1&other=2&name=y"
-        );
-    }
-
-    #[test]
-    fn a_map_and_a_flattened_struct_read_the_last_value_of_a_name() {
-        let map: BTreeMap<String, String> =
-            parse_form(&Bytes::from_static(b"a=1&a=2&b=&c=3")).expect("a map");
-        assert_eq!(
-            map,
-            BTreeMap::from([("a".into(), "2".into()), ("c".into(), "3".into())])
-        );
-
-        let form: WithExtra =
-            parse_form(&Bytes::from_static(b"name=x&name=y&x=1&x=2&blank=")).expect("a struct");
-        assert_eq!(form.name, "y");
-        assert_eq!(form.extra, BTreeMap::from([("x".into(), "2".into())]));
-    }
-
-    #[test]
-    fn an_encoded_value_survives_the_round_trip() {
-        let map: BTreeMap<String, String> =
-            parse_form(&Bytes::from_static(b"q=a+b%26c%3Dd&q2=%C3%A9")).expect("a map");
-        assert_eq!(map["q"], "a b&c=d");
-        assert_eq!(map["q2"], "\u{e9}");
-    }
+    })
 }

@@ -250,10 +250,29 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
         // requests with 413 before consuming any body bytes.
         let (_, bytes) = req.body_bytes_with_cap(Self::max_body_bytes()).await?;
 
-        let data: Self = if is_form {
-            parse_form(&bytes)?
+        let parsed = if is_form {
+            parse_form(&bytes)
         } else {
-            parse_json(&bytes)?
+            parse_json(&bytes)
+        };
+        let data: Self = match parsed {
+            Ok(data) => data,
+            // A field that does not parse keeps the struct from being built,
+            // so no rule can run. A precognitive request hears about the
+            // fields it asked after. When none of those failed it is still
+            // not told the form is valid, since no rule checked it: it hears
+            // which fields are in the way.
+            Err(FrameworkError::Validation(errors)) if is_precognition => {
+                let asked = errors.retain_fields(&validate_only);
+                return Err(FrameworkError::PrecognitionFailure(
+                    if validate_only.is_empty() || asked.is_empty() {
+                        errors
+                    } else {
+                        asked
+                    },
+                ));
+            }
+            Err(error) => return Err(error),
         };
 
         // Run validation. Precognition runs the same validators as a
