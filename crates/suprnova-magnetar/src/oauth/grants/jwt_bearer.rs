@@ -59,7 +59,8 @@ struct AssertionClaims<'a> {
 /// Returns [`OAuthProtocolError::ProviderConfiguration`] when the assertion
 /// fails to sign (an algorithm/key-material mismatch in the host-supplied
 /// `signing_key`) -- caught before any network call. Otherwise propagates
-/// provider/network failure classes from [`super::execute_token_request`].
+/// provider/network failure classes from the shared token-request helper,
+/// `execute_token_request`.
 pub async fn execute(
     provider: &dyn OAuthProvider,
     transport: &dyn HttpTransport,
