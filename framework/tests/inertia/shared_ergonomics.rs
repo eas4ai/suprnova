@@ -215,6 +215,30 @@ async fn inertia_shared_reads_back_a_dotted_value_by_its_full_key_or_its_parent(
 }
 
 #[tokio::test]
+async fn inertia_shared_reads_through_a_json_array_by_numeric_index() {
+    // Laravel's `Arr::get` treats a numeric segment as a list index, so
+    // `users.0.name` reaches into a shared list.
+    let _guard = suprnova::testing::TestContainer::fake();
+    App::inertia_share(
+        "users",
+        serde_json::json!([{ "name": "A" }, { "name": "B" }]),
+    );
+
+    assert_eq!(
+        App::inertia_shared("users.0.name"),
+        Some(serde_json::json!("A"))
+    );
+    assert_eq!(
+        App::inertia_shared("users.1"),
+        Some(serde_json::json!({ "name": "B" }))
+    );
+    assert_eq!(App::inertia_shared("users.2.name"), None);
+    assert_eq!(App::inertia_shared("users.first.name"), None);
+    // Only the canonical spelling is an index, as in PHP.
+    assert_eq!(App::inertia_shared("users.01.name"), None);
+}
+
+#[tokio::test]
 async fn inertia_shared_returns_none_for_a_lazy_share() {
     let _guard = suprnova::testing::TestContainer::fake();
     App::inertia_share_lazy("locale", || async {

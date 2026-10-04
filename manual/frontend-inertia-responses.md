@@ -630,6 +630,9 @@ App::flush_inertia_shared();
 assert_eq!(App::inertia_shared("user.name"), None);
 ```
 
+A numeric segment reads into a shared list, as `Arr::get` does:
+`App::inertia_shared("users.0.name")` reads the first user's name.
+
 `inertia_shared` reads the static registry only - it returns `None` for a
 key registered via `inertia_share_lazy` / `inertia_share_once` (there's no
 request to resolve one against, mirroring Laravel's `getShared`, which
