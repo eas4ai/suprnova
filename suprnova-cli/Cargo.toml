@@ -64,11 +64,14 @@ sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The Live tooling helper runs in its own process group so a timeout can
+# kill everything it started, and an interrupt is forwarded to that group
+# (`commands/live_tool.rs`).
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.31.3", default-features = false, features = ["process", "signal"] }
+
 [dev-dependencies]
 # Verify generated keys round-trip through the framework's loader.
 suprnova = { path = "../framework", version = "3.1.0" }
 # Integration tests that invoke the binary with a temp working directory.
 tempfile = "3"
-
-[target.'cfg(unix)'.dev-dependencies]
-nix = { version = "=0.31.3", default-features = false, features = ["process", "signal"] }
