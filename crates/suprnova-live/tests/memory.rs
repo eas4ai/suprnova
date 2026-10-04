@@ -43,15 +43,11 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 
 /// Serializes the heap tests. Each test takes this lock before anything
 /// else, before any runtime exists, so a test waiting its turn is parked
-/// rather than building a runtime while another measures; the pause after
-/// acquiring lets the harness finish reporting the test before.
+/// rather than building a runtime while another measures.
 fn exclusive() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    guard
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Runs an async measurement on a runtime built after [`exclusive`].
