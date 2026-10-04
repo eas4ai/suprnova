@@ -491,6 +491,12 @@
     font-weight: var(--sn-font-weight-medium);
   }
 
+  /* A label around a checkbox or radio button is the text a person clicks,
+   * so it reads at the checkbox component's size, not a field label's. */
+  label:has(> input[type="checkbox"], > input[type="radio"]) {
+    font-size: var(--sn-font-size-sm);
+  }
+
   fieldset {
     margin: 0 0 var(--sn-density-stack);
     padding: var(--sn-space-4);

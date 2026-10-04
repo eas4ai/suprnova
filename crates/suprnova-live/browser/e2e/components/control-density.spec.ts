@@ -189,8 +189,9 @@ test("the form controls are no larger than the suprnova.app form fields", async 
 });
 
 // A form as an application writes one: fields in plain flow, then the same
-// controls in a fieldset, whose grid gap spaces its parts; and the components
-// that put their label in their own grid or row.
+// controls in a fieldset, whose grid gap spaces its parts; the components
+// that put their label in their own grid or row; and plain labels around a
+// checkbox and a radio button, with no component class.
 const RHYTHM = `<main style="padding: 1.5rem; max-inline-size: 40rem">
 <form id="flow">
 ${field("flow_name", "Name", `<input class="sn-input" id="flow_name" name="flow_name" type="text">`, "", "Enter your name.")}
@@ -208,6 +209,8 @@ ${field("set_city", "City", `<input class="sn-input" id="set_city" name="set_cit
 <sn-input-otp class="sn-otp" data-sn-length="6"><label class="sn-otp-label" for="code">One-time code</label><input class="sn-input sn-otp-input" id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" spellcheck="false" autocapitalize="off" required><span class="sn-otp-cells" aria-hidden="true"><span class="sn-otp-cell" data-sn-index="1"></span><span class="sn-otp-cell" data-sn-index="2"></span></span></sn-input-otp>
 <div class="sn-upload" data-sn-upload="attachment"><label class="sn-upload-label" for="attachment">Attachment</label><input class="sn-upload-input" id="attachment" type="file" accept="image/png"><progress class="sn-upload-progress" max="100" aria-label="Attachment upload progress"></progress><p class="sn-upload-status"><span class="sn-upload-state" data-sn-state="idle">No file chosen.</span></p><div class="sn-upload-controls" role="group" aria-label="Attachment upload controls"><button class="sn-upload-control" type="button">Cancel upload</button></div></div>
 <form class="sn-datatable-filter" role="search" aria-label="Filter invoices"><label class="sn-datatable-filter-label" for="invoices-filter">Filter invoices</label><input class="sn-datatable-filter-input" id="invoices-filter" name="filter" type="search" value=""><button class="sn-datatable-filter-button" type="submit">Apply</button></form>
+<label id="bare-check"><input type="checkbox" name="remember"> Remember me</label>
+<label id="bare-radio"><input type="radio" name="billing" value="monthly"> Monthly</label>
 </main>`;
 
 test("fields and their labels sit no farther apart than on the suprnova.app forms", async ({
@@ -256,6 +259,11 @@ test("fields and their labels sit no farther apart than on the suprnova.app form
         uploadControls: gap(".sn-upload-status", ".sn-upload-controls"),
         filterButton: gap("#invoices-filter", ".sn-datatable-filter-button"),
       },
+      bareChoices: ["#bare-check", "#bare-radio"].map((selector) =>
+        Number.parseFloat(
+          getComputedStyle(document.querySelector(selector) ?? document.body).fontSize,
+        ),
+      ),
     };
   });
 
@@ -278,6 +286,10 @@ test("fields and their labels sit no farther apart than on the suprnova.app form
     uploadControls: 8,
     filterButton: 8,
   });
+
+  // A plain label around a checkbox or radio button reads at the checkbox
+  // component's 14 px, not the 12 px of a label above a field.
+  expect.soft(measured.bareChoices).toEqual([14, 14]);
 });
 
 test.describe("on a touch screen", () => {
