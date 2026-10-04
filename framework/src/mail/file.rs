@@ -11,6 +11,7 @@ use crate::mail::transport::{MailTransport, OutgoingMessage};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::io::AsyncWriteExt;
 
 /// Writes each outgoing message to `dir` as a `.eml` file.
 ///
@@ -20,7 +21,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct FileMailTransport {
     dir: PathBuf,
     /// Disambiguates messages written inside the same millisecond. Without
-    /// it a burst of mail from one request overwrites itself.
+    /// it a burst of mail from one request overwrites itself. It counts per
+    /// transport, so another writer on the same directory (a second
+    /// process, or a second transport) can produce the same name; the file
+    /// is created exclusively and the next number taken instead.
     seq: AtomicU64,
 }
 
@@ -64,15 +68,38 @@ impl MailTransport for FileMailTransport {
             ))
         })?;
 
-        let path = self.dir.join(self.next_filename());
-        tokio::fs::write(&path, email.formatted())
-            .await
-            .map_err(|e| {
-                FrameworkError::internal(format!(
-                    "mail file transport could not write {}: {e}",
-                    path.display()
-                ))
-            })?;
+        let bytes = email.formatted();
+        // `create_new` refuses a name another writer already holds, so a
+        // preview is never overwritten; the next name is tried instead.
+        let (path, mut file) = loop {
+            let path = self.dir.join(self.next_filename());
+            match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .await
+            {
+                Ok(file) => break (path, file),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    return Err(FrameworkError::internal(format!(
+                        "mail file transport could not create {}: {e}",
+                        path.display()
+                    )));
+                }
+            }
+        };
+        let written = async {
+            file.write_all(&bytes).await?;
+            file.flush().await
+        }
+        .await;
+        written.map_err(|e| {
+            FrameworkError::internal(format!(
+                "mail file transport could not write {}: {e}",
+                path.display()
+            ))
+        })?;
 
         tracing::info!(path = %path.display(), "mail (file driver): wrote message");
         Ok(())

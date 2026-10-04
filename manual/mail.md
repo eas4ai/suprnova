@@ -217,7 +217,8 @@ MAIL_DRIVER=file
 MAIL_FILE_PATH=storage/mail
 ```
 
-Each send produces one `<millis>-<seq>.eml` in that directory. Open it with any mail client (Thunderbird,
+Each send produces one new `<millis>-<seq>.eml` in that directory. A name another writer already holds -
+a second process, or a second transport on the same directory - is skipped, never overwritten. Open it with any mail client (Thunderbird,
 Apple Mail, `mutt -f`) to see the message as a recipient sees it - both alternative bodies, every
 attachment, and the full header set including `X-Priority`, `X-Tag`, `X-Metadata-*`, and `Return-Path`.
 
