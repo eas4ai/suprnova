@@ -223,24 +223,28 @@ fn resolve_live_route_with_snapshot(
         Ok(routes) => routes,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let mut resolved_pattern = None;
+    // Several names may share one pattern: a resource names `/posts` both
+    // `posts.index` and `posts.store`. They are one target, since the
+    // identity is the pattern's digest and every name builds the same URL.
+    // Only two different patterns behind one identity would be ambiguous.
+    let mut resolved_pattern: Option<String> = None;
     for pattern in routes.values() {
         if &live_route_identity(pattern)? != identity {
             continue;
         }
-        if resolved_pattern.replace(pattern.clone()).is_some() {
-            return Err(LiveRouteResolutionError::AmbiguousIdentity);
+        match &resolved_pattern {
+            Some(resolved) if resolved != pattern => {
+                return Err(LiveRouteResolutionError::AmbiguousIdentity);
+            }
+            Some(_) => {}
+            None => resolved_pattern = Some(pattern.clone()),
         }
     }
     drop(routes);
     let pattern = resolved_pattern.ok_or(LiveRouteResolutionError::UnknownRoute)?;
     after_snapshot();
-    substitute_strict(&pattern, |key| {
-        parameters
-            .get(key)
-            .map(|value| utf8_percent_encode(value, PATH_SEGMENT_ENCODE).to_string())
-    })
-    .map_err(|_| LiveRouteResolutionError::InvalidParameters)
+    substitute_strict(&pattern, |key| parameters.get(key).cloned())
+        .map_err(|_| LiveRouteResolutionError::InvalidParameters)
 }
 
 fn live_route_identity(pattern: &str) -> Result<RouteIdentity, LiveRouteResolutionError> {
@@ -319,6 +323,11 @@ where
 /// value is left out with its segment, so `/posts/{id?}` becomes `/posts`.
 /// One that has no value while a later one has is kept verbatim like a
 /// required one: leaving it out would move the later value into its place.
+///
+/// `next_value` returns the raw value; this encodes it. A value is encoded
+/// as one path segment. A catch-all, `{*rest}`, is looked up as `rest`, the
+/// name the router captures it under, and spans segments: each segment is
+/// encoded and the slashes between them stay.
 fn substitute<F>(pattern: &str, mut next_value: F) -> String
 where
     F: FnMut(&str) -> Option<String>,
@@ -346,7 +355,7 @@ where
                     out.push('}');
                 }
             }
-        } else if let Some(encoded) = next_value(key) {
+        } else if let Some(encoded) = placeholder_value(key, &mut next_value) {
             out.push_str(&encoded);
         } else {
             out.push('{');
@@ -357,6 +366,34 @@ where
     }
     out.push_str(rest);
     out
+}
+
+/// The name a placeholder's value is looked up by: `rest` for the
+/// catch-all `{*rest}`, the text itself otherwise.
+fn placeholder_name(key: &str) -> &str {
+    key.strip_prefix('*').unwrap_or(key)
+}
+
+/// Look up and encode the value of the placeholder written `key`.
+fn placeholder_value<F>(key: &str, next_value: &mut F) -> Option<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    next_value(placeholder_name(key)).map(|value| encode_placeholder(key, &value))
+}
+
+/// Encode `value` for the placeholder written `key`: one segment, or for a
+/// catch-all, one segment per `/`-separated part.
+fn encode_placeholder(key: &str, value: &str) -> String {
+    if key.starts_with('*') {
+        value
+            .split('/')
+            .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT_ENCODE).to_string())
+            .collect::<Vec<_>>()
+            .join("/")
+    } else {
+        utf8_percent_encode(value, PATH_SEGMENT_ENCODE).to_string()
+    }
 }
 
 /// What an optional placeholder becomes in a generated URL.
@@ -383,7 +420,11 @@ where
         .filter_map(|(key, _)| key.strip_suffix('?'))
         // An empty value is no value. `/posts/` is a URL no form of
         // `/posts/{id?}` matches, so the segment is left out.
-        .map(|name| next_value(name).filter(|value| !value.is_empty()))
+        .map(|key| {
+            next_value(placeholder_name(key))
+                .filter(|value| !value.is_empty())
+                .map(|value| encode_placeholder(key, &value))
+        })
         .collect();
     let last_given = values.iter().rposition(Option::is_some);
     values
@@ -441,15 +482,18 @@ where
                 Some(Filled::Value(encoded)) => out.push_str(encoded),
                 Some(Filled::LeftOut) => leave_segment_out(&mut out),
                 Some(Filled::Missing) | None => {
-                    if !missing.iter().any(|m| m == name) {
-                        missing.push(name.to_string());
+                    if !missing.iter().any(|m| m == placeholder_name(name)) {
+                        missing.push(placeholder_name(name).to_string());
                     }
                 }
             }
-        } else if let Some(encoded) = next_value(key) {
+        } else if let Some(encoded) = placeholder_value(key, &mut next_value) {
             out.push_str(&encoded);
-        } else if !missing.iter().any(|m| m == key) {
-            missing.push(key.to_string());
+        } else {
+            let name = placeholder_name(key);
+            if !missing.iter().any(|m| m == name) {
+                missing.push(name.to_string());
+            }
         }
         rest = &rest[close + 1..];
     }
@@ -493,7 +537,7 @@ pub fn route(name: &str, params: &[(&str, &str)]) -> Option<String> {
         params
             .iter()
             .find(|(k, _)| *k == key)
-            .map(|(_, v)| utf8_percent_encode(v, PATH_SEGMENT_ENCODE).to_string())
+            .map(|(_, v)| (*v).to_string())
     }))
 }
 
@@ -503,11 +547,7 @@ pub fn route(name: &str, params: &[(&str, &str)]) -> Option<String> {
 /// encoding policy.
 pub fn route_with_params(name: &str, params: &HashMap<String, String>) -> Option<String> {
     let path_pattern = lookup_route(name)?;
-    Some(substitute(&path_pattern, |key| {
-        params
-            .get(key)
-            .map(|v| utf8_percent_encode(v, PATH_SEGMENT_ENCODE).to_string())
-    }))
+    Some(substitute(&path_pattern, |key| params.get(key).cloned()))
 }
 
 /// Error returned by [`try_route`] / [`try_route_with_params`] when a
@@ -569,7 +609,7 @@ pub fn try_route(name: &str, params: &[(&str, &str)]) -> Result<String, RouteUrl
         params
             .iter()
             .find(|(k, _)| *k == key)
-            .map(|(_, v)| utf8_percent_encode(v, PATH_SEGMENT_ENCODE).to_string())
+            .map(|(_, v)| (*v).to_string())
     })
     .map_err(|missing| RouteUrlError::MissingParams {
         name: name.into(),
@@ -587,14 +627,11 @@ pub fn try_route_with_params(
 ) -> Result<String, RouteUrlError> {
     let path_pattern =
         lookup_route(name).ok_or_else(|| RouteUrlError::NameNotFound(name.into()))?;
-    substitute_strict(&path_pattern, |key| {
-        params
-            .get(key)
-            .map(|v| utf8_percent_encode(v, PATH_SEGMENT_ENCODE).to_string())
-    })
-    .map_err(|missing| RouteUrlError::MissingParams {
-        name: name.into(),
-        missing,
+    substitute_strict(&path_pattern, |key| params.get(key).cloned()).map_err(|missing| {
+        RouteUrlError::MissingParams {
+            name: name.into(),
+            missing,
+        }
     })
 }
 
@@ -3003,11 +3040,52 @@ mod tests {
         }
     }
 
+    /// A catch-all `{*rest}` is captured under `rest`, so `rest` is the
+    /// key a caller passes to build its URL. Its value spans segments:
+    /// each segment is encoded and the slashes between them stay.
     #[test]
     #[serial_test::serial(route_registry)]
-    fn live_route_resolution_fails_closed_on_ambiguous_identity() {
-        register_route_name("live.ambiguous.first", "/live-ambiguous/{id}");
-        register_route_name("live.ambiguous.second", "/live-ambiguous/{id}");
+    fn named_catch_all_takes_the_captured_parameter_name() {
+        let _ = Router::new()
+            .get("/files/{*rest}", h)
+            .name("catch_all.files.show");
+        assert_eq!(
+            route("catch_all.files.show", &[("rest", "docs/a b/c?.txt")]),
+            Some("/files/docs/a%20b/c%3F.txt".to_string())
+        );
+        let mut params = HashMap::new();
+        params.insert("rest".to_string(), "x/y".to_string());
+        assert_eq!(
+            route_with_params("catch_all.files.show", &params),
+            Some("/files/x/y".to_string())
+        );
+        assert_eq!(
+            try_route("catch_all.files.show", &[("rest", "a/b")]),
+            Ok("/files/a/b".to_string())
+        );
+        assert_eq!(
+            try_route_with_params("catch_all.files.show", &params),
+            Ok("/files/x/y".to_string())
+        );
+        assert_eq!(
+            try_route("catch_all.files.show", &[]),
+            Err(RouteUrlError::MissingParams {
+                name: "catch_all.files.show".to_string(),
+                missing: vec!["rest".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(route_registry)]
+    fn live_route_resolution_accepts_aliases_that_share_one_pattern() {
+        // A resource registers `posts.index` and `posts.store` on `/posts`,
+        // and `posts.show`, `posts.update` and `posts.destroy` on
+        // `/posts/{post}`. Several names on one pattern are one target, not
+        // an ambiguity: every alias must resolve to the same URL.
+        register_route_name("live.alias.show", "/live-alias/{id}");
+        register_route_name("live.alias.update", "/live-alias/{id}");
+        register_route_name("live.alias.destroy", "/live-alias/{id}");
         let parameters = suprnova_live::canonical::CanonicalValue::Object(
             [(
                 "id".to_owned(),
@@ -3016,17 +3094,16 @@ mod tests {
             .into_iter()
             .collect(),
         );
-        let identity = live_route_identity("/live-ambiguous/{id}")
-            .expect("registered pattern has a valid opaque identity");
 
-        assert!(matches!(
-            prepare_live_route_identity("live.ambiguous.first", &parameters),
-            Err(LiveRouteResolutionError::AmbiguousIdentity)
-        ));
-        assert!(matches!(
-            resolve_live_route(&identity, &parameters),
-            Err(LiveRouteResolutionError::AmbiguousIdentity)
-        ));
+        for name in ["live.alias.show", "live.alias.update", "live.alias.destroy"] {
+            let identity = prepare_live_route_identity(name, &parameters)
+                .expect("an alias of a shared pattern is a valid Live route");
+            assert_eq!(
+                resolve_live_route(&identity, &parameters),
+                Ok("/live-alias/7".to_owned()),
+                "{name} must resolve to its pattern"
+            );
+        }
     }
 
     #[test]
