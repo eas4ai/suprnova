@@ -139,6 +139,8 @@
     --sn-density-control-padding-y: calc(var(--sn-space-2) * var(--sn-density-scale));
     --sn-density-gap: calc(var(--sn-space-2) * var(--sn-density-scale));
     --sn-density-stack: calc(var(--sn-space-4) * var(--sn-density-scale));
+    /* the text inside controls and buttons, a step below body text */
+    --sn-density-control-font-size: var(--sn-font-size-sm);
 
     /* state */
     --sn-state-disabled-opacity: 0.6;
@@ -240,6 +242,16 @@
       --sn-motion-duration-fast: 0ms;
       --sn-motion-duration-base: 0ms;
       --sn-motion-duration-slow: 0ms;
+    }
+  }
+
+  /* Control text goes back to the base size on a touch screen. iOS Safari
+   * zooms the page when a focused field's text is under 16px. A coarse
+   * pointer covers every phone and tablet without a browser-specific hack,
+   * and the other touch devices get text that is easier to read and hit. */
+  @media (pointer: coarse) {
+    :root {
+      --sn-density-control-font-size: var(--sn-font-size-base);
     }
   }
 
@@ -472,7 +484,8 @@
    * ------------------------------------------------------------------- */
   label {
     display: inline-block;
-    margin-block-end: var(--sn-space-1);
+    margin-block-end: calc(var(--sn-space-1) / 2);
+    font-size: var(--sn-font-size-xs);
     font-weight: var(--sn-font-weight-medium);
   }
 
@@ -486,6 +499,7 @@
 
   legend {
     padding-inline: var(--sn-space-2);
+    font-size: var(--sn-font-size-sm);
     font-weight: var(--sn-font-weight-semibold);
   }
 
@@ -509,6 +523,7 @@
     border-radius: var(--sn-radius-md);
     background: var(--sn-color-surface);
     color: var(--sn-color-text);
+    font-size: var(--sn-density-control-font-size);
     transition-property: border-color, box-shadow;
     transition-duration: var(--sn-motion-duration-fast);
     transition-timing-function: var(--sn-motion-easing-standard);
@@ -529,7 +544,7 @@
   }
 
   textarea {
-    min-block-size: calc(var(--sn-density-control-height) * 2.5);
+    min-block-size: calc(var(--sn-density-control-height) * 2);
     resize: vertical;
   }
 
@@ -614,6 +629,7 @@
   input[type="file"] {
     inline-size: 100%;
     padding: var(--sn-density-control-padding-y) 0;
+    font-size: var(--sn-density-control-font-size);
   }
 
   input[type="file"]::file-selector-button {
@@ -669,6 +685,7 @@
     border-radius: var(--sn-radius-md);
     background: var(--sn-color-primary);
     color: var(--sn-color-primary-contrast);
+    font-size: var(--sn-density-control-font-size);
     font-weight: var(--sn-font-weight-medium);
     line-height: var(--sn-font-leading-tight);
     text-decoration: none;

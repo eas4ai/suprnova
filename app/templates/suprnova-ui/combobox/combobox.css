@@ -2,7 +2,7 @@
   .sn-combobox {
     position: relative;
     display: grid;
-    gap: var(--sn-space-2);
+    gap: var(--sn-space-1);
   }
 
   .sn-combobox-label {

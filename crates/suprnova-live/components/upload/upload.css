@@ -75,6 +75,7 @@
     background: var(--sn-color-surface-raised);
     color: var(--sn-color-text);
     font: inherit;
+    font-size: var(--sn-density-control-font-size);
     cursor: pointer;
   }
 

@@ -1,6 +1,6 @@
 .sn-label {
   display: block;
-  margin-block-end: var(--sn-space-1);
+  margin-block-end: calc(var(--sn-space-1) / 2);
   font-weight: var(--sn-font-weight-medium);
 }
 

@@ -6,7 +6,7 @@
 
 .sn-hint {
   margin: 0;
-  font-size: var(--sn-font-size-sm);
+  font-size: var(--sn-font-size-xs);
   color: var(--sn-color-text-muted);
 }
 
@@ -16,7 +16,7 @@
 
 .sn-error {
   display: block;
-  font-size: var(--sn-font-size-sm);
+  font-size: var(--sn-font-size-xs);
   color: var(--sn-color-danger);
 }
 
