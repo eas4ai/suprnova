@@ -509,7 +509,6 @@ fn init_telemetry_with_otel(log_config: LogConfig, otel_config: OtelConfig) -> T
     // tests). The existing subscriber wins and we still hand back a guard
     // for orderly shutdown of the providers we built. It also forwards
     // the records of the `log` crate, as the base subscriber does.
-    crate::logging::layer::default_or_stdout();
     let installed = tracing_subscriber::registry()
         .with(env_filter)
         .with(crate::logging::layer::output_layers(&log_config))
@@ -524,7 +523,11 @@ fn init_telemetry_with_otel(log_config: LogConfig, otel_config: OtelConfig) -> T
         .try_init()
         .is_ok();
 
-    if !installed {
+    if installed {
+        // Only once installed, so a refused install leaves the live
+        // subscriber's channels and format as they were.
+        crate::logging::layer::adopt_installed(&log_config);
+    } else {
         tracing::warn!(
             "tracing subscriber already installed; keeping the existing one (this LogConfig \
              was not applied, and the spans and the log lines are not exported)"

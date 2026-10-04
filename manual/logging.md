@@ -343,8 +343,9 @@ init_subscriber(LogConfig {
 ```
 
 `init_subscriber` is **idempotent**. A second call leaves the existing
-subscriber in place and emits a `tracing::warn!` so an operator can
-see that the new `LogConfig` was not applied. This is what lets tests
+subscriber in place, with its default channel and the format of its file
+lines, and emits a `tracing::warn!` so an operator can see that the new
+`LogConfig` was not applied. This is what lets tests
 that each call `init_subscriber` not race each other - the first wins,
 the rest are no-ops.
 

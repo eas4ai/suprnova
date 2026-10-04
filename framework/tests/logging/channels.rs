@@ -1016,3 +1016,58 @@ fn a_stack_level_drops_the_records_below_it_in_every_channel_it_lists() {
         "a channel's own stricter level still applies: {strict_text}"
     );
 }
+
+/// In a child: initialize logging as JSON, move the default channel, then
+/// initialize it again as pretty, which is refused, and write one event
+/// after each.
+#[test]
+fn child_initializes_logging_twice() {
+    if !is_child() {
+        return;
+    }
+    let dir = std::path::PathBuf::from(std::env::var("SUPRNOVA_LOG_DIR").unwrap());
+    Log::define("first-default", LogChannel::single(dir.join("first.log")));
+    suprnova::init_subscriber(LogConfig {
+        level: "info".into(),
+        format: suprnova::LogFormat::Json,
+    });
+    tracing::error!("before-second-init");
+    Log::define("second-default", LogChannel::single(dir.join("second.log")));
+    Log::set_default_channel("second-default").unwrap();
+    suprnova::init_subscriber(LogConfig {
+        level: "info".into(),
+        format: suprnova::LogFormat::Pretty,
+    });
+    tracing::error!("after-second-init");
+    Log::flush();
+}
+
+/// DRIVERS-030: a second `init_subscriber` is refused and promises the
+/// first configuration stays. It used to switch the file lines to its own
+/// format and move the default channel back to `LOG_CHANNEL`.
+#[test]
+fn a_refused_second_init_keeps_the_format_and_the_default_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    run_child(
+        "channels::child_initializes_logging_twice",
+        &[
+            ("LOG_CHANNEL", "first-default"),
+            ("SUPRNOVA_LOG_DIR", dir.path().to_str().unwrap()),
+        ],
+    );
+    let first = read(&dir.path().join("first.log"));
+    let second = read(&dir.path().join("second.log"));
+    assert!(first.contains("before-second-init"), "{first}");
+    assert!(
+        !first.contains("after-second-init"),
+        "the refused init did not move the default back: {first}"
+    );
+    let line = second
+        .lines()
+        .find(|line| line.contains("after-second-init"))
+        .unwrap_or_else(|| panic!("the event went to the default it was moved to: {second}"));
+    assert!(
+        serde_json::from_str::<serde_json::Value>(line).is_ok(),
+        "the line is still JSON: {line}"
+    );
+}
