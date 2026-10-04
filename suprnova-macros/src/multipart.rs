@@ -287,8 +287,16 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 });
                 struct_init.push(quote! { #ident, });
             }
-            FieldShape::TextScalar { inner_ty, failure }
-            | FieldShape::TextOption { inner_ty, failure } => {
+            FieldShape::TextScalar {
+                inner_ty,
+                failure,
+                parse,
+            }
+            | FieldShape::TextOption {
+                inner_ty,
+                failure,
+                parse,
+            } => {
                 let on_invalid = if required {
                     quote! { #invalid_ident = true; }
                 } else {
@@ -301,7 +309,7 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                         // neither parsed nor kept.
                         if #ident.is_none() {
                             match ::suprnova::http::upload::take_text::<#inner_ty>(
-                                __value, #field_name_str, __index, #failure, &mut __errors,
+                                __value, #field_name_str, __index, #failure, #parse, &mut __errors,
                             ) {
                                 ::suprnova::http::upload::Taken::Value(__parsed) => {
                                     #ident = ::core::option::Option::Some(__parsed);
@@ -325,13 +333,17 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                     &mut struct_init,
                 );
             }
-            FieldShape::TextVec { inner_ty, failure } => {
+            FieldShape::TextVec {
+                inner_ty,
+                failure,
+                parse,
+            } => {
                 field_arms.push(quote! {
                     #field_name_str => {
                         #next_index
                         if let ::suprnova::http::upload::Taken::Value(__parsed) =
                             ::suprnova::http::upload::take_text::<#inner_ty>(
-                                __value, #field_name_str, __index, #failure, &mut __errors,
+                                __value, #field_name_str, __index, #failure, #parse, &mut __errors,
                             )
                         {
                             #ident.push(__parsed);
@@ -533,15 +545,29 @@ enum FieldShape {
     TextScalar {
         inner_ty: proc_macro2::TokenStream,
         failure: proc_macro2::TokenStream,
+        parse: proc_macro2::TokenStream,
     },
     TextOption {
         inner_ty: proc_macro2::TokenStream,
         failure: proc_macro2::TokenStream,
+        parse: proc_macro2::TokenStream,
     },
     TextVec {
         inner_ty: proc_macro2::TokenStream,
         failure: proc_macro2::TokenStream,
+        parse: proc_macro2::TokenStream,
     },
+}
+
+/// The function a text field of type `ty` is read with: a `bool` takes the
+/// values forms send (`1`, `on`), anything else its `FromStr`. Chosen by
+/// the type's name, as `parse_failure` is.
+fn text_parser(ty: &Type) -> proc_macro2::TokenStream {
+    if outer_segment_ident(ty).as_deref() == Some("bool") {
+        quote! { ::suprnova::http::upload::parse_form_bool }
+    } else {
+        quote! { ::suprnova::http::upload::parse_from_str::<#ty> }
+    }
 }
 
 /// The `FieldFailure` a text part that does not parse as `ty` reports,
@@ -573,6 +599,7 @@ fn classify(ty: &Type) -> FieldShape {
             } else {
                 FieldShape::TextVec {
                     failure: parse_failure(&inner),
+                    parse: text_parser(&inner),
                     inner_ty: quote! { #inner },
                 }
             }
@@ -583,6 +610,7 @@ fn classify(ty: &Type) -> FieldShape {
             } else {
                 FieldShape::TextOption {
                     failure: parse_failure(&inner),
+                    parse: text_parser(&inner),
                     inner_ty: quote! { #inner },
                 }
             }
@@ -593,6 +621,7 @@ fn classify(ty: &Type) -> FieldShape {
             } else {
                 FieldShape::TextScalar {
                     failure: parse_failure(ty),
+                    parse: text_parser(ty),
                     inner_ty: quote! { #ty },
                 }
             }
@@ -733,6 +762,14 @@ mod tests {
         assert!(failure(parse_quote!(bool)).ends_with("Boolean"));
         assert!(failure(parse_quote!(std::net::IpAddr)).ends_with("Format"));
         assert!(failure(parse_quote!(String)).ends_with("Format"));
+    }
+
+    #[test]
+    fn a_bool_field_is_read_the_way_forms_send_it() {
+        let parser = |ty: Type| text_parser(&ty).to_string();
+        assert!(parser(parse_quote!(bool)).ends_with("parse_form_bool"));
+        assert!(parser(parse_quote!(u32)).contains("parse_from_str"));
+        assert!(parser(parse_quote!(String)).contains("parse_from_str"));
     }
 
     #[test]

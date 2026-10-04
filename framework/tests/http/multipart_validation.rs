@@ -1537,3 +1537,208 @@ async fn an_inertia_form_gets_the_async_hook_error_back_in_props_errors() {
         stages(&run)
     );
 }
+
+// ── PAR-043: the values an Inertia or HTML form sends ──
+
+#[derive(MultipartRequest)]
+struct Consent {
+    #[field("terms")]
+    terms: bool,
+    #[field("newsletter")]
+    newsletter: Option<bool>,
+    #[field("flags[]")]
+    flags: Vec<bool>,
+}
+
+async fn consent(req: Request) -> Response {
+    let form = Consent::from_request(req).await?;
+    Ok(HttpResponse::json(json!({
+        "terms": form.terms,
+        "newsletter": form.newsletter,
+        "flags": form.flags,
+    })))
+}
+
+#[tokio::test]
+async fn a_bool_field_reads_what_inertia_and_html_forms_send() {
+    let app = App::new(Router::new().post("/consent", consent));
+
+    // Inertia sends `1`/`0`; a checked HTML checkbox sends `on`.
+    for (sent, read) in [
+        ("1", true),
+        ("0", false),
+        ("true", true),
+        ("false", false),
+        ("TRUE", true),
+        ("False", false),
+        ("on", true),
+        ("Off", false),
+    ] {
+        let reply = send(
+            &app,
+            Outgoing::post("/consent", form(&[text_part("terms", sent)])),
+        )
+        .await;
+        assert_eq!(reply.status, 200, "`{sent}`: {}", reply.text());
+        assert_eq!(reply.json()["terms"], read, "`{sent}`");
+        // An unchecked checkbox sends nothing: the optional field is absent.
+        assert_eq!(reply.json()["newsletter"], Value::Null, "`{sent}`");
+    }
+
+    let reply = send(
+        &app,
+        Outgoing::post(
+            "/consent",
+            form(&[
+                text_part("terms", "1"),
+                text_part("newsletter", "on"),
+                text_part("flags[]", "1"),
+                text_part("flags[]", "0"),
+                text_part("flags[]", "ON"),
+                text_part("flags[]", "off"),
+            ]),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json()["newsletter"], true);
+    assert_eq!(reply.json()["flags"], json!([true, false, true, false]));
+
+    for sent in ["yes", "2", "onn", " 1"] {
+        let reply = send(
+            &app,
+            Outgoing::post(
+                "/consent",
+                form(&[text_part("terms", sent), text_part("flags[]", "maybe")]),
+            ),
+        )
+        .await;
+        assert_eq!(reply.status, 422, "`{sent}`: {}", reply.text());
+        assert_eq!(
+            first_message(&reply, "terms"),
+            "The terms field must be true or false.",
+            "`{sent}`"
+        );
+        assert_eq!(
+            first_message(&reply, "flags.0"),
+            "The flags.0 field must be true or false."
+        );
+    }
+}
+
+#[derive(MultipartRequest)]
+struct Nullable {
+    #[field("count")]
+    count: Option<u32>,
+    #[field("active")]
+    active: Option<bool>,
+    #[field("ratio")]
+    ratio: Option<f64>,
+    #[field("address")]
+    address: Option<std::net::IpAddr>,
+    #[field("note")]
+    note: Option<String>,
+    #[field("title")]
+    title: String,
+    #[field("ids[]")]
+    ids: Vec<u32>,
+}
+
+async fn nullable(req: Request) -> Response {
+    let form = Nullable::from_request(req).await?;
+    Ok(HttpResponse::json(json!({
+        "count": form.count,
+        "active": form.active,
+        "ratio": form.ratio,
+        "address": form.address.map(|a| a.to_string()),
+        "note": form.note,
+        "title": form.title,
+        "ids": form.ids,
+    })))
+}
+
+#[tokio::test]
+async fn an_empty_part_is_null_for_an_optional_typed_field() {
+    let app = App::new(Router::new().post("/nullable", nullable));
+
+    // What Inertia sends for `null` values: empty text parts.
+    let reply = send(
+        &app,
+        Outgoing::post(
+            "/nullable",
+            form(&[
+                text_part("count", ""),
+                text_part("active", ""),
+                text_part("ratio", ""),
+                text_part("address", ""),
+                text_part("note", ""),
+                text_part("title", ""),
+                text_part("ids[]", "3"),
+                text_part("ids[]", ""),
+                text_part("ids[]", "4"),
+            ]),
+        ),
+    )
+    .await;
+
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    let body = reply.json();
+    assert_eq!(body["count"], Value::Null);
+    assert_eq!(body["active"], Value::Null);
+    assert_eq!(body["ratio"], Value::Null);
+    assert_eq!(body["address"], Value::Null);
+    // A string field keeps the empty string, as a `FormRequest` does for
+    // JSON `""` and for urlencoded `note=`.
+    assert_eq!(body["note"], "");
+    assert_eq!(body["title"], "");
+    // A null element of a list of numbers is left out.
+    assert_eq!(body["ids"], json!([3, 4]));
+}
+
+#[derive(MultipartRequest)]
+#[allow(dead_code)] // the assertions are on the failures, never the values
+struct RequiredTyped {
+    #[field("count")]
+    count: u32,
+    #[field("active")]
+    active: bool,
+    #[field("ratio")]
+    ratio: f64,
+}
+
+async fn required_typed(req: Request) -> Response {
+    RequiredTyped::from_request(req).await?;
+    Ok(HttpResponse::json(json!({ "ok": true })))
+}
+
+#[tokio::test]
+async fn an_empty_part_for_a_required_typed_field_is_missing() {
+    let app = App::new(Router::new().post("/required", required_typed));
+
+    let reply = send(
+        &app,
+        Outgoing::post(
+            "/required",
+            form(&[
+                text_part("count", ""),
+                text_part("active", ""),
+                text_part("ratio", ""),
+            ]),
+        ),
+    )
+    .await;
+
+    assert_eq!(reply.status, 422, "{}", reply.text());
+    assert_eq!(
+        first_message(&reply, "count"),
+        "The count field is required."
+    );
+    assert_eq!(
+        first_message(&reply, "active"),
+        "The active field is required."
+    );
+    assert_eq!(
+        first_message(&reply, "ratio"),
+        "The ratio field is required."
+    );
+}

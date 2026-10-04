@@ -524,6 +524,19 @@ Field shapes:
 | `Option<String>` / `Option<T: FromStr>` | optional text field |
 | `Vec<String>` / `Vec<T: FromStr>` | repeated text fields |
 
+A text field is read through its type's `FromStr`, except a `bool`, which
+takes what forms send: `1` and `0`, as Inertia sends them, `true` and
+`false`, and `on` and `off`, as an HTML checkbox sends them, the words in any
+case. An unchecked checkbox sends nothing, so declare it `Option<bool>` and
+read a missing value as `false` with `unwrap_or(false)`.
+
+Inertia sends a `null` value as an empty text part. For a type that can't
+hold empty text, such as `u32`, `f64` or `bool`, an empty part counts as a
+missing value: an `Option` field is `None`, a required field reports
+`validation-required`, and a `Vec` field leaves the element out. A `String`
+field keeps the empty string, as a `FormRequest` does for a JSON `""` or a
+urlencoded `name=`.
+
 Built-in validators in `suprnova::http::upload::validators`:
 
 - `MaxSize<N>` - stops reading the body at the chunk that takes the file
