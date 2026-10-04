@@ -1671,14 +1671,26 @@ fn build_into_json_resource(ctx: &DataCodegen<'_>, opts: &JsonResourceOptions) -
         })
         .collect();
 
-    // Relationship fields: allow_include=true AND not lazy (Prop fields excluded).
+    // Relationship fields: allow_include=true AND not lazy (Prop fields
+    // excluded). An `input_only` field is never sent, as a relationship no
+    // more than as an attribute: neither its linkage nor, through
+    // `?include=`, the related resource.
     let rel_fields: Vec<(&Ident, String)> = parsed
         .iter()
-        .filter(|(_, fo)| fo.allow_include && fo.lazy.is_none() && !fo.names.skip_serializing)
+        .filter(|(_, fo)| {
+            fo.allow_include && fo.lazy.is_none() && !fo.input_only && !fo.names.skip_serializing
+        })
         .map(|(f, fo)| {
             let ident = f.ident.as_ref().unwrap();
             (ident, fo.names.serialize.clone())
         })
+        .collect();
+    let rel_types: Vec<&syn::Type> = parsed
+        .iter()
+        .filter(|(_, fo)| {
+            fo.allow_include && fo.lazy.is_none() && !fo.input_only && !fo.names.skip_serializing
+        })
+        .map(|(f, _)| &f.ty)
         .collect();
 
     // JSON:API reserves `type` and `id` for the resource object itself: an
@@ -1769,10 +1781,51 @@ fn build_into_json_resource(ctx: &DataCodegen<'_>, opts: &JsonResourceOptions) -
         }
     });
 
+    // The include tree is checked against the types, not against the
+    // values: an empty collection, or one whose relations are all unset,
+    // must still refuse a path no resource here could include.
+    let validated_entries = rel_fields.iter().zip(&rel_types).map(|((_, name), ty)| {
+        quote! {
+            if let ::std::option::Option::Some(subtree) = include_tree.subtree(#name) {
+                <#ty as ::suprnova::resources::PushIncluded>::validate_included(subtree).map_err(
+                    |mut __suprnova_include_err| {
+                        __suprnova_include_err.path = ::std::format!(
+                            "{}.{}",
+                            #name,
+                            __suprnova_include_err.path,
+                        );
+                        __suprnova_include_err
+                    },
+                )?;
+            }
+        }
+    });
+
     quote! {
         impl #impl_generics ::suprnova::resources::IntoJsonResource for #struct_name #ty_generics #where_clause {
             fn resource_type() -> &'static str {
                 #resource_type
+            }
+
+            fn validate_include_tree(
+                include_tree: &::suprnova::resources::IncludeTree,
+            ) -> ::std::result::Result<(), ::suprnova::resources::IncludeResolutionError>
+            where
+                Self: Sized,
+            {
+                const ALLOWED: &[&str] = &[#(#allowed_include_names),*];
+                for (key, _) in include_tree.iter() {
+                    if !ALLOWED.contains(&key) {
+                        return ::std::result::Result::Err(
+                            ::suprnova::resources::IncludeResolutionError {
+                                path: key.to_string(),
+                                on_type: #resource_type_lit,
+                            },
+                        );
+                    }
+                }
+                #(#validated_entries)*
+                ::std::result::Result::Ok(())
             }
 
             fn resource_id(&self) -> ::std::string::String {
