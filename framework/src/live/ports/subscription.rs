@@ -83,7 +83,7 @@ impl SubscriptionAuthorizationPort for SuprnovaSubscriptionAuthorization {
     ) -> SubscriptionFuture<'a, Result<SubscriptionAuthorizationDecision, SubscriptionError>> {
         let (ability, resource) = stream_ability(request.component(), request.stream());
         Box::pin(async move {
-            let Some(principal) = crate::auth::guard::Auth::id() else {
+            let Some(principal) = super::route_principal().await else {
                 return Ok(SubscriptionAuthorizationDecision::Deny);
             };
             let allowed =

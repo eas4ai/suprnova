@@ -1,11 +1,12 @@
 //! Documentation catalog builder.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use super::headings::{Heading, slugify_heading};
-use super::markdown::{ContentResult, MarkdownRenderer};
+use super::markdown::{ContentError, ContentResult, MarkdownRenderer};
 
 /// Input and output paths for a documentation build.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,10 +79,23 @@ pub struct DocsSearchEntry {
     pub plain_text: String,
 }
 
+/// The slug of the catalog artifact [`build_docs`] writes beside the
+/// chapters; no chapter may take it.
+const CATALOG_SLUG: &str = "catalog";
+
 /// Build JSON documentation artifacts from a Markdown table of contents.
+///
+/// Each chapter is written to `<slug>.json`, its slug taken from its file
+/// name, so the table of contents is checked before anything is written:
+/// two different files that map to one slug, or a chapter whose slug is
+/// `catalog`, fail the build rather than overwrite each other. One file
+/// listed more than once is one chapter: the catalog keeps an entry per
+/// listing, and its `<slug>.json` carries the previous and next chapters of
+/// its last listing.
 pub async fn build_docs(config: DocsBuildConfig) -> ContentResult<DocsCatalog> {
     let toc = tokio::fs::read_to_string(&config.toc_file).await?;
     let entries = parse_toc_entries(&toc);
+    check_chapter_slugs(&config.source_dir, &entries).await?;
     let renderer = MarkdownRenderer::default();
 
     tokio::fs::create_dir_all(&config.output_dir).await?;
@@ -160,6 +174,37 @@ struct TocEntry {
     title: String,
     path: PathBuf,
     slug: String,
+}
+
+/// Refuse a table of contents whose chapters would overwrite each other's
+/// artifacts. Files are compared by their canonical path, so `setup.md`
+/// and `./setup.md` are the same chapter while `guide/setup.md` and
+/// `api/setup.md` are two.
+async fn check_chapter_slugs(source_dir: &Path, entries: &[TocEntry]) -> ContentResult<()> {
+    let mut owners: HashMap<&str, (PathBuf, &TocEntry)> = HashMap::new();
+    for entry in entries {
+        if entry.slug == CATALOG_SLUG {
+            return Err(ContentError::ReservedChapterSlug {
+                slug: entry.slug.clone(),
+                path: entry.path.display().to_string(),
+            });
+        }
+        let file = tokio::fs::canonicalize(source_dir.join(&entry.path)).await?;
+        match owners.get(entry.slug.as_str()) {
+            Some((owner, first)) if *owner != file => {
+                return Err(ContentError::DuplicateChapterSlug {
+                    slug: entry.slug.clone(),
+                    first: first.path.display().to_string(),
+                    second: entry.path.display().to_string(),
+                });
+            }
+            Some(_) => {}
+            None => {
+                owners.insert(entry.slug.as_str(), (file, entry));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_toc_entries(markdown: &str) -> Vec<TocEntry> {

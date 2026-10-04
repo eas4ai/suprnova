@@ -8,7 +8,9 @@ use magnetar::crypto::{CryptoPurpose, Encryptor};
 use magnetar::default_first_email_proof::SqlFirstEmailProofStore;
 use magnetar::default_schema::sql_stores::{SqlRememberStore, SqlSessionStore};
 use magnetar::default_schema::sql_two_factor::SqlTwoFactorStore;
-use magnetar::default_schema::{DefaultAuthSchema, lifecycle_deliveries, users};
+use magnetar::default_schema::{
+    DefaultAuthSchema, DefaultSecondFactorSchema, lifecycle_deliveries, users,
+};
 use magnetar::passkey::PasskeyConfig;
 use magnetar::password::hash::{PasswordHashConfig, PasswordVerifier, StandardPasswordHashDriver};
 use magnetar::password::lockout::{LockoutConfig, LockoutService};
@@ -533,13 +535,28 @@ async fn build_default_engines(
         storage.clone(),
         config.lockout,
     ));
-    let factors = Arc::new(TwoFactorService::new(
-        Arc::new(SqlTwoFactorStore(config.connection.clone())),
-        storage.clone(),
-        lockout.clone(),
-        encryptor.clone(),
-        config.two_factor,
+    // The second factor counts its failures in a store of its own: password
+    // sign-in counts against any string it is given as an address, so a
+    // shared store would let a registered address reach the second
+    // factor's key. Its keys are not addresses, so its locks never touch a
+    // user row either.
+    let second_factor_lockout = Arc::new(LockoutService::without_user_lock(
+        Arc::new(SeaOrmStorage::<DefaultSecondFactorSchema>::new(
+            config.connection.clone(),
+        )),
+        config.lockout,
     ));
+    // An account holds the framework's TOTP or this factor, never both.
+    let factors = Arc::new(
+        TwoFactorService::new(
+            Arc::new(SqlTwoFactorStore(config.connection.clone())),
+            storage.clone(),
+            second_factor_lockout,
+            encryptor.clone(),
+            config.two_factor,
+        )
+        .with_other_second_factor(Arc::new(super::engine::FrameworkTotpEnrollment)),
+    );
     let verifier = Arc::new(
         PasswordVerifier::new(
             Arc::new(StandardPasswordHashDriver),

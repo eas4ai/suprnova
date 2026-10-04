@@ -64,7 +64,7 @@ sees a boot failure instead of a half-working app.
 | `CACHE_DRIVER` | `memory` or `redis` | `memory` |
 | `REDIS_URL` | Redis URL (consulted only when `driver=redis`) | `redis://127.0.0.1:6379` |
 | `REDIS_PREFIX` | Key prefix applied to every store operation | `suprnova_cache:` |
-| `CACHE_DEFAULT_TTL` | Default TTL in seconds for `Cache::put(None)`; `0` means no default | `3600` |
+| `CACHE_DEFAULT_TTL` | Default TTL in seconds for `Cache::put`, `Cache::remember`, and `Cache::tags_put` called with `None`; `0` means no default | `3600` |
 | `CACHE_SWEEP_INTERVAL` | Seconds between sweeps of the in-memory cache's expired entries; `0` turns the sweep off | `60` |
 
 Unset `CACHE_DRIVER` parses to `Memory`; any other value (case-
@@ -92,10 +92,12 @@ to `CacheConfig::default()` rather than re-reading env.
 
 ### The `forever` contract holds across backends
 
-`Cache::forever` and `Cache::remember_forever` bypass
-`CACHE_DEFAULT_TTL` entirely; the value never expires regardless of the
-configured default. `Cache::put(key, value, None)` does apply the
-default - that's the point of having one.
+`Cache::forever`, `Cache::remember_forever` (and its alias `Cache::sear`),
+and `Cache::tags_forever` bypass `CACHE_DEFAULT_TTL` entirely; the value
+never expires regardless of the configured default.
+`Cache::put(key, value, None)`, `Cache::remember(key, None, ..)`, and
+`Cache::tags_put(tags, key, value, None)` do apply the default - that's the
+point of having one.
 
 The default-TTL resolution happens at the facade layer. Both `CacheStore`
 backends honour `None` literally at the store boundary (no expiration),
@@ -132,6 +134,11 @@ Cache::forget("session:42").await?;
 Cache::flush().await?;
 ```
 
+On Redis, `flush` deletes the keys that start with `REDIS_PREFIX`, matched
+literally: a prefix with glob characters such as `*`, `?`, or `[` matches only
+itself. An empty prefix matches every key in the Redis database, so `flush`
+then empties the whole database.
+
 `Cache::pull` is **not** atomic - it's a `get` followed by a `forget`,
 same shape as Laravel's `Repository::pull`. For atomic dequeue use
 `Cache::lock` (see below).
@@ -143,7 +150,9 @@ let refreshed = Cache::touch("session:42", Duration::from_secs(1800)).await?;
 ```
 
 `touch` returns `true` if the key existed and the TTL was extended,
-`false` otherwise. The stored value is untouched.
+`false` otherwise. The stored value is untouched, and so are its tags: a
+touched tagged value is still removed by `flush_tags` after its original TTL
+would have run out.
 
 ## Add - write-if-absent (atomic)
 
@@ -311,6 +320,13 @@ Cache::tags_put(
 Cache::flush_tags(&["user:1"]).await?;
 ```
 
+`tags_put` with a `None` TTL applies `CACHE_DEFAULT_TTL`, like `put`. To
+store a tagged value that never expires, use `Cache::tags_forever`:
+
+```rust
+Cache::tags_forever(&["settings"], "settings:site", &settings).await?;
+```
+
 Tag membership is **per-entry**: each tagged write installs that
 write's tag set as the entry's source of truth, replacing any prior
 tags. Two consequences worth knowing:
@@ -321,9 +337,13 @@ tags. Two consequences worth knowing:
 - Overwriting `tags_put(&["a"], …)` with `tags_put(&["b"], …)` makes
   the entry respond only to `flush_tags(&["b"])`.
 
-Stale forward-index references are pruned during the flush walk and on
-`flush()`, so they don't accumulate indefinitely for tags that are
-written but never flushed.
+A tag's index of keys drops entries that can no longer be reached, so it
+doesn't grow without bound for a tag that is written often but rarely
+flushed. Flushing one tag removes the deleted keys from the indexes of their
+other tags too. On the in-memory backend the periodic sweep removes expired
+keys from the indexes. On Redis every tagged write checks a sample of the
+tag's index and removes keys that expired, were forgotten, or were
+overwritten without the tag, and `flush()` clears every index.
 
 ## Two backends
 

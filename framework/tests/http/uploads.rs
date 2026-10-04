@@ -557,6 +557,26 @@ async fn upload_spills_to_disk_above_threshold() {
     assert!(bytes.iter().all(|b| *b == 7u8));
 }
 
+/// `usize::MAX` is the documented way to turn spilling off. Sizing the
+/// sniff buffer as `threshold + 1` overflowed on it, so every part
+/// panicked before a byte was read.
+#[tokio::test]
+async fn upload_with_spilling_disabled_stays_in_memory() {
+    let _g = UploadGlobalsGuard::acquire();
+    suprnova::http::upload::set_global_upload_spill_threshold(usize::MAX);
+
+    let small = vec![5u8; 2048];
+    let body = build_multipart_body("test", &[("file", Some("small.bin"), &small)]);
+    let req = request_from_multipart("test", body).await;
+
+    let form = AnyFile::from_request(req)
+        .await
+        .expect("an upload with spilling disabled must parse");
+    assert_eq!(form.file.size, 2048);
+    let bytes = form.file.bytes().await.unwrap();
+    assert!(bytes.iter().all(|b| *b == 5u8));
+}
+
 #[tokio::test]
 async fn upload_stays_in_memory_below_threshold() {
     let _g = UploadGlobalsGuard::acquire();

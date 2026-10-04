@@ -28,21 +28,9 @@ impl IncludedSink {
     /// Push a rendered resource object. No-op when the `(type, id)`
     /// pair is already in the sink or the object lacks either member.
     pub fn push(&mut self, resource: Value) {
-        let key = (
-            resource
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            resource
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-        );
-        if key.0.is_empty() || key.1.is_empty() {
+        let Some(key) = identity_of(&resource) else {
             return;
-        }
+        };
         if self.seen.insert(key) {
             self.items.push(resource);
         }
@@ -63,6 +51,29 @@ impl IncludedSink {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
+
+    /// Mark a primary resource object as already in the document, so a
+    /// relationship that reaches it does not repeat it in `included`.
+    /// JSON:API allows one resource object per `(type, id)` across the
+    /// whole compound document, primary data included.
+    pub(crate) fn mark_primary(&mut self, resource: &Value) {
+        if let Some(key) = identity_of(resource) {
+            self.seen.insert(key);
+        }
+    }
+}
+
+/// A rendered resource object's `(type, id)`, or `None` when either member
+/// is missing or empty.
+fn identity_of(resource: &Value) -> Option<(String, String)> {
+    let member = |name: &str| {
+        resource
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    Some((member("type")?, member("id")?))
 }
 
 /// Builder for a JSON:API top-level document. Consumed by
@@ -79,6 +90,9 @@ pub struct JsonApiBuilder {
     /// Optional `jsonapi` member (spec §5.1.1).
     jsonapi: Option<Value>,
     seen_included: HashSet<(String, String)>,
+    /// The request named at least one include path. JSON:API then requires
+    /// an `included` member even when it holds no resource.
+    include_requested: bool,
 }
 
 enum PrimaryData {
@@ -96,6 +110,7 @@ impl JsonApiBuilder {
             additional: Map::new(),
             jsonapi: None,
             seen_included: Default::default(),
+            include_requested: false,
         }
     }
 
@@ -108,6 +123,7 @@ impl JsonApiBuilder {
             additional: Map::new(),
             jsonapi: None,
             seen_included: Default::default(),
+            include_requested: false,
         }
     }
 
@@ -188,6 +204,12 @@ impl JsonApiBuilder {
         }
     }
 
+    /// Record that the request asked for includes, so `build` writes an
+    /// `included` member even when no related resource exists.
+    pub(crate) fn include_requested(&mut self, requested: bool) {
+        self.include_requested = requested;
+    }
+
     /// Absorb a pre-deduplicated [`IncludedSink`]. The sink already
     /// resolved duplicates as resources were rendered; this path folds
     /// each item through the builder's dedup check so any later
@@ -209,7 +231,7 @@ impl JsonApiBuilder {
                 doc.insert("data".into(), Value::Array(arr));
             }
         }
-        if !self.included.is_empty() {
+        if !self.included.is_empty() || self.include_requested {
             doc.insert("included".into(), Value::Array(self.included));
         }
         if !self.links.is_empty() {

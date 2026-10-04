@@ -541,6 +541,24 @@ fn input_spec(detected: Option<sniff::InputFormat>) -> String {
     }
 }
 
+/// The input argument and the settings that make ImageMagick work on the
+/// image the built-in driver decodes: the first frame (`[0]`), and for a GIF
+/// that frame composed onto its logical screen (`-coalesce`).
+///
+/// The pipeline uses only the first frame. Without `[0]` ImageMagick keeps
+/// every frame of an animation and transforms each on its own, so a resize
+/// of a GIF whose frames have different sizes scales each one differently.
+/// A GIF frame can sit at an offset on a larger screen; the built-in driver
+/// composes it onto that screen, and `-coalesce` does the same. Other formats
+/// keep their own pixels, as the built-in driver reads them.
+fn first_frame_input(detected: Option<sniff::InputFormat>) -> Vec<String> {
+    let mut args = vec![format!("{}[0]", input_spec(detected))];
+    if detected == Some(sniff::InputFormat::Gif) {
+        args.push("-coalesce".into());
+    }
+    args
+}
+
 /// Full argv (after the binary) for a process run.
 fn process_args(
     pipeline: &ImagePipeline,
@@ -549,7 +567,7 @@ fn process_args(
     target: OutputFormat,
 ) -> Vec<String> {
     let mut args = limit_args(config);
-    args.push(input_spec(detected));
+    args.extend(first_frame_input(detected));
     for step in &pipeline.transformations {
         args.extend(transformation_args(*step));
     }
@@ -576,12 +594,27 @@ fn process_args(
 }
 
 /// Full argv for a dimensions probe.
+///
+/// The probe reads the first frame only (`[0]`). `-format` writes no
+/// separator between frames, so probing a whole animation prints
+/// `100 100100 100` for two 100x100 frames, and the second number reads as a
+/// height of 100100.
+///
+/// A GIF reports its logical screen (`%W %H`), not its first frame's own
+/// size (`%w %h`): a GIF frame can be smaller than the screen it is placed
+/// on, and the built-in driver composes the frame onto that screen, so both
+/// drivers answer with the screen. Every other format reports its pixels,
+/// because a page offset stored in, say, a PNG is not part of the image the
+/// built-in driver decodes.
 fn dimensions_args(config: &ImageConfig, detected: Option<sniff::InputFormat>) -> Vec<String> {
     let mut args = vec!["identify".to_string()];
     args.extend(limit_args(config));
     args.push("-format".into());
-    args.push("%w %h".into());
-    args.push(input_spec(detected));
+    args.push(match detected {
+        Some(sniff::InputFormat::Gif) => "%W %H".into(),
+        _ => "%w %h".into(),
+    });
+    args.push(format!("{}[0]", input_spec(detected)));
     args
 }
 
@@ -592,7 +625,7 @@ fn dimensions_args(config: &ImageConfig, detected: Option<sniff::InputFormat>) -
 /// driver and Laravel, both of which drop alpha rather than weighting by it.
 fn dominant_color_args(config: &ImageConfig, detected: Option<sniff::InputFormat>) -> Vec<String> {
     let mut args = limit_args(config);
-    args.push(input_spec(detected));
+    args.extend(first_frame_input(detected));
     args.push("-alpha".into());
     args.push("off".into());
     args.push("-resize".into());
@@ -644,6 +677,11 @@ fn parse_dimensions(raw: &str) -> Result<(u32, u32), FrameworkError> {
     let mut parts = raw.split_whitespace();
     let width = parts.next().ok_or_else(malformed)?;
     let height = parts.next().ok_or_else(malformed)?;
+    // More values mean more than one frame's output ran together; the first
+    // two would then be a wrong answer rather than an error.
+    if parts.next().is_some() {
+        return Err(malformed());
+    }
     Ok((
         width.parse().map_err(|_| malformed())?,
         height.parse().map_err(|_| malformed())?,
@@ -724,8 +762,9 @@ mod tests {
         let mut expected = limits();
         expected.extend(
             [
-                // The input coder is pinned, not sniffed by ImageMagick.
-                "png:-",
+                // The input coder is pinned, not sniffed by ImageMagick, and
+                // only the first frame is read.
+                "png:-[0]",
                 "-resize",
                 "800x600!",
                 "-colorspace",
@@ -938,10 +977,31 @@ mod tests {
 
     #[test]
     fn dimensions_probe_uses_the_identify_subcommand() {
-        let args = dimensions_args(&config(), Some(sniff::InputFormat::Gif));
+        let args = dimensions_args(&config(), Some(sniff::InputFormat::Png));
         assert_eq!(args[0], "identify");
-        assert_eq!(args[args.len() - 3..], ["-format", "%w %h", "gif:-"]);
+        assert_eq!(args[args.len() - 3..], ["-format", "%w %h", "png:-[0]"]);
         assert!(args.contains(&"-limit".to_string()));
+    }
+
+    #[test]
+    fn a_gif_probe_reports_the_logical_screen() {
+        // A first frame can be smaller than the screen it sits on; the
+        // built-in driver composes it onto the screen and reports that.
+        let args = dimensions_args(&config(), Some(sniff::InputFormat::Gif));
+        assert_eq!(args[args.len() - 3..], ["-format", "%W %H", "gif:-[0]"]);
+        let unknown = dimensions_args(&config(), None);
+        assert_eq!(unknown[unknown.len() - 3..], ["-format", "%w %h", "-[0]"]);
+    }
+
+    #[test]
+    fn dimensions_probe_reads_only_the_first_frame() {
+        // `-format` writes no separator between frames, so an animation probed
+        // whole prints `100 100100 100`. `[0]` selects the first frame, for a
+        // recognised coder and for the bare stdin marker alike.
+        let named = dimensions_args(&config(), Some(sniff::InputFormat::Gif));
+        assert_eq!(named[named.len() - 1], "gif:-[0]");
+        let bare = dimensions_args(&config(), None);
+        assert_eq!(bare[bare.len() - 1], "-[0]");
     }
 
     #[test]
@@ -963,6 +1023,15 @@ mod tests {
         assert!(parse_dimensions("").is_err());
         assert!(parse_dimensions("640").is_err());
         assert!(parse_dimensions("wide tall").is_err());
+    }
+
+    #[test]
+    fn dimensions_output_with_more_than_one_frame_is_an_error() {
+        // Two frames' output run together. Reading the first two values would
+        // report a height of 100100; refusing makes the probe fail loudly
+        // instead.
+        assert!(parse_dimensions("100 100100 100").is_err());
+        assert!(parse_dimensions("100 100 100 100").is_err());
     }
 
     #[test]
@@ -1018,9 +1087,43 @@ mod tests {
     #[test]
     fn every_probe_pins_the_coder_when_the_format_is_known() {
         let dims = dimensions_args(&config(), Some(sniff::InputFormat::Png));
-        assert_eq!(dims[dims.len() - 1], "png:-");
+        assert_eq!(dims[dims.len() - 1], "png:-[0]");
         let colour = dominant_color_args(&config(), Some(sniff::InputFormat::Jpeg));
-        assert!(colour.contains(&"jpeg:-".to_string()));
+        assert!(colour.contains(&"jpeg:-[0]".to_string()));
+    }
+
+    #[test]
+    fn a_gif_is_read_as_its_first_frame_on_its_screen() {
+        // The built-in driver decodes the first frame composed onto the
+        // logical screen; `-coalesce` composes, `[0]` drops the rest.
+        let pipeline = ImagePipeline::default();
+        let gif = process_args(
+            &pipeline,
+            &config(),
+            Some(sniff::InputFormat::Gif),
+            OutputFormat::Gif,
+        );
+        let input = gif
+            .iter()
+            .position(|arg| arg == "gif:-[0]")
+            .expect("the input");
+        assert_eq!(gif[input + 1], "-coalesce");
+        let colour = dominant_color_args(&config(), Some(sniff::InputFormat::Gif));
+        assert!(
+            colour
+                .windows(2)
+                .any(|pair| pair == ["gif:-[0]", "-coalesce"])
+        );
+        // Other formats keep their own pixels: no composing onto a page.
+        let png = process_args(
+            &pipeline,
+            &config(),
+            Some(sniff::InputFormat::Png),
+            OutputFormat::Png,
+        );
+        assert!(!png.contains(&"-coalesce".to_string()));
+        let unknown = process_args(&pipeline, &config(), None, OutputFormat::Png);
+        assert!(unknown.contains(&"-[0]".to_string()));
     }
 
     #[test]

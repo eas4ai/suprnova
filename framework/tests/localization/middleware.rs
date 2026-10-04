@@ -203,6 +203,36 @@ async fn accept_language_negotiates() {
     assert_eq!(body, "Hola");
 }
 
+/// DRIVERS-023: the header's q-values rank the languages, not the order
+/// they are written in, and `q=0` refuses a language outright.
+#[tokio::test]
+#[serial_test::serial]
+async fn accept_language_ranks_by_q_value_not_by_position() {
+    let _tmp = bind_translator();
+    let (status, body) = drive(&[("Accept-Language", "en;q=0.1, es;q=1")]).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body, "Hola",
+        "es outranks en by weight, though en is listed first"
+    );
+
+    let (_, body) = drive(&[("Accept-Language", "en;q=0, es;q=0.5")]).await;
+    assert_eq!(body, "Hola", "en is refused with q=0");
+
+    let en = Locale::parse("en").unwrap();
+    assert_eq!(
+        suprnova::localization::negotiate("en;q=0, fr", std::slice::from_ref(&en)),
+        None,
+        "a refused language is never chosen, even as the only one available"
+    );
+    let es = Locale::parse("es").unwrap();
+    assert_eq!(
+        suprnova::localization::negotiate("es;q=0.5, en;q=0.500", &[en.clone(), es.clone()]),
+        Some(es),
+        "equal weights keep the header's order, and three decimals parse"
+    );
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn cookie_beats_header() {
@@ -260,10 +290,11 @@ async fn session_beats_cookie_and_header() {
 /// duplicating catalog setup.
 mod locale_share {
     use super::bind_translator;
+    use crate::config_guard::LocalizationConfigGuard;
 
     use suprnova::{
-        App, Config, InertiaRequestExt, InertiaSharedData, Locale, LocaleShare, LocalizationConfig,
-        Prop, Translator, scope_locale,
+        App, InertiaRequestExt, InertiaSharedData, Locale, LocaleShare, LocalizationConfig, Prop,
+        Translator, scope_locale,
     };
 
     use serde_json::Value;
@@ -308,9 +339,11 @@ mod locale_share {
     /// calls this itself, immediately before its own `share()` call, so
     /// last-write-wins makes every test self-contained regardless of
     /// what a sibling test (in this module or the six above) registered
-    /// or bound first.
-    fn register_config_with_fallback(fallback: &str) {
-        Config::register(LocalizationConfig {
+    /// or bound first, and holds the returned guard, which puts the
+    /// previous config back when the test ends so a later test in this
+    /// process still resolves the default `en` fallback.
+    fn register_config_with_fallback(fallback: &str) -> LocalizationConfigGuard {
+        LocalizationConfigGuard::register(LocalizationConfig {
             default_locale: Locale::parse("en").unwrap(),
             fallback_locale: Locale::parse(fallback).unwrap(),
             use_isolating: false,
@@ -318,7 +351,7 @@ mod locale_share {
             session_key: "locale".into(),
             cookie_name: "locale".into(),
             parents: Default::default(),
-        });
+        })
     }
 
     #[tokio::test]
@@ -330,7 +363,7 @@ mod locale_share {
             .catalog(&Locale::parse("es").unwrap())
             .expect("bind_translator loads an es catalog")
             .hash;
-        register_config_with_fallback("fr");
+        let _config = register_config_with_fallback("fr");
 
         let shared = scope_locale(Locale::parse("es").unwrap(), async {
             LocaleShare.share(&DummyReq, "Home").await
@@ -377,7 +410,7 @@ mod locale_share {
     #[tokio::test]
     #[serial_test::serial]
     async fn catalog_is_null_without_a_usable_translator() {
-        register_config_with_fallback("de");
+        let _config = register_config_with_fallback("de");
 
         let shared = scope_locale(Locale::parse("zz").unwrap(), async {
             LocaleShare.share(&DummyReq, "Home").await

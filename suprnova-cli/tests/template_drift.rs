@@ -270,6 +270,31 @@ fn api_starter_login_exposes_the_real_token() {
     );
 }
 
+/// `Auth::password().register` answers an address that already has an
+/// account with `Registration::Accepted`. The API starter echoed the
+/// registered user's id, which told any caller whether an address had an
+/// account; registration must answer both outcomes the same way and must not
+/// serialize the account.
+#[test]
+fn api_starter_registration_does_not_reveal_existing_accounts() {
+    let tpl = read("src/templates/files/api/src/controllers/users.rs.tpl");
+    let register = tpl
+        .split_once("pub async fn register(")
+        .expect("template must define the register handler")
+        .1
+        .split_once("pub async fn login(")
+        .expect("template must define the login handler after register")
+        .0;
+    assert!(
+        !register.contains("UserResource") && !register.contains(".id"),
+        "registration must not serialize the account; handler was:\n{register}"
+    );
+    assert!(
+        register.contains(".status(202)"),
+        "registration must answer every outcome with one generic 202; handler was:\n{register}"
+    );
+}
+
 #[test]
 fn api_user_routes_are_behind_an_auth_gate() {
     // `BearerTokenMiddleware` populates the authenticated user when a valid

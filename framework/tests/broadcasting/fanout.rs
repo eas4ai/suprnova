@@ -108,6 +108,45 @@ async fn publish_with_no_subscriber_is_silent() {
         .unwrap();
 }
 
+/// The error a failed connect returns, rendered both ways a caller can
+/// log it.
+async fn connect_error_text(streamer_uri: &str) -> String {
+    match SeaStreamerBroadcastHub::new(streamer_uri, "suprnova-test-credentials").await {
+        Ok(_) => panic!("a malformed streamer URI must not connect"),
+        Err(error) => format!("{error} / {error:?}"),
+    }
+}
+
+/// IDENTITY-030: a Redis fanout URI carries its password in the userinfo.
+/// When the URI does not parse, the connect error is logged and reported
+/// like any other, so it must not repeat the URI - neither the password
+/// nor the user.
+#[tokio::test]
+async fn invalid_streamer_uri_error_does_not_echo_credentials() {
+    // The authority does not parse: the port is not a number.
+    let text = connect_error_text("redis://app-user:s3cr3t-pass@redis.internal:notaport/0").await;
+    assert!(
+        text.contains("invalid redis URL"),
+        "the error must still name the problem: {text}"
+    );
+    assert!(!text.contains("s3cr3t-pass"), "password leaked: {text}");
+    assert!(!text.contains("app-user"), "user leaked: {text}");
+
+    // Every node parses, but the database path does not: the path of a
+    // multi-node URI runs into the next node's userinfo.
+    let text = connect_error_text(
+        "redis://app-user:first-pass@a.internal:6379/3,app-user:s3cr3t-pass@b.internal:6379/3",
+    )
+    .await;
+    assert!(
+        text.contains("invalid redis URL"),
+        "the error must still name the problem: {text}"
+    );
+    assert!(!text.contains("s3cr3t-pass"), "password leaked: {text}");
+    assert!(!text.contains("first-pass"), "password leaked: {text}");
+    assert!(!text.contains("app-user"), "user leaked: {text}");
+}
+
 /// Publishing to the reserved `__presence__` meta-channel (or any
 /// `__`-prefixed name) must be rejected at the publish boundary. The
 /// vulnerability the guard closes: a TaggedEnvelope serialised to the
@@ -647,4 +686,89 @@ async fn redis_presence_reports_stream_write_failure() {
     assert!(!message.contains("presence.receipt"));
     assert!(!message.contains("member-1"));
     assert!(!message.contains(&stream_key));
+}
+
+/// The credentials of a `redis://user:password@host/db` URL authenticate the
+/// hub's Redis connections. A server that requires a password refuses a
+/// connection that drops them, so without them nothing crosses between hubs.
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn redis_backend_authenticates_with_the_url_credentials() {
+    let server = crate::redis_server::PasswordRedis::start("fanout-secret");
+    for url in [
+        format!("redis://:fanout-secret@127.0.0.1:{}", server.port),
+        format!("redis://default:fanout-secret@127.0.0.1:{}/3", server.port),
+    ] {
+        let stream_key = format!("suprnova-test-auth-{}", uuid::Uuid::new_v4());
+        let hub_a = SeaStreamerBroadcastHub::new(&url, &stream_key)
+            .await
+            .expect("hub_a Redis connect");
+        let hub_b = SeaStreamerBroadcastHub::new(&url, &stream_key)
+            .await
+            .expect("hub_b Redis connect");
+        let mut rx = hub_b.subscribe("chat.auth");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        hub_a
+            .publish(envelope(
+                "chat.auth",
+                "MessagePosted",
+                json!({ "from": "a" }),
+            ))
+            .await
+            .expect("an authenticated publish lands");
+        let received = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the event crosses hubs within 5 s")
+            .expect("recv");
+        assert_eq!(received.data["from"], "a");
+    }
+}
+
+/// Two hubs exchange an event over `url`, the round trip every connection of
+/// the hub takes part in: the publish goes out on the writer, the delivery
+/// comes in on the reader.
+async fn cross_hub_round_trip(url: &str) {
+    let stream_key = format!("suprnova-test-{}", uuid::Uuid::new_v4());
+    let hub_a = SeaStreamerBroadcastHub::new(url, &stream_key)
+        .await
+        .expect("hub_a Redis connect");
+    let hub_b = SeaStreamerBroadcastHub::new(url, &stream_key)
+        .await
+        .expect("hub_b Redis connect");
+    let mut rx = hub_b.subscribe("chat.round");
+    hub_a
+        .publish(envelope(
+            "chat.round",
+            "MessagePosted",
+            json!({ "from": "a" }),
+        ))
+        .await
+        .expect("the publish lands");
+    let received = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("the event crosses hubs within 5 s")
+        .expect("recv");
+    assert_eq!(received.data["from"], "a");
+}
+
+/// A `rediss://` URL works for every connection of the hub. The test CA is
+/// trusted through `SSL_CERT_FILE`, which the native certificate store reads,
+/// so the child runs in a process of its own.
+#[test]
+#[ignore = "runs redis-server and openssl"]
+fn redis_backend_reaches_a_tls_server() {
+    crate::own_process::run_alone("fanout::redis_backend_reaches_a_tls_server_child");
+}
+
+#[tokio::test]
+async fn redis_backend_reaches_a_tls_server_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _env = crate::env_lock::lock_env_async().await;
+    let _restore = crate::env_snapshot::EnvSnapshot::capture(&["SSL_CERT_FILE"]);
+    let server = crate::redis_server::TlsRedis::start();
+    crate::env_snapshot::set_env("SSL_CERT_FILE", Some(&server.ca.display().to_string()));
+    cross_hub_round_trip(&format!("rediss://127.0.0.1:{}/0", server.port)).await;
 }

@@ -41,20 +41,35 @@ pub fn check_channels() -> Result<(), FrameworkError> {
 /// stdout otherwise. A subscriber installed before the application's
 /// bootstrap uses this: the bootstrap may define the channel, and the boot
 /// checks it with [`check_channels`] once the bootstrap has run.
-pub(crate) fn default_or_stdout() {
+fn default_or_stdout() {
     if set_default(&configured_default()).is_err() {
         let _ = set_default("stdout");
     }
 }
 
+/// Apply `config` to the channels once a subscriber built from it has been
+/// installed: the default channel, and the format of the lines the file,
+/// syslog and driver sinks write, both process-wide.
+///
+/// Only after the install: a subscriber that was refused because another
+/// is already in place leaves that one's configuration as it was, as the
+/// refusal promises, rather than switching the live sinks to its format or
+/// moving the default channel back to `LOG_CHANNEL`.
+pub(crate) fn adopt_installed(config: &LogConfig) {
+    default_or_stdout();
+    set_format(config.format);
+}
+
 /// The output layers: `tracing`'s own formatter for standard output and
 /// standard error, each on while the default channel includes it, and the
 /// layer that writes events to the default channel's other sinks.
+///
+/// Building them changes nothing outside them; [`adopt_installed`] applies
+/// the configuration once they are installed.
 pub(crate) fn output_layers<S>(config: &LogConfig) -> Vec<Box<dyn Layer<S> + Send + Sync>>
 where
     S: Subscriber + for<'a> LookupSpan<'a> + Send + Sync,
 {
-    set_format(config.format);
     // A dynamic filter, so a callsite's interest is never cached: the
     // default channel can move with `Log::set_default_channel`, and each
     // event asks again whether the stream is in it.
@@ -108,6 +123,11 @@ where
 /// test that installs one for a thread with
 /// `tracing::subscriber::with_default`.
 ///
+/// The channels are process-wide, not the subscriber's: building it makes
+/// the channel `LOG_CHANNEL` names the default and `config.format` the
+/// format of the file, syslog and driver lines for the whole process, as
+/// installing it would. Build it only to use it.
+///
 /// # Errors
 ///
 /// As [`check_channels`].
@@ -117,6 +137,7 @@ pub fn build_subscriber(
     check_channels()?;
     let registry = tracing_subscriber::registry().with(build_env_filter(&config.level));
     let layers = output_layers(&config);
+    set_format(config.format);
     Ok(registry.with(layers))
 }
 
@@ -182,14 +203,21 @@ where
         }
         let mut fields = Fields::default();
         event.record(&mut fields);
-        // The spans' fields, outermost first, then the event's own.
+        // The spans' fields, outermost first, then the event's own. A name
+        // appears once: an inner span's value replaces an outer span's, and
+        // the event's own replaces both, so the message's placeholders and
+        // the context written beside it read the same value.
         if let Some(scope) = ctx.event_scope(event) {
-            let mut inherited = Vec::new();
+            let mut inherited: Vec<(String, String)> = Vec::new();
             for span in scope.from_root() {
                 if let Some(kept) = span.extensions().get::<SpanFields>() {
                     for (key, value) in &kept.0 {
-                        if !fields.context.iter().any(|(name, _)| name == key) {
-                            inherited.push((key.clone(), value.clone()));
+                        if fields.context.iter().any(|(name, _)| name == key) {
+                            continue;
+                        }
+                        match inherited.iter_mut().find(|(name, _)| name == key) {
+                            Some(slot) => slot.1.clone_from(value),
+                            None => inherited.push((key.clone(), value.clone())),
                         }
                     }
                 }
@@ -206,6 +234,8 @@ where
         };
         for (sink, minimum) in sinks {
             if level.passes(minimum) {
+                // Each sink reports its own failure once on stderr, a
+                // driver's through its `ReportedSink`.
                 let _ = sink.write(&record);
             }
         }

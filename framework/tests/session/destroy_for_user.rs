@@ -11,7 +11,6 @@
 //! framework test doesn't need the example-app crate's migration
 //! registry.
 
-use sea_orm::DatabaseBackend;
 use sea_orm_migration::MigrationName;
 use sea_orm_migration::prelude::*;
 use std::path::PathBuf;
@@ -404,7 +403,14 @@ async fn oversized_lifetime_gc_skips_unrepresentable_database_threshold() {
     );
 }
 
-async fn live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(env: &str) {
+/// `column_type` is the type of `last_activity`. Each engine runs once per
+/// type its migrations create: MySQL and MariaDB with `DATETIME` and with
+/// `TIMESTAMP` (what the scaffold's `.timestamp()` creates there), Postgres
+/// with `timestamp` and `timestamptz`.
+async fn live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(
+    env: &str,
+    column_type: &str,
+) {
     let url = std::env::var(env).expect("explicit disposable database URL required");
     let guard = TestContainer::fake();
     let config = DatabaseConfig::builder()
@@ -416,10 +422,6 @@ async fn live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(env
     let database = DbConnection::connect(&config)
         .await
         .expect("connect test database");
-    let timestamp_type = match database.inner().get_database_backend() {
-        DatabaseBackend::MySql => "DATETIME",
-        _ => "TIMESTAMP",
-    };
     // A connection-local table shadows any permanent table and is dropped
     // automatically on disconnect. All driver calls use this one connection.
     database
@@ -427,7 +429,7 @@ async fn live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(env
         .execute_unprepared(&format!(
             "CREATE TEMPORARY TABLE sessions (id VARCHAR(255) PRIMARY KEY, \
              user_id VARCHAR(255), payload TEXT NOT NULL, csrf_token VARCHAR(255) NOT NULL, \
-             last_activity {timestamp_type} NOT NULL)",
+             last_activity {column_type} NOT NULL)",
         ))
         .await
         .expect("create isolated temporary sessions table");
@@ -462,13 +464,38 @@ async fn live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(env
 #[tokio::test]
 #[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
 async fn mysql_session_gc_handles_oversized_lifetime() {
-    live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime("MYSQL_TEST_URL").await;
+    live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(
+        "MYSQL_TEST_URL",
+        "DATETIME",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_session_on_a_timestamp_column_reads_writes_and_collects() {
+    live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(
+        "MYSQL_TEST_URL",
+        "TIMESTAMP",
+    )
+    .await;
 }
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
 async fn postgres_session_gc_handles_oversized_lifetime() {
-    live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime("PG_TEST_URL").await;
+    live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime("PG_TEST_URL", "TIMESTAMP")
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
+async fn postgres_session_on_a_timestamptz_column_reads_writes_and_collects() {
+    live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(
+        "PG_TEST_URL",
+        "TIMESTAMPTZ",
+    )
+    .await;
 }
 
 #[tokio::test]

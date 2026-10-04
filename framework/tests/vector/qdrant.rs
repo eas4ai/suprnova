@@ -116,6 +116,84 @@ fn resolve_point_id_distinct_strings_get_distinct_ids() {
     assert_ne!(point_id_opts(a), point_id_opts(b));
 }
 
+/// The id is a merge key: two different strings are two items. Rust's
+/// `u64` parser also takes `"01"` and `"+1"`, so only the canonical decimal
+/// spelling may map to `Num`.
+#[test]
+fn resolve_point_id_keeps_non_canonical_numbers_apart() {
+    match point_id_opts(QdrantVectorDriver::resolve_point_id("1")) {
+        PointIdOptions::Num(n) => assert_eq!(n, 1),
+        other => panic!("expected Num(1), got {other:?}"),
+    }
+    let one = point_id_opts(QdrantVectorDriver::resolve_point_id("1"));
+    for other in ["01", "001", "+1"] {
+        assert_ne!(
+            point_id_opts(QdrantVectorDriver::resolve_point_id(other)),
+            one,
+            "{other:?} and \"1\" are different items"
+        );
+    }
+    assert_ne!(
+        point_id_opts(QdrantVectorDriver::resolve_point_id("01")),
+        point_id_opts(QdrantVectorDriver::resolve_point_id("+1")),
+    );
+}
+
+/// Qdrant normalizes a UUID, so the uppercase, simple, braced and urn
+/// spellings of one UUID would land on one point. Only the canonical
+/// lowercase hyphenated spelling is used verbatim.
+#[test]
+fn resolve_point_id_keeps_non_canonical_uuid_spellings_apart() {
+    let canonical = "550e8400-e29b-41d4-a716-446655440000";
+    let base = point_id_opts(QdrantVectorDriver::resolve_point_id(canonical));
+    assert_eq!(base, PointIdOptions::Uuid(canonical.to_string()));
+    for other in [
+        "550E8400-E29B-41D4-A716-446655440000",
+        "550e8400e29b41d4a716446655440000",
+        "{550e8400-e29b-41d4-a716-446655440000}",
+        "urn:uuid:550e8400-e29b-41d4-a716-446655440000",
+    ] {
+        let resolved = point_id_opts(QdrantVectorDriver::resolve_point_id(other));
+        let PointIdOptions::Uuid(uuid) = &resolved else {
+            panic!("{other:?} resolves to a derived UUID, got {resolved:?}");
+        };
+        assert_ne!(
+            uuid::Uuid::parse_str(uuid).unwrap(),
+            uuid::Uuid::parse_str(canonical).unwrap(),
+            "{other:?} and the canonical spelling are different items"
+        );
+    }
+}
+
+/// A derived id is a version 5 UUID. A caller who passes the derived UUID of
+/// another id as its own id must get a point of its own, not that one: a
+/// canonical v5 UUID from a caller is derived like any other string.
+#[test]
+fn resolve_point_id_never_lets_a_caller_name_a_derived_point() {
+    let derived = point_id_opts(QdrantVectorDriver::resolve_point_id("doc-42"));
+    let PointIdOptions::Uuid(derived_uuid) = derived.clone() else {
+        panic!("a plain string resolves to a derived UUID, got {derived:?}");
+    };
+    assert_eq!(
+        uuid::Uuid::parse_str(&derived_uuid)
+            .unwrap()
+            .get_version_num(),
+        5
+    );
+    assert_ne!(
+        point_id_opts(QdrantVectorDriver::resolve_point_id(&derived_uuid)),
+        derived,
+        "the caller id {derived_uuid:?} and \"doc-42\" are different items"
+    );
+
+    // Any other version stays verbatim.
+    let v4 = uuid::Uuid::new_v4().to_string();
+    assert_eq!(
+        point_id_opts(QdrantVectorDriver::resolve_point_id(&v4)),
+        PointIdOptions::Uuid(v4.clone())
+    );
+}
+
 // ---------------------------------------------------------------------
 // Pure-function tests - payload encode (build_point)
 // ---------------------------------------------------------------------

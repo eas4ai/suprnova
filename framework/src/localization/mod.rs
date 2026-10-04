@@ -29,7 +29,7 @@ use crate::validation::message::TranslateArgs;
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use indexmap::IndexMap;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
@@ -139,6 +139,49 @@ fn global_locale() -> Option<Locale> {
 fn set_global_locale(locale: Locale) {
     let lock = GLOBAL_LOCALE.get_or_init(|| RwLock::new(None));
     *lock.write().unwrap_or_else(|e| e.into_inner()) = Some(locale);
+}
+
+/// The text hash of every loaded catalog, by locale, or `None` when the
+/// driver serves no catalog text for some locale, so a reload cannot be
+/// shown to have left the catalogs as they were.
+fn catalog_fingerprint(translator: &dyn Translator) -> Option<BTreeMap<String, String>> {
+    translator
+        .available_locales()
+        .iter()
+        .map(|locale| {
+            translator
+                .catalog(locale)
+                .map(|source| (locale.as_str(), source.hash))
+        })
+        .collect()
+}
+
+/// Run `reload` against `translator` and, when it reloaded and the
+/// catalogs now differ from before, advance the RenderCache generation of
+/// `DependencyIdentity::Locale`.
+///
+/// Every render that called `Lang::locale` observed that identity, so
+/// each entry rendered from the old catalogs misses at its next lookup,
+/// the way a row write invalidates the renders that read the row. A reload
+/// that left every catalog's text as it was (a file touched, not edited)
+/// advances nothing. Returns whether the catalogs changed.
+pub(crate) async fn reload_and_invalidate(
+    translator: &dyn Translator,
+    reload: impl FnOnce(&dyn Translator) -> Result<bool, FrameworkError>,
+) -> Result<bool, FrameworkError> {
+    let before = catalog_fingerprint(translator);
+    if !reload(translator)? {
+        return Ok(false);
+    }
+    let after = catalog_fingerprint(translator);
+    let changed = before.is_none() || after.is_none() || before != after;
+    if changed {
+        crate::render_cache::orm::advance(vec![
+            suprnova_live::render_cache::generation::DependencyIdentity::Locale,
+        ])
+        .await?;
+    }
+    Ok(changed)
 }
 
 /// Scope a current locale around a future. Mirrors `scope_include_set`
@@ -346,6 +389,31 @@ impl Lang {
         fallback_chain(&current, &config)
             .into_iter()
             .any(|locale| translator.has(&locale, key))
+    }
+
+    /// Re-read the catalogs from disk, and make every RenderCache entry
+    /// rendered from the old ones miss. Returns whether any catalog's text
+    /// changed.
+    ///
+    /// The call for a deploy hook that ships new `.ftl` files to a running
+    /// process. [`Translator::reload`] alone swaps the catalogs but leaves
+    /// cached pages built from the old text valid until their TTL; this
+    /// also advances the locale generation every localized render observes,
+    /// through the same ledger a model write advances, so the next request
+    /// for such a page renders it again. In `local` and `development`,
+    /// [`LocaleMiddleware`]'s hot reload does the same.
+    ///
+    /// # Errors
+    ///
+    /// When no [`Translator`] is bound, when the reload fails (a malformed
+    /// `.ftl` file, which leaves the old catalogs in place), or when the
+    /// generation cannot be advanced (a database failure).
+    pub async fn reload() -> Result<bool, FrameworkError> {
+        let translator = App::resolve_make::<dyn Translator>()?;
+        reload_and_invalidate(translator.as_ref(), |translator| {
+            translator.reload().map(|()| true)
+        })
+        .await
     }
 
     /// Locales with a loaded catalog. Empty if no `Translator` is bound.

@@ -16,14 +16,12 @@ pub trait IntoInertiaScroll<T> {
     fn into_inertia_scroll(self) -> (ScrollMetadata, Vec<T>);
 }
 
-// The Inertia scroll `pageName` is hardcoded to `"page"` here rather
-// than read from `LengthAwarePaginator::page_name` (a separate field
-// that only affects `url_for_page`'s JSON:API-style pagination
-// *links*). That's a pre-existing gap between the link key and the
-// scroll key, not something this trait changes.
+// The Inertia scroll `pageName` is the query parameter the client sends
+// for the next chunk, so it is the paginator's own `page_name` - the name
+// `paginate_using` read the page from - and the same key its links use.
 impl<T> ProvidesScrollMetadata for LengthAwarePaginator<T> {
     fn page_name(&self) -> String {
-        "page".to_string()
+        self.page_name.as_deref().unwrap_or("page").to_string()
     }
 
     fn previous_page(&self) -> Option<Value> {
@@ -94,9 +92,11 @@ impl<T> IntoInertiaScroll<T> for Paginator<T> {
     }
 }
 
+// The cursor parameter the client sends back, the one `with_cursor_name`
+// set and the paginator's links use.
 impl<T> ProvidesScrollMetadata for CursorPaginator<T> {
     fn page_name(&self) -> String {
-        "cursor".to_string()
+        self.cursor_name.as_deref().unwrap_or("cursor").to_string()
     }
 
     fn previous_page(&self) -> Option<Value> {

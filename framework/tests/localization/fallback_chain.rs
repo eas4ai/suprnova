@@ -498,12 +498,13 @@ mod facade {
     use std::sync::Arc;
 
     use suprnova::{
-        App, CatalogSource, Config, FluentTranslator, FrameworkError, InertiaRequestExt,
-        InertiaSharedData, Lang, Locale, LocaleShare, LocalizationConfig, TranslateArgs,
-        Translator, scope_locale,
+        App, CatalogSource, FluentTranslator, FrameworkError, InertiaRequestExt, InertiaSharedData,
+        Lang, Locale, LocaleShare, LocalizationConfig, TranslateArgs, Translator, scope_locale,
     };
 
     use serde_json::Value;
+
+    use crate::config_guard::LocalizationConfigGuard;
 
     fn locale(s: &str) -> Locale {
         Locale::parse(s).unwrap()
@@ -518,9 +519,11 @@ mod facade {
     /// fallback` documents), so rather than each test racing to install
     /// its own narrower config, every test calls this same idempotent
     /// helper - since the content never varies, concurrent re-registration
-    /// from parallel test threads is harmless.
-    fn register_config() {
-        Config::register(LocalizationConfig {
+    /// from parallel test threads is harmless. Each test holds the returned
+    /// guard, which puts the previous config back when the test ends, so
+    /// these parent chains never reach a test outside this module.
+    fn register_config() -> LocalizationConfigGuard {
+        LocalizationConfigGuard::register(LocalizationConfig {
             default_locale: Locale::parse("en").unwrap(),
             fallback_locale: Locale::parse("en").unwrap(),
             use_isolating: false,
@@ -532,7 +535,7 @@ mod facade {
                 (locale("de-CH"), locale("de-AT")),
                 (locale("de-AT"), locale("de")),
             ]),
-        });
+        })
     }
 
     /// Non-flattening stub `Translator`: a bare `locale -> key -> value`
@@ -594,7 +597,7 @@ mod facade {
     #[tokio::test]
     #[serial_test::serial]
     async fn a_miss_falls_back_to_the_parent_before_the_global_fallback() {
-        register_config();
+        let _config = register_config();
         bind(&[
             ("pt-BR", "greeting", "Ola (BR)"),
             ("en", "greeting", "Hello"),
@@ -614,7 +617,7 @@ mod facade {
     #[tokio::test]
     #[serial_test::serial]
     async fn the_chain_walks_transitively() {
-        register_config();
+        let _config = register_config();
         // Defined only at the root of the three-level chain (`de`); the
         // walk must traverse de-CH -> de-AT -> de to find it.
         bind(&[("de", "deep", "Tief")]);
@@ -633,7 +636,7 @@ mod facade {
     #[tokio::test]
     #[serial_test::serial]
     async fn the_terminal_fallback_still_applies() {
-        register_config();
+        let _config = register_config();
         // Defined only in `en`, the global fallback - absent from both
         // pt-PT and its configured parent pt-BR.
         bind(&[("en", "only-fallback", "English only")]);
@@ -651,7 +654,7 @@ mod facade {
     #[tokio::test]
     #[serial_test::serial]
     async fn precedence_is_current_then_parents_then_fallback() {
-        register_config();
+        let _config = register_config();
         bind(&[
             ("pt-PT", "greeting", "Ola (PT)"),
             ("pt-BR", "greeting", "Ola (BR)"),
@@ -679,7 +682,7 @@ mod facade {
     #[tokio::test]
     #[serial_test::serial]
     async fn has_is_chain_aware() {
-        register_config();
+        let _config = register_config();
         bind(&[("pt-BR", "parent-only", "Somente BR")]);
 
         scope_locale(locale("pt-PT"), async {
@@ -728,7 +731,7 @@ mod facade {
     #[tokio::test]
     #[serial_test::serial]
     async fn the_locale_share_reports_the_flattened_hash_and_terminal_fallback() {
-        register_config();
+        let _config = register_config();
 
         let tmp = tempfile::tempdir().unwrap();
         super::write_lang(

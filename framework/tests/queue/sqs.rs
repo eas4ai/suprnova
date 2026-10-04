@@ -685,6 +685,44 @@ async fn flush_on_clear_deletes_the_stored_payloads() {
     );
 }
 
+/// Two queues with one name, in two accounts (or regions), overflowing onto
+/// one disk. Clearing one must not delete the payloads of the other, whose
+/// messages still point at them.
+#[tokio::test]
+async fn flush_on_clear_keeps_the_payloads_of_a_same_named_queue_elsewhere() {
+    let first = "https://sqs.us-east-1.amazonaws.com/111111111111/default";
+    let second = "https://sqs.us-east-1.amazonaws.com/222222222222/default";
+    let _env = lock_env_async().await;
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    let fake = FakeSqs::start(&[first, second]).await;
+    configure(&fake);
+    let _storage = overflow_on();
+    set_env("SQS_OVERFLOW_FLUSH_ON_CLEAR", Some("true"));
+    set_env("SQS_PREFIX", None);
+    set_env("SQS_QUEUE", Some(first));
+    let cleared = driver();
+    set_env("SQS_QUEUE", Some(second));
+    let other = driver();
+
+    cleared.push(large_envelope()).await.unwrap();
+    let sent = large_envelope();
+    other.push(sent.clone()).await.unwrap();
+    assert_eq!(stored_payloads().await, 2);
+
+    cleared.clear().await.unwrap();
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "only the cleared queue's payload is gone"
+    );
+    let reservation = other
+        .pop(VISIBILITY)
+        .await
+        .expect("the other queue's job can still be read")
+        .expect("and it is there");
+    assert_eq!(reservation.envelope.payload, sent.payload);
+}
+
 #[tokio::test]
 async fn clear_keeps_the_stored_payloads_without_flush_on_clear() {
     let (_env, _restore, _fake) = setup!("default");
@@ -901,6 +939,182 @@ async fn a_refused_send_deletes_its_payload_and_an_unanswered_one_keeps_it() {
         1,
         "whatever answered may have taken the message, so its payload stays"
     );
+}
+
+/// SQS took the message on the first try but the reply was lost; the next
+/// tries are refused. The message that try left in SQS points at the
+/// payload, so the payload must stay and the job must still run.
+#[tokio::test]
+async fn a_refusal_after_an_unanswered_send_keeps_the_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script_accept_then_drop("AmazonSQS.SendMessage");
+    for _ in 0..2 {
+        fake.script(
+            "AmazonSQS.SendMessage",
+            400,
+            r#"{"__type":"com.amazonaws.sqs#RequestThrottled","message":"slow down"}"#,
+        );
+    }
+    let sent = large_envelope();
+    driver
+        .push(sent.clone())
+        .await
+        .expect_err("the last try was refused");
+    assert_eq!(fake.sends().len(), 3, "three tries");
+    assert_eq!(
+        fake.messages(&url("default")).len(),
+        1,
+        "the first try left a message in SQS"
+    );
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "that message points at the payload, so the payload stays"
+    );
+    let reservation = driver
+        .pop(VISIBILITY)
+        .await
+        .expect("the message can be read")
+        .expect("the message is there");
+    assert_eq!(reservation.envelope.payload, sent.payload);
+}
+
+/// SQS took the first try but the reply was lost, and took the retry too:
+/// two messages carry the job. Each must point at a payload of its own, so
+/// acknowledging one does not leave the other unreadable.
+#[tokio::test]
+async fn a_send_taken_twice_gives_each_message_its_own_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script_accept_then_drop("AmazonSQS.SendMessage");
+    let sent = large_envelope();
+    driver
+        .push(sent.clone())
+        .await
+        .expect("the retry was answered");
+    let messages = fake.messages(&url("default"));
+    assert_eq!(messages.len(), 2, "both tries left a message");
+    assert_ne!(
+        messages[0].body, messages[1].body,
+        "the two messages point at different payloads"
+    );
+
+    for _ in 0..2 {
+        let reservation = driver
+            .pop(VISIBILITY)
+            .await
+            .expect("each copy can be read")
+            .expect("each copy is there");
+        assert_eq!(reservation.envelope.payload, sent.payload);
+        driver.ack(&reservation.token).await.unwrap();
+    }
+    assert_eq!(
+        stored_payloads().await,
+        0,
+        "each acknowledgement deleted its own payload"
+    );
+}
+
+#[tokio::test]
+async fn a_batch_taken_twice_gives_each_message_its_own_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script_accept_then_drop("AmazonSQS.SendMessageBatch");
+    let sent = large_envelope();
+    driver
+        .bulk_push(vec![sent.clone()])
+        .await
+        .expect("the retry was answered");
+    assert_eq!(fake.messages(&url("default")).len(), 2);
+
+    for _ in 0..2 {
+        let reservation = driver
+            .pop(VISIBILITY)
+            .await
+            .expect("each copy can be read")
+            .expect("each copy is there");
+        assert_eq!(reservation.envelope.payload, sent.payload);
+        driver.ack(&reservation.token).await.unwrap();
+    }
+    assert_eq!(stored_payloads().await, 0);
+}
+
+/// A fault of the service (5xx) does not say SQS did not take the message,
+/// so a send that ends in one keeps its payload. Each retry after a fault
+/// carries a copy of its own, so each of the three tries keeps the payload
+/// it carried.
+#[tokio::test]
+async fn a_send_that_ends_in_a_service_fault_keeps_the_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+    for _ in 0..3 {
+        fake.script(
+            "AmazonSQS.SendMessage",
+            500,
+            r#"{"__type":"com.amazonaws.sqs#InternalError","message":"oops"}"#,
+        );
+    }
+    driver
+        .push(large_envelope())
+        .await
+        .expect_err("three faults");
+    assert_eq!(stored_payloads().await, 3);
+}
+
+/// The batch form of the same sequence: the first `SendMessageBatch` was
+/// taken and its reply lost, the second rejects an entry. That entry may be
+/// in SQS from the first try, so its payload stays.
+#[tokio::test]
+async fn a_batch_entry_rejected_after_an_unanswered_batch_keeps_its_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script_accept_then_drop("AmazonSQS.SendMessageBatch");
+    fake.script(
+        "AmazonSQS.SendMessageBatch",
+        200,
+        r#"{"Successful":[],"Failed":[{"Id":"0","Code":"InternalError","Message":"oops","SenderFault":false}]}"#,
+    );
+    let sent = large_envelope();
+    driver
+        .bulk_push(vec![sent.clone()])
+        .await
+        .expect_err("the entry was rejected on the last try");
+    assert_eq!(fake.messages(&url("default")).len(), 1);
+    assert_eq!(stored_payloads().await, 1);
+    let reservation = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    assert_eq!(reservation.envelope.payload, sent.payload);
+}
+
+#[tokio::test]
+async fn a_batch_refused_after_an_unanswered_batch_keeps_its_payloads() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script_accept_then_drop("AmazonSQS.SendMessageBatch");
+    for _ in 0..2 {
+        fake.script(
+            "AmazonSQS.SendMessageBatch",
+            400,
+            r#"{"__type":"com.amazonaws.sqs#RequestThrottled","message":"slow down"}"#,
+        );
+    }
+    driver
+        .bulk_push(vec![large_envelope(), large_envelope()])
+        .await
+        .expect_err("the last try was refused");
+    assert_eq!(fake.messages(&url("default")).len(), 2);
+    assert_eq!(stored_payloads().await, 2);
 }
 
 #[tokio::test]
@@ -1176,7 +1390,6 @@ mod fake {
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use std::collections::{HashMap, VecDeque};
-    use std::convert::Infallible;
     use std::sync::{Arc, Mutex};
 
     /// The secret key every test signs with.
@@ -1187,6 +1400,10 @@ mod fake {
 
     /// The longest SQS hides a message, counted from its receive.
     const MAX_VISIBILITY: u64 = 43_200;
+
+    /// The scripted status that acts on the request and then drops the
+    /// connection without a reply. No HTTP status is zero.
+    const ACCEPT_THEN_DROP: u16 = 0;
 
     #[derive(Clone, Debug)]
     pub struct Message {
@@ -1244,7 +1461,13 @@ mod fake {
                     tokio::spawn(async move {
                         let service = service_fn(move |request: hyper::Request<Incoming>| {
                             let state = Arc::clone(&state);
-                            async move { Ok::<_, Infallible>(serve(&state, request).await) }
+                            async move {
+                                // No response: hyper closes the connection
+                                // without writing one.
+                                serve(&state, request).await.ok_or_else(|| {
+                                    std::io::Error::other("the reply was dropped on purpose")
+                                })
+                            }
                         });
                         let _ = hyper::server::conn::http1::Builder::new()
                             .serve_connection(TokioIo::new(stream), service)
@@ -1258,6 +1481,13 @@ mod fake {
         /// Move the fake's clock on by `seconds`.
         pub fn advance(&self, seconds: u64) {
             self.state.lock().unwrap().now += seconds;
+        }
+
+        /// Act on the next request for `target` as SQS would, then close the
+        /// connection without a reply: SQS took the message and the answer
+        /// was lost, which the driver sees as no answer.
+        pub fn script_accept_then_drop(&self, target: &str) {
+            self.script(target, ACCEPT_THEN_DROP, "");
         }
 
         /// Answer the next request for `target` with `status` and `body`.
@@ -1330,7 +1560,7 @@ mod fake {
     async fn serve(
         state: &Mutex<State>,
         request: hyper::Request<Incoming>,
-    ) -> hyper::Response<Full<Bytes>> {
+    ) -> Option<hyper::Response<Full<Bytes>>> {
         let method = request.method().as_str().to_owned();
         let path = request.uri().path().to_owned();
         let query = request.uri().query().unwrap_or_default().to_owned();
@@ -1364,6 +1594,10 @@ mod fake {
             body: body.clone(),
         });
         let scripted = state.script.get_mut(&target).and_then(VecDeque::pop_front);
+        if matches!(scripted, Some((ACCEPT_THEN_DROP, _))) {
+            let _ = act(&mut state, &target, &body);
+            return None;
+        }
         let (status, reply) = if let Some((status, reply)) = scripted {
             (status, reply)
         } else if let Err(reason) = signature {
@@ -1379,11 +1613,13 @@ mod fake {
             let (status, reply) = act(&mut state, &target, &body);
             (status, reply.to_string())
         };
-        hyper::Response::builder()
-            .status(status)
-            .header("content-type", "application/x-amz-json-1.0")
-            .body(Full::new(Bytes::from(reply)))
-            .unwrap()
+        Some(
+            hyper::Response::builder()
+                .status(status)
+                .header("content-type", "application/x-amz-json-1.0")
+                .body(Full::new(Bytes::from(reply)))
+                .unwrap(),
+        )
     }
 
     fn hmac(key: &[u8], data: &str) -> Vec<u8> {

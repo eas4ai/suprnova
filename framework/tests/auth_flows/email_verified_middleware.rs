@@ -334,3 +334,109 @@ fn no_auth_user_falls_into_same_branch() {
         assert!(body.contains("not verified"));
     });
 }
+
+// ── The route's guard (IDENTITY-003) ────────────────────────────────────
+
+/// A provider that answers `is_email_verified` from a fixed list of
+/// verified ids. It resolves nobody: the tests below sign their users in
+/// through `set_user`, which the guard's request cache serves back.
+struct VerifiedIds(&'static [&'static str]);
+
+#[async_trait::async_trait]
+impl suprnova::UserProvider for VerifiedIds {
+    async fn retrieve_by_id(
+        &self,
+        _id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, suprnova::FrameworkError> {
+        Ok(None)
+    }
+
+    async fn is_email_verified(&self, id: &str) -> Result<bool, suprnova::FrameworkError> {
+        Ok(self.0.contains(&id))
+    }
+}
+
+/// Installs a container-scoped manager with the session guards `web` (the
+/// default, over `users`) and `admin` (over `admins`). Web user 7 is
+/// verified; admin 9 is verified only when `admin_verified` is set.
+fn install_two_session_guards(admin_verified: bool) {
+    let config = AuthConfig::new("web").guard("admin", suprnova::GuardConfig::session("admins"));
+    suprnova::testing::TestContainer::singleton(AuthManager::new(config));
+    Auth::register_provider("users", Arc::new(VerifiedIds(&["7"]))).unwrap();
+    let admins: &'static [&'static str] = if admin_verified { &["9"] } else { &[] };
+    Auth::register_provider("admins", Arc::new(VerifiedIds(admins))).unwrap();
+}
+
+/// Signs `(guard, id)` pairs in for the rest of the request.
+struct SignIn(&'static [(&'static str, &'static str)]);
+
+#[async_trait::async_trait]
+impl Middleware for SignIn {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        for &(guard, id) in self.0 {
+            Auth::guard(guard)?
+                .set_user(Arc::new(UserById(id.to_owned())))
+                .await;
+        }
+        next(request).await
+    }
+}
+
+/// Serves one request to `/protected` through `registry` and returns its
+/// status. The server task inherits the caller's container scope.
+async fn serve_scoped(registry: MiddlewareRegistry) -> u16 {
+    let router = Arc::new(router());
+    let middleware = Arc::new(registry);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral listener");
+    let addr = listener.local_addr().expect("local_addr");
+    let server = suprnova::testing::TestContainer::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let svc = service_fn(move |req: hyper::Request<Incoming>| {
+            let router = router.clone();
+            let middleware = middleware.clone();
+            async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), svc)
+            .await;
+    });
+    let (status, _headers, _body) = request(addr, "GET", "/protected", &[]).await;
+    server.await.expect("server task");
+    status
+}
+
+/// The verified gate behind `AuthMiddleware::for_guard("admin")`.
+fn admin_route(signed_in: &'static [(&'static str, &'static str)]) -> MiddlewareRegistry {
+    MiddlewareRegistry::new()
+        .append(SignIn(signed_in))
+        .append(suprnova::AuthMiddleware::new().for_guard("admin"))
+        .append(EnsureEmailVerifiedMiddleware::new())
+}
+
+/// IDENTITY-003: the gate checks the user the route's guard authenticated,
+/// through that guard's provider. A verified default-guard user in the same
+/// session never lets an unverified admin through.
+#[test]
+fn the_verified_gate_checks_the_route_guards_user_not_the_default_guards() {
+    RT.block_on(suprnova::testing::TestContainer::scope(async {
+        install_two_session_guards(false);
+        let status = serve_scoped(admin_route(&[("web", "7"), ("admin", "9")])).await;
+        assert_eq!(
+            status, 403,
+            "admin 9 is unverified; web user 7's verification must not pass the admin route"
+        );
+    }));
+}
+
+/// The other half of IDENTITY-003: a verified admin passes the gate when no
+/// default-guard user is signed in at all.
+#[test]
+fn the_verified_gate_admits_a_verified_route_guard_user_without_a_default_user() {
+    RT.block_on(suprnova::testing::TestContainer::scope(async {
+        install_two_session_guards(true);
+        let status = serve_scoped(admin_route(&[("admin", "9")])).await;
+        assert_eq!(status, 200, "admin 9 is verified on the admin provider");
+    }));
+}

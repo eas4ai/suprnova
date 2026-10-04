@@ -163,3 +163,67 @@ async fn a_message_with_no_bodies_does_not_emit_a_zero_part_alternative() {
         "expected a substituted text/plain part:\n{raw}"
     );
 }
+
+/// Two transports writing into one directory - two worker processes, or a
+/// web process and a worker - each start their sequence at zero. A preview
+/// another writer already holds must never be overwritten. The placeholders
+/// cover every `<millis>-0.eml` name the next few seconds can produce, so the
+/// fresh transport's first name always collides with one of them.
+#[tokio::test]
+async fn a_second_writer_never_overwrites_an_existing_preview() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_millis();
+    for millis in now..now + 5_000 {
+        std::fs::write(dir.path().join(format!("{millis}-0.eml")), b"KEEP")
+            .expect("write placeholder");
+    }
+
+    let t = FileMailTransport::new(dir.path());
+    t.send(&base_message()).await.expect("send writes a file");
+
+    let mut written = 0;
+    for entry in std::fs::read_dir(dir.path()).expect("dir exists") {
+        let path = entry.expect("readable entry").path();
+        let bytes = std::fs::read(&path).expect("readable");
+        if bytes != b"KEEP" {
+            written += 1;
+            assert!(
+                String::from_utf8_lossy(&bytes).contains("Subject: Hello there"),
+                "{} holds neither a placeholder nor the message",
+                path.display()
+            );
+        }
+    }
+    assert_eq!(
+        written, 1,
+        "exactly one new preview, every placeholder intact"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path()).expect("dir exists").count(),
+        5_001,
+        "the message must land beside the placeholders, not on top of one"
+    );
+}
+
+#[tokio::test]
+async fn independent_transports_on_one_directory_keep_every_message() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = FileMailTransport::new(dir.path());
+    let b = FileMailTransport::new(dir.path());
+    let msg = base_message();
+    let sends = (0..40).map(|i| {
+        let t = if i % 2 == 0 { &a } else { &b };
+        t.send(&msg)
+    });
+    for result in futures::future::join_all(sends).await {
+        result.expect("send writes a file");
+    }
+    assert_eq!(
+        std::fs::read_dir(dir.path()).expect("dir exists").count(),
+        40,
+        "one file per message"
+    );
+}

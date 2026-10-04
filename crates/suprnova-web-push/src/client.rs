@@ -272,13 +272,18 @@ impl WebPushClient {
         );
         headers.insert(CONTENT_LENGTH, HeaderValue::from(payload.body().len()));
 
+        // reqwest attaches the request URL to a transport error, and its
+        // `Display` prints it. The path of a push endpoint is the
+        // capability that reaches the browser, so it must not ride into
+        // the error text callers log and hand to failure listeners.
         let resp = self
             .http
             .post(endpoint_url)
             .headers(headers)
             .body(payload.body().to_vec())
             .send()
-            .await?;
+            .await
+            .map_err(|error| WebPushError::Http(error.without_url()))?;
 
         let status = resp.status().as_u16();
         match status {

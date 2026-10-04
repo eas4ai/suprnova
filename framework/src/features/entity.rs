@@ -25,7 +25,18 @@ use chrono::{DateTime, Utc};
 ///
 /// `(name, scope_key)` is a UNIQUE composite key; `scope_key = ""` means a
 /// global flag, other values carry the scope inline as `kind:identifier`.
-#[suprnova::model(table = "features", timestamps)]
+///
+/// The timestamps are cast native because the migration creates native
+/// `timestamp with time zone` columns: the default text cast is refused
+/// by Postgres on write and by every driver on read.
+#[suprnova::model(
+    table = "features",
+    timestamps,
+    casts = {
+        created_at = suprnova::AsNativeDateTime,
+        updated_at = suprnova::AsNativeDateTime,
+    },
+)]
 pub struct Feature {
     /// Primary key.
     pub id: i64,

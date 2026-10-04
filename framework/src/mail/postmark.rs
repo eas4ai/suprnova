@@ -1,9 +1,9 @@
 //! Postmark HTTP transport. POSTs JSON to <https://api.postmarkapp.com/email>.
 
 use crate::error::FrameworkError;
-use crate::mail::address::Address;
 use crate::mail::http_provider::{err, read_error_body, shared_client};
 use crate::mail::transport::{MailTransport, OutgoingMessage};
+use crate::mail::wire;
 use async_trait::async_trait;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -95,7 +95,7 @@ struct PostmarkBody<'a> {
     text_body: Option<&'a str>,
     #[serde(rename = "Attachments", skip_serializing_if = "Vec::is_empty")]
     attachments: Vec<PostmarkAttachment<'a>>,
-    /// Postmark accepts ONE tag per message; we send the first.
+    /// Postmark accepts ONE tag per message; `send` refuses more.
     #[serde(rename = "Tag", skip_serializing_if = "Option::is_none")]
     tag: Option<&'a str>,
     #[serde(rename = "Metadata", skip_serializing_if = "BTreeMap::is_empty")]
@@ -122,18 +122,23 @@ struct PostmarkAttachment<'a> {
     content_type: &'a str,
 }
 
-fn join(addrs: &[Address]) -> String {
-    addrs
-        .iter()
-        .map(|a| a.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 #[async_trait]
 impl MailTransport for PostmarkMailTransport {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
         use base64::Engine;
+        // Postmark reads `To`, `Cc`, `Bcc` and `ReplyTo` as comma-separated
+        // lists, so every display name must be quoted or a comma in it adds
+        // a recipient. `check_message` also refuses CR, LF and NUL in the
+        // caller's headers before they reach the `Headers` array.
+        wire::check_message("Postmark", msg)?;
+        // Postmark carries one tag per email. Sending the first and dropping
+        // the rest lost data silently; Symfony's Postmark transport throws
+        // here too.
+        if msg.tags.len() > 1 {
+            return Err(FrameworkError::internal(
+                "Postmark: Postmark only allows a single tag per email",
+            ));
+        }
         let attachments: Vec<PostmarkAttachment> = msg
             .attachments
             .iter()
@@ -162,11 +167,11 @@ impl MailTransport for PostmarkMailTransport {
         }
 
         let body = PostmarkBody {
-            from: msg.from.to_string(),
-            to: join(&msg.to),
-            cc: join(&msg.cc),
-            bcc: join(&msg.bcc),
-            reply_to: join(&msg.reply_to),
+            from: wire::mailbox_text("Postmark", &msg.from)?,
+            to: wire::mailbox_list("Postmark", &msg.to)?,
+            cc: wire::mailbox_list("Postmark", &msg.cc)?,
+            bcc: wire::mailbox_list("Postmark", &msg.bcc)?,
+            reply_to: wire::mailbox_list("Postmark", &msg.reply_to)?,
             subject: &msg.subject,
             html_body: msg.html.as_deref(),
             text_body: msg.text.as_deref(),

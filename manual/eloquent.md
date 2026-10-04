@@ -322,13 +322,27 @@ let user = User::update_or_create(
 
 let user = User::first_or_new(
     attrs! { email: "alice@example.com" },
-).await?;   // returns an unsaved User; caller saves explicitly
+).await?;   // returns an unsaved User; caller inserts it explicitly
+let user = user.persist().await?;   // `use suprnova::Persistable;`
 ```
 
 Lookup keys go in the first map; extra fields applied on the
 create-path go in the second map. Returning an unsaved model via
-`first_or_new` lets the caller mutate it further before
-`save().await?`.
+`first_or_new` lets the caller mutate it further before inserting it
+with `persist().await?`, which fires `creating` and `created` and
+returns the saved model with the key the database assigned. When
+`first_or_new` finds a row, the model it returns is loaded, and `save`
+updates it.
+
+### Why Suprnova diverges
+
+Laravel's `save` inserts a model that does not exist yet and writes the
+new key into it. Suprnova's `save` borrows the model, so it cannot hand
+the new key back. A model built in the process whose key still holds its
+reset value - a new model from `first_or_new` or `find_or_new`, or a
+replica - has no row to update, so `save` refuses it with an error that
+names `persist`. `persist` consumes the model and returns the inserted
+one, key included.
 
 ## Creating and updating
 
@@ -459,7 +473,10 @@ The rules follow Laravel's `save`:
   `replicate` builds a new model without one.
 - A model you build in memory and save without reading it first has no
   loaded values to compare with: every column counts as changed, and
-  `get_original` returns `None` until that save returns.
+  `get_original` returns `None` until that save returns. Such a model
+  needs a key a row already holds: while its key holds the reset value,
+  as a replica's and a new `first_or_new` model's do, `save` refuses it
+  and `persist` inserts it.
 
 ### Why Suprnova diverges
 
@@ -527,7 +544,9 @@ row they already hold a reference to. `replicate` builds an
 in-memory clone with the PK and the timestamps reset
 (`Default::default()` for each type). Insert it with
 `replica.persist().await?` (the `Persistable` trait), which stamps
-`created_at` and `updated_at` the way `create` does.
+`created_at` and `updated_at` the way `create` does. `replica.save()`
+refuses it: the replica has no row yet, and its reset key would name
+another row.
 
 `refresh` and `refresh_for_update` both return an error when the row no
 longer exists, rather than leaving the model holding stale values.
@@ -579,8 +598,9 @@ or vice-versa.
 `replicate_into<T>` does NOT fire `Replicating` (the event carries
 `Arc<Mutex<Self>>`, so a listener on the source type couldn't mutate
 the cross-type replica anyway). Callers wanting per-T setup should
-run it on the returned `T` before calling `T::save` - the normal
-`Saving` / `Created` chain still fires inside `save`.
+run it on the returned `T` before calling `persist` - the normal
+`Creating` / `Saving` / `Created` / `Saved` chain still fires inside
+`persist`.
 
 ## Deleting and soft deletes
 
@@ -945,7 +965,11 @@ read as a type parameter; for `avg` it is `f64` or `rust_decimal::Decimal`
 (the `AvgValue` trait). Suprnova aliases generated
 aggregate expressions internally so the same typed result is decoded on
 PostgreSQL, MySQL, and SQLite. `sum` and `avg` return zero for an empty
-match set, while `min` and `max` return `None`. An incompatible requested
+match set, while `min` and `max` return `None`. The same holds when no row
+comes back at all - an offset skips the aggregate's one row, as
+`skip(10).count()` does, or a grouped query has no group: `count`, `sum`
+and `avg` return zero and `min` and `max` return `None`, as Laravel's
+`count`, `sum`, `min` and `max` do. An incompatible requested
 Rust type or missing result column is a database error; it is never
 converted into a plausible zero or `None`.
 
@@ -1057,6 +1081,30 @@ let second = User::filter("role", "admin");
 let users  = first.union(second).get().await?;
 let users  = first.union_all(second).get().await?;
 ```
+
+As in Laravel, an ordering, a limit, or an offset belongs to the whole
+union when you add it after `union`, and to the first query alone when
+you add it before. `paginate`, `simple_paginate`, `cursor_paginate`,
+`first`, and `count` all come after `union`, so they page, take, and
+count the rows of the union; a cursor bounds the rows of every arm:
+
+```rust
+let page = User::filter("active", true)
+    .union(User::filter("role", "admin"))
+    .order_by_desc("id")      // orders the union
+    .paginate(20)             // pages the union; `total` counts its rows
+    .await?;
+
+let latest_active = User::filter("active", true)
+    .order_by_desc("created_at")
+    .limit(10)                // the ten newest active users only
+    .union(User::filter("role", "admin"));
+```
+
+The union is wrapped as a subquery for these clauses, so order it by the
+bare names of its columns (`id`, not `users.id`). A `UNION` keeps one
+copy of a row both queries return, and `total` counts it once;
+`union_all` keeps both.
 
 ## Row locking
 
@@ -1393,7 +1441,10 @@ tx.
 Three-way precedence for routing an operation through a connection:
 
 1. **Builder-level override** - `Builder::with_tx(&tx)` or any
-   `Model::*_with_tx(&tx, ...)` shim. Explicit beats ambient.
+   `Model::*_with_tx(&tx, ...)` shim. Explicit beats ambient. The
+   eager loads of such a query read through the same transaction, and
+   those of an `on(name)` query read from that connection, unless the
+   related model declares a connection of its own.
 2. **The ambient transaction** - installed by `DB::transaction` /
    `DB::transaction_with_attempts` for the closure's task scope.
    A read that names another connection, through `on(name)` or a
@@ -1551,6 +1602,7 @@ it when the query runs.
 | `Model::without_global_scopes()` | No |
 | `Model::query().without_global_scope::<S>()` | Yes, minus `S`, wherever it is chained |
 | `Model::with_trashed()` / `Model::only_trashed()` | Yes - only the soft-delete filter is lifted |
+| `RouteParam<Model>` route binding | Yes - the bound row is read through `Model::query()` |
 | `Model::find(id)` | No - PK lookup goes through SeaORM directly |
 | `Model::find_many([...])` | No - same reason |
 | `Model::all()` | No - same reason |
@@ -2183,7 +2235,10 @@ let users = User::query()
 
 The per-row `__eager` cache cells are keyed by:
 
-- `<rel>` (relation NAME alone) for `with` and `with_count`.
+- `<rel>` (relation NAME alone) for `with` and `with_count`. The rows
+  and the count are kept in separate cells, so `with(["posts"])` and
+  `with_count(["posts"])` on one query keep both, and a count alone
+  does not count as loaded rows for `load_missing`.
 - `<rel>_<kind>_<col>` (e.g. `posts_sum_views`) for the four
   aggregate kinds - `with_sum` / `with_avg` / `with_min` / `with_max`.
   This wide key lets multiple aggregates on the same relation coexist
@@ -2690,6 +2745,10 @@ User::query().chunk(100, |batch: Collection<User>| async move {
 The closure receives a `Collection<M>` per batch - slice-shape access
 (`.iter()`, indexing) works directly via `Deref`.
 
+`chunk`, `chunk_map`, and `each` keep the query's own `OFFSET` and
+`LIMIT`, as Laravel's `chunk` does: the offset skips rows once, at the
+start of the walk, and the limit caps the rows the whole walk visits.
+
 `chunk` is OFFSET-paginated and **not safe under concurrent inserts**:
 rows inserted before the next batch's offset get skipped; rows deleted
 before the offset get processed twice (whatever shifted into their
@@ -2711,6 +2770,14 @@ Each batch filters on `WHERE id > last_id ORDER BY id ASC LIMIT n`,
 so rows inserted mid-iteration with PKs above the cursor land in a
 later batch (or are picked up by a subsequent run) - they never cause
 an original row to skip or duplicate.
+
+The walk sets its own order. An `ORDER BY` already on the query is
+dropped, because any other order would make the cursor skip some rows
+and repeat others. An `OFFSET` on the query skips that many rows once,
+before the first batch; every later batch starts at the cursor. A
+`LIMIT` on the query caps the rows the whole walk visits, as in
+Laravel's `chunkById`: `.limit(10).chunk_by_id(3, ..)` hands over 3, 3,
+3 and 1 rows.
 
 The cursor is the value of the primary key, in the order of the key.
 These keys work:
@@ -2796,7 +2863,8 @@ Override the batch size with `lazy_by_id(500)`. `cursor()` is the
 Laravel name and is a zero-cost alias for `lazy()`.
 
 `lazy()`, `lazy_by_id()` and `cursor()` use the same keyset cursor as
-`chunk_by_id`, so the same keys work and the same keys are refused. The
+`chunk_by_id`, so the same keys work, the same keys are refused, and an
+`ORDER BY` or `OFFSET` on the query is treated the same way. The
 error is the first item of the stream. Refusal by column type happens
 before the first query. A row with a null or mismatched key is refused
 when its batch arrives, before the stream yields any row of that batch.
@@ -3706,7 +3774,9 @@ impl Prunable for ExpiredSession {
 
 For high-volume tables (audit logs, request logs, expired cache
 entries) `MassPrunable` skips per-row events and runs a single
-`DELETE WHERE …` statement:
+`DELETE WHERE …` statement. It runs where the `prunable()` query routes,
+the same place the `--pretend` count reads: the model's declared
+connection, or the query's own `on(name)` or `with_tx`:
 
 ```rust
 use suprnova::eloquent::MassPrunable;
@@ -4494,6 +4564,11 @@ let user = user.update_or_fail(attrs).await?;   // not_found if row deleted mid-
 user.delete_or_fail().await?;
 ```
 
+On a model declared with `soft_deletes`, `delete_or_fail`, `delete_quietly`,
+`destroy`, and a `delete` called through the `Model` trait all tombstone
+the row, as `delete()` does. `delete_or_fail` answers not-found for a row
+that is already trashed.
+
 ### Filtered serialisation - `to_array_except` / `to_array_only`
 
 Suprnova's Rust-native replacement for Laravel's per-instance
@@ -4563,7 +4638,8 @@ let user = User::find_or(id, || async {
 
 // Look up by PK; build an unsaved instance from defaults if not found.
 let user = User::find_or_new(id, attrs! { name: "draft" }).await?;
-// user.id == 0 here - the instance is in-memory only.
+// user.id == 0 here - the instance is in-memory only; insert it with
+// `user.persist().await?`.
 
 // Race-safe insert: try create, fall back to fetch on conflict.
 let user = User::create_or_first(

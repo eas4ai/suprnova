@@ -35,9 +35,10 @@ pub use casts::{
     AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal, AsEncrypted,
     AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat, AsHashed,
     AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsNaiveDateTime, AsNativeDateTime,
-    AsObject, AsOptionalArray, AsOptionalArrayObject, AsOptionalCollection, AsOptionalDateTime,
-    AsOptionalJson, AsOptionalNaiveDateTime, AsOptionalNativeDateTime, AsOptionalObject,
-    AsOptionalU64, AsString, AsTimestamp, AsU64, Cast, DynCast, IntoDynCast, StoredU64,
+    AsNativeJson, AsObject, AsOptionalArray, AsOptionalArrayObject, AsOptionalCollection,
+    AsOptionalDateTime, AsOptionalJson, AsOptionalNaiveDateTime, AsOptionalNativeDateTime,
+    AsOptionalNativeJson, AsOptionalObject, AsOptionalU64, AsString, AsTimestamp, AsU64, Cast,
+    DynCast, IntoDynCast, StoredU64,
 };
 pub use collection::Collection;
 pub use fillable::{

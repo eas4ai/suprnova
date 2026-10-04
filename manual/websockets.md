@@ -54,9 +54,9 @@ A WebSocket handshake is an HTTP GET with `Upgrade: websocket`. The framework ru
 
 1. **Route match.** The router looks up the path in the WS route table; on miss the request falls through to the HTTP fallback.
 2. **Origin policy.** The configured [`OriginPolicy`](#origin-policy) is enforced. A violation returns HTTP 403 with no upgrade.
-3. **Subprotocol negotiation.** If the route has `accepted_protocols`, the first client-offered token that overlaps is echoed on the 101 response.
-4. **Middleware chain.** `RequestIdMiddleware` runs outermost, followed by every globally-registered middleware, followed by the route's per-route middleware. A non-2xx response from any middleware short-circuits the upgrade - the peer receives the HTTP error, and the WebSocket future drops cleanly.
-5. **Handshake.** `hyper_tungstenite::upgrade` produces the future that resolves into a `WebSocketStream`.
+3. **Subprotocol negotiation.** If the route has `accepted_protocols`, the first client-offered token that overlaps is echoed on the 101 response, in the client's own spelling.
+4. **Middleware chain.** `RequestIdMiddleware` runs outermost, followed by every globally-registered middleware, followed by the route's per-route middleware. A non-2xx response from any middleware short-circuits the upgrade - the peer receives the HTTP error, and the WebSocket future drops cleanly. When the chain lets the upgrade through, the headers middleware added to its response, such as a session middleware's `Set-Cookie`, are sent on the 101. The handshake fields (`Connection`, `Upgrade`, `Sec-WebSocket-*`) and the body framing fields (`Content-Length`, `Content-Type`, `Content-Encoding`, `Transfer-Encoding`) stay the upgrade's own.
+5. **Handshake.** `hyper_tungstenite::upgrade` produces the future that resolves into a `WebSocketStream`. Registered [terminable middleware](middleware.md#terminable-middleware---post-response-hooks) runs for the upgrade response like for any other response: with status 101, or with the status that refused the upgrade.
 6. **Handler dispatch.** The (possibly middleware-rewritten) `Request` and a freshly-built `WsSocket` are handed to `WebSocketHandler::handle`.
 7. **Heartbeat + handler.** The framework spawns a per-connection heartbeat task and awaits the handler future under a `ws.connection` tracing span carrying the request id.
 8. **Close handshake.** On `Ok(())` the framework sends Close(1000); on `Err(_)` it sends Close(1011 "internal error"). The forwarder is awaited so the close frame is flushed to the wire before the connection's tracked task is reported done.
@@ -238,7 +238,7 @@ PHP frameworks bolt WebSocket support on as a separate process (ratchet, soketi,
 
 ## Path parameters
 
-WebSocket routes support the same `{param}` capture syntax as HTTP routes. Captured values are available on the `Request` passed to the handler.
+WebSocket routes support the same `{param}` capture syntax as HTTP routes. Captured values are available on the `Request` passed to the handler, percent-decoded the same way as HTTP route parameters: `/ws/rooms/a%20b` gives `"a b"`.
 
 ```rust
 // In routes!:
@@ -462,7 +462,7 @@ let cfg = WsConfig {
 };
 ```
 
-When the client offers `Sec-WebSocket-Protocol`, the framework picks the first client-offered token (in client preference order per RFC 6455 §4.2.2) that overlaps with `accepted_protocols`, matched case-insensitively, and echoes it on the 101 response. If the client offered protocols but none matched, the upgrade still succeeds with no `Sec-WebSocket-Protocol` header - RFC 6455 then requires the browser to fail the connection client-side, which is the right behavior (a server that proceeded would silently be speaking the wrong protocol).
+When the client offers `Sec-WebSocket-Protocol`, the framework picks the first client-offered token (in client preference order per RFC 6455 §4.2.2) that overlaps with `accepted_protocols`, matched case-insensitively, and echoes it on the 101 response exactly as the client spelled it. A client offering `CHAT` to a route that accepts `chat` gets `CHAT` back: RFC 6455 makes the client fail a handshake that names a protocol it did not offer, and browsers compare the strings exactly. If the client offered protocols but none matched, the upgrade still succeeds with no `Sec-WebSocket-Protocol` header - RFC 6455 then requires the browser to fail the connection client-side, which is the right behavior (a server that proceeded would silently be speaking the wrong protocol).
 
 When `accepted_protocols` is empty, negotiation is skipped entirely - the upgrade response omits `Sec-WebSocket-Protocol` and the client falls back to default protocol handling.
 

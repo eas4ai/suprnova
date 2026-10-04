@@ -1,6 +1,6 @@
 //! Heading metadata and slug generation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -44,29 +44,43 @@ pub fn slugify_heading(title: &str) -> String {
 }
 
 /// Generates unique heading IDs for a single rendered document.
+///
+/// A repeated title gets `-2`, `-3` and so on after its slug. Those
+/// suffixed IDs can also be the plain slug of another heading (`Overview 2`
+/// slugs to `overview-2`), so uniqueness is checked against every ID
+/// already handed out, not only against the count for one slug.
 pub(crate) struct HeadingIdGenerator {
-    seen: HashMap<String, usize>,
+    used: HashSet<String>,
+    last_suffix: HashMap<String, usize>,
 }
 
 impl HeadingIdGenerator {
     /// Create an empty per-document heading ID generator.
     pub(crate) fn new() -> Self {
         Self {
-            seen: HashMap::new(),
+            used: HashSet::new(),
+            last_suffix: HashMap::new(),
         }
     }
 
     /// Return the next unique heading ID for visible heading text.
     pub(crate) fn next_id(&mut self, title: &str) -> String {
         let base = slugify_heading(title);
-        let count = self.seen.entry(base.clone()).or_insert(0);
-        *count += 1;
-
-        if *count == 1 {
-            base
-        } else {
-            format!("{base}-{count}")
+        let mut id = base.clone();
+        if self.used.contains(&id) {
+            // Resume after the last suffix tried for this slug, so a long
+            // run of one title does not rescan every earlier suffix.
+            let suffix = self.last_suffix.entry(base.clone()).or_insert(1);
+            loop {
+                *suffix += 1;
+                id = format!("{base}-{suffix}");
+                if !self.used.contains(&id) {
+                    break;
+                }
+            }
         }
+        self.used.insert(id.clone());
+        id
     }
 }
 

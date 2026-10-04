@@ -4,8 +4,10 @@
 //! `user_id` with deliberately no foreign-key requirement, ciphertext
 //! secret and recovery blob (this module never sees plaintext), the
 //! confirmed-at stamp that separates pending from active, and the
-//! replay-protection timestep. Hosts implement this trait over their own
-//! table, exactly like the session and remember-me stores.
+//! replay-protection timestep. A proven rotation waits beside the confirmed
+//! secret in the pending columns, so the confirmed secret keeps gating
+//! sign-in until the new one is confirmed. Hosts implement this trait over
+//! their own table, exactly like the session and remember-me stores.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -19,6 +21,8 @@ pub struct TwoFactorRow {
     /// Opaque owning user identifier (no FK requirement, source's choice).
     pub user_id: String,
     /// Ciphertext TOTP secret ([`crate::crypto::CryptoPurpose::TwoFactorSecret`]).
+    /// Once confirmed, this is the secret that gates sign-in, also while a
+    /// rotation waits in [`Self::pending_secret`].
     pub secret: Vec<u8>,
     /// Ciphertext newline-joined recovery codes
     /// ([`crate::crypto::CryptoPurpose::TwoFactorRecovery`]); `None` once
@@ -30,10 +34,18 @@ pub struct TwoFactorRow {
     pub enrollment_session_id: Option<String>,
     /// Expiry snapshot of the actor that began this enrollment.
     pub enrollment_expires_at: Option<DateTime<Utc>>,
-    /// Whether this pending enrollment is a proof-gated rotation.
+    /// Whether a proof-gated rotation waits in [`Self::pending_secret`].
     pub rotation_pending: bool,
-    /// Set when the user proved possession of the new secret; 2FA is
-    /// inactive until then.
+    /// Ciphertext secret of a proven rotation waiting for its confirmation.
+    /// It replaces [`Self::secret`] only when
+    /// [`TwoFactorStore::confirm_rotation`] proves a code from it; until
+    /// then the confirmed secret keeps gating sign-in.
+    pub pending_secret: Option<Vec<u8>>,
+    /// Ciphertext recovery codes minted with [`Self::pending_secret`]; they
+    /// replace [`Self::recovery_codes`] with it.
+    pub pending_recovery_codes: Option<Vec<u8>>,
+    /// Set when the user proved possession of the secret; 2FA is inactive
+    /// until then. A rotation never clears it.
     pub confirmed_at: Option<DateTime<Utc>>,
     /// The highest TOTP timestep that has ever matched, for replay
     /// rejection.
@@ -88,8 +100,40 @@ pub trait TwoFactorStore: Send + Sync {
         secret: &[u8],
         recovery_codes: Option<&[u8]>,
     ) -> Result<bool>;
-    /// Stamp `confirmed_at` and clear the pending-rotation marker.
-    async fn set_confirmed(&self, actor: &CredentialActor, at: DateTime<Utc>) -> Result<bool>;
+    /// Confirm exactly the enrollment a code was checked against, once.
+    ///
+    /// Stamp `confirmed_at`, clear the pending-rotation marker and claim
+    /// `matched_step` as `last_used_timestep`, in one conditional write that
+    /// holds only while the row still stores `expected_secret`, is still
+    /// unconfirmed, and has not used that timestep. A concurrent enrollment
+    /// that replaced the secret after the check therefore stays unconfirmed:
+    /// the code proved possession of the old secret, not of the new one. A
+    /// second confirmation of the same enrollment, or a later reuse of its
+    /// code, finds nothing to change. Returns whether this caller confirmed.
+    async fn set_confirmed(
+        &self,
+        actor: &CredentialActor,
+        expected_secret: &[u8],
+        matched_step: i64,
+        at: DateTime<Utc>,
+    ) -> Result<bool>;
+    /// Promote exactly the pending rotation a code was checked against, once.
+    ///
+    /// Its secret and recovery codes replace the confirmed ones, the pending
+    /// columns clear, `confirmed_at` becomes `at`, and `matched_step` is
+    /// claimed as `last_used_timestep` of the new secret, in one conditional
+    /// write that holds only while the row is confirmed and its pending
+    /// secret is still `expected_pending_secret`. A later rotation that
+    /// replaced it after the check therefore stays pending, and a second
+    /// promotion finds nothing to change. Returns whether this caller
+    /// promoted.
+    async fn confirm_rotation(
+        &self,
+        actor: &CredentialActor,
+        expected_pending_secret: &[u8],
+        matched_step: i64,
+        at: DateTime<Utc>,
+    ) -> Result<bool>;
     /// Claim one matched timestep: set `last_used_timestep = matched_step`
     /// only when the stored value is null or lower. The claim and the
     /// success result are one atomic decision; the returned bool is the
@@ -103,7 +147,13 @@ pub trait TwoFactorStore: Send + Sync {
         expected: &[u8],
         next: Option<&[u8]>,
     ) -> Result<bool>;
-    /// Atomically claim the old factor proof and create a pending rotation.
+    /// Atomically claim the old factor proof and store a pending rotation.
+    ///
+    /// The rotation waits in the pending columns of a confirmed enrollment,
+    /// which keeps its secret, recovery codes and confirmation, and so keeps
+    /// gating sign-in, until [`Self::confirm_rotation`] promotes the new
+    /// secret. The actor snapshot is the rotating actor's. A later rotation
+    /// replaces a pending one.
     async fn rotate_enrollment(
         &self,
         actor: &CredentialActor,
@@ -118,7 +168,8 @@ pub trait TwoFactorStore: Send + Sync {
         claim: TwoFactorProofClaim,
         next: &[u8],
     ) -> Result<bool>;
-    /// Delete the enrollment. Returns whether a row was removed, so hosts
-    /// fire their disabled notification only on a true transition.
+    /// Delete the enrollment, with any rotation waiting in it. Returns
+    /// whether a row was removed, so hosts fire their disabled notification
+    /// only on a true transition.
     async fn delete_enrollment(&self, actor: &CredentialActor) -> Result<bool>;
 }

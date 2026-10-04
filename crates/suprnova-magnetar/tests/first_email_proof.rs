@@ -481,9 +481,25 @@ mod sqlite {
         async fn set_confirmed(
             &self,
             actor: &CredentialActor,
+            expected_secret: &[u8],
+            matched_step: i64,
             at: chrono::DateTime<Utc>,
         ) -> magnetar::Result<bool> {
-            self.inner.set_confirmed(actor, at).await
+            self.inner
+                .set_confirmed(actor, expected_secret, matched_step, at)
+                .await
+        }
+
+        async fn confirm_rotation(
+            &self,
+            actor: &CredentialActor,
+            expected_pending_secret: &[u8],
+            matched_step: i64,
+            at: chrono::DateTime<Utc>,
+        ) -> magnetar::Result<bool> {
+            self.inner
+                .confirm_rotation(actor, expected_pending_secret, matched_step, at)
+                .await
         }
 
         async fn claim_timestep(&self, user_id: &str, matched_step: i64) -> magnetar::Result<bool> {

@@ -480,6 +480,8 @@ The same module also exports a helper `pub fn migrations() -> Vec<Box<dyn Migrat
 
 Every table has a `provider_metadata` JSON column. When the framework's neutral representation doesn't cover a provider-specific field, read it from there.
 
+Every timestamp column is a native `timestamp with time zone` column (`TIMESTAMP` on MySQL and MariaDB), so the database's own date functions work on it. The mirror models declare `AsNativeDateTime` on those fields, and the SeaORM entities under `suprnova::payments::entities` carry them as `DateTime<Utc>` (`Option<DateTime<Utc>>` for `canceled_at`, `paid_at` and `processed_at`). Set them with a `DateTime<Utc>`, not with formatted text.
+
 ### Transactions table
 
 `payments_transactions` splits amounts into `amount_total_minor` and `amount_tax_minor`. Stripe reports amounts exclusive of tax - tax is zero on the transaction row, and any tax data lives in `provider_metadata`. Paddle reports amounts inclusive of tax and sets `amount_tax_minor` to the tax component. Both representations work; add `amount_total_minor - amount_tax_minor` for the net amount.

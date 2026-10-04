@@ -72,7 +72,9 @@ once the bootstrap has run, with an error that names it; so does a name in
 whichever channel is the default. Dates are those of the framework clock,
 in UTC. File lines are text, one line a record, or JSON objects when
 `LOG_FORMAT=json`, and carry the fields of the spans the event is in, the
-request's `request_id` among them.
+request's `request_id` among them. A field an inner span shares a name with
+replaces the outer span's, and an event's own field replaces both, in the
+message's placeholders and in the context alike.
 
 Define your own channels in the bootstrap, and reach any channel with
 `Log`:
@@ -96,14 +98,20 @@ only; `tracing`'s events go to the default channel. A logger has
 Laravel's eight levels, from `emergency` to `debug`, and the `*_with`
 methods take a JSON context: each `{key}` in the message is replaced with
 its value, and the context is written beside the message. A channel
-`.level(...)` keeps only the records at that level or above.
+`.level(...)` keeps only the records at that level or above. A stack's
+`.level(...)` applies to every channel it lists, on top of each channel's
+own, and a default stack that names `stdout` more than once writes an event
+there when any of those channels keeps its level.
 
 A stack writes each record to every channel it lists, and a channel that
 cannot write, such as a file it cannot open, stops none of the others;
 the failure is reported once on stderr, and the code that logged never
-sees an error. `Log::channels()` lists the channels in use,
+sees an error. That covers a driver's sink that returns an error from
+`write` or `flush`, and buffered lines a file cannot flush, such as on a
+full disk. `Log::channels()` lists the channels in use,
 `Log::forget_channel(name)` closes one, which is resolved again on its
-next use, reopening a file rotated away, and `Log::default_channel()` and
+next use, reopening a file rotated away; every stack that lists it, the
+default channel included, reopens it too. `Log::default_channel()` and
 `Log::set_default_channel(name)` read and move the default.
 
 `Log::extend` adds a driver for anything else, such as Slack or a log
@@ -339,8 +347,9 @@ init_subscriber(LogConfig {
 ```
 
 `init_subscriber` is **idempotent**. A second call leaves the existing
-subscriber in place and emits a `tracing::warn!` so an operator can
-see that the new `LogConfig` was not applied. This is what lets tests
+subscriber in place, with its default channel and the format of its file
+lines, and emits a `tracing::warn!` so an operator can see that the new
+`LogConfig` was not applied. This is what lets tests
 that each call `init_subscriber` not race each other - the first wins,
 the rest are no-ops.
 

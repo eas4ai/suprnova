@@ -35,7 +35,7 @@ You now have:
 - A cron scheduler driven by the `Task` trait
 - A console binary per project for `cargo run --bin console <cmd>`
 - Cache, storage (fs/s3/azblob/gcs), mail (SMTP + 5 providers: SES, Mailgun, Postmark, SendGrid, Resend), web push
-- Broadcasting over a pluggable hub (sea-streamer by default)
+- Broadcasting over a pluggable hub (in memory by default, Redis streams across processes)
 - Validation, CSRF, CORS, rate limiting, idempotency, request timeouts, structured errors
 
 And one statically linked binary at the end of `cargo build --release`.
@@ -57,7 +57,7 @@ And one statically linked binary at the end of `cargo build --release`.
 | Templating | `tera` (for mail bodies; frontend is Inertia) |
 | Crypto | `aes-gcm`, `argon2`, `bcrypt` |
 | WebSockets | `hyper-tungstenite` |
-| Streaming | `sea-streamer` (broadcasting fanout backend) |
+| Streaming | `redis` streams (broadcasting fanout backend) |
 | OAuth | Magnetar provider registry and ceremony engine |
 | Tracing | `tracing` + `tracing-subscriber` |
 

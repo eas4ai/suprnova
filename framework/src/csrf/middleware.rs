@@ -529,11 +529,24 @@ impl CsrfMiddleware {
     /// Attach the `XSRF-TOKEN` cookie to the response, if policy
     /// allows and a session token exists. Mirrors Laravel's
     /// `addCookieToResponse` running inside the `tap()` after `next`.
+    /// A session created by this request is marked for storage, so the
+    /// browser gets the session the token belongs to.
     fn maybe_attach_xsrf_cookie(&self, response: Response) -> Response {
         if !self.should_attach_xsrf_cookie() {
             return response;
         }
-        let Some(token) = get_csrf_token() else {
+        // The token is good only with the session that holds it. A session
+        // this request created is stored only when something changed it, and
+        // handing out its token is such a change: a cookieless JSON or HEAD
+        // bootstrap would otherwise receive a token whose session is never
+        // stored, and its next unsafe request would meet a new session and a
+        // 419. A session loaded from the store is left as it is.
+        let Some(token) = crate::session::session_mut(|session| {
+            if !session.loaded_from_store {
+                session.dirty = true;
+            }
+            session.csrf_token.clone()
+        }) else {
             return response;
         };
         let cookie = self.build_xsrf_cookie(&token);
@@ -671,8 +684,7 @@ impl Middleware for CsrfMiddleware {
         // downstream handler can still read its form data.
         let is_form_body = request
             .content_type()
-            .map(|ct| ct.starts_with("application/x-www-form-urlencoded"))
-            .unwrap_or(false);
+            .is_some_and(crate::http::body::is_form_urlencoded);
 
         if !is_form_body {
             return reject_with_419();
@@ -1111,6 +1123,45 @@ mod tests {
             "the _token field stays in the form bag for the handler - \
              CSRF doesn't strip it"
         );
+    }
+
+    /// Media types are case-insensitive (RFC 9110 8.3.1). A form whose
+    /// `Content-Type` is spelled `Application/X-WWW-Form-Urlencoded` is the
+    /// same form, and its correct `_token` must pass rather than 419.
+    #[tokio::test]
+    async fn form_post_with_a_mixed_case_media_type_reads_the_body_token() {
+        let token = "matching-token-fixture-1234567890";
+        let builder = hyper::Request::builder()
+            .method("POST")
+            .uri("http://localhost/login")
+            .header(
+                "content-type",
+                "Application/X-WWW-Form-Urlencoded; charset=UTF-8",
+            );
+        let driven = drive_request(
+            Arc::new(CsrfMiddleware::new()),
+            token,
+            builder,
+            Some(format!("_token={token}&username=alice")),
+        )
+        .await;
+        assert_eq!(
+            driven.status, 200,
+            "a correct body token in a mixed-case form must pass CSRF"
+        );
+
+        let builder = hyper::Request::builder()
+            .method("POST")
+            .uri("http://localhost/login")
+            .header("content-type", "APPLICATION/X-WWW-FORM-URLENCODED");
+        let driven = drive_request(
+            Arc::new(CsrfMiddleware::new()),
+            token,
+            builder,
+            Some("_token=wrong-attacker-token".to_string()),
+        )
+        .await;
+        assert_eq!(driven.status, 419, "a wrong body token still fails");
     }
 
     #[tokio::test]

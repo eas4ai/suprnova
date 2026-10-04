@@ -14,13 +14,15 @@ use std::sync::Arc;
 use bytes::Bytes;
 use http_body_util::Full;
 use live_dogfood_support::{
-    ActionRequest, DOCUMENT_PATH, SUBSCRIPTION_PATH, action_request, build_router,
-    decoded_snapshot, dispatch, fixture, get, production_middleware, session_cookie,
+    ActionRequest, DOCUMENT_PATH, PRIVATE_DOCUMENT_PATH, SUBSCRIPTION_PATH, action_request,
+    build_public_router, build_router, decoded_snapshot, dispatch, fixture, get,
+    private_action_request, production_middleware, session_cookie,
 };
 use serde_json::Value;
-use suprnova::StatusCode;
 use suprnova::container::testing::TestContainer;
+use suprnova::live::LiveConfig;
 use suprnova::live::testing::prepare_live_router_for_test;
+use suprnova::{App, StatusCode};
 
 #[tokio::test]
 #[serial_test::serial]
@@ -188,4 +190,98 @@ async fn the_default_ledger_driver_verifies_its_backend_at_boot() {
     suprnova::live::verify_ledger_backend()
         .await
         .expect("the memory ledger driver reaches nothing, so it always verifies");
+}
+
+/// A signed-in visitor's request for one identity-bound page: the page's
+/// status, its session cookie, and the snapshot its island carries.
+async fn private_page(
+    router: &Arc<suprnova::Router>,
+    middleware: &Arc<suprnova::MiddlewareRegistry>,
+    cookie: &str,
+) -> (StatusCode, String, Value) {
+    let mut request = get(PRIVATE_DOCUMENT_PATH);
+    request
+        .headers_mut()
+        .insert("x-test-login", "user-7".parse().expect("header"));
+    request
+        .headers_mut()
+        .insert("cookie", cookie.parse().expect("cookie"));
+    let (status, headers, body) = dispatch(router.clone(), middleware.clone(), request).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    (status, session_cookie(&headers), decoded_snapshot(&body))
+}
+
+/// A full instance ledger never refuses a page. It evicts the instance that
+/// expires soonest to mount the new one, and the evicted page's next action is
+/// told to refresh its island, which the browser answers with a fresh render.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_full_ledger_mounts_the_next_page_and_the_evicted_page_refreshes() {
+    let _container = TestContainer::fake();
+    fixture();
+    App::singleton(
+        LiveConfig::builder()
+            .ledger_max_instances(1)
+            .build()
+            .expect("a one-instance ledger"),
+    );
+    let router = Arc::new(build_public_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+    let middleware = production_middleware();
+
+    // Sign in on one request, so the identity-bound renders that follow bind
+    // the session that survives the framework's fixation rotation.
+    let mut login = get(DOCUMENT_PATH);
+    login
+        .headers_mut()
+        .insert("x-test-login", "user-7".parse().expect("header"));
+    let (status, headers, body) = dispatch(router.clone(), middleware.clone(), login).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let signed_in = session_cookie(&headers);
+
+    let (_, first_cookie, first) = private_page(&router, &middleware, &signed_in).await;
+    // The ledger holds one instance and the first page has it, so this mount
+    // only succeeds by evicting the first page's instance.
+    let (_, second_cookie, second) = private_page(&router, &middleware, &first_cookie).await;
+
+    let (status, _, body) = dispatch(
+        router.clone(),
+        middleware.clone(),
+        private_action_request(ActionRequest {
+            snapshot: first,
+            cookie: &first_cookie,
+            fetch_site: Some("same-origin"),
+            login: Some("user-7"),
+            idempotency_key: "QEFCQ0RFRkdISUpLTE1OTw",
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let refused: Value = serde_json::from_slice(&body).expect("refresh JSON");
+    assert_eq!(refused["outcome"], "refresh_required", "{refused}");
+    assert_eq!(
+        refused["error"]["recovery"], "refresh_island",
+        "the evicted page recovers with a fresh render: {refused}"
+    );
+
+    let (status, _, body) = dispatch(
+        router,
+        middleware,
+        private_action_request(ActionRequest {
+            snapshot: second,
+            cookie: &second_cookie,
+            fetch_site: Some("same-origin"),
+            login: Some("user-7"),
+            idempotency_key: "QUFCQ0RFRkdISUpLTE1OTw",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let accepted: Value = serde_json::from_slice(&body).expect("accepted action JSON");
+    assert_eq!(accepted["outcome"], "accepted", "{accepted}");
 }

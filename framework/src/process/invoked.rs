@@ -54,22 +54,29 @@ struct Target {
 }
 
 impl Target {
-    /// Send `signal` to the program and everything it started.
-    /// `leader_reaped` says the program has been waited on, so its id may
-    /// belong to another process now; `streams_open` says something still
-    /// holds its output, so members of its group are alive.
-    fn signal_all(&self, signal: Signal, leader_reaped: bool, streams_open: bool) {
+    /// Send `signal` to the program and everything it started, unless the
+    /// program has been reaped: from then on its id - and, for a group, the
+    /// group's id, which is the same number - may belong to another process.
+    ///
+    /// Nothing short of the unreaped program proves a group id is still
+    /// ours. A process holding the program's output may have left the group,
+    /// so an open pipe says nothing about the group having a member, and an
+    /// empty group's id is free for reuse once the program is reaped. So the
+    /// program is not reaped while its output is open (see
+    /// `Real::may_reap`): until then, the program, even exited, keeps its id
+    /// and the group's pinned to it.
+    fn signal_all(&self, signal: Signal, leader_reaped: bool) {
         let Some(pid) = self.pid else {
             return;
         };
+        if leader_reaped {
+            return;
+        }
         match self.reach {
-            // A group id cannot be reused while the group has a member, so
-            // signalling it is safe while anything holds the output.
-            Reach::Group if !leader_reaped || streams_open => {
+            Reach::Group => {
                 let _ = send_signal(pid, true, signal);
             }
-            Reach::Tree if !leader_reaped => signal_tree(pid, signal),
-            _ => {}
+            Reach::Tree => signal_tree(pid, signal),
         }
     }
 }
@@ -213,26 +220,42 @@ pub(crate) struct Utf8Stream {
 }
 
 impl Utf8Stream {
+    /// The text `bytes` complete, each invalid sequence replaced with
+    /// U+FFFD as `String::from_utf8_lossy` replaces it. Only an incomplete
+    /// character at the very end is held back for the next chunk; one
+    /// after an invalid byte is not, so `[0xff, 0xe2]` then `[0x82, 0xac]`
+    /// is the replacement character and then the euro sign.
     pub(crate) fn push(&mut self, bytes: &[u8]) -> String {
         self.pending.extend_from_slice(bytes);
-        match std::str::from_utf8(&self.pending) {
-            Ok(text) => {
-                let text = text.to_owned();
-                self.pending.clear();
-                text
-            }
-            Err(error) if error.error_len().is_none() => {
-                let valid = error.valid_up_to();
-                let text = String::from_utf8_lossy(&self.pending[..valid]).into_owned();
-                self.pending.drain(..valid);
-                text
-            }
-            Err(_) => {
-                let text = String::from_utf8_lossy(&self.pending).into_owned();
-                self.pending.clear();
-                text
+        let mut text = String::new();
+        let mut start = 0;
+        while start < self.pending.len() {
+            let rest = &self.pending[start..];
+            match std::str::from_utf8(rest) {
+                Ok(valid) => {
+                    text.push_str(valid);
+                    start = self.pending.len();
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    text.push_str(&String::from_utf8_lossy(&rest[..valid]));
+                    match error.error_len() {
+                        Some(invalid) => {
+                            text.push('\u{fffd}');
+                            start += valid + invalid;
+                        }
+                        // The rest is the start of a character the next
+                        // chunk may finish.
+                        None => {
+                            start += valid;
+                            break;
+                        }
+                    }
+                }
             }
         }
+        self.pending.drain(..start);
+        text
     }
 
     pub(crate) fn finish(&mut self) -> String {
@@ -398,11 +421,20 @@ impl InvokedProcess {
     }
 
     /// Whether the process is still running.
+    ///
+    /// On a platform that cannot look at an exit without collecting it
+    /// (macOS, for one), a program that exits while something it started
+    /// still holds its output counts as running until that output closes:
+    /// collecting it any earlier would free its id for reuse while its
+    /// group may still be signalled.
     pub fn running(&mut self) -> bool {
         match &mut self.inner {
             Inner::Real(real) => {
                 if real.status.is_some() {
                     return false;
+                }
+                if !real.may_reap() {
+                    return !real.exited_unreaped();
                 }
                 match real.child.try_wait() {
                     Ok(Some(status)) => {
@@ -470,7 +502,7 @@ impl InvokedProcess {
     pub fn signal(&self, signal: Signal) -> Result<(), ProcessError> {
         match &self.inner {
             Inner::Real(real) => match real.target.pid {
-                Some(pid) if real.status.is_none() => {
+                Some(pid) if real.status.is_none() && !real.exited_unreaped() => {
                     send_signal(pid, false, signal).map_err(|message| ProcessError::Signal {
                         command: self.command.clone(),
                         message,
@@ -577,10 +609,16 @@ impl InvokedProcess {
                 return Err(real.finish_killed(&command, expiry).await);
             }
             if closed && real.status.is_some() {
-                return Ok(false);
+                // The output is complete, so a character it ended inside of
+                // is now a replacement character, which the output
+                // callback is offered too.
+                let (out, err) = (out_text.finish(), err_text.finish());
+                return Ok((!out.is_empty() && until(OutputKind::Out, &out))
+                    || (!err.is_empty() && until(OutputKind::Err, &err)));
             }
+            let reap = real.status.is_none() && real.may_reap();
             tokio::select! {
-                status = real.child.wait(), if real.status.is_none() => {
+                status = real.child.wait(), if reap => {
                     real.record(status.map_err(|source| ProcessError::Io {
                         command: command.clone(),
                         source,
@@ -630,10 +668,54 @@ impl Real {
         self.captured.lock().open_streams > 0
     }
 
+    /// Whether the program may be reaped now: not while its output is open.
+    ///
+    /// Reaping frees the program's id, and the id of the group it leads.
+    /// While something holds its output, the group may still have to be
+    /// signalled, and only the unreaped program keeps that id from being
+    /// handed to an unrelated process. On Windows the child's handle keeps
+    /// its id, so reaping is never early there.
+    fn may_reap(&self) -> bool {
+        cfg!(not(unix)) || !self.streams_open()
+    }
+
+    /// Whether the program has exited, found without reaping it.
+    #[cfg(any(
+        target_os = "android",
+        target_os = "freebsd",
+        all(target_os = "linux", not(target_env = "uclibc")),
+    ))]
+    fn exited_unreaped(&self) -> bool {
+        use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid};
+        let Some(pid) = self.target.pid.and_then(|pid| nix_pid(pid).ok()) else {
+            return false;
+        };
+        // `WNOWAIT` leaves the exit to be collected later, so the id stays
+        // pinned. An error means there is no such child to wait on any more.
+        !matches!(
+            waitid(
+                Id::Pid(pid),
+                WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+            ),
+            Ok(WaitStatus::StillAlive)
+        )
+    }
+
+    /// Whether the program has exited, found without reaping it. This
+    /// platform cannot tell without reaping, so the answer waits for the
+    /// reap, which waits for the program's output to close.
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "freebsd",
+        all(target_os = "linux", not(target_env = "uclibc")),
+    )))]
+    fn exited_unreaped(&self) -> bool {
+        false
+    }
+
     fn signal_all(&mut self, signal: Signal) {
-        let streams_open = self.streams_open();
-        self.target
-            .signal_all(signal, self.status.is_some(), streams_open);
+        let reaped = self.captured.lock().reaped;
+        self.target.signal_all(signal, reaped);
         if signal == Signal::Kill && self.status.is_none() {
             let _ = self.child.start_kill();
         }
@@ -661,8 +743,9 @@ impl Real {
             if self.status.is_some() && !self.streams_open() {
                 return Ok(());
             }
+            let reap = self.status.is_none() && self.may_reap();
             tokio::select! {
-                status = self.child.wait(), if self.status.is_none() => {
+                status = self.child.wait(), if reap => {
                     self.record(status.map_err(|source| ProcessError::Io {
                         command: command.to_owned(),
                         source,
@@ -676,6 +759,11 @@ impl Real {
     /// Reap a killed program and give its output readers a bounded time to
     /// finish, for a process that left its group and holds the pipes.
     async fn finish_bounded(&mut self, command: &str) -> Result<(), ProcessError> {
+        // The watchdog goes before the reap: once the program is reaped, its
+        // id is no longer ours to signal.
+        if let Some(watchdog) = self.watchdog.take() {
+            watchdog.abort();
+        }
         if self.status.is_none() {
             let status = self.child.wait().await.map_err(|source| ProcessError::Io {
                 command: command.to_owned(),
@@ -688,9 +776,6 @@ impl Real {
             if tokio::time::timeout(READER_GRACE, reader).await.is_err() {
                 abort.abort();
             }
-        }
-        if let Some(watchdog) = self.watchdog.take() {
-            watchdog.abort();
         }
         self.finished = true;
         Ok(())
@@ -718,8 +803,9 @@ impl Real {
             if self.status.is_some() && closed {
                 break;
             }
+            let reap = self.status.is_none() && self.may_reap();
             tokio::select! {
-                status = self.child.wait(), if self.status.is_none() => {
+                status = self.child.wait(), if reap => {
                     self.record(status.map_err(|source| ProcessError::Io {
                         command: command.to_owned(),
                         source,
@@ -795,10 +881,10 @@ async fn watchdog(captured: Arc<Captured>, target: Target) {
             if due.is_some() {
                 state.expired = due;
             }
-            due.map(|_| (state.reaped, state.open_streams > 0))
+            due.map(|_| state.reaped)
         };
-        if let Some((reaped, streams_open)) = expired {
-            target.signal_all(Signal::Kill, reaped, streams_open);
+        if let Some(reaped) = expired {
+            target.signal_all(Signal::Kill, reaped);
             captured.changed.notify_one();
             return;
         }
@@ -983,6 +1069,39 @@ mod tests {
     fn invalid_bytes_are_replaced() {
         let mut stream = Utf8Stream::default();
         assert_eq!(stream.push(&[b'a', 0xff, b'b']), "a\u{fffd}b");
+    }
+
+    /// DRIVERS-048: an invalid byte before a character the chunk boundary
+    /// cut must not take the cut character's first bytes down with it.
+    #[test]
+    fn an_invalid_byte_does_not_discard_a_cut_character_after_it() {
+        let mut stream = Utf8Stream::default();
+        let mut text = stream.push(&[0xff, 0xe2]);
+        text.push_str(&stream.push(&[0x82, 0xac]));
+        text.push_str(&stream.finish());
+        assert_eq!(text, "\u{fffd}\u{20ac}");
+        assert_eq!(text, String::from_utf8_lossy(&[0xff, 0xe2, 0x82, 0xac]));
+    }
+
+    /// DRIVERS-048, the end-of-output half: `wait_until` offers the
+    /// replacement for an incomplete last character once the process has
+    /// closed its output, as the output callback does.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wait_until_offers_the_unfinished_last_character_at_the_end() {
+        let mut process = crate::process::Process::shell("printf 'a\\342'")
+            .start()
+            .unwrap();
+        let mut seen = String::new();
+        let matched = process
+            .wait_until(|_, text| {
+                seen.push_str(text);
+                seen.contains('\u{fffd}')
+            })
+            .await
+            .unwrap();
+        assert!(matched, "the replacement reached wait_until: {seen:?}");
+        assert_eq!(seen, "a\u{fffd}");
     }
 
     /// MEM-003: a process that is waited on to the end moves its settled

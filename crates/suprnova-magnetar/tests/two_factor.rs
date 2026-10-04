@@ -30,8 +30,8 @@ use magnetar::storage::{
     AttemptFinalization, AttemptReservation, AttemptStats, CredentialActor, LockoutStore, UserStore,
 };
 use magnetar::two_factor::{
-    TwoFactorConfig, TwoFactorProofClaim, TwoFactorRow, TwoFactorService, TwoFactorStore, totp,
-    totp::STEP_SECONDS,
+    OtherSecondFactor, TwoFactorConfig, TwoFactorProofClaim, TwoFactorRow, TwoFactorService,
+    TwoFactorStore, totp, totp::STEP_SECONDS,
 };
 use parking_lot::Mutex;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, EntityTrait, IntoActiveModel};
@@ -48,6 +48,7 @@ struct CoordinatedAttemptStore {
     attempts: Mutex<Vec<CoordinatedAttempt>>,
     preflight: Option<Barrier>,
     fail_records: bool,
+    fail_finalize: bool,
 }
 
 struct CoordinatedAttempt {
@@ -62,6 +63,7 @@ impl CoordinatedAttemptStore {
             attempts: Mutex::new(Vec::new()),
             preflight: Some(Barrier::new(parties)),
             fail_records: false,
+            fail_finalize: false,
         }
     }
 
@@ -70,6 +72,17 @@ impl CoordinatedAttemptStore {
             attempts: Mutex::new(Vec::new()),
             preflight: None,
             fail_records: true,
+            fail_finalize: false,
+        }
+    }
+
+    /// Admits attempts but cannot record a failed one.
+    fn failing_finalize() -> Self {
+        Self {
+            attempts: Mutex::new(Vec::new()),
+            preflight: None,
+            fail_records: true,
+            fail_finalize: true,
         }
     }
 
@@ -121,7 +134,7 @@ impl LockoutStore for CoordinatedAttemptStore {
         window_start: DateTime<Utc>,
         max_attempts: u32,
     ) -> magnetar::Result<AttemptReservation> {
-        if self.fail_records {
+        if self.fail_records && !self.fail_finalize {
             return Err(magnetar::Error::Internal {
                 message: "forced attempt persistence failure".to_owned(),
             });
@@ -193,6 +206,11 @@ impl LockoutStore for CoordinatedAttemptStore {
         window_start: DateTime<Utc>,
         _max_attempts: u32,
     ) -> magnetar::Result<AttemptFinalization> {
+        if self.fail_finalize {
+            return Err(magnetar::Error::Internal {
+                message: "forced attempt finalization failure".to_owned(),
+            });
+        }
         let mut attempts = self.attempts.lock();
         let Some(attempt) = attempts
             .iter_mut()
@@ -264,9 +282,25 @@ impl TwoFactorStore for ClaimFailingTwoFactorStore {
     async fn set_confirmed(
         &self,
         actor: &CredentialActor,
+        expected_secret: &[u8],
+        matched_step: i64,
         at: DateTime<Utc>,
     ) -> magnetar::Result<bool> {
-        self.inner.set_confirmed(actor, at).await
+        self.inner
+            .set_confirmed(actor, expected_secret, matched_step, at)
+            .await
+    }
+
+    async fn confirm_rotation(
+        &self,
+        actor: &CredentialActor,
+        expected_pending_secret: &[u8],
+        matched_step: i64,
+        at: DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .confirm_rotation(actor, expected_pending_secret, matched_step, at)
+            .await
     }
 
     async fn claim_timestep(&self, _user_id: &str, _matched_step: i64) -> magnetar::Result<bool> {
@@ -374,13 +408,13 @@ impl LockoutStore for FailingResetLockout {
 
     async fn reset_admitted_attempts(
         &self,
-        identity: &str,
-        reservation_id: &str,
-        context: Option<&str>,
+        _identity: &str,
+        _reservation_id: &str,
+        _context: Option<&str>,
     ) -> magnetar::Result<u64> {
-        self.inner
-            .reset_admitted_attempts(identity, reservation_id, context)
-            .await
+        Err(magnetar::Error::Internal {
+            message: "forced lockout reset failure".to_owned(),
+        })
     }
 
     async fn attempt_stats(
@@ -457,6 +491,13 @@ async fn confirmed_enrollment(
         .await
         .unwrap();
     enrollment
+}
+
+/// The code of the timestep after the current one. Confirming an
+/// enrollment uses its code up, so a proof that follows a confirmation needs
+/// a later code; the next step's code stays valid across one boundary.
+fn next_step_code(otpauth_url: &secrecy::SecretString) -> String {
+    totp_code_at(otpauth_url, Utc::now().timestamp() + STEP_SECONDS)
 }
 
 fn service_with_attempt_store(
@@ -1283,19 +1324,19 @@ async fn stale_regenerate_wrong_and_valid_proofs_are_indistinguishable() {
 }
 
 #[tokio::test]
-#[tracing_test::traced_test]
-async fn a_failed_attempt_that_cannot_be_recorded_is_logged() {
+async fn a_failed_attempt_that_cannot_be_recorded_refuses_with_the_storage_error() {
     let world = factor_world().await;
     let user_id = registered_user(&world).await;
     let actor = credential_actor(&world, &user_id).await;
     world.two_factor.enroll(&actor).await.unwrap();
-    // Refuse exactly the row a rejected confirmation records.
+    // Refuse exactly the write that turns a rejected confirmation's
+    // reservation into a counted failure.
     world
         .db
         .execute_unprepared(
-            "CREATE TRIGGER fail_two_factor_attempt_insert \
-             BEFORE INSERT ON storage_lockouts \
-             WHEN NEW.reason = 'two-factor confirm' \
+            "CREATE TRIGGER fail_two_factor_attempt_finalize \
+             BEFORE UPDATE ON storage_second_factor_lockouts \
+             WHEN NEW.reason LIKE '%two-factor confirm' AND NEW.reason <> OLD.reason \
              BEGIN \
                  SELECT RAISE(ABORT, 'injected failed-attempt write failure'); \
              END",
@@ -1307,18 +1348,16 @@ async fn a_failed_attempt_that_cannot_be_recorded_is_logged() {
         .two_factor
         .confirm(&actor, "000000")
         .await
-        .expect_err("a wrong code is rejected whether or not it can be recorded");
+        .expect_err("a wrong code is never accepted");
 
-    assert!(matches!(error, magnetar::Error::InvalidInput { .. }));
     assert!(
-        logs_contain(
-            "lockout failed-attempt accounting failed after a rejected two-factor confirmation"
-        ),
-        "the accounting failure is in the log"
+        matches!(&error, magnetar::Error::Internal { message } if message.contains("injected failed-attempt write failure")),
+        "the uncounted failure surfaces instead of reading as a plain wrong code: {error:?}"
     );
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
 async fn re_enroll_returns_artifacts_after_lockout_reset_failure() {
     let world = factor_world().await;
     let user_id = registered_user(&world).await;
@@ -1332,9 +1371,13 @@ async fn re_enroll_returns_artifacts_after_lockout_reset_failure() {
     let service = service_with_failing_lockout_reset(&world);
 
     let rotated = service
-        .re_enroll(&actor, &totp_code_now(&enrollment.otpauth_url))
+        .re_enroll(&actor, &next_step_code(&enrollment.otpauth_url))
         .await
         .expect("committed rotation still returns its one-time artifacts");
+    assert!(
+        logs_contain("lockout reset failed after a committed two-factor change"),
+        "the reset failure is in the log"
+    );
 
     let row = storage_schema::sql_two_factor::SqlTwoFactorStore(world.db.clone())
         .find_enrollment(&user_id)
@@ -1343,7 +1386,12 @@ async fn re_enroll_returns_artifacts_after_lockout_reset_failure() {
         .unwrap();
     assert!(row.rotation_pending);
     let secret = AeadEncryptor::new([21; 32])
-        .decrypt(CryptoPurpose::TwoFactorSecret, &row.secret)
+        .decrypt(
+            CryptoPurpose::TwoFactorSecret,
+            row.pending_secret
+                .as_deref()
+                .expect("the rotation is pending"),
+        )
         .unwrap();
     assert!(
         totp::matched_step(
@@ -1355,12 +1403,13 @@ async fn re_enroll_returns_artifacts_after_lockout_reset_failure() {
         .is_some()
     );
     assert_eq!(
-        decrypt_recovery_codes(row.recovery_codes.as_deref().unwrap()),
+        decrypt_recovery_codes(row.pending_recovery_codes.as_deref().unwrap()),
         rotated.recovery_codes
     );
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
 async fn regenerate_returns_artifacts_after_lockout_reset_failure() {
     let world = factor_world().await;
     let user_id = registered_user(&world).await;
@@ -1377,6 +1426,10 @@ async fn regenerate_returns_artifacts_after_lockout_reset_failure() {
         .regenerate_recovery_codes(&actor, &enrollment.recovery_codes[0])
         .await
         .expect("committed recovery rotation still returns its one-time artifacts");
+    assert!(
+        logs_contain("lockout reset failed after a committed two-factor change"),
+        "the reset failure is in the log"
+    );
 
     let row = storage_schema::sql_two_factor::SqlTwoFactorStore(world.db.clone())
         .find_enrollment(&user_id)
@@ -1506,7 +1559,7 @@ async fn plain_enroll_preserves_a_pending_proof_gated_rotation() {
         .unwrap();
     world
         .two_factor
-        .re_enroll(&actor, &totp_code_now(&enrollment.otpauth_url))
+        .re_enroll(&actor, &next_step_code(&enrollment.otpauth_url))
         .await
         .unwrap();
     let store = storage_schema::sql_two_factor::SqlTwoFactorStore(world.db.clone());
@@ -1515,7 +1568,7 @@ async fn plain_enroll_preserves_a_pending_proof_gated_rotation() {
         .await
         .unwrap()
         .expect("pending rotated enrollment exists");
-    assert!(pending.confirmed_at.is_none());
+    assert!(pending.confirmed_at.is_some() && pending.pending_secret.is_some());
 
     let error = world.two_factor.enroll(&actor).await.unwrap_err();
 
@@ -1531,6 +1584,8 @@ async fn plain_enroll_preserves_a_pending_proof_gated_rotation() {
         .expect("pending rotated enrollment remains");
     assert_eq!(after.secret, pending.secret);
     assert_eq!(after.recovery_codes, pending.recovery_codes);
+    assert_eq!(after.pending_secret, pending.pending_secret);
+    assert_eq!(after.pending_recovery_codes, pending.pending_recovery_codes);
 }
 #[tokio::test]
 async fn enrollment_is_inactive_until_confirmed() {
@@ -1661,7 +1716,9 @@ async fn rotation_paths_demand_proof_of_possession() {
     let enrollment = confirmed_enrollment(&world, &user_id).await;
     let actor = credential_actor(&world, &user_id).await;
 
-    // Wrong proof: refused and counted against the lockout budget.
+    // Wrong proof: refused and counted against the second factor's own
+    // lockout budget, not the password's.
+    let second_factor = magnetar::two_factor::lockout_identity(&user_id);
     let refused = world
         .two_factor
         .regenerate_recovery_codes(&actor, "000000")
@@ -1672,8 +1729,17 @@ async fn rotation_paths_demand_proof_of_possession() {
         magnetar::Error::InvalidInput { field, .. } if field == "proof"
     ));
     assert_eq!(
-        world.lockout.status(EMAIL).await.unwrap().failed_attempts,
+        world
+            .second_factor_lockout
+            .status(&second_factor)
+            .await
+            .unwrap()
+            .failed_attempts,
         1
+    );
+    assert_eq!(
+        world.lockout.status(EMAIL).await.unwrap().failed_attempts,
+        0
     );
 
     // A recovery code is valid proof; rotation replaces the whole set and
@@ -1685,7 +1751,12 @@ async fn rotation_paths_demand_proof_of_possession() {
         .unwrap();
     assert_eq!(rotated.len(), 10);
     assert_eq!(
-        world.lockout.status(EMAIL).await.unwrap().failed_attempts,
+        world
+            .second_factor_lockout
+            .status(&second_factor)
+            .await
+            .unwrap()
+            .failed_attempts,
         0
     );
     assert!(
@@ -1714,8 +1785,8 @@ async fn rotation_paths_demand_proof_of_possession() {
         .await
         .unwrap();
     assert!(
-        !world.two_factor.is_enabled(&user_id).await.unwrap(),
-        "re-enrollment is pending until confirmed against the new secret"
+        world.two_factor.is_enabled(&user_id).await.unwrap(),
+        "the confirmed secret keeps gating until the new one is confirmed"
     );
     world
         .two_factor
@@ -1727,6 +1798,104 @@ async fn rotation_paths_demand_proof_of_possession() {
     // Disable reports the transition exactly once.
     assert!(world.two_factor.disable(&actor).await.unwrap());
     assert!(!world.two_factor.disable(&actor).await.unwrap());
+}
+
+/// A rotation proves the confirmed secret and mints a new one. Until a code
+/// from the new secret confirms it, the confirmed secret keeps gating
+/// sign-in: a rotation nobody finishes must not leave the account without a
+/// second factor.
+#[tokio::test]
+async fn a_rotation_keeps_the_confirmed_secret_gating_until_it_is_confirmed() {
+    let world = factor_world().await;
+    let user_id = registered_user(&world).await;
+    let enrollment = confirmed_enrollment(&world, &user_id).await;
+    let actor = credential_actor(&world, &user_id).await;
+
+    let rotated = world
+        .two_factor
+        .re_enroll(&actor, &next_step_code(&enrollment.otpauth_url))
+        .await
+        .unwrap();
+
+    assert!(
+        world.two_factor.is_enabled(&user_id).await.unwrap(),
+        "the confirmed secret still counts as enabled"
+    );
+    let login = send(&world, login_request(EMAIL, PASSWORD)).await;
+    assert_eq!(login.status, 200);
+    assert!(
+        login.grant.is_none(),
+        "a pending rotation still demands the second factor"
+    );
+    assert!(
+        world
+            .two_factor
+            .consume_recovery_code(&user_id, &enrollment.recovery_codes[0])
+            .await
+            .unwrap(),
+        "the confirmed recovery codes still work"
+    );
+    assert!(
+        !world
+            .two_factor
+            .consume_recovery_code(&user_id, &rotated.recovery_codes[0])
+            .await
+            .unwrap(),
+        "nothing from the unconfirmed rotation works yet"
+    );
+
+    world
+        .two_factor
+        .confirm(&actor, &totp_code_now(&rotated.otpauth_url))
+        .await
+        .unwrap();
+
+    assert!(world.two_factor.is_enabled(&user_id).await.unwrap());
+    assert!(
+        !world
+            .two_factor
+            .consume_recovery_code(&user_id, &enrollment.recovery_codes[1])
+            .await
+            .unwrap(),
+        "the old recovery codes go with the old secret"
+    );
+    assert!(
+        world
+            .two_factor
+            .consume_recovery_code(&user_id, &rotated.recovery_codes[0])
+            .await
+            .unwrap(),
+        "the confirmed rotation's recovery codes work"
+    );
+}
+
+/// Disabling the second factor discards a rotation waiting for
+/// confirmation along with the confirmed secret.
+#[tokio::test]
+async fn disable_discards_a_pending_rotation() {
+    let world = factor_world().await;
+    let user_id = registered_user(&world).await;
+    let enrollment = confirmed_enrollment(&world, &user_id).await;
+    let actor = credential_actor(&world, &user_id).await;
+    let rotated = world
+        .two_factor
+        .re_enroll(&actor, &next_step_code(&enrollment.otpauth_url))
+        .await
+        .unwrap();
+
+    assert!(world.two_factor.disable(&actor).await.unwrap());
+
+    assert!(!world.two_factor.is_enabled(&user_id).await.unwrap());
+    assert!(
+        world
+            .two_factor
+            .confirm(&actor, &totp_code_now(&rotated.otpauth_url))
+            .await
+            .is_err(),
+        "the discarded rotation cannot be confirmed"
+    );
+    let login = send(&world, login_request(EMAIL, PASSWORD)).await;
+    assert!(login.grant.is_some(), "no second factor remains");
 }
 
 #[tokio::test]
@@ -1819,4 +1988,652 @@ async fn every_primary_provider_promotes_through_one_gate() {
     .await;
     assert_eq!(stale.status, 400);
     assert!(stale.grant.is_none());
+}
+
+// ---- Reserve-before-evaluate on the enrollment proof paths -----------------
+//
+// confirm, re_enroll and regenerate_recovery_codes check a code like the
+// challenge does, so each reserves an attempt on the second-factor key before
+// reading the proof. A status read followed by a later record let parallel
+// guesses all pass the read, and a swallowed record let them go uncounted.
+
+/// Which enrollment proof path a test drives.
+#[derive(Clone, Copy, Debug)]
+enum ProofPath {
+    Confirm,
+    ReEnroll,
+    Regenerate,
+}
+
+/// Prepare the user for `path`: a pending enrollment for `confirm`, a
+/// confirmed one for the rotations. Returns the actor and the enrollment.
+async fn prepared_for(
+    world: &FactorWorld,
+    user_id: &str,
+    path: ProofPath,
+) -> (CredentialActor, magnetar::two_factor::EnrollmentResponse) {
+    let actor = credential_actor(world, user_id).await;
+    let enrollment = world.two_factor.enroll(&actor).await.unwrap();
+    if !matches!(path, ProofPath::Confirm) {
+        world
+            .two_factor
+            .confirm(&actor, &totp_code_now(&enrollment.otpauth_url))
+            .await
+            .unwrap();
+    }
+    (actor, enrollment)
+}
+
+/// Run `path` once with `proof` through `service`; `Ok(())` when accepted.
+async fn submit(
+    service: &TwoFactorService,
+    actor: &CredentialActor,
+    path: ProofPath,
+    proof: &str,
+) -> magnetar::Result<()> {
+    match path {
+        ProofPath::Confirm => service.confirm(actor, proof).await,
+        ProofPath::ReEnroll => service.re_enroll(actor, proof).await.map(|_| ()),
+        ProofPath::Regenerate => service
+            .regenerate_recovery_codes(actor, proof)
+            .await
+            .map(|_| ()),
+    }
+}
+
+fn is_rejected_proof(outcome: &magnetar::Result<()>) -> bool {
+    matches!(outcome, Err(magnetar::Error::InvalidInput { field, .. }) if field == "proof" || field == "code")
+}
+
+fn is_lockout(outcome: &magnetar::Result<()>) -> bool {
+    matches!(outcome, Err(magnetar::Error::Conflict { resource, .. }) if resource == "account lockout")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_wrong_proofs_on_each_enrollment_path_evaluate_at_most_the_threshold() {
+    const ATTEMPT_LIMIT: usize = 2;
+    const PARALLEL: usize = 4;
+    let mut problems = Vec::new();
+    for path in [
+        ProofPath::Confirm,
+        ProofPath::ReEnroll,
+        ProofPath::Regenerate,
+    ] {
+        let world = factor_world().await;
+        let user_id = registered_user(&world).await;
+        let (actor, _) = prepared_for(&world, &user_id, path).await;
+        let service = service_with_attempt_store(
+            &world,
+            Arc::new(CoordinatedAttemptStore::racing(PARALLEL)),
+            ATTEMPT_LIMIT as u32,
+        );
+
+        let mut tasks = Vec::new();
+        for index in 0..PARALLEL {
+            let service = service.clone();
+            let actor = actor.clone();
+            tasks.push(tokio::spawn(async move {
+                submit(&service, &actor, path, &format!("wrong-proof-{index}")).await
+            }));
+        }
+        let mut outcomes = Vec::new();
+        for task in tasks {
+            outcomes.push(task.await.expect("proof task joins"));
+        }
+
+        let evaluated = outcomes
+            .iter()
+            .filter(|outcome| is_rejected_proof(outcome))
+            .count();
+        let refused = outcomes
+            .iter()
+            .filter(|outcome| is_lockout(outcome))
+            .count();
+        if evaluated != ATTEMPT_LIMIT || refused != PARALLEL - ATTEMPT_LIMIT {
+            problems.push(format!(
+                "{path:?}: {evaluated} proofs evaluated and {refused} refused before evaluation, \
+                 expected {ATTEMPT_LIMIT} and {}: {outcomes:?}",
+                PARALLEL - ATTEMPT_LIMIT
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[tokio::test]
+async fn an_attempt_store_that_cannot_reserve_refuses_even_a_valid_proof() {
+    let mut problems = Vec::new();
+    for path in [
+        ProofPath::Confirm,
+        ProofPath::ReEnroll,
+        ProofPath::Regenerate,
+    ] {
+        let world = factor_world().await;
+        let user_id = registered_user(&world).await;
+        let (actor, enrollment) = prepared_for(&world, &user_id, path).await;
+        let store = storage_schema::sql_two_factor::SqlTwoFactorStore(world.db.clone());
+        let before = store.find_enrollment(&user_id).await.unwrap().unwrap();
+        let service =
+            service_with_attempt_store(&world, Arc::new(CoordinatedAttemptStore::failing()), 5);
+        let proof = match path {
+            ProofPath::Regenerate => enrollment.recovery_codes[0].clone(),
+            ProofPath::Confirm => totp_code_now(&enrollment.otpauth_url),
+            ProofPath::ReEnroll => next_step_code(&enrollment.otpauth_url),
+        };
+
+        let outcome = submit(&service, &actor, path, &proof).await;
+
+        if !matches!(&outcome, Err(magnetar::Error::Internal { message }) if message == "forced attempt persistence failure")
+        {
+            problems.push(format!("{path:?}: not refused: {outcome:?}"));
+        }
+        let after = store.find_enrollment(&user_id).await.unwrap().unwrap();
+        if after != before {
+            problems.push(format!(
+                "{path:?}: the enrollment changed without a reservation"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[tokio::test]
+async fn a_wrong_proof_whose_failure_cannot_be_recorded_surfaces_the_error() {
+    let mut problems = Vec::new();
+    for path in [
+        ProofPath::Confirm,
+        ProofPath::ReEnroll,
+        ProofPath::Regenerate,
+    ] {
+        let world = factor_world().await;
+        let user_id = registered_user(&world).await;
+        let (actor, _) = prepared_for(&world, &user_id, path).await;
+        let service = service_with_attempt_store(
+            &world,
+            Arc::new(CoordinatedAttemptStore::failing_finalize()),
+            5,
+        );
+
+        let outcome = submit(&service, &actor, path, "wrong-proof").await;
+
+        if !matches!(&outcome, Err(magnetar::Error::Internal { message }) if message == "forced attempt finalization failure")
+        {
+            problems.push(format!(
+                "{path:?}: the uncounted failure was not surfaced: {outcome:?}"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// A two-factor store where a concurrent request always claims the proof
+/// first: every rotation reports the lost claim.
+struct ClaimLostTwoFactorStore {
+    inner: Arc<dyn TwoFactorStore>,
+}
+
+#[async_trait]
+impl TwoFactorStore for ClaimLostTwoFactorStore {
+    async fn find_enrollment(&self, user_id: &str) -> magnetar::Result<Option<TwoFactorRow>> {
+        self.inner.find_enrollment(user_id).await
+    }
+
+    async fn begin_enrollment(
+        &self,
+        actor: &CredentialActor,
+        secret: &[u8],
+        recovery_codes: Option<&[u8]>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .begin_enrollment(actor, secret, recovery_codes)
+            .await
+    }
+
+    async fn set_confirmed(
+        &self,
+        actor: &CredentialActor,
+        expected_secret: &[u8],
+        matched_step: i64,
+        at: DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .set_confirmed(actor, expected_secret, matched_step, at)
+            .await
+    }
+
+    async fn confirm_rotation(
+        &self,
+        actor: &CredentialActor,
+        expected_pending_secret: &[u8],
+        matched_step: i64,
+        at: DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .confirm_rotation(actor, expected_pending_secret, matched_step, at)
+            .await
+    }
+
+    async fn claim_timestep(&self, user_id: &str, matched_step: i64) -> magnetar::Result<bool> {
+        self.inner.claim_timestep(user_id, matched_step).await
+    }
+
+    async fn swap_recovery_codes(
+        &self,
+        user_id: &str,
+        expected: &[u8],
+        next: Option<&[u8]>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .swap_recovery_codes(user_id, expected, next)
+            .await
+    }
+
+    async fn rotate_enrollment(
+        &self,
+        _actor: &CredentialActor,
+        _claim: TwoFactorProofClaim,
+        _secret: &[u8],
+        _recovery_codes: Option<&[u8]>,
+    ) -> magnetar::Result<bool> {
+        Ok(false)
+    }
+
+    async fn regenerate_recovery_codes(
+        &self,
+        _actor: &CredentialActor,
+        _claim: TwoFactorProofClaim,
+        _next: &[u8],
+    ) -> magnetar::Result<bool> {
+        Ok(false)
+    }
+
+    async fn delete_enrollment(&self, actor: &CredentialActor) -> magnetar::Result<bool> {
+        self.inner.delete_enrollment(actor).await
+    }
+}
+
+#[tokio::test]
+async fn a_valid_proof_that_loses_its_claim_is_not_counted_but_a_wrong_one_is() {
+    let mut problems = Vec::new();
+    for path in [ProofPath::ReEnroll, ProofPath::Regenerate] {
+        let world = factor_world().await;
+        let user_id = registered_user(&world).await;
+        let (actor, enrollment) = prepared_for(&world, &user_id, path).await;
+        let attempts = Arc::new(CoordinatedAttemptStore::racing(1));
+        let service = TwoFactorService::new(
+            Arc::new(ClaimLostTwoFactorStore {
+                inner: Arc::new(storage_schema::sql_two_factor::SqlTwoFactorStore(
+                    world.db.clone(),
+                )),
+            }),
+            world.storage.clone(),
+            Arc::new(LockoutService::new(
+                attempts.clone(),
+                world.storage.clone(),
+                LockoutConfig::default(),
+            )),
+            Arc::new(AeadEncryptor::new([21; 32])),
+            TwoFactorConfig::default(),
+        );
+        let valid = match path {
+            ProofPath::Regenerate => enrollment.recovery_codes[0].clone(),
+            ProofPath::Confirm => totp_code_now(&enrollment.otpauth_url),
+            ProofPath::ReEnroll => next_step_code(&enrollment.otpauth_url),
+        };
+
+        let lost = submit(&service, &actor, path, &valid).await;
+        let left_after_lost = attempts.attempts.lock().len();
+        let wrong = submit(&service, &actor, path, "wrong-proof").await;
+        let counted_after_wrong = attempts
+            .attempts
+            .lock()
+            .iter()
+            .filter(|attempt| !attempt.pending)
+            .count();
+
+        if !is_rejected_proof(&lost) || left_after_lost != 0 {
+            problems.push(format!(
+                "{path:?}: a lost claim left {left_after_lost} attempts: {lost:?}"
+            ));
+        }
+        if !is_rejected_proof(&wrong) || counted_after_wrong != 1 {
+            problems.push(format!(
+                "{path:?}: a wrong proof left {counted_after_wrong} counted failures: {wrong:?}"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+// ---- Confirmation stamps the checked secret, once ---------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_correct_confirmations_confirm_once() {
+    const PARALLEL: usize = 4;
+    let world = factor_world().await;
+    let user_id = registered_user(&world).await;
+    let actor = credential_actor(&world, &user_id).await;
+    let enrollment = world.two_factor.enroll(&actor).await.unwrap();
+    let code = totp_code_now(&enrollment.otpauth_url);
+
+    let mut tasks = Vec::new();
+    for _ in 0..PARALLEL {
+        let service = world.two_factor.clone();
+        let actor = actor.clone();
+        let code = code.clone();
+        tasks.push(tokio::spawn(
+            async move { service.confirm(&actor, &code).await },
+        ));
+    }
+    let mut outcomes = Vec::new();
+    for task in tasks {
+        outcomes.push(task.await.expect("confirm task joins"));
+    }
+
+    assert_eq!(
+        outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
+        1,
+        "one code confirms the enrollment once: {outcomes:?}"
+    );
+}
+
+/// A two-factor store that lets another request change the enrollment row
+/// right after this request read it: the read returns the old row, and the
+/// row in the database is already the replacement.
+struct ReplacedAfterRead {
+    inner: Arc<dyn TwoFactorStore>,
+    db: sea_orm::DatabaseConnection,
+    replacement: Mutex<Option<storage_schema::two_factor::ActiveModel>>,
+}
+
+#[async_trait]
+impl TwoFactorStore for ReplacedAfterRead {
+    async fn find_enrollment(&self, user_id: &str) -> magnetar::Result<Option<TwoFactorRow>> {
+        let row = self.inner.find_enrollment(user_id).await?;
+        let replacement = self.replacement.lock().take();
+        if let Some(replacement) = replacement {
+            replacement
+                .update(&self.db)
+                .await
+                .expect("the concurrent write commits");
+        }
+        Ok(row)
+    }
+
+    async fn begin_enrollment(
+        &self,
+        actor: &CredentialActor,
+        secret: &[u8],
+        recovery_codes: Option<&[u8]>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .begin_enrollment(actor, secret, recovery_codes)
+            .await
+    }
+
+    async fn set_confirmed(
+        &self,
+        actor: &CredentialActor,
+        expected_secret: &[u8],
+        matched_step: i64,
+        at: DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .set_confirmed(actor, expected_secret, matched_step, at)
+            .await
+    }
+
+    async fn confirm_rotation(
+        &self,
+        actor: &CredentialActor,
+        expected_pending_secret: &[u8],
+        matched_step: i64,
+        at: DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .confirm_rotation(actor, expected_pending_secret, matched_step, at)
+            .await
+    }
+
+    async fn claim_timestep(&self, user_id: &str, matched_step: i64) -> magnetar::Result<bool> {
+        self.inner.claim_timestep(user_id, matched_step).await
+    }
+
+    async fn swap_recovery_codes(
+        &self,
+        user_id: &str,
+        expected: &[u8],
+        next: Option<&[u8]>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .swap_recovery_codes(user_id, expected, next)
+            .await
+    }
+
+    async fn rotate_enrollment(
+        &self,
+        actor: &CredentialActor,
+        claim: TwoFactorProofClaim,
+        secret: &[u8],
+        recovery_codes: Option<&[u8]>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .rotate_enrollment(actor, claim, secret, recovery_codes)
+            .await
+    }
+
+    async fn regenerate_recovery_codes(
+        &self,
+        actor: &CredentialActor,
+        claim: TwoFactorProofClaim,
+        next: &[u8],
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .regenerate_recovery_codes(actor, claim, next)
+            .await
+    }
+
+    async fn delete_enrollment(&self, actor: &CredentialActor) -> magnetar::Result<bool> {
+        self.inner.delete_enrollment(actor).await
+    }
+}
+
+/// Run `confirm` with a code for the enrollment as it was read, while a
+/// concurrent request replaces the secret right after the read: a restarted
+/// enrollment replaces a pending secret, and a second rotation replaces a
+/// pending rotation. Returns the outcome, the row afterwards and the
+/// replacement secret.
+async fn confirm_racing_a_replacement(
+    world: &FactorWorld,
+    user_id: &str,
+    actor: &CredentialActor,
+    code: &str,
+    rotation: bool,
+) -> (magnetar::Result<()>, TwoFactorRow, Vec<u8>) {
+    let replacement_secret = AeadEncryptor::new([21; 32])
+        .encrypt(CryptoPurpose::TwoFactorSecret, b"JBSWY3DPEHPK3PXP")
+        .unwrap();
+    // Written by the same session, so only the secret tells the two
+    // enrollments apart.
+    let snapshot = storage_schema::two_factor::ActiveModel {
+        user_id: Set(user_id.to_owned()),
+        enrollment_auth_epoch: Set(i64::try_from(actor.issuance_epoch()).unwrap()),
+        enrollment_session_id: Set(actor.opaque_session_id().map(str::to_owned)),
+        enrollment_expires_at: Set(actor.expires_at()),
+        ..Default::default()
+    };
+    let replacement = if rotation {
+        storage_schema::two_factor::ActiveModel {
+            pending_secret: Set(Some(replacement_secret.clone())),
+            rotation_pending: Set(true),
+            ..snapshot
+        }
+    } else {
+        storage_schema::two_factor::ActiveModel {
+            secret: Set(replacement_secret.clone()),
+            confirmed_at: Set(None),
+            rotation_pending: Set(false),
+            last_used_timestep: Set(None),
+            ..snapshot
+        }
+    };
+    let store = ReplacedAfterRead {
+        inner: Arc::new(storage_schema::sql_two_factor::SqlTwoFactorStore(
+            world.db.clone(),
+        )),
+        db: world.db.clone(),
+        replacement: Mutex::new(Some(replacement)),
+    };
+    let service = TwoFactorService::new(
+        Arc::new(store),
+        world.storage.clone(),
+        world.second_factor_lockout.clone(),
+        Arc::new(AeadEncryptor::new([21; 32])),
+        TwoFactorConfig::default(),
+    );
+
+    let outcome = service.confirm(actor, code).await;
+
+    let row = storage_schema::sql_two_factor::SqlTwoFactorStore(world.db.clone())
+        .find_enrollment(user_id)
+        .await
+        .unwrap()
+        .unwrap();
+    (outcome, row, replacement_secret)
+}
+
+#[tokio::test]
+async fn a_confirmation_racing_an_enrollment_restart_confirms_neither_secret() {
+    let world = factor_world().await;
+    let user_id = registered_user(&world).await;
+    let actor = credential_actor(&world, &user_id).await;
+    let enrollment = world.two_factor.enroll(&actor).await.unwrap();
+
+    // The code is for the enrollment the confirmation read; a restarted
+    // enrollment replaced it before the stamp.
+    let (outcome, row, _) = confirm_racing_a_replacement(
+        &world,
+        &user_id,
+        &actor,
+        &totp_code_now(&enrollment.otpauth_url),
+        false,
+    )
+    .await;
+
+    assert!(outcome.is_err(), "nothing is confirmed: {outcome:?}");
+    assert!(
+        row.confirmed_at.is_none(),
+        "the replacement secret was never proven and stays unconfirmed"
+    );
+}
+
+#[tokio::test]
+async fn a_confirmation_racing_a_re_enrollment_confirms_neither_secret() {
+    let world = factor_world().await;
+    let user_id = registered_user(&world).await;
+    let enrollment = confirmed_enrollment(&world, &user_id).await;
+    let actor = credential_actor(&world, &user_id).await;
+    let rotated = world
+        .two_factor
+        .re_enroll(&actor, &next_step_code(&enrollment.otpauth_url))
+        .await
+        .unwrap();
+
+    // The confirmation reads the pending rotation; a second re-enrollment
+    // replaces it before the stamp.
+    let (outcome, row, replacement) = confirm_racing_a_replacement(
+        &world,
+        &user_id,
+        &actor,
+        &totp_code_now(&rotated.otpauth_url),
+        true,
+    )
+    .await;
+
+    assert!(outcome.is_err(), "nothing is confirmed: {outcome:?}");
+    assert!(
+        row.confirmed_at.is_some()
+            && row.secret != replacement
+            && row.pending_secret.as_deref() == Some(replacement.as_slice()),
+        "the replacement rotation was never proven and stays pending beside the confirmed secret"
+    );
+}
+
+/// A second factor kept outside the service that always answers `present`.
+struct FixedOtherSecondFactor {
+    present: bool,
+}
+
+#[async_trait]
+impl OtherSecondFactor for FixedOtherSecondFactor {
+    async fn enrolled_or_pending(&self, _user_id: &str) -> magnetar::Result<bool> {
+        Ok(self.present)
+    }
+}
+
+/// An account has one second-factor system, not both: each refuses the
+/// sign-ins that do not verify it, so an account with both could sign in by
+/// no path. While the other system holds a factor for the account, enrolling
+/// is refused, and so is confirming an enrollment that began before it.
+#[tokio::test]
+async fn enroll_and_confirm_are_refused_while_another_second_factor_exists() {
+    let world = factor_world().await;
+    let user_id = registered_user(&world).await;
+    let actor = credential_actor(&world, &user_id).await;
+    let pending = world.two_factor.enroll(&actor).await.unwrap();
+    let service = TwoFactorService::new(
+        Arc::new(storage_schema::sql_two_factor::SqlTwoFactorStore(
+            world.db.clone(),
+        )),
+        world.storage.clone(),
+        world.second_factor_lockout.clone(),
+        Arc::new(AeadEncryptor::new([21; 32])),
+        TwoFactorConfig::default(),
+    )
+    .with_other_second_factor(Arc::new(FixedOtherSecondFactor { present: true }));
+
+    let enrolled = service.enroll(&actor).await;
+    let confirmed = service
+        .confirm(&actor, &totp_code_now(&pending.otpauth_url))
+        .await;
+
+    for outcome in [enrolled.map(|_| ()), confirmed] {
+        assert!(
+            matches!(
+                &outcome,
+                Err(magnetar::Error::Conflict { resource, .. })
+                    if resource == magnetar::two_factor::OTHER_SECOND_FACTOR
+            ),
+            "{outcome:?}"
+        );
+    }
+    assert!(!world.two_factor.is_enabled(&user_id).await.unwrap());
+    let key = magnetar::two_factor::lockout_identity(&user_id);
+    assert_eq!(
+        world
+            .second_factor_lockout
+            .status(&key)
+            .await
+            .unwrap()
+            .failed_attempts,
+        0,
+        "a refusal is not a wrong code"
+    );
+
+    // Without the other factor the same enrollment confirms.
+    let service = TwoFactorService::new(
+        Arc::new(storage_schema::sql_two_factor::SqlTwoFactorStore(
+            world.db.clone(),
+        )),
+        world.storage.clone(),
+        world.second_factor_lockout.clone(),
+        Arc::new(AeadEncryptor::new([21; 32])),
+        TwoFactorConfig::default(),
+    )
+    .with_other_second_factor(Arc::new(FixedOtherSecondFactor { present: false }));
+    service
+        .confirm(&actor, &totp_code_now(&pending.otpauth_url))
+        .await
+        .unwrap();
+    assert!(world.two_factor.is_enabled(&user_id).await.unwrap());
 }

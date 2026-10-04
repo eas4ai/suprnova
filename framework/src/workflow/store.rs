@@ -128,18 +128,28 @@ pub async fn mark_running(
     })
 }
 
+/// Refuse a database the worker cannot claim from.
+///
+/// The claim is one `FOR UPDATE SKIP LOCKED` statement, which only
+/// Postgres runs. The worker checks this before its loop starts, so the
+/// refusal is a startup error rather than a claim error retried forever.
+pub(crate) fn ensure_claim_backend() -> Result<(), FrameworkError> {
+    let db = DB::connection()?;
+    if db.inner().get_database_backend() != DatabaseBackend::Postgres {
+        return Err(FrameworkError::internal(
+            "Workflow worker requires a Postgres database",
+        ));
+    }
+    Ok(())
+}
+
 /// Claim the next workflow to run (Postgres only)
 pub async fn claim_next_workflow(
     worker_id: &str,
     config: &WorkflowConfig,
 ) -> Result<Option<ClaimedWorkflow>, FrameworkError> {
+    ensure_claim_backend()?;
     let db = DB::connection()?;
-    let backend = db.inner().get_database_backend();
-    if backend != DatabaseBackend::Postgres {
-        return Err(FrameworkError::internal(
-            "Workflow worker requires a Postgres database",
-        ));
-    }
 
     // The initial expiry is computed by the database (`NOW() + $1`),
     // not from a client-side timestamp taken before the round trip.

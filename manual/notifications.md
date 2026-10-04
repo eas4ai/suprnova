@@ -125,8 +125,8 @@ consults them in the dispatcher; `Notify::queue` checks `should_send` before
 enqueuing each per-channel job, and the worker re-checks `should_send` before
 delivery (state can change between enqueue and run) and runs `after_sending`
 after a successful send. The three lifecycle *events*
-(`NotificationSending` / `NotificationSent` / `NotificationFailed`) still fire
-only on the synchronous path.
+(`NotificationSending` / `NotificationSent` / `NotificationFailed`) fire on
+both paths, and both carry `data()` as their payload.
 
 ## Channels
 
@@ -381,7 +381,7 @@ the call site at boot uses `?`.
 
 ### Lifecycle events
 
-Three events surround every synchronous channel delivery:
+Three events surround every channel delivery, synchronous or queued:
 
 | Event | When | Listener-error behaviour |
 |---|---|---|
@@ -389,8 +389,11 @@ Three events surround every synchronous channel delivery:
 | `NotificationSent` | After a successful delivery | Best-effort dispatch - listener errors don't propagate |
 | `NotificationFailed` | When a channel returned an error | Best-effort dispatch; the underlying channel error still propagates per the first-failure-stops contract |
 
-All three carry `(notification, channel, route, data)`. `Failed` adds
-the stringified `error`. Listen with `EventFacade::listen::<E, L>` -
+All three carry `(notification, channel, route, data)`, where `data` is the
+notification's `data()` - the payload the channels see. A queued
+notification is rebuilt on the worker from its full serialized form, but
+the events still carry `data()`, so a field you keep out of `data()` never
+reaches a listener. `Failed` adds the stringified `error`. Listen with `EventFacade::listen::<E, L>` -
 see [Events](events.md).
 
 These events fire only on the synchronous `Notify::send` path. The
@@ -438,6 +441,8 @@ register_notification_factory::<OrderShipped>()?;
 Notify::queue(&user, OrderShipped { tracking }).await?;
 ```
 
+The worker already knows `SendNotificationJob`: the framework registers its own job, so you register factories and never call `register_job` for it.
+
 At dispatch time the worker:
 
 1. Looks up the notification factory by `notification_name`
@@ -454,10 +459,11 @@ silently (the recipient returned `None` at queue time).
 
 `Notify::queue` also evaluates `should_send` at enqueue time, so a vetoed
 channel is never enqueued in the first place; the worker re-check covers
-state that changes between enqueue and run. The queued path **does not**
-fire the three lifecycle events (`NotificationSending` / `NotificationSent`
-/ `NotificationFailed`) - those remain synchronous-only. If you depend on
-the events, send through `Notify::send`.
+state that changes between enqueue and run. The worker fires the three
+lifecycle events (`NotificationSending` / `NotificationSent` /
+`NotificationFailed`) around each channel exactly as `Notify::send` does,
+with the same `data()` payload, and a `NotificationSending` listener error
+vetoes the channel on the worker too.
 
 ### Queue tuning
 

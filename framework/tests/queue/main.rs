@@ -35,6 +35,8 @@ pub mod panic_isolation;
 pub mod pause;
 pub mod reclaim_attempts;
 pub mod redis;
+#[path = "../support/redis_server.rs"]
+mod redis_server;
 pub mod restart;
 pub mod retry;
 pub mod routing;

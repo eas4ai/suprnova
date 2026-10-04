@@ -3,6 +3,8 @@
 
 #[path = "../support/env_lock.rs"]
 mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
 #[path = "../support/http_wire.rs"]
 mod http_wire;
 #[cfg(feature = "testing")]
@@ -16,7 +18,10 @@ pub mod email_verify;
 pub mod login_throttle_backend_error;
 pub mod password_reset;
 pub mod password_reset_provider;
+#[cfg(feature = "testing")]
+pub mod scaffold_token_table;
 pub mod two_factor;
 pub mod two_factor_brute_force_integration;
 pub mod two_factor_challenge_flow;
 pub mod two_factor_challenge_middleware;
+pub mod two_factor_engines;

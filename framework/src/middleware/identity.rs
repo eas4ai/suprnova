@@ -24,6 +24,12 @@
 //! An entry holds a `Weak`, never the middleware. The address of a dropped
 //! box can be given to a new one, and the `Weak` is how a lookup tells that
 //! the box it was handed is the one the entry was written for.
+//!
+//! # The alias a box was resolved from
+//!
+//! A box an alias produced also carries the alias and its arguments
+//! ([`name_as`]). A route reads it to keep each named middleware once,
+//! whichever group or call brought it ([`alias_of`]).
 
 use super::{BoxedMiddleware, Middleware, MiddlewareFuture, Next, into_boxed};
 use crate::http::Request;
@@ -35,7 +41,11 @@ type Boxed = dyn Fn(Request, Next) -> MiddlewareFuture + Send + Sync;
 
 struct Known {
     middleware: Weak<Boxed>,
-    type_id: TypeId,
+    /// The middleware type, when the box was made by [`boxed_as`].
+    type_id: Option<TypeId>,
+    /// The alias and parsed arguments the box was resolved from, when a
+    /// route named it.
+    alias: Option<String>,
 }
 
 #[derive(Default)]
@@ -65,20 +75,51 @@ pub(crate) fn boxed_as<M: Middleware + 'static>(middleware: M) -> BoxedMiddlewar
     // A poisoned table is recovered, as the registries beside it are: a
     // panic elsewhere must not stop middleware from being registered.
     let mut table = table().write().unwrap_or_else(|p| p.into_inner());
-    if table.known.len() >= table.sweep_at {
-        table
-            .known
-            .retain(|_, known| known.middleware.strong_count() > 0);
-        table.sweep_at = (table.known.len() * 2).max(64);
-    }
+    sweep(&mut table);
     table.known.insert(
         key(&boxed),
         Known {
             middleware: Arc::downgrade(&boxed),
-            type_id: TypeId::of::<M>(),
+            type_id: Some(TypeId::of::<M>()),
+            alias: None,
         },
     );
     boxed
+}
+
+/// Remember that `boxed` was resolved from the alias `identity`, the alias
+/// name and its arguments as parsed (`"throttle:60,1"`). Alias resolution
+/// calls this, at route registration and never on a request.
+pub(crate) fn name_as(boxed: &BoxedMiddleware, identity: String) {
+    let mut table = table().write().unwrap_or_else(|p| p.into_inner());
+    let current = table
+        .known
+        .get_mut(&key(boxed))
+        .filter(|known| is_entry_of(known, boxed));
+    match current {
+        Some(known) => known.alias = Some(identity),
+        None => {
+            sweep(&mut table);
+            table.known.insert(
+                key(boxed),
+                Known {
+                    middleware: Arc::downgrade(boxed),
+                    type_id: None,
+                    alias: Some(identity),
+                },
+            );
+        }
+    }
+}
+
+/// The alias `boxed` was resolved from, when an alias produced it.
+pub(crate) fn alias_of(boxed: &BoxedMiddleware) -> Option<String> {
+    let table = table().read().unwrap_or_else(|p| p.into_inner());
+    let known = table.known.get(&key(boxed))?;
+    if !is_entry_of(known, boxed) {
+        return None;
+    }
+    known.alias.clone()
 }
 
 /// The middleware type `boxed` was registered as, when it was registered
@@ -86,11 +127,31 @@ pub(crate) fn boxed_as<M: Middleware + 'static>(middleware: M) -> BoxedMiddlewar
 pub(crate) fn type_of(boxed: &BoxedMiddleware) -> Option<TypeId> {
     let table = table().read().unwrap_or_else(|p| p.into_inner());
     let known = table.known.get(&key(boxed))?;
+    if !is_entry_of(known, boxed) {
+        return None;
+    }
+    known.type_id
+}
+
+/// Whether `known` was written for `boxed` itself, and not for a dropped
+/// box whose address `boxed` now reuses.
+fn is_entry_of(known: &Known, boxed: &BoxedMiddleware) -> bool {
     known
         .middleware
         .upgrade()
         .is_some_and(|live| Arc::ptr_eq(&live, boxed))
-        .then_some(known.type_id)
+}
+
+/// Drop the entries of dropped middleware once the table reaches its sweep
+/// size, so the table grows with the live boxes and not with every box
+/// ever registered.
+fn sweep(table: &mut Table) {
+    if table.known.len() >= table.sweep_at {
+        table
+            .known
+            .retain(|_, known| known.middleware.strong_count() > 0);
+        table.sweep_at = (table.known.len() * 2).max(64);
+    }
 }
 
 /// Order `chain` by the priority list, the way Laravel's `SortedMiddleware`

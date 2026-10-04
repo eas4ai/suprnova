@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::primary::{AuthenticationContext, FactorGateApproval, SignInMethod, VerifiedPrincipal};
 use crate::crypto::Encryptor;
 use crate::sessions::opaque::{OpaqueSessionProvider, OpaqueSessionStore};
-use crate::sessions::{SessionGrant, SessionIssuer};
+use crate::sessions::{SessionGrant, SessionIssuer, SessionMetadata};
 use crate::storage::{CeremonyStore, NewCeremony};
 use crate::{Error, Result};
 
@@ -91,6 +91,17 @@ pub trait FactorVerifier: Send + Sync {
 
     /// Return whether this user has a confirmed second-factor enrollment.
     async fn has_confirmed_enrollment(&self, user_id: &str) -> Result<bool>;
+
+    /// Return whether this user has a second-factor enrollment at all,
+    /// confirmed or waiting for its confirmation.
+    ///
+    /// A host that keeps a second factor of its own asks this before it
+    /// enrolls one, so an account never holds both. The default answers for
+    /// confirmed enrollments only; verifiers that keep pending enrollments
+    /// override it.
+    async fn has_enrollment(&self, user_id: &str) -> Result<bool> {
+        self.has_confirmed_enrollment(user_id).await
+    }
 
     /// Read and verify a submitted code without consuming one-time state.
     async fn prepare_code(
@@ -201,6 +212,71 @@ where
 
     fn selector() -> String {
         format!("challenge-{:032x}", rand::random::<u128>())
+    }
+
+    /// Refuse a host sign-in that would bypass this gate's factor policy.
+    ///
+    /// Hosts call this before they evaluate a proof of their own, so a
+    /// refusal neither consumes the proof nor fires the host's login
+    /// events. [`Self::complete_host_sign_in`] repeats the check when it
+    /// issues.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Conflict`] when the user has a confirmed second factor in
+    /// this gate's verifier, and the verifier's storage errors.
+    pub async fn check_host_sign_in(&self, user_id: &str) -> Result<()> {
+        if user_id.is_empty() {
+            return Err(invalid("user_id", "must not be empty"));
+        }
+        if self.factors.has_confirmed_enrollment(user_id).await? {
+            return Err(Error::Conflict {
+                resource: "host sign-in".to_owned(),
+                message: "the user has a second factor the host did not verify".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Issue a session for a user whose sign-in the host application
+    /// completed itself, outside every Magnetar provider.
+    ///
+    /// **Host-trusted.** This mints a session from a bare user id, as
+    /// Laravel's `Auth::loginUsingId` does: the caller asserts that it
+    /// authenticated the user. Only the host that composed this concrete
+    /// gate can call it. Providers and plugins receive an
+    /// `Arc<dyn FactorGate>`, whose trait has no such method, so no plugin
+    /// context can reach it. Never expose it to code that does not own the
+    /// application's authentication decision.
+    ///
+    /// A host can keep a credential check of its own - a session guard over
+    /// its own user table, or its own TOTP store - and still route its
+    /// sessions through this store, because revocation, auth epochs and web
+    /// bindings answer to the store. The issuance stays behind the gate's
+    /// factor policy (see [`Self::check_host_sign_in`]).
+    ///
+    /// `auth_epoch` is the user's epoch as the host read it when it checked
+    /// the user's credential. Issuance fails once it is no longer current,
+    /// so a password reset or a sign-out-everywhere between that check and
+    /// this call cancels the sign-in.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Conflict`] when the user has a confirmed second factor,
+    /// [`Error::InvalidInput`] for an empty user id or a stale epoch, and the
+    /// session store's issuance errors.
+    pub async fn complete_host_sign_in(
+        &self,
+        user_id: &str,
+        auth_epoch: u64,
+        metadata: SessionMetadata,
+    ) -> Result<SessionGrant> {
+        self.check_host_sign_in(user_id).await?;
+        let approval = FactorGateApproval {
+            user_id: user_id.to_owned(),
+            context: AuthenticationContext::new(metadata, auth_epoch, Utc::now()),
+        };
+        self.issue(approval).await
     }
 }
 

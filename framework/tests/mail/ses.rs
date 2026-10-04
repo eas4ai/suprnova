@@ -402,9 +402,9 @@ async fn ses_does_not_duplicate_a_header_set_twice() {
 #[serial]
 async fn ses_rejects_a_header_name_carrying_crlf() {
     // A CR/LF in a header name is how a caller-supplied string becomes a
-    // second header. Mailgun already refuses it (mail/mailgun.rs:68); SES must
-    // refuse it identically on BOTH content paths, so that attaching a file
-    // never changes whether a message is accepted.
+    // second header. SES must refuse it identically on BOTH content paths,
+    // so that attaching a file never changes whether a message is accepted.
+    // The dispatch path refuses it first and names the bound transport.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -426,7 +426,7 @@ async fn ses_rejects_a_header_name_carrying_crlf() {
             .unwrap_err();
         let s = format!("{err}");
         assert!(
-            s.contains("SES") && s.contains("header name"),
+            s.contains("ses: ") && s.contains("header name"),
             "the error must name the transport and the offending field (Simple path): {s}"
         );
 
@@ -440,7 +440,7 @@ async fn ses_rejects_a_header_name_carrying_crlf() {
             .unwrap_err();
         let s = format!("{err}");
         assert!(
-            s.contains("SES") && s.contains("header name"),
+            s.contains("ses: ") && s.contains("header name"),
             "the error must name the transport and the offending field (Raw path): {s}"
         );
     }
@@ -479,7 +479,7 @@ async fn ses_rejects_a_header_name_with_space_or_colon() {
             .unwrap_err();
         let s = format!("{err}");
         assert!(
-            s.contains("SES") && s.contains("header name"),
+            s.contains("ses: ") && s.contains("header name"),
             "the error must name the transport and the offending field: {s}"
         );
     }

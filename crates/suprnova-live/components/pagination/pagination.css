@@ -18,6 +18,7 @@
   background: var(--sn-color-surface);
   color: var(--sn-color-text);
   font: inherit;
+  font-size: var(--sn-density-control-font-size);
   text-decoration: none;
   cursor: pointer;
 }

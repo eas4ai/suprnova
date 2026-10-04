@@ -1,9 +1,10 @@
 //! Source-shape-aware authentication migration primitives.
 //!
 //! This module plans and executes the source-owned part of an upgrade while an
-//! application supplies the narrow [`MigrationBindings`] seam for its own
-//! users, external identities, and passkey storage. Magnetar never assumes an
-//! application's table names or public identifier format.
+//! application supplies the narrow
+//! [`MigrationBindings`](crate::migration::MigrationBindings) seam for its
+//! own users, external identities, and passkey storage. Magnetar never
+//! assumes an application's table names or public identifier format.
 
 pub mod fingerprint;
 mod identity_map;
@@ -542,26 +543,26 @@ where
         plan: &MigrationPlan,
         backend: &M,
         tables: &[SwapTable],
-    ) -> core::result::Result<MySqlMigrationReport, MySqlMigrationFailure> {
+    ) -> core::result::Result<MySqlMigrationReport, Box<MySqlMigrationFailure>> {
         if !matches!(
             plan.backend_strategy,
             BackendStrategy::MySqlShadowSwap { .. }
         ) {
-            return Err(MySqlMigrationFailure {
+            return Err(Box::new(MySqlMigrationFailure {
                 journal: None,
                 error: Error::InvalidInput {
                     field: "MySQL migration plan".to_owned(),
                     message: "plan does not declare the MySQL shadow-swap strategy".to_owned(),
                 },
                 write_barrier_held: false,
-            });
+            }));
         }
         if let Err(error) = backend.acquire_write_barrier().await {
-            return Err(MySqlMigrationFailure {
+            return Err(Box::new(MySqlMigrationFailure {
                 journal: None,
                 error,
                 write_barrier_held: false,
-            });
+            }));
         }
         match backend.write_barrier_held().await {
             Ok(true) => {}
@@ -662,18 +663,18 @@ where
                     ),
                 },
             };
-            return Err(MySqlMigrationFailure {
+            return Err(Box::new(MySqlMigrationFailure {
                 journal: None,
                 error,
                 write_barrier_held: true,
-            });
+            }));
         }
         if let Err(error) = source_snapshot.commit().await {
-            return Err(MySqlMigrationFailure {
+            return Err(Box::new(MySqlMigrationFailure {
                 journal: None,
                 error: database_error("committing MySQL source snapshot", error),
                 write_barrier_held: true,
-            });
+            }));
         }
 
         let journal = match mysql_swap::MySqlShadowSwap
@@ -682,21 +683,21 @@ where
         {
             Ok(journal) => journal,
             Err(failure) => {
-                return Err(MySqlMigrationFailure {
+                return Err(Box::new(MySqlMigrationFailure {
                     journal: Some(failure.journal),
                     error: failure.error,
                     write_barrier_held: true,
-                });
+                }));
             }
         };
         let cleanup_transaction = match self.database.begin().await {
             Ok(transaction) => transaction,
             Err(error) => {
-                return Err(MySqlMigrationFailure {
+                return Err(Box::new(MySqlMigrationFailure {
                     journal: Some(journal),
                     error: database_error("starting MySQL cleanup transaction", error),
                     write_barrier_held: true,
-                });
+                }));
             }
         };
         let cleanup_statements =
@@ -705,33 +706,33 @@ where
                 Ok(cleanup_statements) => cleanup_statements,
                 Err(error) => {
                     let _ = cleanup_transaction.rollback().await;
-                    return Err(MySqlMigrationFailure {
+                    return Err(Box::new(MySqlMigrationFailure {
                         journal: Some(journal),
                         error,
                         write_barrier_held: true,
-                    });
+                    }));
                 }
             };
         if let Err(error) = cleanup_transaction.commit().await {
-            return Err(MySqlMigrationFailure {
+            return Err(Box::new(MySqlMigrationFailure {
                 journal: Some(journal),
                 error: database_error("committing MySQL cleanup transaction", error),
                 write_barrier_held: true,
-            });
+            }));
         }
         if let Err(error) = self.bindings.mark_migration_completed(&plan.plan_id).await {
-            return Err(MySqlMigrationFailure {
+            return Err(Box::new(MySqlMigrationFailure {
                 journal: Some(journal),
                 error,
                 write_barrier_held: true,
-            });
+            }));
         }
         if let Err(error) = backend.release_write_barrier().await {
-            return Err(MySqlMigrationFailure {
+            return Err(Box::new(MySqlMigrationFailure {
                 journal: Some(journal),
                 error,
                 write_barrier_held: true,
-            });
+            }));
         }
         Ok(MySqlMigrationReport {
             migration: MigrationReport {
@@ -749,8 +750,8 @@ async fn release_mysql_failure<M: mysql_swap::MySqlSwapBackend>(
     backend: &M,
     journal: Option<SwapJournal>,
     error: Error,
-) -> MySqlMigrationFailure {
-    match backend.release_write_barrier().await {
+) -> Box<MySqlMigrationFailure> {
+    Box::new(match backend.release_write_barrier().await {
         Ok(()) => MySqlMigrationFailure {
             journal,
             error,
@@ -765,7 +766,7 @@ async fn release_mysql_failure<M: mysql_swap::MySqlSwapBackend>(
             },
             write_barrier_held: true,
         },
-    }
+    })
 }
 
 async fn validate_mysql_swap_tables<M: mysql_swap::MySqlSwapBackend>(

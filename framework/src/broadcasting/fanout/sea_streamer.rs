@@ -1,8 +1,14 @@
-//! sea-streamer-backed BroadcastHub for cross-process fanout.
+//! Stream-backed BroadcastHub for cross-process fanout.
 //!
 //! Wraps an `InMemoryBroadcastHub` for local subscribers AND writes every
-//! published envelope to a sea-streamer stream so other processes subscribed
-//! to the same stream receive the event in their own local hubs.
+//! published envelope to a shared stream so other processes reading the
+//! same stream receive the event in their own local hubs.
+//!
+//! The type keeps the name `SeaStreamerBroadcastHub` it had when the stream
+//! went through the sea-streamer crate. It now talks to Redis through the
+//! redis client the rest of the framework uses, so a hub carries the URL's
+//! credentials, its database index and its `rediss://` TLS, as the queue's
+//! Redis driver does.
 //!
 //! ## Architecture
 //!
@@ -11,10 +17,10 @@
 //!       │
 //!       ├─► InMemoryBroadcastHub::publish (immediate, local WS subs)
 //!       │
-//!       └─► SeaProducer::send (serialized JSON to sea-streamer stream)
+//!       └─► stream writer (XADD of the serialized JSON, in enqueue order)
 //!                │
-//!                ▼ (loopback/other processes)
-//!           consumer_pump_task
+//!                ▼ (every hub on the stream, this one included)
+//!           consumer_pump_task (XREAD from the stream's tail)
 //!                │
 //!                ├─ channel == __presence__ ─► apply_presence_event (cross_process_view)
 //!                │
@@ -27,7 +33,7 @@
 //! are wrapped in a `TaggedEnvelope` that carries the origin `instance_id`.
 //! The consumer pump drops non-presence messages whose `instance_id` matches
 //! the local hub's own ID - this prevents local subscribers from seeing each
-//! event twice (once from the direct local publish and once looped back through
+//! event twice (once from the direct local publish and once read back from
 //! the stream).
 //!
 //! Presence meta-channel messages are **not** skipped based on instance_id -
@@ -51,36 +57,31 @@
 //!
 //! ## Backends
 //!
-//! The hub uses sea-streamer's **socket adapter** (`SeaStreamer`,
-//! `SeaProducer`, `SeaConsumer`), which is an enum-dispatched wrapper over
-//! every backend compiled into the `sea-streamer` dependency. The backend is
-//! selected at runtime from the URI scheme:
+//! The backend is selected from the URI scheme:
 //!
-//! | URI scheme           | Backend                                  | Production-ready |
-//! |----------------------|------------------------------------------|------------------|
-//! | `stdio://`           | stdin/stdout pipes (tests, single-proc)  | No               |
-//! | `redis://` `rediss://` | Redis Streams (`sea-streamer-redis`)  | **Yes**          |
-//! | `kafka://` `kafka+ssl://` | Kafka (if `sea-streamer-kafka` is enabled) | **Yes** |
-//! | `file://`            | Local file (`sea-streamer-file`)         | No               |
-//!
-//! The default Suprnova build enables `stdio` + `redis` + `socket`. To enable
-//! Kafka, add `kafka` to the `sea-streamer` feature set in `framework/Cargo.toml`
-//! (it pulls in `sea-streamer-kafka`).
+//! | URI scheme             | Backend                                   | Production-ready |
+//! |------------------------|-------------------------------------------|------------------|
+//! | `redis://` `rediss://` | Redis Streams (`XADD` / `XREAD`)          | **Yes**          |
+//! | `memory://` `stdio://` | An in-process stream (tests, single-proc) | No               |
 //!
 //! For multi-process deployments, use `redis://host:6379` (or `rediss://` for
-//! TLS). Redis Streams persists events, supports consumer groups, and survives
-//! a hub restart - the cross-process fanout works exactly like the loopback
-//! test scenario.
+//! TLS). The URL's `user:password@` and `/db` apply to every connection. A
+//! hub reads the stream from the entry that was last when it connected, so
+//! an event published after `new` returns always reaches it, and entries
+//! written by hubs of an earlier version (field `msg`) read the same.
+//!
+//! `memory://` connects every hub of this process that names the same stream
+//! key, and nothing else; `stdio://` is accepted as its alias and no longer
+//! touches the process's stdin or stdout.
 //!
 //! ## Loopback mode
 //!
-//! `SeaStreamerBroadcastHub::new_loopback` enables the stdio loopback option,
-//! which feeds produced messages back to consumers in the same process. This
-//! is intended for **testing only** - the duplicate guard (instance_id) ensures
-//! the local hub still sees each app-data event only once. Loopback is a
-//! stdio-specific option; if you pass `loopback = true` with a non-stdio URI
-//! the option is silently ignored by the non-stdio backends (each one has its
-//! own native cross-process behaviour).
+//! Every backend delivers each message to every hub on the stream, the
+//! publishing hub included; the duplicate guard (instance_id) drops a hub's
+//! own app-data events, and its own presence events apply idempotently.
+//! `SeaStreamerBroadcastHub::new_loopback` and
+//! `new_loopback_with_presence_ttl` are kept for the code that names them,
+//! and behave as `new` and `new_with_presence_ttl`.
 
 use crate::FrameworkError;
 use crate::broadcasting::hub::{
@@ -88,20 +89,17 @@ use crate::broadcasting::hub::{
 };
 use async_trait::async_trait;
 use futures::FutureExt;
-use sea_streamer::{
-    Buffer, Consumer, ConsumerMode, ConsumerOptions, Message, Producer, SeaConnectOptions,
-    SeaConsumer, SeaConsumerOptions, SeaProducer, SeaProducerOptions, SeaStreamer, StreamKey,
-    Streamer, StreamerUri,
-};
+use redis::aio::{ConnectionManager, ConnectionManagerConfig};
+use redis::streams::{StreamRangeReply, StreamReadReply};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock as AsyncRwLock;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -122,7 +120,7 @@ const PRESENCE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Maximum time a caller-visible send waits for the backend delivery receipt.
 ///
-/// `SeaProducer::send` only enqueues work; the returned future reports the
+/// `Producer::send` only enqueues work; the returned future reports the
 /// actual backend write. Bounding that future prevents an unavailable broker
 /// from holding an application request indefinitely.
 const SEND_RECEIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -160,9 +158,259 @@ where
     }
 }
 
+// ── transport ────────────────────────────────────────────────────────────────
+
+/// The stream entry field a message's bytes travel in. sea-streamer-redis
+/// wrote the same field, so hubs of an earlier version on the same stream
+/// read and write the same entries.
+const MESSAGE_FIELD: &str = "msg";
+
+/// How long one `XREAD` waits for new entries before it asks again. The
+/// read connection's response timeout leaves room above it.
+const READ_BLOCK: Duration = Duration::from_secs(1);
+
+/// The most entries one `XREAD` hands back; the next call reads on.
+const READ_BATCH: usize = 128;
+
+/// Writes a hub's messages to its stream, in the order they were enqueued:
+/// the heartbeat relies on that order so a removal can never be overtaken
+/// by a stale heartbeat enqueued before it.
+#[derive(Clone)]
+enum Producer {
+    /// Each message goes to the writer task, which runs one `XADD` at a time.
+    Redis(mpsc::UnboundedSender<WriteRequest>),
+    /// Each message goes straight to every hub on the in-process stream.
+    Memory(Arc<MemoryStream>),
+}
+
+/// One message for the Redis writer task, and where to report its write.
+struct WriteRequest {
+    bytes: Vec<u8>,
+    receipt: oneshot::Sender<Result<(), String>>,
+}
+
+impl Producer {
+    /// Enqueue `bytes`. The returned receipt resolves once the backend has
+    /// written them, or with the error it reported.
+    fn send(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Result<impl Future<Output = Result<(), String>> + Send + use<>, FrameworkError> {
+        let receipt = match self {
+            Producer::Redis(writer) => {
+                let (receipt, written) = oneshot::channel();
+                writer.send(WriteRequest { bytes, receipt }).map_err(|_| {
+                    FrameworkError::internal(
+                        "SeaStreamerBroadcastHub: the stream writer has stopped",
+                    )
+                })?;
+                Some(written)
+            }
+            Producer::Memory(stream) => {
+                stream.publish(Arc::from(bytes));
+                None
+            }
+        };
+        Ok(async move {
+            match receipt {
+                None => Ok(()),
+                Some(written) => written
+                    .await
+                    .unwrap_or_else(|_| Err("the stream writer stopped before writing".to_owned())),
+            }
+        })
+    }
+}
+
+/// Runs the `XADD`s of one hub, one at a time, in the order they were
+/// enqueued. Ends once the hub and its heartbeat task have dropped their
+/// producers.
+async fn stream_writer_task(
+    mut conn: ConnectionManager,
+    stream: String,
+    mut requests: mpsc::UnboundedReceiver<WriteRequest>,
+) {
+    while let Some(request) = requests.recv().await {
+        // A caller whose receipt timed out has been told the write failed;
+        // writing it later would make that untrue and let an outage pile up
+        // writes nobody waits for.
+        if request.receipt.is_closed() {
+            continue;
+        }
+        let written: redis::RedisResult<String> = redis::cmd("XADD")
+            .arg(&stream)
+            .arg("*")
+            .arg(MESSAGE_FIELD)
+            .arg(request.bytes)
+            .query_async(&mut conn)
+            .await;
+        let _ = request
+            .receipt
+            .send(written.map(|_| ()).map_err(|error| error.to_string()));
+    }
+}
+
+/// Reads the messages other hubs (and this one) wrote to the stream.
+enum Consumer {
+    /// `XREAD` from the entry after `last_id`, on a connection of its own so
+    /// the blocking read never delays a write.
+    Redis {
+        conn: ConnectionManager,
+        stream: String,
+        last_id: String,
+    },
+    /// The in-process stream's feed for this hub.
+    Memory(mpsc::UnboundedReceiver<Arc<[u8]>>),
+}
+
+impl Consumer {
+    /// The messages that arrived since the last call. On Redis it waits up
+    /// to [`READ_BLOCK`] and may return none; an entry without a readable
+    /// [`MESSAGE_FIELD`] is skipped with a warning.
+    async fn next_batch(&mut self) -> Result<Vec<Arc<[u8]>>, String> {
+        match self {
+            Consumer::Memory(feed) => feed
+                .recv()
+                .await
+                .map(|bytes| vec![bytes])
+                .ok_or_else(|| "the in-process stream closed".to_owned()),
+            Consumer::Redis {
+                conn,
+                stream,
+                last_id,
+            } => {
+                let reply: Option<StreamReadReply> = redis::cmd("XREAD")
+                    .arg("COUNT")
+                    .arg(READ_BATCH)
+                    .arg("BLOCK")
+                    .arg(READ_BLOCK.as_millis() as u64)
+                    .arg("STREAMS")
+                    .arg(stream.as_str())
+                    .arg(last_id.as_str())
+                    .query_async(conn)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let mut messages = Vec::new();
+                for key in reply.map(|reply| reply.keys).unwrap_or_default() {
+                    for mut entry in key.ids {
+                        *last_id = entry.id.clone();
+                        match entry
+                            .map
+                            .remove(MESSAGE_FIELD)
+                            .map(redis::from_redis_value::<Vec<u8>>)
+                        {
+                            Some(Ok(bytes)) => messages.push(Arc::from(bytes)),
+                            _ => tracing::warn!(
+                                entry = %entry.id,
+                                "fanout consumer: stream entry has no readable msg field; skipping"
+                            ),
+                        }
+                    }
+                }
+                Ok(messages)
+            }
+        }
+    }
+}
+
+/// The in-process stream behind `memory://` (and its `stdio://` alias):
+/// every hub of this process connected with the same stream key receives
+/// every message, in the order it was published.
+struct MemoryStream {
+    readers: Mutex<Vec<mpsc::UnboundedSender<Arc<[u8]>>>>,
+}
+
+impl MemoryStream {
+    /// The process's stream named `key`, created on first use.
+    fn named(key: &str) -> Arc<Self> {
+        static STREAMS: OnceLock<Mutex<HashMap<String, Arc<MemoryStream>>>> = OnceLock::new();
+        let mut streams = STREAMS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Arc::clone(streams.entry(key.to_owned()).or_insert_with(|| {
+            Arc::new(MemoryStream {
+                readers: Mutex::new(Vec::new()),
+            })
+        }))
+    }
+
+    /// A feed of every message published from now on.
+    fn subscribe(&self) -> mpsc::UnboundedReceiver<Arc<[u8]>> {
+        let (reader, feed) = mpsc::unbounded_channel();
+        self.readers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(reader);
+        feed
+    }
+
+    /// Hand `bytes` to every live feed, forgetting the feeds of dropped hubs.
+    fn publish(&self, bytes: Arc<[u8]>) {
+        self.readers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|reader| reader.send(Arc::clone(&bytes)).is_ok());
+    }
+}
+
+/// The writer, reader and start position of a hub on a Redis stream.
+async fn connect_redis(uri: &str, stream: &str) -> Result<(Producer, Consumer), FrameworkError> {
+    // The URL is never repeated in an error: it can carry a password.
+    let client = crate::redis_client::open(uri).map_err(|error| {
+        FrameworkError::internal(format!(
+            "SeaStreamerBroadcastHub: invalid redis URL ({:?})",
+            error.kind()
+        ))
+    })?;
+    let mut write_conn = ConnectionManager::new(client.clone())
+        .await
+        .map_err(|error| {
+            FrameworkError::internal(format!("SeaStreamerBroadcastHub: connect failed: {error}"))
+        })?;
+    let read_conn = ConnectionManager::new_with_config(
+        client,
+        ConnectionManagerConfig::new().set_response_timeout(Some(READ_BLOCK * 6)),
+    )
+    .await
+    .map_err(|error| {
+        FrameworkError::internal(format!("SeaStreamerBroadcastHub: connect failed: {error}"))
+    })?;
+    // Start after the entry that is last now: an event published once the
+    // constructor returns always reaches this hub, and nothing published
+    // before it is replayed.
+    let latest: StreamRangeReply = redis::cmd("XREVRANGE")
+        .arg(stream)
+        .arg("+")
+        .arg("-")
+        .arg("COUNT")
+        .arg(1)
+        .query_async(&mut write_conn)
+        .await
+        .map_err(|error| {
+            FrameworkError::internal(format!(
+                "SeaStreamerBroadcastHub: could not read the stream's tail: {error}"
+            ))
+        })?;
+    let last_id = latest
+        .ids
+        .first()
+        .map_or_else(|| "0-0".to_owned(), |entry| entry.id.clone());
+    let (writer, requests) = mpsc::unbounded_channel();
+    tokio::spawn(stream_writer_task(write_conn, stream.to_owned(), requests));
+    Ok((
+        Producer::Redis(writer),
+        Consumer::Redis {
+            conn: read_conn,
+            stream: stream.to_owned(),
+            last_id,
+        },
+    ))
+}
+
 // ── internal wire format ─────────────────────────────────────────────────────
 
-/// Wire format written to / read from the sea-streamer stream.
+/// Wire format written to / read from the stream.
 ///
 /// Carries the origin `instance_id` so the consumer pump can skip
 /// non-presence messages produced by the same hub instance, avoiding
@@ -241,20 +489,19 @@ type CrossProcessView = Arc<AsyncRwLock<HashMap<String, HashMap<(String, String)
 // ── SeaStreamerBroadcastHub ───────────────────────────────────────────────────
 
 /// BroadcastHub implementation that fans out both locally and across
-/// processes via sea-streamer.
+/// processes through a shared stream.
 ///
 /// Local subscribers (this process's WS handlers) are served by the inner
 /// `InMemoryBroadcastHub` immediately on every `publish`. The same
-/// serialised envelope is also written to a sea-streamer stream; a spawned
-/// consumer pump drives any other process's hub - or, in loopback / test
-/// mode, this process's own hub - by calling `local.publish` for each
+/// serialised envelope is also written to the stream; a spawned consumer
+/// pump drives every hub on the stream by calling `local.publish` for each
 /// inbound message whose `instance_id` differs from the hub's own ID.
 ///
 /// Presence state is replicated across processes via the `__presence__`
 /// meta-channel. See module-level docs for the full design.
 pub struct SeaStreamerBroadcastHub {
     local: Arc<InMemoryBroadcastHub>,
-    producer: SeaProducer,
+    producer: Producer,
     instance_id: Uuid,
     /// Replicated presence view: merged local + remote members.
     cross_process_view: CrossProcessView,
@@ -278,11 +525,14 @@ impl Drop for SeaStreamerBroadcastHub {
 }
 
 impl SeaStreamerBroadcastHub {
-    /// Connect using the stdio backend in normal (non-loopback) mode.
+    /// Connect to the stream `stream_key` at `streamer_uri`.
     ///
-    /// `streamer_uri` - the streamer URI, e.g. `"stdio://"`.
+    /// `streamer_uri` - `redis://` or `rediss://` (with the URL's
+    ///                  credentials and database), or `memory://` for an
+    ///                  in-process stream.
     /// `stream_key`   - the stream name shared by all processes, e.g.
-    ///                  `"suprnova-broadcast"`.
+    ///                  `"suprnova-broadcast"`: at most 249 ASCII letters,
+    ///                  digits, `.`, `_` or `-`.
     ///
     /// Uses the default presence TTL (60 s). See
     /// [`new_with_presence_ttl`](Self::new_with_presence_ttl) to override.
@@ -292,14 +542,12 @@ impl SeaStreamerBroadcastHub {
     /// Returns `FrameworkError::Internal` if the URI is invalid or the
     /// backend fails to connect.
     pub async fn new(streamer_uri: &str, stream_key: &str) -> Result<Self, FrameworkError> {
-        Self::connect(streamer_uri, stream_key, false, PRESENCE_TTL).await
+        Self::connect(streamer_uri, stream_key, PRESENCE_TTL).await
     }
 
     /// Connect with a custom presence TTL.
     ///
-    /// `streamer_uri` - the streamer URI, e.g. `"stdio://"`.
-    /// `stream_key`   - the stream name shared by all processes, e.g.
-    ///                  `"suprnova-broadcast"`.
+    /// `streamer_uri` and `stream_key` are as for [`new`](Self::new).
     ///
     /// Presence members whose `last_seen` exceeds `ttl` are pruned. The
     /// heartbeat interval is derived as `ttl / 6` so that live members
@@ -318,99 +566,64 @@ impl SeaStreamerBroadcastHub {
         stream_key: &str,
         ttl: std::time::Duration,
     ) -> Result<Self, FrameworkError> {
-        Self::connect(streamer_uri, stream_key, false, ttl).await
+        Self::connect(streamer_uri, stream_key, ttl).await
     }
 
-    /// Connect with stdio loopback enabled.
+    /// The same as [`new`](Self::new), kept for the code that names it.
     ///
-    /// With loopback, messages produced are fed back to consumers in the
-    /// same process. **Use only in tests.** The duplicate-delivery guard
-    /// (instance_id) ensures local subscribers still receive each app-data
-    /// event exactly once. Presence events round-trip intentionally.
-    ///
-    /// Uses the default presence TTL (60 s).
+    /// Every backend feeds a hub's own messages back to it; the
+    /// duplicate-delivery guard (instance_id) ensures local subscribers
+    /// still receive each app-data event exactly once. Presence events
+    /// round-trip intentionally.
     pub async fn new_loopback(
         streamer_uri: &str,
         stream_key: &str,
     ) -> Result<Self, FrameworkError> {
-        Self::connect(streamer_uri, stream_key, true, PRESENCE_TTL).await
+        Self::connect(streamer_uri, stream_key, PRESENCE_TTL).await
     }
 
-    /// Connect with loopback enabled and a custom presence TTL.
-    ///
-    /// Combines the loopback test mode with a configurable TTL for tests
-    /// that need to exercise the crash-recovery / TTL-prune path quickly.
+    /// The same as [`new_with_presence_ttl`](Self::new_with_presence_ttl),
+    /// kept for the code that names it.
     pub async fn new_loopback_with_presence_ttl(
         streamer_uri: &str,
         stream_key: &str,
         ttl: std::time::Duration,
     ) -> Result<Self, FrameworkError> {
-        Self::connect(streamer_uri, stream_key, true, ttl).await
+        Self::connect(streamer_uri, stream_key, ttl).await
     }
 
-    /// Internal constructor.
-    ///
-    /// Backend selection is driven by the URI scheme - see the module-level
-    /// "Backends" table. `loopback` is a stdio-only option (other backends
-    /// have native cross-process behaviour); we set it on the stdio sub-options
-    /// unconditionally and let other backends ignore it.
+    /// Internal constructor. The backend is chosen by the URI scheme - see
+    /// the module-level "Backends" table.
     async fn connect(
         streamer_uri: &str,
-        stream_key_str: &str,
-        loopback: bool,
+        stream_key: &str,
         presence_ttl: std::time::Duration,
     ) -> Result<Self, FrameworkError> {
-        let uri = StreamerUri::from_str(streamer_uri).map_err(|e| {
-            FrameworkError::internal(format!(
-                "SeaStreamerBroadcastHub: invalid streamer URI \"{streamer_uri}\": {e}"
-            ))
-        })?;
-
-        let stream_key = StreamKey::new(stream_key_str).map_err(|e| {
-            FrameworkError::internal(format!(
-                "SeaStreamerBroadcastHub: invalid stream key \"{stream_key_str}\": {e:?}"
-            ))
-        })?;
-
-        let mut connect_opts = SeaConnectOptions::default();
-        connect_opts.set_stdio_connect_options(|opts| {
-            opts.set_loopback(loopback);
-        });
-        // Same producer-database rule as the queue driver: sea-streamer does
-        // not take the logical database index from a redis URL's path, so a
-        // hub pointed at `redis://host:6379/3` would silently operate on
-        // database 0. Carry the index across explicitly.
-        if streamer_uri.starts_with("redis://") || streamer_uri.starts_with("rediss://") {
-            let db = crate::queue::redis::redis_db_from_url(streamer_uri)?;
-            connect_opts.set_redis_connect_options(|opts| {
-                opts.set_db(db);
-            });
+        if !crate::redis_client::is_valid_stream_key(stream_key) {
+            return Err(FrameworkError::internal(format!(
+                "SeaStreamerBroadcastHub: invalid stream key \"{stream_key}\": use at most \
+                 249 ASCII letters, digits, '.', '_' or '-'"
+            )));
         }
-
-        let streamer = SeaStreamer::connect(uri, connect_opts).await.map_err(|e| {
-            FrameworkError::internal(format!("SeaStreamerBroadcastHub: connect failed: {e}"))
-        })?;
-
-        let producer = streamer
-            .create_producer(stream_key.clone(), SeaProducerOptions::default())
-            .await
-            .map_err(|e| {
-                FrameworkError::internal(format!(
-                    "SeaStreamerBroadcastHub: create_producer failed: {e}"
-                ))
-            })?;
-
-        let consumer = streamer
-            .create_consumer(
-                std::slice::from_ref(&stream_key),
-                SeaConsumerOptions::new(ConsumerMode::RealTime),
-            )
-            .await
-            .map_err(|e| {
-                FrameworkError::internal(format!(
-                    "SeaStreamerBroadcastHub: create_consumer failed: {e}"
-                ))
-            })?;
+        let scheme = streamer_uri
+            .split_once("://")
+            .map_or("", |(scheme, _)| scheme);
+        let (producer, consumer) = match scheme {
+            "redis" | "rediss" => connect_redis(streamer_uri, stream_key).await?,
+            "memory" | "stdio" => {
+                let stream = MemoryStream::named(stream_key);
+                let feed = stream.subscribe();
+                (Producer::Memory(stream), Consumer::Memory(feed))
+            }
+            // Only the scheme is repeated: the rest of a URL can carry a
+            // password.
+            other => {
+                return Err(FrameworkError::internal(format!(
+                    "SeaStreamerBroadcastHub: unsupported URI scheme \"{other}\"; use \
+                     redis://, rediss:// or memory://"
+                )));
+            }
+        };
 
         // Derive heartbeat and prune intervals from the TTL:
         //   heartbeat = ttl / 6   (refresh well within the TTL window)
@@ -531,7 +744,7 @@ impl SeaStreamerBroadcastHub {
                 "SeaStreamerBroadcastHub: failed to serialize presence TaggedEnvelope: {e}"
             ))
         })?;
-        let receipt = self.producer.send(bytes.as_slice()).map_err(|e| {
+        let receipt = self.producer.send(bytes).map_err(|e| {
             tracing::error!(
                 error = %e,
                 event = event_name,
@@ -582,14 +795,14 @@ where
     }
 }
 
-/// Long-running task that reads from the sea-streamer consumer and routes:
+/// Long-running task that reads the stream and routes:
 ///
 /// - `__presence__` channel envelopes → `apply_presence_event` (updates
 ///   the cross_process_view for all processes including this one).
 /// - All other channels → local hub (skipping own instance_id to prevent
 ///   double-delivery for app-data envelopes).
 async fn consumer_pump_task(
-    consumer: SeaConsumer,
+    mut consumer: Consumer,
     local: Arc<InMemoryBroadcastHub>,
     own_id: Uuid,
     cross_view: CrossProcessView,
@@ -611,53 +824,16 @@ async fn consumer_pump_task(
         receive_error_flag.store(false, Ordering::Relaxed);
         let receive_error_flag_inner = Arc::clone(&receive_error_flag);
         let outcome = run_iteration_guarded("consumer_pump", async {
-            match consumer.next().await {
-                Ok(msg) => {
-                    let payload = msg.message();
-                    let bytes = payload.as_bytes();
-                    match serde_json::from_slice::<TaggedEnvelope>(bytes) {
-                        Ok(tagged) if tagged.envelope.channel == PRESENCE_META_CHANNEL => {
-                            // Presence meta-channel - update the replicated view.
-                            // We process our OWN presence events too (no instance_id skip)
-                            // so our members appear in cross_process_view via the same
-                            // code path as remote members.
-                            match serde_json::from_value::<PresenceEvent>(tagged.envelope.data) {
-                                Ok(pe) => apply_presence_event(&cross_view, pe).await,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "sea-streamer consumer: __presence__ payload is not a valid PresenceEvent; dropping"
-                                    );
-                                }
-                            }
-                        }
-                        Ok(tagged) if tagged.instance_id == own_id => {
-                            // Our own app-data message reflected back - skip to avoid
-                            // double delivery to local subscribers.
-                        }
-                        Ok(tagged) => {
-                            // In-memory publish is infallible; logging is just
-                            // a belt-and-braces guard against a future trait
-                            // impl that needs to surface a failure here.
-                            if let Err(e) = local.publish(tagged.envelope).await {
-                                tracing::warn!(
-                                    error = %e,
-                                    "sea-streamer consumer: local hub publish failed; dropping"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "sea-streamer consumer: payload is not a valid TaggedEnvelope; dropping"
-                            );
-                        }
+            match consumer.next_batch().await {
+                Ok(messages) => {
+                    for bytes in messages {
+                        route_message(&bytes, &local, own_id, &cross_view).await;
                     }
                 }
                 Err(e) => {
                     tracing::error!(
                         error = %e,
-                        "sea-streamer consumer: receive error; backing off (escalating)"
+                        "fanout consumer: receive error; backing off (escalating)"
                     );
                     receive_error_flag_inner.store(true, Ordering::Relaxed);
                 }
@@ -681,6 +857,54 @@ async fn consumer_pump_task(
         // busy-spin a worker thread.
         if outcome.is_err() {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
+}
+
+/// Route one message read from the stream: presence events to the
+/// replicated view, other hubs' app-data events to local subscribers.
+async fn route_message(
+    bytes: &[u8],
+    local: &InMemoryBroadcastHub,
+    own_id: Uuid,
+    cross_view: &CrossProcessView,
+) {
+    match serde_json::from_slice::<TaggedEnvelope>(bytes) {
+        Ok(tagged) if tagged.envelope.channel == PRESENCE_META_CHANNEL => {
+            // Presence meta-channel - update the replicated view. We process
+            // our OWN presence events too (no instance_id skip) so our
+            // members appear in cross_process_view via the same code path as
+            // remote members.
+            match serde_json::from_value::<PresenceEvent>(tagged.envelope.data) {
+                Ok(pe) => apply_presence_event(cross_view, pe).await,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "fanout consumer: __presence__ payload is not a valid PresenceEvent; dropping"
+                    );
+                }
+            }
+        }
+        Ok(tagged) if tagged.instance_id == own_id => {
+            // Our own app-data message read back - skip to avoid double
+            // delivery to local subscribers.
+        }
+        Ok(tagged) => {
+            // In-memory publish is infallible; logging is just a
+            // belt-and-braces guard against a future trait impl that needs
+            // to surface a failure here.
+            if let Err(e) = local.publish(tagged.envelope).await {
+                tracing::warn!(
+                    error = %e,
+                    "fanout consumer: local hub publish failed; dropping"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "fanout consumer: payload is not a valid TaggedEnvelope; dropping"
+            );
         }
     }
 }
@@ -730,7 +954,7 @@ async fn apply_presence_event(view: &CrossProcessView, event: PresenceEvent) {
 /// process instances that started after the original `MemberAdded` was
 /// published - so stale TTL pruning doesn't evict live members.
 async fn heartbeat_task(
-    producer: SeaProducer,
+    producer: Producer,
     instance_id: String,
     local_members: Arc<AsyncRwLock<HashMap<(String, String), Value>>>,
     interval: std::time::Duration,
@@ -854,10 +1078,10 @@ async fn prune_task(
 /// function so it can be called from the spawned task without capturing
 /// `self`. The returned receipt is observed with the rest of the snapshot.
 fn send_presence_via_producer(
-    producer: &SeaProducer,
+    producer: &Producer,
     event: &PresenceEvent,
     instance_id_str: &str,
-) -> Result<<SeaProducer as Producer>::SendFuture, FrameworkError> {
+) -> Result<impl Future<Output = Result<(), String>> + Send + use<>, FrameworkError> {
     let event_name = match event {
         PresenceEvent::MemberAdded { .. } => "member_added",
         PresenceEvent::MemberRemoved { .. } => "member_removed",
@@ -883,7 +1107,7 @@ fn send_presence_via_producer(
             "SeaStreamerBroadcastHub: presence heartbeat serialization failed: {error}"
         ))
     })?;
-    producer.send(bytes.as_slice()).map_err(|error| {
+    producer.send(bytes).map_err(|error| {
         FrameworkError::internal(format!(
             "SeaStreamerBroadcastHub: presence heartbeat enqueue failed: {error}"
         ))
@@ -916,7 +1140,7 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         // drop in-process listeners.
         self.local.publish(envelope.clone()).await?;
 
-        // Cross-process fanout via sea-streamer. A failure here is a
+        // Cross-process fanout through the stream. A failure here is a
         // real loss - other processes' subscribers won't see the event.
         // Surface it to the caller so a Broadcastable dispatch returns
         // Err and the operator can react.
@@ -932,7 +1156,7 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         // `send()` only enqueues work. Await its bounded receipt so a backend
         // write failure cannot be reported as a successful cross-process
         // publish.
-        let receipt = self.producer.send(bytes.as_slice()).map_err(|e| {
+        let receipt = self.producer.send(bytes).map_err(|e| {
             FrameworkError::internal(format!("SeaStreamerBroadcastHub: producer send error: {e}"))
         })?;
         await_send_receipt(receipt, "broadcast publish").await

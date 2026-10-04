@@ -273,6 +273,35 @@ async fn cursor_paginate_threads_next_cursor() {
     Context::test_clear_query();
 }
 
+/// DATA-019: an offset on the query positions the first page only. It
+/// used to apply again after every cursor, so the page after 3 and 4 was
+/// 7 and 8, and 5 and 6 were never shown.
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn cursor_paginate_applies_an_offset_to_the_first_page_only() {
+    let _db = fixture(8).await;
+    Context::test_clear_query();
+
+    let page1 = T7Article::query()
+        .offset(2)
+        .cursor_paginate(2)
+        .await
+        .unwrap();
+    let ids1: Vec<i64> = page1.data.iter().map(|a| a.id).collect();
+    assert_eq!(ids1, vec![3, 4]);
+
+    Context::test_set_query("cursor", page1.next_cursor.clone().expect("a next cursor"));
+    let page2 = T7Article::query()
+        .offset(2)
+        .cursor_paginate(2)
+        .await
+        .unwrap();
+    let ids2: Vec<i64> = page2.data.iter().map(|a| a.id).collect();
+    assert_eq!(ids2, vec![5, 6], "the cursor alone positions a later page");
+
+    Context::test_clear_query();
+}
+
 #[cfg(feature = "testing")]
 #[tokio::test]
 async fn cursor_paginate_last_page_has_no_next_cursor() {

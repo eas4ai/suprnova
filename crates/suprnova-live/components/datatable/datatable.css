@@ -76,6 +76,12 @@
     margin-block-end: var(--sn-space-3);
   }
 
+  /* The 8px row gap spaces the input and the button; the label takes 2px
+     of it back, so it sits 6px above the input like a field label. */
+  .sn-datatable-filter-label {
+    margin-block-end: calc(var(--sn-space-1) / -2);
+  }
+
   .sn-datatable-filter-input {
     padding-block: var(--sn-space-1);
     padding-inline: var(--sn-space-2);

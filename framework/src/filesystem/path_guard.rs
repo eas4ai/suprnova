@@ -376,32 +376,48 @@ fn staging_path_for(path: &str) -> String {
     )
 }
 
-/// The on-disk path a storage path names under `root`.
-///
-/// `root` is the inner accessor's already-canonicalized root, and `path` has
-/// been through [`validate_storage_path`], so this join cannot leave the root.
-fn on_disk_path(root: &str, path: &str) -> PathBuf {
-    Path::new(root).join(path.trim_end_matches('/'))
-}
-
 /// Wrap a filesystem failure raised while this layer publishes a staged write.
+///
+/// A refusal stays a refusal: a path that resolves out of the root, or that
+/// changed into a symlink while the write was in flight, is reported as
+/// `PermissionDenied` like every other confinement failure of this layer.
 fn publish_error(what: &str, path: &str, e: std::io::Error) -> Error {
+    let kind = if e.kind() == std::io::ErrorKind::PermissionDenied {
+        ErrorKind::PermissionDenied
+    } else {
+        ErrorKind::Unexpected
+    };
     Error::new(
-        ErrorKind::Unexpected,
+        kind,
         format!("{what} while publishing '{path}' on a local-filesystem disk"),
     )
     .set_source(e)
 }
 
-/// Create the target's parent directories, which the inner accessor would have
-/// created had it been given the caller's path rather than a staging path.
-async fn ensure_parent_dir(target: &Path, path: &str) -> Result<()> {
-    if let Some(parent) = target.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| publish_error("creating the parent directory failed", path, e))?;
-    }
-    Ok(())
+/// The refusal of an exclusive publish that found `path` already taken.
+fn exclusive_publish_refused(path: &str) -> Error {
+    Error::new(
+        ErrorKind::ConditionNotMatch,
+        format!("'{path}' already exists, doesn't match the condition if_not_exists"),
+    )
+}
+
+/// The file name of a staging path made by [`staging_path_for`].
+#[cfg(unix)]
+fn staged_file_name(staged: &str) -> &str {
+    staged.rsplit(['/', '\\']).next().unwrap_or(staged)
+}
+
+/// Run blocking confined filesystem work on the blocking pool.
+#[cfg(unix)]
+async fn confined<T: Send + 'static>(
+    root: &str,
+    work: impl FnOnce(&super::confined::ConfinedRoot) -> std::io::Result<T> + Send + 'static,
+) -> std::io::Result<T> {
+    let root = root.to_owned();
+    tokio::task::spawn_blocking(move || work(&super::confined::ConfinedRoot::new(root)?))
+        .await
+        .map_err(std::io::Error::other)?
 }
 
 /// Materialize `path` as an empty object if it is missing, without truncating
@@ -419,70 +435,124 @@ async fn ensure_parent_dir(target: &Path, path: &str) -> Result<()> {
 /// onto an existing object has always done - an append is the one operation
 /// here that is not published in a single step - so the two cases stay
 /// consistent rather than one of them being quietly atomic.
+///
+/// The create is `O_CREAT | O_EXCL | O_NOFOLLOW`, and on Unix it is made
+/// relative to a parent directory resolved inside the root. `O_EXCL` fails on a
+/// final component that is a symlink, dangling or not; plain `O_CREAT` on a
+/// dangling link would create the link's *target*, anywhere on the host.
+/// `validate_resolved_path` refuses that path first, but a check followed by a
+/// create is a race, and these flags close it in the kernel instead of
+/// narrowing it.
 async fn ensure_target_exists(root: &str, path: &str) -> Result<()> {
-    let target = on_disk_path(root, path);
-    ensure_parent_dir(&target, path).await?;
-    // `create_new` is `O_CREAT | O_EXCL`, and POSIX requires that combination to
-    // fail when the final component is a symlink - dangling or not. That matters
-    // because this is the only create in this layer that would otherwise follow
-    // one: plain `O_CREAT` on a dangling link creates the link's *target*, so a
-    // link planted in the root becomes a write at an arbitrary path.
-    // `validate_resolved_path` already refuses that path above, but a check
-    // followed by a create is a race, and `O_EXCL` closes it in the kernel
-    // instead of narrowing it - with no extra dependency and nothing
-    // platform-specific.
-    match tokio::fs::OpenOptions::new()
-        .append(true)
-        .create_new(true)
-        .open(&target)
-        .await
-    {
-        Ok(_) => Ok(()),
-        // Something is already at the path: an ordinary object, or a symlink
-        // `O_EXCL` refused to follow. Either way this function has nothing left
-        // to do - it exists only to materialize a target that is genuinely
-        // missing - so the write proceeds into opendal exactly as it would have
-        // without this call. For an existing object that is the in-place append
-        // this function is here to guarantee; for a symlink it is opendal's own
-        // staged write, which publishes by `rename(2)` and stays in the root.
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(publish_error("creating the append target failed", path, e)),
-    }
+    #[cfg(unix)]
+    let created = {
+        let path = path.to_owned();
+        confined(root, move |root| root.ensure_exists(&path)).await
+    };
+    #[cfg(not(unix))]
+    let created = {
+        let target = Path::new(root).join(path.trim_end_matches('/'));
+        let created = match target.parent() {
+            Some(parent) => tokio::fs::create_dir_all(parent).await,
+            None => Ok(()),
+        };
+        match created {
+            Ok(()) => match tokio::fs::OpenOptions::new()
+                .append(true)
+                .create_new(true)
+                .open(&target)
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        }
+    };
+    // Something already at the path - an ordinary object, or a symlink the
+    // create refused to follow - leaves the write to proceed into opendal
+    // exactly as it would have without this call.
+    created.map_err(|e| publish_error("creating the append target failed", path, e))
 }
 
-/// Publish `staged` at `target` with `link(2)`.
+/// Publish the staging file `staged` - a storage path made by
+/// [`staging_path_for`] - at `path`.
 ///
-/// This is what keeps `if_not_exists` an exclusive create. opendal publishes a
-/// staged write with an unconditional `rename(2)`, so its `if_not_exists`
-/// degrades to a `try_exists` check followed by a clobber: every racing writer
-/// passes the check and the last rename wins, silently discarding the rest.
-/// `link(2)` fails with `EEXIST` instead, atomically and in the kernel, so
-/// exactly one racer can claim the path. The staging directory lives inside the
-/// disk root, so the link never crosses a filesystem.
-async fn link_exclusive(staged: &Path, target: &Path, path: &str) -> Result<()> {
-    ensure_parent_dir(target, path).await?;
-    match tokio::fs::hard_link(staged, target).await {
+/// With `exclusive` it publishes with `link(2)`. That is what keeps
+/// `if_not_exists` an exclusive create: opendal publishes a staged write with
+/// an unconditional `rename(2)`, so its `if_not_exists` degrades to a check
+/// followed by a clobber, and every racing writer passes the check. `link(2)`
+/// fails with `EEXIST` instead, atomically and in the kernel, so exactly one
+/// racer claims the path. Otherwise it publishes with `rename(2)`. The staging
+/// directory lives inside the disk root, so neither crosses a filesystem.
+///
+/// On Unix both syscalls name the target relative to its parent directory as
+/// resolved inside the root, so a parent swapped for a symlink while the bytes
+/// were staged cannot carry the publish out of the root.
+async fn publish_staged(root: &str, staged: &str, path: &str, exclusive: bool) -> Result<()> {
+    let what = if exclusive {
+        "linking the staged write failed"
+    } else {
+        "renaming the staged copy failed"
+    };
+    #[cfg(unix)]
+    let published = {
+        let name = std::ffi::OsString::from(staged_file_name(staged));
+        let target = path.trim_end_matches('/').to_owned();
+        confined(root, move |root| {
+            let staging = root.root_dir(ATOMIC_STAGING_DIR)?;
+            root.publish(&staging, &name, &target, exclusive)
+        })
+        .await
+    };
+    #[cfg(not(unix))]
+    let published = {
+        let staged = Path::new(root).join(staged);
+        let target = Path::new(root).join(path.trim_end_matches('/'));
+        let created = match target.parent() {
+            Some(parent) => tokio::fs::create_dir_all(parent).await,
+            None => Ok(()),
+        };
+        match created {
+            Ok(()) if exclusive => tokio::fs::hard_link(&staged, &target).await,
+            Ok(()) => tokio::fs::rename(&staged, &target).await,
+            Err(e) => Err(e),
+        }
+    };
+    match published {
         Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(Error::new(
-            ErrorKind::ConditionNotMatch,
-            format!("'{path}' already exists, doesn't match the condition if_not_exists"),
-        )),
-        Err(e) => Err(publish_error("linking the staged write failed", path, e)),
+        Err(e) if exclusive && e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(exclusive_publish_refused(path))
+        }
+        Err(e) => Err(publish_error(what, path, e)),
     }
 }
 
 /// Remove a staging file, logging rather than failing: the caller is either
 /// returning an error that matters more or has already published the bytes
 /// under their real name.
-async fn remove_staged(staged: &Path) {
-    match tokio::fs::remove_file(staged).await {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::warn!(
-            path = %staged.display(),
+async fn remove_staged(root: &str, staged: &str) {
+    #[cfg(unix)]
+    let removed = {
+        let name = std::ffi::OsString::from(staged_file_name(staged));
+        confined(root, move |root| {
+            let staging = root.root_dir(ATOMIC_STAGING_DIR)?;
+            super::confined::ConfinedRoot::remove_in(&staging, &name)
+        })
+        .await
+    };
+    #[cfg(not(unix))]
+    let removed = match tokio::fs::remove_file(Path::new(root).join(staged)).await {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    };
+    if let Err(e) = removed {
+        tracing::warn!(
+            path = %staged,
             error = %e,
             "failed to remove an atomic-write staging file"
-        ),
+        );
     }
 }
 
@@ -821,10 +891,10 @@ impl<W: oio::Write + 'static> oio::Write for PathGuardWriter<W> {
                 Publish::ExclusiveLink {
                     staged,
                     settled: false,
-                } => Some(on_disk_path(&self.root, staged)),
+                } => Some(staged.clone()),
                 _ => None,
             };
-            let target = on_disk_path(&self.root, &self.path);
+            let root = self.root.clone();
             let path = self.path.clone();
             self.closing = Some(owned_task(async move {
                 // One owner spans backend close, publication, and cleanup.
@@ -832,7 +902,7 @@ impl<W: oio::Write + 'static> oio::Write for PathGuardWriter<W> {
                 let result = async {
                     let meta = inner.close().await?;
                     if let Some(staged) = &staged {
-                        link_exclusive(staged, &target, &path).await?;
+                        publish_staged(&root, staged, &path, true).await?;
                     }
                     Ok(meta)
                 }
@@ -843,7 +913,7 @@ impl<W: oio::Write + 'static> oio::Write for PathGuardWriter<W> {
                     tracing::warn!(%error, "failed to abort failed local writer");
                 }
                 if let Some(staged) = &staged {
-                    remove_staged(staged).await;
+                    remove_staged(&root, staged).await;
                 }
                 result
             })?);
@@ -897,13 +967,14 @@ impl<W: oio::Write + 'static> oio::Write for PathGuardWriter<W> {
                 Publish::ExclusiveLink {
                     staged,
                     settled: false,
-                } => Some(on_disk_path(&self.root, staged)),
+                } => Some(staged.clone()),
                 _ => None,
             };
+            let root = self.root.clone();
             self.abort = AbortState::Running(owned_task(async move {
                 let aborted = inner.abort().await;
                 if let Some(staged) = &staged {
-                    remove_staged(staged).await;
+                    remove_staged(&root, staged).await;
                 }
                 aborted
             })?);
@@ -934,9 +1005,8 @@ impl<W: oio::Write + 'static> Drop for PathGuardWriter<W> {
         }
         let inner = self.inner.clone();
         let abort = std::mem::replace(&mut self.abort, AbortState::Failed);
-        let staged = self
-            .take_staged()
-            .map(|path| on_disk_path(&self.root, &path));
+        let staged = self.take_staged();
+        let root = self.root.clone();
         detached_cleanup(async move {
             if let AbortState::Running(mut task) = abort
                 && task_result(&mut task).await.is_ok()
@@ -946,7 +1016,7 @@ impl<W: oio::Write + 'static> Drop for PathGuardWriter<W> {
             let mut inner = inner.lock().await;
             let aborted = inner.abort().await;
             if let Some(staged) = &staged {
-                remove_staged(staged).await;
+                remove_staged(&root, staged).await;
             }
             aborted
         });
@@ -1044,20 +1114,14 @@ impl<C: oio::Copy + 'static> oio::Copy for PathGuardCopier<C> {
         if self.closing.is_none() {
             self.validate_once().await?;
             let mut inner = self.inner.clone().lock_owned().await;
-            let staged = self
-                .staged
-                .as_ref()
-                .map(|path| on_disk_path(&self.root, path));
-            let target = on_disk_path(&self.root, &self.to);
+            let staged = self.staged.clone();
+            let root = self.root.clone();
             let path = self.to.clone();
             self.closing = Some(owned_task(async move {
                 let result = async {
                     let meta = inner.close().await?;
                     if let Some(staged) = &staged {
-                        ensure_parent_dir(&target, &path).await?;
-                        tokio::fs::rename(staged, &target).await.map_err(|e| {
-                            publish_error("renaming the staged copy failed", &path, e)
-                        })?;
+                        publish_staged(&root, staged, &path, false).await?;
                     }
                     Ok(meta)
                 }
@@ -1068,7 +1132,7 @@ impl<C: oio::Copy + 'static> oio::Copy for PathGuardCopier<C> {
                     tracing::warn!(%error, "failed to abort failed local copier");
                 }
                 if let Some(staged) = &staged {
-                    remove_staged(staged).await;
+                    remove_staged(&root, staged).await;
                 }
                 result
             })?);
@@ -1113,14 +1177,12 @@ impl<C: oio::Copy + 'static> oio::Copy for PathGuardCopier<C> {
         if !matches!(self.abort, AbortState::Running(_)) {
             self.abort = AbortState::Failed;
             let mut inner = self.inner.clone().lock_owned().await;
-            let staged = self
-                .staged
-                .as_ref()
-                .map(|path| on_disk_path(&self.root, path));
+            let staged = self.staged.clone();
+            let root = self.root.clone();
             self.abort = AbortState::Running(owned_task(async move {
                 let aborted = inner.abort().await;
                 if let Some(staged) = &staged {
-                    remove_staged(staged).await;
+                    remove_staged(&root, staged).await;
                 }
                 aborted
             })?);
@@ -1151,10 +1213,8 @@ impl<C: oio::Copy + 'static> Drop for PathGuardCopier<C> {
         }
         let inner = self.inner.clone();
         let abort = std::mem::replace(&mut self.abort, AbortState::Failed);
-        let staged = self
-            .staged
-            .take()
-            .map(|path| on_disk_path(&self.root, &path));
+        let staged = self.staged.take();
+        let root = self.root.clone();
         detached_cleanup(async move {
             if let AbortState::Running(mut task) = abort
                 && task_result(&mut task).await.is_ok()
@@ -1164,7 +1224,7 @@ impl<C: oio::Copy + 'static> Drop for PathGuardCopier<C> {
             let mut inner = inner.lock().await;
             let aborted = inner.abort().await;
             if let Some(staged) = &staged {
-                remove_staged(staged).await;
+                remove_staged(&root, staged).await;
             }
             aborted
         });

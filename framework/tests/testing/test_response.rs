@@ -140,6 +140,42 @@ fn assert_cookie_panics_when_no_matching_set_cookie_header() {
     .assert_cookie("suprnova_session");
 }
 
+/// A `Set-Cookie` line is one `name=value` pair followed by attributes.
+/// Parsing the whole line as a request `Cookie` header turned every
+/// attribute into a cookie, so `assert_cookie("Path")` passed on any
+/// response that set a cookie with a path.
+#[test]
+#[should_panic(expected = "assert_cookie")]
+fn assert_cookie_does_not_pass_on_an_attribute_name() {
+    TestResponse::new(
+        200,
+        headers(&[("Set-Cookie", "sid=abc; Path=/; HttpOnly; SameSite=Lax")]),
+        Bytes::new(),
+    )
+    .assert_cookie("HttpOnly");
+}
+
+#[test]
+fn cookie_reads_only_the_name_value_pair_of_each_set_cookie_header() {
+    let response = TestResponse::new(
+        200,
+        headers(&[
+            ("Set-Cookie", "sid=abc; Path=/; HttpOnly; SameSite=Lax"),
+            ("Set-Cookie", "Path=mine; Path=/admin; Secure"),
+        ]),
+        Bytes::new(),
+    );
+    assert_eq!(response.cookie("sid").as_deref(), Some("abc"));
+    assert_eq!(response.cookie("HttpOnly"), None);
+    assert_eq!(response.cookie("SameSite"), None);
+    assert_eq!(response.cookie("Secure"), None);
+    assert_eq!(
+        response.cookie("Path").as_deref(),
+        Some("mine"),
+        "a cookie named like an attribute reads its own value, not the attribute's"
+    );
+}
+
 // ── `assert_session_has` - needs a real session store ───────────────
 
 fn ensure_crypt() {

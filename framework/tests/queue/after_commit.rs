@@ -2101,3 +2101,86 @@ async fn a_deferred_push_carries_the_context_of_the_code_that_pushed_it() {
         );
     }
 }
+
+// --- DRIVERS-072: a deferred unique push that fails before the driver ------
+
+/// Whether [`SerializationFailsJob`] refuses to serialize. A process-wide
+/// switch, flipped only by the `#[serial]` test below.
+static REFUSE_SERIALIZE: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Deserialize)]
+struct SerializationFailsJob {
+    key: String,
+}
+
+impl Serialize for SerializationFailsJob {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if REFUSE_SERIALIZE.load(Ordering::SeqCst) {
+            return Err(serde::ser::Error::custom("refused at commit"));
+        }
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            key: &'a str,
+        }
+        Wire { key: &self.key }.serialize(serializer)
+    }
+}
+
+#[async_trait]
+impl Job for SerializationFailsJob {
+    fn job_name() -> &'static str {
+        "drivers-072-serialization-fails"
+    }
+    fn after_commit() -> bool {
+        true
+    }
+    fn unique_id(&self) -> Option<String> {
+        Some(self.key.clone())
+    }
+    fn unique_for() -> Duration {
+        Duration::from_secs(3600)
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+/// The commit-time callback built the envelope with `?` before the block
+/// that releases the dedupe lease on failure. A job whose payload could not
+/// be encoded at the commit was never queued, yet its lease blocked every
+/// retry for the rest of `unique_for`.
+#[tokio::test]
+#[serial]
+async fn a_deferred_unique_push_that_cannot_build_its_envelope_releases_the_lease() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+
+    REFUSE_SERIALIZE.store(true, Ordering::SeqCst);
+    let committed = DB::transaction(|_| {
+        Box::pin(async {
+            assert!(
+                Queue::push_unique(SerializationFailsJob {
+                    key: "encode-at-commit".into()
+                })
+                .await?
+            );
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await;
+    REFUSE_SERIALIZE.store(false, Ordering::SeqCst);
+    let err = committed.expect_err("the deferred push failed at the commit");
+    assert!(err.to_string().contains("refused at commit"), "{err}");
+    assert_eq!(driver.count(), 0, "nothing reached the queue");
+
+    assert!(
+        Queue::push_unique(SerializationFailsJob {
+            key: "encode-at-commit".into()
+        })
+        .await
+        .expect("retry dispatch"),
+        "the failed deferred push kept its dedupe lease, so the retry was suppressed"
+    );
+    assert_eq!(driver.count(), 1);
+}

@@ -1,7 +1,7 @@
 //! [`CountryCode`] - ISO 3166-1 alpha-2 country code, validated on construction.
 
 use crate::payments::PaymentError;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// ISO 3166-1 alpha-2 country code - two uppercase ASCII letters.
 ///
@@ -10,10 +10,19 @@ use serde::{Deserialize, Serialize};
 ///
 /// # Wire format
 ///
-/// Serializes as a single string - "ZM", "US", "KE", etc.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Serializes as a single string - "ZM", "US", "KE", etc. Deserializing runs
+/// the same validation and uppercasing as [`CountryCode::new`], so routing
+/// code can compare a deserialized code with a constant.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct CountryCode(String);
+
+impl<'de> Deserialize<'de> for CountryCode {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::new(raw).map_err(serde::de::Error::custom)
+    }
+}
 
 impl CountryCode {
     /// Parse and validate an ISO 3166-1 alpha-2 country code.

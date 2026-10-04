@@ -658,6 +658,19 @@ impl Server {
             }
         }
 
+        // Drain the post-response hooks (`Terminable`) still running. The
+        // connections are drained above, so no response can start another
+        // batch behind this one. Bounded like the WebSocket drain: a hook
+        // that never returns is aborted after the deadline.
+        let abandoned_hooks =
+            crate::middleware::drain_terminations(std::time::Duration::from_secs(5)).await;
+        if abandoned_hooks > 0 {
+            tracing::warn!(
+                hooks_in_flight = abandoned_hooks,
+                "terminable drain deadline exceeded; aborted the remaining hooks"
+            );
+        }
+
         // Signal supervisors to exit cleanly, then drain their tasks.
         // This runs AFTER WS_TASKS so in-flight WebSocket connections get
         // their close frames before the process tears down background work.
@@ -778,7 +791,13 @@ async fn route_request(
     {
         crate::error::debug_page::note_route_pattern(ws_match.pattern());
         let live_metadata = router.live_route_metadata(&hyper::Method::GET, ws_match.pattern());
-        return handle_ws_upgrade(req, ws_match, middleware_registry, peer_ip, live_metadata).await;
+        let response =
+            handle_ws_upgrade(req, ws_match, middleware_registry, peer_ip, live_metadata).await;
+        // An upgrade answers its GET like any request does - with the 101,
+        // or with the status that refused it - so the terminables run for
+        // it too.
+        spawn_termination(method, path, response.status());
+        return response;
     }
 
     // Built-in health check endpoints under /_suprnova/health.
@@ -915,28 +934,32 @@ async fn route_request(
         response
     };
 
-    // Post-response termination: run every registered `Terminable`
-    // hook. Spawned on the background runtime so the client gets the
-    // response immediately and the slow work (session persistence,
-    // audit logging, metrics flush) runs without blocking the wire.
-    // The count check elides the spawn entirely when no hooks are
-    // registered, keeping the hot path zero-cost.
-    //
-    // The hooks belong to this request, so they carry its container scope:
-    // they resolve the scoped values the request resolved, and the scope
-    // ends when the last of them ends.
-    if crate::middleware::terminable_count() > 0 {
-        let snapshot = crate::middleware::TerminationSnapshot {
-            method: terminate_method.clone(),
-            path: terminate_path.clone(),
-            status: response.status().as_u16(),
-        };
-        tokio::spawn(App::in_current_scope(async move {
-            crate::middleware::dispatch_termination(snapshot).await;
-        }));
-    }
+    spawn_termination(terminate_method, terminate_path, response.status());
 
     response
+}
+
+/// Run every registered `Terminable` hook for a response on its way to the
+/// client.
+///
+/// Spawned on the background runtime so the client gets the response
+/// immediately and the slow work (session persistence, audit logging,
+/// metrics flush) runs without blocking the wire. The count check elides
+/// the spawn entirely when no hooks are registered, keeping the hot path
+/// zero-cost.
+///
+/// The hooks belong to this request, so they carry its container scope:
+/// they resolve the scoped values the request resolved, and the scope
+/// ends when the last of them ends.
+fn spawn_termination(method: hyper::Method, path: String, status: hyper::StatusCode) {
+    if crate::middleware::terminable_count() > 0 {
+        let snapshot = crate::middleware::TerminationSnapshot {
+            method,
+            path,
+            status: status.as_u16(),
+        };
+        crate::middleware::spawn_termination(snapshot);
+    }
 }
 
 /// Replace the body of an outgoing response with an empty `BoxBody`.
@@ -1408,7 +1431,7 @@ async fn handle_ws_upgrade(
     // abort the upgrade rather than re-panicking inside the per-connection
     // task - one poisoned upgrade must not cascade into the accept loop or
     // other in-flight connections.
-    let mut suprnova_req = {
+    let (mut suprnova_req, middleware_headers) = {
         let captured: Arc<Mutex<Option<Request>>> = Arc::new(Mutex::new(None));
         let captured_for_terminator = captured.clone();
 
@@ -1528,9 +1551,14 @@ async fn handle_ws_upgrade(
             return http_response.into_hyper();
         }
 
+        // The chain let the upgrade through. Its success response is not
+        // sent - the 101 below is - but the headers middleware put on it
+        // are, by `copy_middleware_headers_onto_handshake`.
+        let middleware_headers = http_response.into_hyper().into_parts().0.headers;
+
         match lock::lock(&captured, "ws upgrade terminator capture") {
             Ok(mut guard) => match guard.take() {
-                Some(req) => req,
+                Some(req) => (req, middleware_headers),
                 None => {
                     // Middleware chain returned 2xx without ever
                     // invoking `next(req)`. That's a programming bug
@@ -1575,6 +1603,8 @@ async fn handle_ws_upgrade(
     // moved into the session task below: the handler owns the request and
     // may drop it long before the socket closes.
     let connection_holds = suprnova_req.take_connection_holds();
+
+    copy_middleware_headers_onto_handshake(response.headers_mut(), &middleware_headers);
 
     // Echo X-Request-Id on the 101 handshake response so the upgrade GET
     // stays correlatable with logs, the same contract as the HTTP path.
@@ -1777,6 +1807,61 @@ async fn handle_ws_upgrade(
     }
 
     convert_response_body(response)
+}
+
+/// Copy the headers the middleware chain put on its success response
+/// onto the 101 that completes a WebSocket upgrade.
+///
+/// The chain runs against the upgrade GET like against any request, and
+/// its success response is what a session or cookie middleware decorates:
+/// a new or regenerated session's `Set-Cookie` goes there. The upgrade
+/// builds the 101 itself, so without this copy those headers never reach
+/// the client, and a session id is persisted that the browser never gets.
+///
+/// Every field is copied with all its values, so repeated `Set-Cookie`
+/// lines survive, except the ones [`handshake_owns_header`] names.
+fn copy_middleware_headers_onto_handshake(
+    handshake: &mut hyper::HeaderMap,
+    middleware: &hyper::HeaderMap,
+) {
+    for name in middleware.keys() {
+        if handshake_owns_header(name) {
+            continue;
+        }
+        handshake.remove(name);
+        for value in middleware.get_all(name) {
+            handshake.append(name.clone(), value.clone());
+        }
+    }
+}
+
+/// Whether the 101 of a WebSocket upgrade keeps its own value of `name`
+/// rather than the middleware's.
+///
+/// `Connection`, `Upgrade` and the `Sec-WebSocket-*` fields make the 101 a
+/// valid handshake; a middleware value would break it. The body framing
+/// and content fields describe the chain's placeholder body, and a 101
+/// has none. `Keep-Alive`, `Proxy-Connection`, `TE` and `Trailer` belong
+/// to the connection, not to the response.
+fn handshake_owns_header(name: &hyper::header::HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "upgrade"
+            | "sec-websocket-accept"
+            | "sec-websocket-protocol"
+            | "sec-websocket-extensions"
+            | "sec-websocket-key"
+            | "sec-websocket-version"
+            | "content-length"
+            | "content-type"
+            | "content-encoding"
+            | "transfer-encoding"
+            | "keep-alive"
+            | "proxy-connection"
+            | "te"
+            | "trailer"
+    )
 }
 
 /// A Live request that cannot be prepared ends as a closed 500. The visitor

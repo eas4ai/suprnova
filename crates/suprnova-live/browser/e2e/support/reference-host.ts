@@ -12,7 +12,9 @@ const REFERENCE_ORIGIN = "http://127.0.0.1:4175";
  * on its own uploads would refuse for every later test. This reset releases
  * the pause and disarms the faults the finished test left, cancels the
  * uploads it left unfinished, and then resets the creation window, so one
- * stalled request fails only its own test.
+ * stalled request fails only its own test. It also retires every async
+ * transport no page opened: a page that stopped between its authorization
+ * and its socket would otherwise refuse every later page's first generation.
  *
  * Polled, not posted once: the host answers 409 while an operation still
  * holds an upload, which ends on its own.

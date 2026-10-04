@@ -567,8 +567,9 @@ DB::transaction(|_tx| Box::pin(async move {
 })).await?;
 ```
 
-A plain SeaORM model uses the blanket `Persistable` impl, which inserts
-through `DB::connection()` and does not join an ambient transaction.
+A plain SeaORM model uses the blanket `Persistable` impl. It inserts on
+the ambient transaction too when one is open, and through
+`DB::connection()` otherwise.
 
 ## "After-creating" behaviour
 

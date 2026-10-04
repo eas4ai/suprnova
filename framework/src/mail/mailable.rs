@@ -146,8 +146,8 @@ pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
     }
 
     /// Render the subject. When `subject_template_source` returns `Some`,
-    /// Tera-renders that template with `self` as the context; otherwise
-    /// returns `subject()` unchanged. The dispatch path
+    /// Tera-renders that template with `self` as the context and trims the
+    /// result; otherwise returns `subject()` unchanged. The dispatch path
     /// (`MailBuilder::send`, the queue worker, the notification mail
     /// channel) calls this - so a Tera-templated subject in any of the
     /// supported surfaces renders correctly without each call site
@@ -156,7 +156,10 @@ pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
         let Some(src) = self.subject_template_source() else {
             return Ok(self.subject());
         };
-        render_with_self(self, &src, "subject")
+        // Trimmed: a template file usually ends with a newline, and a line
+        // break in a subject is refused on every transport because it would
+        // start a new header.
+        render_with_self(self, &src, "subject").map(|subject| subject.trim().to_string())
     }
 
     /// Render the HTML body. Default impl uses Tera with the mailable's

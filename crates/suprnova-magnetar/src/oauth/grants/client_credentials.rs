@@ -37,8 +37,8 @@ async fn prepare(
 ///
 /// # Errors
 ///
-/// Propagates provider/network failure classes from
-/// [`super::execute_token_request`].
+/// Propagates provider/network failure classes from the shared
+/// token-request helper, `execute_token_request`.
 pub async fn execute(
     provider: &dyn OAuthProvider,
     transport: &dyn HttpTransport,

@@ -454,3 +454,230 @@ async fn without_the_guard_a_tighter_limiter_binds_requests_it_should_ignore() {
          changed and the app wiring should be revisited"
     );
 }
+
+/// A query value the handler never reads must not choose the bucket for
+/// the body address the handler does read. Before the fix the query won,
+/// so each request with a fresh `?email=` decoy reached the victim's
+/// address under a fresh quota. A request whose query and body name two
+/// different addresses is ambiguous, and every such request shares one
+/// bucket, so varying the decoy buys nothing.
+#[tokio::test]
+async fn a_query_decoy_does_not_buy_a_fresh_bucket_for_the_body_address() {
+    let mw = RateLimitMiddleware::new(limiter(), one_per_window(), |req| {
+        identity_key(req, "email", "issuance")
+    })
+    .key_reads_body(4096)
+    .only_when(|req| suprnova::rate_limit::names_identity(req, "email"));
+
+    let addr = spawn_server(echo_router(mw), 6).await;
+
+    let (first, echoed) = post_form(
+        addr,
+        "/issue?email=decoy-1@example.com",
+        "email=victim@example.com",
+    )
+    .await;
+    let (second, _) = post_form(
+        addr,
+        "/issue?email=decoy-2@example.com",
+        "email=victim@example.com",
+    )
+    .await;
+    // The reverse shape, for a handler that reads the query instead.
+    let (reversed, _) = post_form(
+        addr,
+        "/issue?email=victim@example.com",
+        "email=decoy-3@example.com",
+    )
+    .await;
+
+    assert_eq!(first, 200);
+    assert_eq!(echoed, "email=victim@example.com");
+    assert_eq!(
+        second, 429,
+        "a new query decoy must not open a fresh bucket for the same body address"
+    );
+    assert_eq!(
+        reversed, 429,
+        "a body decoy must not open a fresh bucket for a query address either"
+    );
+}
+
+/// `?email=` names nobody, so it must not hide the address in the body.
+/// Before the fix the blank query value suppressed the body lookup, the
+/// identity read as absent, and `only_when(names_identity)` skipped the
+/// limiter for every such request.
+#[tokio::test]
+async fn a_blank_query_value_does_not_hide_the_body_address() {
+    let mw = RateLimitMiddleware::new(limiter(), one_per_window(), |req| {
+        identity_key(req, "email", "issuance")
+    })
+    .key_reads_body(4096)
+    .only_when(|req| suprnova::rate_limit::names_identity(req, "email"));
+
+    let addr = spawn_server(echo_router(mw), 6).await;
+
+    let (first, _) = post_form(addr, "/issue?email=", "email=victim@example.com").await;
+    let (second, _) = post_form(addr, "/issue?email=", "email=victim@example.com").await;
+    let (plain, _) = post_form(addr, "/issue", "email=victim@example.com").await;
+
+    assert_eq!(first, 200);
+    assert_eq!(
+        second, 429,
+        "a blank query value must not make the limiter stand aside"
+    );
+    assert_eq!(
+        plain, 429,
+        "the request was keyed on the body address, so the address's own bucket is spent"
+    );
+}
+
+/// The same address in the query and the body is one identity, not an
+/// ambiguous request: it shares the address's bucket.
+#[tokio::test]
+async fn the_same_address_in_query_and_body_is_one_identity() {
+    let mw = RateLimitMiddleware::new(limiter(), one_per_window(), |req| {
+        identity_key(req, "email", "issuance")
+    })
+    .key_reads_body(4096);
+
+    let addr = spawn_server(echo_router(mw), 6).await;
+
+    let (both, _) = post_form(
+        addr,
+        "/issue?email=Victim@Example.com",
+        "email=victim@example.com",
+    )
+    .await;
+    let (plain, _) = post_form(addr, "/issue", "email=victim@example.com").await;
+
+    assert_eq!(both, 200);
+    assert_eq!(
+        plain, 429,
+        "both requests name one address, so they share its bucket"
+    );
+}
+
+/// Media types are case-insensitive (RFC 9110 8.3.1), and the handler's
+/// `FormRequest` parses `Application/X-WWW-Form-Urlencoded` as a form. The
+/// limiter must read the same body, or `only_when(names_identity)` skips
+/// the per-address quota while the handler acts on the address.
+#[tokio::test]
+async fn a_mixed_case_form_media_type_is_still_read_for_the_identity() {
+    let mw = RateLimitMiddleware::new(limiter(), one_per_window(), |req| {
+        identity_key(req, "email", "issuance")
+    })
+    .key_reads_body(4096)
+    .only_when(|req| suprnova::rate_limit::names_identity(req, "email"));
+
+    let addr = spawn_server(echo_router(mw), 6).await;
+
+    let content_type = "Application/X-WWW-Form-Urlencoded; charset=UTF-8";
+    let (first, _) = post_with_type(addr, "/issue", "email=victim@example.com", content_type).await;
+    let (second, _) =
+        post_with_type(addr, "/issue", "email=victim@example.com", content_type).await;
+
+    assert_eq!(first, 200);
+    assert_eq!(
+        second, 429,
+        "the address in a mixed-case form body must be keyed, not skipped"
+    );
+}
+
+/// A JSON login names its address in the body as well. Unless the key
+/// reads it, a JSON route is keyed on the caller's IP, and
+/// `only_when(names_identity)` stands the per-address limit aside.
+#[tokio::test]
+async fn a_json_body_names_the_identity_too() {
+    let mw = RateLimitMiddleware::new(limiter(), one_per_window(), |req| {
+        identity_key(req, "email", "issuance")
+    })
+    .key_reads_body(4096)
+    .only_when(|req| suprnova::rate_limit::names_identity(req, "email"));
+
+    let addr = spawn_server(echo_router(mw), 6).await;
+
+    let body = r#"{"email":"victim@example.com","password":"x"}"#;
+    let (first, echoed) = post_with_type(addr, "/issue", body, "application/json").await;
+    let (second, _) = post_with_type(
+        addr,
+        "/issue",
+        r#"{"email":" Victim@Example.com "}"#,
+        "Application/JSON; charset=utf-8",
+    )
+    .await;
+    let (form, _) = post_form(addr, "/issue", "email=victim@example.com").await;
+
+    assert_eq!(first, 200);
+    assert_eq!(echoed, body, "the handler still reads the JSON it was sent");
+    assert_eq!(
+        second, 429,
+        "the same address in a JSON body must share its bucket"
+    );
+    assert_eq!(
+        form, 429,
+        "the JSON and the form spelling of one address are one identity"
+    );
+}
+
+/// The IDENTITY-012 rule holds for a JSON body: a query decoy beside a
+/// JSON address is ambiguous, and every ambiguous request shares one
+/// bucket, so a fresh decoy per request buys nothing.
+#[tokio::test]
+async fn a_query_decoy_does_not_buy_a_fresh_bucket_for_a_json_body_address() {
+    let mw = RateLimitMiddleware::new(limiter(), one_per_window(), |req| {
+        identity_key(req, "email", "issuance")
+    })
+    .key_reads_body(4096);
+
+    let addr = spawn_server(echo_router(mw), 6).await;
+
+    let body = r#"{"email":"victim@example.com"}"#;
+    let (first, _) = post_with_type(
+        addr,
+        "/issue?email=decoy-1@example.com",
+        body,
+        "application/json",
+    )
+    .await;
+    let (second, _) = post_with_type(
+        addr,
+        "/issue?email=decoy-2@example.com",
+        body,
+        "application/json",
+    )
+    .await;
+
+    assert_eq!(first, 200);
+    assert_eq!(
+        second, 429,
+        "a new query decoy must not open a fresh bucket for a JSON body address"
+    );
+}
+
+/// Only a top-level string names an identity. A JSON body whose field is
+/// a number, an array or nested names nobody, so it falls back like a
+/// request without the field.
+#[tokio::test]
+async fn a_json_field_that_is_no_string_names_nobody() {
+    let mw = RateLimitMiddleware::new(limiter(), one_per_window(), |req| {
+        identity_key(req, "email", "issuance")
+    })
+    .key_reads_body(4096)
+    .only_when(|req| suprnova::rate_limit::names_identity(req, "email"));
+
+    let addr = spawn_server(echo_router(mw), 8).await;
+
+    for body in [
+        r#"{"email":["victim@example.com"]}"#,
+        r#"{"email":42}"#,
+        r#"{"user":{"email":"victim@example.com"}}"#,
+        r#"["victim@example.com"]"#,
+    ] {
+        let (status, _) = post_with_type(addr, "/issue", body, "application/json").await;
+        assert_eq!(
+            status, 200,
+            "{body} names nobody, so the limiter stands aside"
+        );
+    }
+}

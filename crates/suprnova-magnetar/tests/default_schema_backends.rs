@@ -567,6 +567,60 @@ async fn sqlite_remember_owner_selector_contract() {
     verify_remember_owner_selector_contract(&database).await;
 }
 
+/// IDENTITY-037: the default schema holds one account per email address.
+/// A second account for an address is refused by the store. A table that
+/// already holds two accounts for one address stops the migration with a
+/// message that names no address, and the migration indexes the table once
+/// the operator removes the duplicate.
+#[cfg(feature = "seaorm-sqlite")]
+#[tokio::test]
+async fn sqlite_default_schema_holds_one_account_per_email() {
+    let database = Database::connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory SQLite");
+    magnetar::default_schema::migrate(&database)
+        .await
+        .expect("create default auth tables");
+    let account = |id: i64| magnetar::default_schema::users::ActiveModel {
+        id: Set(id),
+        email: Set("twin@example.test".to_owned()),
+        auth_epoch: Set(0),
+        ..Default::default()
+    };
+    account(1).insert(&database).await.expect("first account");
+    assert!(
+        account(2).insert(&database).await.is_err(),
+        "a second account for one email address is refused"
+    );
+
+    database
+        .execute_unprepared("DROP INDEX app_users_email_unique")
+        .await
+        .expect("drop the index, as a schema from before it existed");
+    account(2)
+        .insert(&database)
+        .await
+        .expect("a duplicate account");
+    let error = magnetar::default_schema::migrate(&database)
+        .await
+        .expect_err("the migration cannot index duplicate accounts")
+        .to_string();
+    assert!(error.contains("more than one account"), "got: {error}");
+    assert!(
+        !error.contains("twin@example.test"),
+        "names no address: {error}"
+    );
+
+    magnetar::default_schema::users::Entity::delete_by_id(2)
+        .exec(&database)
+        .await
+        .expect("the operator removes the duplicate");
+    magnetar::default_schema::migrate(&database)
+        .await
+        .expect("the migration indexes the table");
+    assert!(account(3).insert(&database).await.is_err());
+}
+
 #[cfg(feature = "seaorm-sqlite")]
 #[tokio::test]
 async fn sqlite_nocase_remember_owner_selector_contract() {

@@ -120,15 +120,16 @@ impl Number {
             Err(TryGetError::Null(name)) => return Err(TryGetError::Null(name)),
             Err(TryGetError::DbErr(_)) => {}
         }
-        // Postgres reads each integer width as its own type only: the
-        // minimum of an `integer` column is an `int4`.
+        if let Ok(n) = <u64 as TryGetable>::try_get_by(row, column) {
+            return Ok(Self::Integer(n.into()));
+        }
+        // Postgres answers `integer` for the MIN and MAX of an `INTEGER`
+        // column and `smallint` for those of a `SMALLINT` one, and its
+        // driver decodes neither as an `i64`.
         if let Ok(n) = <i32 as TryGetable>::try_get_by(row, column) {
             return Ok(Self::Integer(n.into()));
         }
         if let Ok(n) = <i16 as TryGetable>::try_get_by(row, column) {
-            return Ok(Self::Integer(n.into()));
-        }
-        if let Ok(n) = <u64 as TryGetable>::try_get_by(row, column) {
             return Ok(Self::Integer(n.into()));
         }
         if let Ok(n) = <f64 as TryGetable>::try_get_by(row, column) {

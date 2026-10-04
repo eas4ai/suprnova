@@ -709,6 +709,9 @@ impl AsyncState {
     }
 
     /// Issues one new signed subscription for a validated mount context.
+    ///
+    /// `principal` is the route's principal the request was authorized for
+    /// (see `ports::route_principal`); every delivery re-authorizes it.
     #[allow(
         clippy::too_many_arguments,
         reason = "issuance keeps every independently trusted authority input explicit"
@@ -723,6 +726,7 @@ impl AsyncState {
         origin: VerifiedOrigin,
         baseline: StreamPosition,
         session_id: Option<String>,
+        principal: String,
     ) -> Result<IssuedView, AsyncErrorKind> {
         let now = self.now()?;
         let expires_at = UnixMillis::new(now.get().saturating_add(SUBSCRIPTION_LIFETIME_MS));
@@ -907,7 +911,7 @@ impl AsyncState {
                 binding_text,
                 previous_binding: None,
                 authorized: Arc::new(authorized),
-                principal: crate::auth::guard::Auth::id(),
+                principal: Some(principal),
                 session: context.host_scope_facts().session().cloned(),
                 session_id: session_id
                     .filter(|candidate| crate::session::is_valid_session_id(candidate)),
@@ -975,6 +979,16 @@ impl AsyncState {
                 if position.0 != log.epoch() || position.1 > log.head() {
                     return Err(AsyncErrorKind::PositionInvalid);
                 }
+                // ROOT-37: a position whose tail the log already evicted
+                // cannot be resumed from. Only the events themselves prove
+                // what the browser missed, so the renewal is refused before
+                // any authority rotates, rather than answered with an
+                // authoritative no-tail proof at the browser's own position.
+                // The browser then degrades the membership, so the island
+                // never claims to be current on that position (spec 14).
+                if log.tail_after(position.0, position.1).is_none() {
+                    return Err(AsyncErrorKind::PositionInvalid);
+                }
             }
             self.prune(&mut tables, now);
             let record = tables
@@ -1025,7 +1039,9 @@ impl AsyncState {
             match encoded_tail(&log, position.0, position.1) {
                 Some(tail) if tail.is_empty() => (Vec::new(), "authoritative_no_tail"),
                 Some(tail) => (tail, "complete_replay"),
-                None => (Vec::new(), "authoritative_no_tail"),
+                // Evicted (or no longer encodable) since the check above: the
+                // same refusal, for the same reason (ROOT-37).
+                None => return Err(AsyncErrorKind::PositionInvalid),
             }
         };
         let mut guard = self.tables();

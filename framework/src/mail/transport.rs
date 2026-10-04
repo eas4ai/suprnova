@@ -161,6 +161,13 @@ fn has_email(list: &[Address], email: &str) -> bool {
 
 /// Outgoing-mail backend (SMTP, Postmark, SendGrid, SES, …). Every
 /// configured transport receives a fully-rendered [`OutgoingMessage`].
+///
+/// Through the `Mail` facade, the queue worker, and the notification mail
+/// channel, the message has already passed
+/// [`check_message`](crate::mail::wire::check_message) and its addresses are
+/// in wire form. An implementation should still build recipient text with
+/// [`mail::wire`](crate::mail::wire), never with `Address`'s `Display`, which
+/// does not quote the display name.
 #[async_trait]
 pub trait MailTransport: Send + Sync {
     /// Deliver `msg` through this transport. Returns `Ok(())` only when
@@ -188,7 +195,11 @@ pub trait MailTransport: Send + Sync {
 /// queue worker in [`SendMailJob`](crate::mail::SendMailJob), and the
 /// notification [`MailChannel`](crate::notifications::channels::mail::MailChannel).
 /// Routing every dispatch through one entrypoint guarantees one span
-/// schema regardless of how the message was produced.
+/// schema regardless of how the message was produced. Those framework
+/// paths reach it through one crate-internal wrapper that also fires
+/// [`MessageSending`](crate::mail::MessageSending) and
+/// [`MessageSent`](crate::mail::MessageSent); this function emits the span
+/// only.
 ///
 /// Fields are kept deliberately minimal (the message *shape*, not its
 /// content).

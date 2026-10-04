@@ -13,7 +13,10 @@
 //! [`slot_scope`] runs an identity-bound island's mount in the **slot**
 //! bucket, whose reads are counted into [`CollectorReport::slot_reads`]
 //! and recorded nowhere else, because those islands are re-rendered on
-//! every hit.
+//! every hit. The slot belongs to the mount's future, not to the task: a
+//! sibling future joined beside a pending mount (`tokio::join!` runs both
+//! on one task) still reads into the gate or content bucket, because its
+//! reads build the shell.
 //!
 //! Only a [`crate::render_cache::RepresentationClass::PublicShellStitched`]
 //! route classifies from the content bucket alone. Three things together
@@ -43,13 +46,15 @@
 //!
 //! # Limitations, by design
 //!
-//! - **Config and Feature identities have no automatic producer.** No
-//!   framework read observes a config or feature generation and no write
-//!   path advances one, so observing them would spend the bounded
-//!   observation budget while contributing nothing to invalidation - the
-//!   same reasoning as ruling R24 on query classes. `Config::get::<T>()` is
-//!   also type-keyed rather than name-keyed, so there is no stable name to
-//!   build an identity from at that seam. The one reserved exception is
+//! - **Config identities have no automatic producer.** No framework read
+//!   observes a config generation and no write path advances one, so
+//!   observing them would spend the bounded observation budget while
+//!   contributing nothing to invalidation - the same reasoning as ruling R24
+//!   on query classes. `Config::get::<T>()` is also type-keyed rather than
+//!   name-keyed, so there is no stable name to build an identity from at
+//!   that seam. Feature identities do have a producer: the framework's flag
+//!   evaluators observe one per read ([`observe_feature_read`]) and its flag
+//!   writes advance it. The one reserved config exception is
 //!   [`permission_version_identity`], a `Config` identity this crate itself
 //!   both observes (for every render whose key carries a resolved
 //!   `Principal`) and advances
@@ -229,6 +234,10 @@ pub struct CollectedContext {
 /// Which bucket a read lands in. A scope starts in `Gate`; the Live
 /// completion middleware (the last middleware before the handler)
 /// switches it to `Content`; an identity-bound mount runs in `Slot`.
+///
+/// `State::attribution` only ever holds `Gate` or `Content`. `Slot` is
+/// decided per read by the `IN_SLOT` task-local, which is set only while
+/// the mount's own future is being polled; see [`slot_scope`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum Attribution {
     #[default]
@@ -355,7 +364,10 @@ impl CollectorReport {
 struct State {
     report: CollectorReport,
     seen: std::collections::BTreeSet<DependencyIdentity>,
-    /// Which bucket the next read lands in; see the module documentation.
+    /// Which of the gate and content buckets the next read outside a slot
+    /// lands in; see the module documentation. Never `Slot`: whether a read
+    /// is inside a slot is a property of the future making it, which
+    /// `IN_SLOT` answers, not of the task this state is shared across.
     attribution: Attribution,
     /// The gate bucket's own deduplication set, kept separate from `seen`
     /// so a table read by both the gate and the handler is recorded once
@@ -384,6 +396,18 @@ tokio::task_local! {
     static COLLECTOR: Collector;
 }
 
+tokio::task_local! {
+    /// Set while an identity-bound mount's future is being polled, and only
+    /// then. Tokio sets a task-local for the duration of each poll of the
+    /// future it scopes, so a sibling future that `tokio::join!` polls on
+    /// the same task between two polls of the mount does not see it. One
+    /// shared field on `State` could not tell the two apart: it stayed
+    /// `Slot` across the mount's whole await, and every read the sibling
+    /// made in that window - a principal, a session value, a table - was
+    /// dropped from the shell's report (DATA-027).
+    static IN_SLOT: ();
+}
+
 impl Collector {
     /// Runs `future` with a fresh collector; the report is readable inside via
     /// [`current_report`] and dropped with the scope.
@@ -398,12 +422,23 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
         .ok()
 }
 
+/// The bucket a read made right now lands in: the slot while the current
+/// future runs inside [`slot_scope`], and otherwise whichever of gate and
+/// content the scope is in.
+fn bucket(state: &State) -> Attribution {
+    if IN_SLOT.try_with(|()| ()).is_ok() {
+        Attribution::Slot
+    } else {
+        state.attribution
+    }
+}
+
 /// Runs `f` against the context of whichever bucket the current
 /// attribution selects, or counts a slot read and does nothing when the
 /// request is inside an identity-bound mount. `None` outside a scope, and
 /// `None` for a slot read, which has no context to hand back.
 fn with_context<R>(f: impl FnOnce(&mut CollectedContext) -> R) -> Option<R> {
-    with_state(|state| match state.attribution {
+    with_state(|state| match bucket(state) {
         Attribution::Gate => Some(f(&mut state.report.gate.context)),
         Attribution::Content => Some(f(&mut state.report.context)),
         Attribution::Slot => {
@@ -434,21 +469,25 @@ pub fn begin_handler() {
     });
 }
 
-/// Runs `future` with reads attributed to an identity-bound island slot.
-/// Restores the previous attribution afterwards, including on an early
-/// return, a panic, or the future being dropped part-way.
+/// Runs `future` with its own reads attributed to an identity-bound island
+/// slot.
+///
+/// The slot is scoped to `future` itself, not to the task running it.
+/// Tokio sets the `IN_SLOT` task-local only while `future` is being polled,
+/// so it ends with the future however the future ends - completion, an
+/// early return, a panic, or being dropped part-way - and a sibling future
+/// polled on the same task while this one is pending is never in the slot.
+/// That sibling is building the shell: its principal, session, and table
+/// reads are what the shell's classification and invalidation depend on.
 ///
 /// Nested calls stay in the slot bucket rather than being rejected: the
-/// inner scope's "previous" attribution is `Slot` itself, so a mount that
-/// nests another mount keeps counting reads the same way and the
-/// outermost scope restores gate or content exactly once. A slot read is
-/// recorded nowhere, so nesting cannot leak one into a recorded bucket.
+/// inner scope sets the same marker the outer one already set, so a mount
+/// that nests another mount keeps counting reads the same way. A slot read
+/// is recorded nowhere, so nesting cannot leak one into a recorded bucket.
 ///
-/// A scope that found the gate bucket restores the *content* bucket when
-/// [`begin_handler`] ran while it was open: the handler boundary was
-/// genuinely crossed inside the slot, so restoring gate would record the
-/// handler's own later reads as gate reads it never made, moving them to
-/// the wrong side of the boundary a stitched route classifies from.
+/// [`begin_handler`] called inside a slot moves the scope from gate to
+/// content at once: the handler boundary was genuinely crossed, so the
+/// reads that follow the slot are the handler's own and land in content.
 ///
 /// Framework-internal, and `pub` only because the framework's own
 /// integration tests drive it: calling it from application code suppresses
@@ -457,24 +496,7 @@ pub fn begin_handler() {
 /// less than it actually read.
 #[doc(hidden)]
 pub async fn slot_scope<F: std::future::Future>(future: F) -> F::Output {
-    struct Restore(Option<Attribution>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            if let Some(previous) = self.0 {
-                with_state(|state| {
-                    state.attribution =
-                        if previous == Attribution::Gate && state.report.handler_began {
-                            Attribution::Content
-                        } else {
-                            previous
-                        };
-                });
-            }
-        }
-    }
-    let previous = with_state(|state| std::mem::replace(&mut state.attribution, Attribution::Slot));
-    let _restore = Restore(previous);
-    future.await
+    IN_SLOT.scope((), future).await
 }
 
 /// Whether a collector is active on this task.
@@ -511,7 +533,7 @@ pub fn is_active() -> bool {
 /// produced them is the one that failed
 /// (`render_cache::live::a_failed_identity_bound_mount_publishes_a_shell_with_no_island_bytes`).
 fn mark_incomplete() {
-    with_state(|state| match state.attribution {
+    with_state(|state| match bucket(state) {
         Attribution::Slot => state.report.slot_reads += 1,
         Attribution::Gate | Attribution::Content => state.report.context.overflowed = true,
     });
@@ -528,7 +550,7 @@ fn mark_incomplete() {
 /// count of *distinct* identities, since that is what the fold produces:
 /// see the private `State::distinct` field's own comment.
 pub fn observe(identity: DependencyIdentity) {
-    with_state(|state| match state.attribution {
+    with_state(|state| match bucket(state) {
         Attribution::Slot => state.report.slot_reads += 1,
         Attribution::Gate => {
             if state.seen_gate.contains(&identity) {
@@ -671,15 +693,15 @@ pub fn observe_record_read_json(table: &str, key: &serde_json::Value) {
     }
 }
 
-/// A read of one feature flag whose rules the snapshot holds, at any scope
-/// key including the global default.
+/// A read of one feature flag through the framework's evaluators.
 ///
 /// Records a [`DependencyIdentity::Feature`], so a change to any of the
 /// flag's rules invalidates the entry through the coherence path the same
-/// way a table write does. A flag the snapshot holds at no scope key
-/// records nothing: that render depended on the caller's compiled default,
-/// not on stored state, and a generation for it would be a row nothing ever
-/// writes. See [`observe_table_read`] for the bound-failure behaviour.
+/// way a table write does. A flag the snapshot holds at no scope key is
+/// recorded too: that render used the caller's compiled default, and the
+/// first rule stored for the flag changes the answer and advances exactly
+/// this generation. See [`observe_table_read`] for the bound-failure
+/// behaviour.
 pub fn observe_feature_read(feature: &str) {
     if !is_active() {
         return;

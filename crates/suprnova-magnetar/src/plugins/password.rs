@@ -26,7 +26,10 @@ use crate::plugin::{
 };
 use crate::schema::AuthSchema;
 use crate::sessions::RememberFacade;
-use crate::storage::{CredentialActor, MethodStore, NewUser, UserRecord, UserStore};
+use crate::storage::{
+    CredentialActor, MethodStore, NewUser, SignUpAccount, UserRecord, UserStore,
+    create_or_find_existing,
+};
 use crate::{Error, Result};
 
 use super::{Gate, acquire, bad_request, body_string, generic_ok, request_metadata, unavailable};
@@ -155,7 +158,8 @@ impl PasswordAuthService {
         // bcrypt-format and one Argon2-format driver call.
         let verdict = self
             .verifier
-            .verify_attempt(stored_hash.as_deref(), password)?;
+            .verify_attempt_blocking(stored_hash, password.clone())
+            .await?;
         Ok((user, verdict))
     }
 }
@@ -184,7 +188,7 @@ impl PasswordAuthProvider for PasswordAuthService {
                 message: "must not be empty".to_owned(),
             });
         }
-        let hash = self.verifier.mint_target(&input.password)?;
+        let hash = self.verifier.mint_target_blocking(input.password).await?;
         if let Some(existing) = self.users.find_by_email(&email).await? {
             // Anti-enumeration and takeover protection: the equal-cost target
             // hash is discarded; the stored password is never touched.
@@ -192,16 +196,24 @@ impl PasswordAuthProvider for PasswordAuthService {
                 user_id: existing.user_id,
             });
         }
-        let created = self
-            .users
-            .create_user(NewUser {
+        // A concurrent registration that created the account between the
+        // lookup above and this insert answers as any known address does.
+        let account = create_or_find_existing(
+            self.users.as_ref(),
+            NewUser {
                 email: email.clone(),
                 password_hash: Some(hash),
-            })
-            .await?;
-        Ok(RegistrationOutcome::Created {
-            user_id: created.user_id,
-            email,
+            },
+        )
+        .await?;
+        Ok(match account {
+            SignUpAccount::Created(created) => RegistrationOutcome::Created {
+                user_id: created.user_id,
+                email,
+            },
+            SignUpAccount::Existing(existing) => RegistrationOutcome::Existing {
+                user_id: existing.user_id,
+            },
         })
     }
 
@@ -220,7 +232,8 @@ impl PasswordAuthProvider for PasswordAuthService {
         let user = self.users.find_by_email(&email).await?;
         let stored_hash = user.as_ref().and_then(|user| user.password_hash.clone());
         self.verifier
-            .verify_work_only(stored_hash.as_deref(), password)
+            .verify_work_only_blocking(stored_hash, password.clone())
+            .await
     }
 
     async fn authenticate_with_outcome(
@@ -281,17 +294,21 @@ impl PasswordAuthProvider for PasswordAuthService {
     ) -> Result<()> {
         validate_password(new_password.expose_secret())?;
         let Some(user) = self.users.find_by_id(user_id).await? else {
-            let _ = self.verifier.verify_attempt(None, &current_password)?;
+            let _ = self
+                .verifier
+                .verify_attempt_blocking(None, current_password)
+                .await?;
             return Err(invalid_credentials());
         };
         let verdict = self
             .verifier
-            .verify_attempt(user.password_hash.as_deref(), &current_password)?;
+            .verify_attempt_blocking(user.password_hash.clone(), current_password)
+            .await?;
         if !verdict.valid {
             return Err(invalid_credentials());
         }
         let actor = CredentialActor::verified_primary(&user.user_id, user.auth_epoch);
-        let hash = self.verifier.mint_target(&new_password)?;
+        let hash = self.verifier.mint_target_blocking(new_password).await?;
         self.users.set_password_hash(&actor, &hash).await
     }
 
@@ -301,7 +318,7 @@ impl PasswordAuthProvider for PasswordAuthService {
         new_password: SecretString,
     ) -> Result<()> {
         validate_password(new_password.expose_secret())?;
-        let hash = self.verifier.mint_target(&new_password)?;
+        let hash = self.verifier.mint_target_blocking(new_password).await?;
         self.users.set_password_hash(actor, &hash).await
     }
 

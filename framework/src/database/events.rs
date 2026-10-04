@@ -111,42 +111,74 @@ impl QueryExecuted {
     /// log messages - escaping is debug-format (`{:?}`), NOT SQL-safe.
     /// Mirrors Laravel's `QueryExecuted::toRawSql()` shape.
     ///
-    /// Placeholders are substituted left-to-right by lexical
-    /// `?`-occurrence (MySQL / SQLite) or `$N` numeric indices
-    /// (Postgres). When the binding count mismatches, the original SQL
-    /// is returned unchanged.
+    /// Placeholders are substituted in one left-to-right pass: `$N`
+    /// numeric indices (Postgres) when the SQL holds one, `?` occurrences
+    /// (MySQL / SQLite) otherwise. A substituted value is never scanned
+    /// again, so a binding that itself reads `$1` stays as it is. When
+    /// the bindings do not match the placeholders - one is missing, or one
+    /// is left over - the original SQL is returned unchanged.
     pub fn to_raw_sql(&self) -> String {
-        if self.sql.contains('$') {
-            // Postgres: $1, $2, ...
-            //
-            // Iterate highest-index-first so longer placeholder needles
-            // are substituted before their prefixes. Otherwise replacing
-            // `$1` first globally corrupts `$10`, `$11`, ... - turning
-            // `WHERE id = $10` into `<value-of-$1>0`.
-            let mut rendered = self.sql.clone();
-            for (i, b) in self.bindings.iter().enumerate().rev() {
-                let needle = format!("${}", i + 1);
-                rendered = rendered.replace(&needle, b);
-            }
-            rendered
+        let rendered = if has_numbered_placeholder(&self.sql) {
+            self.render_numbered()
         } else {
-            // ? placeholders
-            let mut out = String::with_capacity(self.sql.len());
-            let mut iter = self.bindings.iter();
-            for c in self.sql.chars() {
-                if c == '?' {
-                    if let Some(b) = iter.next() {
-                        out.push_str(b);
-                    } else {
-                        out.push('?');
-                    }
-                } else {
-                    out.push(c);
-                }
-            }
-            out
-        }
+            self.render_positional()
+        };
+        rendered.unwrap_or_else(|| self.sql.clone())
     }
+
+    /// `$N` substitution, or `None` when a placeholder names no binding
+    /// or a binding is named by no placeholder. A placeholder may repeat:
+    /// each occurrence takes its binding.
+    fn render_numbered(&self) -> Option<String> {
+        let sql = self.sql.as_str();
+        let mut out = String::with_capacity(sql.len());
+        let mut named = vec![false; self.bindings.len()];
+        let mut rest = sql;
+        while let Some(at) = rest.find('$') {
+            out.push_str(&rest[..at]);
+            let after = &rest[at + 1..];
+            let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+            if digits == 0 {
+                out.push('$');
+                rest = after;
+                continue;
+            }
+            let index: usize = after[..digits].parse().ok()?;
+            let slot = index.checked_sub(1)?;
+            out.push_str(self.bindings.get(slot)?);
+            named[slot] = true;
+            rest = &after[digits..];
+        }
+        out.push_str(rest);
+        named.iter().all(|seen| *seen).then_some(out)
+    }
+
+    /// `?` substitution, or `None` when the count of `?` and of bindings
+    /// differ.
+    fn render_positional(&self) -> Option<String> {
+        let placeholders = self.sql.matches('?').count();
+        if placeholders != self.bindings.len() {
+            return None;
+        }
+        let mut out = String::with_capacity(self.sql.len());
+        let mut bindings = self.bindings.iter();
+        for c in self.sql.chars() {
+            if c == '?' {
+                out.push_str(bindings.next()?);
+            } else {
+                out.push(c);
+            }
+        }
+        Some(out)
+    }
+}
+
+/// Whether `sql` holds a Postgres `$N` placeholder: a `$` followed by a
+/// digit. A `$` alone, as in a dollar-quoted string, does not count.
+fn has_numbered_placeholder(sql: &str) -> bool {
+    sql.as_bytes()
+        .windows(2)
+        .any(|pair| pair[0] == b'$' && pair[1].is_ascii_digit())
 }
 
 impl Event for QueryExecuted {
@@ -454,6 +486,62 @@ mod tests {
             q.to_raw_sql(),
             "SELECT b11, b1, b10, b2 FROM t WHERE a = b3 AND b = b4 AND c = b5 \
              AND d = b6 AND e = b7 AND f = b8 AND g = b9"
+        );
+    }
+
+    fn executed(sql: &str, bindings: &[&str]) -> QueryExecuted {
+        QueryExecuted {
+            sql: sql.into(),
+            bindings: bindings.iter().map(|b| (*b).to_string()).collect(),
+            time: Duration::from_millis(1),
+            connection_name: "__primary__".into(),
+            read_write_type: Some(ReadWriteType::Read),
+            result: Ok(()),
+        }
+    }
+
+    // DATA-002: a binding count that does not match the placeholders
+    // returns the SQL unchanged, as the method promises, rather than a
+    // half-substituted statement.
+    #[test]
+    fn to_raw_sql_returns_sql_unchanged_when_a_question_mark_binding_is_missing() {
+        assert_eq!(
+            executed("SELECT ? + ?", &["7"]).to_raw_sql(),
+            "SELECT ? + ?"
+        );
+    }
+
+    #[test]
+    fn to_raw_sql_returns_sql_unchanged_when_bindings_are_left_over() {
+        assert_eq!(
+            executed("SELECT * FROM t WHERE id = ?", &["1", "2"]).to_raw_sql(),
+            "SELECT * FROM t WHERE id = ?"
+        );
+    }
+
+    #[test]
+    fn to_raw_sql_returns_postgres_sql_unchanged_when_a_binding_is_missing() {
+        assert_eq!(
+            executed("SELECT $1 + $2", &["7"]).to_raw_sql(),
+            "SELECT $1 + $2"
+        );
+        assert_eq!(
+            executed("SELECT $1", &["7", "8"]).to_raw_sql(),
+            "SELECT $1",
+            "a binding no placeholder names is a mismatch too"
+        );
+    }
+
+    #[test]
+    fn to_raw_sql_postgres_leaves_placeholders_inside_substituted_values_alone() {
+        assert_eq!(
+            executed("SELECT $1, $2", &["a", "'$1'"]).to_raw_sql(),
+            "SELECT a, '$1'"
+        );
+        assert_eq!(
+            executed("SELECT $1, $1", &["x"]).to_raw_sql(),
+            "SELECT x, x",
+            "a placeholder used twice takes its binding twice"
         );
     }
 }

@@ -256,6 +256,9 @@ cargo run --bin console -- db:seed UsersSeeder
 ```
 
 All three look the seeder up in the registry by exact name and run it.
+A name the registry doesn't hold fails with
+``no seeder registered for `<Name>` `` and a non-zero exit, including on
+an empty registry.
 
 A targeted run reports its progress:
 

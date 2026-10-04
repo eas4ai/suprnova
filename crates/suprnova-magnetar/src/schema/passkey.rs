@@ -14,6 +14,15 @@ pub trait PasskeyFields: EntityBinding {
     fn read_passkey_id(model: &Self::Model) -> String;
     /// Return the generated passkey identifier column.
     fn passkey_id_column() -> Self::Column;
+    /// Convert an opaque passkey identifier into the binding's database
+    /// value, for the statements that name one row by its id.
+    ///
+    /// The default binds text. A binding with an integer key must override
+    /// it: PostgreSQL has no implicit text-to-integer cast, so a text value
+    /// compared with an integer column fails the whole statement.
+    fn passkey_id_value(value: &str) -> sea_orm::Value {
+        value.to_owned().into()
+    }
     /// Set the passkey row identifier on a new row.
     fn write_passkey_id(model: &mut Self::ActiveModel, value: &str);
     /// Read the owning user identifier.

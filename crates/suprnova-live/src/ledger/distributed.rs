@@ -17,7 +17,7 @@
 //! tier run one state machine and answer one conformance suite.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -256,6 +256,35 @@ pub trait InstanceRecordStore: Send + Sync {
     /// other operation, so a backend never has to read a record to retire a
     /// claim it cannot interpret.
     async fn count_instances(&self) -> Result<usize, LedgerError>;
+
+    /// Reads up to `limit` of the instance records
+    /// [`InstanceRecordStore::count_instances`] counts, soonest store
+    /// deadline first, each with the key it lives at.
+    ///
+    /// This is how a full ledger finds what to evict, and it runs on every
+    /// creation at capacity, so it must be an ordered range with a limit over
+    /// an index by deadline, never a scan of the table or the keyspace. The
+    /// kernel decodes the records and decides which one goes; the store still
+    /// never reads one.
+    async fn soonest_expiring_instances(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(InstanceRecordKey, StoredRecord)>, LedgerError>;
+
+    /// Deletes the instance record at `key` only while it still carries
+    /// `expected_version`, reporting whether this call deleted it.
+    ///
+    /// Eviction removes exactly the state it read and chose: a claim that
+    /// landed after that read keeps its record, and two creators evicting at
+    /// once never both count the same removal. Like
+    /// [`InstanceRecordStore::remove`] it decides nothing by store time,
+    /// because a record that elapsed after the read stops counting against
+    /// capacity whether or not it is deleted.
+    async fn compare_and_remove(
+        &self,
+        key: &InstanceRecordKey,
+        expected_version: u64,
+    ) -> Result<bool, LedgerError>;
 }
 
 /// One key's row in [`MemoryRecordStore`].
@@ -286,78 +315,161 @@ impl RecordSlot {
 /// sorted expiry index) rather than an unbounded delete.
 const MAX_RECLAIMED_PER_OPERATION: usize = 64;
 
-/// One key a deadline entry reclaims, in whichever table holds it.
-enum Reclaimable {
-    Instance(InstanceRecordKey),
-    Promotion(PromotionRecordKey),
-}
-
-/// Both record tables under one lock, so each operation reads store time and
-/// the state it guards as a single atomic step.
+/// One record table and its deadline order, which change only together.
 ///
-/// `deadlines` is the reclamation index: one entry per record written, in
-/// deadline order, so an operation finds the records that have elapsed
-/// without walking the ones that have not, and counting instances stays a
-/// map length rather than a scan.
-struct RecordState {
-    instances: BTreeMap<InstanceRecordKey, RecordSlot>,
-    promotions: BTreeMap<PromotionRecordKey, RecordSlot>,
-    deadlines: BTreeMap<UnixMillis, Vec<Reclaimable>>,
+/// `order` holds exactly one entry per stored record, under that record's
+/// deadline. Reclamation finds the records that have elapsed, and eviction
+/// finds the ones that elapse next, without walking any other record, and
+/// counting stays a map length. Keeping the order exact rather than lazy is
+/// what lets eviction read the soonest records in bounded time: a lazy index
+/// would collect a stale entry at its head for every record evicted from it.
+struct Table<K> {
+    slots: BTreeMap<K, RecordSlot>,
+    order: BTreeMap<UnixMillis, BTreeSet<K>>,
 }
 
-impl RecordState {
-    /// Records that the key at `deadline` becomes reclaimable then.
-    fn schedule(&mut self, deadline: UnixMillis, key: Reclaimable) {
-        self.deadlines.entry(deadline).or_default().push(key);
+impl<K: Clone + Ord> Table<K> {
+    const fn new() -> Self {
+        Self {
+            slots: BTreeMap::new(),
+            order: BTreeMap::new(),
+        }
     }
 
-    /// Drops at most [`MAX_RECLAIMED_PER_OPERATION`] elapsed records.
+    fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn get(&self, key: &K) -> Option<&RecordSlot> {
+        self.slots.get(key)
+    }
+
+    /// Stores `slot` at `key`, replacing whatever record held it.
     ///
-    /// An entry whose record was already removed, replaced, or given another
-    /// deadline reclaims nothing and is simply spent, which is what keeps the
-    /// index from having to be kept in step with every write.
-    fn reclaim(&mut self, now: UnixMillis) {
-        for _ in 0..MAX_RECLAIMED_PER_OPERATION {
-            let Some((deadline, key)) = self.pop_due(now) else {
-                break;
-            };
-            match key {
-                Reclaimable::Instance(key) => {
-                    if self
-                        .instances
-                        .get(&key)
-                        .is_some_and(|slot| slot.expires_at == deadline)
-                    {
-                        self.instances.remove(&key);
-                    }
-                }
-                Reclaimable::Promotion(key) => {
-                    if self
-                        .promotions
-                        .get(&key)
-                        .is_some_and(|slot| slot.expires_at == deadline)
-                    {
-                        self.promotions.remove(&key);
-                    }
-                }
+    /// A replacement that keeps the record's deadline leaves the order alone,
+    /// so rewriting one record a thousand times costs the order nothing.
+    fn put(&mut self, key: &K, slot: RecordSlot) {
+        let deadline = slot.expires_at;
+        match self.slots.insert(key.clone(), slot) {
+            Some(previous) if previous.expires_at == deadline => {}
+            Some(previous) => {
+                self.unschedule(previous.expires_at, key);
+                self.schedule(deadline, key);
+            }
+            None => self.schedule(deadline, key),
+        }
+    }
+
+    /// Removes the record at `key`, returning it.
+    fn remove(&mut self, key: &K) -> Option<RecordSlot> {
+        let slot = self.slots.remove(key)?;
+        self.unschedule(slot.expires_at, key);
+        Some(slot)
+    }
+
+    fn schedule(&mut self, deadline: UnixMillis, key: &K) {
+        self.order.entry(deadline).or_default().insert(key.clone());
+    }
+
+    fn unschedule(&mut self, deadline: UnixMillis, key: &K) {
+        if let Some(keys) = self.order.get_mut(&deadline) {
+            keys.remove(key);
+            if keys.is_empty() {
+                self.order.remove(&deadline);
             }
         }
     }
 
-    /// Takes one scheduled key whose deadline has passed.
-    fn pop_due(&mut self, now: UnixMillis) -> Option<(UnixMillis, Reclaimable)> {
-        loop {
-            let mut entry = self.deadlines.first_entry()?;
-            let deadline = *entry.key();
-            if deadline > now {
-                return None;
+    /// The soonest deadline in the table, when store time has passed it.
+    fn first_due(&self, now: UnixMillis) -> Option<UnixMillis> {
+        self.order
+            .first_key_value()
+            .map(|(deadline, _)| *deadline)
+            .filter(|deadline| *deadline <= now)
+    }
+
+    /// Removes the record whose deadline comes first.
+    fn pop_first(&mut self) {
+        let Some(mut entry) = self.order.first_entry() else {
+            return;
+        };
+        let key = entry.get_mut().pop_first();
+        if entry.get().is_empty() {
+            entry.remove();
+        }
+        if let Some(key) = key {
+            self.slots.remove(&key);
+        }
+    }
+
+    /// Up to `limit` records, soonest deadline first.
+    fn soonest(&self, limit: usize) -> Vec<(K, StoredRecord)> {
+        self.order
+            .values()
+            .flatten()
+            .take(limit)
+            .filter_map(|key| self.slots.get(key).map(|slot| (key.clone(), slot.stored())))
+            .collect()
+    }
+
+    /// Reads the unexpired record at `key`, dropping an elapsed one as it
+    /// goes so a key that is read after its record died stops costing memory.
+    fn take_unexpired(&mut self, key: &K, now: UnixMillis) -> Option<StoredRecord> {
+        match self.slots.get(key) {
+            Some(slot) if slot.expires_at > now => Some(slot.stored()),
+            Some(_) => {
+                self.remove(key);
+                None
             }
-            let key = entry.get_mut().pop();
-            if entry.get().is_empty() {
-                entry.remove();
-            }
-            if let Some(key) = key {
-                return Some((deadline, key));
+            None => None,
+        }
+    }
+
+    /// Creates the record at `key` unless an unexpired one holds it.
+    fn insert_absent(
+        &mut self,
+        key: &K,
+        bytes: &[u8],
+        expires_at: UnixMillis,
+        now: UnixMillis,
+    ) -> bool {
+        if self.get(key).is_some_and(|slot| slot.expires_at > now) {
+            return false;
+        }
+        self.put(
+            key,
+            RecordSlot {
+                bytes: bytes.to_vec(),
+                version: FIRST_VERSION,
+                expires_at,
+            },
+        );
+        true
+    }
+}
+
+/// Both record tables under one lock, so each operation reads store time and
+/// the state it guards as a single atomic step.
+struct RecordState {
+    instances: Table<InstanceRecordKey>,
+    promotions: Table<PromotionRecordKey>,
+}
+
+impl RecordState {
+    /// Drops at most [`MAX_RECLAIMED_PER_OPERATION`] elapsed records across
+    /// both tables, soonest deadline first.
+    fn reclaim(&mut self, now: UnixMillis) {
+        for _ in 0..MAX_RECLAIMED_PER_OPERATION {
+            match (
+                self.instances.first_due(now),
+                self.promotions.first_due(now),
+            ) {
+                (Some(instance), Some(promotion)) if promotion < instance => {
+                    self.promotions.pop_first();
+                }
+                (Some(_), _) => self.instances.pop_first(),
+                (None, Some(_)) => self.promotions.pop_first(),
+                (None, None) => break,
             }
         }
     }
@@ -382,9 +494,8 @@ impl MemoryRecordStore {
         Self {
             clock,
             state: Mutex::new(RecordState {
-                instances: BTreeMap::new(),
-                promotions: BTreeMap::new(),
-                deadlines: BTreeMap::new(),
+                instances: Table::new(),
+                promotions: Table::new(),
             }),
         }
     }
@@ -406,45 +517,6 @@ impl MemoryRecordStore {
     }
 }
 
-/// Reads the unexpired record at `key`, dropping an elapsed one as it goes so
-/// a key that is read after its record died stops costing memory.
-fn take_unexpired<K: Clone + Ord>(
-    table: &mut BTreeMap<K, RecordSlot>,
-    key: &K,
-    now: UnixMillis,
-) -> Option<StoredRecord> {
-    match table.get(key) {
-        Some(slot) if slot.expires_at > now => Some(slot.stored()),
-        Some(_) => {
-            table.remove(key);
-            None
-        }
-        None => None,
-    }
-}
-
-/// Creates the record at `key` unless an unexpired one holds it.
-fn insert_absent<K: Clone + Ord>(
-    table: &mut BTreeMap<K, RecordSlot>,
-    key: &K,
-    bytes: &[u8],
-    expires_at: UnixMillis,
-    now: UnixMillis,
-) -> bool {
-    if table.get(key).is_some_and(|slot| slot.expires_at > now) {
-        return false;
-    }
-    table.insert(
-        key.clone(),
-        RecordSlot {
-            bytes: bytes.to_vec(),
-            version: FIRST_VERSION,
-            expires_at,
-        },
-    );
-    true
-}
-
 /// The store's operations, each one atomic under the table lock.
 ///
 /// They are inherent and synchronous because nothing an in-process store does
@@ -463,7 +535,7 @@ impl MemoryRecordStore {
             Timing::Elapsing => {
                 let now = self.store_now()?;
                 state.reclaim(now);
-                Ok(take_unexpired(&mut state.instances, key, now))
+                Ok(state.instances.take_unexpired(key, now))
             }
             Timing::Regardless => Ok(state.instances.get(key).map(RecordSlot::stored)),
         }
@@ -478,11 +550,7 @@ impl MemoryRecordStore {
         let mut state = self.lock()?;
         let now = self.store_now()?;
         state.reclaim(now);
-        if !insert_absent(&mut state.instances, key, bytes, expires_at, now) {
-            return Ok(false);
-        }
-        state.schedule(expires_at, Reclaimable::Instance(key.clone()));
-        Ok(true)
+        Ok(state.instances.insert_absent(key, bytes, expires_at, now))
     }
 
     fn replace_record(
@@ -505,7 +573,7 @@ impl MemoryRecordStore {
                 state.instances.remove(key);
             }
         }
-        let Some(slot) = state.instances.get_mut(key) else {
+        let Some(slot) = state.instances.get(key) else {
             return Ok(CasOutcome::Missing);
         };
         if slot.version != expected_version {
@@ -515,16 +583,14 @@ impl MemoryRecordStore {
             .version
             .checked_add(1)
             .ok_or_else(|| LedgerError::new(LedgerErrorKind::CounterExhausted))?;
-        let rescheduled = slot.expires_at != expires_at;
-        slot.bytes = bytes.to_vec();
-        slot.version = version;
-        slot.expires_at = expires_at;
-        // A replacement that keeps the record's deadline keeps its index
-        // entry too, so rewriting one record a thousand times costs the index
-        // nothing.
-        if rescheduled {
-            state.schedule(expires_at, Reclaimable::Instance(key.clone()));
-        }
+        state.instances.put(
+            key,
+            RecordSlot {
+                bytes: bytes.to_vec(),
+                version,
+                expires_at,
+            },
+        );
         Ok(CasOutcome::Stored { version })
     }
 
@@ -540,7 +606,7 @@ impl MemoryRecordStore {
         let mut state = self.lock()?;
         let now = self.store_now()?;
         state.reclaim(now);
-        Ok(take_unexpired(&mut state.promotions, key, now))
+        Ok(state.promotions.take_unexpired(key, now))
     }
 
     fn insert_reservation_if_absent(
@@ -552,11 +618,7 @@ impl MemoryRecordStore {
         let mut state = self.lock()?;
         let now = self.store_now()?;
         state.reclaim(now);
-        if !insert_absent(&mut state.promotions, key, bytes, expires_at, now) {
-            return Ok(false);
-        }
-        state.schedule(expires_at, Reclaimable::Promotion(key.clone()));
-        Ok(true)
+        Ok(state.promotions.insert_absent(key, bytes, expires_at, now))
     }
 
     /// Counting is a map length: elapsed records are reclaimed by the bounded
@@ -568,6 +630,39 @@ impl MemoryRecordStore {
         let now = self.store_now()?;
         state.reclaim(now);
         Ok(state.instances.len())
+    }
+
+    /// The head of the instance order, after the same bounded sweep counting
+    /// runs.
+    ///
+    /// Above that bound this store counts elapsed records it has not reached
+    /// yet, so it offers them here too and an eviction reclaims one; the
+    /// adapters count and offer only unexpired records.
+    fn soonest_records(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(InstanceRecordKey, StoredRecord)>, LedgerError> {
+        let mut state = self.lock()?;
+        let now = self.store_now()?;
+        state.reclaim(now);
+        Ok(state.instances.soonest(limit))
+    }
+
+    fn remove_record_at(
+        &self,
+        key: &InstanceRecordKey,
+        expected_version: u64,
+    ) -> Result<bool, LedgerError> {
+        let mut state = self.lock()?;
+        if state
+            .instances
+            .get(key)
+            .is_none_or(|slot| slot.version != expected_version)
+        {
+            return Ok(false);
+        }
+        state.instances.remove(key);
+        Ok(true)
     }
 }
 
@@ -619,6 +714,21 @@ impl InstanceRecordStore for MemoryRecordStore {
     async fn count_instances(&self) -> Result<usize, LedgerError> {
         self.count_records()
     }
+
+    async fn soonest_expiring_instances(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(InstanceRecordKey, StoredRecord)>, LedgerError> {
+        self.soonest_records(limit)
+    }
+
+    async fn compare_and_remove(
+        &self,
+        key: &InstanceRecordKey,
+        expected_version: u64,
+    ) -> Result<bool, LedgerError> {
+        self.remove_record_at(key, expected_version)
+    }
 }
 
 /// Attempts one operation makes before it reports contention: the first
@@ -640,6 +750,16 @@ const APPLY_ATTEMPTS: usize = 2;
 /// free the instant it elapses, or an exact retry after expiry could recover
 /// authority over an instance that is gone.
 const ELAPSED_RECORD_RETENTION_MS: u64 = 60_000;
+
+/// Instance records one creation at capacity reads to choose what to evict.
+///
+/// Small, because each candidate is read in full, up to
+/// [`MAX_RECORD_BYTES`](super::MAX_RECORD_BYTES). Large enough that a few
+/// creators evicting at once each find a record of their own, and that an
+/// instance or two mid-action at the head of the order do not push the
+/// eviction onto a running claim. It also bounds how much of an excess one
+/// creation sheds.
+const EVICTION_CANDIDATES: usize = 4;
 
 /// The store deadline one record's instance expiry earns.
 fn store_expiry(expires_at: UnixMillis) -> UnixMillis {
@@ -894,9 +1014,9 @@ impl<S: InstanceRecordStore> DistributedInstanceLedger<S> {
     ///
     /// An elapsed record does not hold its key: it is replaced at the version
     /// it was read at, which is the distributed form of the pruning an
-    /// in-process ledger did under its lock. Only a key nothing holds is
-    /// measured against the configured instance capacity, so replacing an
-    /// elapsed record never fails for capacity.
+    /// in-process ledger did under its lock. Only a key nothing holds adds an
+    /// instance, so only that path makes room first; replacing an elapsed
+    /// record never evicts anything.
     async fn create(
         &self,
         key: &InstanceRecordKey,
@@ -917,9 +1037,7 @@ impl<S: InstanceRecordStore> DistributedInstanceLedger<S> {
                 }
             }
             Loaded::Absent => {
-                if self.store.count_instances().await? >= self.limits.max_instances() {
-                    return Err(LedgerError::new(LedgerErrorKind::CapacityExceeded));
-                }
+                self.make_room(now).await?;
                 let bytes = encode_record(record)?;
                 if self
                     .store
@@ -932,6 +1050,54 @@ impl<S: InstanceRecordStore> DistributedInstanceLedger<S> {
                 }
             }
         }
+    }
+
+    /// Makes room for one more instance when the store is at the configured
+    /// capacity, by evicting the instances that expire soonest.
+    ///
+    /// A full ledger never refuses a creation. Refusing would take mounting
+    /// down for the whole site until the oldest instance expired, days later
+    /// at the default lifetime, and anyone who can mount in a loop could keep
+    /// everyone else from mounting. An evicted instance's page is not broken:
+    /// its next action finds no record, is told [`RefreshReason::Missing`],
+    /// and takes the fresh-render recovery every refresh reason takes.
+    ///
+    /// Every instance gets the same configured lifetime, so the soonest to
+    /// expire is the oldest. A candidate with a claim in flight goes last
+    /// (see [`state::claim_in_flight`]), and is still evicted when every
+    /// candidate is mid-claim, because a limit must not take mounting down. A
+    /// candidate is removed only at the version it was read at, so a claim
+    /// that lands after the read keeps its record.
+    ///
+    /// A store over capacity sheds its whole excess, up to the candidates one
+    /// read returns. An operator who lowered the limit over a shared store
+    /// leaves it over, and so do creators on several nodes who each counted
+    /// the same free slot or lost every removal to each other; each creation
+    /// that follows brings the store back towards the limit.
+    async fn make_room(&self, now: UnixMillis) -> Result<(), LedgerError> {
+        let live = self.store.count_instances().await?;
+        let excess = live
+            .saturating_add(1)
+            .saturating_sub(self.limits.max_instances());
+        if excess == 0 {
+            return Ok(());
+        }
+        let (idle, busy): (Vec<_>, Vec<_>) = self
+            .store
+            .soonest_expiring_instances(EVICTION_CANDIDATES)
+            .await?
+            .into_iter()
+            .partition(|(_, stored)| !busy_record(stored, now));
+        let mut evicted = 0;
+        for (key, stored) in idle.into_iter().chain(busy) {
+            if evicted == excess {
+                break;
+            }
+            if self.store.compare_and_remove(&key, stored.version).await? {
+                evicted += 1;
+            }
+        }
+        Ok(())
     }
 
     /// Resolves a promotion against the reservation its retry identity holds,
@@ -1027,6 +1193,14 @@ impl<S: InstanceRecordStore> DistributedInstanceLedger<S> {
             .await?;
         Ok(())
     }
+}
+
+/// Whether an eviction candidate has an action running against it.
+///
+/// A record that does not decode is not: no operation can use it, so it is
+/// the cheapest record there is to evict.
+fn busy_record(stored: &StoredRecord, now: UnixMillis) -> bool {
+    decode_record(&stored.bytes).is_ok_and(|record| state::claim_in_flight(&record, now))
 }
 
 /// Decodes what a store returned into what the kernel decides against.
@@ -1364,6 +1538,7 @@ mod tests {
     use super::*;
     use crate::clock::ClockError;
     use crate::identity::ContentDigest;
+    use crate::ledger::AcceptedOutcomeKind;
 
     struct FixedClock {
         now: AtomicU64,
@@ -1558,6 +1733,21 @@ mod tests {
 
         async fn count_instances(&self) -> Result<usize, LedgerError> {
             self.inner.count_instances().await
+        }
+
+        async fn soonest_expiring_instances(
+            &self,
+            limit: usize,
+        ) -> Result<Vec<(InstanceRecordKey, StoredRecord)>, LedgerError> {
+            self.inner.soonest_expiring_instances(limit).await
+        }
+
+        async fn compare_and_remove(
+            &self,
+            key: &InstanceRecordKey,
+            expected_version: u64,
+        ) -> Result<bool, LedgerError> {
+            self.inner.compare_and_remove(key, expected_version).await
         }
     }
 
@@ -2196,6 +2386,295 @@ mod tests {
         );
         clock.set(3_000);
         assert_eq!(store.count_instances().await.expect("the store answers"), 0);
+    }
+
+    /// One mount in a scope every eviction test shares, expiring at
+    /// `expires_at`.
+    fn eviction_mount(start: u8, expires_at: u64) -> MountInstanceRecord {
+        MountInstanceRecord::new(
+            instance_key(0x10).scope,
+            InstanceId::from_bytes(&bytes::<16>(start)).expect("instance is valid"),
+            digest(0x30),
+            Revision::new(0),
+            UnixMillis::new(expires_at),
+        )
+    }
+
+    /// A first claim on one of [`eviction_mount`]'s instances.
+    fn eviction_claim(start: u8, base: u64) -> ClaimRequest {
+        ClaimRequest::new(
+            instance_key(0x10).scope,
+            InstanceId::from_bytes(&bytes::<16>(start)).expect("instance is valid"),
+            Revision::new(base),
+            IdempotencyKey::from_bytes(&bytes::<16>(start.wrapping_add(0x40)))
+                .expect("retry key is valid"),
+            digest(start),
+        )
+    }
+
+    fn eviction_ledger(
+        store: &Arc<MemoryRecordStore>,
+        clock: &Arc<FixedClock>,
+        max_instances: usize,
+    ) -> DistributedInstanceLedger<MemoryRecordStore> {
+        DistributedInstanceLedger::new(
+            Arc::clone(store),
+            clock.clone(),
+            LedgerLimits::new(100, 10_000, 2, max_instances).expect("limits are valid"),
+        )
+    }
+
+    /// Mounts one instance per start, each expiring one millisecond after
+    /// the one before it, so the first is the soonest to expire.
+    async fn mount_in_order(ledger: &DistributedInstanceLedger<MemoryRecordStore>, starts: &[u8]) {
+        for (offset, start) in starts.iter().enumerate() {
+            let offset = u64::try_from(offset).expect("the fixture is small");
+            ledger
+                .mount_instance(eviction_mount(*start, 5_000 + offset))
+                .await
+                .expect("the mount is admitted");
+        }
+    }
+
+    async fn granted(
+        ledger: &DistributedInstanceLedger<MemoryRecordStore>,
+        start: u8,
+        base: u64,
+    ) -> ClaimGrant {
+        match ledger
+            .claim(eviction_claim(start, base))
+            .await
+            .expect("the claim classifies")
+        {
+            ClaimOutcome::Granted(grant) => grant,
+            other => panic!("the instance was expected to be claimable, not {other:?}"),
+        }
+    }
+
+    async fn is_missing(ledger: &DistributedInstanceLedger<MemoryRecordStore>, start: u8) -> bool {
+        matches!(
+            ledger
+                .claim(eviction_claim(start, 0))
+                .await
+                .expect("the claim classifies"),
+            ClaimOutcome::RefreshRequired(RefreshReason::Missing)
+        )
+    }
+
+    #[tokio::test]
+    async fn a_full_ledger_evicts_its_soonest_expiring_instance_to_admit_a_mount() {
+        let clock = Arc::new(FixedClock::new(1_000));
+        let store = Arc::new(MemoryRecordStore::new(clock.clone()));
+        let ledger = eviction_ledger(&store, &clock, 3);
+        mount_in_order(&ledger, &[0x20, 0x21, 0x22]).await;
+
+        ledger
+            .mount_instance(eviction_mount(0x23, 5_010))
+            .await
+            .expect("a full ledger admits a new mount");
+
+        assert!(
+            is_missing(&ledger, 0x20).await,
+            "the soonest-expiring instance made room, and its page is told to refresh"
+        );
+        for start in [0x21, 0x22, 0x23] {
+            granted(&ledger, start, 0).await;
+        }
+        assert_eq!(
+            store.count_instances().await.expect("the store answers"),
+            3,
+            "the ledger stays at its configured capacity"
+        );
+    }
+
+    #[tokio::test]
+    async fn eviction_passes_over_an_instance_whose_claim_is_in_flight() {
+        let clock = Arc::new(FixedClock::new(1_000));
+        let store = Arc::new(MemoryRecordStore::new(clock.clone()));
+        let ledger = eviction_ledger(&store, &clock, 3);
+        mount_in_order(&ledger, &[0x20, 0x21, 0x22]).await;
+        let in_flight = granted(&ledger, 0x20, 0).await;
+
+        ledger
+            .mount_instance(eviction_mount(0x23, 5_010))
+            .await
+            .expect("a full ledger admits a new mount");
+
+        ledger
+            .commit(
+                &in_flight.into_token(),
+                AcceptedOutcome::new(AcceptedOutcomeKind::Rendered, digest(0x60)),
+            )
+            .await
+            .expect("the action that was running keeps its instance and commits");
+        assert!(
+            is_missing(&ledger, 0x21).await,
+            "the soonest-expiring instance with no claim in flight made room instead"
+        );
+        granted(&ledger, 0x22, 0).await;
+    }
+
+    #[tokio::test]
+    async fn a_ledger_whose_every_candidate_is_mid_claim_still_admits_the_mount() {
+        let clock = Arc::new(FixedClock::new(1_000));
+        let store = Arc::new(MemoryRecordStore::new(clock.clone()));
+        let ledger = eviction_ledger(&store, &clock, 2);
+        mount_in_order(&ledger, &[0x20, 0x21]).await;
+        let oldest = granted(&ledger, 0x20, 0).await;
+        let newer = granted(&ledger, 0x21, 0).await;
+
+        ledger
+            .mount_instance(eviction_mount(0x22, 5_010))
+            .await
+            .expect("a limit never takes mounting down, even when every instance is busy");
+
+        assert_eq!(
+            ledger
+                .commit(
+                    &oldest.into_token(),
+                    AcceptedOutcome::new(AcceptedOutcomeKind::Rendered, digest(0x60)),
+                )
+                .await
+                .expect_err("the evicted instance has no claim left to commit")
+                .kind(),
+            LedgerErrorKind::ClaimMismatch,
+            "the soonest-expiring instance made room"
+        );
+        ledger
+            .commit(
+                &newer.into_token(),
+                AcceptedOutcome::new(AcceptedOutcomeKind::Rendered, digest(0x61)),
+            )
+            .await
+            .expect("the newer claim is untouched");
+        assert_eq!(store.count_instances().await.expect("the store answers"), 2);
+    }
+
+    #[tokio::test]
+    async fn a_store_over_its_capacity_sheds_the_excess_at_the_next_mount() {
+        let clock = Arc::new(FixedClock::new(1_000));
+        let store = Arc::new(MemoryRecordStore::new(clock.clone()));
+        // The store filled under a larger limit, which is what an operator
+        // lowering the setting over a shared database or Redis leaves behind.
+        let before = eviction_ledger(&store, &clock, 5);
+        mount_in_order(&before, &[0x20, 0x21, 0x22, 0x23, 0x24]).await;
+        let after = eviction_ledger(&store, &clock, 3);
+
+        after
+            .mount_instance(eviction_mount(0x25, 5_010))
+            .await
+            .expect("the lowered limit admits a new mount");
+
+        assert_eq!(
+            store.count_instances().await.expect("the store answers"),
+            3,
+            "one mount brings the store back to the configured capacity"
+        );
+        for start in [0x20, 0x21, 0x22] {
+            assert!(
+                is_missing(&after, start).await,
+                "the soonest-expiring instances went first"
+            );
+        }
+        for start in [0x23, 0x24, 0x25] {
+            granted(&after, start, 0).await;
+        }
+    }
+
+    fn keys(records: &[(InstanceRecordKey, StoredRecord)]) -> Vec<InstanceRecordKey> {
+        records.iter().map(|(key, _)| key.clone()).collect()
+    }
+
+    #[tokio::test]
+    async fn the_soonest_expiring_instances_come_first_and_stop_at_the_limit() {
+        let store = MemoryRecordStore::new(Arc::new(FixedClock::new(0)));
+        for (start, deadline) in [(0x30, 3_000), (0x10, 1_000), (0x20, 2_000)] {
+            store
+                .insert_if_absent(&instance_key(start), b"record", UnixMillis::new(deadline))
+                .await
+                .expect("the store answers");
+        }
+        store
+            .insert_promotion_if_absent(&promotion_key(0x40), b"reservation", UnixMillis::new(500))
+            .await
+            .expect("the store answers");
+
+        assert_eq!(
+            keys(
+                &store
+                    .soonest_expiring_instances(2)
+                    .await
+                    .expect("the store answers")
+            ),
+            vec![instance_key(0x10), instance_key(0x20)],
+            "deadline order, bounded by the limit, and never a reservation"
+        );
+
+        store
+            .compare_and_store(
+                &instance_key(0x10),
+                FIRST_VERSION,
+                b"moved",
+                UnixMillis::new(4_000),
+            )
+            .await
+            .expect("the store answers");
+        let soonest = store
+            .soonest_expiring_instances(8)
+            .await
+            .expect("the store answers");
+        assert_eq!(
+            keys(&soonest),
+            vec![instance_key(0x20), instance_key(0x30), instance_key(0x10)],
+            "a record given a new deadline moves to it, and leaves nothing at the old one"
+        );
+        assert_eq!(soonest[2].1.version, FIRST_VERSION + 1);
+    }
+
+    #[tokio::test]
+    async fn compare_and_remove_takes_only_the_version_it_was_read_at() {
+        let store = MemoryRecordStore::new(Arc::new(FixedClock::new(0)));
+        let key = instance_key(0x10);
+        store
+            .insert_if_absent(&key, b"first", UnixMillis::new(1_000))
+            .await
+            .expect("the store answers");
+        store
+            .compare_and_store(&key, FIRST_VERSION, b"claimed", UnixMillis::new(1_000))
+            .await
+            .expect("the store answers");
+
+        assert!(
+            !store
+                .compare_and_remove(&key, FIRST_VERSION)
+                .await
+                .expect("the store answers"),
+            "a record that moved on since it was read is not removed"
+        );
+        assert_eq!(store.count_instances().await.expect("the store answers"), 1);
+        assert!(
+            store
+                .compare_and_remove(&key, FIRST_VERSION + 1)
+                .await
+                .expect("the store answers"),
+            "the version that was read is removed"
+        );
+        assert!(store.load(&key).await.expect("the store answers").is_none());
+        assert!(
+            store
+                .soonest_expiring_instances(8)
+                .await
+                .expect("the store answers")
+                .is_empty(),
+            "a removed record leaves nothing in the deadline order"
+        );
+        assert!(
+            !store
+                .compare_and_remove(&key, FIRST_VERSION + 1)
+                .await
+                .expect("the store answers"),
+            "a second remover finds nothing to count as its own"
+        );
     }
 
     #[tokio::test]

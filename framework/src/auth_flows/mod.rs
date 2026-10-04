@@ -69,7 +69,7 @@ pub use events::{
 pub use mail::{EmailVerificationMail, PasswordChangedMail, PasswordResetMail};
 pub use password_reset::PasswordReset;
 pub use token_store::{TokenPurpose, create_auth_flow_tokens_table};
-pub use two_factor::{EnrollmentResponse, TwoFactor, TwoFactorUser};
+pub use two_factor::{EnrollmentResponse, TwoFactor, TwoFactorLockout, TwoFactorUser};
 pub use two_factor_challenge_middleware::TwoFactorChallengeMiddleware;
 
 /// Resolve the `MAIL_FROM` env var. Errors when unset - the auth-flow

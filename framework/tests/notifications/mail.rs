@@ -1,6 +1,6 @@
 //! `MailChannel` integration tests.
 //!
-//! All six tests share the process-global mail renderer registry, so
+//! These tests share the process-global mail renderer registry, so
 //! every test runs `#[serial]` and uses a unique `notification_name()`
 //! to avoid colliding with prior registrations.
 
@@ -282,40 +282,39 @@ async fn mail_channel_errors_on_unregistered_notification() {
 }
 
 // ============================================================================
-// Test 5: payload that doesn't deserialize into the target N produces a
-// helpful error naming the notification
+// Test 5: `to_mail` runs on the notification itself, not on `data()`
 // ============================================================================
+//
+// `data()` is the public payload the database and broadcast channels
+// persist; nothing requires it to round-trip the notification. A field the
+// mail rendering needs but `data()` leaves out must still reach `to_mail`,
+// on the synchronous path and on the queued one, where the worker rebuilds
+// the whole notification from its serialized form.
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct DecodeFail {
-    // This field is required by serde, but the dispatched
-    // `Notification::data()` impl deliberately returns a JSON object
-    // missing it - so the renderer's `from_value::<DecodeFail>(...)`
-    // call must fail.
+struct PublicDataSubset {
+    order_id: i64,
+    // Needed by the mail body, deliberately kept out of `data()`.
     tracking: String,
 }
 
-impl Notification for DecodeFail {
+impl Notification for PublicDataSubset {
     fn notification_name() -> &'static str {
-        "DecodeFail"
+        "PublicDataSubset"
     }
     fn channels(&self) -> Vec<&'static str> {
         vec!["mail"]
     }
     fn data(&self) -> serde_json::Value {
-        // Deliberately wrong shape: missing the required `tracking`
-        // field. The renderer must surface a decode error mentioning
-        // the notification name.
-        serde_json::json!({ "wrong_field": 42 })
+        serde_json::json!({ "order_id": self.order_id })
     }
 }
 
-impl NotificationMailable for DecodeFail {
+impl NotificationMailable for PublicDataSubset {
     fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
-        // Never reached - decode fails before `to_mail` runs.
         Ok(MailRendering {
-            subject: "unreachable".into(),
-            text: Some("unreachable".into()),
+            subject: format!("Order {} shipped", self.order_id),
+            text: Some(format!("Tracking number: {}", self.tracking)),
             ..Default::default()
         })
     }
@@ -323,34 +322,67 @@ impl NotificationMailable for DecodeFail {
 
 #[tokio::test]
 #[serial]
-async fn mail_channel_renderer_decode_failure_propagates() {
-    let _ = Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
-
-    let _ = register_mail_renderer::<DecodeFail>();
+async fn mail_channel_renders_the_notification_itself_not_its_public_data() {
+    let transport = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(transport.clone());
+    register_mail_renderer::<PublicDataSubset>().unwrap();
 
     let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
-
-    let err = dispatcher
+    dispatcher
         .notify(
             &User {
                 email: "eve@example.org".into(),
             },
-            &DecodeFail {
-                tracking: "irrelevant - data() returns wrong shape".into(),
+            &PublicDataSubset {
+                order_id: 42,
+                tracking: "1Z999".into(),
             },
         )
         .await
-        .unwrap_err();
+        .expect("to_mail renders from the notification's own fields");
 
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("decode"),
-        "expected decode-error prefix, got: {msg}"
-    );
-    assert!(
-        msg.contains("DecodeFail"),
-        "expected notification name in error, got: {msg}"
-    );
+    let captured = transport.captured();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].subject, "Order 42 shipped");
+    assert_eq!(captured[0].text.as_deref(), Some("Tracking number: 1Z999"));
+}
+
+#[tokio::test]
+#[serial]
+async fn queued_mail_channel_renders_the_rebuilt_notification_not_its_public_data() {
+    use std::collections::HashMap;
+    use suprnova::notifications::notify_job::SendNotificationJob;
+    use suprnova::queue::Job;
+
+    let transport = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(transport.clone());
+    register_mail_renderer::<PublicDataSubset>().unwrap();
+    suprnova::notifications::register_notification_factory::<PublicDataSubset>().unwrap();
+    let _ = suprnova::notifications::set_dispatcher(Arc::new(
+        NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new())),
+    ));
+
+    // The payload `Notify::queue` stores: the whole notification.
+    let job = SendNotificationJob {
+        notifiable_route_per_channel: HashMap::from([(
+            "mail".to_string(),
+            "eve@example.org".to_string(),
+        )]),
+        notification_name: "PublicDataSubset".to_string(),
+        notification_payload: serde_json::to_value(PublicDataSubset {
+            order_id: 42,
+            tracking: "1Z999".into(),
+        })
+        .unwrap(),
+        channels: vec!["mail".to_string()],
+    };
+    job.handle()
+        .await
+        .expect("the worker renders from the rebuilt notification");
+
+    let captured = transport.captured();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].text.as_deref(), Some("Tracking number: 1Z999"));
 }
 
 // ============================================================================
@@ -531,4 +563,70 @@ async fn mail_channel_threads_cc_bcc_reply_to_and_attachments_into_outgoing() {
     assert_eq!(msg.attachments[0].filename, "receipt.pdf");
     assert_eq!(msg.attachments[0].content_type, "application/pdf");
     assert_eq!(msg.attachments[0].content, b"%PDF-1.4\nreceipt");
+}
+
+// ============================================================================
+// Mail events: a notification sent by mail is a dispatched mail
+// ============================================================================
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct ObservedNotice;
+
+impl Notification for ObservedNotice {
+    fn notification_name() -> &'static str {
+        "ObservedNotice"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["mail"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("ObservedNotice serializes")
+    }
+}
+
+impl NotificationMailable for ObservedNotice {
+    fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
+        Ok(MailRendering {
+            subject: "Observed notice".into(),
+            text: Some("body".into()),
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_channel_fires_message_sending_and_message_sent() {
+    // The mail manual promises both events for every successful dispatch,
+    // and Laravel's mail channel sends through the mailer, which fires them.
+    use suprnova::events::{EventFacade, dispatched};
+    use suprnova::mail::{MessageSending, MessageSent};
+
+    let _events = EventFacade::fake();
+    let transport = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(transport.clone());
+    let _ = register_mail_renderer::<ObservedNotice>();
+    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
+
+    dispatcher
+        .notify(
+            &User {
+                email: "alice@example.org".into(),
+            },
+            &ObservedNotice,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(transport.captured().len(), 1);
+    assert_eq!(
+        dispatched::<MessageSending>(|e| e.subject == "Observed notice").len(),
+        1,
+        "MessageSending fires for a notification sent by mail"
+    );
+    assert_eq!(
+        dispatched::<MessageSent>(|e| e.subject == "Observed notice").len(),
+        1,
+        "MessageSent fires for a notification sent by mail"
+    );
 }

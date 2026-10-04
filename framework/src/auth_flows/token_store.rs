@@ -16,9 +16,10 @@
 
 use chrono::Duration;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Select, Set, TransactionTrait};
 
 use crate::database::DB;
+use crate::database::stored_datetime::storable_expiry;
 use crate::error::FrameworkError;
 
 /// What an `auth_flow_tokens` row authorizes. Stored as the stable
@@ -70,14 +71,17 @@ impl TokenPurpose {
 ///   token; the UNIQUE constraint gives `check`/`consume` an indexed
 ///   equality lookup and backs the single-use guarantee at the DB level
 /// - `purpose`    TEXT not null - [`TokenPurpose::as_str`] discriminator
-/// - `expires_at` TIMESTAMP not null - token TTL boundary
-/// - `used_at`    TIMESTAMP null - set atomically on single-use consume
-/// - `created_at` TIMESTAMP not null
+/// - `expires_at` DATETIME not null - token TTL boundary
+/// - `used_at`    DATETIME null - set atomically on single-use consume
+/// - `created_at` DATETIME not null
 ///
-/// Timestamps are plain `.timestamp()` (not `timestamp_with_time_zone`)
-/// to pair with the entity's `chrono::NaiveDateTime` fields, which are
-/// written via `.naive_utc()` - the same convention `auth::remember` and
-/// `magnetar_integration::ceremony` use.
+/// Timestamps are `.date_time()` (not `timestamp_with_time_zone`): DATETIME
+/// on MySQL, `timestamp` on Postgres, written as the UTC wall clock - the
+/// same convention `auth::remember` and `magnetar_integration::ceremony`
+/// use. DATETIME holds dates past 2038-01-19, where MySQL's TIMESTAMP
+/// stops. Tables an older builder created have `.timestamp()` columns,
+/// TIMESTAMP on MySQL and MariaDB; [`TokenStore`] works with both because
+/// it never reads these columns into Rust: it filters on them in SQL.
 pub fn create_auth_flow_tokens_table() -> sea_orm::sea_query::TableCreateStatement {
     use sea_orm::sea_query::{ColumnDef, Table};
 
@@ -101,13 +105,13 @@ pub fn create_auth_flow_tokens_table() -> sea_orm::sea_query::TableCreateStateme
         .col(ColumnDef::new(AuthFlowTokens::Purpose).text().not_null())
         .col(
             ColumnDef::new(AuthFlowTokens::ExpiresAt)
-                .timestamp()
+                .date_time()
                 .not_null(),
         )
-        .col(ColumnDef::new(AuthFlowTokens::UsedAt).timestamp().null())
+        .col(ColumnDef::new(AuthFlowTokens::UsedAt).date_time().null())
         .col(
             ColumnDef::new(AuthFlowTokens::CreatedAt)
-                .timestamp()
+                .date_time()
                 .not_null(),
         )
         .to_owned()
@@ -173,17 +177,48 @@ impl TokenStore {
         purpose: TokenPurpose,
         ttl: Duration,
     ) -> Result<String, FrameworkError> {
-        let plaintext = generate_plaintext()?;
+        Self::store(user_id, purpose, ttl, generate_plaintext()?).await
+    }
+
+    /// Mint a token whose plaintext also carries what it is bound to:
+    /// `<random>.<binding>`, where `bind` computes the binding from the
+    /// random part.
+    ///
+    /// The stored hash covers the whole plaintext, so the binding cannot be
+    /// changed without making the token unknown. The flow that issued it
+    /// checks the binding again when the token is redeemed. The random part
+    /// is URL-safe base64 and never holds a `.`, so the binding is the text
+    /// after the last `.`.
+    pub(crate) async fn issue_bound(
+        user_id: &str,
+        purpose: TokenPurpose,
+        ttl: Duration,
+        bind: impl FnOnce(&str) -> String,
+    ) -> Result<String, FrameworkError> {
+        let random = generate_plaintext()?;
+        let binding = bind(&random);
+        Self::store(user_id, purpose, ttl, format!("{random}.{binding}")).await
+    }
+
+    /// Store the hash of `plaintext` for `user_id` with `purpose` and
+    /// expiry, and return the plaintext.
+    async fn store(
+        user_id: &str,
+        purpose: TokenPurpose,
+        ttl: Duration,
+        plaintext: String,
+    ) -> Result<String, FrameworkError> {
         let token_hash = hash_token(&plaintext);
         let now = crate::clock::now().naive_utc();
         let expires_at = now + ttl;
 
         let conn = DB::connection()?;
+        let backend = conn.inner().get_database_backend();
         let model = entity::ActiveModel {
             user_id: Set(user_id.to_string()),
             token_hash: Set(token_hash),
             purpose: Set(purpose.as_str().to_string()),
-            expires_at: Set(expires_at),
+            expires_at: Set(storable_expiry(backend, expires_at)),
             used_at: Set(None),
             created_at: Set(now),
             ..Default::default()
@@ -205,16 +240,12 @@ impl TokenStore {
         let now = crate::clock::now().naive_utc();
         let token_hash = hash_token(token);
 
-        let row = entity::Entity::find()
-            .filter(entity::Column::TokenHash.eq(token_hash))
-            .filter(entity::Column::Purpose.eq(purpose.as_str()))
-            .filter(entity::Column::ExpiresAt.gt(now))
-            .filter(entity::Column::UsedAt.is_null())
+        let owner = live_token_owner(&token_hash, purpose, now)
             .one(conn.inner())
             .await
             .map_err(|e| FrameworkError::database(format!("check auth-flow token: {e}")))?;
 
-        Ok(row.is_some())
+        Ok(owner.is_some())
     }
 
     /// Return the owner of a live, unused token without consuming it.
@@ -225,14 +256,9 @@ impl TokenStore {
         let conn = DB::connection()?;
         let now = crate::clock::now().naive_utc();
         let token_hash = hash_token(token);
-        entity::Entity::find()
-            .filter(entity::Column::TokenHash.eq(token_hash))
-            .filter(entity::Column::Purpose.eq(purpose.as_str()))
-            .filter(entity::Column::ExpiresAt.gt(now))
-            .filter(entity::Column::UsedAt.is_null())
+        live_token_owner(&token_hash, purpose, now)
             .one(conn.inner())
             .await
-            .map(|row| row.map(|row| row.user_id))
             .map_err(|error| {
                 FrameworkError::database(format!("read auth-flow token owner: {error}"))
             })
@@ -288,19 +314,15 @@ impl TokenStore {
         // below - not this read - is the single-use authority, so a
         // concurrent consumer that wins the UPDATE race is still rejected
         // here via `rows_affected`.
-        let row = entity::Entity::find()
-            .filter(entity::Column::TokenHash.eq(&token_hash))
-            .filter(entity::Column::Purpose.eq(purpose.as_str()))
-            .filter(entity::Column::ExpiresAt.gt(now))
-            .filter(entity::Column::UsedAt.is_null())
+        let owner = live_token_owner(&token_hash, purpose, now)
             .one(&txn)
             .await
             .map_err(|e| {
                 FrameworkError::database(format!("consume auth-flow token lookup: {e}"))
             })?;
 
-        let row = match row {
-            Some(r) => r,
+        let owner = match owner {
+            Some(owner) => owner,
             None => {
                 let _ = txn.rollback().await;
                 return Ok(None);
@@ -333,7 +355,7 @@ impl TokenStore {
         // sibling being consumed. Harmless no-op when there are none.
         entity::Entity::update_many()
             .col_expr(entity::Column::UsedAt, Expr::value(now))
-            .filter(entity::Column::UserId.eq(&row.user_id))
+            .filter(entity::Column::UserId.eq(&owner))
             .filter(entity::Column::Purpose.eq(purpose.as_str()))
             .filter(entity::Column::UsedAt.is_null())
             .exec(&txn)
@@ -348,7 +370,7 @@ impl TokenStore {
             FrameworkError::database(format!("consume auth-flow token: commit: {e}"))
         })?;
 
-        Ok(Some(row.user_id))
+        Ok(Some(owner))
     }
 
     /// Delete every row whose `expires_at` is in the past. Returns the
@@ -368,6 +390,29 @@ impl TokenStore {
     }
 }
 
+/// The owner of the live, unused token of `purpose` whose hash is
+/// `token_hash`, as a query that reads only `user_id`.
+///
+/// It leaves the time columns out of the row on purpose: in a table an
+/// older builder created they are `TIMESTAMP` on MySQL and MariaDB (see
+/// [`create_auth_flow_tokens_table`]), which the entity's `NaiveDateTime`
+/// fields cannot decode there.
+fn live_token_owner(
+    token_hash: &str,
+    purpose: TokenPurpose,
+    now: chrono::NaiveDateTime,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<String>> {
+    let select: Select<entity::Entity> = entity::Entity::find()
+        .filter(entity::Column::TokenHash.eq(token_hash))
+        .filter(entity::Column::Purpose.eq(purpose.as_str()))
+        .filter(entity::Column::ExpiresAt.gt(now))
+        .filter(entity::Column::UsedAt.is_null());
+    select
+        .select_only()
+        .column(entity::Column::UserId)
+        .into_tuple::<String>()
+}
+
 /// SeaORM entity for the `auth_flow_tokens` table.
 ///
 /// Schema (kept in sync with [`create_auth_flow_tokens_table`]):
@@ -376,9 +421,14 @@ impl TokenStore {
 /// - `user_id`    TEXT not null - opaque string id
 /// - `token_hash` TEXT not null UNIQUE - SHA-256 hash of the plaintext token
 /// - `purpose`    TEXT not null - [`TokenPurpose::as_str`] discriminator
-/// - `expires_at` TIMESTAMP not null - token TTL boundary
-/// - `used_at`    TIMESTAMP null - set on single-use consume
-/// - `created_at` TIMESTAMP not null
+/// - `expires_at` DATETIME not null - token TTL boundary
+/// - `used_at`    DATETIME null - set on single-use consume
+/// - `created_at` DATETIME not null
+///
+/// `Model`'s `NaiveDateTime` fields decode only from `DATETIME` on MySQL
+/// and `timestamp` on Postgres, so reading whole rows through this entity
+/// fails on the `TIMESTAMP` columns an older builder created on MySQL and
+/// MariaDB. [`TokenStore`] reads only `user_id`.
 pub mod entity {
     use sea_orm::entity::prelude::*;
 

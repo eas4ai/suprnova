@@ -8,6 +8,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Second-factor attempt limits.** `TWO_FACTOR_MAX_ATTEMPTS` (default 5)
+  and `TWO_FACTOR_LOCKOUT_MINUTES` (default 15, at most 43,200) set the
+  sliding window in which second-factor failures lock an account's second
+  factor; `TwoFactor::unlock` and Magnetar's `TwoFactorService::unlock`
+  lift it. Password and second-factor lockouts count separately, so a
+  password reset no longer lifts a second-factor lock.
+  `Authenticatable::auth_epoch` lets a provider carry the epoch it read
+  with the password hash through sign-in. This landed after the `v3.1.0`
+  tag.
+- **`Lang::reload`.** `Lang::reload().await` reloads the translation
+  catalogs and, when their text changed, makes RenderCache pages built from
+  the old translations miss; dev hot reload does the same. Call it from a
+  deploy hook instead of `Translator::reload`, which left cached pages in
+  the old language until their TTL. This landed after the `v3.1.0` tag.
 - **Action directives pass arguments.** `live:click="remove(42)"` and
   `live:click="rename('draft', true)"` send literal arguments to the
   action's parameters in declared order; before, every action directive
@@ -400,6 +414,97 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **Magnetar rotations and second-factor lockouts.** Magnetar's
+  `re_enroll` keeps the confirmed second factor gating sign-in until a code
+  from the new secret confirms the rotation; the rotation waits in new
+  `auth_two_factor` columns, `pending_secret` and `pending_recovery_codes`,
+  which `default_schema::migrate` adds. `TwoFactorRow` gains those two
+  fields, and a custom `TwoFactorStore` implements the new
+  `confirm_rotation`. A second-factor lock or unlock never touches an
+  `app_users` row (`LockoutFields::IDENTITY_IS_EMAIL`,
+  `LockoutService::without_user_lock`), so an account registered as
+  `two-factor:{id}` is never locked or unlocked by it. An account holds the
+  framework's TOTP or a Magnetar second factor, never both: enrolling or
+  confirming either answers 409 while the other exists, and disabling
+  either one recovers an account that already has both. A custom host
+  attaches `FrameworkTotpEnrollment` to its `TwoFactorService` through
+  `with_other_second_factor`. This landed after the `v3.1.0` tag.
+- **Live field and argument names must be ASCII and at most 128 bytes**,
+  and a view-visible field named `component` is a compile error. Such
+  names used to panic at registration or fail later. This landed after the
+  `v3.1.0` tag.
+- **Cron steps count from the first value.** `*/N` in the day-of-month and
+  month fields counts from 1, as cron and Laravel do, so `*/2` means odd
+  days and schedules using it shift; the timezone display now agrees with
+  the scheduler. Ranges with steps (`1-15/7`) and mixed lists parse. This
+  landed after the `v3.1.0` tag.
+- **Workflow steps are named by module path and function name**, so
+  same-named steps in different modules are different steps. Runs recorded
+  with bare names still replay. This landed after the `v3.1.0` tag.
+- **`TestContainerGuard` can no longer be built directly**; use
+  `TestContainer::fake()`. `dispatch_argv_with_init` boots the process and
+  waits for queued listeners after the command; `dispatch_argv` does
+  neither. This landed after the `v3.1.0` tag.
+- **`save` and `update` refuse a model that was never inserted.** A
+  replica, or a new model from `first_or_new` or `find_or_new`, still has
+  its reset key, and `save` updated the row with key 0. It now returns an
+  error naming `persist()`, which inserts the model and returns it with its
+  new key. Laravel's `save` inserts such a model; `save` here takes `&self`
+  and cannot hand the new key back, which the Eloquent manual explains. This
+  landed after the `v3.1.0` tag.
+- **The broadcast fanout no longer uses sea-streamer.**
+  `SeaStreamerBroadcastHub` keeps its name and runs on the framework's own
+  Redis client, and `sea-streamer` and `sea-streamer-redis` left the
+  dependency tree. It supports `redis://`, `rediss://` and `memory://`, a
+  stream shared by hubs in one process; `stdio://` is an alias for
+  `memory://` and no longer reads or writes stdin and stdout. `kafka://`
+  and `file://`, which were never compiled in, now give a clear error, and
+  `new_loopback` behaves like `new`. An event published after the
+  constructor returns always arrives. Stream entries keep their `msg`
+  field, so hubs of the earlier version on the same stream interoperate
+  during a rolling deploy. This landed after the `v3.1.0` tag.
+- **New applications' session, remember-me and auth-flow token tables use
+  `DATETIME` on MySQL**, so these columns stay writable past 2038-01-19.
+  Postgres and SQLite are unchanged. This landed after the `v3.1.0` tag.
+- **Two-factor needs two new migrations.** Add
+  `suprnova::auth_flows::two_factor::migration_attempts` (the
+  `two_factor_attempts` table) and `migration_rotation` (the
+  `two_factor_rotations` table) to your migrator. Without the first, every
+  two-factor proof path answers 503 and names the migration; without the
+  second, `TwoFactor::re_enroll` answers 503. A pending rotation keeps the
+  confirmed secret gating sign-in until `confirm` promotes the new one,
+  `enroll` cannot replace a pending rotation, and `disable` discards it.
+  `enroll` answers 422 for a user id longer than 255 characters. This
+  landed after the `v3.1.0` tag.
+- **`Auth::password().register` returns a `Registration`**:
+  `Created(user)` or `Accepted`, never the existing account. The
+  `MagnetarPasswordAuthEngine::password_register` trait method returns it, and a
+  custom engine gains `admit_host_sign_in` and `issue_host_session`, which
+  refuse with 503 by default. The API starter answers every registration
+  with one generic 202. This landed after the `v3.1.0` tag.
+- **Magnetar's second-factor lockouts have their own table.** The default
+  schema's migrate creates `auth_second_factor_lockouts`
+  (`DefaultSecondFactorSchema`), and `TwoFactorService::new` takes a
+  lockout service over it. `TwoFactorStore::set_confirmed` takes the
+  enrollment snapshot that was checked, and the MySQL migration failures
+  (`SwapFailure`, `MySqlMigrationFailure`) are boxed. This landed after the
+  `v3.1.0` tag.
+- **`Cache::tags_put` without a TTL applies `CACHE_DEFAULT_TTL`**, as
+  `Cache::put` does. A tagged value that must never expire uses the new
+  `Cache::tags_forever`. This landed after the `v3.1.0` tag.
+- **`DiskExt::temporary_upload_url` returns a `TemporaryUploadUrl`** with
+  `url`, `method` and `headers`, instead of a `String`. An S3 disk with
+  server-side encryption signs headers such as
+  `x-amz-server-side-encryption`, and an upload that did not send them was
+  refused. Use `.url` and send `.headers` with the upload. Its `Debug`
+  output redacts the signature and header values. This landed after the
+  `v3.1.0` tag.
+- **`Queue::bulk` honours debounce.** Every copy of a debounced job pushed
+  through `Queue::bulk` used to run. A debounced burst now collapses onto
+  its last job, and a job declaring both `debounce_for` and `unique_id` is
+  refused, as `Queue::push` does. Laravel's `bulk` skips debounce; the
+  queues manual explains the difference. This landed after the `v3.1.0`
+  tag.
 - **Multipart failures answer as validation errors under the field's
   input name.** A missing field, a text part that does not parse as its
   type or is not UTF-8, a part of the wrong kind, and a file a validator
@@ -420,8 +525,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   parts its field takes: a text part sent where a file belongs fails as
   `validation-file`, and a later part for a field that holds one file is
   ignored without being read into memory or a temporary file. For a field
-  that holds one value, the first part that is not empty decides it, so
-  several failing parts report one error. An `UploadValidator` returns
+  that holds one value, its first part decides it, valid or not, so
+  several failing parts report one error; an empty part does not decide a
+  field that is not a `String`, so the next part of its name can. An `UploadValidator` returns
   `FrameworkError::invalid_upload` for a validation failure, and its other
   errors keep their status. A `bool` field accepts `1`, `0`, `true`,
   `false`, `on` and `off`. An empty part, which Inertia sends for `null`,
@@ -511,8 +617,464 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `from_storage_json`; a cast whose in-memory value is the stored value
   returns it without copying.
 
+- **Framework payments, features and RBAC models carry `DateTime<Utc>`
+  timestamps.** The SeaORM `Model` of the six payments entities, of
+  `features::entity`, and of the RBAC `Role` and `Permission` carries
+  `DateTime<Utc>` (`Option<DateTime<Utc>>` for `canceled_at`, `paid_at` and
+  `processed_at`) where it carried `String`, because their migrations
+  create native timestamp columns. Code that read those fields as text
+  needs the date-time type. This landed after the `v3.1.0` tag.
+- **A mail message is checked on the dispatch path, and a refusal is a
+  500.** `Mail::send`, `Mail::raw`, `Mail::html`, the queue worker and the
+  notification mail channel check the message before `MessageSending`
+  fires and before any transport sees it, including a transport bound with
+  `Mail::set_transport` and the one behind `Mail::fake`. `Mail::queue` and
+  `Mail::later` check it when they push. A refusal is an internal error, a
+  500 with the detail in the log, where it was a 400 that echoed the
+  address. Headers the message structure owns (`To`, `Cc`, `Bcc`, `From`,
+  `Sender`, `Reply-To`, `Return-Path`, `Subject`, `Date`, `Message-ID`,
+  `MIME-Version` and `Content-*`) are refused as caller headers. Postmark
+  refuses a second tag, and SES refuses a tag or metadata it cannot carry,
+  instead of dropping them. The address and header serializer is public as
+  `suprnova::mail_wire` for transport authors. This landed after the
+  `v3.1.0` tag.
+- **The framework registers its own mail and notification jobs.** A
+  worker dispatches `SendMailJob` and `SendNotificationJob` with no
+  `register_job` line. Registering the same job type again is quiet; only
+  a different type taking over a job name still warns. This landed after
+  the `v3.1.0` tag.
+- **A full Live instance ledger evicts instead of refusing mounts.** At
+  `LIVE_LEDGER_MAX_INSTANCES`, a new mount or promotion removes the
+  instance that expires soonest, preferring one with no claim in flight,
+  and the evicted page's next action gets `refresh_required` and reloads
+  fresh. Before, a full ledger refused every mount on the site until
+  records expired, and anyone who could mount in a loop could keep
+  everyone else out. `CapacityExceeded` now means only a record over a
+  codec bound. A custom `InstanceRecordStore` implements two new methods,
+  `soonest_expiring_instances` and `compare_and_remove`; the memory, SQL
+  and Redis stores ship them. This landed after the `v3.1.0` tag.
+- **Live form controls match the density of the suprnova.app forms.**
+  Controls read at 14px through `--sn-density-control-font-size` (16px on
+  a coarse pointer), fields are 40px tall, labels are 12px and sit 6px
+  above their control, legends are 14px, and hints and errors are 12px. A
+  textarea shows three rows and is at least two control heights tall.
+  `--sn-density-field-gap` puts 12px between fields, checkboxes, switches
+  and groups, and a group's options sit 8px apart. To pick it up in an
+  application, run `live:add` again for `button`, `checkbox`, `combobox`,
+  `datatable`, `date-picker`, `field`, `fieldset`, `input-otp`, `label`,
+  `load-more`, `pagination`, `radio-group`, `switch`, `textarea` and
+  `upload`. This landed after the `v3.1.0` tag.
+
+- **Content negotiation treats `q=0` as a refusal.** `accepts`,
+  `accepts_json`, `prefers`, `wants_json`, `expects_json` and
+  `acceptable_content_types` leave out an `Accept` type weighted `q=0`, as
+  RFC 9110 says, even beside `*/*`; the most specific matching range
+  decides. Laravel lists such types as acceptable. This landed after the
+  `v3.1.0` tag.
+
+- **Vendor HTTP clients no longer follow redirects, and SQS overflow
+  payloads move.** Pinecone and the HTTP mail drivers treat a 3xx as an
+  error. SQS overflow payloads live under
+  `sqs-payloads/<queue>-<digest>/`, so `SQS_OVERFLOW_FLUSH_ON_CLEAR` no
+  longer deletes a same-named queue's payloads from another account or
+  region; payloads written before still read, but `clear` no longer sweeps
+  them. Qdrant ids `"01"`, `"+1"` and non-canonical UUID spellings no longer
+  map to the point of `"1"` or the canonical UUID, so items stored under
+  such ids must be written again. A caller's version 5 UUID id is hashed
+  like any other string, so it can never name a point a derived id holds;
+  items stored under v5 UUID ids must be written again too. Resend tags go out as `tag_<i>` name and
+  value pairs, and a tag Resend cannot carry is refused before sending.
+  `DynNotification` gains `as_any`, with a default. This landed after the
+  `v3.1.0` tag.
+
+- **`build_docs` refuses chapters that would overwrite each other.** Two
+  chapters with the same file name, or one named `catalog.md`, now fail
+  with the new `ContentError::DuplicateChapterSlug` or
+  `ContentError::ReservedChapterSlug`, naming the files, so an exhaustive
+  `match` on `ContentError` needs the two arms. The same file listed twice
+  is still allowed. This landed after the `v3.1.0` tag.
+
+- **`IMAGE_MAX_ALLOC_BYTES` bounds the whole decode, and defaults to 1
+  GiB.** It used to bound only the decoded RGBA size, so a decoder could
+  allocate several times the limit while it worked. It now covers every
+  buffer a decode and its source read hold, measured per format (the cost
+  table is in `manual/images.md`), and the default rose from 256 MiB to 1
+  GiB so a 48-megapixel photo in any 8-bit format still decodes. JPEGs
+  decode through `zune-jpeg` (pinned at `0.5.16-rc2`, the first release that
+  decodes every Huffman and arithmetic sampling correctly); lossless JPEGs
+  still decode through `oxideav-mjpeg` and are refused by name above 67
+  million samples. This landed after the `v3.1.0` tag.
+
+- **Guard names, verification links and the default auth schema.** A guard
+  name other than the default session or token guard may not contain `:`,
+  because a non-default guard's principal is now `<guard>:<id>`. A token
+  guard other than the default no longer copies its user into the default
+  `Auth` view, so `Auth::has_user()` stays false for it. Email verification
+  links issued before this change are refused and must be sent again. The
+  default auth schema enforces one account per email with a unique index,
+  so a migration over an `app_users` table that already holds duplicate
+  emails stops with an error until they are merged. New, with defaults:
+  `TokenGuard::named` and `UserProvider::verification_email`. This landed
+  after the `v3.1.0` tag.
+
 ### Fixed
 
+- **Generated routes and types, Inertia props and JSON:API.**
+  `generate-types --routes` applies `group!` path and name prefixes, gives
+  each repeated-handler alias its own helper, percent-encodes path values
+  like `route()`, and uses serde's input keys in request interfaces;
+  helpers for a second route of one handler get a new params interface
+  name. An SSR exclusion glob such as `**/foo/*` matches where `**` spans a
+  repeated literal. The redirect back for an empty Inertia response keeps
+  the handler's cookies, security headers and error report. Replacing a
+  lazy prop drops its `?include=` gate, a later dotted prop wins over an
+  earlier lazy parent, and `App::inertia_shared("users.0.name")` reads into
+  shared lists. A JSON-style `inertia_response!` prop that fails to
+  serialize returns an error instead of panicking. JSON:API documents no
+  longer repeat primary resources in `included`, an empty collection
+  refuses unknown includes with 400, a requested include always returns an
+  `included` array, and error pointers are escaped per RFC 6901. `i128` and
+  `u128` route-parameter fields in Data DTOs extract instead of answering
+  422, and DTOs with route-parameter fields compile without a direct `url`
+  dependency. Live route intents can target resource routes, and `route()`
+  and `try_route()` fill a catch-all `{*rest}` by the name `rest`, keeping
+  its slashes. Numeric `expect!` matchers fail on NaN and other unordered
+  values. Schema dump and load accept every TLS parameter spelling the
+  application's connection accepts and pass the Postgres password through
+  `password=`. The `Idempotency::remember` example key includes the
+  authenticated user. Live component names, views and action text that
+  mention development crate names compile, action arguments named `target`
+  or `request` no longer break generated code, and `#[session]` Live fields
+  load from and persist to the visitor's session once the action's outcome
+  is accepted (they need `SessionMiddleware`). This landed after the
+  `v3.1.0` tag.
+- **Workers, the console and process lifecycle.** Queue, schedule and
+  workflow workers, the `queue:*` commands and console commands boot the
+  `#[injectable]` and `#[service]` inventory, so a job or command that
+  resolves an action no longer fails with `ServiceNotFound`. The console
+  also boots the runtime drivers and `#[policy]` gates, warns on stderr and
+  goes on when a driver cannot boot, and waits for queued listeners before
+  it exits; `down`, `up` and `schedule:list` run the application's
+  bootstrap hook. `schedule:work` stops on SIGTERM while an inline task
+  runs, stopping a task still running after the 30-second grace. A
+  panicking `Terminable` hook no longer skips the hooks after it, and a
+  graceful shutdown waits up to 5 seconds for hooks still running.
+  `Context::get` and `Context::hidden_get` no longer deadlock when a custom
+  `Deserialize` writes to the context. A `TestContainerGuard` or
+  `TestQueryGuard` dropped on another thread clears only what it installed.
+  Binding an `#[injectable]` by hand before boot no longer requires the
+  dependencies only its generated constructor reads. `db:seed
+  --class=<Name>` fails with not-found on an empty registry, and a
+  poisoned registry fails instead of reporting nothing to run. A
+  supervisor spawned during or after shutdown no longer starts outside the
+  drain. A second `init_telemetry` while the first guard lives no longer
+  takes over the global meter provider. `start_workflow!` accepts
+  imported, re-exported, `crate::`, `self::` and `super::` paths, and
+  `workflow:work` on a database other than Postgres exits with an error at
+  startup instead of retrying forever. This landed after the `v3.1.0` tag.
+- **Relations and soft deletes.** `destroy`, `delete_quietly`,
+  `delete_or_fail` and trait-dispatched `delete` permanently deleted
+  soft-delete rows; they now tombstone them, and `delete_or_fail` on an
+  already trashed row is a 404. `with_count` and the `with_sum` family
+  counted trashed rows and rows hidden by global scopes; they now cover
+  exactly the rows `with` loads. `with([..])` and `with_count([..])` on one
+  relation no longer panic, a count no longer makes `load_missing` skip the
+  rows, and a failed or cancelled nested `load_missing` no longer erases
+  relations already loaded. Relations declared with `lk = "..."` read and
+  write by that column, and an `lk` naming no field is a compile error.
+  Eager many-to-many honours `related_key`, a relation's `pivot_table`
+  override is used when loading pivot context, and eager `HasManyThrough`
+  skips rows reached through a trashed intermediate. Eager loads of a
+  `with_tx(&tx)` or `on(name)` query run on that transaction or connection,
+  `MassPrunable` deletes on the connection its dry run counted, and factory
+  inserts of plain SeaORM rows join the surrounding `DB::transaction`.
+  `with_min` and `with_max` of an integer column read on Postgres. This
+  landed after the `v3.1.0` tag.
+- **Magnetar hashing and sign-up races.** Magnetar password hashing runs on
+  Tokio's blocking pool instead of stalling async workers. A magic-link or
+  passkey sign-up that loses a race for a new email address answers as the
+  existing account instead of failing. This landed after the `v3.1.0` tag.
+- **RenderCache stays coherent under cancellation, races and flags.** A
+  write that was cancelled at its generation advance, including a bulk
+  write, `increment`, a soft delete, restore or force delete, could commit
+  while cached pages stayed current; the write and its advance now share
+  one transaction. An unrelated successful write no longer resumes serving
+  pages whose invalidation failed: the missed invalidation is applied
+  first. A process that wrote before installing RenderCache advances
+  generations after the install. Pages rendered with a flag's compiled
+  default refresh when the first rule for that flag is stored, and a page
+  rendered during `set_flag` or `reload` no longer stays cached with the
+  old answer. `DB::unprepared`, `DB::statement` and `statement_on` with a
+  batch that begins with `SELECT` invalidate cached pages. Pages built from
+  `EntityExt` or `QueryBuilder` reads, relation counts and aggregates, or
+  through-relation loads refresh when those tables change.
+  `RenderCache::advance_epoch` reaches the next request even with another
+  request's authority read in flight. A rebuild that fails after the
+  stale-on-error window closed returns its error instead of the expired
+  entry, a node runs at most one background refresh per key, a cancelled
+  L1 publish can no longer overwrite a newer entry, and L1 sweeps no longer
+  scan the whole store. SQL Live record cleanup no longer deletes a fresh
+  instance or reservation another node just created. Renewing an async
+  subscription from an evicted position is refused, so the membership
+  degrades instead of claiming continuity. The Live tooling helper's
+  timeout ends the call even when a process it started keeps its output
+  open. This landed after the `v3.1.0` tag.
+- **Query builder, pagination and Eloquent.** Paginating, ordering and
+  taking `first` of a union works on every engine, and `total` counts its
+  rows; as in Laravel, ordering, limit and offset set before `union` apply
+  to the first query and those set after it to the whole union. `count`,
+  `sum`, `avg`, `min` and `max` work after `select(...)`, after an
+  ordering, on a union and with `having`. `in_random_order` works on MySQL,
+  and `skip` or `offset` without `limit` works on SQLite and MySQL.
+  `chunk_by_id`, `lazy_by_id`, `cursor_paginate` and `Pagination::cursor`
+  visit every row once whatever the query was ordered by, and apply an
+  offset once. `chunk`, `chunk_map`, `each`, `chunk_by_id` and `lazy_by_id`
+  honour the query's `limit` as a cap on the whole walk and its `offset` as
+  a one-time skip, so `.limit(5).chunk_by_id(2, ..)` visits 5 rows instead
+  of the whole table. `cursor_paginate` on a union pages the whole union.
+  `count`, `sum` and `avg` return 0, and `min` and `max` return `None`,
+  when an offset skips the aggregate's row or a grouped query has no rows,
+  instead of failing with "aggregate query returned no row". `filter_json_contains` works on Postgres and MySQL with
+  strings, objects and arrays. `create_or_first` inside a Postgres
+  transaction returns the existing row, and a lost race creating a Live
+  record no longer aborts the host's Postgres transaction. `Unique` and
+  `Exists` inside `DB::transaction` see the transaction's own rows and no
+  longer wait on its connection. `Collection::sort_by` and the by-value
+  `Distinct` rule compare integers above 2^53 exactly. Index and foreign key
+  names holding a backtick or double quote create and drop.
+  `decrement(col, i64::MIN)` subtracts instead of panicking.
+  `UniqueIdKind::Ulid.is_valid` rejects strings that overflow 128 bits.
+  `QueryExecuted::to_raw_sql()` returns the SQL unchanged when a binding is
+  missing or left over, and `QueryBuilder::count` and
+  `Pagination::length_aware` report the `COUNT(*)` they ran to `DB::listen`
+  and the query log. Inertia infinite scroll asks for the paginator's own
+  page or cursor parameter. Concurrent `Schema::dump` calls to one path each
+  write a whole file. `test_database!()` with no argument compiles and uses
+  the crate's own `migrations::Migrator`. This landed after the `v3.1.0`
+  tag.
+- **Sessions and remember-me tokens restore on MySQL and MariaDB.** A
+  scaffolded application's session, remember-me and auth-flow token time
+  columns are `TIMESTAMP` there, and the framework read them as a type the
+  MySQL driver decodes only from `DATETIME`. Every session read failed: a
+  form POST answered 419 and the next page 500, the remember-me cookie
+  never signed anyone back in, and verification and reset links could not
+  be used. The notification inbox and the ceremony store failed the same
+  way, and on Postgres each failed on a `timestamptz` column. They now read
+  `DATETIME`, `TIMESTAMP`, `timestamp`, `timestamptz` and SQLite text, and
+  existing tables need no migration. A notification whose `read_at` does
+  not decode is an error instead of unread. On MySQL, an expiry past
+  2038-01-19 03:14:07 UTC is stored as that moment. This landed after the
+  `v3.1.0` tag.
+- **A new application registers and signs in on every database.** The
+  `users` table and `User` model that `suprnova new` writes disagreed on
+  the time column type, so registering failed on MySQL 8.4, MariaDB and
+  Postgres. The migration now uses `.date_time()` and the model names
+  `AsNaiveDateTime`. An existing application gives its `User` the casts for
+  its columns: the native casts on MySQL and MariaDB, the naive ones on
+  Postgres. See Authentication, "The scaffolded User model". This landed
+  after the `v3.1.0` tag.
+- **Two-factor flows on every engine.** A framework login completed with
+  `TwoFactor::complete_challenge` stays signed in under the Magnetar
+  engine. The two-factor credentials table and the attempt-counter
+  migration create on MySQL and MariaDB. Concurrent second-factor
+  admissions no longer deadlock across users on MySQL. On Postgres, a
+  correct Magnetar second-factor code, every ceremony state change, passkey
+  registration and removal, and account unlinking answered 500; they work.
+  A committed two-factor confirmation is reported as confirmed even when
+  its attempt record cannot settle. A password reset keeps an encrypted
+  column that changed while it ran, and stores the new hash verbatim
+  whatever the model's mutators. This landed after the `v3.1.0` tag.
+- **Cache, maintenance mode and read-through disks.**
+  `Cache::remember_forever` and `Cache::sear` no longer expire after
+  `CACHE_DEFAULT_TTL`, and `down` with `MAINTENANCE_DRIVER=cache` no longer
+  ends by itself after it. On Redis, `Cache::flush` matches `REDIS_PREFIX`
+  literally, so a prefix holding `*`, `?`, `[` or `\` no longer deletes
+  other applications' keys or misses its own, and a value extended with
+  `Cache::touch` is still removed by `Cache::flush_tags`. Tag indexes no
+  longer grow without bound for tags written often and rarely flushed.
+  Concurrent `down` runs with the file driver no longer publish a
+  half-written down file. The production guard for `on_one_server()` checks
+  the bound cache store instead of `CACHE_DRIVER`; a custom shared
+  `CacheStore` overrides the new `locks_are_shared` to return `true`. The
+  cached feature-flag evaluator sees an admin change made during a
+  concurrent miss and holds at most 4096 entries. Read-through promotions
+  stream into the primary instead of holding the object in memory,
+  unpromoted reads fetch only their range, a delete or move during a
+  promotion is not undone, on the same node or another one (a promotion
+  re-checks the fallback after publishing and withdraws its own copy),
+  versioned and conditional reads reach the fallback, and a refused move
+  keeps the fallback copy. Ranged reads stop at the requested range: a
+  server that ignores `Range` can no longer make a small read buffer the
+  whole object, and S3, Azure Blob and GCS refuse a response that is not
+  the requested range before reading its body, open-ended ranges included.
+  This landed after the `v3.1.0` tag.
+- **Queues, events and processes.** Cancelling `Transaction::commit()`
+  while its COMMIT was in flight could drop its `after_commit` callbacks and
+  `push_after_commit_with_tx` jobs although the rows committed; they now
+  always run. A queued listener that dispatches another queued event no
+  longer hangs queued event dispatch, `drain_queued` waits for and counts
+  listeners admitted while it drains, and `EventDispatcher::defer` buffers
+  only its own dispatcher's events. A debounced dispatch claims its window
+  only after its envelope is queued, so a failed or cancelled dispatch can
+  no longer get queued work dropped as superseded, and `max_debounce_wait`
+  longer than the debounce token's lifetime forces a run again. Batches on
+  the `sync` driver finish and fire their callbacks, a batch whose dispatch
+  failed part way fires `catch` and `finally` once its queued jobs settle,
+  and two concurrent first batch dispatches no longer lose one batch's
+  tracking. `JobAttempted` fires for jobs that fail or time out terminally.
+  A cache error while `ThrottlesExceptions` clears its counter no longer
+  fails a completed job, and one while it counts a failure no longer
+  replaces the job's own error or turns a backoff release into a failed
+  attempt. A cancelled memory-queue `pop`, delayed `nack` or
+  `release` keeps the job. `FailoverQueueDriver` counts a driver registered
+  under two labels once. An after-commit `push_unique` whose job fails to
+  serialize releases its lease. A started process whose child left its
+  group can no longer have its timeout, `stop()` or drop signal an
+  unrelated process group. This landed after the `v3.1.0` tag.
+- **A Fluent message named `NUMBER` or `DATETIME` keeps the function
+  callable.** Such a message broke every `NUMBER(...)` or `DATETIME(...)`
+  call in its catalog. The message keeps its key and the functions still
+  format. This landed after the `v3.1.0` tag.
+- **Presence channels and WebSocket upgrades.** A presence channel whose
+  last member left stayed in memory, so parameterized presence channels grew
+  with churn; empty channels are now removed. A connection aborted at
+  shutdown or cancelled during a re-subscribe left its presence member
+  visible and its forwarder tasks running; cleanup, `presence.left`
+  included, now runs on every exit. Headers middleware adds to a successful
+  WebSocket upgrade, such as a session `Set-Cookie`, now reach the client on
+  the 101, and terminable middleware runs for upgrade responses with status
+  101 or the refusing status. WebSocket route parameters are percent-decoded
+  like HTTP ones, subprotocol negotiation echoes the client's own spelling
+  as RFC 6455 requires, and `sse::last_event_id` returns Unicode event ids
+  instead of `None`. This landed after the `v3.1.0` tag.
+- **Each named middleware runs once per route.** A middleware group
+  included by two sibling groups, an alias listed twice, or a middleware
+  named both through a group and on the route itself ran twice per
+  request, so a throttle there counted each request twice. A route now runs
+  each named middleware once, identified by its alias and parsed arguments,
+  at its first occurrence, as Laravel's `uniqueMiddleware` does. Middleware
+  added by type with `.middleware(M)` is never dropped. This landed after
+  the `v3.1.0` tag.
+- **Gates, OAuth starts, CSRF bootstraps and registrations.** A gate
+  callback that calls `Gate::define` no longer deadlocks the request. An
+  OAuth start that is the browser's first request (JSON or POST) sets the
+  session cookie, so the callback binds instead of answering 400. A
+  cookieless JSON or HEAD request that receives `XSRF-TOKEN` also receives
+  its session, so the next POST no longer gets 419. Two registrations
+  racing for one email create one account. This landed after the `v3.1.0`
+  tag.
+- **Images decode correctly at the sizes the framework allows.** JPEGs
+  above about 22 megapixels decoded on no driver; they now decode up to the
+  budget. JPEG colours were off by about 6 levels, arithmetic-coded,
+  odd-sized 4:2:0 and 4:2:2, 4:4:0 and 4:1:1 JPEGs decoded wrong or not at
+  all, and small progressive JPEGs could fail. GIFs from ImageMagick and
+  Pillow decode, and the GIFs the default driver writes open in other
+  software. The `magick` driver processes and sizes only the first frame of
+  an animation, as the default driver does, and reports a GIF's logical
+  screen as its size. This landed after the `v3.1.0` tag.
+- **Localization.** `Accept-Language` negotiation honours q-values:
+  `en;q=0.1, fr` picks `fr`, and a language sent with `q=0` is never
+  chosen. `DATETIME()` formats in the catalog's own locale. A catalog edit
+  saved during a reload is picked up by the next one. `Lang::has` is false
+  for a message that has only attributes, matching `Lang::get`. A Fluent
+  term and a message with the same name both resolve on the server, as in
+  the browser. This landed after the `v3.1.0` tag.
+- **Logging.** A custom driver's failed write or flush, and a file channel
+  that cannot flush (a full disk), are reported once on stderr instead of
+  dropping lines silently. `LogChannel::stack([...]).level(...)` filters
+  every channel the stack lists. A refused second `init_subscriber` or
+  `init_telemetry` no longer changes the live file format or the default
+  channel. `Log::forget_channel` after rotation reopens the file in every
+  stack that lists the channel. A default stack with several stdout
+  channels writes an event when any of them keeps its level. Nested spans
+  that share a field name log the inner value in the message and the
+  context. This landed after the `v3.1.0` tag.
+- **Markdown heading ids are unique, and process output keeps its
+  characters.** A heading titled like a numbered duplicate (`Overview 2`)
+  no longer shares an anchor with a repeated `Overview`. Streamed process
+  output no longer drops a character split across reads after an invalid
+  byte, and `wait_until` sees a final incomplete character. This landed
+  after the `v3.1.0` tag.
+- **Payments, mail, notifications and queues.** `PhoneNumber` and
+  `CountryCode` validate when deserialized, where invalid values were
+  accepted and `digits()` could panic. `MailFake::assert_not_outgoing`
+  fails when the mailable was sent, not only queued. The `file` mail driver
+  never overwrites a preview written in the same millisecond. Tagged Resend
+  mail is accepted by Resend. Notification mail renders from the
+  notification itself, so `data()` no longer has to hold every field
+  `to_mail` reads. An SQS overflow job whose first send went unanswered
+  keeps its payload when the retries are refused, and when SQS took both
+  an unanswered send and its retry, each message now carries its own
+  payload copy, so acknowledging one no longer leaves the other unreadable.
+  The Redis queue and the broadcast fanout work with
+  `redis://user:password@...` and `rediss://` URLs, taking credentials,
+  database and TLS from the URL. This landed after the `v3.1.0` tag.
+- **Middleware, sessions, uploads and test helpers.** A middleware group
+  reused by two sibling groups no longer fails with `CycleDetected`. A
+  `RateLimiter` counter that expired in the middle of a hit gets its expiry
+  back, where it could refuse every later request until cleared. Flash keys
+  containing `_flash.new.` or `_flash.old.` survive the next request, and
+  `SessionData::decrement(key, i64::MIN)` saturates instead of panicking. A
+  form body sent as `Application/X-WWW-Form-Urlencoded` (any case) is read
+  by `Request::input`, CSRF, Pusher channel auth and identity rate limits.
+  `set_global_upload_spill_threshold(usize::MAX)`, the documented way to
+  keep uploads in memory, no longer panics. The Inertia error page compares
+  `Accept` qvalues to three decimals. A redirect on a route without a
+  session keeps `App::flash` values for the current response.
+  `TestResponse::assert_cookie` matches only cookie names, not attributes
+  such as `Path` or `HttpOnly`. This landed after the `v3.1.0` tag.
+- **A Live page with several islands on SSE keeps its updates.** When an
+  island's first event arrived before its subscribe answer, the browser
+  treated it as traffic for an unknown subscription, retired the shared
+  stream and showed every island on the page as "Updates degraded". Such an
+  event is now held, counted against `LIVE_ASYNC_MAX_QUEUED_EVENTS`, and
+  applied once that exact answer arrives, or dropped if the subscribe is
+  refused; the same holds for the replacement subscribe that follows a
+  failed island. A WebSocket transport still fails closed, as before. A
+  document whose held and queued events pass the limit now reports the
+  breach with the limit's key and reconnects, instead of degrading every
+  island. This landed after the `v3.1.0` tag.
+- **Payment webhooks, feature flags and RBAC work on Postgres, MySQL and
+  MariaDB.** Their models used a text cast for native timestamp columns,
+  so every payment webhook answered 500, `set_flag` and the feature admin
+  failed, and `Role` and `Permission` could not read a row the RBAC
+  helpers wrote. They now read and write the native columns; text written
+  on SQLite still reads back. This landed after the `v3.1.0` tag.
+- **Job batches settle on Postgres.** The documented `job_batches` schema
+  declares `INTEGER` columns, which Postgres stores as 32-bit, and the
+  repository read them as 64-bit, so every settlement failed: the job ran
+  again after each visibility timeout and the batch callbacks never fired.
+  The repository reads either width, and the documented epoch columns are
+  now `BIGINT`; tables created from the earlier schema keep working. This
+  landed after the `v3.1.0` tag.
+- **The MariaDB vector store works against a real server.** `similar`
+  looked for the vector index in a form MariaDB never prints, so every
+  call failed, and the table `ensure_table_sql` emits could not be created
+  because its key was too long for a vector index. The id column is now
+  `VARBINARY(254)`, which also compares ids byte for byte as the other
+  drivers do. This landed after the `v3.1.0` tag.
+- **Native JSON columns have their own cast.** The structured casts bind
+  and read text, which Postgres refuses for `json` and `jsonb` and MySQL
+  for `JSON`, although their documentation said those columns worked. The
+  new `AsNativeJson<T>` and `AsOptionalNativeJson<T>` store any serde type
+  as JSON. The `AsBool` documentation now names a `BIGINT` column and sends
+  a native boolean column to a plain `bool` field. This landed after the
+  `v3.1.0` tag.
+- **SMTP mail goes out from the return path.** A return path reached SMTP
+  only as a header, so bounces still went to the author; the envelope
+  sender is now the return path. This landed after the `v3.1.0` tag.
+- **Queued mail and queued notifications send.** Nothing registered their
+  jobs with the worker and the manuals never said to, so every one failed
+  as an unknown job and dead-lettered, and with the sync driver the push
+  itself failed. This landed after the `v3.1.0` tag.
+- **Queued and notification mail fire `MessageSending` and `MessageSent`.**
+  Only a direct send fired them, so switching to `queue` or sending through
+  a notification cut off audit and metrics listeners. This landed after
+  the `v3.1.0` tag.
+- **A Live primary button looks like the primary action.** A
+  `type="button"` button with the default primary variant rendered as a
+  secondary control, and so did dialog, sheet and drawer triggers. This
+  landed after the `v3.1.0` tag.
 - **`sum` and `avg` of an integer column read on Postgres and MySQL.**
   Postgres answers `numeric` and MySQL `DECIMAL` for them, which `sum` and
   `avg` could not read, so they failed there while passing on SQLite. They
@@ -770,6 +1332,160 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `#[derive(InertiaProps)]` structs keep their Rust names: their own
   `Serialize` never reads `#[serde(...)]`. This fix landed on main after the
   `v3.0.0` tag.
+
+### Security
+
+- **Input-only relationships stay out of JSON:API output.** A relationship
+  marked `#[data(input_only, allow_include)]` was linked and includable in
+  responses; it is now never sent. This landed after the `v3.1.0` tag.
+- **The environment is written only where that is sound.** `Config::init`
+  and `config::load_dotenv` refuse to write the process environment inside
+  a Tokio runtime or after `#[suprnova::main]` loaded it, where another
+  thread could read it mid-write. A failed load restores the real system
+  values and registers no config. This landed after the `v3.1.0` tag.
+- **Route bindings and pivot extras respect what models declare.**
+  `RouteParam<Model>` ignored global scopes on models without
+  `soft_deletes`, so a guessed id of another tenant's row bound to the
+  handler; the binding now applies every global scope, and a hidden row is
+  a 404. `attach_with` wrote pivot extras past the pivot model's casts, so
+  an `AsEncrypted` column was stored as plaintext and an `AsHashed` one
+  unhashed; extras now go through the pivot's casts and mutators, and an
+  extra that does not decode into its field is a validation error. This
+  landed after the `v3.1.0` tag.
+- **RenderCache never stores or reuses a personalized page as shared.**
+  Work a handler joined beside an identity-bound island mount
+  (`tokio::join!`) had its principal, session and table reads dropped from
+  the stitched shell's report, so a personalized shell could be stored as
+  public; those reads now count. `PrivateCached` responses send
+  `Cache-Control: private, no-cache` instead of `private, max-age`, which
+  let a browser show the previous account's page to the next account on
+  the same browser. Oversized Redis hint payloads are dropped before they
+  are copied or queued. This landed after the `v3.1.0` tag.
+- **Redis credentials stay out of the boot log.** When Redis was
+  unreachable at boot, the cache error held the whole `REDIS_URL`, password
+  included, and `CacheConfig` and `CacheConfigBuilder` printed it when
+  debug-formatted. The error now names only the host and port or socket
+  path, and the configurations print the URL as `redis://<redacted>`. This
+  landed after the `v3.1.0` tag.
+- **Second-factor codes are rate limited and single use.**
+  `TwoFactor::verify` and `consume_recovery_code` ignored the account
+  lockout, so a caller with the password could guess TOTP codes without
+  limit; both now refuse while the second factor is locked, and every
+  framework login is refused before it spends a code. A confirmation code
+  and a TOTP code straddling a timestep are accepted once, and `confirm`
+  confirms only the secret whose code was checked, in the framework and in
+  Magnetar. Second-factor failures are counted in a table that no password
+  identity can reach, so a decoy account named after the second-factor key
+  can neither clear nor lock it. A password reset during the password
+  check cancels the sign-in or challenge. HTTP Basic once, `Auth::once` and
+  `once_using_id` refuse an account with a Magnetar second factor, and
+  Magnetar's password, magic link, passkey and OAuth sign-ins refuse an
+  account with framework TOTP. A remembered framework login is refused
+  before it issues a credential, and account flows write only the
+  verified-at or password column. This landed after the `v3.1.0` tag.
+- **Local disks stay inside their root.** On Unix, a directory inside a
+  local disk root swapped for a symlink during an operation could redirect
+  a read, write, copy, rename, delete, listing or publish outside the root.
+  Every path is now resolved one component at a time without following
+  symlinks, and each operation runs relative to the directory it resolved.
+  This landed after the `v3.1.0` tag.
+- **Cached feature flags stay per identity.** Two identities whose user and
+  team strings joined to the same text could share a cached flag decision.
+  The cache key now keeps each part separate. This landed after the
+  `v3.1.0` tag.
+- **Fanout URL errors no longer print credentials.** A broadcasting fanout
+  URL that failed to parse was copied into the error message, password
+  included. The error now names the problem without the URL. This landed
+  after the `v3.1.0` tag.
+- **A JSON login is rate limited by its address.** `identity_key` and
+  `names_identity` ignored JSON bodies, so a JSON login was keyed on the
+  caller's IP and a `?email=` decoy opened a fresh per-address bucket on
+  each request. A top-level string field of a JSON object body now names
+  the identity under the same query-versus-body rule as a form field. This
+  landed after the `v3.1.0` tag.
+- **An SVG allowlist accepts only SVG.** A `MimeType` allowlist naming
+  `image/svg+xml` accepted any non-markup text declared as SVG, script
+  included, and refused real SVG files. A part now passes only when its
+  root element is `<svg>`; anything else declared as SVG fails as the
+  wrong type. This landed after the `v3.1.0` tag.
+- **A route uses the guard that authenticated it.** Behind a guard other
+  than the default, the email-verified gate, the role and permission
+  middleware, the Live principal and render-cache identity reads all used
+  the default guard's user, so a verified or privileged default-guard user
+  let another guard's user through, and a page built for one guard could be
+  served from cache to a visitor without that sign-in. A second token guard
+  over another provider answered with the first guard's user. Each now
+  reads the user of the route's own guard through that guard's provider.
+  Live gated actions, uploads and subscriptions, `EmailVerification::verify`
+  and the Pusher user and presence endpoints do the same: behind
+  `AuthMiddleware::for_guard(name)` they act for that guard's user, as
+  `<guard>:<id>` (default-guard principals are unchanged), a named guard's
+  logout ends that guard's Live memberships, and a stream with a
+  `:principal` topic is refused behind a non-default guard.
+- **Encoded cookie names cannot stand in for prefixed cookies.** A cookie
+  named `%5F%5FHost-suprnova_session` resumed the `__Host-` session; a
+  prefix that appears only after decoding is now dropped.
+- **A verification link verifies only the address it was sent to.**
+  Changing the account's email no longer lets an old link verify the new
+  address.
+- **Password reset checks the token before hashing.** A dead or made-up
+  token made the server compute an Argon2id hash first, in the framework's
+  reset flow and in Magnetar's `PasswordManagementService`.
+- **A session that loses its Magnetar authority ends its Live
+  memberships** on this node, so it stops receiving events.
+- **An image cannot allocate past its decode budget.** A crafted PNG
+  inflated past `IMAGE_MAX_ALLOC_BYTES`, a lossless WebP's prefix-code
+  tables were unbounded, a JPEG could be measured at one frame header and
+  decoded at another, and path and disk sources were read into memory
+  before the size check. Each is now counted against the budget before the
+  memory is taken.
+- **The mock payment provider refuses unsigned webhooks outside
+  development.** It accepted them when the application registered a
+  production or staging `AppConfig` in code with `APP_ENV` unset; it now
+  requires both the configured environment and `APP_ENV` to be local,
+  development or testing.
+- **Queued notification events carry only `data()`.** The queued
+  `NotificationSending`, `NotificationSent` and `NotificationFailed` events
+  carried the whole serialized notification, including fields kept out of
+  `data()` such as reset tokens.
+- **Vendor API keys stay with their vendor.** Pinecone and the HTTP mail
+  drivers followed redirects, forwarding `Api-Key` and
+  `x-postmark-server-token` to another origin. Web push transport errors no
+  longer carry the subscription endpoint URL into logs and
+  `NotificationFailed`.
+- **CORS patterns anchor every alternative.** `allow_origin_patterns`
+  anchored only the first and last alternative of a pattern such as
+  `a|b`, so `https://app.example.evil.test` matched
+  `https://app\.example|...` and got a credentialed allow. Every
+  alternative must now match the whole origin.
+- **Rate limits cannot be sidestepped.** On the Redis limiter, a
+  shorter-window quota sharing a key with a longer one deleted the longer
+  quota's history; history now lasts for the longest window used on the
+  key, as the memory driver already did. An identity-keyed limit read the
+  query string or the body, so `?email=decoy` or a blank `?email=` reached
+  a body address under a fresh quota; both are now read, and a request that
+  names two different addresses shares one `{prefix}:{field}-ambiguous`
+  bucket.
+- **`MimeType` sniffs before it trusts the header.** Script text, or
+  markup hidden after 16 KiB of whitespace, passed an image allowlist on a
+  spoofed `Content-Type`. The header now counts only for types without
+  magic bytes, such as `text/csv`.
+- **An Inertia validation redirect stays on the host.** A same-host
+  `Referer` such as `https://app.test//evil.test/x` sent the redirect to
+  another host; it now falls back to the previous URL.
+- **Signed URLs sign the order of a repeated parameter.** Swapping the
+  values of a repeated key (`?mode=a&mode=b` to `?mode=b&mode=a`) kept the
+  signature valid while changing what the handler read. URLs minted before
+  still verify.
+- **Mail headers and recipients cannot be injected.** Postmark and Mailgun
+  received recipient lists joined from unquoted display names, so a name
+  such as `attacker@example.com, Victim` added a recipient, and SMTP and
+  the file transport wrote header names carrying CR, LF or NUL verbatim.
+  Every transport now builds addresses and headers through one validating
+  serializer: an address is exactly one RFC 5322 address with its display
+  name quoted when needed, a header name follows the RFC 5322 grammar and
+  is at most 76 bytes, and a header value, the subject included, refuses
+  control characters other than tab. This landed after the `v3.1.0` tag.
 
 ## 3.0.0 - 2026-09-29
 

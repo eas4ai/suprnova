@@ -4,9 +4,11 @@
 //! delivered via mail opts in by implementing [`NotificationMailable`]
 //! and registering its renderer once at boot via
 //! [`register_mail_renderer`]. At dispatch time, the channel looks up
-//! the renderer by `Notification::notification_name()`, deserializes
-//! the JSON payload back into the concrete `N`, and invokes
-//! `N::to_mail(&self)` to produce a [`MailRendering`]. The channel
+//! the renderer by `Notification::notification_name()` and invokes
+//! `N::to_mail(&self)` on the notification itself to produce a
+//! [`MailRendering`]. On the queued path that is the notification the
+//! worker rebuilt from its full serialized form; `data()`, the public
+//! payload other channels persist, is not what `to_mail` reads. The channel
 //! then assembles an `OutgoingMessage` addressed to the route
 //! returned by the `Notifiable` and dispatches it through
 //! `Mail::current_transport`.
@@ -26,7 +28,7 @@
 
 use crate::error::FrameworkError;
 use crate::lock;
-use crate::mail::transport::{OutgoingMessage, dispatch_with_telemetry};
+use crate::mail::transport::OutgoingMessage;
 use crate::mail::{Address, Attachment, Mail};
 use crate::notifications::{Channel, DynNotification, Notification};
 use async_trait::async_trait;
@@ -86,9 +88,10 @@ pub struct MailRendering {
 /// The Notification owns its mail representation - `to_mail` produces
 /// the rendered subject/body content. No `Notifiable` argument: the
 /// queued path loses the original `Notifiable`, so per-recipient
-/// variation must ride through the Notification's `data()` (the
-/// payload is serialized at queue time and reconstructed before
-/// `to_mail` runs).
+/// variation must ride on the Notification's own fields (the whole
+/// notification is serialized at queue time and rebuilt before
+/// `to_mail` runs). `to_mail` reads those fields, not `data()`, so a
+/// field the mail needs may stay out of the public payload.
 ///
 /// Bootstrap registers each implementor once via
 /// [`register_mail_renderer::<N>()`]. The [`MailChannel`] then looks
@@ -105,7 +108,7 @@ pub trait NotificationMailable: Notification {
 /// [`register_mail_renderer`], which only closes over the type
 /// parameter `N`. Bump to `Arc<dyn Fn>` if a future caller needs to
 /// capture state.
-type MailRendererFn = fn(serde_json::Value) -> Result<MailRendering, FrameworkError>;
+type MailRendererFn = fn(&dyn DynNotification) -> Result<MailRendering, FrameworkError>;
 
 static MAIL_RENDERERS: RwLock<Option<HashMap<&'static str, MailRendererFn>>> = RwLock::new(None);
 
@@ -117,8 +120,18 @@ static MAIL_RENDERERS: RwLock<Option<HashMap<&'static str, MailRendererFn>>> = R
 /// renderer (last-write-wins) - matches the notification factory
 /// registry and the dispatcher's channel registration.
 pub fn register_mail_renderer<N: NotificationMailable>() -> Result<(), FrameworkError> {
-    let renderer: MailRendererFn = |payload| {
-        let n: N = serde_json::from_value(payload).map_err(|e| {
+    let renderer: MailRendererFn = |notification| {
+        // The notification itself, so `to_mail` sees every field.
+        if let Some(n) = notification
+            .as_any()
+            .and_then(|any| any.downcast_ref::<N>())
+        {
+            return n.to_mail();
+        }
+        // A different type registered under the same name, or a
+        // hand-written `DynNotification`: nothing typed to hand over, so
+        // decode `N` from the public payload as the only shape there is.
+        let n: N = serde_json::from_value(notification.data()).map_err(|e| {
             FrameworkError::internal(format!("decode {}: {e}", N::notification_name()))
         })?;
         n.to_mail()
@@ -178,7 +191,7 @@ impl Channel for MailChannel {
         notification: &dyn DynNotification,
     ) -> Result<(), FrameworkError> {
         let renderer = renderer_for(notification.name())?;
-        let rendering = renderer(notification.data())?;
+        let rendering = renderer(notification)?;
 
         // Empty-body guard - mirror MailBuilder::send's upstream check
         // so notification dispatch can never silently send a blank
@@ -206,6 +219,9 @@ impl Channel for MailChannel {
         let msg = Mail::apply_always_defaults(msg);
 
         let transport = Mail::current_transport()?;
-        dispatch_with_telemetry(transport.as_ref(), &msg).await
+        // A notification sent by mail is a dispatched mail, so it fires
+        // `MessageSending` and `MessageSent` like any other (Laravel's mail
+        // channel sends through the mailer, which fires them too).
+        crate::mail::deliver(transport.as_ref(), &msg).await
     }
 }

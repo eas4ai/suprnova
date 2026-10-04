@@ -835,7 +835,22 @@ fn run_in(
         operation.as_str(),
     ];
     args.extend(extra_args.iter().map(String::as_str));
-    let mut command = super::cargo_run_console(&args);
+    exchange(
+        super::cargo_run_console(&args),
+        operation,
+        protocol,
+        timeout,
+    )
+}
+
+/// Spawns `command` as the helper and consumes its exchange for
+/// `operation` in `protocol`, under `timeout`.
+fn exchange(
+    mut command: std::process::Command,
+    operation: Operation,
+    protocol: u16,
+    timeout: Duration,
+) -> Result<Session, ToolFailure> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -857,7 +872,12 @@ fn run_in(
         Err(_) => {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = reader.join();
+            // Never joined (ROOT-38). A process the helper started can
+            // still hold the stdout pipe after the helper itself is killed,
+            // and the reader blocked on that pipe would then hold this call
+            // past its own timeout for as long as the stray process lives.
+            // Detached, the reader ends when the last writer closes the pipe.
+            drop(reader);
             return Err(ToolFailure::Timeout(timeout.as_secs()));
         }
     };
@@ -887,6 +907,33 @@ fn run_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ROOT-38: the helper timeout bounds the call even when a process the
+    /// helper started still holds the stdout pipe after the helper itself is
+    /// killed. The reader blocked on that pipe used to be joined
+    /// unconditionally on timeout, so the call waited for the stray process
+    /// rather than for its own timeout. The shell here starts a sleeper that
+    /// inherits its stdout, then becomes a sleeper itself and never answers.
+    #[cfg(unix)]
+    #[test]
+    fn the_helper_timeout_bounds_the_call_when_a_child_of_the_helper_keeps_stdout_open() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 30 & exec sleep 30"]);
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = exchange(
+                command,
+                Operation::Check,
+                PROTOCOL_VERSION,
+                Duration::from_millis(200),
+            );
+            let _ = done_tx.send(matches!(result, Err(ToolFailure::Timeout(_))));
+        });
+        let timed_out = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the call returns within its own timeout, not when the stray process exits");
+        assert!(timed_out, "the call reports the helper timeout");
+    }
 
     #[test]
     fn limits_carry_only_configuration_keys_and_plain_units() {

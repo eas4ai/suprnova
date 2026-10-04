@@ -23,12 +23,15 @@ use crate::error::FrameworkError;
 use crate::validation::message::TranslateArgs;
 use fluent_bundle::concurrent::FluentBundle;
 use fluent_bundle::{FluentArgs, FluentResource, FluentValue};
-use fluent_syntax::ast::Resource as FtlResource;
+use fluent_syntax::ast::{
+    CallArguments, Entry, Expression, InlineExpression, Pattern, PatternElement,
+    Resource as FtlResource,
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 /// The framework's embedded English validation catalog. Sits at the
@@ -74,6 +77,11 @@ pub struct FluentTranslator {
     /// maximum, so a *deleted* file (which can only hold or lower a max,
     /// never raise it) is still detected - see `mtime_snapshot`.
     snapshot: RwLock<BTreeMap<PathBuf, SystemTime>>,
+    /// Held across a whole reload - snapshot, read, publish - so two
+    /// reloads never interleave. Without it, a reload that read the files
+    /// first could publish its older catalogs after a later reload, paired
+    /// with whichever snapshot landed last.
+    reloading: Mutex<()>,
 }
 
 // `fluent_bundle::concurrent::FluentBundle` doesn't implement `Debug`, so
@@ -108,13 +116,17 @@ impl FluentTranslator {
         config: &LocalizationConfig,
     ) -> Result<Self, FrameworkError> {
         let dir = dir.as_ref();
-        let inner = load_all(dir, config)?;
+        // The snapshot is taken before the files are read, never after: an
+        // edit landing between the two must leave the snapshot older than
+        // the file, so the next `reload_if_stale` reads it.
         let snapshot = mtime_snapshot(dir);
+        let inner = load_all(dir, config)?;
         Ok(Self {
             dir: dir.to_path_buf(),
             config: config.clone(),
             inner: RwLock::new(inner),
             snapshot: RwLock::new(snapshot),
+            reloading: Mutex::new(()),
         })
     }
 
@@ -125,18 +137,25 @@ impl FluentTranslator {
     /// locale directory appearing or disappearing, since that changes
     /// which files exist). Returns whether a reload actually happened.
     /// Intended for a dev-mode watcher; production deployments call
-    /// `reload()` explicitly (e.g. on a deploy hook) instead of polling.
+    /// [`Lang::reload`](super::Lang::reload) explicitly (e.g. on a deploy
+    /// hook) instead of polling.
     pub fn reload_if_stale(&self) -> Result<bool, FrameworkError> {
-        let current = mtime_snapshot(&self.dir);
-        let is_stale = {
-            let stored = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
-            current != *stored
-        };
-        if !is_stale {
+        if !self.is_stale(&mtime_snapshot(&self.dir)) {
             return Ok(false);
         }
-        self.reload()?;
+        let _reloading = self.reloading.lock().unwrap_or_else(|e| e.into_inner());
+        // Checked again under the lock: a reload that held it may have read
+        // this change already.
+        let current = mtime_snapshot(&self.dir);
+        if !self.is_stale(&current) {
+            return Ok(false);
+        }
+        self.rebuild(current, || {})?;
         Ok(true)
+    }
+
+    fn is_stale(&self, current: &BTreeMap<PathBuf, SystemTime>) -> bool {
+        *current != *self.snapshot.read().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -192,9 +211,16 @@ impl Translator for FluentTranslator {
         Ok(rendered.into_owned())
     }
 
+    /// A message with attributes but no value counts as absent:
+    /// [`translate`](Translator::translate) has no value to render for it,
+    /// and `Lang::has` promises a real translation.
     fn has(&self, locale: &Locale, key: &str) -> bool {
         let map = self.inner.read().unwrap_or_else(|e| e.into_inner());
-        map.get(locale).is_some_and(|c| c.bundle.has_message(key))
+        map.get(locale).is_some_and(|c| {
+            c.bundle
+                .get_message(key)
+                .is_some_and(|message| message.value().is_some())
+        })
     }
 
     fn available_locales(&self) -> Vec<Locale> {
@@ -208,17 +234,7 @@ impl Translator for FluentTranslator {
     }
 
     fn reload(&self) -> Result<(), FrameworkError> {
-        let rebuilt = load_all(&self.dir, &self.config)?;
-        let snapshot = mtime_snapshot(&self.dir);
-        {
-            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
-            *guard = rebuilt;
-        }
-        {
-            let mut guard = self.snapshot.write().unwrap_or_else(|e| e.into_inner());
-            *guard = snapshot;
-        }
-        Ok(())
+        self.reload_observing(|| {})
     }
 
     /// Delegates to the inherent [`FluentTranslator::reload_if_stale`].
@@ -236,6 +252,36 @@ impl Translator for FluentTranslator {
     /// a bug.
     fn reload_if_stale(&self) -> Result<bool, FrameworkError> {
         self.reload_if_stale()
+    }
+}
+
+impl FluentTranslator {
+    /// [`Translator::reload`], with `after_read` run once the files have
+    /// been read and before the result is published - the window a
+    /// concurrent edit or reload can land in, which the tests drive.
+    fn reload_observing(&self, after_read: impl FnOnce()) -> Result<(), FrameworkError> {
+        let _reloading = self.reloading.lock().unwrap_or_else(|e| e.into_inner());
+        self.rebuild(mtime_snapshot(&self.dir), after_read)
+    }
+
+    /// Read every catalog and publish it with `snapshot`, which the caller
+    /// took before the read, holding `reloading`.
+    fn rebuild(
+        &self,
+        snapshot: BTreeMap<PathBuf, SystemTime>,
+        after_read: impl FnOnce(),
+    ) -> Result<(), FrameworkError> {
+        let rebuilt = load_all(&self.dir, &self.config)?;
+        after_read();
+        {
+            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            *guard = rebuilt;
+        }
+        {
+            let mut guard = self.snapshot.write().unwrap_or_else(|e| e.into_inner());
+            *guard = snapshot;
+        }
+        Ok(())
     }
 }
 
@@ -448,7 +494,13 @@ fn build_locale_catalog(
     })?;
     // `add_builtins()` covers `NUMBER()`; `DATETIME()` is the framework's
     // own ICU4X-backed addition (see `functions.rs`).
-    functions::register(&mut bundle)?;
+    functions::register(&mut bundle, locale)?;
+    let runtime = runtime_catalog(ast);
+    if let Some(runtime) = &runtime {
+        for (function, id) in &runtime.functions {
+            functions::register_as(&mut bundle, locale, function, id)?;
+        }
+    }
 
     let serialized = super::merge::serialize(ast);
     // Computed from `&serialized` before it's moved into
@@ -460,13 +512,20 @@ fn build_locale_catalog(
         .take(32)
         .collect();
     let text: Arc<str> = Arc::from(serialized.as_str());
+    // The served text keeps the author's names; only the compiled copy
+    // renames a term or a function call that collides (see
+    // `runtime_catalog`).
+    let compiled = match runtime {
+        Some(runtime) => super::merge::serialize(&runtime.ast),
+        None => serialized,
+    };
 
     // Every entry in `ast` already passed through `parse_strict` as an
     // individual file (or the embedded catalog), so a failure to
     // re-parse the serialized, merged result is an internal invariant
     // failure of the merge/serialize round trip - not a user-facing
     // malformed-file error - and must never panic.
-    let resource = FluentResource::try_new(serialized).map_err(|(_, errors)| {
+    let resource = FluentResource::try_new(compiled).map_err(|(_, errors)| {
         FrameworkError::param(format!(
             "lang/{locale}: internal error re-parsing the flattened catalog: {errors:?}"
         ))
@@ -477,6 +536,180 @@ fn build_locale_catalog(
         bundle,
         source: CatalogSource { text, hash },
     })
+}
+
+/// What the runtime bundle compiles when it must differ from the catalog
+/// served to the browser: see [`runtime_catalog`].
+struct RuntimeCatalog {
+    /// The flattened AST with the colliding names replaced.
+    ast: FtlResource<String>,
+    /// Each built-in function a message shares its name with, and the id
+    /// the compiled calls use for it instead.
+    functions: Vec<(&'static str, String)>,
+}
+
+/// The names [`runtime_catalog`] replaces in the compiled bundle: terms by
+/// their name without the `-`, functions by their call name.
+#[derive(Default)]
+struct Renames {
+    terms: HashMap<String, String>,
+    functions: HashMap<String, String>,
+}
+
+/// The catalog the runtime bundle compiles, when it must differ from the
+/// one served to the browser.
+///
+/// fluent-bundle keys messages, terms and functions by their bare name in
+/// one map, so `-brand` and `brand` overwrite each other there, a term
+/// `-NUMBER` hides the `NUMBER()` function, and a message `NUMBER` replaces
+/// it, although Fluent itself, the merge (`super::merge`) and the browser's
+/// `@fluent/bundle` keep the three apart. In the compiled copy, each term
+/// whose name is also a message's or a function's is renamed, and each
+/// function whose name a message uses is called under another id, every
+/// reference rewritten, to names nothing in the catalog uses. Messages
+/// keep their keys, so callers find them as written. `None` when nothing
+/// collides, the usual case, so the served text is compiled as it is.
+fn runtime_catalog(ast: &FtlResource<String>) -> Option<RuntimeCatalog> {
+    let mut messages: HashSet<&str> = HashSet::new();
+    let mut terms: HashSet<&str> = HashSet::new();
+    for entry in &ast.body {
+        match entry {
+            Entry::Message(message) => {
+                messages.insert(message.id.name.as_str());
+            }
+            Entry::Term(term) => {
+                terms.insert(term.id.name.as_str());
+            }
+            _ => {}
+        }
+    }
+    let mut colliding_terms: Vec<&str> = terms
+        .iter()
+        .copied()
+        .filter(|name| messages.contains(name) || functions::FUNCTION_NAMES.contains(name))
+        .collect();
+    let colliding_functions: Vec<&'static str> = functions::FUNCTION_NAMES
+        .iter()
+        .copied()
+        .filter(|name| messages.contains(name))
+        .collect();
+    if colliding_terms.is_empty() && colliding_functions.is_empty() {
+        return None;
+    }
+
+    let mut taken: HashSet<String> = messages
+        .iter()
+        .chain(terms.iter())
+        .chain(functions::FUNCTION_NAMES.iter())
+        .map(|name| (*name).to_owned())
+        .collect();
+    // The first `{name}{suffix}{n}` no entry, function or earlier rename
+    // uses.
+    let mut fresh = |name: &str, suffix: &str| {
+        let id = (1..)
+            .map(|n| format!("{name}{suffix}{n}"))
+            .find(|candidate| !taken.contains(candidate))
+            .unwrap_or_else(|| format!("{name}{suffix}"));
+        taken.insert(id.clone());
+        id
+    };
+    let mut renames = Renames::default();
+    // Sorted, so a catalog always compiles to the same names.
+    colliding_terms.sort_unstable();
+    for name in colliding_terms {
+        let id = fresh(name, "-term-");
+        renames.terms.insert(name.to_owned(), id);
+    }
+    let mut function_ids = Vec::with_capacity(colliding_functions.len());
+    for name in colliding_functions {
+        // Upper case, as a Fluent function call's name must be.
+        let id = fresh(name, "-BUILTIN-");
+        renames.functions.insert(name.to_owned(), id.clone());
+        function_ids.push((name, id));
+    }
+
+    let mut renamed = ast.clone();
+    for entry in &mut renamed.body {
+        match entry {
+            Entry::Message(message) => {
+                if let Some(value) = &mut message.value {
+                    rename_in_pattern(value, &renames);
+                }
+                for attribute in &mut message.attributes {
+                    rename_in_pattern(&mut attribute.value, &renames);
+                }
+            }
+            Entry::Term(term) => {
+                if let Some(name) = renames.terms.get(&term.id.name) {
+                    term.id.name = name.clone();
+                }
+                rename_in_pattern(&mut term.value, &renames);
+                for attribute in &mut term.attributes {
+                    rename_in_pattern(&mut attribute.value, &renames);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(RuntimeCatalog {
+        ast: renamed,
+        functions: function_ids,
+    })
+}
+
+fn rename_in_pattern(pattern: &mut Pattern<String>, renames: &Renames) {
+    for element in &mut pattern.elements {
+        if let PatternElement::Placeable { expression } = element {
+            rename_in_expression(expression, renames);
+        }
+    }
+}
+
+fn rename_in_expression(expression: &mut Expression<String>, renames: &Renames) {
+    match expression {
+        Expression::Select { selector, variants } => {
+            rename_in_inline(selector, renames);
+            for variant in variants {
+                rename_in_pattern(&mut variant.value, renames);
+            }
+        }
+        Expression::Inline(inline) => rename_in_inline(inline, renames),
+    }
+}
+
+fn rename_in_inline(inline: &mut InlineExpression<String>, renames: &Renames) {
+    match inline {
+        InlineExpression::TermReference { id, arguments, .. } => {
+            if let Some(name) = renames.terms.get(&id.name) {
+                id.name = name.clone();
+            }
+            if let Some(arguments) = arguments {
+                rename_in_arguments(arguments, renames);
+            }
+        }
+        InlineExpression::FunctionReference { id, arguments } => {
+            if let Some(name) = renames.functions.get(&id.name) {
+                id.name = name.clone();
+            }
+            rename_in_arguments(arguments, renames);
+        }
+        InlineExpression::Placeable { expression } => {
+            rename_in_expression(expression, renames);
+        }
+        InlineExpression::StringLiteral { .. }
+        | InlineExpression::NumberLiteral { .. }
+        | InlineExpression::MessageReference { .. }
+        | InlineExpression::VariableReference { .. } => {}
+    }
+}
+
+fn rename_in_arguments(arguments: &mut CallArguments<String>, renames: &Renames) {
+    for positional in &mut arguments.positional {
+        rename_in_inline(positional, renames);
+    }
+    for named in &mut arguments.named {
+        rename_in_inline(&mut named.value, renames);
+    }
 }
 
 /// A path → mtime inventory of every `.ftl` file directly under a locale
@@ -517,4 +750,108 @@ fn mtime_snapshot(dir: &Path) -> BTreeMap<PathBuf, SystemTime> {
         }
     }
     files
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn config() -> LocalizationConfig {
+        LocalizationConfig {
+            default_locale: Locale::fallback_en(),
+            fallback_locale: Locale::fallback_en(),
+            use_isolating: false,
+            detection: Vec::new(),
+            session_key: "locale".into(),
+            cookie_name: "locale".into(),
+            parents: Default::default(),
+        }
+    }
+
+    /// Write `text` and stamp the file `seconds` past `base`, so two edits
+    /// never share an mtime however coarse the filesystem clock is.
+    fn edit(path: &Path, text: &str, base: SystemTime, seconds: u64) {
+        fs::write(path, text).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(base + Duration::from_secs(seconds))
+            .unwrap();
+    }
+
+    fn greeting(translator: &FluentTranslator) -> String {
+        translator
+            .translate(&Locale::fallback_en(), "greeting", &TranslateArgs::new())
+            .unwrap()
+    }
+
+    /// DRIVERS-025: an edit that lands after a reload has read the files
+    /// but before it records their mtimes must not be acknowledged as
+    /// loaded. The next `reload_if_stale` sees it and picks it up.
+    #[test]
+    fn an_edit_during_a_reload_is_picked_up_by_the_next_stale_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("en");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("app.ftl");
+        let base = SystemTime::now();
+        edit(&file, "greeting = one\n", base, 0);
+        let translator = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
+
+        edit(&file, "greeting = two\n", base, 10);
+        translator
+            .reload_observing(|| edit(&file, "greeting = three\n", base, 20))
+            .unwrap();
+        assert_eq!(
+            greeting(&translator),
+            "two",
+            "the reload read the file before the edit"
+        );
+
+        assert!(
+            translator.reload_if_stale().unwrap(),
+            "the edit made during the reload is still unread, so the catalog is stale"
+        );
+        assert_eq!(greeting(&translator), "three");
+    }
+
+    /// DRIVERS-025, the concurrent form: a second reload that runs while
+    /// the first is between reading and publishing must not leave the
+    /// first one's older catalog paired with the newer snapshot.
+    #[test]
+    fn a_reload_that_overlaps_another_never_pairs_old_content_with_a_new_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("en");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("app.ftl");
+        let base = SystemTime::now();
+        edit(&file, "greeting = one\n", base, 0);
+        let translator = Arc::new(FluentTranslator::from_dir(tmp.path(), &config()).unwrap());
+
+        edit(&file, "greeting = two\n", base, 10);
+        let other = Arc::clone(&translator);
+        let file_for_other = file.clone();
+        translator
+            .reload_observing(move || {
+                // Another reload starts while this one holds the content of
+                // "two" and has not published it yet.
+                std::thread::spawn(move || {
+                    edit(&file_for_other, "greeting = three\n", base, 20);
+                    other.reload().unwrap();
+                });
+                std::thread::sleep(Duration::from_millis(200));
+            })
+            .unwrap();
+        // Let the other reload finish if it was made to wait.
+        std::thread::sleep(Duration::from_millis(200));
+
+        translator.reload_if_stale().unwrap();
+        assert_eq!(
+            greeting(&translator),
+            "three",
+            "whatever order the two reloads finished in, the file's latest content wins"
+        );
+    }
 }

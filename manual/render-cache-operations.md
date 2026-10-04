@@ -161,6 +161,11 @@ provider, or a backend:
 `hits` increments only for `l0`, `l1`, `conditional`, and `stale`.
 `publications` counts only a store answering "published", never a fenced or
 rejected attempt. `rebuilds` counts one per spawned background rebuild.
+A node runs at most one background rebuild per key at a time: a stale hit on
+a key whose rebuild is still running serves the stale copy and spawns
+nothing. A background rebuild renders only when the coordinator makes it the
+key's leader, so a rebuild another node is already running costs this node
+no handler run.
 
 The two island-stitch counters carry their own sets: `assembled` and
 `fail_document` for assemblies; `rendered`, `omitted`, `fallback`, and
@@ -198,8 +203,10 @@ exactly one of `applied` (the message named a digest a validation lease on
 this node observes, and every such lease was shortened),
 `ignored_unknown_key` (it named nothing this node holds a lease against,
 which includes a message this node cannot read at all), `dropped_over_bound`
-(it carried more than 64 digests and was dropped whole rather than
-truncated, because a truncated hint is a silently wrong hint),
+(it carried more than 64 digests, or more bytes than 64 digests take, and
+was dropped whole rather than truncated, because a truncated hint is a
+silently wrong hint; an oversized payload is dropped before it is copied or
+queued),
 `subscriber_dropped` (this node's subscription ended, because it fell behind
 or the connection failed, and is being re-established), and
 `dropped_publish_queue_full` (this node had an advance to announce and its
@@ -234,8 +241,11 @@ uses, so a private entry's file is retired earlier than a public one's and a
 sweep can never disagree with a freshness check about whether an entry is
 truly dead.
 
-`sweep` removes at most 64 entries per call, oldest publication first, and
-returns whether more remain. It runs automatically on every 256th
+`sweep` removes at most 64 entries per call, and returns whether more
+remain. It takes entries whose retention has run out, in the order it ran
+out, then entries from an older epoch, and it finds them through indexes
+kept in that order, so the work of one call does not grow with the number
+of live entries in the directory. It runs automatically on every 256th
 publication, so a healthy directory needs no attention. `RenderCache::sweep()`
 drives it explicitly when you want to, and a backlog larger than one call's
 limit drains across later triggers rather than blocking on one long scan.

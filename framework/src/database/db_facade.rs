@@ -114,14 +114,30 @@ fn sqlite_value_by_runtime_type(
     None
 }
 
-/// True when `sql`, ignoring leading whitespace, starts with `SELECT`
-/// (case-insensitive). Used by [`DB::statement`](crate::DB::statement) to
-/// decide whether a raw statement is a read (skip the render cache's
-/// broad-authority advance) or a write of unknown shape (advance it).
+/// True when `sql` is one `SELECT` statement: it starts with `SELECT`
+/// (case-insensitive, leading whitespace ignored) and holds no `;` before
+/// an optional trailing one. Used by [`DB::statement`](crate::DB::statement)
+/// and its raw siblings to decide whether a raw statement is a read (skip
+/// the render cache's broad-authority advance) or a write of unknown shape
+/// (advance it).
+///
+/// The single-statement half matters because `DB::unprepared` runs its
+/// whole string, and PostgreSQL's simple-query protocol and SQLite both run
+/// every statement in a batch: `SELECT 1; UPDATE posts ...` commits the
+/// update. Judged by its first six bytes alone, that batch advanced nothing
+/// and every page that read `posts` went on being served (DATA-055). A `;`
+/// inside a string literal also counts, which only ever over-invalidates.
 fn is_select_statement(sql: &str) -> bool {
-    sql.trim_start()
-        .get(.."SELECT".len())
-        .is_some_and(|head| head.eq_ignore_ascii_case("SELECT"))
+    let trimmed = sql.trim();
+    let single = trimmed
+        .strip_suffix(';')
+        .unwrap_or(trimmed)
+        .bytes()
+        .all(|byte| byte != b';');
+    single
+        && trimmed
+            .get(.."SELECT".len())
+            .is_some_and(|head| head.eq_ignore_ascii_case("SELECT"))
 }
 
 /// Bind `value`, written to `column`, and return its placeholder.
@@ -1432,12 +1448,11 @@ impl DbTableBuilder {
             sql.push_str(&order.join(", "));
         }
 
-        if let Some(n) = self.limit_value {
-            sql.push_str(&format!(" LIMIT {n}"));
-        }
-        if let Some(n) = self.offset_value {
-            sql.push_str(&format!(" OFFSET {n}"));
-        }
+        sql.push_str(&super::clauses::render_limit_offset(
+            backend,
+            self.limit_value,
+            self.offset_value,
+        ));
 
         Ok(sql)
     }

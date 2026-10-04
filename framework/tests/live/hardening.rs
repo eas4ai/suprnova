@@ -252,6 +252,352 @@ async fn plain_logout_ends_delivery() {
     );
 }
 
+/// IDENTITY-036: a session that loses its signed-in user to the session
+/// authority check ends that user's memberships on this node, as a plain
+/// logout does (LIVE-021). The browser session holds alice with no Magnetar
+/// binding. Once an engine that owns session authority is installed, that
+/// identity no longer holds: the next ordinary request clears it, the same
+/// path a revoked opaque session takes. The session row survives, so only
+/// the revocation hook can end the stream.
+///
+/// Runs in its own process: installing the Magnetar engine is process-wide
+/// and would change how every other test's session validates.
+#[cfg(feature = "testing")]
+#[test]
+fn invalidated_session_authority_ends_delivery() {
+    crate::own_process::run_alone("hardening::invalidated_session_authority_ends_delivery_child");
+}
+
+#[cfg(feature = "testing")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalidated_session_authority_ends_delivery_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let (router, _runtime) = router_and_runtime();
+    let store = Arc::new(MemorySessionStore::default());
+    let server = spawn_server_with_sessions(router, Arc::clone(&store)).await;
+    let session_id = "livesessionauthority000000000000000000a1".to_owned();
+    assert_eq!(session_id.len(), 40, "a store-shaped session id");
+    let mut session = SessionData::new(session_id.clone(), "csrf-token".to_owned());
+    session.user_id = Some("alice".to_owned());
+    store.seed(session);
+    let cookie_name = suprnova::session::SessionConfig::default().cookie_name;
+    let cookie = suprnova::http::cookie::Cookie::encrypted(&cookie_name, &session_id)
+        .expect("encrypt the session cookie");
+    let alice = Identity::alice().with_cookie(&format!("{cookie_name}={}", cookie.value()));
+
+    let issued = issue(
+        server.port,
+        &alice,
+        orders_issue_body("sse", "doc-instance-0001"),
+    )
+    .await;
+    let credential = issued.credential.clone().expect("an SSE credential");
+    let mut stream = SseClient::open(server.port, &alice, &credential, 1, &[]).await;
+    assert_eq!(stream.status.as_u16(), 200);
+    let ack = subscribe(
+        server.port,
+        &alice,
+        &credential,
+        &issued,
+        "nonce-subscribe-0001",
+        1,
+    )
+    .await;
+    assert_eq!(ack.status.as_u16(), 200);
+
+    crate::magnetar_auth::install().await;
+    let touch = send(
+        server.port,
+        &alice,
+        Method::GET,
+        "/session/touch",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(touch.status.as_u16(), 200);
+    assert!(
+        store.contains(&session_id),
+        "the session row survives; only its signed-in user is cleared"
+    );
+
+    LiveStreams::resolve()
+        .expect("the Live streams facade resolves")
+        .event::<OrdersUpdated>(
+            "orders",
+            LiveEventTarget::Island,
+            CanonicalValue::String("post-authority-loss".into()),
+        )
+        .await
+        .expect("publishing to a topic with no live member is not an error");
+
+    assert!(
+        !stream_carries(&mut stream, "post-authority-loss").await,
+        "an event published after the session lost its user reached the old stream"
+    );
+}
+
+/// A user known by its id alone.
+struct GuardUser(&'static str);
+
+impl suprnova::Authenticatable for GuardUser {
+    fn get_auth_identifier(&self) -> String {
+        self.0.to_owned()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
+        self
+    }
+}
+
+/// Resolves nobody: the users below are signed in through `set_user`.
+struct NoLookups;
+
+#[suprnova::async_trait]
+impl suprnova::UserProvider for NoLookups {
+    async fn retrieve_by_id(
+        &self,
+        _id: &str,
+    ) -> Result<Option<Arc<dyn suprnova::Authenticatable>>, suprnova::FrameworkError> {
+        Ok(None)
+    }
+}
+
+/// Signs the request in from `x-test-principal`: `both` holds web user 7 on
+/// the default guard and admin 9 on the `admin` guard; `web-only` holds web
+/// user 7 alone.
+struct TwoGuardSignIn;
+
+#[suprnova::async_trait]
+impl suprnova::Middleware for TwoGuardSignIn {
+    async fn handle(&self, request: suprnova::Request, next: suprnova::Next) -> suprnova::Response {
+        let principal = request.header("x-test-principal").unwrap_or_default();
+        if matches!(principal, "both" | "web-only") {
+            suprnova::Auth::guard("web")?
+                .set_user(Arc::new(GuardUser("7")))
+                .await;
+        }
+        if principal == "both" {
+            suprnova::Auth::guard("admin")?
+                .set_user(Arc::new(GuardUser("9")))
+                .await;
+        }
+        next(request).await
+    }
+}
+
+/// Records the browser's Origin and CSRF proof, which a Live route's own
+/// middleware establishes before its `AuthMiddleware` runs; the Live
+/// boundary refuses checks recorded out of order.
+struct OriginAndCsrf;
+
+#[suprnova::async_trait]
+impl suprnova::Middleware for OriginAndCsrf {
+    async fn handle(
+        &self,
+        mut request: suprnova::Request,
+        next: suprnova::Next,
+    ) -> suprnova::Response {
+        use suprnova::live::testing::{
+            LiveSecurityCheck, inspect_request_attestation, record_live_security_pass_for_test,
+        };
+        for check in [LiveSecurityCheck::Origin, LiveSecurityCheck::Csrf] {
+            let missing = inspect_request_attestation(&request)
+                .missing_checks()
+                .contains(&check);
+            if missing {
+                let _ = record_live_security_pass_for_test(&mut request, check, None);
+            }
+        }
+        next(request).await
+    }
+}
+
+/// The principals the inventory stream's Gate was asked about.
+static INVENTORY_GATE_PRINCIPALS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn inventory_gate_principals() -> Vec<String> {
+    std::mem::take(&mut *INVENTORY_GATE_PRINCIPALS.lock().expect("gate principals"))
+}
+
+/// A Live route behind a second guard authorizes, issues and delivers to
+/// that guard's principal, `admin:9`, never the default guard's user in the
+/// same session; with no user on the route's guard it refuses; and the
+/// guard's logout ends the membership on this node. A stream with a
+/// `:principal` topic is refused there: `admin:9` is not a topic segment,
+/// and the topic must never resolve to web user 7.
+///
+/// Runs in its own process: it registers a process-wide `AuthManager` with
+/// an `admin` guard, which would change how every other test authenticates.
+#[cfg(feature = "testing")]
+#[test]
+fn a_second_guard_route_subscribes_and_delivers_as_its_own_principal() {
+    crate::own_process::run_alone(
+        "hardening::a_second_guard_route_subscribes_and_delivers_as_its_own_principal_child",
+    );
+}
+
+#[cfg(feature = "testing")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_guard_route_subscribes_and_delivers_as_its_own_principal_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let (router, _runtime) = router_and_runtime();
+    let config =
+        suprnova::AuthConfig::new("web").guard("admin", suprnova::GuardConfig::session("admins"));
+    suprnova::App::singleton(suprnova::AuthManager::new(config));
+    suprnova::Auth::register_provider("users", Arc::new(NoLookups)).expect("users provider");
+    suprnova::Auth::register_provider("admins", Arc::new(NoLookups)).expect("admins provider");
+    Gate::define::<String, String>(
+        "live:tests.async-inventory.stream.inventory",
+        |principal, _| {
+            INVENTORY_GATE_PRINCIPALS
+                .lock()
+                .expect("gate principals")
+                .push(principal.clone());
+            true
+        },
+    );
+    let store = Arc::new(MemorySessionStore::default());
+    let registry = suprnova::MiddlewareRegistry::new()
+        .append(suprnova::session::SessionMiddleware::with_store(
+            suprnova::session::SessionConfig::default(),
+            store,
+        ))
+        .append(TwoGuardSignIn)
+        .append(OriginAndCsrf)
+        .append(suprnova::AuthMiddleware::optional().for_guard("admin"))
+        .append(StrictAsyncFacts);
+    let server = spawn_server_with(router, registry).await;
+
+    let both = Identity::alice().with_principal("both").anonymous();
+    let bootstrap = send(
+        server.port,
+        &both,
+        Method::GET,
+        "/session/touch",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(bootstrap.status.as_u16(), 200);
+    let cookie = session_cookie(&bootstrap).expect("the session middleware set its cookie");
+    let both = both.with_cookie(&cookie);
+    let issued = issue(
+        server.port,
+        &both,
+        inventory_issue_body("sse", "doc-instance-0001"),
+    )
+    .await;
+    let asked = inventory_gate_principals();
+    assert!(
+        !asked.is_empty() && asked.iter().all(|principal| principal == "admin:9"),
+        "the route's guard is `admin`: its user is the principal, never web user 7 - {asked:?}"
+    );
+    let credential = issued.credential.clone().expect("an SSE credential");
+    let mut stream = SseClient::open(server.port, &both, &credential, 1, &[]).await;
+    assert_eq!(stream.status.as_u16(), 200);
+    let ack = subscribe(
+        server.port,
+        &both,
+        &credential,
+        &issued,
+        "nonce-subscribe-0001",
+        1,
+    )
+    .await;
+    assert_eq!(ack.status.as_u16(), 200);
+    let streams = LiveStreams::resolve().expect("the Live streams facade resolves");
+    streams
+        .event::<StockChanged>(
+            "inventory",
+            LiveEventTarget::Island,
+            CanonicalValue::String("for-admin".into()),
+        )
+        .await
+        .expect("publish to the admin membership");
+    assert!(stream_carries(&mut stream, "for-admin").await);
+    assert!(
+        inventory_gate_principals()
+            .iter()
+            .all(|principal| principal == "admin:9"),
+        "delivery re-authorizes the membership's own principal"
+    );
+
+    let principal_topic = post_control(
+        server.port,
+        &both,
+        SUBSCRIPTION_PATH,
+        None,
+        orders_issue_body("sse", "doc-instance-0003"),
+    )
+    .await;
+    assert_eq!(
+        principal_topic.status.as_u16(),
+        404,
+        "a `:principal` topic does not resolve for `admin:9`: {}",
+        String::from_utf8_lossy(&principal_topic.body)
+    );
+
+    let web_only = Identity::alice()
+        .with_principal("web-only")
+        .anonymous()
+        .with_cookie(&cookie);
+    let refused = post_control(
+        server.port,
+        &web_only,
+        SUBSCRIPTION_PATH,
+        None,
+        inventory_issue_body("sse", "doc-instance-0002"),
+    )
+    .await;
+    assert_eq!(
+        refused.status.as_u16(),
+        403,
+        "no user on the route's guard: the default guard's user never stands in - {}",
+        String::from_utf8_lossy(&refused.body)
+    );
+    assert!(
+        !inventory_gate_principals().contains(&"7".to_owned()),
+        "web user 7 must never reach the Gate on the admin route"
+    );
+
+    let logout = send(
+        server.port,
+        &both,
+        Method::POST,
+        "/session/logout-admin",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(
+        logout.status.as_u16(),
+        200,
+        "admin logout failed: {}",
+        String::from_utf8_lossy(&logout.body)
+    );
+    streams
+        .event::<StockChanged>(
+            "inventory",
+            LiveEventTarget::Island,
+            CanonicalValue::String("after-admin-logout".into()),
+        )
+        .await
+        .expect("publishing to a topic with no live member is not an error");
+    assert!(
+        !stream_carries(&mut stream, "after-admin-logout").await,
+        "an event published after the admin logout reached the admin's stream"
+    );
+}
+
 /// LIVE-020: a session destroyed behind the runtime, as another node's
 /// logout does, stops delivery within the re-verification interval. The
 /// session row is removed from the shared store directly, the clock passes

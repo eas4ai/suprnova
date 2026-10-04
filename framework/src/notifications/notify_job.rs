@@ -48,10 +48,12 @@ impl Job for SendNotificationJob {
     async fn handle(self) -> Result<(), FrameworkError> {
         let dispatcher = dispatcher_for_queue()?;
         let factory = factory_for(&self.notification_name)?;
-        // Snapshot the payload before the factory consumes it - it doubles as
-        // the `data` field on the lifecycle events below.
-        let payload = self.notification_payload.clone();
         let notification: Box<dyn DynNotification> = factory(self.notification_payload)?;
+        // The lifecycle events carry `data()`, the payload channels see, as
+        // they do on the synchronous path. The serialized notification the
+        // factory just consumed holds every field, including internal ones
+        // the application kept out of `data()`; it never reaches listeners.
+        let payload = notification.data();
         for channel_name in &self.channels {
             let Some(route) = self.notifiable_route_per_channel.get(channel_name) else {
                 continue;

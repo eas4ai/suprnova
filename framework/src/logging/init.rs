@@ -68,15 +68,17 @@ pub fn init_subscriber(config: LogConfig) {
 /// in place and emits a `tracing::warn!` through it so the operator can
 /// see that this `LogConfig` was not applied.
 pub(crate) fn install_base_subscriber(config: &LogConfig) -> bool {
-    // The application's bootstrap may define the channel yet; the server
-    // and the workers check it with `check_channels` once it has run.
-    super::layer::default_or_stdout();
     let result = tracing_subscriber::registry()
         .with(build_env_filter(&config.level))
         .with(super::layer::output_layers(config))
         .try_init();
     let installed = result.is_ok();
-    if !installed {
+    if installed {
+        // The application's bootstrap may define the channel yet; the
+        // server and the workers check it with `check_channels` once it
+        // has run.
+        super::layer::adopt_installed(config);
+    } else {
         // A global subscriber is already installed (common in tests, or an
         // embedder that initialises logging more than once). The existing
         // one wins and this `LogConfig` was NOT applied. `try_init` only

@@ -3,21 +3,21 @@
 //! revocation" and "Client credentials and JWT bearer" sections).
 //!
 //! Each submodule renders one grant's wire parameters from Task 1's
-//! declarative [`super::request_shape`] types plus
-//! [`super::provider::OAuthProvider::client_id`]/
-//! [`super::provider::OAuthProvider::client_authentication`], executes the
-//! token-endpoint POST through the host-supplied
+//! declarative [`crate::oauth::request_shape`] types plus
+//! [`crate::oauth::provider::OAuthProvider::client_id`]/
+//! [`crate::oauth::provider::OAuthProvider::client_authentication`],
+//! executes the token-endpoint POST through the host-supplied
 //! [`crate::plugin::HttpTransport`] (spec 09's "reqwest-compatible trait"
 //! transport seam), and parses the result through Task 1's
-//! [`super::protocol`] types -- including providers that deliver an error
-//! body under an HTTP 200 status
-//! ([`super::request_shape::TokenRequestShape::accept_http_success_error_body`]).
+//! [`crate::oauth::protocol`] types -- including providers that deliver an
+//! error body under an HTTP 200 status
+//! ([`crate::oauth::request_shape::TokenRequestShape::accept_http_success_error_body`]).
 //!
 //! These executors are single-shot: one token request in, one
-//! [`super::protocol::TokenSuccessResponse`] or
-//! [`super::errors::OAuthProtocolError`] out. Persisting, rotating, or
-//! single-flighting the resulting tokens is the token broker's job (a later
-//! iteration-003 task), not this module's.
+//! [`crate::oauth::protocol::TokenSuccessResponse`] or
+//! [`crate::oauth::errors::OAuthProtocolError`] out. Persisting, rotating,
+//! or single-flighting the resulting tokens is the token broker's job (a
+//! later iteration-003 task), not this module's.
 
 pub mod authorization_code;
 pub mod client_credentials;

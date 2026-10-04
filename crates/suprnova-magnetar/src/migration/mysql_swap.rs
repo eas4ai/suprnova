@@ -211,7 +211,7 @@ impl MySqlShadowSwap {
         backend: &B,
         tables: &[SwapTable],
         cleanup: &SacrificeableCleanup,
-    ) -> core::result::Result<SwapJournal, SwapFailure> {
+    ) -> core::result::Result<SwapJournal, Box<SwapFailure>> {
         let mut journal = SwapJournal {
             tables: tables.to_vec(),
             cleanup: cleanup.clone(),
@@ -220,18 +220,18 @@ impl MySqlShadowSwap {
         match backend.write_barrier_held().await {
             Ok(true) => {}
             Ok(false) => {
-                return Err(SwapFailure {
+                return Err(Box::new(SwapFailure {
                     journal,
                     error: Error::Conflict {
                         resource: "MySQL source write barrier".to_owned(),
                         message: "shadow copy requires an active source-write barrier".to_owned(),
                     },
-                });
+                }));
             }
-            Err(error) => return Err(SwapFailure { journal, error }),
+            Err(error) => return Err(Box::new(SwapFailure { journal, error })),
         }
         if let Err(error) = validate_swap_set(backend, tables).await {
-            return Err(SwapFailure { journal, error });
+            return Err(Box::new(SwapFailure { journal, error }));
         }
         journal.renames = tables
             .iter()
@@ -249,11 +249,11 @@ impl MySqlShadowSwap {
         for table in tables {
             let fingerprint = match backend.fingerprint(&table.active).await {
                 Ok(fingerprint) => fingerprint,
-                Err(error) => return Err(SwapFailure { journal, error }),
+                Err(error) => return Err(Box::new(SwapFailure { journal, error })),
             };
             let schema_digest = match backend.schema_digest(&table.active).await {
                 Ok(schema_digest) => schema_digest,
-                Err(error) => return Err(SwapFailure { journal, error }),
+                Err(error) => return Err(Box::new(SwapFailure { journal, error })),
             };
             journal
                 .source_fingerprints
@@ -264,10 +264,10 @@ impl MySqlShadowSwap {
         }
         journal.phase = JournalPhase::Preparing;
         if let Err(error) = backend.persist_journal(&journal).await {
-            return Err(SwapFailure { journal, error });
+            return Err(Box::new(SwapFailure { journal, error }));
         }
         if let Err(error) = self.resume_preparation(backend, &mut journal).await {
-            return Err(SwapFailure { journal, error });
+            return Err(Box::new(SwapFailure { journal, error }));
         }
         self.resume(backend, journal).await
     }
@@ -343,42 +343,42 @@ impl MySqlShadowSwap {
         &self,
         backend: &B,
         mut journal: SwapJournal,
-    ) -> core::result::Result<SwapJournal, SwapFailure> {
+    ) -> core::result::Result<SwapJournal, Box<SwapFailure>> {
         if let Err(error) = acquire_recovery_barrier(backend).await {
-            return Err(SwapFailure { journal, error });
+            return Err(Box::new(SwapFailure { journal, error }));
         }
         if let Err(error) = validate_journal_baselines(&journal) {
-            return Err(SwapFailure { journal, error });
+            return Err(Box::new(SwapFailure { journal, error }));
         }
         if let Err(error) = validate_resume_journal(&journal) {
-            return Err(SwapFailure { journal, error });
+            return Err(Box::new(SwapFailure { journal, error }));
         }
         if journal.phase == JournalPhase::Preparing
             && let Err(error) = self.resume_preparation(backend, &mut journal).await
         {
-            return Err(SwapFailure { journal, error });
+            return Err(Box::new(SwapFailure { journal, error }));
         }
         if let Err(error) = validate_resume_journal(&journal) {
-            return Err(SwapFailure { journal, error });
+            return Err(Box::new(SwapFailure { journal, error }));
         }
         if matches!(
             journal.phase,
             JournalPhase::Restoring | JournalPhase::Restored | JournalPhase::Aborted
         ) {
-            return Err(SwapFailure {
+            return Err(Box::new(SwapFailure {
                 journal,
                 error: Error::Conflict {
                     resource: "MySQL swap journal".to_owned(),
                     message: "journal is not resumable in its current phase".to_owned(),
                 },
-            });
+            }));
         }
         if let Err(error) = verify_resumable_shadows(backend, &journal).await {
-            return Err(SwapFailure { journal, error });
+            return Err(Box::new(SwapFailure { journal, error }));
         }
         journal.phase = JournalPhase::CuttingOver;
         if let Err(error) = backend.persist_journal(&journal).await {
-            return Err(SwapFailure { journal, error });
+            return Err(Box::new(SwapFailure { journal, error }));
         }
         for index in 0..journal.renames.len() {
             if journal.renames[index].state == RenameState::Completed {
@@ -387,7 +387,7 @@ impl MySqlShadowSwap {
             if journal.renames[index].state != RenameState::Prepared {
                 journal.renames[index].state = RenameState::Prepared;
                 if let Err(error) = backend.persist_journal(&journal).await {
-                    return Err(SwapFailure { journal, error });
+                    return Err(Box::new(SwapFailure { journal, error }));
                 }
             }
             let from = journal.renames[index].from.clone();
@@ -402,11 +402,11 @@ impl MySqlShadowSwap {
                         if let Err(error) =
                             verify_active_unchanged(backend, &journal, &table.active).await
                         {
-                            return Err(SwapFailure { journal, error });
+                            return Err(Box::new(SwapFailure { journal, error }));
                         }
                     }
                     (Err(error), _) | (_, Err(error)) => {
-                        return Err(SwapFailure { journal, error });
+                        return Err(Box::new(SwapFailure { journal, error }));
                     }
                     _ => {}
                 }
@@ -414,7 +414,7 @@ impl MySqlShadowSwap {
                 let table = &journal.tables[index - journal.tables.len()];
                 let shadow_exists = match backend.table_exists(&table.shadow).await {
                     Ok(exists) => exists,
-                    Err(error) => return Err(SwapFailure { journal, error }),
+                    Err(error) => return Err(Box::new(SwapFailure { journal, error })),
                 };
                 let candidate = if shadow_exists {
                     table.shadow.as_str()
@@ -426,10 +426,10 @@ impl MySqlShadowSwap {
                         (Ok(true), Ok(true)) => table.active.as_str(),
                         (Ok(_), Ok(_)) => {
                             let error = topology_error(&table.shadow, &table.active);
-                            return Err(SwapFailure { journal, error });
+                            return Err(Box::new(SwapFailure { journal, error }));
                         }
                         (Err(error), _) | (_, Err(error)) => {
-                            return Err(SwapFailure { journal, error });
+                            return Err(Box::new(SwapFailure { journal, error }));
                         }
                     }
                 };
@@ -437,20 +437,20 @@ impl MySqlShadowSwap {
                     verify_table_baseline(backend, &journal, candidate, "MySQL promotion shadow")
                         .await
                 {
-                    return Err(SwapFailure { journal, error });
+                    return Err(Box::new(SwapFailure { journal, error }));
                 }
             }
             if let Err(error) = reconcile_rename(backend, &from, &to).await {
-                return Err(SwapFailure { journal, error });
+                return Err(Box::new(SwapFailure { journal, error }));
             }
             journal.renames[index].state = RenameState::Completed;
             if let Err(error) = backend.persist_journal(&journal).await {
-                return Err(SwapFailure { journal, error });
+                return Err(Box::new(SwapFailure { journal, error }));
             }
         }
         journal.phase = JournalPhase::Complete;
         if let Err(error) = backend.persist_journal(&journal).await {
-            return Err(SwapFailure { journal, error });
+            return Err(Box::new(SwapFailure { journal, error }));
         }
         Ok(journal)
     }

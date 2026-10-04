@@ -626,6 +626,11 @@ Table, column, the exclusion key, and every `where_eq` column are validated
 against an identifier allowlist before they reach the SQL string; the value
 under test and all scope values are bound parameters.
 
+`Unique` and `Exists` read the primary connection. Inside a
+`DB::transaction` they read through that transaction, so they see the rows
+it has written and not yet committed, as every other query in the closure
+does.
+
 ### Unique is advisory - the database constraint is the guarantee
 
 `Unique` runs a `SELECT COUNT(*)` **before** the write, so it carries an

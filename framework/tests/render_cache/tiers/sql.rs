@@ -25,7 +25,9 @@
 //! What is proven of `SqlInstanceRecordStore`: a record is created once,
 //! compare-and-store replaces exactly the version it read, a record past
 //! store time answers as one that was never written, elapsed records are
-//! reclaimed in bounded batches, a record over the codec's bound is refused
+//! reclaimed in bounded batches, eviction reads the soonest live records in
+//! deadline order and removes one only at the version it read, a record over
+//! the codec's bound is refused
 //! before any statement, and - the coupling only a database can offer - a
 //! claim made inside a host transaction that rolls back leaves no row. The
 //! kernel over it answers the engine's own ledger conformance suite.
@@ -43,7 +45,10 @@ use suprnova::render_cache::ledger::tier_migration_present;
 use suprnova::render_cache::providers::{SqlInstanceRecordStore, SqlLeaseStore, SqlRenderStore};
 use suprnova::{DB, FrameworkError};
 use suprnova_live::identity::UnixMillis;
-use suprnova_live::ledger::{CasOutcome, InstanceRecordStore, LedgerErrorKind, MAX_RECORD_BYTES};
+use suprnova_live::ledger::{
+    CasOutcome, InstanceRecordKey, InstanceRecordStore, LedgerErrorKind, MAX_RECORD_BYTES,
+    StoredRecord,
+};
 use suprnova_live::render_cache::entry::{EntryLimits, decode};
 use suprnova_live::render_cache::singleflight::{
     LocalCoordinatorLimits, RebuildAdmission, RebuildCoordinator,
@@ -1049,6 +1054,96 @@ async fn assert_full_width_identities_are_their_own_rows() {
     );
 }
 
+/// The keys of a run of records, in the order the store returned them.
+fn keys_of(records: &[(InstanceRecordKey, StoredRecord)]) -> Vec<InstanceRecordKey> {
+    records.iter().map(|(key, _)| key.clone()).collect()
+}
+
+/// Offers the live instances whose deadlines come first, in that order and
+/// bounded by the limit, and removes one only at the version it was read at.
+/// These are the two statements a full ledger evicts through, and the
+/// ordered read, the bound limit, and the conditional delete are per-dialect.
+///
+/// Its deadlines are seconds away, sooner than the minute every other record
+/// helper in this file uses, so these records are the head of the order even
+/// in a database another helper has already written to. It runs after those
+/// helpers, because it leaves records behind that they would count.
+async fn assert_eviction_reads_the_soonest_and_removes_by_version() {
+    let store = SqlInstanceRecordStore::new();
+    for (tag, after_ms) in [(0x70, 1_000), (0x71, 5_000), (0x72, 6_000), (0x73, 7_000)] {
+        assert!(
+            store
+                .insert_if_absent(
+                    &instance_key(tag),
+                    b"candidate",
+                    store_deadline(after_ms).await
+                )
+                .await
+                .expect("insert")
+        );
+    }
+    // Two seconds on, the first record has elapsed and is no longer counted.
+    store.set_time_offset_for_test(2_000);
+
+    assert_eq!(
+        keys_of(
+            &store
+                .soonest_expiring_instances(2)
+                .await
+                .expect("the soonest records")
+        ),
+        vec![instance_key(0x71), instance_key(0x72)],
+        "deadline order, bounded by the limit, and never an elapsed record"
+    );
+
+    let claimed = instance_key(0x72);
+    assert_eq!(
+        store
+            .compare_and_store(&claimed, 1, b"claimed", store_deadline(6_000).await)
+            .await
+            .expect("compare and store"),
+        CasOutcome::Stored { version: 2 }
+    );
+    assert!(
+        !store
+            .compare_and_remove(&claimed, 1)
+            .await
+            .expect("compare and remove"),
+        "a record that moved on since it was read is not removed"
+    );
+    assert!(
+        store
+            .compare_and_remove(&claimed, 2)
+            .await
+            .expect("compare and remove"),
+        "the version that was read is removed"
+    );
+    assert!(store.load(&claimed).await.expect("load").is_none());
+    assert!(
+        !store
+            .compare_and_remove(&claimed, 2)
+            .await
+            .expect("compare and remove"),
+        "a second remover finds nothing to count as its own"
+    );
+    assert_eq!(
+        keys_of(
+            &store
+                .soonest_expiring_instances(2)
+                .await
+                .expect("the soonest records")
+        ),
+        vec![instance_key(0x71), instance_key(0x73)],
+        "the removed record left the order"
+    );
+}
+
+#[tokio::test]
+async fn eviction_reads_the_soonest_and_removes_by_version() {
+    let _db = boot().await;
+    assert_eviction_reads_the_soonest_and_removes_by_version().await;
+}
+
 #[tokio::test]
 async fn full_width_identities_are_their_own_rows() {
     let _db = boot().await;
@@ -1362,6 +1457,93 @@ async fn live_postgres_record_creation_and_cas_conflict() {
 
     assert_record_creation_and_cas_conflict().await;
     assert_full_width_identities_are_their_own_rows().await;
+    assert_eviction_reads_the_soonest_and_removes_by_version().await;
+}
+
+/// DATA-026: reclamation deletes only records that are still elapsed when
+/// its delete runs. It chooses its victims with one read and deletes them by
+/// key in a second statement; a peer that reclaimed the same elapsed key in
+/// between and created a fresh record there used to lose that record to the
+/// delete, so a successful mount or retry reservation vanished before its
+/// deadline. Under PostgreSQL's default READ COMMITTED nothing else stops
+/// it: the read takes no lock.
+async fn assert_reclamation_never_deletes_a_peer_s_fresh_record() {
+    let reclaimer = Arc::new(SqlInstanceRecordStore::new());
+    let peer = SqlInstanceRecordStore::new();
+    let contested = instance_key(0x31);
+    let fresh_deadline = store_deadline(60_000).await;
+
+    // An elapsed record at the contested key: past its deadline by store
+    // time the moment it is written.
+    assert!(
+        peer.insert_if_absent(&contested, b"elapsed", UnixMillis::new(1))
+            .await
+            .expect("insert the elapsed record")
+    );
+
+    let (chosen_tx, chosen_rx) = tokio::sync::oneshot::channel::<()>();
+    let (resume_tx, resume_rx) = tokio::sync::oneshot::channel::<()>();
+    let chosen_tx = std::sync::Mutex::new(Some(chosen_tx));
+    let resume_rx = Arc::new(tokio::sync::Mutex::new(Some(resume_rx)));
+    reclaimer.set_reclaim_pause_for_test(Some(Arc::new(move || {
+        if let Some(chosen) = chosen_tx.lock().expect("chosen").take() {
+            let _ = chosen.send(());
+        }
+        let resume_rx = Arc::clone(&resume_rx);
+        Box::pin(async move {
+            if let Some(resume) = resume_rx.lock().await.take() {
+                let _ = resume.await;
+            }
+        })
+    })));
+
+    // The reclaimer creates an unrelated record; its reclamation chooses
+    // the contested key and pauses before deleting it.
+    let creating = {
+        let reclaimer = Arc::clone(&reclaimer);
+        tokio::spawn(async move {
+            reclaimer
+                .insert_if_absent(&instance_key(0x32), b"unrelated", fresh_deadline)
+                .await
+        })
+    };
+    chosen_rx.await.expect("the reclamation chose its victims");
+
+    // The peer reclaims the elapsed record itself and creates a fresh one
+    // at the same key, committed while the reclaimer is paused.
+    assert!(
+        peer.insert_if_absent(&contested, b"fresh", fresh_deadline)
+            .await
+            .expect("the peer creates the fresh record"),
+        "the elapsed record no longer holds the key"
+    );
+    resume_tx.send(()).expect("resume the reclamation");
+    assert!(
+        creating
+            .await
+            .expect("join")
+            .expect("the reclaimer's own create")
+    );
+
+    let held = peer
+        .load(&contested)
+        .await
+        .expect("load")
+        .expect("the peer's fresh record survives the stale reclamation");
+    assert_eq!(held.bytes, b"fresh".to_vec());
+}
+
+#[tokio::test]
+#[ignore = "requires live Postgres; run with --ignored live_postgres"]
+async fn live_postgres_reclamation_never_deletes_a_peer_s_fresh_record() {
+    let url = std::env::var("PG_TEST_URL")
+        .expect("set PG_TEST_URL to a disposable Postgres - this test drops and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("Postgres test DB not reachable - check PG_TEST_URL");
+    let _guard = reset_and_migrate(conn).await;
+
+    assert_reclamation_never_deletes_a_peer_s_fresh_record().await;
 }
 
 #[tokio::test]
@@ -1376,6 +1558,80 @@ async fn live_mysql_record_creation_and_cas_conflict() {
 
     assert_record_creation_and_cas_conflict().await;
     assert_full_width_identities_are_their_own_rows().await;
+    assert_eviction_reads_the_soonest_and_removes_by_version().await;
+}
+
+/// DATA-040: a record creation that loses the race on the unique key
+/// inside a host transaction leaves that transaction usable. The winner
+/// inserts first and holds its row uncommitted; the host's locking read
+/// cannot see it, so the host's insert waits on the key and then fails
+/// when the winner commits. On Postgres a failed statement aborts the
+/// transaction unless it ran under a savepoint, and the store used to
+/// report the lost race with the host's transaction left aborted, so the
+/// host's next statement failed.
+async fn assert_a_raced_creation_leaves_the_host_transaction_usable() {
+    use std::time::Duration;
+
+    let store = Arc::new(SqlInstanceRecordStore::new());
+    let key = instance_key(0x51);
+    let expires_at = store_deadline(60_000).await;
+    let (inserted, wait_for_insert) = tokio::sync::oneshot::channel::<()>();
+
+    let winner = DB::transaction({
+        let store = Arc::clone(&store);
+        let key = key.clone();
+        move |_tx| {
+            Box::pin(async move {
+                let created = store
+                    .insert_if_absent(&key, b"winner", expires_at)
+                    .await
+                    .map_err(|e| FrameworkError::internal(format!("winner insert: {e}")))?;
+                let _ = inserted.send(());
+                // Hold the row uncommitted while the host's insert waits on it.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                Ok::<bool, FrameworkError>(created)
+            })
+        }
+    });
+    let host = DB::transaction({
+        let store = Arc::clone(&store);
+        let key = key.clone();
+        move |_tx| {
+            Box::pin(async move {
+                let _ = wait_for_insert.await;
+                let created = store
+                    .insert_if_absent(&key, b"host", expires_at)
+                    .await
+                    .map_err(|e| FrameworkError::internal(format!("host insert: {e}")))?;
+                let after = DB::select("SELECT 1 AS one", Vec::<sea_orm::Value>::new()).await?;
+                Ok::<(bool, usize), FrameworkError>((created, after.len()))
+            })
+        }
+    });
+    let (winner, host) = tokio::join!(winner, host);
+
+    assert!(
+        winner.expect("the winner commits"),
+        "the winner creates the record"
+    );
+    let (created, rows) = host.expect("the host's transaction survives the lost race");
+    assert!(!created, "the host reports the key as held");
+    assert_eq!(rows, 1, "the host's next statement runs");
+    let stored = store.load(&key).await.expect("load").expect("the record");
+    assert_eq!(stored.bytes, b"winner".to_vec());
+}
+
+#[tokio::test]
+#[ignore = "requires live Postgres; run with --ignored postgres_"]
+async fn postgres_a_raced_record_creation_leaves_the_host_transaction_usable() {
+    let url = std::env::var("PG_TEST_URL")
+        .expect("set PG_TEST_URL to a disposable Postgres - this test drops and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("Postgres test DB not reachable - check PG_TEST_URL");
+    let _guard = reset_and_migrate(conn).await;
+
+    assert_a_raced_creation_leaves_the_host_transaction_usable().await;
 }
 
 // --- End to end: two nodes over one database ---

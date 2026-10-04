@@ -99,6 +99,18 @@ impl Auth {
     ///
     /// Regenerates the session ID to prevent session fixation, and rotates the
     /// CSRF token.
+    ///
+    /// # With Magnetar installed
+    ///
+    /// Every web login then needs a Magnetar session, so revocation and auth
+    /// epochs reach it. This method cannot await the engine, so
+    /// [`SessionMiddleware`](crate::SessionMiddleware) issues the session for
+    /// `user_id` at the end of the request and records its binding before it
+    /// stores the session. When the engine refuses - an unknown user, a
+    /// Magnetar second factor this login did not prove - the request fails
+    /// with that error and nothing is stored. The async session-guard
+    /// logins ([`Auth::attempt`](Self::attempt), [`Auth::login`](Self::login))
+    /// ask the engine before they log in, so their refusal fires no event.
     pub fn login_id(user_id: impl Into<String>) -> Result<(), crate::error::FrameworkError> {
         Self::refuse_custom_default_guard("login_id", "login")?;
         Self::login_guard_id(&Self::default_guard_name(), user_id)
@@ -185,8 +197,15 @@ impl Auth {
         ttl_minutes: i64,
     ) -> Result<(), crate::error::FrameworkError> {
         Self::ensure_remember_issue_scopes()?;
-        Self::flush_pending_remember_revocations().await?;
         let user_id = user_id.into();
+        // With the Magnetar engine installed, ask before anything changes:
+        // a refused login must not leave a remember credential behind.
+        let host_auth_epoch = if guard_name == Self::default_guard_name() {
+            crate::magnetar_integration::admit_host_sign_in(&user_id).await?
+        } else {
+            None
+        };
+        Self::flush_pending_remember_revocations().await?;
         let remember_to_revoke = Self::prepare_guard_remember_identity_replacement(guard_name);
         if let Some((previous_user_id, selector)) = remember_to_revoke {
             Self::revoke_remember_selector(guard_name, &previous_user_id, &selector).await?;
@@ -195,6 +214,9 @@ impl Auth {
         // also verifies the session scope is installed - failing loud here
         // before the DB row gets written by `issue_remember_cookie`.
         Self::login_guard_id(guard_name, user_id.clone())?;
+        if let Some(auth_epoch) = host_auth_epoch {
+            crate::session::middleware::record_host_sign_in_epoch(&user_id, auth_epoch);
+        }
         // Issue the row + queue the cookie.
         Self::issue_remember_cookie_for_guard(guard_name, &user_id, ttl_minutes).await
     }
@@ -216,6 +238,11 @@ impl Auth {
     /// call [`login_remember`](Self::login_remember) instead - it
     /// handles session id rotation + CSRF + auth user + remember-me in
     /// one step.
+    ///
+    /// With the Magnetar engine installed, the credential is a Magnetar
+    /// remember credential, and Magnetar treats a remembered sign-in as
+    /// having proved every factor. Issue one only for a user who proved
+    /// every factor the account has: this method does not check.
     pub async fn issue_remember_cookie(
         user_id: &str,
         ttl_minutes: i64,
@@ -568,6 +595,12 @@ impl Auth {
         }
 
         let saved_id = crate::session::middleware::persisted_guard_auth_user_id(guard_name);
+        // The identity and session this guard's Live memberships were issued
+        // under, captured before either is cleared (LIVE-021).
+        let live_principal = request_state::guard_user_id(guard_name)
+            .or_else(|| saved_id.clone())
+            .map(|id| Self::guard_principal(guard_name, &id));
+        let live_session_id = session().map(|session| session.id);
         let mut selectors = session()
             .and_then(|session| session.auth_guard_remember_selector(guard_name))
             .into_iter()
@@ -582,6 +615,12 @@ impl Auth {
             session.csrf_token = generate_csrf_token();
             session.dirty = true;
         });
+        // The session survives this guard's logout, so the Live memberships
+        // it opened for this guard's user end here (LIVE-021).
+        if let (Some(session_id), Some(principal)) = (live_session_id, live_principal) {
+            crate::live::revocation::session_deauthenticated(session_id.as_bytes(), &principal)
+                .await;
+        }
         let mut first_revoke_error = None;
         for selector in selectors {
             if let Some(ref expected_user_id) = saved_id {
@@ -685,6 +724,8 @@ impl Auth {
         // session would share an ID - defeating "complete session
         // destruction." Laravel's `session()->invalidate()` is
         // explicitly `flush()` + `regenerate()`; we match that here.
+        // The default identity's Magnetar session ends with it.
+        crate::session::middleware::retire_default_binding_before_flush();
         regenerate_session_id();
         session_mut(|session| {
             session.flush();
@@ -925,6 +966,86 @@ impl Auth {
         match request_state::route_guard() {
             Some(guard) => Self::guard(&guard)?.user().await,
             None => Self::user().await,
+        }
+    }
+
+    /// The identifier of the route's user, by the rule of
+    /// [`route_user`](Self::route_user), without a provider lookup: the
+    /// route's guard reports it, or [`id`](Self::id) when the route names no
+    /// guard.
+    pub(crate) async fn route_user_id() -> Result<Option<String>, crate::error::FrameworkError> {
+        match request_state::route_guard() {
+            Some(guard) => Self::guard(&guard)?.id().await,
+            None => Ok(Self::id()),
+        }
+    }
+
+    /// The provider of the route's guard: the provider its configuration
+    /// names, or the default guard's provider when the route names no guard.
+    ///
+    /// A route check asks this provider about the route's user. The default
+    /// provider knows the default guard's users, which are not the users of
+    /// another guard.
+    pub(crate) fn route_user_provider()
+    -> Result<Arc<dyn UserProvider>, crate::error::FrameworkError> {
+        match request_state::route_guard() {
+            Some(guard) => Self::manager()?.guard_provider(&guard),
+            None => super::active_user_provider(),
+        }
+    }
+
+    /// The principal of the route's user, by the rule of
+    /// [`guard_principal`](Self::guard_principal): the bare id for the
+    /// default guard, `<guard>:<id>` for any other. Gates that take a
+    /// principal string, such as Live's, are asked about this value.
+    ///
+    /// The route's guard is the one the last `AuthMiddleware` that passed
+    /// the request on checked. When the route names none, it is the default
+    /// guard: [`id`](Self::id), unchanged, or the user of a default guard of
+    /// the application under its name. `None` when that guard has no user.
+    pub(crate) async fn route_principal() -> Result<Option<String>, crate::error::FrameworkError> {
+        let guard = match request_state::route_guard() {
+            Some(guard) => guard,
+            None => match Self::custom_default_guard() {
+                Some(guard) => guard,
+                None => return Ok(Self::id()),
+            },
+        };
+        let id = Self::guard(&guard)?.id().await?;
+        Ok(id.map(|id| Self::guard_principal(&guard, &id)))
+    }
+
+    /// The route's guard, by name, when it is not the default guard: the
+    /// guard the last `AuthMiddleware` that passed the request on checked.
+    /// `None` when that is the default guard, named or not, or when no such
+    /// middleware ran.
+    pub(crate) fn route_guard_other_than_default() -> Option<String> {
+        request_state::route_guard().filter(|guard| *guard != Self::default_guard_name())
+    }
+
+    /// The principal that the user `id` of the guard `guard_name` stands
+    /// for, wherever an identity is recorded: the Live principal attestation
+    /// and the identity material of the render cache.
+    ///
+    /// The default guard keeps the bare id, the value [`id`](Self::id)
+    /// reports, so attestations and render-cache keys built from the default
+    /// guard keep their value. Every other guard, and a guard of the
+    /// application even as the default, gives `<guard>:<id>`. User 7 of an
+    /// `admin` guard is not user 7 of the default guard, even when both
+    /// guards read one table, and a body built for one is never served as
+    /// the other's. The manager refuses a `:` in the name of every guard
+    /// that gives `<guard>:<id>`, so two guards never give one principal.
+    pub(crate) fn guard_principal(guard_name: &str, id: &str) -> String {
+        let bare = match App::get::<AuthManager>() {
+            Some(manager) => {
+                guard_name == manager.default_guard_name() && !manager.is_custom_guard(guard_name)
+            }
+            None => guard_name == "web",
+        };
+        if bare {
+            id.to_owned()
+        } else {
+            format!("{guard_name}:{id}")
         }
     }
 
@@ -1328,7 +1449,9 @@ impl Auth {
     /// use suprnova::Auth;
     ///
     /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
-    /// let user = Auth::password().register("alice@example.com", "s3cret!").await?;
+    /// // An address that already has an account yields
+    /// // `Registration::Accepted` and never that account.
+    /// let _registration = Auth::password().register("alice@example.com", "s3cret!").await?;
     /// let (user, session) = Auth::password()
     ///     .authenticate("alice@example.com", "s3cret!", None, None)
     ///     .await?;

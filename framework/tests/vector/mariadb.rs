@@ -360,7 +360,7 @@ fn ensure_table_sql_cosine_shape() {
     let sql =
         MariaDbVectorDriver::ensure_table_sql("documents", 1536, MariaDbDistance::Cosine).unwrap();
     assert!(sql.contains("CREATE TABLE IF NOT EXISTS `documents`"));
-    assert!(sql.contains("id VARCHAR(255) NOT NULL PRIMARY KEY"));
+    assert!(sql.contains("id VARBINARY(254) NOT NULL PRIMARY KEY"));
     assert!(sql.contains("embedding VECTOR(1536) NOT NULL"));
     assert!(sql.contains("metadata JSON NULL"));
     assert!(sql.contains("VECTOR INDEX (embedding) DISTANCE=cosine"));
@@ -722,8 +722,10 @@ async fn integration_similar_euclidean_returns_best_match_first() {
         .await
         .unwrap();
 
+    // Next to the origin rather than at it: every driver refuses a
+    // zero-vector query, whatever the distance.
     let hits = driver
-        .similar(&table, vec![0.0, 0.0, 0.0], 3)
+        .similar(&table, vec![0.01, 0.0, 0.0], 3)
         .await
         .unwrap();
     assert_eq!(hits.len(), 3);
@@ -890,7 +892,10 @@ async fn integration_vec_fromtext_accepts_our_format() {
         &[0.0, 0.0, 0.0],
         &[-1.5, 0.25, -0.0001],
         &[1e-20, 1.5, 1e10],
-        &[f32::MIN_POSITIVE, 1.0, f32::MAX],
+        // The largest magnitudes MariaDB stores: it refuses a vector whose
+        // squared length overflows a `float` (above about 3.4e38), so
+        // `f32::MAX` itself can never be stored, however it is written.
+        &[f32::MIN_POSITIVE, 1.0, 1.8e19],
     ];
     for v in cases {
         let text = MariaDbVectorDriver::embedding_to_vec_text(v).unwrap();
@@ -1102,5 +1107,60 @@ async fn integration_count_on_empty_table_is_zero() {
         .expect("CREATE TABLE");
 
     assert_eq!(driver.count(&table).await.unwrap(), 0);
+    drop_table(&driver, &table).await;
+}
+
+/// Ids are merge keys compared byte for byte, like every other driver's: two
+/// ids that differ only in case or accent are two rows, and an id that is
+/// not ASCII comes back from `similar` unchanged. (The table's own
+/// `utf8mb4` collation would have merged the first pair.)
+#[tokio::test]
+#[ignore]
+async fn integration_ids_are_exact_byte_strings() {
+    let url = match mariadb_url_or_skip("integration_ids_are_exact_byte_strings") {
+        Some(u) => u,
+        None => return,
+    };
+    let driver = MariaDbVectorDriver::from_url(&url).unwrap();
+    let table = unique_table("exact_ids");
+    drop_table(&driver, &table).await;
+    let create_sql =
+        MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Cosine).unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
+        .execute(driver.pool())
+        .await
+        .expect("CREATE TABLE");
+
+    driver
+        .upsert(
+            &table,
+            vec![
+                VectorItem::new("Doc", vec![1.0, 0.0, 0.0], serde_json::Value::Null),
+                VectorItem::new("doc", vec![0.0, 1.0, 0.0], serde_json::Value::Null),
+                VectorItem::new("caf\u{e9}", vec![0.0, 0.0, 1.0], serde_json::Value::Null),
+                VectorItem::new("cafe", vec![0.5, 0.5, 0.0], serde_json::Value::Null),
+            ],
+        )
+        .await
+        .expect("upsert");
+    assert_eq!(driver.count(&table).await.unwrap(), 4);
+
+    let best = driver
+        .similar(&table, vec![0.0, 0.0, 1.0], 1)
+        .await
+        .expect("similar");
+    assert_eq!(best[0].id, "caf\u{e9}");
+
+    driver
+        .delete(&table, vec!["doc".into()])
+        .await
+        .expect("delete");
+    let best = driver
+        .similar(&table, vec![1.0, 0.0, 0.0], 1)
+        .await
+        .expect("similar");
+    assert_eq!(best[0].id, "Doc", "deleting `doc` leaves `Doc`");
+    assert_eq!(driver.count(&table).await.unwrap(), 3);
+
     drop_table(&driver, &table).await;
 }

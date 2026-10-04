@@ -3,6 +3,7 @@ use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use sea_orm_migration::{MigrationTrait, SchemaManager};
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -742,4 +743,183 @@ async fn a_queued_notification_carries_the_context_of_the_code_that_queued_it() 
         context.data.get("trace_id"),
         Some(&serde_json::json!("abc"))
     );
+}
+
+/// Set only in the child process that
+/// `a_worker_with_no_manual_job_registration_delivers_queued_notifications`
+/// spawns.
+const SCAFFOLD_WORKER_CHILD: &str = "SUPRNOVA_SCAFFOLD_NOTIFICATION_WORKER_CHILD";
+
+/// The worker of an app built from the manual: a dispatcher, a queue driver
+/// and the notification factory, and no `register_job` call. It runs in its
+/// own process because the job registry is process-global and other tests
+/// in this binary register `SendNotificationJob` by hand, which would hide
+/// the defect.
+#[tokio::test]
+async fn scaffold_shaped_notification_worker_child() {
+    if std::env::var(SCAFFOLD_WORKER_CHILD).is_err() {
+        return;
+    }
+    let _events = EventFacade::fake();
+    let db = fresh_db().await;
+    let dispatcher = NotificationDispatcher::new()
+        .register_channel(Arc::new(DatabaseChannel::new(db.clone(), "users")));
+    suprnova::notifications::set_dispatcher(Arc::new(dispatcher)).unwrap();
+    suprnova::notifications::register_notification_factory::<OrderShipped>().unwrap();
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Notify::queue(
+        &User { id: 7 },
+        OrderShipped {
+            tracking: "1Z".into(),
+        },
+    )
+    .await
+    .unwrap();
+    run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: Some(1),
+            queues: Vec::new(),
+        },
+        CancellationToken::new(),
+    )
+    .await;
+
+    let row = db
+        .query_one_raw(Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT COUNT(*) FROM notifications".to_string(),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    let delivered: i64 = row.try_get_by_index(0).unwrap();
+    let exceptions: Vec<String> =
+        dispatched::<suprnova::queue::events::JobExceptionOccurred>(|_| true)
+            .into_iter()
+            .map(|e| e.exception)
+            .collect();
+    assert_eq!(
+        delivered, 1,
+        "the worker must deliver a queued notification with no manual register_job; \
+         worker exceptions: {exceptions:?}"
+    );
+}
+
+#[test]
+fn a_worker_with_no_manual_job_registration_delivers_queued_notifications() {
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--exact",
+            "queue::scaffold_shaped_notification_worker_child",
+            "--nocapture",
+        ])
+        .env(SCAFFOLD_WORKER_CHILD, "1")
+        .output()
+        .expect("spawn the worker child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("running 1 test"),
+        "the child filter matched no test (its module path changed?); stdout:\n{stdout}"
+    );
+    assert!(
+        output.status.success(),
+        "a worker that follows the manual must deliver queued notifications; \
+         status: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
+}
+
+/// A notification whose public `data()` leaves out an internal field the
+/// worker needs to rebuild it.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct ResetLinkNote {
+    user_id: i64,
+    token: String,
+}
+
+impl Notification for ResetLinkNote {
+    fn notification_name() -> &'static str {
+        "ResetLinkNote"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["database", "sms"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::json!({ "user_id": self.user_id })
+    }
+}
+
+struct FailingSms;
+
+#[async_trait]
+impl Channel for FailingSms {
+    fn name(&self) -> &'static str {
+        "sms"
+    }
+    async fn deliver(
+        &self,
+        _route: &str,
+        _notification: &dyn DynNotification,
+    ) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal("synthetic sms failure"))
+    }
+}
+
+/// The lifecycle events carry the payload channels see - `data()` - on the
+/// queued path exactly as on `Notify::send`. The worker rebuilds the whole
+/// notification from its serialized form, and that form, with internal
+/// fields the application kept out of `data()`, must not reach listeners.
+#[tokio::test]
+#[serial]
+async fn queued_lifecycle_events_carry_the_public_data_not_the_serialized_notification() {
+    use std::collections::HashMap;
+    use suprnova::notifications::events::{
+        NotificationFailed, NotificationSending, NotificationSent,
+    };
+
+    let dispatcher = NotificationDispatcher::new()
+        .register_channel(Arc::new(CountingChannel))
+        .register_channel(Arc::new(FailingSms));
+    let _ = suprnova::notifications::set_dispatcher(Arc::new(dispatcher));
+    suprnova::notifications::register_notification_factory::<ResetLinkNote>().unwrap();
+    let _events = EventFacade::fake();
+
+    let notification = ResetLinkNote {
+        user_id: 7,
+        token: "reset-token-secret".into(),
+    };
+    let job = SendNotificationJob {
+        notifiable_route_per_channel: HashMap::from([
+            ("database".to_string(), "7".to_string()),
+            ("sms".to_string(), "+15550100".to_string()),
+        ]),
+        notification_name: "ResetLinkNote".to_string(),
+        notification_payload: serde_json::to_value(&notification).unwrap(),
+        channels: vec!["database".to_string(), "sms".to_string()],
+    };
+    let err = job.handle().await.expect_err("the sms channel fails");
+    assert!(err.to_string().contains("synthetic sms failure"));
+
+    let public = serde_json::json!({ "user_id": 7 });
+    let sending = dispatched::<NotificationSending>(|_| true);
+    assert_eq!(sending.len(), 2, "one Sending per channel");
+    for event in &sending {
+        assert_eq!(
+            event.data, public,
+            "Sending on {} carries data()",
+            event.channel
+        );
+    }
+    let sent = dispatched::<NotificationSent>(|_| true);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].data, public, "Sent carries data()");
+    let failed = dispatched::<NotificationFailed>(|_| true);
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].data, public, "Failed carries data()");
 }

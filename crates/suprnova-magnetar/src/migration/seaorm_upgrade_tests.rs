@@ -55,11 +55,15 @@ fn assert_expected_upgrade_delta(
     before: &BTreeMap<String, String>,
     after: &BTreeMap<String, String>,
 ) {
-    let before_tables: BTreeSet<&str> = before.keys().map(String::as_str).collect();
+    let mut before_tables: BTreeSet<&str> = before.keys().map(String::as_str).collect();
     let after_tables: BTreeSet<&str> = after.keys().map(String::as_str).collect();
+    // The second factor's lockout table postdates SeaORM 1.1 catalogs; the
+    // first pass adds it and keeps every source table.
+    before_tables.insert("auth_second_factor_lockouts");
     assert_eq!(
         before_tables, after_tables,
-        "first migration pass must preserve the source catalog table set"
+        "first migration pass must preserve the source catalog table set and add only \
+         the second-factor lockout table"
     );
 
     let changed_tables: BTreeSet<&str> = before
@@ -68,10 +72,19 @@ fn assert_expected_upgrade_delta(
         .map(String::as_str)
         .filter(|table| before.get(*table) != after.get(*table))
         .collect();
+    // app_users gains its email uniqueness index and auth_two_factor its
+    // pending-rotation columns, which postdate them too.
     assert_eq!(
-        BTreeSet::from(["auth_lockouts"]),
+        BTreeSet::from([
+            "app_users",
+            "auth_lockouts",
+            "auth_second_factor_lockouts",
+            "auth_two_factor"
+        ]),
         changed_tables,
-        "first migration pass must only add the current auth_lockouts schema"
+        "first migration pass must only add the current auth_lockouts schema, the \
+         second-factor lockout table, the app_users email index and the \
+         pending-rotation columns"
     );
 }
 

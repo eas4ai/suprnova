@@ -937,3 +937,60 @@ async fn redis_driver_inspection_listings_round_trip() {
         "an acked job must no longer be reserved either"
     );
 }
+
+/// Push, pop and acknowledge one job through `url`, the round trip every
+/// connection of the driver takes part in: the push goes out on the
+/// producer, the pop and the acknowledgement on the command connections.
+async fn round_trip(url: &str) {
+    let stream = format!("test-{}", uuid::Uuid::new_v4());
+    let driver = RedisQueueDriver::connect(url, &stream, "g1", "c1", Duration::from_secs(60))
+        .await
+        .expect("the driver connects");
+    driver.push(env("R")).await.expect("the push lands");
+    let reservation = driver
+        .pop(Duration::from_secs(60))
+        .await
+        .expect("the pop runs")
+        .expect("the job is there");
+    assert_eq!(reservation.envelope.job_name, "R");
+    driver.ack(&reservation.token).await.expect("the ack lands");
+}
+
+/// The credentials of a `redis://user:password@host/db` URL authenticate
+/// every connection the driver opens, the producer's included. A server
+/// that requires a password refuses a connection that drops them.
+#[ignore = "runs redis-server"]
+#[tokio::test]
+async fn redis_driver_authenticates_every_connection_with_the_url_credentials() {
+    let server = crate::redis_server::PasswordRedis::start("queue-secret");
+    round_trip(&format!(
+        "redis://:queue-secret@127.0.0.1:{}/0",
+        server.port
+    ))
+    .await;
+    round_trip(&format!(
+        "redis://default:queue-secret@127.0.0.1:{}/2",
+        server.port
+    ))
+    .await;
+}
+
+/// A `rediss://` URL works for every connection of the driver. The test CA
+/// is trusted through `SSL_CERT_FILE`, which the native certificate store
+/// reads, so the child runs in a process of its own.
+#[ignore = "runs redis-server and openssl"]
+#[test]
+fn redis_driver_reaches_a_tls_server() {
+    crate::own_process::run_alone("redis::redis_driver_reaches_a_tls_server_child");
+}
+
+#[tokio::test]
+async fn redis_driver_reaches_a_tls_server_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _env = crate::env_lock::lock_env_async().await;
+    let server = crate::redis_server::TlsRedis::start();
+    crate::env_snapshot::set_env("SSL_CERT_FILE", Some(&server.ca.display().to_string()));
+    round_trip(&format!("rediss://127.0.0.1:{}/0", server.port)).await;
+}

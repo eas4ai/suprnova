@@ -35,12 +35,26 @@ if [[ "${1-}" == "--live" ]]; then
     run_live_test test default_schema_backends mysql_default_schema_is_replay_safe
     run_live_test test foundation_gate postgres_backend_is_reachable
     run_live_test test foundation_gate mysql_backend_is_reachable
+    run_live_test test method_ids_live postgres_a_registered_passkey_is_read_back_by_its_id
+    run_live_test test method_ids_live postgres_a_passkey_is_removed_by_its_id
+    run_live_test test method_ids_live postgres_a_linked_account_is_unlinked_by_its_id
+    run_live_test test method_ids_live mysql_a_registered_passkey_is_read_back_by_its_id
+    run_live_test test method_ids_live mysql_a_passkey_is_removed_by_its_id
+    run_live_test test method_ids_live mysql_a_linked_account_is_unlinked_by_its_id
     run_live_test test seaorm_upgrade_compat postgres_upgrade_from_seaorm_1_1_is_replay_safe
     run_live_test test seaorm_upgrade_compat mysql_upgrade_from_seaorm_1_1_is_replay_safe
     run_live_test test storage_tokens configured_postgres_target_is_required
     run_live_test test storage_tokens configured_mysql_target_is_required
     run_live_test test token_broker_concurrency two_pod_convergence_postgres
     run_live_test test token_broker_concurrency two_pod_convergence_mysql
+    run_live_test test two_factor_live postgres_parallel_wrong_second_factor_proofs_evaluate_at_most_the_threshold
+    run_live_test test two_factor_live postgres_a_correct_second_factor_proof_under_contention_is_accepted_once
+    run_live_test test two_factor_live postgres_a_password_success_does_not_clear_second_factor_failures
+    run_live_test test two_factor_live postgres_a_confirmation_racing_a_replacement_confirms_neither_secret
+    run_live_test test two_factor_live mysql_parallel_wrong_second_factor_proofs_evaluate_at_most_the_threshold
+    run_live_test test two_factor_live mysql_a_correct_second_factor_proof_under_contention_is_accepted_once
+    run_live_test test two_factor_live mysql_a_password_success_does_not_clear_second_factor_failures
+    run_live_test test two_factor_live mysql_a_confirmation_racing_a_replacement_confirms_neither_secret
     run_live_test lib _ migration::mysql_swap_tests::plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_barrier
     run_live_test lib _ migration::seaorm_upgrade_tests::postgres_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1
     run_live_test lib _ migration::seaorm_upgrade_tests::mysql_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1
@@ -77,6 +91,12 @@ cargo fmt --all -- --check
 
 printf 'Running lint check...\n'
 cargo clippy --all-targets --all-features
+
+# The crate root denies broken and private intra-doc links, and only rustdoc
+# checks them. The JSON renderer runs those lints without the much heavier
+# HTML pass; it is unstable output, hence RUSTC_BOOTSTRAP.
+printf 'Running rustdoc link check...\n'
+RUSTC_BOOTSTRAP=1 cargo rustdoc --lib --all-features -- -Z unstable-options --output-format json
 
 # PostgreSQL and MySQL suites are manual `#[ignore]`d qualification tests.
 # Run their individual test targets while changing a backend-specific boundary;

@@ -32,7 +32,8 @@ use crate::crypto::Encryptor;
 use crate::password::normalize_email;
 use crate::sessions::SessionMetadata;
 use crate::storage::{
-    CeremonyStore, CredentialActor, NewUser, PasskeyRow, PasskeyStore, UserStore,
+    CeremonyStore, CredentialActor, NewUser, PasskeyRow, PasskeyStore, SignUpAccount, UserStore,
+    create_or_find_existing,
 };
 use crate::{Error, Result};
 
@@ -170,8 +171,24 @@ impl PasskeyAuthService {
                 message: "must not be empty".to_owned(),
             });
         }
-        let (user, actor) = match self.users.find_by_email(&email).await? {
-            Some(existing) => {
+        // A sign-up that loses the race for a new address meets the
+        // existing-account rule, as if the lookup had found the account the
+        // other sign-up created.
+        let account = match self.users.find_by_email(&email).await? {
+            Some(existing) => SignUpAccount::Existing(existing),
+            None => {
+                create_or_find_existing(
+                    self.users.as_ref(),
+                    NewUser {
+                        email: email.clone(),
+                        password_hash: None,
+                    },
+                )
+                .await?
+            }
+        };
+        let (user, actor) = match account {
+            SignUpAccount::Existing(existing) => {
                 let actor = intent.actor.ok_or_else(|| Error::InvalidInput {
                     field: "actor".to_owned(),
                     message: "enrolling a passkey on an existing account requires the \
@@ -207,15 +224,8 @@ impl PasskeyAuthService {
                 })?;
                 (existing, actor)
             }
-            None => {
+            SignUpAccount::Created(created) => {
                 // A brand-new email registering a passkey IS a signup.
-                let created = self
-                    .users
-                    .create_user(NewUser {
-                        email: email.clone(),
-                        password_hash: None,
-                    })
-                    .await?;
                 if created.password_hash.is_some() {
                     return Err(Error::Internal {
                         message: "user binding cannot represent passwordless accounts; \

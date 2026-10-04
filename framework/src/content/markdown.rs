@@ -26,6 +26,31 @@ pub enum ContentError {
     /// JSON serialization failed.
     #[error("content serialization error: {0}")]
     Json(#[from] serde_json::Error),
+    /// Two different chapter files in a docs table of contents map to the
+    /// same slug, so one chapter's `<slug>.json` would overwrite the
+    /// other's while the catalog still listed both.
+    #[error(
+        "docs chapters `{first}` and `{second}` both map to the slug `{slug}`; rename one of the files"
+    )]
+    DuplicateChapterSlug {
+        /// The slug both chapters map to.
+        slug: String,
+        /// The chapter listed first, as the table of contents names it.
+        first: String,
+        /// The later chapter, as the table of contents names it.
+        second: String,
+    },
+    /// A chapter's slug is the name of an artifact the docs build writes
+    /// itself (`catalog`), which would overwrite the chapter.
+    #[error(
+        "docs chapter `{path}` maps to the slug `{slug}`, which the docs build reserves for its own `{slug}.json`; rename the file"
+    )]
+    ReservedChapterSlug {
+        /// The reserved slug.
+        slug: String,
+        /// The chapter, as the table of contents names it.
+        path: String,
+    },
 }
 
 /// Options controlling Markdown rendering.

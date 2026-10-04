@@ -248,3 +248,75 @@ fn repeat_load_does_not_promote_stale_keys_to_system_tier() {
          must not be frozen in the system-env snapshot"
     );
 }
+
+/// The loader refuses to write the environment from inside a Tokio runtime,
+/// whose worker threads already exist and may read the environment at the
+/// same moment through `getenv`. `load_dotenv` and `Config::init` are safe
+/// public functions, and they used to write it anyway.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loading_the_environment_inside_a_runtime_is_refused() {
+    let _env = crate::env_lock::lock_env_async().await;
+    __reset_loaded_keys_for_tests();
+    let _snap = EnvSnapshot::capture(&["DOTENV_TEST_IN_RUNTIME"]);
+    set_env("DOTENV_TEST_IN_RUNTIME", None);
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    write_env_file(dir, ".env", "DOTENV_TEST_IN_RUNTIME=written\n");
+
+    let err = load_dotenv(dir).expect_err("a load inside a runtime is refused");
+    assert!(err.to_string().contains("Tokio runtime"), "{err}");
+    let err = suprnova::Config::init(dir).expect_err("Config::init is refused too");
+    assert!(err.to_string().contains("Tokio runtime"), "{err}");
+    assert!(
+        std::env::var("DOTENV_TEST_IN_RUNTIME").is_err(),
+        "a refused load writes nothing"
+    );
+}
+
+/// A load that fails part way leaves the process environment as it found
+/// it: a real system variable that `.env.local` overrode is restored, and
+/// the keys the files did write are recorded, so the next load replaces
+/// them. The failure used to return before both steps: the override
+/// stuck, and a retry took the half-loaded values for real system ones.
+#[test]
+fn a_failed_load_restores_the_system_environment() {
+    let _env = crate::env_lock::lock_env();
+    __reset_loaded_keys_for_tests();
+    let _snap = EnvSnapshot::capture(&[
+        "APP_ENV",
+        "DOTENV_TEST_SYSTEM",
+        "DOTENV_TEST_NEW",
+        "DOTENV_TEST_PROD",
+    ]);
+    set_env("APP_ENV", None);
+    set_env("DOTENV_TEST_SYSTEM", Some("from-system"));
+    set_env("DOTENV_TEST_NEW", None);
+    set_env("DOTENV_TEST_PROD", None);
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    write_env_file(dir, ".env", "APP_ENV=production\nDOTENV_TEST_NEW=first\n");
+    write_env_file(dir, ".env.local", "DOTENV_TEST_SYSTEM=from-file\n");
+    write_env_file(dir, ".env.production", "APP_KEY=\"unterminated\n");
+
+    load_dotenv(dir).expect_err("the malformed .env.production fails the load");
+    assert_eq!(
+        std::env::var("DOTENV_TEST_SYSTEM").as_deref(),
+        Ok("from-system"),
+        "the system value outranks .env.local after a failed load too"
+    );
+
+    write_env_file(dir, ".env", "APP_ENV=production\nDOTENV_TEST_NEW=second\n");
+    write_env_file(dir, ".env.production", "DOTENV_TEST_PROD=ok\n");
+    load_dotenv(dir).expect("the repaired files load");
+    assert_eq!(
+        std::env::var("DOTENV_TEST_NEW").as_deref(),
+        Ok("second"),
+        "the failed load's value was not frozen as a system value"
+    );
+    assert_eq!(
+        std::env::var("DOTENV_TEST_SYSTEM").as_deref(),
+        Ok("from-system")
+    );
+}

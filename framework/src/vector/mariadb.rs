@@ -21,12 +21,19 @@
 //!
 //! ```sql
 //! CREATE TABLE `<store>` (
-//!     id        VARCHAR(255) NOT NULL PRIMARY KEY,
-//!     embedding VECTOR(<N>)  NOT NULL,
-//!     metadata  JSON         NULL,
+//!     id        VARBINARY(254) NOT NULL PRIMARY KEY,
+//!     embedding VECTOR(<N>)    NOT NULL,
+//!     metadata  JSON           NULL,
 //!     VECTOR INDEX (embedding) DISTANCE=<euclidean|cosine>
 //! ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 //! ```
+//!
+//! MariaDB refuses a vector index on a table whose primary key is longer
+//! than 256 bytes, counting the two length bytes, so the id is at most
+//! 254 bytes. A `utf8mb4` `VARCHAR(255)` key would be 1020 bytes and the
+//! server rejects the `CREATE TABLE`. `VARBINARY` also compares ids byte
+//! for byte, the way every other driver keys them: the table's default
+//! collation would treat `Doc` and `doc` as one row.
 //!
 //! Use [`MariaDbVectorDriver::ensure_table_sql`] to emit this string -
 //! paste it into your migration. **The driver does not auto-create
@@ -45,8 +52,8 @@
 //!
 //! # ID mapping - there is none
 //!
-//! `VARCHAR(255)` accepts arbitrary strings. [`VectorItem::id`] passes
-//! through unchanged; similarity hits round-trip the same string in
+//! The id column holds any UTF-8 string up to 254 bytes. [`VectorItem::id`]
+//! passes through unchanged; similarity hits round-trip the same string in
 //! [`VectorMatch::id`]. No reserved payload keys, no derived UUIDs.
 //!
 //! # Store-name validation
@@ -355,7 +362,7 @@ impl MariaDbVectorDriver {
         }
         Ok(format!(
             "CREATE TABLE IF NOT EXISTS `{table}` (\n  \
-             id VARCHAR(255) NOT NULL PRIMARY KEY,\n  \
+             id VARBINARY(254) NOT NULL PRIMARY KEY,\n  \
              embedding VECTOR({dim}) NOT NULL,\n  \
              metadata JSON NULL,\n  \
              VECTOR INDEX (embedding) DISTANCE={dist}\n\
@@ -447,7 +454,7 @@ impl MariaDbVectorDriver {
         }
     }
 
-    /// Verify the table's `VECTOR INDEX ... DISTANCE=<clause>` matches
+    /// Verify the distance of the table's vector index matches
     /// `self.distance`. MariaDB does not error when a `VEC_DISTANCE_*`
     /// function disagrees with the index's distance - it silently falls
     /// back to a full table scan, leaving users with mysteriously slow
@@ -511,29 +518,37 @@ impl MariaDbVectorDriver {
     }
 }
 
-/// Extract the `DISTANCE=<clause>` value from a `SHOW CREATE TABLE`
-/// output's `VECTOR INDEX (...)` line. Returns the literal value
-/// (lowercase) when present; defaults to `"euclidean"` when the
-/// `VECTOR INDEX` line exists but omits the clause (MariaDB's own
-/// default); returns `None` when there is no `VECTOR INDEX` at all.
+/// Extract the distance of the vector index from `SHOW CREATE TABLE`
+/// output. Returns the value in lower case when the index names one;
+/// `"euclidean"` when it names none (MariaDB's default); `None` when the
+/// table has no vector index at all.
 ///
-/// Token-based parse - searches the line for `DISTANCE=cosine` or
-/// `DISTANCE=euclidean` substrings, in that order. Both are the only
-/// values MariaDB accepts for the clause as of 11.7, so a future
-/// metric would need an explicit update here anyway.
-fn extract_vector_index_distance(ddl: &str) -> Option<&'static str> {
+/// The server does not print the DDL it was given. MariaDB 11.7 and later
+/// print the index as ``VECTOR KEY `name` (`col`)`` and its options as
+/// backtick-quoted names, `` `distance`=cosine `` in 11.7 and
+/// `` `DISTANCE`=cosine `` in 12. The parse takes the line that starts
+/// with `VECTOR KEY` or `VECTOR INDEX` (the second is the DDL
+/// [`MariaDbVectorDriver::ensure_table_sql`] writes), drops the backticks,
+/// ignores case and reads the `distance=` option. A column line cannot
+/// match: the server quotes every column name, so such a line starts with
+/// a backtick.
+fn extract_vector_index_distance(ddl: &str) -> Option<String> {
     for line in ddl.lines() {
-        if line.contains("VECTOR INDEX") {
-            if line.contains("DISTANCE=cosine") {
-                return Some("cosine");
-            }
-            if line.contains("DISTANCE=euclidean") {
-                return Some("euclidean");
-            }
-            // VECTOR INDEX present without explicit DISTANCE - MariaDB
-            // defaults to euclidean per its docs.
-            return Some("euclidean");
+        let line = line.trim().to_ascii_lowercase();
+        let is_vector_index = ["vector key", "vector index"].iter().any(|keyword| {
+            line.strip_prefix(keyword)
+                .is_some_and(|rest| rest.starts_with([' ', '(', '`']))
+        });
+        if !is_vector_index {
+            continue;
         }
+        let options = line.replace('`', "").replace(" =", "=").replace("= ", "=");
+        let distance = options.split_whitespace().find_map(|token| {
+            token
+                .strip_prefix("distance=")
+                .map(|value| value.trim_end_matches([',', ')']).to_owned())
+        });
+        return Some(distance.unwrap_or_else(|| "euclidean".to_owned()));
     }
     None
 }
@@ -688,8 +703,13 @@ impl VectorDriver for MariaDbVectorDriver {
 
         let mut matches = Vec::with_capacity(rows.len());
         for row in rows {
-            let id: String = row.try_get("id").map_err(|e| {
+            // The id column is `VARBINARY`, which the driver hands back as
+            // bytes; a table created with a text id reads the same way.
+            let id: Vec<u8> = row.try_get("id").map_err(|e| {
                 FrameworkError::internal(format!("mariadb similar: decode id column: {e}"))
+            })?;
+            let id = String::from_utf8(id).map_err(|e| {
+                FrameworkError::internal(format!("mariadb similar: id is not UTF-8: {e}"))
             })?;
             let metadata: Option<serde_json::Value> = row.try_get("metadata").map_err(|e| {
                 FrameworkError::internal(format!(
@@ -903,39 +923,54 @@ mod distance_extract_tests {
     fn explicit_cosine() {
         let ddl = "CREATE TABLE `t` (\n  id INT,\n  embedding VECTOR(3) NOT NULL,\n  \
                    VECTOR INDEX (embedding) DISTANCE=cosine\n) ENGINE=InnoDB";
-        assert_eq!(extract_vector_index_distance(ddl), Some("cosine"));
+        assert_eq!(
+            extract_vector_index_distance(ddl).as_deref(),
+            Some("cosine")
+        );
     }
 
     #[test]
     fn explicit_euclidean() {
         let ddl = "...\n  VECTOR INDEX (embedding) DISTANCE=euclidean\n";
-        assert_eq!(extract_vector_index_distance(ddl), Some("euclidean"));
+        assert_eq!(
+            extract_vector_index_distance(ddl).as_deref(),
+            Some("euclidean")
+        );
     }
 
     #[test]
     fn with_m_parameter_before_distance() {
         let ddl = "...\n  VECTOR INDEX (embedding) M=8 DISTANCE=cosine\n";
-        assert_eq!(extract_vector_index_distance(ddl), Some("cosine"));
+        assert_eq!(
+            extract_vector_index_distance(ddl).as_deref(),
+            Some("cosine")
+        );
     }
 
     #[test]
     fn omitted_clause_defaults_to_euclidean() {
         // MariaDB's own default when DISTANCE= isn't specified.
         let ddl = "...\n  VECTOR INDEX (embedding)\n";
-        assert_eq!(extract_vector_index_distance(ddl), Some("euclidean"));
+        assert_eq!(
+            extract_vector_index_distance(ddl).as_deref(),
+            Some("euclidean")
+        );
     }
 
     #[test]
     fn omitted_clause_with_m_defaults_to_euclidean() {
         let ddl = "...\n  VECTOR INDEX (embedding) M=16\n";
-        assert_eq!(extract_vector_index_distance(ddl), Some("euclidean"));
+        assert_eq!(
+            extract_vector_index_distance(ddl).as_deref(),
+            Some("euclidean")
+        );
     }
 
     #[test]
     fn no_vector_index_returns_none() {
         let ddl = "CREATE TABLE `t` (\n  id INT,\n  PRIMARY KEY (id),\n  \
                    INDEX (other_col)\n) ENGINE=InnoDB";
-        assert_eq!(extract_vector_index_distance(ddl), None);
+        assert_eq!(extract_vector_index_distance(ddl).as_deref(), None);
     }
 
     #[test]
@@ -948,7 +983,10 @@ mod distance_extract_tests {
             super::MariaDbDistance::Cosine,
         )
         .unwrap();
-        assert_eq!(extract_vector_index_distance(&sql), Some("cosine"));
+        assert_eq!(
+            extract_vector_index_distance(&sql).as_deref(),
+            Some("cosine")
+        );
 
         let sql = super::MariaDbVectorDriver::ensure_table_sql(
             "documents",
@@ -956,7 +994,84 @@ mod distance_extract_tests {
             super::MariaDbDistance::Euclidean,
         )
         .unwrap();
-        assert_eq!(extract_vector_index_distance(&sql), Some("euclidean"));
+        assert_eq!(
+            extract_vector_index_distance(&sql).as_deref(),
+            Some("euclidean")
+        );
+    }
+
+    /// `SHOW CREATE TABLE` from MariaDB 12.3.1 for the table
+    /// `ensure_table_sql` creates, verbatim: the server prints the index as
+    /// `VECTOR KEY` and its options as backtick-quoted names.
+    const MARIADB_12_COSINE: &str = "CREATE TABLE `v1` (\n  \
+        `id` varbinary(254) NOT NULL,\n  \
+        `embedding` vector(3) NOT NULL,\n  \
+        `metadata` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`metadata`)),\n  \
+        PRIMARY KEY (`id`),\n  \
+        VECTOR KEY `embedding` (`embedding`) `DISTANCE`=cosine\n\
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci";
+
+    #[test]
+    fn real_server_output_names_cosine() {
+        assert_eq!(
+            extract_vector_index_distance(MARIADB_12_COSINE).as_deref(),
+            Some("cosine")
+        );
+    }
+
+    #[test]
+    fn real_server_output_names_euclidean() {
+        let ddl = "CREATE TABLE `v2` (\n  `id` varbinary(254) NOT NULL,\n  \
+                   `embedding` vector(3) NOT NULL,\n  PRIMARY KEY (`id`),\n  \
+                   VECTOR KEY `embedding` (`embedding`) `DISTANCE`=euclidean\n\
+                   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci";
+        assert_eq!(
+            extract_vector_index_distance(ddl).as_deref(),
+            Some("euclidean")
+        );
+    }
+
+    #[test]
+    fn real_server_output_without_distance_defaults_to_euclidean() {
+        let ddl = "CREATE TABLE `v3` (\n  `id` varbinary(254) NOT NULL,\n  \
+                   `embedding` vector(3) NOT NULL,\n  PRIMARY KEY (`id`),\n  \
+                   VECTOR KEY `embedding` (`embedding`)\n\
+                   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci";
+        assert_eq!(
+            extract_vector_index_distance(ddl).as_deref(),
+            Some("euclidean")
+        );
+    }
+
+    #[test]
+    fn real_server_output_with_a_named_key_and_m() {
+        let ddl = "CREATE TABLE `v4` (\n  `id` varbinary(254) NOT NULL,\n  \
+                   `embedding` vector(3) NOT NULL,\n  PRIMARY KEY (`id`),\n  \
+                   VECTOR KEY `idx_e` (`embedding`) `M`=8 `DISTANCE`=cosine\n\
+                   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci";
+        assert_eq!(
+            extract_vector_index_distance(ddl).as_deref(),
+            Some("cosine")
+        );
+    }
+
+    /// MariaDB 11.7's own test results (`mysql-test/main/vector.result`)
+    /// print the option name in lower case.
+    #[test]
+    fn mariadb_11_7_lower_case_option() {
+        let ddl = "  VECTOR KEY `v` (`v`) `distance`=cosine\n";
+        assert_eq!(
+            extract_vector_index_distance(ddl).as_deref(),
+            Some("cosine")
+        );
+    }
+
+    /// A column or key whose name merely contains the words is not the
+    /// vector index.
+    #[test]
+    fn a_column_named_like_the_keyword_is_not_the_index() {
+        let ddl = "CREATE TABLE `t` (\n  `vector key` int,\n  KEY `vector index` (`x`)\n)";
+        assert_eq!(extract_vector_index_distance(ddl).as_deref(), None);
     }
 }
 

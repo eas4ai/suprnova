@@ -262,8 +262,21 @@ async fn request_with_headers(
     request_rx.await.expect("capture in-memory request")
 }
 
+/// Runs in its own process: `init_magnetar_oauth_only` installs the
+/// process-wide Magnetar engines, which every other installing test in this
+/// binary also claims.
+#[test]
+fn oauth_only_initialization_leaves_legacy_session_authority_active() {
+    crate::own_process::run_alone(
+        "oauth_only::oauth_only_initialization_leaves_legacy_session_authority_active_child",
+    );
+}
+
 #[tokio::test]
-async fn oauth_only_initialization_leaves_legacy_session_authority_active() {
+async fn oauth_only_initialization_leaves_legacy_session_authority_active_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Crypt::init(EncryptionKey::generate());
     let database = sea_orm::Database::connect("sqlite::memory:")
         .await
@@ -314,6 +327,8 @@ async fn oauth_only_initialization_leaves_legacy_session_authority_active() {
             enrollment_session_id: Set(None),
             enrollment_expires_at: Set(None),
             rotation_pending: Set(false),
+            pending_secret: Set(None),
+            pending_recovery_codes: Set(None),
             confirmed_at: Set(Some(now)),
             last_used_timestep: Set(None),
             created_at: Set(Some(now)),
@@ -603,5 +618,76 @@ async fn oauth_only_initialization_leaves_legacy_session_authority_active() {
                 .expect("revoke all OAuth-only sessions after single revoke"),
             0,
         );
+
+        // IDENTITY-006: a browser's first contact can be the OAuth start
+        // itself, as a JSON request that previous-URL tracking skips. The
+        // ceremony is bound to that request's session, so the session must
+        // persist and reach the browser, or the callback arrives under a
+        // different session and fails the binding.
+        let started_state = Arc::new(Mutex::new(None::<String>));
+        let started_state_for_handler = started_state.clone();
+        let start: Next = Arc::new(move |_| {
+            let started_state = started_state_for_handler.clone();
+            Box::pin(async move {
+                let kickoff = Auth::oauth("community")
+                    .begin()
+                    .await
+                    .expect("begin a first-contact OAuth ceremony");
+                *started_state.lock().expect("started OAuth state") = Some(kickoff.state);
+                Ok(suprnova::HttpResponse::text("started"))
+            })
+        });
+        let started = middleware
+            .handle(
+                suprnova::Request::for_test_with_headers(
+                    "GET",
+                    "/oauth/start",
+                    [("accept", "application/json")],
+                ),
+                start,
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "first-contact OAuth start returned status {}",
+                    error.status_code()
+                )
+            })
+            .into_hyper();
+        let start_cookie = started
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|value| value.starts_with(&cookie_prefix))
+            .and_then(|value| value.split(';').next())
+            .map(str::to_owned)
+            .expect("a first-contact OAuth start must persist its session and set its cookie");
+        let state = started_state
+            .lock()
+            .expect("started OAuth state")
+            .clone()
+            .expect("the start handler ran");
+        let callback: Next = Arc::new(move |_| {
+            let state = state.clone();
+            Box::pin(async move {
+                Auth::oauth("community")
+                    .complete_outcome("code", &state)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("the callback under the start's session must bind: {error}")
+                    });
+                Ok(suprnova::HttpResponse::text("called back"))
+            })
+        });
+        if let Err(error) = middleware
+            .handle(
+                request_with_headers(Some(&start_cookie), None).await,
+                callback,
+            )
+            .await
+        {
+            panic!("OAuth callback returned status {}", error.status_code());
+        }
     }
 }

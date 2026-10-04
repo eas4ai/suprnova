@@ -122,3 +122,14 @@ async fn has_unique_id_kind_const_is_correct() {
         UniqueIdKind::UuidV4
     );
 }
+
+/// DATA-012: a ULID is 128 bits, so its first character carries three bits
+/// and stops at `7`. Twenty-six `z` passed the length and alphabet check
+/// while encoding 130 bits.
+#[test]
+fn a_ulid_whose_first_character_overflows_128_bits_is_not_valid() {
+    assert!(!UniqueIdKind::Ulid.is_valid(&"z".repeat(26)));
+    assert!(!UniqueIdKind::Ulid.is_valid(&format!("8{}", "0".repeat(25))));
+    assert!(UniqueIdKind::Ulid.is_valid(&format!("7{}", "z".repeat(25))));
+    assert!(UniqueIdKind::Ulid.is_valid(&format!("0{}", "Z".repeat(25))));
+}

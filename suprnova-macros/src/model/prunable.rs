@@ -70,30 +70,15 @@ pub fn expand(item: TokenStream) -> Result<TokenStream> {
                 // one above and don't reuse it after.
                 builder.count().await.map(|c| c as u64)
             } else {
-                // Bulk delete via the builder's dedicated DELETE
-                // renderer. Walks the WHERE AST directly into
-                // `DELETE FROM table WHERE ...` - no SELECT→DELETE
-                // string rewrite, so the bulk path is correct even
-                // when the prunable() scope sets `.select(...)` /
-                // `.order_by(...)` / etc.
-                let table = <#self_ty as ::suprnova::eloquent::EloquentModel>::TABLE;
-                // T11: route through ExecutorChoice so MassPrunable
-                // bulk-deletes inside `DB::transaction` land in the
-                // active tx.
-                let exec = ::suprnova::database::transaction::ExecutorChoice::resolve()?;
-                let backend = exec.backend();
-                let (delete_sql, vals) =
-                    builder.to_delete_sql_with_bindings_for(backend, table);
-                let res = exec
-                    .run(::suprnova::sea_orm::Statement::from_sql_and_values(
-                        backend,
-                        &delete_sql,
-                        vals,
-                    ))
-                    .await
-                    .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                ::suprnova::render_cache::orm::after_table_write(table).await?;
-                Ok(res.rows_affected())
+                // Bulk delete through the builder's own DELETE, the one
+                // the dry run's count mirrors. It walks the WHERE AST
+                // into `DELETE FROM table WHERE ...` - so a scope that
+                // sets `.select(...)` / `.order_by(...)` cannot break
+                // it - and it runs where the builder routes: its
+                // `with_tx` or `on(name)`, an ambient `DB::transaction`,
+                // or the model's `#[model(connection = "...")]`. The
+                // count and the delete therefore reach the same rows.
+                builder.force_delete_all().await
             }
         }
     } else {

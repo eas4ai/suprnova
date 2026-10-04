@@ -463,17 +463,33 @@ impl WebhookHandler for MockPaymentProvider {
     /// This mirrors the framework's APP_KEY fail-closed contract
     /// (`crate::crypto::resolve_boot_keyring`): permissive in
     /// `local` / `development` / `testing`, hard-rejecting in any other
-    /// `APP_ENV` (production, staging, or a custom environment).
+    /// environment (production, staging, or a custom environment).
+    ///
+    /// Both readers of the environment must agree that this is a
+    /// development process: the effective one (`Config::environment()`,
+    /// which prefers an `AppConfig` registered in code and is what the
+    /// server's own fail-closed checks read) and the process `APP_ENV`.
+    /// Reading only `APP_ENV` let a server registered as production in code,
+    /// with `APP_ENV` unset, accept forged webhooks.
     fn verify(&self, _ctx: &WebhookContext<'_>) -> PaymentResult<()> {
-        use crate::config::Environment;
-        match Environment::detect() {
-            Environment::Local | Environment::Development | Environment::Testing => Ok(()),
-            env => Err(PaymentError::WebhookSignature(format!(
-                "MockPaymentProvider accepts every webhook unverified and refuses \
-                 to run outside a development environment (APP_ENV={env}). Register \
-                 a real provider with signature verification in production/staging."
-            ))),
+        use crate::config::{Config, Environment};
+        let permissive = |env: &Environment| {
+            matches!(
+                env,
+                Environment::Local | Environment::Development | Environment::Testing
+            )
+        };
+        for env in [Config::environment(), Environment::detect()] {
+            if !permissive(&env) {
+                return Err(PaymentError::WebhookSignature(format!(
+                    "MockPaymentProvider accepts every webhook unverified and refuses \
+                     to run outside a development environment (environment={env}). \
+                     Register a real provider with signature verification in \
+                     production/staging."
+                )));
+            }
         }
+        Ok(())
     }
 
     fn parse_event(&self, body: &[u8]) -> PaymentResult<WebhookEvent> {

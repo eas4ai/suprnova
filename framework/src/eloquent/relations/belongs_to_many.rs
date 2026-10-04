@@ -393,6 +393,10 @@ where
         // default routes correctly outside a tx - pivot tables
         // conventionally live on the parent's database.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
+        let extra = pivot_extras_through_casts::<P>(
+            extra,
+            &[&self.pivot_foreign_key, &self.pivot_related_key],
+        )?;
         match &exec {
             ExecutorChoice::Tx(t, _) => {
                 attach_one(
@@ -638,7 +642,7 @@ where
                         &self.pivot_target(),
                         &self.parent_key_value,
                         related_id,
-                        Attrs::new(),
+                        Vec::new(),
                         self.with_timestamps,
                     )
                     .await?;
@@ -665,7 +669,7 @@ where
                         &self.pivot_target(),
                         &self.parent_key_value,
                         related_id,
-                        Attrs::new(),
+                        Vec::new(),
                         self.with_timestamps,
                     )
                     .await?;
@@ -763,18 +767,20 @@ where
             q.get().await?.into_vec()
         };
 
-        // Fetch the pivot rows attached to this parent, under the same
-        // predicates the id scan used - otherwise a filtered read could
-        // stamp `__pivot` from a row the filter excluded.
-        let pivot_rows: Vec<P> = self
-            .pivot_filters
-            .apply(P::query().filter(
-                self.pivot_foreign_key.as_str(),
-                self.parent_key_value.clone(),
-            ))
-            .get()
-            .await?
-            .into_vec();
+        // Fetch the pivot rows attached to this parent, from the table
+        // the id scan read and under the same predicates - otherwise a
+        // filtered read, or a relation that names its own pivot table,
+        // could stamp `__pivot` from a row the scan never saw.
+        let pivot_rows: Vec<P> = load_pivot_rows::<P>(
+            &self.pivot_table,
+            L::default_connection_name(),
+            vec![(
+                self.pivot_foreign_key.clone(),
+                PivotMatch::Eq(self.parent_key_value.clone()),
+            )],
+            &self.pivot_filters,
+        )
+        .await?;
 
         // Index pivots by related_key value (JSON-string form).
         use std::collections::HashMap;
@@ -1026,18 +1032,11 @@ pub(crate) async fn bind_pivot_write<C: ConnectionTrait>(
     typed: Option<sea_orm::Value>,
     value: &serde_json::Value,
 ) -> Result<sea_orm::Value, FrameworkError> {
-    use crate::eloquent::casts::unsigned::{
-        beyond_signed, bind_large_unsigned, exact_unsigned, refuse_unsigned_overflow,
-    };
+    use crate::eloquent::casts::unsigned::{bind_large_unsigned, exact_unsigned};
 
     let backend = conn.get_database_backend();
     match typed {
-        Some(bound @ sea_orm::Value::BigUnsigned(_)) if beyond_signed(backend, &bound) => {
-            refuse_unsigned_overflow(backend, table, column, &bound)
-                .map_err(FrameworkError::database)?;
-            Ok(bound)
-        }
-        Some(bound) => Ok(bound),
+        Some(bound) => checked_pivot_value(backend, table, column, bound),
         None => match value.as_u64() {
             Some(n) if n > i64::MAX as u64 => {
                 let mut bound = bind_large_unsigned(conn, table, &[(column.to_owned(), n)]).await?;
@@ -1048,6 +1047,25 @@ pub(crate) async fn bind_pivot_write<C: ConnectionTrait>(
             _ => Ok(json_value_to_sea_value(value)),
         },
     }
+}
+
+/// `bound`, a typed value written to pivot column `column` of `table`, or
+/// the refusal of a `u64` above `i64::MAX` that Postgres or SQLite would
+/// write to a signed column: the drivers there cannot bind it, and SQLite
+/// would store a rounded REAL. The refusal names the column.
+pub(crate) fn checked_pivot_value(
+    backend: DatabaseBackend,
+    table: &str,
+    column: &str,
+    bound: sea_orm::Value,
+) -> Result<sea_orm::Value, FrameworkError> {
+    use crate::eloquent::casts::unsigned::{beyond_signed, refuse_unsigned_overflow};
+
+    if beyond_signed(backend, &bound) {
+        refuse_unsigned_overflow(backend, table, column, &bound)
+            .map_err(FrameworkError::database)?;
+    }
+    Ok(bound)
 }
 
 /// Bind `value`, compared with a pivot column in a pivot statement's
@@ -1096,6 +1114,277 @@ pub(crate) fn pivot_key_json(
         .map(serde_json::Value::from)
 }
 
+/// One pivot extra as the INSERT writes it: the column, and its value.
+pub(crate) type PivotExtra = (String, PivotExtraValue);
+
+/// The value of one pivot extra, as [`pivot_extras_through_casts`]
+/// encodes it.
+pub(crate) enum PivotExtraValue {
+    /// An explicit SQL `NULL`.
+    Null,
+    /// The value the pivot model stores for a column it declares.
+    Stored(sea_orm::Value),
+    /// The value given for a column the pivot model does not declare,
+    /// bound when it is written by the column's own type
+    /// ([`bind_pivot_write`]).
+    Undeclared(serde_json::Value),
+}
+
+/// Bind pivot extra `column`'s `value`, written to `table`: `None` for an
+/// explicit SQL `NULL`. A stored `u64` above `i64::MAX` is refused on
+/// Postgres and SQLite, as a key column's is, and an undeclared column's
+/// value binds by the column's type (see [`bind_pivot_write`]).
+pub(crate) async fn bind_pivot_extra<C: ConnectionTrait>(
+    conn: &C,
+    table: &str,
+    column: &str,
+    value: PivotExtraValue,
+) -> Result<Option<sea_orm::Value>, FrameworkError> {
+    match value {
+        PivotExtraValue::Null => Ok(None),
+        PivotExtraValue::Stored(stored) => {
+            checked_pivot_value(conn.get_database_backend(), table, column, stored).map(Some)
+        }
+        PivotExtraValue::Undeclared(given) => bind_pivot_write(conn, table, column, None, &given)
+            .await
+            .map(Some),
+    }
+}
+
+/// Encode `attach_with`'s extras the way pivot model `P` stores them.
+///
+/// The pivot is a `#[suprnova::model]` with its own casts, and reads go
+/// through them, so the write must too. A column `P` declares is passed
+/// through `P::active_model_from_attrs` - its cast, mutator and storage
+/// type - and the stored value read back off the active model: an
+/// `AsEncrypted` note is written as ciphertext, an `AsHashed` one as its
+/// hash. Binding the JSON as it came stored plaintext under an
+/// encryption cast, and every later read of the relation failed to
+/// decrypt it.
+///
+/// A column `P` does not declare has no cast to apply and binds as it
+/// is, as before. Every key is checked as an SQL identifier first,
+/// since the keys are interpolated into the INSERT and may carry caller
+/// input. A key in `framework_columns` (the pivot's own foreign keys) is
+/// dropped: the relation writes those itself.
+pub(crate) fn pivot_extras_through_casts<P>(
+    extra: Attrs,
+    framework_columns: &[&str],
+) -> Result<Vec<PivotExtra>, FrameworkError>
+where
+    P: Model,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    use sea_orm::{ActiveModelTrait, ActiveValue, EntityTrait, IdenStatic, Iterable};
+
+    let column_of = |name: &str| {
+        <<P::Entity as EntityTrait>::Column as Iterable>::iter().find(|c| c.as_str() == name)
+    };
+    let mut declared = Attrs::new();
+    let mut encoded: Vec<(String, PivotExtraValue, bool)> = Vec::new();
+    for (key, value) in extra.iter() {
+        if framework_columns.contains(&key) {
+            continue;
+        }
+        crate::database::validate_identifier(key)?;
+        if value.is_null() {
+            encoded.push((key.to_string(), PivotExtraValue::Null, false));
+        } else if column_of(key).is_some() {
+            declared.insert(key, value.clone());
+            encoded.push((key.to_string(), PivotExtraValue::Null, true));
+        } else {
+            encoded.push((
+                key.to_string(),
+                PivotExtraValue::Undeclared(value.clone()),
+                false,
+            ));
+        }
+    }
+    let active = if declared.is_empty() {
+        None
+    } else {
+        Some(P::active_model_from_attrs(declared)?)
+    };
+    encoded
+        .into_iter()
+        .map(|(key, value, through_cast)| {
+            if !through_cast {
+                return Ok((key, value));
+            }
+            let column = column_of(&key).ok_or_else(|| {
+                FrameworkError::internal(format!("pivot column `{key}` vanished while encoding"))
+            })?;
+            let stored = active.as_ref().map(|am| am.get(column));
+            match stored {
+                Some(ActiveValue::Set(stored) | ActiveValue::Unchanged(stored)) => {
+                    Ok((key, PivotExtraValue::Stored(stored)))
+                }
+                _ => Err(FrameworkError::internal(format!(
+                    "pivot column `{key}` was not encoded by the pivot model"
+                ))),
+            }
+        })
+        .collect()
+}
+
+/// How a pivot read matches one column.
+pub(crate) enum PivotMatch {
+    /// `column = value`.
+    Eq(serde_json::Value),
+    /// `column IN (values)`.
+    In(Vec<serde_json::Value>),
+}
+
+/// The pivot rows of a relation, hydrated through pivot model `P`.
+///
+/// They are read from `table`, the pivot table the relation names, which
+/// a `pivot_table = "..."` declaration can set apart from the table `P`
+/// is declared over. The relation's id scan, `count`, and pivot writes
+/// all use `table`; reading the pivot context from `P`'s own table
+/// instead stamped rows from another table onto the related models.
+/// When the two tables are the same, the read is `P::query()`, as it
+/// always was, so `P`'s own scopes still apply there. Otherwise the
+/// rows are read from `table` on `connection` (the parent's, where the
+/// pivot writes go) and hydrated through `P`'s casts.
+pub(crate) async fn load_pivot_rows<P>(
+    table: &str,
+    connection: Option<&'static str>,
+    conditions: Vec<(String, PivotMatch)>,
+    filters: &PivotFilters,
+) -> Result<Vec<P>, FrameworkError>
+where
+    P: Model,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    if table == P::TABLE {
+        let mut query = P::query();
+        for (column, matched) in conditions {
+            query = match matched {
+                PivotMatch::Eq(value) => query.filter(column.as_str(), value),
+                PivotMatch::In(values) => query.filter_in(column.as_str(), values),
+            };
+        }
+        return Ok(filters.apply(query).get().await?.into_vec());
+    }
+
+    crate::database::validate_identifier(table)?;
+    let exec = ExecutorChoice::resolve_read(None, None, connection).await?;
+    let backend = exec.backend();
+    let mut values: Vec<sea_orm::Value> = Vec::new();
+    let mut position: usize = 0;
+    let mut predicates: Vec<String> = Vec::with_capacity(conditions.len());
+    let mut bind = |column: &str, value: &serde_json::Value, values: &mut Vec<sea_orm::Value>| {
+        position += 1;
+        values
+            .push(P::bind_column(column, value).unwrap_or_else(|| json_value_to_sea_value(value)));
+        crate::database::__macro_support::placeholder(backend, position)
+    };
+    for (column, matched) in &conditions {
+        crate::database::validate_identifier(column)?;
+        match matched {
+            PivotMatch::Eq(value) => {
+                let placeholder = bind(column, value, &mut values)?;
+                predicates.push(format!("{column} = {placeholder}"));
+            }
+            PivotMatch::In(list) if list.is_empty() => predicates.push("1 = 0".to_string()),
+            PivotMatch::In(list) => {
+                let placeholders = list
+                    .iter()
+                    .map(|value| bind(column, value, &mut values))
+                    .collect::<Result<Vec<_>, _>>()?;
+                predicates.push(format!("{column} IN ({})", placeholders.join(", ")));
+            }
+        }
+    }
+    let mut sql = format!("SELECT * FROM {table}");
+    if !predicates.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&predicates.join(" AND "));
+    }
+    let mut next = position;
+    let filtered = filters.render_and(backend, &mut values, &mut next)?;
+    if predicates.is_empty() && !filtered.is_empty() {
+        sql.push_str(" WHERE 1 = 1");
+    }
+    sql.push_str(&filtered);
+
+    crate::render_cache::collector::observe_table_read(table);
+    let rows = exec
+        .statement_all::<<P::Entity as sea_orm::EntityTrait>::Model>(
+            Statement::from_sql_and_values(backend, &sql, values),
+        )
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
+    let mut pivots = rows
+        .into_iter()
+        .map(P::try_from_storage)
+        .collect::<Result<Vec<_>, _>>()?;
+    P::__mark_query_result(&mut pivots);
+    Ok(pivots)
+}
+
+/// The pivot rows an eager many-to-many load reads: those whose `column`
+/// is one of `keys`, and whose `type_column` holds `type_value` when a
+/// polymorphic relation passes one. Read from the relation's own pivot
+/// table, as [`BelongsToMany::get`] reads them - see
+/// `load_pivot_rows`.
+///
+/// **Not part of the public API.** It is `pub` because the
+/// `#[suprnova::model]` macro's eager arms call it.
+#[doc(hidden)]
+pub async fn __eager_pivot_rows<P>(
+    table: &str,
+    connection: Option<&'static str>,
+    column: &str,
+    keys: Vec<serde_json::Value>,
+    type_match: Option<(&str, &str)>,
+) -> Result<Vec<P>, FrameworkError>
+where
+    P: Model,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    let mut conditions = vec![(column.to_string(), PivotMatch::In(keys))];
+    if let Some((type_column, type_value)) = type_match {
+        conditions.push((
+            type_column.to_string(),
+            PivotMatch::Eq(serde_json::Value::String(type_value.to_string())),
+        ));
+    }
+    load_pivot_rows::<P>(table, connection, conditions, &PivotFilters::default()).await
+}
+
 /// Shared INSERT path used by `attach` / `attach_with` / `sync`. The
 /// connection-or-transaction handle is taken as a generic `&C: ConnectionTrait`
 /// so the same routine runs against both `DatabaseConnection` and
@@ -1105,7 +1394,7 @@ async fn attach_one<C: ConnectionTrait>(
     target: &PivotTarget<'_>,
     parent_id: &serde_json::Value,
     related_id: &serde_json::Value,
-    extra: Attrs,
+    extra: Vec<PivotExtra>,
     with_timestamps: bool,
 ) -> Result<(), FrameworkError> {
     let backend = conn.get_database_backend();
@@ -1113,9 +1402,10 @@ async fn attach_one<C: ConnectionTrait>(
     let pivot_foreign_key = target.foreign_key;
     let pivot_related_key = target.related_key;
     // Build the column / value lists deterministically:
-    //   FK columns first, then `extra` (skipping the FK columns if the
-    //   user passed them, so the caller-provided overrides don't
-    //   double-write), then timestamps if enabled.
+    //   FK columns first, then `extra` (already encoded through the
+    //   pivot model's casts by `pivot_extras_through_casts`, which drops
+    //   any FK column the caller passed so it is not written twice),
+    //   then timestamps if enabled.
     let mut columns: Vec<String> =
         vec![pivot_foreign_key.to_string(), pivot_related_key.to_string()];
     // `None` represents an explicit JSON null from pivot extras. Framework-
@@ -1142,26 +1432,10 @@ async fn attach_one<C: ConnectionTrait>(
             .await?,
         ),
     ];
-    for (k, v) in extra.iter() {
-        if k == pivot_foreign_key || k == pivot_related_key {
-            continue;
-        }
-        // Validate every caller-supplied `extra` column name before
-        // interpolating it into the INSERT. The framework-managed
-        // FK columns (pivot_foreign_key, pivot_related_key) and the
-        // timestamps (created_at, updated_at) are framework
-        // literals; the `extra` keys come from `Attrs::insert` /
-        // `attrs!(...)` and may carry caller input through. Without
-        // this check a controller that builds `Attrs` from request
-        // input would expose a SQL-injection footgun. Matches
-        // `DbTableBuilder::insert`'s identifier validation.
-        crate::database::validate_identifier(k)?;
-        columns.push(k.to_string());
-        values.push(if v.is_null() {
-            None
-        } else {
-            Some(bind_pivot_write(conn, pivot_table, k, target.typed(k, None, v), v).await?)
-        });
+    for (column, value) in extra {
+        let bound = bind_pivot_extra(conn, pivot_table, &column, value).await?;
+        columns.push(column);
+        values.push(bound);
     }
     if with_timestamps {
         let now = crate::clock::now();

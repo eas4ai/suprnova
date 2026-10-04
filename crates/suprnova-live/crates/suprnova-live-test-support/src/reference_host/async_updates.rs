@@ -104,11 +104,8 @@ impl IssuedTransport {
     /// attached to it, and none of its memberships is open or mid-control.
     ///
     /// A browser receives a transport's authority before it opens the socket
-    /// or event stream, and it can stop or leave in between, as a document
-    /// retired during a reconnect backoff does. Only a reader's drop retires a
-    /// transport, so the authority it never used would otherwise hold its
-    /// kind for the life of the host, and every later document, which starts
-    /// again at generation 1, would be refused.
+    /// or event stream, and it can give up in between, as a document whose
+    /// handshake timed out does when it reconnects at its next generation.
     fn abandoned(&self) -> bool {
         !self.reader_active
             && self
@@ -364,10 +361,15 @@ impl AsyncRuntime {
             }
             _ => return Err("transport_facts_invalid"),
         };
-        // A transport of this kind that no document can still be using does
-        // not hold the kind against a request at another generation: it is
-        // retired, and its continuity carries to the replacement. One at the
-        // requested generation is still reused below.
+        // A document that gave up on a transport it never connected asks
+        // again at a later generation, so only a newer generation retires
+        // one no document is using, and its continuity carries to the
+        // replacement. Generations are a document's own count: every document
+        // starts at 1, and one restored from the back-forward cache starts
+        // there again. A lower generation therefore cannot show that the
+        // transport's document gave up on it; it may come from a page that
+        // has already closed, and the transport stays for the document still
+        // opening it. One at the requested generation is reused below.
         let abandoned = {
             let mut state = self.state.lock().expect("async runtime lock");
             if state.retired {
@@ -381,7 +383,7 @@ impl AsyncRuntime {
                         .transports
                         .get(*transport_id)
                         .is_some_and(|transport| {
-                            transport.generation != request.transport_generation
+                            request.transport_generation > transport.generation
                                 && transport.abandoned()
                         })
                 })
@@ -1476,11 +1478,13 @@ impl AsyncRuntime {
                     return Err("engine_sequence_state_invalid");
                 }
                 if case == "replay-overflow" {
-                    let mut transcript = Vec::with_capacity(MAX_REPLAY_TRANSCRIPT_ENVELOPES + 1);
-                    for offset in 0..=MAX_REPLAY_TRANSCRIPT_ENVELOPES {
-                        let offset = u64::try_from(offset).map_err(|_| "engine_replay_invalid")?;
-                        transcript.push(engine.envelope(&authorization, sequence + offset + 1)?);
-                    }
+                    // The engine refuses a transcript one past its maximum on
+                    // the count, before it reads a single envelope, so the
+                    // transcript repeats one validated envelope. Validating
+                    // every one is a canonical encode and decode each, which
+                    // took seconds in all on an async worker under this lock.
+                    let envelope = engine.envelope(&authorization, sequence + 1)?;
+                    let transcript = vec![envelope; MAX_REPLAY_TRANSCRIPT_ENVELOPES + 1];
                     let error = match transport.document.admit_replay(
                         &authorization,
                         transcript,
@@ -1557,6 +1561,36 @@ impl AsyncRuntime {
 
     pub(super) fn maximum_memberships(&self) -> usize {
         self.maximum_memberships.load(Ordering::SeqCst)
+    }
+
+    /// Retires every transport no reader holds, whatever its memberships.
+    ///
+    /// The browser suite runs this between tests, when no page owns a
+    /// transport. A page that stopped between its authorization and its
+    /// socket or stream leaves a transport nothing else retires: one at a
+    /// later generation would refuse every later page, which starts at
+    /// generation 1, and one with an open membership would hold a logical
+    /// membership the next test waits on.
+    pub(super) async fn retire_unconnected_transports(&self) -> Result<(), &'static str> {
+        let unconnected = {
+            let mut state = self.state.lock().expect("async runtime lock");
+            let ids = state
+                .transports
+                .iter()
+                .filter(|(_, transport)| !transport.reader_active)
+                .map(|(transport_id, _)| transport_id.clone())
+                .collect::<Vec<_>>();
+            ids.iter()
+                .filter_map(|transport_id| state.take_transport(transport_id))
+                .collect::<Vec<_>>()
+        };
+        let mut retired = Ok(());
+        for mut transport in unconnected {
+            if transport.document.close().await.is_err() {
+                retired = Err("transport_retirement_failed");
+            }
+        }
+        retired
     }
 
     pub(super) async fn retire(&self) -> Result<(), String> {
@@ -2045,7 +2079,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_reauthorized_websocket_that_never_connects_does_not_refuse_the_next_document() {
+    async fn the_between_tests_reset_retires_a_reauthorized_websocket_that_never_connected() {
         let resources = Arc::new(ResourceCounter::default());
         let runtime = AsyncRuntime::new(ReferenceFaultSchedule::None, Arc::clone(&resources))
             .await
@@ -2075,7 +2109,20 @@ mod tests {
             .expect("reauthorized transport");
         let abandoned = abandoned["transport"].as_str().expect("transport");
 
-        // Every new document starts again at generation 1.
+        // Every new document starts again at generation 1, and nothing in a
+        // running test shows that the reauthorizing document stopped. Between
+        // tests no page owns a transport.
+        assert_eq!(
+            runtime
+                .create(websocket_create(1, None), origin)
+                .await
+                .err(),
+            Some("transport_generation_invalid")
+        );
+        runtime
+            .retire_unconnected_transports()
+            .await
+            .expect("between-tests retirement");
         let next = runtime
             .create(websocket_create(1, None), origin)
             .await
@@ -2097,6 +2144,93 @@ mod tests {
             subscribe_first_membership(&runtime, &next, 1).await,
             delivered + 1,
             "the next document's first envelope directly succeeds its baseline"
+        );
+        drop(reader);
+        runtime.retire().await.expect("runtime retires");
+        assert_eq!(resources.current(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_newer_generation_retires_the_transport_its_document_never_connected() {
+        let resources = Arc::new(ResourceCounter::default());
+        let runtime = AsyncRuntime::new(ReferenceFaultSchedule::None, Arc::clone(&resources))
+            .await
+            .expect("async runtime");
+        let origin = "http://127.0.0.1:4197";
+        let abandoned = runtime
+            .create(websocket_create(1, None), origin)
+            .await
+            .expect("first generation");
+        let abandoned = abandoned["transport"].as_str().expect("transport");
+        let replacement = runtime
+            .create(websocket_create(2, None), origin)
+            .await
+            .expect("the next generation replaces the unconnected transport");
+        let replacement_transport = replacement["transport"].as_str().expect("transport");
+        assert_ne!(replacement_transport, abandoned);
+        assert_eq!(replacement["transport_generation"], 2);
+        assert_eq!(
+            runtime
+                .acquire_reader(abandoned, DocumentTransportKind::WebSocket)
+                .err(),
+            Some("transport_authority_invalid")
+        );
+        let reader = runtime
+            .acquire_reader(replacement_transport, DocumentTransportKind::WebSocket)
+            .expect("replacement socket");
+        assert_eq!(
+            subscribe_first_membership(&runtime, &replacement, 2).await,
+            1
+        );
+        drop(reader);
+        runtime.retire().await.expect("runtime retires");
+        assert_eq!(resources.current(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_late_first_generation_create_does_not_retire_a_newer_unconnected_transport() {
+        let resources = Arc::new(ResourceCounter::default());
+        let runtime = AsyncRuntime::new(ReferenceFaultSchedule::None, Arc::clone(&resources))
+            .await
+            .expect("async runtime");
+        let origin = "http://127.0.0.1:4197";
+        let first = runtime
+            .create(websocket_create(1, None), origin)
+            .await
+            .expect("first transport");
+        let reader = runtime
+            .acquire_reader(
+                first["transport"].as_str().expect("transport"),
+                DocumentTransportKind::WebSocket,
+            )
+            .expect("first socket");
+        let delivered = subscribe_first_membership(&runtime, &first, 1).await;
+        let subscription = first["memberships"][0]["subscription"]
+            .as_str()
+            .expect("subscription");
+        drop(reader);
+
+        // A live document reconnects at its third generation and has not
+        // opened the replacement socket yet when a request a closed page sent
+        // earlier arrives at the first generation.
+        let reconnect = runtime
+            .create(websocket_create(3, Some((subscription, delivered))), origin)
+            .await
+            .expect("reconnect transport");
+        let reconnect_transport = reconnect["transport"].as_str().expect("transport");
+        assert_eq!(
+            runtime
+                .create(websocket_create(1, None), origin)
+                .await
+                .err(),
+            Some("transport_generation_invalid")
+        );
+        let reader = runtime
+            .acquire_reader(reconnect_transport, DocumentTransportKind::WebSocket)
+            .expect("the reconnecting document still opens its socket");
+        assert_eq!(
+            subscribe_first_membership(&runtime, &reconnect, 3).await,
+            delivered + 1
         );
         drop(reader);
         runtime.retire().await.expect("runtime retires");
@@ -2133,6 +2267,64 @@ mod tests {
             transport
         );
         drop(reader);
+        runtime.retire().await.expect("runtime retires");
+        assert_eq!(resources.current(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replay_overflow_is_refused_on_its_count_without_seconds_of_work() {
+        let resources = Arc::new(ResourceCounter::default());
+        let runtime = AsyncRuntime::new(ReferenceFaultSchedule::None, Arc::clone(&resources))
+            .await
+            .expect("async runtime");
+        let created = runtime
+            .create(
+                TransportCreateRequest {
+                    kind: "sse".to_owned(),
+                    position: None,
+                    prior_subscription: None,
+                    subscription: "orders".to_owned(),
+                    transport_generation: 1,
+                },
+                "http://127.0.0.1:4197",
+            )
+            .await
+            .expect("transport");
+        let transport = created["transport"].as_str().expect("transport");
+        let membership = &created["memberships"][0];
+        runtime
+            .membership(
+                transport,
+                membership["subscription"].as_str().expect("subscription"),
+                MembershipRequest {
+                    authority: membership["authority"]
+                        .as_str()
+                        .expect("authority")
+                        .to_owned(),
+                    control_nonce: "replay-overflow-subscribe".to_owned(),
+                    operation: "subscribe".to_owned(),
+                    transport_generation: 1,
+                },
+            )
+            .await
+            .expect("subscribed membership");
+
+        // The control runs synchronously on an async worker while it holds
+        // the runtime's lock, so its cost is time that worker and every other
+        // async route spend waiting. Building the full over-limit transcript
+        // took seconds in a debug build; the refusal itself takes
+        // milliseconds.
+        let started = std::time::Instant::now();
+        let outcome = runtime
+            .adversarial_delivery(transport, "replay-overflow")
+            .expect("replay-overflow outcome");
+        let elapsed = started.elapsed();
+        assert_eq!(outcome.disposition, "invalid_envelope");
+        assert_eq!(outcome.recovery, "fresh_render");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the replay-overflow control took {elapsed:?}"
+        );
         runtime.retire().await.expect("runtime retires");
         assert_eq!(resources.current(), 0);
     }

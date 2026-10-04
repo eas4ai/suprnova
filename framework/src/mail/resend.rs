@@ -2,9 +2,9 @@
 //! `Authorization: Bearer <api-key>`.
 
 use crate::error::FrameworkError;
-use crate::mail::address::Address;
 use crate::mail::http_provider::{err, read_error_body, shared_client};
 use crate::mail::transport::{MailTransport, OutgoingMessage};
+use crate::mail::wire;
 use async_trait::async_trait;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -79,19 +79,54 @@ struct RsAttachment<'a> {
     content_type: &'a str,
 }
 
+/// Resend requires both `name` and `value` on every tag and rejects the
+/// whole email over a tag that lacks either.
 #[derive(Serialize)]
 struct RsTag<'a> {
-    name: &'a str,
+    name: String,
+    value: &'a str,
 }
 
-fn addr_str(a: &Address) -> String {
-    a.to_string()
+/// Resend tag rule: a tag name and value hold only ASCII letters, digits,
+/// `_` and `-`, at most 256 characters, and Resend rejects the whole email
+/// over one that does not.
+fn resend_tag_valid(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 256
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Map the plain-string `tags` onto Resend's `{name, value}` pairs the way
+/// SES maps them: a bare tag becomes `{name: "tag_<i>", value: tag}`, whose
+/// name is valid by construction. A tag Resend cannot carry is refused here,
+/// so the caller gets the error instead of a queued mail Resend rejects on
+/// every retry.
+fn resend_tags(msg: &OutgoingMessage) -> Result<Vec<RsTag<'_>>, FrameworkError> {
+    msg.tags
+        .iter()
+        .enumerate()
+        .map(|(i, tag)| {
+            if resend_tag_valid(tag) {
+                Ok(RsTag {
+                    name: format!("tag_{i}"),
+                    value: tag,
+                })
+            } else {
+                Err(FrameworkError::internal(format!(
+                    "Resend: tag {tag:?} cannot be sent: a Resend tag value holds only \
+                     [A-Za-z0-9_-], at most 256 characters"
+                )))
+            }
+        })
+        .collect()
 }
 
 #[async_trait]
 impl MailTransport for ResendMailTransport {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
         use base64::Engine;
+        wire::check_message("Resend", msg)?;
         let attachments: Vec<RsAttachment> = msg
             .attachments
             .iter()
@@ -102,15 +137,19 @@ impl MailTransport for ResendMailTransport {
             })
             .collect();
 
-        // Resend tags are a list of `{name, value}` objects; the
-        // Suprnova model carries plain strings, so we send the
-        // tag-name only. Metadata maps to provider headers (Resend has
-        // no first-class metadata field - `headers` is the standard
-        // pass-through). Caller-set custom headers union over metadata.
-        let tags: Vec<RsTag> = msg.tags.iter().map(|t| RsTag { name: t }).collect();
+        // Resend tags are a list of `{name, value}` objects; the Suprnova
+        // model carries plain strings, mapped by `resend_tags`. Metadata
+        // maps to provider headers (Resend has no first-class metadata
+        // field - `headers` is the standard pass-through). Caller-set
+        // custom headers union over metadata.
+        let tags = resend_tags(msg)?;
         let mut headers: BTreeMap<String, String> = BTreeMap::new();
         for (k, v) in &msg.metadata {
-            headers.insert(format!("X-Metadata-{k}"), v.clone());
+            // The metadata key becomes part of a header name, so it is held
+            // to the header-name rule. Caller headers were checked above.
+            let name = format!("X-Metadata-{k}");
+            wire::check_header("Resend", &name, v)?;
+            headers.insert(name, v.clone());
         }
         for (k, v) in &msg.headers {
             headers.insert(k.clone(), v.clone());
@@ -120,11 +159,11 @@ impl MailTransport for ResendMailTransport {
         }
 
         let body = RsBody {
-            from: addr_str(&msg.from),
-            to: msg.to.iter().map(addr_str).collect(),
-            cc: msg.cc.iter().map(addr_str).collect(),
-            bcc: msg.bcc.iter().map(addr_str).collect(),
-            reply_to: msg.reply_to.iter().map(addr_str).collect(),
+            from: wire::mailbox_text("Resend", &msg.from)?,
+            to: wire::mailbox_texts("Resend", &msg.to)?,
+            cc: wire::mailbox_texts("Resend", &msg.cc)?,
+            bcc: wire::mailbox_texts("Resend", &msg.bcc)?,
+            reply_to: wire::mailbox_texts("Resend", &msg.reply_to)?,
             subject: &msg.subject,
             html: msg.html.as_deref(),
             text: msg.text.as_deref(),

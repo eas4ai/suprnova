@@ -88,14 +88,19 @@ impl Middleware for LocaleMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
         if let Ok(translator) = App::resolve_make::<dyn Translator>() {
             // Dev-mode hot reload: pick up catalog edits without a
-            // restart. Best-effort - a reload failure (e.g. a
-            // momentarily malformed `.ftl` mid-save) must never turn a
-            // page request into a 500, so the error is dropped.
+            // restart, and make the cached pages built from the old text
+            // miss. Best-effort - a reload failure (e.g. a momentarily
+            // malformed `.ftl` mid-save) must never turn a page request
+            // into a 500, so the error is dropped.
             if matches!(
                 Environment::detect(),
                 Environment::Local | Environment::Development
             ) {
-                let _ = translator.reload_if_stale();
+                let _ =
+                    crate::localization::reload_and_invalidate(translator.as_ref(), |translator| {
+                        translator.reload_if_stale()
+                    })
+                    .await;
             }
             let locale = self.detect(&request, translator.as_ref());
             return crate::localization::scope_locale(locale, next(request)).await;

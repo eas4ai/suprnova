@@ -875,3 +875,200 @@ async fn chainable_meta_link_status_combine() {
     assert_eq!(body["meta"]["v"], 1);
     assert_eq!(body["links"]["self"], "/api/users/5");
 }
+
+// ── Compound-document integrity ───────────────────────────────────────────
+
+#[derive(Debug, Clone, Data, Validate)]
+#[json_resource("people")]
+pub struct PersonResource {
+    pub id: i64,
+    pub name: String,
+
+    #[data(allow_include)]
+    pub friends: Vec<PersonResource>,
+}
+
+#[derive(Debug, Clone, Data, Validate)]
+#[json_resource("accounts")]
+pub struct AccountResource {
+    pub id: i64,
+    pub name: String,
+
+    /// Accepted from input, never sent: not as an attribute, and not as a
+    /// relationship either.
+    #[data(input_only, allow_include)]
+    pub owner: Option<UserResource>,
+}
+
+fn person(id: i64, friends: Vec<PersonResource>) -> PersonResource {
+    PersonResource {
+        id,
+        name: format!("person {id}"),
+        friends,
+    }
+}
+
+async fn render_with_include<F, Fut>(query: &str, render: F) -> (u16, Value)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = suprnova::HttpResponse> + Send + 'static,
+{
+    use suprnova::{RequestIncludeSet, scope_include_set};
+
+    scope_include_set(RequestIncludeSet::from_query(query), async move {
+        let response = render().await;
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        (response.status_code(), body)
+    })
+    .await
+}
+
+#[tokio::test]
+async fn included_never_repeats_a_primary_resource() {
+    // people/1's friend is people/2, which is already primary data. JSON:API
+    // allows one resource object per type and id in the whole document.
+    let (status, body) = render_with_include("include=friends", || async {
+        Resource::collection(vec![person(1, vec![person(2, vec![])]), person(2, vec![])])
+            .render()
+            .await
+            .unwrap()
+    })
+    .await;
+
+    assert_eq!(status, 200);
+    let included = body["included"].as_array().expect("included is present");
+    assert!(
+        !included
+            .iter()
+            .any(|resource| resource["type"] == "people" && resource["id"] == "2"),
+        "people/2 is primary data and must not repeat in included: {body}"
+    );
+
+    // A single resource whose relationship cycles back to itself.
+    let (_, body) = render_with_include("include=friends.friends", || async {
+        Resource::single(person(1, vec![person(2, vec![person(1, vec![])])]))
+            .render()
+            .await
+            .unwrap()
+    })
+    .await;
+    let included = body["included"].as_array().expect("included is present");
+    assert_eq!(included.len(), 1, "only people/2 is included: {body}");
+    assert_eq!(included[0]["id"], "2");
+}
+
+#[tokio::test]
+async fn an_empty_collection_still_validates_its_include_paths() {
+    let (status, body) = render_with_include("include=forbidden_field", || async {
+        Resource::collection(Vec::<PostResource>::new())
+            .render()
+            .await
+            .unwrap()
+    })
+    .await;
+    assert_eq!(status, 400, "an unknown include is refused: {body}");
+
+    let (status, _) = render_with_include("include=author.bogus", || async {
+        use suprnova::LengthAwarePaginator;
+        let paginator = LengthAwarePaginator::new(Vec::<PostResource>::new(), 0, 10, 1)
+            .with_base_url("/api/posts");
+        Resource::paginated(paginator).render().await.unwrap()
+    })
+    .await;
+    assert_eq!(status, 400, "a nested unknown include is refused too");
+
+    // Validation does not depend on which relations happen to be loaded:
+    // every post here lacks an author, and `author.bogus` is still unknown.
+    let (status, _) = render_with_include("include=author.bogus", || async {
+        Resource::collection(vec![PostResource {
+            id: 1,
+            title: "No author".into(),
+            author: None,
+            tags: vec![],
+        }])
+        .render()
+        .await
+        .unwrap()
+    })
+    .await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn a_requested_include_always_answers_with_an_included_array() {
+    let (status, body) = render_with_include("include=author", || async {
+        Resource::collection(Vec::<PostResource>::new())
+            .render()
+            .await
+            .unwrap()
+    })
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body["included"],
+        serde_json::json!([]),
+        "a supported include on an empty result still returns included: {body}"
+    );
+
+    let (_, body) = render_with_include("include=tags", || async {
+        Resource::single(PostResource {
+            id: 1,
+            title: "Untagged".into(),
+            author: None,
+            tags: vec![],
+        })
+        .render()
+        .await
+        .unwrap()
+    })
+    .await;
+    assert_eq!(body["included"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn an_input_only_relationship_is_never_sent() {
+    let account = AccountResource {
+        id: 3,
+        name: "Acme".into(),
+        owner: Some(UserResource {
+            id: 9,
+            email: "owner@example.com".into(),
+            password: "secret".into(),
+        }),
+    };
+
+    let response = Resource::single(account.clone()).render().await.unwrap();
+    let body: Value = serde_json::from_slice(response.body()).unwrap();
+    assert!(
+        body["data"].get("relationships").is_none()
+            || body["data"]["relationships"].get("owner").is_none(),
+        "an input_only relationship must not be linked: {body}"
+    );
+
+    let (status, body) = render_with_include("include=owner", move || async move {
+        Resource::single(account).render().await.unwrap()
+    })
+    .await;
+    assert_eq!(
+        status, 400,
+        "an input_only relationship cannot be included: {body}"
+    );
+    assert!(
+        !body.to_string().contains("owner@example.com"),
+        "the related resource must not leak: {body}"
+    );
+}
+
+#[test]
+fn error_pointers_escape_json_pointer_tokens() {
+    use suprnova::FrameworkError;
+
+    // RFC 6901: `~` is written `~0` and `/` is written `~1`, so a literal
+    // attribute named `a/b~c` is one token, not a path into `a`.
+    let err = FrameworkError::validation("a/b~c", "is invalid");
+    let body: Value = serde_json::from_slice(err.into_json_api_response().body()).unwrap();
+    assert_eq!(
+        body["errors"][0]["source"]["pointer"],
+        "/data/attributes/a~1b~0c"
+    );
+}

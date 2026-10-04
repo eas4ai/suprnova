@@ -1069,6 +1069,15 @@ async fn boot(
         .layers(suprnova::render_cache::StorageLayers::l0_and_l1())
         .build()
         .expect("l1 cached policy");
+    // DATA-046: lease coherence over L0 and L1, so an entry can survive the
+    // L0 clear an emergency epoch advance performs while its validation
+    // lease is still live. Only meaningful when booted with L1.
+    let l1_leased_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .coherence(suprnova::render_cache::CoherenceMode::Lease { max_age_ms: 60_000 })
+        .layers(suprnova::render_cache::StorageLayers::l0_and_l1())
+        .build()
+        .expect("l1 leased policy");
     // Fix round 3, item 1: same shape as `leaky_policy` - no declared
     // `Principal` variance - paired with a handler that reads identity
     // through a different, previously-uninstrumented accessor.
@@ -1308,6 +1317,7 @@ async fn boot(
     let router: Router = router.get("/leased/{id}", cached_handler).into();
     let router: Router = router.get("/short-leased/{id}", cached_handler).into();
     let router: Router = router.get("/l1-cached/{id}", cached_handler).into();
+    let router: Router = router.get("/l1-leased/{id}", cached_handler).into();
     let router: Router = router
         .get("/leaky-via-request-state", leaky_handler_via_request_state)
         .into();
@@ -1574,6 +1584,8 @@ async fn boot(
         .expect("attach short leased policy")
         .try_render_cache("/l1-cached/{id}", GroupPolicy::from(l1_cached_policy))
         .expect("attach l1 cached policy")
+        .try_render_cache("/l1-leased/{id}", GroupPolicy::from(l1_leased_policy))
+        .expect("attach l1 leased policy")
         .try_render_cache(
             "/leaky-via-request-state",
             GroupPolicy::from(leaky_via_request_state_policy),
@@ -3153,6 +3165,22 @@ pub mod race {
         race_points::arm(&race_points::EPOCH_CAPTURED, hook);
     }
 
+    /// Arms the next hit that reads the authority (a lease-mode hit with no
+    /// live lease, or any authority-mode hit) to advance the installed
+    /// runtime's authority epoch after its read of the old epoch returned
+    /// and before that read renews the lease. One-shot: consumed the first
+    /// time [`race_points::AUTHORITY_READ_RETURNED`] fires after this call.
+    pub fn advance_epoch_during_next_authority_read(_harness: &Harness) {
+        let hook: race_points::Hook = Box::new(|| {
+            Box::pin(async {
+                RenderCache::advance_epoch()
+                    .await
+                    .expect("advance epoch during race test");
+            })
+        });
+        race_points::arm(&race_points::AUTHORITY_READ_RETURNED, hook);
+    }
+
     pub use super::wait_until_background_finished;
 
     /// Disarms every race point. Fix round 1, F4: nothing previously
@@ -3174,6 +3202,7 @@ pub mod race {
         race_points::disarm(&race_points::BEFORE_VIEW);
         race_points::disarm(&race_points::AFTER_VIEW_CLOSE);
         race_points::disarm(&race_points::DURING_REREAD);
+        race_points::disarm(&race_points::AUTHORITY_READ_RETURNED);
     }
 }
 

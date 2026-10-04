@@ -118,7 +118,7 @@ listeners. The bridge between the event dispatcher and the
 
 The trait that names "the thing that fans out a message to all
 WebSocket subscribers of a channel" - the in-memory implementation
-(`InMemoryBroadcastHub`) is the default; the sea-streamer
+(`InMemoryBroadcastHub`) is the default; the Redis stream
 implementation (`SeaStreamerBroadcastHub`) is the multi-process
 production deployment. See [Broadcasting - Multi-Process Fanout](broadcasting.md#multi-process-fanout).
 
@@ -811,7 +811,7 @@ Middleware that registers a hook to run *after* the response has been
 written to the client - implemented via the `Terminable` trait,
 captured into a `TerminationSnapshot`, and dispatched by
 `dispatch_termination`. Useful for logging, metric flushes, post-flight
-auditing. See [Middleware - Terminable middleware](middleware.md#terminable-middleware-post-response-hooks).
+auditing. See [Middleware - Terminable middleware](middleware.md#terminable-middleware---post-response-hooks).
 
 ### Through (relation)
 

@@ -1121,3 +1121,148 @@ async fn the_automatic_every_256th_publication_sweep_is_bounded_to_the_batch_lim
         "128 of the original 256 dead entries are still tracked after two batches"
     );
 }
+
+/// DATA-024: a publication whose future is dropped once its blocking file
+/// work has started finishes that work - the rename and the tally update
+/// both - before any other operation on the store can run. The lock used to
+/// be released with the dropped future while the detached blocking task
+/// went on, so a newer publication could take the lock, publish, and then
+/// have the older frame renamed over it, leaving a lower fence live on disk
+/// and a tally that described the newer one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_canceled_publication_finishes_before_a_newer_one_can_run() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use suprnova::render_cache::file_store::PublishIoStage;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(FileRenderStore::open(dir.path(), 1024 * 1024).expect("open"));
+    let k = key("/canceled-publication");
+
+    // The first publication to reach its rename stops there until released,
+    // and reports when its rename has landed. Every later one passes. The
+    // held publication is told apart by the blocking thread running it.
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let (renamed_tx, renamed_rx) = mpsc::channel::<()>();
+    let armed = AtomicBool::new(true);
+    let held_thread = std::sync::Mutex::new(None);
+    let entered_tx = std::sync::Mutex::new(entered_tx);
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let renamed_tx = std::sync::Mutex::new(renamed_tx);
+    store.set_publish_io_hook_for_test(Some(Arc::new(move |stage| match stage {
+        PublishIoStage::BeforeRename => {
+            if armed.swap(false, Ordering::SeqCst) {
+                *held_thread.lock().expect("held thread") = Some(std::thread::current().id());
+                let _ = entered_tx.lock().expect("entered").send(());
+                let _ = release_rx.lock().expect("release").recv();
+            }
+        }
+        PublishIoStage::AfterRename => {
+            if *held_thread.lock().expect("held thread") == Some(std::thread::current().id()) {
+                let _ = renamed_tx.lock().expect("renamed").send(());
+            }
+        }
+    })));
+
+    let older = {
+        let store = Arc::clone(&store);
+        let k = k.clone();
+        tokio::spawn(async move {
+            store
+                .publish(&k, Bytes::from_static(b"older"), fence(1), 1_000, 60_000)
+                .await
+        })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv())
+        .await
+        .expect("join")
+        .expect("the older publication reached its rename");
+    older.abort();
+    assert!(
+        older.await.is_err_and(|error| error.is_cancelled()),
+        "the older publication's future was dropped mid-write"
+    );
+
+    let mut newer = {
+        let store = Arc::clone(&store);
+        let k = k.clone();
+        tokio::spawn(async move {
+            store
+                .publish(&k, Bytes::from_static(b"newer"), fence(2), 2_000, 60_000)
+                .await
+        })
+    };
+    // A newer publication either completes on its own (the lock was given up
+    // with the dropped future) or waits for the older one's file work to
+    // finish. Release the older write once the newer has had its chance.
+    let newer_finished_first = tokio::select! {
+        _ = &mut newer => true,
+        () = tokio::time::sleep(std::time::Duration::from_secs(2)) => false,
+    };
+    release_tx.send(()).expect("release the older write");
+    tokio::task::spawn_blocking(move || renamed_rx.recv())
+        .await
+        .expect("join")
+        .expect("the older write's rename landed");
+    if !newer_finished_first {
+        assert_eq!(
+            newer.await.expect("join").expect("publish"),
+            PublishOutcome::Published
+        );
+    }
+
+    let live = store.get(&k).await.expect("get").expect("an entry");
+    assert_eq!(
+        live.fence,
+        fence(2),
+        "the newer fence is the live entry, not the older frame renamed over it"
+    );
+    assert_eq!(live.bytes.as_ref(), b"newer");
+    let inspection = store.inspect().await.expect("inspect");
+    assert_eq!(inspection.entries, 1);
+    assert_eq!(inspection.bytes, b"newer".len());
+}
+
+/// DATA-025: one sweep's work is bounded by the batch it removes, not by
+/// the size of the store. It used to collect, clone and sort every dead
+/// entry and then scan every entry again for `more_remain`, all under the
+/// lock every publish, evict and corrupt read waits on.
+#[tokio::test]
+async fn a_sweep_examines_a_bounded_number_of_entries_however_large_the_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileRenderStore::open(dir.path(), 64 * 1024 * 1024).expect("open");
+    for n in 0..200_u64 {
+        store
+            .publish(
+                &key(&format!("/live/{n}")),
+                Bytes::from(vec![1_u8; 8]),
+                fence(n + 1),
+                1_000,
+                3_600_000,
+            )
+            .await
+            .expect("publish a live entry");
+    }
+    store
+        .publish(
+            &key("/dead"),
+            Bytes::from(vec![1_u8; 8]),
+            fence(1_000),
+            1_000,
+            0,
+        )
+        .await
+        .expect("publish a dead entry");
+    let _ = store.take_sweep_examined_for_test();
+
+    let outcome = store.sweep(1_000, 1).await.expect("sweep");
+    assert_eq!(outcome.removed, 1, "the one dead entry is removed");
+    assert!(!outcome.more_remain);
+    let examined = store.take_sweep_examined_for_test();
+    assert!(
+        examined < 16,
+        "a sweep that removes one entry looks at a handful, not all 201: examined {examined}"
+    );
+    assert_eq!(store.inspect().await.expect("inspect").entries, 200);
+}

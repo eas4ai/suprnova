@@ -38,7 +38,12 @@ pub enum LedgerErrorKind {
     /// rejection and never a partial write: the caller retries the whole
     /// operation, with a fresh identity where it proposed one.
     InstanceConflict,
-    /// The embedded provider reached its configured live-instance capacity.
+    /// A record did not fit a bound the record codec enforces, such as
+    /// [`MAX_RECORD_BYTES`](super::MAX_RECORD_BYTES).
+    ///
+    /// The configured instance capacity never produces it: a full ledger
+    /// evicts the instance that expires soonest and creates the new one, so a
+    /// limit never takes mounting down.
     CapacityExceeded,
     /// The clock provider could not supply a usable timestamp.
     ClockUnavailable,

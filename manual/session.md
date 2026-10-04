@@ -306,6 +306,14 @@ path to `/`; it drops a `Domain` on `__Host-` and logs a warning because that
 narrows the requested scope. The browser silently drops an invalid prefixed
 cookie, so check the boot diagnostic before deployment.
 
+The browser applies the prefix rules to the cookie name it stores, so a
+name such as `%5F%5FHost-suprnova_session` escapes them, and a sibling
+subdomain can set it. Suprnova ignores a cookie whose `__Host-` or
+`__Secure-` prefix appears only after percent-decoding its name, so it never
+answers for `__Host-suprnova_session` or `__Secure-suprnova_session`. A
+cookie sent under its literal name also wins over any encoded alias of that
+name.
+
 For local HTTP development, leave the prefix empty and set
 `SESSION_SECURE=false` only in the local environment. For production, deploy
 HTTPS, keep `SESSION_SECURE=true`, use `SESSION_COOKIE_PREFIX=__Host-`, keep
@@ -478,7 +486,7 @@ documents it):
 | `user_id` | VARCHAR NULL | authenticated user id (string, supports opaque ids) |
 | `payload` | TEXT | JSON-serialized session data map |
 | `csrf_token` | VARCHAR | per-session CSRF token |
-| `last_activity` | TIMESTAMP | last access; drives expiry + GC |
+| `last_activity` | DATETIME or TIMESTAMP (`timestamp` or `timestamptz` on Postgres) | last access, in UTC; drives expiry + GC |
 
 Two indexes ship alongside the table: `idx_sessions_user_id` (for
 `destroy_for_user`) and `idx_sessions_last_activity` (for `gc()`).

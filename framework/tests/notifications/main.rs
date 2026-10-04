@@ -4,6 +4,7 @@
 pub mod anonymous;
 pub mod broadcast;
 pub mod database;
+pub mod database_mysql;
 pub mod database_postgres;
 pub mod database_read;
 pub mod dispatch;

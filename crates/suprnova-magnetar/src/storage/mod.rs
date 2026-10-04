@@ -50,6 +50,7 @@ pub use tokens::{
     PasswordResetInput, PasswordResetStore, PresentedToken, TokenStore,
 };
 pub use users::{NewUser, UserRecord, UserStore};
+pub(crate) use users::{SignUpAccount, create_or_find_existing};
 
 /// A transaction borrowed by a composite storage operation.
 ///

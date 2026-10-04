@@ -120,20 +120,28 @@ impl Cache {
                 App::bind::<dyn CacheStore>(memory_cache);
             }
             CacheDriver::Redis => {
-                // No silent downgrade - surface the connection failure
-                // so operators notice misconfiguration at boot.
-                let redis_cache = RedisCache::connect(&config).await.map_err(|e| {
-                    FrameworkError::internal(format!(
-                        "Cache::bootstrap: CACHE_DRIVER=redis but Redis is unreachable at \
-                         {url}: {e}. Fix the URL or set CACHE_DRIVER=memory to use the \
-                         in-memory backend explicitly.",
-                        url = config.url,
-                    ))
-                })?;
+                let redis_cache = Self::connect_redis(&config).await?;
                 App::bind::<dyn CacheStore>(Arc::new(redis_cache));
             }
         }
         Ok(())
+    }
+
+    /// Connect the Redis store the bootstrap binds.
+    ///
+    /// No silent downgrade - surface the connection failure so operators
+    /// notice misconfiguration at boot.
+    async fn connect_redis(config: &CacheConfig) -> Result<RedisCache, FrameworkError> {
+        RedisCache::connect(config).await.map_err(|e| {
+            // The endpoint, never the URL: `REDIS_URL` routinely carries a
+            // password, and this message goes to boot logs.
+            FrameworkError::internal(format!(
+                "Cache::bootstrap: CACHE_DRIVER=redis but Redis is unreachable at \
+                 {endpoint}: {e}. Fix REDIS_URL or set CACHE_DRIVER=memory to use the \
+                 in-memory backend explicitly.",
+                endpoint = config::redis_endpoint(&config.url),
+            ))
+        })
     }
 
     /// Get the underlying cache store
@@ -502,16 +510,25 @@ impl Cache {
 
     /// Get an item or store a default value forever
     ///
-    /// Same as `remember` but with no expiration. Inherits `remember`'s
-    /// non-atomic / stampede-prone semantics - see [`Cache::remember`]
-    /// for the lock-based mitigation.
+    /// Same as `remember` but with no expiration, whatever
+    /// `CACHE_DEFAULT_TTL` says. Inherits `remember`'s non-atomic /
+    /// stampede-prone semantics - see [`Cache::remember`] for the
+    /// lock-based mitigation.
     pub async fn remember_forever<T, F, Fut>(key: &str, default: F) -> Result<T, FrameworkError>
     where
         T: Serialize + DeserializeOwned,
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, FrameworkError>>,
     {
-        Self::remember(key, None, default).await
+        if let Some(cached) = Self::get::<T>(key).await? {
+            return Ok(cached);
+        }
+        let value = default().await?;
+        // Through `forever`, not `remember(key, None, ..)`: a `None` TTL on
+        // `put` means "the configured default", which would make this value
+        // expire after `CACHE_DEFAULT_TTL`.
+        Self::forever(key, &value).await?;
+        Ok(value)
     }
 
     /// Store a tagged value via the static facade.
@@ -519,6 +536,10 @@ impl Cache {
     /// The value is serialized to JSON and stored under `key`. Every tag in
     /// `tags` records this key so that a subsequent `Cache::flush_tags` call
     /// removes it.
+    ///
+    /// If `ttl` is `None`, the configured default TTL applies, exactly as it
+    /// does for [`Cache::put`]. Use [`Cache::tags_forever`] for a tagged
+    /// value that never expires.
     ///
     /// # Example
     ///
@@ -539,7 +560,35 @@ impl Cache {
         let store = Self::store()?;
         let json = serde_json::to_string(value)
             .map_err(|e| FrameworkError::internal(format!("Cache serialize error: {e}")))?;
-        store.tagged_put_raw(tags, key, &json, ttl).await
+        let effective_ttl = ttl.or_else(|| store.default_ttl());
+        store.tagged_put_raw(tags, key, &json, effective_ttl).await
+    }
+
+    /// Store a tagged value that never expires.
+    ///
+    /// The tagged counterpart of [`Cache::forever`]: it bypasses
+    /// `CACHE_DEFAULT_TTL`, and the value stays until it is forgotten,
+    /// overwritten, or flushed through one of its tags.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let settings = "theme=dark";
+    /// Cache::tags_forever(&["settings"], "settings:site", &settings).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn tags_forever<T: Serialize>(
+        tags: &[&str],
+        key: &str,
+        value: &T,
+    ) -> Result<(), FrameworkError> {
+        let store = Self::store()?;
+        let json = serde_json::to_string(value)
+            .map_err(|e| FrameworkError::internal(format!("Cache serialize error: {e}")))?;
+        // `None` reaches the store literally, which means no expiration.
+        store.tagged_put_raw(tags, key, &json, None).await
     }
 
     /// Remove every key that was stored under any of the given tags.
@@ -644,6 +693,36 @@ impl LockGuard {
     /// token no longer matches.
     pub async fn refresh(&self, ttl: Duration) -> Result<bool, FrameworkError> {
         self.store.refresh_lock(&self.key, &self.token, ttl).await
+    }
+}
+
+#[cfg(test)]
+mod redis_url_redaction {
+    use super::*;
+
+    /// The bootstrap error for an unreachable Redis names where it tried to
+    /// connect, never the credentials in `REDIS_URL`. The error used to
+    /// carry the whole URL, password included, into boot logs.
+    #[tokio::test]
+    async fn an_unreachable_redis_error_names_the_endpoint_not_the_credentials() {
+        let config = CacheConfig::builder()
+            .driver(CacheDriver::Redis)
+            // Port 1 refuses the connection at once on a local host.
+            .url("redis://cache-user:s3cret-pw@127.0.0.1:1/2")
+            .build();
+        let Err(err) = Cache::connect_redis(&config).await else {
+            panic!("nothing listens on port 1, so the connect must fail");
+        };
+        for rendered in [err.to_string(), format!("{err:?}")] {
+            assert!(
+                !rendered.contains("s3cret-pw") && !rendered.contains("cache-user"),
+                "the error leaks REDIS_URL credentials: {rendered}"
+            );
+        }
+        assert!(
+            err.to_string().contains("127.0.0.1:1"),
+            "the error still names the endpoint it could not reach: {err}"
+        );
     }
 }
 

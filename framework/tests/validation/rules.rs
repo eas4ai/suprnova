@@ -689,6 +689,55 @@ fn distinct_ignore_case_and_strict_flags_change_comparison() {
     );
 }
 
+/// ROOT-24: by-value comparison stays exact for integers. 2^53 and
+/// 2^53 + 1 share one `f64`, and used to be rejected as duplicates.
+#[test]
+fn distinct_by_value_tells_integers_above_two_to_the_53_apart() {
+    let loose = Distinct {
+        ignore_case: false,
+        strict: false,
+    };
+    assert!(
+        loose
+            .passes(&serde_json::json!([
+                9007199254740992_i64,
+                9007199254740993_i64
+            ]))
+            .is_ok(),
+        "two different integers are not duplicates"
+    );
+    assert!(
+        loose
+            .passes(&serde_json::json!([
+                9007199254740993_i64,
+                9007199254740993_i64
+            ]))
+            .is_err()
+    );
+    assert!(
+        loose
+            .passes(&serde_json::json!([
+                18446744073709551615_u64,
+                18446744073709551614_u64
+            ]))
+            .is_ok(),
+        "u64 values near the top are told apart"
+    );
+    assert!(
+        loose.passes(&serde_json::json!([2, 2.0])).is_err(),
+        "an integer and a float of the same value are still one value"
+    );
+    assert!(
+        loose
+            .passes(&serde_json::json!([
+                9007199254740993_i64,
+                9007199254740992.0
+            ]))
+            .is_ok(),
+        "the integer above the float's value is not equal to it"
+    );
+}
+
 // --- membership rules (in_array, contains, doesnt_contain) ---
 
 #[test]

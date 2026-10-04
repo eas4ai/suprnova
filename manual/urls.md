@@ -394,27 +394,32 @@ URL was minted from a named route or from a raw path.
 
 ### Wire format
 
-Two URLs that differ only by query-parameter order produce identical
-signatures because the canonical form sorts query pairs lexicographically
-before hashing. That matters because clients sometimes reorder query
-parameters in transit (proxies, link previewers, mobile email apps), and
-a signed URL that breaks under reordering would be unusable.
+Two URLs that differ only by the order of their query parameters
+produce identical signatures because the canonical form sorts query pairs
+by key before hashing. That matters because clients sometimes reorder
+query parameters in transit (proxies, link previewers, mobile email
+apps), and a signed URL that breaks under reordering would be unusable.
+The values of one repeated key are the exception: their order is signed,
+because it decides what a handler reads.
 
 | Component | Value |
 |---|---|
 | Algorithm | HMAC-SHA256 |
 | Key | Active `APP_KEY` raw bytes |
 | Payload | `path?<sorted-query>` (omit `?` when no params) |
-| Sort order | `(key, value)` - every pair, repeats included |
+| Sort order | By key, stable - every pair, repeats included in their original order |
 | Encoding | Hex-encoded 64-character digest |
 | Comparison | Constant-time via `subtle::ConstantTimeEq` |
 | Reserved keys | `signature`, `expires` |
 
 **Repeated keys are signed, not collapsed.** `?tag=a&tag=b` carries both
-values into the payload, so neither can be added, removed, or substituted
-without breaking the signature. Sorting on `(key, value)` rather than the
-key alone is what keeps that order total, so the reordering guarantee
-above still holds when a key appears more than once.
+values into the payload, in that order, so none can be added, removed,
+substituted, or swapped without breaking the signature. The order matters
+because `query_param` returns a repeated key's last value: if
+`?mode=a&mode=b` and `?mode=b&mode=a` shared a signature, a client could
+swap them and change what the handler acts on. The signer keeps the order
+you pass. A URL signed by an earlier version, which sorted repeated values
+by value, still verifies.
 
 This is worth stating because the alternative bites hard. An earlier
 version canonicalised into a map, which kept only the last value for a

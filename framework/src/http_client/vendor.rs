@@ -10,8 +10,9 @@
 //!
 //! What they *should* share is the safety envelope, which is what lives
 //! here: bounded timeouts so a black-holed peer can't hold an `await`
-//! forever, and a capped read of error bodies so a hostile or misconfigured
-//! peer can't force an unbounded buffer.
+//! forever, a capped read of error bodies so a hostile or misconfigured
+//! peer can't force an unbounded buffer, and no redirects, so a peer can't
+//! send a request and its credential to another origin.
 
 use reqwest::Client;
 use std::time::Duration;
@@ -41,11 +42,19 @@ pub(crate) const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 /// `user_agent` identifies the calling subsystem (`suprnova-mail/1.2.3`)
 /// rather than the framework as a whole, so a provider-side rate limit or
 /// abuse report points at the right driver.
+///
+/// The client follows no redirect. These drivers authenticate with custom
+/// headers (`Api-Key`, `x-postmark-server-token`), and reqwest strips only
+/// `Authorization` and cookies when a redirect crosses origins, so a
+/// redirecting endpoint would receive the request again on another host,
+/// or over plain HTTP, credential and body included. A vendor REST API does
+/// not redirect a call; the 3xx surfaces as the provider's error instead.
 pub(crate) fn build_client(user_agent: &'static str) -> Client {
     Client::builder()
         .user_agent(user_agent)
         .timeout(DEFAULT_REQUEST_TIMEOUT)
         .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("reqwest client builder")
 }

@@ -304,6 +304,101 @@ tokio::task_local! {
     pub(crate) static CURRENT_TX: Option<Arc<TxState>>;
 }
 
+tokio::task_local! {
+    /// The explicit routing of the query whose eager loads are running,
+    /// installed by `Builder::get` around them. See [`EagerRoute`].
+    static EAGER_ROUTE: EagerRoute;
+}
+
+/// The `with_tx` transaction and `on(name)` connection a query was
+/// given, inherited by the reads of its eager loads.
+///
+/// An eager load runs one query per relation, each built fresh from the
+/// related model, so none of them carries the parent query's builder.
+/// Ambient `CURRENT_TX` reaches them, but an explicit `with_tx(&tx)` or
+/// `on(name)` did not: the parent read the transaction's uncommitted
+/// rows while its relations read the pool and missed them - or waited
+/// for the connection the transaction held - and a parent read from a
+/// named connection loaded its relations from the default one.
+///
+/// `Builder::get` installs the query's routing around its eager loads,
+/// and [`ExecutorChoice::resolve_read`] reads it when the read at hand
+/// names no routing of its own. The transaction is inherited the way an
+/// ambient one is: a related model that declares another connection
+/// still reads there. The connection is inherited only by a related
+/// model that declares none, as Laravel's relations take the parent's
+/// connection only when the related model names none.
+#[derive(Clone, Default)]
+pub(crate) struct EagerRoute {
+    /// The parent query's `with_tx` transaction.
+    pub(crate) tx: Option<TxHandle>,
+    /// The parent query's `on(name)` connection.
+    pub(crate) connection: Option<String>,
+}
+
+impl EagerRoute {
+    /// The routing installed around the running eager loads, or none.
+    fn current() -> Self {
+        EAGER_ROUTE.try_with(Clone::clone).unwrap_or_default()
+    }
+
+    /// Run `loads` with this routing installed. A field this routing
+    /// leaves unset keeps the value of an enclosing one, so a nested
+    /// query with eager loads of its own does not drop what its parent
+    /// passed down.
+    pub(crate) async fn scope<F: std::future::Future>(self, loads: F) -> F::Output {
+        let outer = Self::current();
+        let route = Self {
+            tx: self.tx.or(outer.tx),
+            connection: self.connection.or(outer.connection),
+        };
+        EAGER_ROUTE.scope(route, loads).await
+    }
+
+    /// The executor for a read on the inherited transaction: the
+    /// transaction itself, or the pool of the connection the read is
+    /// bound for when that is another database, as under an ambient
+    /// transaction. `None` when no transaction is inherited.
+    async fn read_on_tx(
+        &self,
+        connection_override: Option<&str>,
+        model_default_conn: Option<&'static str>,
+    ) -> Result<Option<ExecutorChoice>, FrameworkError> {
+        let Some(handle) = &self.tx else {
+            return Ok(None);
+        };
+        if let Some(name) = connection_override
+            .or(model_default_conn)
+            .filter(|name| *name != crate::database::PRIMARY_CONNECTION_NAME)
+            .filter(|name| handle.connection_name.as_ref() != *name)
+        {
+            crate::render_cache::collector::observe_foreign_connection_read();
+            return Ok(Some(ExecutorChoice::Pool(
+                DB::named(name).await?,
+                name.into(),
+            )));
+        }
+        Ok(Some(ExecutorChoice::Tx(
+            handle.inner.clone(),
+            handle.connection_name.clone(),
+        )))
+    }
+
+    /// The inherited connection, for a read that names none and whose
+    /// model declares none.
+    fn connection_for(
+        self,
+        connection_override: Option<&str>,
+        model_default_conn: Option<&'static str>,
+    ) -> Option<String> {
+        if connection_override.is_some() || model_default_conn.is_some() {
+            None
+        } else {
+            self.connection
+        }
+    }
+}
+
 /// Handle returned by [`DB::begin_transaction`] and surfaced as
 /// `&Transaction` inside the closure form. Owns the active
 /// `DatabaseTransaction` until [`Self::commit`] / [`Self::rollback`]
@@ -456,7 +551,9 @@ impl ExecutorChoice {
     /// Five-step precedence:
     ///
     /// 1. **Builder-level transaction override** (`Builder::with_tx`).
-    ///    Explicit beats every other consideration.
+    ///    Explicit beats every other consideration. A read an eager load
+    ///    makes for a query given `with_tx` or `on(name)` inherits that
+    ///    routing here when it names none of its own.
     /// 2. **Ambient `CURRENT_TX`** installed by [`DB::transaction`] /
     ///    [`DB::transaction_with_attempts`]. Inside a closure-form
     ///    transaction every read uses the tx connection - `on(name)`
@@ -484,6 +581,19 @@ impl ExecutorChoice {
                 h.connection_name.clone(),
             ));
         }
+        // Step 1b: the routing an eager load inherits from its parent
+        // query - its transaction, or its connection when this read
+        // names none and its model declares none. See `EagerRoute`.
+        let inherited = EagerRoute::current();
+        if let Some(choice) = inherited
+            .read_on_tx(connection_override, model_default_conn)
+            .await?
+        {
+            return Ok(choice);
+        }
+        let inherited_connection =
+            inherited.connection_for(connection_override, model_default_conn);
+        let connection_override = connection_override.or(inherited_connection.as_deref());
         // Step 2: ambient closure-form transaction.
         if let Ok(Some(state)) = CURRENT_TX.try_with(|t| t.clone()) {
             // CACHE-008: a read bound for another connection runs there,
@@ -563,6 +673,17 @@ impl ExecutorChoice {
                 h.connection_name.clone(),
             ));
         }
+        // The routing an eager load inherits, as in `resolve_read`.
+        let inherited = EagerRoute::current();
+        if let Some(choice) = inherited
+            .read_on_tx(connection_override, model_default_conn)
+            .await?
+        {
+            return Ok(choice);
+        }
+        let inherited_connection =
+            inherited.connection_for(connection_override, model_default_conn);
+        let connection_override = connection_override.or(inherited_connection.as_deref());
         if let Ok(Some(state)) = CURRENT_TX.try_with(|t| t.clone()) {
             // CACHE-008: a read bound for another connection runs there,
             // not on the ambient transaction, which is pinned to one
@@ -767,38 +888,32 @@ impl ExecutorChoice {
     /// Execute a SeaORM-built `Select<E>` as a `COUNT(*)` and return the
     /// total matching row count. See [`Self::select_all`] for the
     /// observability contract.
+    ///
+    /// The statement is the one SeaORM's `PaginatorTrait::count` runs -
+    /// the SELECT without its ordering, wrapped in
+    /// `SELECT COUNT(*) AS num_items FROM (...)` - built here and run
+    /// through [`Self::query_one`], so an observer sees the COUNT that
+    /// ran, not the SELECT it was built from.
     #[doc(hidden)]
     pub async fn select_count<E>(&self, q: sea_orm::Select<E>) -> Result<u64, sea_orm::DbErr>
     where
         E: sea_orm::EntityTrait,
         E::Model: Send + Sync,
     {
-        use sea_orm::PaginatorTrait;
-        if super::events::is_dispatching() || !super::events::query_observation_active() {
-            return match self {
-                ExecutorChoice::Tx(t, _) => q.count(t.as_ref()).await,
-                ExecutorChoice::Pool(c, _) => q.count(c.inner()).await,
-            };
+        use sea_orm::QueryTrait;
+        use sea_orm::sea_query::{Expr, SelectStatement};
+
+        let mut inner = q.into_query();
+        inner.clear_order_by();
+        let count = SelectStatement::new()
+            .expr(Expr::cust("COUNT(*) AS num_items"))
+            .from_subquery(inner, "sub_query")
+            .to_owned();
+        let stmt = self.backend().build(&count);
+        match self.query_one(stmt).await? {
+            Some(row) => Ok(u64::try_from(row.try_get::<i64>("", "num_items")?).unwrap_or(0)),
+            None => Ok(0),
         }
-        let stmt = sea_orm::QueryTrait::build(&q, self.backend());
-        let (sql, bindings) = (stmt.sql.clone(), stmt_bindings_strings(&stmt));
-        let conn_name = self.connection_name().to_string();
-        let start = std::time::Instant::now();
-        let res = match self {
-            ExecutorChoice::Tx(t, _) => q.count(t.as_ref()).await,
-            ExecutorChoice::Pool(c, _) => q.count(c.inner()).await,
-        };
-        let elapsed = start.elapsed();
-        finish_query_event(
-            sql,
-            bindings,
-            elapsed,
-            super::events::ReadWriteType::Read,
-            conn_name,
-            &res,
-        )
-        .await;
-        res
     }
 
     /// Execute a prepared `Statement` that produces rows.
@@ -1290,34 +1405,25 @@ impl Transaction {
     pub async fn commit(self) -> Result<(), FrameworkError> {
         let conn_name = self.connection_name.to_string();
         let (after_commit, on_rollback) = take_own_callbacks(self.registry);
-        let tx = match Arc::try_unwrap(self.inner) {
-            Ok(tx) => tx,
-            Err(_) => {
-                super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
-                    .compensate()
-                    .await;
-                return Err(FrameworkError::internal(
-                    "Transaction::commit: TxHandle clones still alive; \
-                     drop them before commit so no further writes can race",
-                ));
-            }
-        };
-        if let Err(error) = tx.commit().await {
-            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
-                .compensate()
-                .await;
-            return Err(FrameworkError::database(error.to_string()));
-        }
-        drop(on_rollback);
-        // Armed before any listener runs, as in `finish_transaction`: a
-        // listener panic must not discard a callback of a committed
-        // transaction.
-        let callbacks = super::after_commit::GuardedCallbacks::after_commit(after_commit);
-        emit_tx_event(super::events::TransactionCommitted {
-            connection_name: conn_name,
-        })
-        .await;
-        callbacks.run_after_commit().await
+        // The COMMIT and everything it releases run on a task of their own,
+        // as the closure form's finalization does. A caller cancelled while
+        // the COMMIT is in flight - a client disconnect, a timeout around
+        // this call - cannot take the callbacks with it: the server may
+        // already have committed, and the rows would then stand without the
+        // jobs and callbacks that were waiting for them.
+        super::after_commit::spawn_owned(commit_owned(
+            self.inner,
+            conn_name,
+            after_commit,
+            on_rollback,
+        ))
+        .await
+        .map_err(|error| {
+            FrameworkError::internal(format!(
+                "Transaction::commit: the commit task ended without a result; the \
+                 database outcome is unknown and must not be retried: {error}"
+            ))
+        })?
     }
 
     /// Roll back the manual transaction returned by
@@ -1330,30 +1436,90 @@ impl Transaction {
     pub async fn rollback(self) -> Result<(), FrameworkError> {
         let conn_name = self.connection_name.to_string();
         let (after_commit, on_rollback) = take_own_callbacks(self.registry);
-        // Whatever happens below, this transaction does not commit.
-        let callbacks =
-            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback);
-        let tx = match Arc::try_unwrap(self.inner) {
-            Ok(tx) => tx,
-            Err(_) => {
-                callbacks.compensate().await;
-                return Err(FrameworkError::internal(
-                    "Transaction::rollback: TxHandle clones still alive; \
-                     drop them before rollback so no further writes can race",
-                ));
-            }
-        };
-        if let Err(error) = tx.rollback().await {
-            callbacks.compensate().await;
-            return Err(FrameworkError::database(error.to_string()));
-        }
-        emit_tx_event(super::events::TransactionRolledBack {
-            connection_name: conn_name,
-        })
-        .await;
-        callbacks.compensate().await;
-        Ok(())
+        // Owned by its own task for the reason `commit` gives: the
+        // compensations release what the transaction held, such as a deferred
+        // `push_unique`'s dedupe lock, and run only once the ROLLBACK has
+        // landed, whatever happens to the caller meanwhile.
+        super::after_commit::spawn_owned(rollback_owned(
+            self.inner,
+            conn_name,
+            after_commit,
+            on_rollback,
+        ))
+        .await
+        .map_err(|error| {
+            FrameworkError::internal(format!(
+                "Transaction::rollback: the rollback task ended without a result: {error}"
+            ))
+        })?
     }
+}
+
+/// The body of [`Transaction::commit`], on the task that owns it.
+async fn commit_owned(
+    inner: Arc<DatabaseTransaction>,
+    conn_name: String,
+    after_commit: Vec<super::after_commit::AfterCommitCallback>,
+    on_rollback: Vec<super::after_commit::AfterCommitCallback>,
+) -> Result<(), FrameworkError> {
+    let tx = match Arc::try_unwrap(inner) {
+        Ok(tx) => tx,
+        Err(_) => {
+            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
+                .compensate()
+                .await;
+            return Err(FrameworkError::internal(
+                "Transaction::commit: TxHandle clones still alive; \
+                 drop them before commit so no further writes can race",
+            ));
+        }
+    };
+    if let Err(error) = tx.commit().await {
+        super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
+            .compensate()
+            .await;
+        return Err(FrameworkError::database(error.to_string()));
+    }
+    drop(on_rollback);
+    // Armed before any listener runs, as in `finish_transaction`: a listener
+    // panic must not discard a callback of a committed transaction.
+    let callbacks = super::after_commit::GuardedCallbacks::after_commit(after_commit);
+    emit_tx_event(super::events::TransactionCommitted {
+        connection_name: conn_name,
+    })
+    .await;
+    callbacks.run_after_commit().await
+}
+
+/// The body of [`Transaction::rollback`], on the task that owns it.
+async fn rollback_owned(
+    inner: Arc<DatabaseTransaction>,
+    conn_name: String,
+    after_commit: Vec<super::after_commit::AfterCommitCallback>,
+    on_rollback: Vec<super::after_commit::AfterCommitCallback>,
+) -> Result<(), FrameworkError> {
+    // Whatever happens below, this transaction does not commit.
+    let callbacks = super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback);
+    let tx = match Arc::try_unwrap(inner) {
+        Ok(tx) => tx,
+        Err(_) => {
+            callbacks.compensate().await;
+            return Err(FrameworkError::internal(
+                "Transaction::rollback: TxHandle clones still alive; \
+                 drop them before rollback so no further writes can race",
+            ));
+        }
+    };
+    if let Err(error) = tx.rollback().await {
+        callbacks.compensate().await;
+        return Err(FrameworkError::database(error.to_string()));
+    }
+    emit_tx_event(super::events::TransactionRolledBack {
+        connection_name: conn_name,
+    })
+    .await;
+    callbacks.compensate().await;
+    Ok(())
 }
 
 /// The callbacks a handle may finish itself, taken out of its registry.

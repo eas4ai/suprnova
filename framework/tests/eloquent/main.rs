@@ -13,6 +13,7 @@ pub mod builder_identifier_validation;
 pub mod cast_panic_diagnostic;
 pub mod casts_encrypted;
 pub mod casts_encrypted_key_rotation;
+pub mod casts_native_columns;
 pub mod casts_primitive;
 pub mod casts_structured;
 pub mod chunking;
@@ -20,6 +21,7 @@ pub mod collection_surface;
 pub mod dump;
 pub mod eager;
 pub mod eager_cache;
+pub mod eager_cache_rows;
 pub mod eager_dispatcher;
 pub mod eager_named_connection;
 pub mod eager_query_count;
@@ -44,12 +46,18 @@ pub mod model;
 pub mod model_changes;
 pub mod observers;
 pub mod pagination;
+// Its tests move the framework clock with `TestClock`, which exists with
+// the `testing` feature only.
+#[cfg(feature = "testing")]
+pub mod pivot_timestamps_engines;
 pub mod prunable_relations;
 pub mod query_helpers_model;
+pub mod query_shapes_engines;
 pub mod read_instrumentation;
 pub mod registry;
 pub mod relation_registry;
 pub mod relation_trait;
+pub mod relations_declarations;
 pub mod relations_m2m_tx;
 pub mod relations_morph;
 pub mod relations_morph_custom_type;

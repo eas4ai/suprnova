@@ -420,3 +420,83 @@ async fn clean_request_survives_existing_session_read_failure_without_write() {
     assert_eq!(store.reads.load(Ordering::SeqCst), 1);
     assert_eq!(store.writes.load(Ordering::SeqCst), 0);
 }
+
+/// The value of the `name` cookie a response set, if any.
+fn set_cookie_value<B>(response: &hyper::Response<B>, name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find(|value| value.starts_with(&prefix))
+        .and_then(|value| value.split(';').next())
+        .map(|pair| pair[prefix.len()..].to_owned())
+}
+
+/// `SessionMiddleware` around `CsrfMiddleware` around a handler that
+/// answers `ok`, the order an application registers them in.
+async fn through_session_and_csrf(
+    sessions: &SessionMiddleware,
+    request: suprnova::Request,
+) -> hyper::Response<http_body_util::combinators::BoxBody<bytes::Bytes, std::convert::Infallible>> {
+    use suprnova::Middleware;
+
+    let next: suprnova::middleware::Next = Arc::new(|request| {
+        Box::pin(async move {
+            let ok: suprnova::middleware::Next =
+                Arc::new(|_request| Box::pin(async { Ok(suprnova::HttpResponse::text("ok")) }));
+            suprnova::CsrfMiddleware::new().handle(request, ok).await
+        })
+    });
+    match sessions.handle(request, next).await {
+        Ok(response) | Err(response) => response.into_hyper(),
+    }
+}
+
+/// IDENTITY-014: a cookieless SPA bootstrap that is not a tracked HTML GET
+/// (a JSON GET, or a HEAD) receives an `XSRF-TOKEN` together with the session
+/// that token belongs to, so its next unsafe request passes the check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cookieless_csrf_bootstrap_persists_the_session_its_token_belongs_to() {
+    ensure_crypt();
+    let config = insecure_config();
+    let session_cookie = config.cookie_name.clone();
+    for (method, headers) in [
+        ("GET", vec![("accept", "application/json")]),
+        ("HEAD", Vec::new()),
+    ] {
+        let store = Arc::new(crate::cookie_prefix_roundtrip::MemoryStore::default());
+        let sessions = SessionMiddleware::with_store(config.clone(), store);
+
+        let bootstrap = through_session_and_csrf(
+            &sessions,
+            suprnova::Request::for_test_with_headers(method, "/csrf-cookie", headers),
+        )
+        .await;
+        let token = set_cookie_value(&bootstrap, "XSRF-TOKEN")
+            .unwrap_or_else(|| panic!("{method}: the bootstrap hands out an XSRF-TOKEN"));
+        let session = set_cookie_value(&bootstrap, &session_cookie).unwrap_or_else(|| {
+            panic!("{method}: the token is useless without its session, which must persist")
+        });
+
+        let cookie = format!("{session_cookie}={session}");
+        let submit = through_session_and_csrf(
+            &sessions,
+            suprnova::Request::for_test_with_headers(
+                "POST",
+                "/submit",
+                [
+                    ("cookie", cookie.as_str()),
+                    ("x-xsrf-token", token.as_str()),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(
+            submit.status().as_u16(),
+            200,
+            "{method}: the token echoed with its session must pass the CSRF check"
+        );
+    }
+}

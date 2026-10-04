@@ -183,10 +183,17 @@ pub(crate) fn memory_ledger(
     clock: Arc<ManualClock>,
     max_instances: usize,
 ) -> Arc<MemoryInstanceLedger> {
-    Arc::new(MemoryInstanceLedger::new(
+    memory_ledger_with(
         clock,
         LedgerLimits::new(100, 10_000, 4, max_instances).expect("ledger limits are valid"),
-    ))
+    )
+}
+
+fn memory_ledger_with(
+    clock: Arc<ManualClock>,
+    ledger_limits: LedgerLimits,
+) -> Arc<MemoryInstanceLedger> {
+    Arc::new(MemoryInstanceLedger::new(clock, ledger_limits))
 }
 
 pub(crate) fn signed_seed(keys: &SnapshotKeyRing, query: &str) -> Vec<u8> {
@@ -404,8 +411,17 @@ pub(crate) struct Harness {
 }
 
 pub(crate) fn harness(limits: PromotionLimits, max_instances: usize) -> Harness {
+    harness_over(
+        limits,
+        LedgerLimits::new(100, 10_000, 4, max_instances).expect("ledger limits are valid"),
+    )
+}
+
+/// A harness whose ledger is built with `ledger_limits`, so a test can give
+/// it limits a promotion cannot meet.
+pub(crate) fn harness_over(limits: PromotionLimits, ledger_limits: LedgerLimits) -> Harness {
     let clock = Arc::new(ManualClock::new(1_000));
-    let ledger = memory_ledger(clock.clone(), max_instances);
+    let ledger = memory_ledger_with(clock.clone(), ledger_limits);
     let generator = Arc::new(SequenceGenerator::new(0xd0));
     let keys = Arc::new(key_ring());
     let snapshot_limits = snapshot_limits();

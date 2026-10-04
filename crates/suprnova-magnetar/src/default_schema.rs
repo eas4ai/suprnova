@@ -97,6 +97,13 @@ entity_common!(lockouts, "auth_lockouts", {
     pub locked_at: Option<ChronoDateTime<ChronoUtc>>,
     pub reason: Option<String>,
 });
+entity_common!(second_factor_lockouts, "auth_second_factor_lockouts", {
+    #[sea_orm(primary_key)] pub id: i64,
+    pub identity: String,
+    pub attempted_at: ChronoDateTime<ChronoUtc>,
+    pub locked_at: Option<ChronoDateTime<ChronoUtc>>,
+    pub reason: Option<String>,
+});
 entity_common!(two_factor, "auth_two_factor", {
     #[sea_orm(primary_key, auto_increment = false)] pub user_id: String,
     pub secret: Vec<u8>,
@@ -105,6 +112,8 @@ entity_common!(two_factor, "auth_two_factor", {
     pub enrollment_session_id: Option<String>,
     pub enrollment_expires_at: Option<ChronoDateTime<ChronoUtc>>,
     pub rotation_pending: bool,
+    pub pending_secret: Option<Vec<u8>>,
+    pub pending_recovery_codes: Option<Vec<u8>>,
     pub confirmed_at: Option<ChronoDateTime<ChronoUtc>>,
     pub last_used_timestep: Option<i64>,
     pub created_at: Option<ChronoDateTime<ChronoUtc>>,
@@ -173,6 +182,7 @@ bind!(
     tokens,
     ceremonies,
     lockouts,
+    second_factor_lockouts,
     remembers,
     lifecycle_deliveries,
     migration_runs,
@@ -197,6 +207,32 @@ impl AuthSchema for DefaultAuthSchema {
 
 impl BrokerSchema for DefaultAuthSchema {
     type ProviderToken = provider_tokens::Entity;
+}
+
+/// The default schema with second-factor attempts counted in a table of
+/// their own, `auth_second_factor_lockouts`.
+///
+/// Password sign-in counts its failures against whatever address it is
+/// given, and an address is any string a visitor registers. Second-factor
+/// attempts counted in the same table, under a key derived from the user
+/// id, were reachable by password identities: registering the key as an
+/// address and signing in to it cleared the second factor's failures, and
+/// failing a sign-in as it locked the second factor. A separate table gives
+/// the second factor a namespace no password identity can reach. Build the
+/// second factor's [`crate::password::LockoutService`] over
+/// `SeaOrmStorage<DefaultSecondFactorSchema>`; every other role is the
+/// default schema's own.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DefaultSecondFactorSchema;
+impl AuthSchema for DefaultSecondFactorSchema {
+    type User = users::Entity;
+    type Session = sessions::Entity;
+    type LinkedAccount = accounts::Entity;
+    type Passkey = methods::Entity;
+    type Token = tokens::Entity;
+    type Ceremony = ceremonies::Entity;
+    type Lockout = second_factor_lockouts::Entity;
+    type TokenRecord = tokens::Entity;
 }
 
 impl UserFields for users::Entity {
@@ -343,6 +379,13 @@ impl LinkedAccountFields for accounts::Entity {
     fn account_id_column() -> Self::Column {
         accounts::Column::Id
     }
+    fn account_id_value(value: &str) -> sea_orm::Value {
+        // Ids come from the store, so they parse. Text that does not names
+        // no row; it is bound as text and the database refuses it.
+        value
+            .parse::<i64>()
+            .map_or_else(|_| value.to_owned().into(), Into::into)
+    }
     fn write_account_id(m: &mut Self::ActiveModel, v: &str) {
         m.id = Set(v.parse().expect("fixture account ids are i64"));
     }
@@ -395,6 +438,13 @@ impl PasskeyFields for methods::Entity {
     }
     fn passkey_id_column() -> Self::Column {
         methods::Column::Id
+    }
+    fn passkey_id_value(value: &str) -> sea_orm::Value {
+        // Ids come from the store, so they parse. Text that does not names
+        // no row; it is bound as text and the database refuses it.
+        value
+            .parse::<i64>()
+            .map_or_else(|_| value.to_owned().into(), Into::into)
     }
     fn write_passkey_id(m: &mut Self::ActiveModel, v: &str) {
         m.id = Set(v.parse().expect("fixture passkey ids are i64"));
@@ -517,6 +567,13 @@ impl CeremonyFields for ceremonies::Entity {
     }
     fn ceremony_id_column() -> Self::Column {
         ceremonies::Column::Id
+    }
+    fn ceremony_id_value(value: &str) -> sea_orm::Value {
+        // Ids come from `read_ceremony_id`, so they parse. Text that does
+        // not names no row; it is bound as text and the database refuses it.
+        value
+            .parse::<i64>()
+            .map_or_else(|_| value.to_owned().into(), Into::into)
     }
     fn read_kind(m: &Self::Model) -> String {
         m.kind.clone()
@@ -730,6 +787,51 @@ impl crate::schema::LockoutFields for lockouts::Entity {
     }
     fn attempted_at_column() -> Self::Column {
         lockouts::Column::AttemptedAt
+    }
+    fn write_attempted_at(m: &mut Self::ActiveModel, v: DateTime<Utc>) {
+        m.attempted_at = Set(v);
+    }
+    fn read_locked_at(m: &Self::Model) -> Option<DateTime<Utc>> {
+        m.locked_at
+    }
+    fn read_reason(m: &Self::Model) -> Option<String> {
+        m.reason.clone()
+    }
+    fn write_reason(m: &mut Self::ActiveModel, v: Option<&str>) {
+        m.reason = Set(v.map(ToOwned::to_owned));
+    }
+    fn write_locked_at(m: &mut Self::ActiveModel, v: Option<DateTime<Utc>>) {
+        m.locked_at = Set(v);
+    }
+}
+
+impl crate::schema::LockoutFields for second_factor_lockouts::Entity {
+    // Second-factor identities are not addresses; see
+    // `LockoutFields::IDENTITY_IS_EMAIL`.
+    const IDENTITY_IS_EMAIL: bool = false;
+    fn read_lockout_id(m: &Self::Model) -> String {
+        m.id.to_string()
+    }
+    fn write_lockout_id(m: &mut Self::ActiveModel, v: &str) {
+        // The lockout store mints these ids as integers in i64 range.
+        if let Ok(id) = v.parse() {
+            m.id = Set(id);
+        }
+    }
+    fn read_user_id(m: &Self::Model) -> String {
+        m.identity.clone()
+    }
+    fn user_id_column() -> Self::Column {
+        second_factor_lockouts::Column::Identity
+    }
+    fn write_user_id(m: &mut Self::ActiveModel, v: &str) {
+        m.identity = Set(v.to_owned());
+    }
+    fn read_attempted_at(m: &Self::Model) -> DateTime<Utc> {
+        m.attempted_at
+    }
+    fn attempted_at_column() -> Self::Column {
+        second_factor_lockouts::Column::AttemptedAt
     }
     fn write_attempted_at(m: &mut Self::ActiveModel, v: DateTime<Utc>) {
         m.attempted_at = Set(v);
@@ -1172,7 +1274,6 @@ pub mod sql_two_factor {
         enrollment_auth_epoch: i64,
         enrollment_session_id: Option<&str>,
         enrollment_expires_at: Option<DateTime<Utc>>,
-        rotation_pending: bool,
     ) -> two_factor::ActiveModel {
         two_factor::ActiveModel {
             user_id: Set(user_id.to_owned()),
@@ -1181,7 +1282,9 @@ pub mod sql_two_factor {
             enrollment_auth_epoch: Set(enrollment_auth_epoch),
             enrollment_session_id: Set(enrollment_session_id.map(str::to_owned)),
             enrollment_expires_at: Set(enrollment_expires_at),
-            rotation_pending: Set(rotation_pending),
+            rotation_pending: Set(false),
+            pending_secret: Set(None),
+            pending_recovery_codes: Set(None),
             confirmed_at: Set(None),
             last_used_timestep: Set(None),
             ..Default::default()
@@ -1214,7 +1317,6 @@ pub mod sql_two_factor {
             enrollment_auth_epoch,
             enrollment_session_id,
             enrollment_expires_at,
-            false,
         );
         if existing.is_some() {
             two_factor::Entity::update(model)
@@ -1233,9 +1335,9 @@ pub mod sql_two_factor {
     async fn set_confirmed_in(
         transaction: &mut AuthTransaction<'_>,
         user_id: &str,
-        enrollment_auth_epoch: i64,
-        enrollment_session_id: Option<&str>,
-        enrollment_expires_at: Option<DateTime<Utc>>,
+        snapshot: &EnrollmentActorSnapshot,
+        expected_secret: &[u8],
+        matched_step: i64,
         at: DateTime<Utc>,
     ) -> Result<bool> {
         let Some(enrollment) = two_factor::Entity::find_by_id(user_id.to_owned())
@@ -1245,16 +1347,82 @@ pub mod sql_two_factor {
         else {
             return Ok(false);
         };
-        if enrollment.enrollment_auth_epoch != enrollment_auth_epoch
-            || enrollment.enrollment_session_id.as_deref() != enrollment_session_id
-            || enrollment.enrollment_expires_at != enrollment_expires_at
+        if enrollment.enrollment_auth_epoch != snapshot.auth_epoch
+            || enrollment.enrollment_session_id != snapshot.session_id
+            || enrollment.enrollment_expires_at != snapshot.expires_at
         {
             return Err(stale_actor());
         }
         let update = two_factor::Entity::update_many()
             .col_expr(two_factor::Column::ConfirmedAt, Expr::value(at))
             .col_expr(two_factor::Column::RotationPending, Expr::value(false))
+            .col_expr(
+                two_factor::Column::LastUsedTimestep,
+                Expr::value(matched_step),
+            )
             .filter(two_factor::Column::UserId.eq(user_id.to_owned()))
+            .filter(two_factor::Column::Secret.eq(expected_secret.to_vec()))
+            .filter(two_factor::Column::ConfirmedAt.is_null())
+            .filter(
+                Condition::any()
+                    .add(two_factor::Column::LastUsedTimestep.is_null())
+                    .add(two_factor::Column::LastUsedTimestep.lt(matched_step)),
+            )
+            .exec(transaction.connection())
+            .await
+            .map_err(db_error)?;
+        Ok(update.rows_affected == 1)
+    }
+
+    async fn confirm_rotation_in(
+        transaction: &mut AuthTransaction<'_>,
+        user_id: &str,
+        snapshot: &EnrollmentActorSnapshot,
+        expected_pending_secret: &[u8],
+        matched_step: i64,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let Some(enrollment) = two_factor::Entity::find_by_id(user_id.to_owned())
+            .one(transaction.connection())
+            .await
+            .map_err(db_error)?
+        else {
+            return Ok(false);
+        };
+        if enrollment.enrollment_auth_epoch != snapshot.auth_epoch
+            || enrollment.enrollment_session_id != snapshot.session_id
+            || enrollment.enrollment_expires_at != snapshot.expires_at
+        {
+            return Err(stale_actor());
+        }
+        // The claimed step belongs to the new secret, which no code has
+        // matched yet, so it replaces the old secret's step outright.
+        let update = two_factor::Entity::update_many()
+            .col_expr(
+                two_factor::Column::Secret,
+                Expr::col(two_factor::Column::PendingSecret),
+            )
+            .col_expr(
+                two_factor::Column::RecoveryCodes,
+                Expr::col(two_factor::Column::PendingRecoveryCodes),
+            )
+            .col_expr(
+                two_factor::Column::PendingSecret,
+                Expr::value(None::<Vec<u8>>),
+            )
+            .col_expr(
+                two_factor::Column::PendingRecoveryCodes,
+                Expr::value(None::<Vec<u8>>),
+            )
+            .col_expr(two_factor::Column::RotationPending, Expr::value(false))
+            .col_expr(two_factor::Column::ConfirmedAt, Expr::value(at))
+            .col_expr(
+                two_factor::Column::LastUsedTimestep,
+                Expr::value(matched_step),
+            )
+            .filter(two_factor::Column::UserId.eq(user_id.to_owned()))
+            .filter(two_factor::Column::ConfirmedAt.is_not_null())
+            .filter(two_factor::Column::PendingSecret.eq(expected_pending_secret.to_vec()))
             .exec(transaction.connection())
             .await
             .map_err(db_error)?;
@@ -1311,19 +1479,36 @@ pub mod sql_two_factor {
         if !claim_proof_in(transaction, user_id, claim).await? {
             return Ok(false);
         }
-        two_factor::Entity::update(enrollment_model(
-            user_id,
-            secret,
-            recovery_codes,
-            snapshot.auth_epoch,
-            snapshot.session_id.as_deref(),
-            snapshot.expires_at,
-            true,
-        ))
-        .exec(transaction.connection())
-        .await
-        .map_err(db_error)?;
-        Ok(true)
+        // The confirmed secret, its recovery codes and its confirmation stay:
+        // they keep gating sign-in until the rotation is confirmed.
+        let update = two_factor::Entity::update_many()
+            .col_expr(
+                two_factor::Column::PendingSecret,
+                Expr::value(Some(secret.to_vec())),
+            )
+            .col_expr(
+                two_factor::Column::PendingRecoveryCodes,
+                Expr::value(recovery_codes.map(<[u8]>::to_vec)),
+            )
+            .col_expr(two_factor::Column::RotationPending, Expr::value(true))
+            .col_expr(
+                two_factor::Column::EnrollmentAuthEpoch,
+                Expr::value(snapshot.auth_epoch),
+            )
+            .col_expr(
+                two_factor::Column::EnrollmentSessionId,
+                Expr::value(snapshot.session_id.clone()),
+            )
+            .col_expr(
+                two_factor::Column::EnrollmentExpiresAt,
+                Expr::value(snapshot.expires_at),
+            )
+            .filter(two_factor::Column::UserId.eq(user_id.to_owned()))
+            .filter(two_factor::Column::ConfirmedAt.is_not_null())
+            .exec(transaction.connection())
+            .await
+            .map_err(db_error)?;
+        Ok(update.rows_affected == 1)
     }
 
     async fn regenerate_recovery_codes_in(
@@ -1406,6 +1591,8 @@ pub mod sql_two_factor {
                 enrollment_session_id: row.enrollment_session_id,
                 enrollment_expires_at: row.enrollment_expires_at,
                 rotation_pending: row.rotation_pending,
+                pending_secret: row.pending_secret,
+                pending_recovery_codes: row.pending_recovery_codes,
                 confirmed_at: row.confirmed_at,
                 last_used_timestep: row.last_used_timestep,
             }))
@@ -1441,20 +1628,52 @@ pub mod sql_two_factor {
             .await
         }
 
-        async fn set_confirmed(&self, actor: &CredentialActor, at: DateTime<Utc>) -> Result<bool> {
+        async fn set_confirmed(
+            &self,
+            actor: &CredentialActor,
+            expected_secret: &[u8],
+            matched_step: i64,
+            at: DateTime<Utc>,
+        ) -> Result<bool> {
             let user_id = actor.user_id().to_owned();
-            let enrollment_auth_epoch = actor_epoch(actor)?;
-            let enrollment_session_id = actor.opaque_session_id().map(str::to_owned);
-            let enrollment_expires_at = actor.expires_at();
+            let snapshot = enrollment_actor_snapshot(actor)?;
+            let expected_secret = expected_secret.to_vec();
             let storage = SeaOrmStorage::<DefaultAuthSchema>::new(self.0.clone());
             fenced_credential_write(&storage, actor, move |transaction| {
                 Box::pin(async move {
                     set_confirmed_in(
                         transaction,
                         &user_id,
-                        enrollment_auth_epoch,
-                        enrollment_session_id.as_deref(),
-                        enrollment_expires_at,
+                        &snapshot,
+                        &expected_secret,
+                        matched_step,
+                        at,
+                    )
+                    .await
+                })
+            })
+            .await
+        }
+
+        async fn confirm_rotation(
+            &self,
+            actor: &CredentialActor,
+            expected_pending_secret: &[u8],
+            matched_step: i64,
+            at: DateTime<Utc>,
+        ) -> Result<bool> {
+            let user_id = actor.user_id().to_owned();
+            let snapshot = enrollment_actor_snapshot(actor)?;
+            let expected_pending_secret = expected_pending_secret.to_vec();
+            let storage = SeaOrmStorage::<DefaultAuthSchema>::new(self.0.clone());
+            fenced_credential_write(&storage, actor, move |transaction| {
+                Box::pin(async move {
+                    confirm_rotation_in(
+                        transaction,
+                        &user_id,
+                        &snapshot,
+                        &expected_pending_secret,
+                        matched_step,
                         at,
                     )
                     .await
@@ -1557,6 +1776,15 @@ pub mod sql_two_factor {
 }
 
 const LOCKOUT_IDENTITY_INDEX: &str = "auth_lockouts_identity";
+const SECOND_FACTOR_LOCKOUT_IDENTITY_INDEX: &str = "auth_second_factor_lockouts_identity";
+
+fn second_factor_lockout_identity_index() -> sea_orm::sea_query::IndexCreateStatement {
+    sea_orm::sea_query::Index::create()
+        .name(SECOND_FACTOR_LOCKOUT_IDENTITY_INDEX)
+        .table(second_factor_lockouts::Entity)
+        .col(second_factor_lockouts::Column::Identity)
+        .to_owned()
+}
 
 fn lockout_identity_index() -> sea_orm::sea_query::IndexCreateStatement {
     sea_orm::sea_query::Index::create()
@@ -1564,6 +1792,47 @@ fn lockout_identity_index() -> sea_orm::sea_query::IndexCreateStatement {
         .table(lockouts::Entity)
         .col(lockouts::Column::Identity)
         .to_owned()
+}
+
+const USER_EMAIL_INDEX: &str = "app_users_email_unique";
+
+/// One account per email address. Registration, magic-link sign-up and
+/// passkey sign-up each look the address up and then insert; two of them
+/// racing for one new address both miss the lookup. Without this index both
+/// inserts succeed, and every later sign-in, reset or verification by email
+/// picks one of the two accounts at random.
+fn user_email_index() -> sea_orm::sea_query::IndexCreateStatement {
+    sea_orm::sea_query::Index::create()
+        .name(USER_EMAIL_INDEX)
+        .table(users::Entity)
+        .col(users::Column::Email)
+        .unique()
+        .to_owned()
+}
+
+/// Refuse to continue when `app_users` already holds two accounts for one
+/// email address: the unique index cannot be created over them, and which
+/// account is the real one is the operator's decision, not the migration's.
+/// The message names no address.
+async fn ensure_unique_user_emails(db: &DatabaseConnection) -> crate::Result<()> {
+    let backend = db.get_database_backend();
+    let duplicate = db
+        .query_one_raw(Statement::from_string(
+            backend,
+            "SELECT email FROM app_users GROUP BY email HAVING COUNT(*) > 1 LIMIT 1",
+        ))
+        .await
+        .map_err(|error| crate::Error::Internal {
+            message: format!("inspect app_users email uniqueness: {error}"),
+        })?;
+    if duplicate.is_some() {
+        return Err(crate::Error::Internal {
+            message: "app_users holds more than one account for one email address; merge or \
+                      remove the duplicate accounts, then run the migration again"
+                .to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Create every default auth table and required index.
@@ -1579,8 +1848,8 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
         && column_exists(db, "app_users", "name").await?
         && column_exists(db, "app_users", "password_hash").await?
         && column_exists(db, "app_users", "auth_epoch").await?;
-    let legacy_source_present =
-        users_source_present || (app_users_present && !app_users_is_default);
+    let app_users_is_legacy_source = app_users_present && !app_users_is_default;
+    let legacy_source_present = users_source_present || app_users_is_legacy_source;
     let completed_marker = migration_state_value(db, "schema_version").await?;
     let pending_marker = migration_state_value(db, "source_pending").await?;
     let defer_completion_marker =
@@ -1614,6 +1883,10 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
             .to_owned(),
         schema
             .create_table_from_entity(lockouts::Entity)
+            .if_not_exists()
+            .to_owned(),
+        schema
+            .create_table_from_entity(second_factor_lockouts::Entity)
             .if_not_exists()
             .to_owned(),
         schema
@@ -1772,6 +2045,29 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
             .await
             .map_err(|error| crate::Error::Internal {
                 message: format!("create lockout identity index: {error}"),
+            })?;
+    }
+    // A legacy `app_users` is a migration source, not the default table:
+    // the migration engine rebuilds it, and a later run indexes the result.
+    if !app_users_is_legacy_source && !index_exists(db, "app_users", USER_EMAIL_INDEX).await? {
+        ensure_unique_user_emails(db).await?;
+        db.execute(&user_email_index())
+            .await
+            .map_err(|error| crate::Error::Internal {
+                message: format!("create app_users email uniqueness index: {error}"),
+            })?;
+    }
+    if !index_exists(
+        db,
+        "auth_second_factor_lockouts",
+        SECOND_FACTOR_LOCKOUT_IDENTITY_INDEX,
+    )
+    .await?
+    {
+        db.execute(&second_factor_lockout_identity_index())
+            .await
+            .map_err(|error| crate::Error::Internal {
+                message: format!("create second-factor lockout identity index: {error}"),
             })?;
     }
     if completed_marker.as_deref() != Some("1") {
@@ -1979,6 +2275,30 @@ async fn add_two_factor_enrollment_snapshot_columns(db: &DatabaseConnection) -> 
             .await
             .map_err(|error| crate::Error::Internal {
                 message: format!("add auth_two_factor.rotation_pending: {error}"),
+            })?;
+    }
+    // A rotation waits beside the confirmed secret in these two columns.
+    // Before they existed a rotation overwrote the confirmed secret.
+    for (name, column) in [
+        ("pending_secret", two_factor::Column::PendingSecret),
+        (
+            "pending_recovery_codes",
+            two_factor::Column::PendingRecoveryCodes,
+        ),
+    ] {
+        if column_exists(db, "auth_two_factor", name).await? {
+            continue;
+        }
+        let definition =
+            Schema::new(db.get_database_backend()).get_column_def::<two_factor::Entity>(column);
+        let alter = sea_orm::sea_query::Table::alter()
+            .table(two_factor::Entity)
+            .add_column(definition)
+            .to_owned();
+        db.execute(&alter)
+            .await
+            .map_err(|error| crate::Error::Internal {
+                message: format!("add auth_two_factor.{name}: {error}"),
             })?;
     }
     Ok(())
