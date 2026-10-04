@@ -95,7 +95,7 @@ struct PostmarkBody<'a> {
     text_body: Option<&'a str>,
     #[serde(rename = "Attachments", skip_serializing_if = "Vec::is_empty")]
     attachments: Vec<PostmarkAttachment<'a>>,
-    /// Postmark accepts ONE tag per message; we send the first.
+    /// Postmark accepts ONE tag per message; `send` refuses more.
     #[serde(rename = "Tag", skip_serializing_if = "Option::is_none")]
     tag: Option<&'a str>,
     #[serde(rename = "Metadata", skip_serializing_if = "BTreeMap::is_empty")]
@@ -131,6 +131,14 @@ impl MailTransport for PostmarkMailTransport {
         // a recipient. `check_message` also refuses CR, LF and NUL in the
         // caller's headers before they reach the `Headers` array.
         wire::check_message("Postmark", msg)?;
+        // Postmark carries one tag per email. Sending the first and dropping
+        // the rest lost data silently; Symfony's Postmark transport throws
+        // here too.
+        if msg.tags.len() > 1 {
+            return Err(FrameworkError::internal(
+                "Postmark: Postmark only allows a single tag per email",
+            ));
+        }
         let attachments: Vec<PostmarkAttachment> = msg
             .attachments
             .iter()

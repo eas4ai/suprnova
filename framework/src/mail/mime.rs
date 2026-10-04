@@ -75,7 +75,7 @@ pub(crate) fn base_builder(
         builder = builder.raw_header(wire::mime_header(
             transport,
             "Return-Path",
-            &wire::path(transport, rp)?,
+            &wire::email(transport, rp)?,
         )?);
     }
 

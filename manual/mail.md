@@ -308,7 +308,7 @@ Mail::to("alice@example.org")
 
 `Address` accepts `&str`, `String`, and `(name, email)` tuples; `Mail::to(...)` accepts anything `Into<Address>`.
 
-Every transport writes an address the same way. The display name is quoted whenever it holds a comma, a quote, an `@`, or angle brackets, so a name such as `Doe, Jane`, or a name a user typed into their profile, stays one recipient on every provider. The email itself must be exactly one address. The send fails with an error, and nothing is sent, when the email is not one address (for example `a@example.com, b@example.com`) or the display name contains a line break or another control character.
+Every transport writes an address the same way. The display name is quoted whenever it holds a comma, a quote, an `@`, angle brackets, `=?`, or any non-ASCII character, so a name such as `Doe, Jane`, or a name a user typed into their profile, stays one recipient on every provider. A line break in a display name becomes one space, and whitespace around an email is trimmed. The email itself must be exactly one plain address. A list (`a@example.com, b@example.com`), a `Name <email>` form, a quoted local part (`"a b"@example.com`), and a domain literal (`user@[127.0.0.1]`) are refused, and so is a display name with any other control character. See [What a message may contain](#what-a-message-may-contain).
 
 ## Attachments
 
@@ -436,7 +436,8 @@ pub struct StdoutTransport;
 #[async_trait]
 impl MailTransport for StdoutTransport {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
-        println!("--- mail ---\n{}\n--- end ---", msg.subject);
+        let to = suprnova::mail_wire::mailbox_list("stdout", &msg.to)?;
+        println!("--- mail to {to} ---\n{}\n--- end ---", msg.subject);
         Ok(())
     }
     fn name(&self) -> &'static str { "stdout" }
@@ -446,6 +447,8 @@ impl MailTransport for StdoutTransport {
 use std::sync::Arc;
 suprnova::mail::Mail::set_transport(Arc::new(StdoutTransport))?;
 ```
+
+By the time `send` runs, the dispatch path has validated the message and put every address in its wire form. Build recipient text with `suprnova::mail_wire` - `mailbox_text`, `mailbox_list`, `email`, and `display_name` - never with `Address`'s `Display`, which does not quote the display name, so `Doe, Jane <jane@example.com>` reads as two recipients. `mail_wire::check_header` and `mail_wire::check_message` apply the rules in [What a message may contain](#what-a-message-may-contain) for a transport you also call directly.
 
 Transports run on Tokio's runtime - async IO, connection pooling, and concurrent send are first-class. There is no per-request fork penalty.
 
@@ -565,18 +568,25 @@ Every dispatched message can carry Laravel-style provider hints - tags, metadata
 
 On SMTP, the return path also becomes the envelope sender (`MAIL FROM`), which is the address bounces are sent to. The `From` header and the recipients do not change.
 
-Every transport checks custom headers the same way before it sends. A header name must be printable ASCII with no space or `:` (the RFC 5322 field-name grammar), so CR, LF, and NUL - the bytes that turn one header into two - are refused. A header value may hold any text except CR, LF, and NUL; long values are folded for you. On SMTP, the `file` driver, and Resend, a metadata key becomes part of an `X-Metadata-<key>` header name and follows the same rule. A message that breaks a rule fails with an error and is not sent.
+### What a message may contain
+
+Every message is checked before anything sees it. `Mail::send`, `Mail::raw`, `Mail::html`, the queue worker, and the notification mail channel validate it before `MessageSending` fires and before the transport receives it - including a transport you bound with `Mail::set_transport` and the one behind `Mail::fake()`. `Mail::queue` and `Mail::later` validate when they push, so the caller gets the error instead of a worker failing the job on every attempt. The rules:
+
+- A header name is 1 to 76 printable ASCII characters other than `:`, with no space (the RFC 5322 field-name grammar). CR, LF, and NUL are the bytes that turn one header into two.
+- `To`, `Cc`, `Bcc`, `From`, `Sender`, `Reply-To`, `Return-Path`, `Subject`, `Date`, `Message-ID`, `MIME-Version`, and every `Content-*` header are refused as custom headers. Set them with the builder methods (`to`, `cc`, `bcc`, `from`, `reply_to`, `return_path`, `subject`, `attach`).
+- A header value and the subject may not contain a line break or a control character other than TAB. A templated subject (`subject_template_source`) is trimmed, so the newline at the end of a template file does no harm. lettre folds a long header value at its spaces; a single word longer than a line is written unbroken.
+- A tag, a metadata value, and an attachment name may not contain a line break or any control character.
+- A metadata key follows the header-name grammar and is at most 65 characters, on every transport, because SMTP, the `file` driver, and Resend write it into an `X-Metadata-<key>` header name.
+- An attachment's content type must parse as a MIME type.
+
+A message that breaks a rule fails with an internal error and is not sent. An HTTP response shows a 500 and the detail stays in the logs, as with Laravel's `RfcComplianceException`: a bad address is a fault in the application, not in the request. Two provider limits add refusals of their own: Postmark carries one tag per email, and SES carries tags and metadata only when the tag, the key, and the value hold nothing but `A-Z`, `a-z`, `0-9`, `_`, and `-`.
 
 On SES specifically, headers ride whichever content shape the message uses:
 `Content.Simple.Headers` for a plain message, real MIME header lines for a
-message with attachments (which SES only accepts as raw MIME). A header name
-is validated the same way regardless of which shape the message ends up
-using - CR, LF, and NUL are rejected (that is how a caller-supplied string
-turns into a second header), and so is an empty name, a name over 76 bytes,
-a non-ASCII byte, or a `:` or space in the name, matching what the raw MIME
-builder itself requires. A header name repeated more than once keeps every
-value on the plain-message path but only the last value on the attachment
-path - the same limit SMTP has.
+message with attachments (which SES only accepts as raw MIME). The rules above
+apply the same way to both shapes. A header name repeated more than once
+keeps every value on the plain-message path but only the last value on the
+attachment path - the same limit SMTP has.
 
 Two ways to attach them - at the Mailable level for per-type defaults, or per-message on the builder:
 
@@ -739,7 +749,7 @@ Additional helpers:
 
 ## Events: `MessageSending` and `MessageSent`
 
-Every dispatch fires two framework events, whatever path sent it: `Mail::send`, `Mail::raw` and `Mail::html`, a queued mail when the worker sends it, and a notification sent through the mail channel:
+Every dispatch fires two framework events, whatever path sent it: `Mail::send`, `Mail::raw` and `Mail::html`, a queued mail when the worker sends it, and a notification sent through the mail channel. A message refused by [What a message may contain](#what-a-message-may-contain) fires neither:
 
 - `MessageSending` - immediately BEFORE the transport call. Listeners observe the message shape (recipients, subject, tags, body-shape flags).
 - `MessageSent` - immediately AFTER a successful transport call. Listeners observe the same shape; failed sends do not emit this event.

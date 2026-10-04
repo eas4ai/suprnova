@@ -32,7 +32,6 @@ use crate::mail::wire;
 use async_trait::async_trait;
 use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, sign};
 use aws_sigv4::sign::v4::SigningParams;
-use lettre::message::header::HeaderName;
 use lettre::message::{
     Attachment as LettreAttachment, Message, MultiPart, SinglePart, header::ContentType,
 };
@@ -347,32 +346,46 @@ struct SesBodyContent {
     text: Option<SesData>,
 }
 
-/// Reject a caller-supplied header name that is not safe on either SES
-/// content path. One rule, not two: a name accepted here is accepted by
-/// the raw MIME path's [`wire::mime_header`] as well, so acceptance never
-/// depends on whether the message happens to carry an attachment.
+/// SES tag rule: a tag name and value hold only `[A-Za-z0-9_-]`, and AWS
+/// rejects the whole `SendEmail` call over one that does not.
+fn ses_tag_valid(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Map `tags` and `metadata` onto SES `EmailTags`, refusing any value SES
+/// cannot carry. Dropping it with a warning lost the caller's data
+/// silently; the caller gets the error instead.
 ///
-/// Two checks make up that one rule:
-/// - [`wire::check_header_name`], the RFC 5322 field-name grammar every
-///   transport uses. It refuses CR, LF and NUL - a caller-supplied string
-///   containing one turns into a second header on the raw path, or corrupts
-///   the `Content.Simple.Headers` list - and also an empty name, a non-ASCII
-///   byte, or a `:` or space in the name.
-/// - `HeaderName::new_from_ascii`, which the raw path needs to build the
-///   header, and which adds one limit of its own: at most 76 bytes.
-///
-/// Applied before the content branch, not inside it: attachments are the
-/// only thing that switches SES from `Simple` to `Raw`, and a message that
-/// is rejected with an attachment but accepted without one would be the
-/// worst possible shape for this check.
-fn validate_header_name(name: &str) -> Result<(), FrameworkError> {
-    wire::check_header_name("SES", name)?;
-    HeaderName::new_from_ascii(name.to_string()).map_err(|_| {
-        FrameworkError::param(format!(
-            "SES: invalid header name (must be at most 76 bytes): {name:?}"
-        ))
-    })?;
-    Ok(())
+/// A bare tag becomes `{Name: "tag_<i>", Value: tag}`, whose name is valid
+/// by construction; a metadata entry becomes `{Name: key, Value: value}`.
+fn email_tags(msg: &OutgoingMessage) -> Result<Vec<SesTag>, FrameworkError> {
+    let mut email_tags = Vec::with_capacity(msg.tags.len() + msg.metadata.len());
+    for (i, t) in msg.tags.iter().enumerate() {
+        if !ses_tag_valid(t) {
+            return Err(FrameworkError::internal(format!(
+                "SES: tag {t:?} cannot be sent: an SES tag value holds only [A-Za-z0-9_-]"
+            )));
+        }
+        email_tags.push(SesTag {
+            name: format!("tag_{i}"),
+            value: t.clone(),
+        });
+    }
+    for (k, v) in &msg.metadata {
+        if !ses_tag_valid(k) || !ses_tag_valid(v) {
+            return Err(FrameworkError::internal(format!(
+                "SES: metadata {k:?} cannot be sent: SES carries metadata as tags, whose \
+                 key and value hold only [A-Za-z0-9_-]"
+            )));
+        }
+        email_tags.push(SesTag {
+            name: k.clone(),
+            value: v.clone(),
+        });
+    }
+    Ok(email_tags)
 }
 
 fn uri_host(endpoint: &str) -> String {
@@ -457,14 +470,10 @@ impl MailTransport for SesMailTransport {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
         // Validate once, ahead of the content branch, so the verdict does not
         // depend on whether this particular message happens to have an
-        // attachment. `validate_header_name` enforces the same rule
-        // `build_mime`'s `wire::mime_header` would apply on the raw path -
-        // one rule for both content shapes, not two. `check_message` covers
-        // the addresses and the header values.
+        // attachment: `check_message` applies the same header rule the raw
+        // path's `wire::mime_header` would, one rule for both content shapes.
         wire::check_message("SES", msg)?;
-        for (name, _) in &msg.headers {
-            validate_header_name(name)?;
-        }
+        let email_tags = email_tags(msg)?;
 
         let content = if msg.attachments.is_empty() {
             SesContent::Simple(SesSimple {
@@ -492,52 +501,6 @@ impl MailTransport for SesMailTransport {
             SesContent::Raw(SesRaw { data: encoded })
         };
 
-        // SES tag rule: Name and Value chars are restricted to
-        // `[A-Za-z0-9_-]`. Drop entries that violate the rule rather
-        // than ship malformed JSON to AWS (which would reject the
-        // whole send call). Log the drop so misconfigured caller code
-        // is observable rather than mysteriously losing tags.
-        //
-        // The synthetic `tag_<i>` keys we generate are by construction
-        // valid; only caller-supplied tag VALUES and the full
-        // metadata KEY/VALUE pair can violate the allowlist.
-        fn ses_tag_valid(s: &str) -> bool {
-            !s.is_empty()
-                && s.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        }
-        let mut email_tags: Vec<SesTag> = Vec::new();
-        for (i, t) in msg.tags.iter().enumerate() {
-            if !ses_tag_valid(t) {
-                tracing::warn!(
-                    tag_index = i,
-                    tag_value = %t,
-                    "SES: dropping msg.tag at index {i} - value contains chars outside \
-                     [A-Za-z0-9_-]; AWS would reject the entire send call"
-                );
-                continue;
-            }
-            email_tags.push(SesTag {
-                name: format!("tag_{i}"),
-                value: t.clone(),
-            });
-        }
-        for (k, v) in &msg.metadata {
-            if !ses_tag_valid(k) || !ses_tag_valid(v) {
-                tracing::warn!(
-                    metadata_key = %k,
-                    metadata_value = %v,
-                    "SES: dropping msg.metadata entry - key or value contains chars outside \
-                     [A-Za-z0-9_-]; AWS would reject the entire send call"
-                );
-                continue;
-            }
-            email_tags.push(SesTag {
-                name: k.clone(),
-                value: v.clone(),
-            });
-        }
-
         // Per-message header wins over the transport default, matching
         // Laravel's `SesV2Transport`, which starts from the configured
         // options array and then overwrites the message-derived keys.
@@ -552,7 +515,7 @@ impl MailTransport for SesMailTransport {
             .or_else(|| self.list_management.clone());
 
         let feedback_forwarding_email_address = match &msg.return_path {
-            Some(rp) => Some(wire::path("SES", rp)?),
+            Some(rp) => Some(wire::email("SES", rp)?),
             None => None,
         };
         let body = SesBody {

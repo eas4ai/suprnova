@@ -99,11 +99,14 @@ struct SgAttachment<'a> {
     disposition: &'a str,
 }
 
-fn to_sg(addr: &Address) -> SgAddress {
-    SgAddress {
-        email: addr.email.clone(),
-        name: addr.name.clone(),
-    }
+/// The address in its wire form: the trimmed email and the display name
+/// with line breaks collapsed. SendGrid takes them as separate fields, so
+/// no quoting is needed.
+fn to_sg(addr: &Address) -> Result<SgAddress, FrameworkError> {
+    Ok(SgAddress {
+        email: wire::email("SendGrid", addr)?,
+        name: wire::display_name("SendGrid", addr)?,
+    })
 }
 
 #[async_trait]
@@ -152,7 +155,7 @@ impl MailTransport for SendGridMailTransport {
         // object - unlike Postmark (CSV) or SES (array). If the caller
         // configured multiple addresses we still send the first but
         // surface a warn so the dropped recipients aren't invisible.
-        let reply_to = msg.reply_to.first().map(to_sg);
+        let reply_to = msg.reply_to.first().map(to_sg).transpose()?;
         if msg.reply_to.len() > 1 {
             let dropped: Vec<&str> = msg
                 .reply_to
@@ -187,11 +190,11 @@ impl MailTransport for SendGridMailTransport {
 
         let body = SgBody {
             personalizations: vec![SgPersonalization {
-                to: msg.to.iter().map(to_sg).collect(),
-                cc: msg.cc.iter().map(to_sg).collect(),
-                bcc: msg.bcc.iter().map(to_sg).collect(),
+                to: msg.to.iter().map(to_sg).collect::<Result<_, _>>()?,
+                cc: msg.cc.iter().map(to_sg).collect::<Result<_, _>>()?,
+                bcc: msg.bcc.iter().map(to_sg).collect::<Result<_, _>>()?,
             }],
-            from: to_sg(&msg.from),
+            from: to_sg(&msg.from)?,
             reply_to,
             subject: &msg.subject,
             content,

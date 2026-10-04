@@ -132,7 +132,7 @@ fn build_form_fields(msg: &OutgoingMessage) -> Result<Vec<FormField<'_>>, Framew
         form.push(("h:X-Priority".into(), p.to_string().into()));
     }
     if let Some(rp) = &msg.return_path {
-        form.push(("h:Return-Path".into(), wire::path("Mailgun", rp)?.into()));
+        form.push(("h:Return-Path".into(), wire::email("Mailgun", rp)?.into()));
     }
     Ok(form)
 }

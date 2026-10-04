@@ -223,3 +223,34 @@ async fn smtp_refuses_a_header_that_would_inject_another_header() {
         "the message is refused before the transport connects"
     );
 }
+
+#[tokio::test]
+async fn smtp_refuses_a_bcc_header_that_would_add_a_recipient() {
+    // lettre reads a raw `Bcc` header back when it derives the envelope, so
+    // `.header("Bcc", ...)` used to add an SMTP recipient.
+    let (sink, port) = SmtpSink::start().await;
+    let transport = SmtpMailTransport::unencrypted("127.0.0.1", port).unwrap();
+    let mut msg = sink_message();
+    msg.headers = vec![("Bcc".into(), "attacker@evil.example".into())];
+
+    let err = transport.send(&msg).await.unwrap_err();
+    assert!(format!("{err}").contains("builder"), "{err}");
+    let log = sink.snapshot();
+    assert!(
+        commands_starting(&log, "RCPT TO").is_empty(),
+        "no recipient may be added: {:?}",
+        log.commands
+    );
+}
+
+#[tokio::test]
+async fn smtp_refuses_a_subject_with_a_line_break() {
+    let (sink, port) = SmtpSink::start().await;
+    let transport = SmtpMailTransport::unencrypted("127.0.0.1", port).unwrap();
+    let mut msg = sink_message();
+    msg.subject = "Hello\r\nBcc: attacker@evil.example".into();
+
+    let err = transport.send(&msg).await.unwrap_err();
+    assert!(format!("{err}").contains("Subject"), "{err}");
+    assert_eq!(sink.snapshot().connections, 0);
+}
