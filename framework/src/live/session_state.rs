@@ -40,7 +40,7 @@ pub fn load<T: DeserializeOwned>(component: &str, field: &str) -> Option<T> {
 
 /// Stage the value of `field` of `component` for the session.
 ///
-/// Inside a request that accepts outcomes ([`scope`]), the value is written
+/// Inside a request that accepts outcomes (`scope`), the value is written
 /// when the outcome is accepted. Outside one, it is written at once.
 ///
 /// # Errors
