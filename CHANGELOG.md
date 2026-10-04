@@ -562,6 +562,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **A Live page with several islands on SSE keeps its updates.** When an
+  island's first event arrived before its subscribe answer, the browser
+  treated it as traffic for an unknown subscription, retired the shared
+  stream and showed every island on the page as "Updates degraded". Such an
+  event is now held, counted against `LIVE_ASYNC_MAX_QUEUED_EVENTS`, and
+  applied once that exact answer arrives, or dropped if the subscribe is
+  refused; the same holds for the replacement subscribe that follows a
+  failed island. A WebSocket transport still fails closed, as before. A
+  document whose held and queued events pass the limit now reports the
+  breach with the limit's key and reconnects, instead of degrading every
+  island. This landed after the `v3.1.0` tag.
 - **Payment webhooks, feature flags and RBAC work on Postgres, MySQL and
   MariaDB.** Their models used a text cast for native timestamp columns,
   so every payment webhook answered 500, `set_flag` and the feature admin
