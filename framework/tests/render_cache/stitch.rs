@@ -446,13 +446,12 @@ async fn a_zero_slot_composite_is_assembled_with_a_fresh_nonce_on_every_hit() {
     assert_eq!(published.status, StatusCode::OK, "{}", published.text());
     // Pins `lead_render`'s half of the override, which nothing else does:
     // `no-store` must never reach a Composite with no per-principal bytes in
-    // it, on the publishing render any more than on the hits below.
-    assert!(
-        published
-            .header("cache-control")
-            .expect("cache-control")
-            .starts_with("private, max-age="),
-        "the render that published a zero-slot Composite keeps the class's private freshness"
+    // it, on the publishing render any more than on the hits below. It is
+    // still private, so the browser revalidates before reusing it.
+    assert_eq!(
+        published.header("cache-control"),
+        Some("private, no-cache"),
+        "the render that published a zero-slot Composite keeps the class's private treatment"
     );
     let before = handler_renders(SEED_ONLY_NONCE_PATH);
     let first = dispatch(
@@ -496,14 +495,13 @@ async fn a_zero_slot_composite_is_assembled_with_a_fresh_nonce_on_every_hit() {
     let first_etag = suprnova_live::render_cache::Validator::strong_for(&first.body).etag();
     assert_eq!(first.header("etag"), Some(first_etag.as_str()));
     // No slot means no per-principal bytes in the document, only a
-    // per-request nonce, so this one keeps the class's private `max-age`
-    // rather than the `no-store` a slotted entry is sent with.
-    assert!(
-        first
-            .header("cache-control")
-            .expect("cache-control")
-            .starts_with("private, max-age="),
-        "a zero-slot Composite keeps the class's private freshness"
+    // per-request nonce, so this one keeps the class's private treatment,
+    // revalidated before every reuse, rather than the `no-store` a slotted
+    // entry is sent with.
+    assert_eq!(
+        first.header("cache-control"),
+        Some("private, no-cache"),
+        "a zero-slot Composite is revalidated before every reuse"
     );
 }
 

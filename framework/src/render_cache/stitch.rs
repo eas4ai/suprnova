@@ -763,8 +763,8 @@ pub(crate) fn cache_control_override_for(entry: &CompositeEntry) -> Option<&'sta
 /// principal's islands to whoever sits down next, and would skip the
 /// per-request reauthorization for the whole window. A zero-slot Composite
 /// has no per-principal bytes in it - only a per-request nonce - so it
-/// keeps the class's private `max-age` from
-/// [`cache_control_value`] as any other private representation would. The
+/// takes `private, no-cache` from [`cache_control_value`] as any other
+/// private representation would. The
 /// decision itself is [`cache_control_override_for`], which the leader's
 /// own render asks as well, so the directive does not depend on which code
 /// path produced the bytes.
@@ -784,8 +784,8 @@ fn respond(
     let header = entry.header();
     let freshness = policy.freshness();
     // A zero-slot Composite has no per-principal bytes in it - only a
-    // per-request nonce - so it keeps the class's private `max-age` the
-    // engine computes for any other private representation; a slotted one
+    // per-request nonce - so it takes the `private, no-cache` the engine
+    // forms for any other private representation; a slotted one
     // is pinned to `private, no-store`, for the reason this function's own
     // "A slotted entry is `private, no-store`" paragraph gives. The leader's
     // render of the same entry asks the same function, so the two answers

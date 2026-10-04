@@ -168,7 +168,7 @@ async fn a_second_request_is_an_l0_hit_that_runs_no_handler_and_carries_validato
     assert_eq!(counting_route::renders(), 1);
     let etag = first.header("etag").expect("etag").to_owned();
     assert!(etag.starts_with("\"sha256-"));
-    assert_eq!(first.header("cache-control"), Some("private, max-age=60"));
+    assert_eq!(first.header("cache-control"), Some("private, no-cache"));
 
     let second = dispatch_get(&harness, "/cached/1", &[]).await;
     assert_eq!(second.status, StatusCode::OK);
