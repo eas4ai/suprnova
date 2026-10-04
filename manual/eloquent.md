@@ -932,15 +932,17 @@ let count   = User::count().await?;
 let count   = User::filter("active", true).count().await?;
 let sum     = User::sum::<f64>("balance").await?;
 let visits  = Page::sum::<u64>("views").await?;
-let avg     = Order::avg("total").await?;
+let avg     = Order::avg::<f64>("total").await?;
+let exact   = Order::avg::<Decimal>("total").await?;
 let min     = Order::min::<DateTime<Utc>>("created_at").await?;
 let max     = Order::max::<DateTime<Utc>>("created_at").await?;
 let exists  = User::filter("email", &email).exists().await?;
 let missing = User::filter("email", &email).doesnt_exist().await?;
 ```
 
-`count` returns an `i64` and `avg` an `f64`. `sum`, `min` and `max` take
-the type to read as a type parameter. Suprnova aliases generated
+`count` returns an `i64`. `sum`, `avg`, `min` and `max` take the type to
+read as a type parameter; for `avg` it is `f64` or `rust_decimal::Decimal`
+(the `AvgValue` trait). Suprnova aliases generated
 aggregate expressions internally so the same typed result is decoded on
 PostgreSQL, MySQL, and SQLite. `sum` and `avg` return zero for an empty
 match set, while `min` and `max` return `None`. An incompatible requested
@@ -950,10 +952,13 @@ converted into a plausible zero or `None`.
 The database chooses the type of a sum or an average: PostgreSQL answers
 `numeric` for the sum of a `bigint` column and for any average of
 integers, MySQL answers `DECIMAL`, and SQLite answers an integer or a
-real. `sum` reads whichever arrives. An integer type such as `i64` or
-`u64` takes the sum exactly, and a sum with a fraction, or outside the
-type's range, is an error rather than a truncated value. `f64` takes the
-nearest value, and so does `avg`.
+real. `sum` and `avg` read whichever arrives. An integer type such as
+`i64` or `u64` takes a sum exactly, and a sum with a fraction, or outside
+the type's range, is an error rather than a truncated value. `Decimal`
+takes a sum or an average exactly, so the average of a `DECIMAL` money
+column keeps every digit, and a value it can't hold is an error. `f64`
+takes the nearest value. SQLite has no exact decimal type: it stores a
+`DECIMAL` column as a real, and `Decimal` reads that real.
 
 ### Terminals
 

@@ -11,6 +11,7 @@
 use std::any::{Any, TypeId};
 
 use bigdecimal::{BigDecimal, ToPrimitive};
+use rust_decimal::Decimal;
 use sea_orm::{ColIdx, DbErr, QueryResult, TryGetError, TryGetable};
 
 use crate::eloquent::casts::StoredU64;
@@ -151,6 +152,35 @@ impl Number {
         })
     }
 
+    /// The number as a [`Decimal`], exactly: an integer, a decimal, or the
+    /// shortest decimal that reads back as the same `f64`, which is all a
+    /// real says. A number a `Decimal` cannot hold exactly (more than 28
+    /// fractional digits, or beyond 96 bits) is an error, never rounded.
+    fn exact_decimal(&self) -> Result<Decimal, DbErr> {
+        let exact = match self {
+            Self::Integer(n) => Decimal::try_from_i128_with_scale(*n, 0).ok(),
+            Self::Real(n) if n.is_finite() => Decimal::from_str_exact(&n.to_string()).ok(),
+            Self::Real(_) => None,
+            Self::Decimal(n) => {
+                let (digits, exponent) = n.normalized().as_bigint_and_exponent();
+                let digits = digits.to_i128();
+                match (digits, u32::try_from(exponent)) {
+                    (Some(digits), Ok(scale)) => {
+                        Decimal::try_from_i128_with_scale(digits, scale).ok()
+                    }
+                    // A negative exponent: trailing zeros of a whole number.
+                    (Some(digits), Err(_)) => u32::try_from(exponent.unsigned_abs())
+                        .ok()
+                        .and_then(|zeros| 10i128.checked_pow(zeros))
+                        .and_then(|power| digits.checked_mul(power))
+                        .and_then(|whole| Decimal::try_from_i128_with_scale(whole, 0).ok()),
+                    (None, _) => None,
+                }
+            }
+        };
+        exact.ok_or_else(|| DbErr::Type(format!("{self} does not fit in a Decimal exactly")))
+    }
+
     /// The number as the nearest `f64`.
     fn nearest_f64(&self) -> Result<f64, DbErr> {
         match self {
@@ -168,7 +198,8 @@ impl Number {
 ///
 /// An integer `T` reads the result exactly: one with a fraction, or
 /// outside `T`'s range, is an error that quotes it, never truncated or
-/// wrapped. `f64` and `f32` read the nearest value. Any other `T` decodes
+/// wrapped. A [`Decimal`] reads it exactly too, or fails when it cannot
+/// hold it. `f64` and `f32` read the nearest value. Any other `T` decodes
 /// as [`ColumnValue`] does.
 pub(crate) fn read_aggregate<T: ColumnValue>(row: &QueryResult, column: &str) -> Result<T, DbErr> {
     macro_rules! exactly {
@@ -186,6 +217,10 @@ pub(crate) fn read_aggregate<T: ColumnValue>(row: &QueryResult, column: &str) ->
     exactly!(
         i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize
     );
+    if TypeId::of::<T>() == TypeId::of::<Decimal>() {
+        let value = Number::read(row, column)?.exact_decimal()?;
+        return as_wanted::<T, Decimal>(value).map_err(DbErr::from);
+    }
     if TypeId::of::<T>() == TypeId::of::<f64>() {
         let value = Number::read(row, column)?.nearest_f64()?;
         return as_wanted::<T, f64>(value).map_err(DbErr::from);
@@ -198,6 +233,31 @@ pub(crate) fn read_aggregate<T: ColumnValue>(row: &QueryResult, column: &str) ->
         return as_wanted::<T, f32>(value).map_err(DbErr::from);
     }
     T::from_column(row, column).map_err(DbErr::from)
+}
+
+/// The type an average reads as: `f64`, or [`rust_decimal::Decimal`] for
+/// an exact one.
+///
+/// The database chooses the type of `AVG`: Postgres answers `numeric`,
+/// MySQL `DECIMAL`, and SQLite a real. An `f64` takes the nearest value,
+/// which is what a floating-point column holds anyway. A `Decimal` takes
+/// an exact one, as a money column's average needs: Postgres's and MySQL's
+/// decimals and every integer exactly, a real as the shortest decimal that
+/// reads back as the same `f64`, and an average it cannot hold is an error
+/// rather than a rounded value.
+///
+/// Implemented for those two types only.
+pub trait AvgValue: ColumnValue + Default + sealed::Sealed {}
+
+impl AvgValue for f64 {}
+impl AvgValue for Decimal {}
+
+mod sealed {
+    /// Keeps [`super::AvgValue`] to the types the average reader converts.
+    pub trait Sealed {}
+
+    impl Sealed for f64 {}
+    impl Sealed for rust_decimal::Decimal {}
 }
 
 /// Reads a relation aggregate (`with_sum`, `with_avg`, `with_min`,
@@ -233,6 +293,17 @@ mod tests {
         }
         assert!(decimal("1e40").whole("i128").is_err());
         assert_eq!(decimal("17.5").nearest_f64().ok(), Some(17.5));
+        let exact = |number: Number| number.exact_decimal().map(|d| d.to_string()).ok();
+        assert_eq!(
+            exact(decimal("12345678901234567.900000")).as_deref(),
+            Some("12345678901234567.9")
+        );
+        assert_eq!(exact(decimal("1e3")).as_deref(), Some("1000"));
+        assert_eq!(exact(Number::Integer(-100)).as_deref(), Some("-100"));
+        assert_eq!(exact(Number::Real(0.375)).as_deref(), Some("0.375"));
+        assert_eq!(exact(Number::Real(1e300)), None);
+        assert_eq!(exact(Number::Real(f64::INFINITY)), None);
+        assert_eq!(exact(decimal("0.12345678901234567890123456789")), None);
         assert_eq!(decimal("1.750").to_string(), "1.75");
     }
 

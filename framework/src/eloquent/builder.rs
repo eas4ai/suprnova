@@ -5728,9 +5728,9 @@ where
     ///
     /// Postgres answers `numeric` for the sum of a `bigint` and MySQL
     /// `DECIMAL` for any sum of integers, so the sum is read as whichever
-    /// type arrived. An integer `T` takes it exactly: a sum with a
-    /// fraction, or outside `T`'s range, is an error, never truncated.
-    /// `f64` takes the nearest value.
+    /// type arrived. An integer `T` or a `rust_decimal::Decimal` takes it
+    /// exactly: a sum with a fraction (for an integer), or one `T` cannot
+    /// hold, is an error, never truncated. `f64` takes the nearest value.
     pub async fn sum<T: ColumnValue + Default>(
         self,
         col: impl IntoColumn,
@@ -5741,17 +5741,16 @@ where
             .await
     }
 
-    /// `SELECT COALESCE(AVG(col), 0)`, as an `f64`: `0.0` on an empty
-    /// result set.
+    /// `SELECT COALESCE(AVG(col), 0)`. Returns zero on empty result sets.
     ///
-    /// The average is an `f64` on every database, whatever the column:
-    /// Postgres answers `numeric` and MySQL `DECIMAL` for the average of
-    /// an integer column, and SQLite a real, so the result is read as
-    /// whichever arrived and converted to the nearest `f64`.
-    pub async fn avg(self, col: impl IntoColumn) -> Result<f64, FrameworkError> {
+    /// `T` is `f64` or `rust_decimal::Decimal` (see
+    /// [`AvgValue`](crate::AvgValue)): the database answers `numeric`,
+    /// `DECIMAL` or a real, and an `f64` reads the nearest value while a
+    /// `Decimal` reads an exact one or fails.
+    pub async fn avg<T: crate::AvgValue>(self, col: impl IntoColumn) -> Result<T, FrameworkError> {
         let col_name = col.col_name();
         crate::database::validate_identifier(&col_name)?;
-        self.aggregate_value::<f64>(&format!("COALESCE(AVG({col_name}), 0)"))
+        self.aggregate_value::<T>(&format!("COALESCE(AVG({col_name}), 0)"))
             .await
     }
 

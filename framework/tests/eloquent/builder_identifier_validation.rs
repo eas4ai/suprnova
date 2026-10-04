@@ -265,7 +265,7 @@ async fn aggregate_projection_columns_are_validated() {
     assert!(format!("{err}").contains("SQL identifier"));
 
     let err = T338BuilderIdentUser::query()
-        .avg("id); DROP TABLE t338_builder_ident_users --")
+        .avg::<f64>("id); DROP TABLE t338_builder_ident_users --")
         .await
         .expect_err("attacker-controlled AVG column must be rejected");
     assert!(format!("{err}").contains("SQL identifier"));

@@ -6,14 +6,17 @@
 //! terminals read whichever arrives, exactly: a sum that does not fit the
 //! type asked for, or has a fraction, is an error, never truncated.
 
-use sea_orm::DatabaseConnection;
+use std::str::FromStr;
+
+use rust_decimal::Decimal;
+use sea_orm::{DatabaseConnection, DbBackend};
 use sea_orm_migration::prelude::*;
 use serial_test::serial;
 use suprnova::schema::Schema;
 use suprnova::testing::TestContainer;
 use suprnova::{DbConnection, Model, attrs, model};
 
-use super::cases::drop_tables;
+use super::cases::{drop_tables, run};
 use super::mysql::connect_mysql;
 use super::postgres::connect_postgres;
 use super::sqlite::connect_sqlite;
@@ -64,6 +67,7 @@ async fn create_entries(conn: &DatabaseConnection) {
         t.double("ratio");
         t.float("weight");
         t.string("tag");
+        t.decimal("price", 30, 2).nullable();
     })
     .await
     .expect("create ia_entries");
@@ -124,17 +128,32 @@ pub async fn integer_aggregates_read_on_every_database(conn: &DatabaseConnection
         35
     );
 
-    assert_eq!(IaEntry::avg("hits").await.expect("avg of a u64"), 4.0);
-    assert_eq!(IaEntry::avg("small").await.expect("avg of an int"), 3.0);
-    assert_eq!(kept().avg("amount").await.expect("avg of an i64"), 17.5);
-    assert_eq!(kept().avg("ratio").await.expect("avg of a real"), 0.375);
+    assert_eq!(
+        IaEntry::avg::<f64>("hits").await.expect("avg of a u64"),
+        4.0
+    );
+    assert_eq!(
+        IaEntry::avg::<f64>("small").await.expect("avg of an int"),
+        3.0
+    );
+    assert_eq!(
+        kept().avg::<f64>("amount").await.expect("avg of an i64"),
+        17.5
+    );
+    assert_eq!(
+        kept().avg::<f64>("ratio").await.expect("avg of a real"),
+        0.375
+    );
 
     assert_eq!(none().sum::<i64>("amount").await.expect("an empty sum"), 0);
     assert_eq!(
         none().sum::<u64>("hits").await.expect("an empty u64 sum"),
         0
     );
-    assert_eq!(none().avg("amount").await.expect("an empty avg"), 0.0);
+    assert_eq!(
+        none().avg::<f64>("amount").await.expect("an empty avg"),
+        0.0
+    );
 
     let fraction = IaEntry::sum::<i64>("ratio")
         .await
@@ -214,6 +233,119 @@ pub async fn relation_aggregates_read_on_every_database(conn: &DatabaseConnectio
     assert_eq!(owner.entries_avg_of("amount"), Some(17.5), "with_avg");
 
     drop_tables(conn, TABLES).await;
+}
+
+/// `avg::<f64>` and `avg::<Decimal>` read every database's average. On a
+/// `DECIMAL(30, 2)` column whose average is `12345678901234567.90`, which no
+/// `f64` holds, Postgres and MySQL answer an exact decimal and
+/// `avg::<Decimal>` reads it exactly while `avg::<f64>` reads the nearest
+/// `f64`; SQLite stores the column as a real, so both read that real.
+/// `sum::<Decimal>` reads the exact sum. An average a `Decimal` cannot hold
+/// is an error. It fails to compile while `avg` takes no type parameter.
+pub async fn averages_read_as_f64_and_decimal(conn: &DatabaseConnection) {
+    create_entries(conn).await;
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(conn.clone()));
+    add(10, 3, 1, 0.5, "kept").await;
+    add(25, 4, 2, 0.25, "kept").await;
+    run(
+        conn,
+        "INSERT INTO ia_entries (amount, hits, small, ratio, weight, tag, price) VALUES \
+         (0, 0, 0, 0, 0, 'money', 12345678901234567.89), \
+         (0, 0, 0, 0, 0, 'money', 12345678901234567.91), \
+         (0, 0, 0, 1e300, 0, 'vast', NULL)",
+    )
+    .await
+    .expect("insert the decimal rows");
+    let kept = || IaEntry::query().filter("tag", "kept");
+    let money = || IaEntry::query().filter("tag", "money");
+    let decimal = |text: &str| Decimal::from_str(text).expect("a decimal");
+
+    assert_eq!(kept().avg::<f64>("amount").await.expect("avg::<f64>"), 17.5);
+    assert_eq!(
+        kept()
+            .avg::<Decimal>("amount")
+            .await
+            .expect("avg::<Decimal>"),
+        decimal("17.5")
+    );
+    assert_eq!(
+        kept()
+            .avg::<Decimal>("ratio")
+            .await
+            .expect("avg::<Decimal> of a real"),
+        decimal("0.375")
+    );
+    assert_eq!(
+        IaEntry::query()
+            .filter("tag", "missing")
+            .avg::<Decimal>("amount")
+            .await
+            .expect("an empty avg"),
+        Decimal::ZERO
+    );
+
+    let as_f64 = money()
+        .avg::<f64>("price")
+        .await
+        .expect("avg::<f64> of money");
+    let as_decimal = money()
+        .avg::<Decimal>("price")
+        .await
+        .expect("avg::<Decimal> of money");
+    let exact = decimal("12345678901234567.90");
+    assert_eq!(as_f64, 12345678901234567.90_f64, "the nearest f64");
+    if conn.get_database_backend() == DbBackend::Sqlite {
+        assert_eq!(
+            as_decimal,
+            decimal(&as_f64.to_string()),
+            "SQLite stores the column as a real, and the average is that real"
+        );
+    } else {
+        assert_eq!(as_decimal, exact, "the exact average");
+        assert_ne!(
+            decimal(&as_f64.to_string()),
+            exact,
+            "no f64 holds the average"
+        );
+        assert_eq!(
+            money()
+                .sum::<Decimal>("price")
+                .await
+                .expect("sum::<Decimal>"),
+            decimal("24691357802469135.80")
+        );
+    }
+
+    assert!(
+        IaEntry::query()
+            .filter("tag", "vast")
+            .avg::<Decimal>("ratio")
+            .await
+            .is_err(),
+        "no Decimal holds 1e300"
+    );
+
+    drop_tables(conn, TABLES).await;
+}
+
+#[tokio::test]
+async fn sqlite_averages_read_as_f64_and_decimal() {
+    averages_read_as_f64_and_decimal(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_averages_read_as_f64_and_decimal() {
+    averages_read_as_f64_and_decimal(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_averages_read_as_f64_and_decimal() {
+    averages_read_as_f64_and_decimal(&connect_mysql().await).await;
 }
 
 #[tokio::test]

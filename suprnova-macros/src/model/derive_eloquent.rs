@@ -1651,10 +1651,14 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 <Self as ::suprnova::eloquent::Model>::query().sum(col).await
             }
 
-            /// `SELECT COALESCE(AVG(col), 0) FROM table`, as an `f64`.
-            pub async fn avg(
+            /// `SELECT COALESCE(AVG(col), 0) FROM table`, as an `f64` or a
+            /// `rust_decimal::Decimal`.
+            pub async fn avg<T>(
                 col: impl ::suprnova::eloquent::builder::IntoColumn,
-            ) -> ::core::result::Result<f64, ::suprnova::FrameworkError> {
+            ) -> ::core::result::Result<T, ::suprnova::FrameworkError>
+            where
+                T: ::suprnova::AvgValue,
+            {
                 <Self as ::suprnova::eloquent::Model>::query().avg(col).await
             }
 
