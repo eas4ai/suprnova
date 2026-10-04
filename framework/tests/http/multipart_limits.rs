@@ -1,6 +1,7 @@
 //! Streaming multipart DoS limits: the total part-count ceiling,
 //! `Content-Length` pre-rejection, per-field `max_count` enforced during
-//! streaming, and oversized-text-field rejection at the spill threshold.
+//! streaming, and oversized-text-field rejection at the spill threshold,
+//! each a request-wide 413.
 //!
 //! Each test asserts the *mechanism*, not just the status code: the
 //! part-count and per-field tests count validator callbacks (which fire
@@ -17,6 +18,7 @@ use common::{
     build_multipart_body, request_from_multipart, request_with_chunked_body,
     request_with_declared_length,
 };
+use suprnova::FrameworkError;
 use suprnova::http::upload::{
     MultipartLimits, parse_multipart_streaming_with_limits, upload_tempfiles_spilled_total,
 };
@@ -153,7 +155,8 @@ async fn oversized_text_field_rejected_at_threshold_without_spilling() {
     let big = vec![b'a'; 4096];
 
     // A text part (no filename) that crosses the 64-byte spill threshold is
-    // rejected at the threshold rather than spilled to disk.
+    // rejected at the threshold rather than spilled to disk. Like the body
+    // cap, it bounds the request's memory, so it is a request-wide 413.
     let text_body = build_multipart_body("test", &[("bio", None, &big)]);
     let text_req = request_from_multipart("test", text_body).await;
     let text_err = parse_multipart_streaming_with_limits(
@@ -169,7 +172,7 @@ async fn oversized_text_field_rejected_at_threshold_without_spilling() {
     .await
     .err()
     .expect("an oversized text field must be rejected");
-    assert_eq!(text_err.status_code(), 400);
+    assert_eq!(text_err.status_code(), 413);
     assert!(
         text_err.to_string().contains("in-memory limit"),
         "text rejection names the in-memory limit; got: {text_err}"
@@ -198,6 +201,71 @@ async fn oversized_text_field_rejected_at_threshold_without_spilling() {
     assert!(
         upload_tempfiles_spilled_total() > before,
         "the file part must have spilled to a temp file"
+    );
+}
+
+/// One chunk that takes a text part past the in-memory limit and past what a
+/// validator allows answers the request-wide 413, never the validator's 422.
+#[tokio::test]
+async fn the_text_limit_wins_over_a_validator_in_the_same_chunk() {
+    let big = vec![b'a'; 4096];
+    let body = build_multipart_body("test", &[("bio", None, &big)]);
+    let req = request_from_multipart("test", body).await;
+
+    let err = parse_multipart_streaming_with_limits(
+        req,
+        MultipartLimits {
+            max_body_bytes: 1024 * 1024,
+            max_parts: 1000,
+            spill_threshold: 64,
+            per_field_max_counts: &[],
+        },
+        // The same limit as the threshold, so the chunk that crosses one
+        // crosses both.
+        |_name, _sniff, size| {
+            if size > 64 {
+                return Err(FrameworkError::invalid_upload("too long for the validator"));
+            }
+            Ok(())
+        },
+    )
+    .await
+    .err()
+    .expect("an oversized text field must be rejected");
+
+    assert_eq!(err.status_code(), 413, "got: {err}");
+    assert!(
+        err.to_string().contains("in-memory limit"),
+        "the text limit answered, not the validator; got: {err}"
+    );
+}
+
+/// When one chunk crosses the body cap and the text limit together, the
+/// body cap answers.
+#[tokio::test]
+async fn the_body_cap_wins_over_the_text_limit_in_the_same_chunk() {
+    let big = vec![b'a'; 4096];
+    let body = build_multipart_body("test", &[("bio", None, &big)]);
+    let req = request_from_multipart("test", body).await;
+
+    let err = parse_multipart_streaming_with_limits(
+        req,
+        MultipartLimits {
+            max_body_bytes: 1024,
+            max_parts: 1000,
+            spill_threshold: 64,
+            per_field_max_counts: &[],
+        },
+        |_n, _s, _z| Ok(()),
+    )
+    .await
+    .err()
+    .expect("a body over its cap must be rejected");
+
+    assert_eq!(err.status_code(), 413, "got: {err}");
+    assert!(
+        err.to_string().contains("exceeds 1024 bytes (cap)"),
+        "the body cap answered; got: {err}"
     );
 }
 
