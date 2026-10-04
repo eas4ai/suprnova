@@ -4,7 +4,7 @@
 //! than email.
 
 use crate::payments::PaymentError;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// E.164-style phone number - `+` prefix followed by 8 to 15 ASCII digits.
 ///
@@ -17,10 +17,20 @@ use serde::{Deserialize, Serialize};
 /// # Wire format
 ///
 /// Serializes as a single string ("+countrycode...digits") - frontend SDKs and
-/// provider APIs both consume this shape directly.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// provider APIs both consume this shape directly. Deserializing runs the
+/// same validation as [`PhoneNumber::new`], so a value read from a request,
+/// a queue payload, or the database holds the same invariant as one built
+/// in code.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct PhoneNumber(String);
+
+impl<'de> Deserialize<'de> for PhoneNumber {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::new(raw).map_err(serde::de::Error::custom)
+    }
+}
 
 impl PhoneNumber {
     /// Construct a phone number from a string with optional leading `+`.
@@ -50,7 +60,7 @@ impl PhoneNumber {
     #[inline]
     #[must_use]
     pub fn digits(&self) -> &str {
-        &self.0[1..]
+        self.0.strip_prefix('+').unwrap_or(&self.0)
     }
 }
 

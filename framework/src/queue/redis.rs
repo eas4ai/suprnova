@@ -78,7 +78,7 @@
 //! On every `pop`, the driver runs a Lua script under `EVAL` that strips the
 //! prefix (while accepting legacy raw-JSON members), atomically claims a bounded
 //! batch of entries with `score <= now` (currently 128), `XADD`s them onto the
-//! stream (field `msg`, matching sea-streamer-redis's payload encoding), and
+//! stream (field `msg`, the field `push` writes), and
 //! `ZREM`s them. The script iterates
 //! `ZREM` by member rather than using
 //! `ZREMRANGEBYSCORE` so a brand-new same-score entry that lands between the
@@ -123,11 +123,18 @@
 //!
 //! ## Connection topology
 //!
-//! `RedisQueueDriver` uses sea-streamer for producer `XADD`, a dedicated
-//! `redis::aio::ConnectionManager` for blocking `XREADGROUP`, and another
-//! manager for claims, inspection, ZSET operations, and Lua scripts. The read
-//! connection is separate because a blocking stream command would otherwise
-//! stall unrelated commands multiplexed on the same socket.
+//! `RedisQueueDriver` uses a dedicated `redis::aio::ConnectionManager` for
+//! blocking `XREADGROUP`, and another manager for `XADD`, claims, inspection,
+//! ZSET operations, and Lua scripts. The read connection is separate because
+//! a blocking stream command would otherwise stall unrelated commands
+//! multiplexed on the same socket.
+//!
+//! Every connection is opened by the redis client from the configured URL,
+//! so all of them carry its credentials, its database index, and its
+//! `rediss://` TLS. `push` does not use sea-streamer's producer for its
+//! `XADD`: that producer keeps only the host and port of a URL and is built
+//! without TLS, so a password-protected server refuses it and a `rediss://`
+//! URL cannot connect.
 //!
 //! The endpoint must be standalone Redis 6.2 or newer. Redis Cluster is rejected
 //! because the settlement scripts atomically access stream, delayed-set, epoch,
@@ -154,12 +161,10 @@ use chrono::Utc;
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use redis::streams::{StreamAutoClaimOptions, StreamAutoClaimReply, StreamReadReply};
-use sea_streamer::{Producer, StreamKey, Streamer, StreamerUri};
-use sea_streamer_redis::{RedisConnectOptions, RedisProducer, RedisStreamer};
+use sea_streamer::StreamKey;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -203,9 +208,10 @@ fn pop_probe_budget(_requested_visibility: Duration) -> Duration {
 /// number promoted; a full batch means more remain due and the next `pop`
 /// will take another bite.
 ///
-/// The `XADD` field name is `msg` to match sea-streamer-redis's default
-/// payload field, so promoted entries decode identically to ones the producer
-/// pushed directly.
+/// The `XADD` field name is `msg`, the field `push` writes, so promoted
+/// entries decode identically to ones pushed directly. It is also
+/// sea-streamer-redis's default payload field, so entries already in a
+/// stream decode the same way.
 const PROMOTE_DUE_SCRIPT: &str = r#"
   local entries = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
   for _, entry in ipairs(entries) do
@@ -1483,7 +1489,6 @@ where
 /// Construct via [`RedisQueueDriver::connect`]. The driver is `Send + Sync`
 /// and can be wrapped in an `Arc` for sharing across tasks.
 pub struct RedisQueueDriver {
-    producer: RedisProducer,
     stream_key: StreamKey,
     /// `<stream>:delayed` - the sorted set holding envelopes whose
     /// `available_at` is still in the future. Promoted into the stream by
@@ -1504,9 +1509,8 @@ pub struct RedisQueueDriver {
     /// Dedicated connection for bounded blocking `XREADGROUP` calls. Keeping
     /// it separate prevents one empty poll from delaying settlement commands.
     read_conn: ConnectionManager,
-    /// Direct Redis connection used for delayed ZSET operations and Lua-backed
-    /// promotion/settlement. Sea-streamer's consumer API is intentionally
-    /// bypassed; its producer remains responsible for immediate `XADD`. The
+    /// Direct Redis connection used for immediate `XADD`, delayed ZSET
+    /// operations and Lua-backed promotion/settlement. The
     /// `ConnectionManager` is cheap to clone (internally a multiplexed
     /// connection plus an Arc-shared task) and is what the `redis` crate
     /// recommends for high-throughput async use.
@@ -1562,31 +1566,6 @@ fn validate_redis_server_info(server_info: &str, cluster_info: &str) -> Result<(
     }
 }
 
-/// The logical database index a `redis://` URL selects, by the same rule the
-/// redis client applies: the URL path, `/`-trimmed, empty meaning `0`.
-///
-/// The redis crate parses this itself but keeps the parsed value private, and
-/// sea-streamer ignores the path entirely - so this is how the producer half
-/// learns the index the consumer half is already using. `Client::open` has
-/// validated the URL before this runs, so a path that fails to parse here is
-/// a bug worth surfacing, not a case to paper over with a default.
-pub(crate) fn redis_db_from_url(url: &str) -> Result<u32, FrameworkError> {
-    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let without_suffix = after_scheme
-        .split_once(['?', '#'])
-        .map_or(after_scheme, |(head, _)| head);
-    let path = without_suffix
-        .split_once('/')
-        .map_or("", |(_, path)| path)
-        .trim_matches('/');
-    if path.is_empty() {
-        return Ok(0);
-    }
-    path.parse::<u32>().map_err(|_| {
-        FrameworkError::internal(format!("redis URL selects a non-numeric database: {path}"))
-    })
-}
-
 fn validate_redis_visibility_timeout(visibility_timeout: Duration) -> Result<(), FrameworkError> {
     let milliseconds = visibility_timeout.as_millis();
     if milliseconds == 0 {
@@ -1632,8 +1611,8 @@ fn new_delivery_read_command(
 }
 
 impl RedisQueueDriver {
-    /// Connect to Redis and initialize the producer, direct read connections,
-    /// and consumer group.
+    /// Connect to Redis and initialize the direct connections and the
+    /// consumer group.
     ///
     /// # Arguments
     ///
@@ -1653,17 +1632,14 @@ impl RedisQueueDriver {
     ) -> Result<Self, FrameworkError> {
         validate_redis_visibility_timeout(visibility_timeout)?;
 
-        let uri = StreamerUri::from_str(url)
-            .map_err(|e| FrameworkError::internal(format!("redis URI parse error: {e}")))?;
         let stream_key = StreamKey::new(stream)
             .map_err(|e| FrameworkError::internal(format!("redis stream key error: {e}")))?;
 
-        // Validate the direct-command backend before the producer creates any
-        // queue state. One manager is reserved for blocking XREADGROUP; the
-        // other remains available for claims, settlement, and inspection.
+        // Validate the backend before anything creates queue state. One
+        // manager is reserved for blocking XREADGROUP; the other carries
+        // XADD, claims, settlement, and inspection.
         let client = crate::redis_client::open(url)
             .map_err(|e| FrameworkError::internal(format!("redis client open: {e}")))?;
-        let redis_db = redis_db_from_url(url)?;
         let conn = ConnectionManager::new(client.clone())
             .await
             .map_err(|e| FrameworkError::internal(format!("redis command connection: {e}")))?;
@@ -1683,28 +1659,10 @@ impl RedisQueueDriver {
             .map_err(|e| FrameworkError::internal(format!("redis INFO cluster: {e}")))?;
         validate_redis_server_info(&server_info, &cluster_info)?;
 
-        // The producer must land in the same logical database the direct
-        // connections read from. sea-streamer does not take the database
-        // index from the URI's path the way the redis client does - left at
-        // its default it always writes to database 0, so a URL like
-        // `redis://host:6379/3` produced into a database the consumer half
-        // never reads. Carry the index across explicitly.
-        let mut streamer_options = RedisConnectOptions::default();
-        streamer_options.set_db(redis_db);
-        let streamer = RedisStreamer::connect(uri, streamer_options)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("redis connect error: {e}")))?;
-        // The producer is not anchored; push names the stream explicitly.
-        let producer: RedisProducer = streamer
-            .create_generic_producer(Default::default())
-            .await
-            .map_err(|e| FrameworkError::internal(format!("redis producer error: {e}")))?;
-
         let delayed_key = format!("{}:delayed", stream);
         let epoch_key = format!("{}:epoch", stream);
 
         let driver = Self {
-            producer,
             stream_key,
             delayed_key,
             epoch_key,
@@ -1980,7 +1938,7 @@ impl QueueDriver for RedisQueueDriver {
     /// Envelopes whose `available_at` is in the future go to the
     /// `<stream>:delayed` ZSET and only enter the stream when a later `pop`
     /// runs the promotion script. Immediate envelopes go straight to the
-    /// stream via the sea-streamer producer.
+    /// stream with `XADD`, on the command connection.
     async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
         if env.available_at > crate::clock::now() {
             return self.zadd_delayed(&env).await;
@@ -1990,14 +1948,15 @@ impl QueueDriver for RedisQueueDriver {
             .to_json()
             .map_err(|e| FrameworkError::internal(format!("envelope encode error: {e}")))?;
 
-        // send_to returns a SendFuture; awaiting it delivers the receipt.
-        let fut = self
-            .producer
-            .send_to(&self.stream_key, json.as_str())
+        let mut conn = self.conn.clone();
+        let _id: String = redis::cmd("XADD")
+            .arg(self.stream_key.name())
+            .arg("*")
+            .arg("msg")
+            .arg(json.as_str())
+            .query_async(&mut conn)
+            .await
             .map_err(|e| FrameworkError::internal(format!("redis send error: {e}")))?;
-
-        fut.await
-            .map_err(|e| FrameworkError::internal(format!("redis send receipt error: {e}")))?;
 
         Ok(())
     }
@@ -2716,19 +2675,6 @@ fn is_busy_group(error: &redis::RedisError) -> bool {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
-
-    #[test]
-    fn redis_db_from_url_matches_the_client_rule() {
-        assert_eq!(redis_db_from_url("redis://127.0.0.1:6379").unwrap(), 0);
-        assert_eq!(redis_db_from_url("redis://127.0.0.1:6379/").unwrap(), 0);
-        assert_eq!(redis_db_from_url("redis://127.0.0.1:6379/9").unwrap(), 9);
-        assert_eq!(redis_db_from_url("redis://127.0.0.1:6379/9/").unwrap(), 9);
-        assert_eq!(
-            redis_db_from_url("rediss://user:pw@example.test:6380/3?timeout=1").unwrap(),
-            3
-        );
-        assert!(redis_db_from_url("redis://127.0.0.1:6379/nine").is_err());
-    }
 
     fn lifecycle_envelope() -> Envelope {
         Envelope {

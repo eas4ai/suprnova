@@ -117,9 +117,11 @@ the thread while the application boots. The first request connects.
 
 **ID mapping.** Qdrant requires point IDs to be either `u64` or a valid UUID. The framework bridges arbitrary strings with three rules:
 
-1. If the string parses as `u64`, use the `Num(u64)` variant.
-2. If the string is a valid UUID, use the `Uuid(String)` variant verbatim.
+1. If the string is the canonical decimal spelling of a `u64` (no sign, no leading zero), use the `Num(u64)` variant.
+2. If the string is a UUID in its canonical spelling (lowercase, hyphenated), use the `Uuid(String)` variant verbatim.
 3. Otherwise, derive a deterministic v5 UUID from a stable namespace.
+
+The id is a merge key, so `"1"`, `"01"`, and `"+1"` are three items, as they are in every other driver. Only the canonical spellings map to native ids, because Qdrant would read `"01"` as point `1`, and every spelling of one UUID as one point. Items written before this rule with a non-canonical numeric or UUID id now resolve to a derived id; rewrite them (upsert, then delete the old point through `driver.client()`) to keep one point per item.
 
 The caller's original string is stashed in the point's payload under the reserved key `__suprnova_id` (exported as `SUPRNOVA_ID_PAYLOAD_KEY`) and stripped from `VectorMatch.metadata` on retrieval. Power users who query Qdrant directly via `driver.client()` can filter on `__suprnova_id` to bridge framework writes with direct calls.
 

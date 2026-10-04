@@ -102,6 +102,37 @@ fn clear_queue_capture() {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
+    SENT_NAME_CAPTURE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+/// `Mailable::mailable_name()` of every mailable delivered while a
+/// `Mail::fake()` is active. A sent [`OutgoingMessage`] carries no mailable
+/// identity, so without this record `MailFake::assert_not_outgoing` could
+/// see only the queued track and pass for a mailable that was sent.
+static SENT_NAME_CAPTURE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Record that the mailable named `name` was delivered, when a
+/// `Mail::fake()` is active. Called after a successful delivery by
+/// `MailBuilder::send` and by the `SendMailJob` worker.
+pub(crate) fn record_sent_name(name: &str) {
+    if queue_fake_active() {
+        SENT_NAME_CAPTURE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(name.to_owned());
+    }
+}
+
+fn sent_name_count(name: &str) -> usize {
+    SENT_NAME_CAPTURE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|sent| sent.as_str() == name)
+        .count()
 }
 
 /// Validate `msg` and ship it through `transport` with the whole
@@ -441,7 +472,9 @@ impl MailBuilder {
         // Apply Mail::always_* defaults so the queue/notification/raw
         // paths all converge on identical precedence rules.
         let msg = Mail::apply_always_defaults(self.into_outgoing(&mailable)?);
-        deliver(transport.as_ref(), &msg).await
+        deliver(transport.as_ref(), &msg).await?;
+        record_sent_name(M::mailable_name());
+        Ok(())
     }
 
     /// Render `mailable` and merge the builder's hints into the message a
@@ -963,12 +996,22 @@ impl MailFake {
 
     /// Assert NEITHER sent NOR queued for `mailable_name`. Mirrors
     /// `assertNotOutgoing`.
+    ///
+    /// The sent track matches mailables delivered by name through
+    /// `MailBuilder::send` (or a `SendMailJob` run) while this fake was
+    /// active. One-off `Mail::raw` / `Mail::html` sends have no mailable
+    /// name and never match.
     pub fn assert_not_outgoing(&self, mailable_name: &str) {
-        // Sent path matches by string name not present in OutgoingMessage,
-        // so we approximate with subject-or-tag-or-header equality. The
-        // canonical Laravel-side check is class-name; in Suprnova the
-        // sent-side counterpart is the queued track only.
-        self.assert_not_queued(mailable_name);
+        let sent = sent_name_count(mailable_name);
+        let queued = self.queued_named(mailable_name);
+        if sent > 0 || !queued.is_empty() {
+            panic!(
+                "Mail::fake assertion failed: expected NO sent or queued {mailable_name}, \
+                 found {sent} sent and {} queued: {:#?}",
+                queued.len(),
+                queued
+            );
+        }
     }
 
     /// Assert nothing was sent and nothing was queued.

@@ -218,11 +218,16 @@ SQS_OVERFLOW_DELETE_AFTER_PROCESSING=true # delete the file when the job is done
 SQS_OVERFLOW_FLUSH_ON_CLEAR=false         # true deletes the files on Queue::clear
 ```
 
-The files go under `sqs-payloads/<queue>/` on the disk. The server does not
-boot when overflow is on and the disk is not registered. A file is deleted
-only when the driver knows no message points at it any more, so a send that
-times out, or a settlement after its reservation expired, leaves the file
-on the disk rather than risk a message that can no longer be read.
+The files go under `sqs-payloads/<queue>-<digest>/` on the disk, where the
+digest is 16 hexadecimal digits of the SHA-256 of the full queue URL, so
+two queues with one name in different accounts or regions never share a
+directory and `SQS_OVERFLOW_FLUSH_ON_CLEAR` deletes only the cleared queue's
+files. The server does not boot when overflow is on and the disk is not
+registered. A file is deleted only when the driver knows no message points
+at it any more, so a send that times out, a send that is refused after an
+earlier try timed out or met a fault of the service (5xx), or a settlement
+after its reservation expired, leaves the file on the disk rather than risk
+a message that can no longer be read.
 
 `SqsQueueDriver` is behind the `queue-sqs` cargo feature, which is on by
 default and brings `filesystem` with it.

@@ -10,3 +10,6 @@ pub mod middleware;
 pub mod presence;
 pub mod protocol;
 pub mod pusher;
+#[cfg(feature = "broadcasting-fanout")]
+#[path = "../support/redis_server.rs"]
+mod redis_server;
