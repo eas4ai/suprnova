@@ -777,9 +777,11 @@ fn emit_relation_inventory(
     // key - the same column `local_key_ident` reads for the relation's
     // own queries. A model keyed on `uid` correlates `has("kids")` on
     // `uid`, not on an `id` column it may not have. BelongsTo's
-    // "parent_key" maps to the OWNED model's key column ("id" by
-    // default).
-    let parent_key_str = match rel.kind {
+    // "parent_key" maps to the OWNER's key column: the `lk` override,
+    // else the owner model's primary key (`owner_key_expr`), so `has`
+    // and the owner-touch cascade find the owner by the column the
+    // relation's reads use.
+    let parent_key_expr: TokenStream = match rel.kind {
         RelationKindAttr::HasOne
         | RelationKindAttr::HasMany
         | RelationKindAttr::MorphOne
@@ -788,15 +790,16 @@ fn emit_relation_inventory(
         | RelationKindAttr::MorphToMany
         | RelationKindAttr::MorphedByMany
         | RelationKindAttr::HasOneThrough
-        | RelationKindAttr::HasManyThrough => lk_override(rel)
-            .unwrap_or(input.primary_key.as_str())
-            .to_string(),
+        | RelationKindAttr::HasManyThrough => {
+            let key = lk_override(rel).unwrap_or(input.primary_key.as_str());
+            quote! { #key }
+        }
         // BelongsTo: parent_key is the COLUMN on the related table the
-        // child's FK references (defaults to "id").
-        RelationKindAttr::BelongsTo => lk_override(rel).unwrap_or("id").to_string(),
+        // child's FK references.
+        RelationKindAttr::BelongsTo => owner_key_expr(rel, target_ty),
         // MorphTo: parent_key is the PK on the (variable) target
         // table - Laravel default "id".
-        RelationKindAttr::MorphTo => "id".to_string(),
+        RelationKindAttr::MorphTo => quote! { "id" },
     };
 
     // Foreign key - what the child / pivot / morph row carries.
@@ -861,7 +864,7 @@ fn emit_relation_inventory(
                 target_type_name: &target_type_name,
                 target_table_expr: &target_table_expr,
                 foreign_key: "",
-                parent_key: &parent_key_str,
+                parent_key: &parent_key_expr,
                 pivot_table_expr: &pivot_table_token,
                 pivot_parent_key: &parent_pivot_col,
                 pivot_related_key: &related_pivot_col,
@@ -928,7 +931,7 @@ fn emit_relation_inventory(
                 target_type_name: &target_type_name,
                 target_table_expr: &target_table_expr,
                 foreign_key: "",
-                parent_key: &parent_key_str,
+                parent_key: &parent_key_expr,
                 pivot_table_expr: &pivot_table_token,
                 pivot_parent_key: &pivot_parent_col,
                 pivot_related_key: &pivot_related_col,
@@ -966,7 +969,7 @@ fn emit_relation_inventory(
         target_type_name: &target_type_name,
         target_table_expr: &target_table_expr,
         foreign_key: &foreign_key_str,
-        parent_key: &parent_key_str,
+        parent_key: &parent_key_expr,
         pivot_table_expr: &pivot_table_expr,
         pivot_parent_key: &pivot_parent_key_str,
         pivot_related_key: &pivot_related_key_str,
@@ -992,7 +995,7 @@ struct InventoryFields<'a> {
     target_type_name: &'a str,
     target_table_expr: &'a TokenStream,
     foreign_key: &'a str,
-    parent_key: &'a str,
+    parent_key: &'a TokenStream,
     pivot_table_expr: &'a TokenStream,
     pivot_parent_key: &'a str,
     pivot_related_key: &'a str,
@@ -1153,6 +1156,22 @@ fn local_key_ident(input: &ModelInput, rel: &RelationDecl) -> Result<syn::Ident>
                 ),
             )),
         },
+    }
+}
+
+/// The owner column a `BelongsTo`'s foreign key holds, as a `&str`
+/// expression: the declared `lk`, else the owner model's own primary
+/// key, as Laravel's `belongsTo` defaults its owner key to the related
+/// model's key name.
+///
+/// The lazy relation, the eager, count and aggregate arms, and the
+/// inventory entry `has` and owner touches read, all use this one
+/// expression. They used to default to `id`, which an owner keyed on
+/// another column does not have.
+fn owner_key_expr(rel: &RelationDecl, target_ty: &syn::Type) -> TokenStream {
+    match lk_override(rel) {
+        Some(lk) => quote! { #lk },
+        None => quote! { <#target_ty as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY },
     }
 }
 
@@ -1632,14 +1651,9 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             let fk = fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_belongs_to_fk(target_ty));
-            // owner key on parent = parent's PK by default ("id").
-            // T2: BelongsTo's parent PK isn't introspectable from this
-            // macro (the parent struct lives in a different `#[model]`
-            // invocation), so we default to "id" + honour an explicit
-            // `lk = "..."` override.
-            let owner_key = lk_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            // The owner's column the foreign key holds - see
+            // `owner_key_expr`.
+            let owner_key = owner_key_expr(rel, target_ty);
 
             let fk_ident = quote::format_ident!("{}", fk);
             // Inspect the FK field type on the child struct. If
@@ -2592,10 +2606,9 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_belongs_to_fk(target_ty));
             let fk_ident = quote::format_ident!("{}", fk);
-            // Owner key on the parent.
-            let owner_key = lk_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            // The owner's column the foreign key holds - see
+            // `owner_key_expr`.
+            let owner_key = owner_key_expr(rel, target_ty);
             let fk_is_optional = field_is_optional(input, &fk);
             let with_default_chain = match with_default_expr(rel) {
                 Some(expr) => quote! { .with_default(#expr) },
@@ -3861,9 +3874,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             let fk = fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_belongs_to_fk(target_ty));
-            let owner_key = lk_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            let owner_key = owner_key_expr(rel, target_ty);
             let fk_ident = quote::format_ident!("{}", fk);
             let fk_is_optional = field_is_optional(input, &fk);
             let per_parent_key_expr = if fk_is_optional {
@@ -4949,9 +4960,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
             let fk = fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_belongs_to_fk(target_ty));
-            let owner_key = lk_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            let owner_key = owner_key_expr(rel, target_ty);
             let fk_ident = quote::format_ident!("{}", fk);
             let fk_is_optional = field_is_optional(input, &fk);
             let per_parent_key_expr = if fk_is_optional {
