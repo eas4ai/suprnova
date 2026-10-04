@@ -212,16 +212,43 @@ impl MaintenanceMode for FileMaintenanceMode {
         // atomic on the same filesystem, so a request reading the down file
         // concurrently with `down` never observes a half-written (and thus
         // unparseable) file - which would otherwise surface as a 500.
-        let tmp = self.path.with_extension("tmp");
-        tokio::fs::write(&tmp, json).await.map_err(|e| {
-            FrameworkError::internal(format!("maintenance: write {}: {e}", tmp.display()))
-        })?;
-        tokio::fs::rename(&tmp, &self.path).await.map_err(|e| {
-            FrameworkError::internal(format!(
+        //
+        // The temp name is unique and created exclusively. `rename` publishes
+        // a pathname, not a writer: with one shared name, a second `down`
+        // could truncate and refill the inode the first had just published,
+        // and the second's own rename then failed with the name gone.
+        let mut name = self
+            .path
+            .file_name()
+            .map(std::ffi::OsStr::to_os_string)
+            .unwrap_or_else(|| "down".into());
+        name.push(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+        let tmp = self.path.with_file_name(name);
+        let written = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .await?;
+            tokio::io::AsyncWriteExt::write_all(&mut file, json.as_bytes()).await?;
+            tokio::io::AsyncWriteExt::flush(&mut file).await
+        }
+        .await;
+        if let Err(e) = written {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(FrameworkError::internal(format!(
+                "maintenance: write {}: {e}",
+                tmp.display()
+            )));
+        }
+        if let Err(e) = tokio::fs::rename(&tmp, &self.path).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(FrameworkError::internal(format!(
                 "maintenance: rename into {}: {e}",
                 self.path.display()
-            ))
-        })
+            )));
+        }
+        Ok(())
     }
 
     async fn deactivate(&self) -> Result<(), FrameworkError> {
@@ -833,6 +860,75 @@ mod tests {
 
         driver.deactivate().await.unwrap();
         assert!(!driver.active().await.unwrap());
+    }
+
+    /// ROOT-02: concurrent `down` runs each stage their own temp file. They
+    /// used to share `down.tmp`, so one run could publish a file another was
+    /// still writing, and the loser's rename failed with the temp name gone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_file_activations_never_publish_a_partial_file() {
+        let path = temp_down_path();
+        let driver = std::sync::Arc::new(FileMaintenanceMode::with_path(path.clone()));
+        // A payload big enough that writing it is not a single syscall.
+        let except: Vec<String> = (0..4_000).map(|i| format!("api/route/{i}")).collect();
+
+        let mut writers = Vec::new();
+        for w in 0..8 {
+            let driver = driver.clone();
+            let except = except.clone();
+            writers.push(tokio::spawn(async move {
+                for round in 0..25 {
+                    let payload = MaintenancePayload {
+                        retry: Some(w * 1_000 + round),
+                        except: except.clone(),
+                        ..Default::default()
+                    };
+                    driver.activate(&payload).await?;
+                }
+                Ok::<(), FrameworkError>(())
+            }));
+        }
+        let reader = {
+            let driver = driver.clone();
+            tokio::spawn(async move {
+                let mut torn = 0usize;
+                for _ in 0..400 {
+                    if driver.active().await.unwrap_or(false) && driver.data().await.is_err() {
+                        torn += 1;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                torn
+            })
+        };
+
+        let mut failures = Vec::new();
+        for writer in writers {
+            if let Err(e) = writer.await.expect("writer task") {
+                failures.push(e.to_string());
+            }
+        }
+        let torn = reader.await.expect("reader task");
+        assert!(
+            failures.is_empty(),
+            "concurrent activations failed: {:?}",
+            &failures[..failures.len().min(3)]
+        );
+        assert_eq!(torn, 0, "a reader saw a partial or unparseable down file");
+        let read = driver.data().await.expect("final down file parses");
+        assert_eq!(read.except.len(), except.len());
+
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().expect("down file has a parent"))
+            .expect("list the down directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name != "down")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+        driver.deactivate().await.unwrap();
     }
 
     #[test]
