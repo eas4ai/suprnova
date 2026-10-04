@@ -15,7 +15,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   template. Only literals are accepted (numbers, quoted strings, `true`,
   `false`, `null`), and `live:check` reports a wrong count or a literal of
   the wrong type at its line and column. The island root lists each
-  action's parameter names in `data-suprnova-live-actions`.
+  action's parameter names in `data-suprnova-live-actions`. This landed
+  after the `v3.1.0` tag.
 - **Heap profiling.** With the framework's `heap-profiling` feature an
   application profiles its heap with dhat: the framework installs dhat's
   allocator, `#[suprnova::main]` starts the profiler, and a command that
@@ -349,9 +350,74 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `tx.after_commit` and `Queue::push_after_commit_with_tx`, because ambient
   code is outside that transaction. This landed on main after the `v3.0.0`
   tag (#128).
+- **OAuth identities carry the account's picture.** `OAuthIdentity` has
+  `avatar_url`: the picture URL the provider reports, or none. Google
+  fills it from `picture`, TikTok from `avatar_url`, Facebook from
+  `picture.data.url` and X from `profile_image_url`; Apple reports none,
+  and an empty value is none. Treat it as untrusted profile data, and check
+  its scheme and length before you render, fetch or store it. A provider
+  supplies it through `OAuthProvider::avatar_url`, which returns none
+  unless the provider implements it, so a provider written before it
+  compiles and signs in unchanged. This landed after the `v3.1.0` tag
+  (#140).
+- **An asynchronous multipart hook.** `MultipartRequestHooks` has
+  `after_validation_async`, for checks that need the database before the
+  handler runs. A multipart request runs `authorize` before it reads the
+  body, then extraction with its field validation, `after_validation`,
+  `after_validation_async` and the handler, each only after the one before
+  succeeded. A hook that returns errors answers 422 with them, and an empty
+  set of errors is success. An override needs `#[async_trait]`. This
+  landed after the `v3.1.0` tag (#139).
+- **Unsigned keys on every database.** A model field declared `u64` or
+  `Option<u64>`, its key and foreign keys included, reads and writes on
+  SQLite, Postgres and MySQL through the new `AsU64` and `AsOptionalU64`
+  casts: the whole range on MySQL's unsigned columns, and `0` to
+  `i64::MAX` on SQLite and Postgres, which store it signed. There a larger
+  value fails with an error naming the column before anything is sent,
+  and a negative stored value fails to read the same way. This landed
+  after the `v3.1.0` tag (#137).
+- **Settings that match Laravel's schema.** In a package's `Cargo.toml`,
+  `[package.metadata.suprnova.model] datetime_cast = "native"` makes every
+  `DateTime<Utc>` field of that package's models without a cast of its
+  own, the managed timestamps included, use `AsNativeDateTime`, for a
+  time-zone-aware column, and `"naive"` uses `AsNaiveDateTime`, for the
+  time-zone-free columns Laravel creates on Postgres. In the binary's
+  package, `[package.metadata.suprnova.schema] unsigned_ids = true` makes
+  `id()` and `foreign_id()` create unsigned columns on MySQL in every
+  migration the binary runs, and changes nothing on Postgres and SQLite;
+  `#[suprnova::main]` installs it, and `Schema::use_unsigned_ids()` does
+  the same for a program without it. An unknown key or value fails the
+  build. New applications carry both settings commented out. This landed
+  after the `v3.1.0` tag (#137).
 
 ### Changed
 
+- **Multipart failures answer as validation errors under the field's
+  input name.** A missing field, a text part that does not parse as its
+  type, a part of the wrong kind, and a file a validator refuses (too
+  large, not an image, a type `MimeType` does not allow) answer 422 with
+  `errors` under the form input name, so the second file of a `files[]`
+  field is `files.1`, and the Inertia validation middleware shows each
+  error under its field. Before, a text part that did not parse answered
+  400, a file over `MaxSize` 413, and the others 422 without `errors`. The
+  messages come from the validation catalog (`validation-required`,
+  `validation-max-file` and the rest), so an application's
+  `lang/<locale>/validation.ftl` overrides them. A file over `MaxSize`
+  stops the body at the chunk that crossed the limit and leaves no
+  temporary file. A field's `max_count` answers 413 with the other
+  request-wide limits, instead of 422. An `UploadValidator` returns
+  `FrameworkError::invalid_upload` for a validation failure, and its other
+  errors keep their status. A `bool` field accepts `1`, `0`, `true`,
+  `false`, `on` and `off`. An empty part, which Inertia sends for `null`,
+  is none for an optional field that is not a `String` and missing for a
+  required one, and a part of the wrong kind sent to an optional or list
+  field fails instead of being ignored. This landed after the `v3.1.0` tag
+  (#139).
+- **`#[model]` takes the key type from the key field.** Without
+  `key_type`, the key type is the type of the field `primary_key` names;
+  it was `i64` whatever the field said. A `key_type` that disagrees with
+  that field fails to compile, naming both. This landed after the `v3.1.0`
+  tag (#137).
 - **The combobox submits the chosen option's value.** A selection used to
   write the option's label into the one bound field, so the value each
   option carries never reached the server. `suprnova.combobox` now binds
@@ -360,7 +426,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `<name>_query` is the typed text, which a remote listbox answers. The
   macro takes the island's value as `value`, and the script marks that
   option selected. Bind the query field where you bound `name` before, and
-  read the choice from `name`.
+  read the choice from `name`. This landed after the `v3.1.0` tag.
 - **Live's limits are settings sized for large pages.** Every limit Live
   applies is a `LIVE_*` key in the application's `.env` file or a
   `LiveConfig::builder()` method, and a value outside a key's range fails
@@ -368,20 +434,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   limits of its own: it refused an island render over 32 KiB and a morph
   past 10,000 nodes or one second while the server allowed 1 MiB, and an
   action whose island root passed 1 MiB failed. The bootstrap now writes
-  every limit into the page's configuration element and the browser
-  applies those values, so it never refuses what the server allows.
-  Requests, responses and island HTML default to 16 MiB; a morph takes up
-  to 1,000,000 nodes and keys with no deadline; an upload sends 8 MiB
-  chunks of a file up to 1 GiB; an open document holds and replays up to
-  4,096 asynchronous events; and a session streams to 64 open tabs, where
-  it was 8. A replay log holds up to 4 MiB per subscription and 256 MiB
-  across the process, dropping its oldest entries first, and a reconnect
-  that needed a dropped entry renders fresh. A tripped limit's message
-  names the limit, the measured and configured values and the key, in the
-  browser console and in the server log. `suprnova live:inspect` prints
-  every limit by its key, and the Live chapter lists them with their
-  ranges. `live:check` and `live:inspect` speak tooling protocol 2 and
-  fall back to protocol 1 with an application built before it.
+  every limit into the page's configuration element and the browser applies
+  those values, so it never refuses what the server allows. Requests,
+  responses and island HTML default to 16 MiB; a morph takes up to
+  1,000,000 nodes and keys with no deadline; an upload sends 8 MiB chunks
+  of a file up to 1 GiB; an open document holds and replays up to 4,096
+  asynchronous events; and a session streams to 64 open tabs, where it was
+  8. A replay log holds up to 4 MiB per subscription and 256 MiB across the
+  process, dropping its oldest entries first, and a reconnect that needed a
+  dropped entry renders fresh. A tripped limit's message names the limit,
+  the measured and configured values and the key, in the browser console
+  and in the server log. `suprnova live:inspect` prints every limit by its
+  key, and the Live chapter lists them with their ranges. `live:check` and
+  `live:inspect` speak tooling protocol 2 and fall back to protocol 1 with
+  an application built before it. This landed after the `v3.1.0` tag.
 - **Less memory for the same work.** Model events are built only when a
   listener, a fake or a deferral will see them, so a query no longer
   copies every row it reads for a `Retrieved` event nobody hears. Eager
@@ -417,6 +483,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Facebook sign-in receives the email.** The Facebook provider requested
+  a bare `/me`, for which the Graph API returns only `id` and `name`; it
+  now names `id`, `name`, `email` and `picture`. X requests
+  `profile_image_url` among its user fields. This landed after the
+  `v3.1.0` tag (#140).
 - **`live:check` finds unescaped output wherever a template writes it.**
   It read `|safe` from an expression's text and skipped `{% let %}`, so
   `{% let y = x|safe %}{{ y }}`, `x|safe|lower` and `escape("none")`
@@ -427,21 +498,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   and the framework's, a Rust macro in an expression, and a dynamic value
   in an unquoted attribute, an `on*` attribute or `script` or `style` text
   are reported as unproved, so a view that passed before can now need a
-  change.
+  change. This landed after the `v3.1.0` tag.
 - **`live:check` handles views with many conditionals.** It counted every
   combination of `if` blocks, so eight independent ones exceeded its limit;
   each conditional's branches are now checked once. Its limits are sized
   for real templates (4 MiB of source, 262,144 nodes) and configurable.
+  This landed after the `v3.1.0` tag.
 - **`live:check` reports the real column.** Directive and markup
   diagnostics reported column 1; they now point at the attribute or tag,
-  in the template that wrote it.
+  in the template that wrote it. This landed after the `v3.1.0` tag.
 - **An action can dispatch more than 128 events.** An action's outcome
   refused more than 128 flash messages, events or effects; it now takes as
-  many as `LIVE_MAX_RESPONSE_ITEMS` allows, 65,536 by default.
+  many as `LIVE_MAX_RESPONSE_ITEMS` allows, 65,536 by default. This landed
+  after the `v3.1.0` tag.
 - **Reordering a long keyed list morphs in linear time.** The morph looked
   up each keyed element in the list of moved elements, so reordering every
   row took time quadratic in the row count; 10,000 rows took about 67 ms
-  and now take under 20 ms.
+  and now take under 20 ms. This landed after the `v3.1.0` tag.
 - **A workflow step can take an integer argument.** `#[workflow_step]`
   handed the step's body to the workflow context in a closure that borrowed
   its arguments, and the context needs one it can keep, so a step taking a
