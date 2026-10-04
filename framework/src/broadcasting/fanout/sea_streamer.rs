@@ -376,14 +376,33 @@ impl SeaStreamerBroadcastHub {
         connect_opts.set_stdio_connect_options(|opts| {
             opts.set_loopback(loopback);
         });
-        // Same producer-database rule as the queue driver: sea-streamer does
-        // not take the logical database index from a redis URL's path, so a
-        // hub pointed at `redis://host:6379/3` would silently operate on
-        // database 0. Carry the index across explicitly.
+        // sea-streamer keeps only the scheme, host and port of a redis URL:
+        // the logical database index of its path and the credentials of its
+        // userinfo are dropped, so a hub pointed at `redis://host:6379/3`
+        // would silently operate on database 0, and one pointed at a
+        // password-protected server would be refused. Parse the URL with the
+        // redis client's own rules and carry all three across explicitly.
         if streamer_uri.starts_with("redis://") || streamer_uri.starts_with("rediss://") {
-            let db = crate::queue::redis::redis_db_from_url(streamer_uri)?;
+            let info =
+                redis::IntoConnectionInfo::into_connection_info(streamer_uri).map_err(|e| {
+                    FrameworkError::internal(format!(
+                        "SeaStreamerBroadcastHub: invalid redis URL ({:?}); the URL is \
+                         not repeated because it can carry a password",
+                        e.kind()
+                    ))
+                })?;
+            let settings = info.redis_settings();
+            let db = u32::try_from(settings.db()).map_err(|_| {
+                FrameworkError::internal(
+                    "SeaStreamerBroadcastHub: the redis URL selects a negative database",
+                )
+            })?;
+            let username = settings.username().map(str::to_owned);
+            let password = settings.password().map(str::to_owned);
             connect_opts.set_redis_connect_options(|opts| {
                 opts.set_db(db);
+                opts.set_username(username);
+                opts.set_password(password);
             });
         }
 

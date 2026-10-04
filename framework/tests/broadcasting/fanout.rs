@@ -648,3 +648,40 @@ async fn redis_presence_reports_stream_write_failure() {
     assert!(!message.contains("member-1"));
     assert!(!message.contains(&stream_key));
 }
+
+/// The credentials of a `redis://user:password@host/db` URL authenticate the
+/// hub's Redis connections. A server that requires a password refuses a
+/// connection that drops them, so without them nothing crosses between hubs.
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn redis_backend_authenticates_with_the_url_credentials() {
+    let server = crate::redis_server::PasswordRedis::start("fanout-secret");
+    for url in [
+        format!("redis://:fanout-secret@127.0.0.1:{}", server.port),
+        format!("redis://default:fanout-secret@127.0.0.1:{}/3", server.port),
+    ] {
+        let stream_key = format!("suprnova-test-auth-{}", uuid::Uuid::new_v4());
+        let hub_a = SeaStreamerBroadcastHub::new(&url, &stream_key)
+            .await
+            .expect("hub_a Redis connect");
+        let hub_b = SeaStreamerBroadcastHub::new(&url, &stream_key)
+            .await
+            .expect("hub_b Redis connect");
+        let mut rx = hub_b.subscribe("chat.auth");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        hub_a
+            .publish(envelope(
+                "chat.auth",
+                "MessagePosted",
+                json!({ "from": "a" }),
+            ))
+            .await
+            .expect("an authenticated publish lands");
+        let received = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the event crosses hubs within 5 s")
+            .expect("recv");
+        assert_eq!(received.data["from"], "a");
+    }
+}
