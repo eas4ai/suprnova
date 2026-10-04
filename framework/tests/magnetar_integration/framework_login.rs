@@ -23,7 +23,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use sea_orm::{ConnectOptions, ConnectionTrait, Database};
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, FromQueryResult};
 use sea_orm_migration::MigratorTrait;
 use suprnova::auth_flows::two_factor::migration::Migration as TwoFactorMigration;
 use suprnova::auth_flows::two_factor::migration_attempts::Migration as TwoFactorAttemptsMigration;
@@ -269,6 +269,12 @@ fn router() -> Router {
         .get("/two-factor-challenge", |request: Request| async move {
             match TwoFactor::complete_challenge(&header(&request, "x-code")).await {
                 Ok(user) => Ok(HttpResponse::text(user.id.to_string())),
+                Err(error) => failure(error),
+            }
+        })
+        .get("/login-remember", |request: Request| async move {
+            match Auth::login_remember(header(&request, "x-user-id"), 60).await {
+                Ok(()) => Ok(HttpResponse::text("signed in")),
                 Err(error) => failure(error),
             }
         })
@@ -829,4 +835,33 @@ async fn a_failed_session_save_retires_the_issued_magnetar_session() {
     assert_eq!(status, 500);
     assert_eq!(browser.whoami().await, "guest");
     assert_eq!(session_count(&account).await, 0);
+}
+
+/// `Auth::login_remember` of an account with a Magnetar second factor is
+/// refused before a remember-me credential exists: none reaches the
+/// browser, and none is left in the engine to sign in with later.
+#[tokio::test]
+async fn a_magnetar_second_factor_refuses_a_remembered_login_up_front() {
+    let account = setup().await;
+    enroll_magnetar_factor(&account).await;
+
+    let mut browser = Browser::open().await;
+    let (status, body) = browser
+        .get("/login-remember", &[("x-user-id", &account.id)])
+        .await;
+    assert_eq!(status, 409, "{body}");
+    assert!(!browser.cookies.contains_key("remember_me"));
+    assert_eq!(browser.whoami().await, "guest");
+    let remembered: Vec<sea_orm::JsonValue> =
+        sea_orm::JsonValue::find_by_statement(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Sqlite,
+            format!(
+                "SELECT id FROM auth_remember_tokens WHERE user_id = {}",
+                account.id
+            ),
+        ))
+        .all(CONNECTION.get().expect("setup ran"))
+        .await
+        .expect("query remember rows");
+    assert!(remembered.is_empty(), "no remember credential was issued");
 }

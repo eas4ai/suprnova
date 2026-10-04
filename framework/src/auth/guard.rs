@@ -197,8 +197,15 @@ impl Auth {
         ttl_minutes: i64,
     ) -> Result<(), crate::error::FrameworkError> {
         Self::ensure_remember_issue_scopes()?;
-        Self::flush_pending_remember_revocations().await?;
         let user_id = user_id.into();
+        // With the Magnetar engine installed, ask before anything changes:
+        // a refused login must not leave a remember credential behind.
+        let host_auth_epoch = if guard_name == Self::default_guard_name() {
+            crate::magnetar_integration::admit_host_sign_in(&user_id).await?
+        } else {
+            None
+        };
+        Self::flush_pending_remember_revocations().await?;
         let remember_to_revoke = Self::prepare_guard_remember_identity_replacement(guard_name);
         if let Some((previous_user_id, selector)) = remember_to_revoke {
             Self::revoke_remember_selector(guard_name, &previous_user_id, &selector).await?;
@@ -207,6 +214,9 @@ impl Auth {
         // also verifies the session scope is installed - failing loud here
         // before the DB row gets written by `issue_remember_cookie`.
         Self::login_guard_id(guard_name, user_id.clone())?;
+        if let Some(auth_epoch) = host_auth_epoch {
+            crate::session::middleware::record_host_sign_in_epoch(&user_id, auth_epoch);
+        }
         // Issue the row + queue the cookie.
         Self::issue_remember_cookie_for_guard(guard_name, &user_id, ttl_minutes).await
     }
