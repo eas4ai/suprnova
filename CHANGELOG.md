@@ -560,8 +560,29 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `load-more`, `pagination`, `radio-group`, `switch`, `textarea` and
   `upload`. This landed after the `v3.1.0` tag.
 
+- **Content negotiation treats `q=0` as a refusal.** `accepts`,
+  `accepts_json`, `prefers`, `wants_json`, `expects_json` and
+  `acceptable_content_types` leave out an `Accept` type weighted `q=0`, as
+  RFC 9110 says, even beside `*/*`; the most specific matching range
+  decides. Laravel lists such types as acceptable. This landed after the
+  `v3.1.0` tag.
+
 ### Fixed
 
+- **Middleware, sessions, uploads and test helpers.** A middleware group
+  reused by two sibling groups no longer fails with `CycleDetected`. A
+  `RateLimiter` counter that expired in the middle of a hit gets its expiry
+  back, where it could refuse every later request until cleared. Flash keys
+  containing `_flash.new.` or `_flash.old.` survive the next request, and
+  `SessionData::decrement(key, i64::MIN)` saturates instead of panicking. A
+  form body sent as `Application/X-WWW-Form-Urlencoded` (any case) is read
+  by `Request::input`, CSRF, Pusher channel auth and identity rate limits.
+  `set_global_upload_spill_threshold(usize::MAX)`, the documented way to
+  keep uploads in memory, no longer panics. The Inertia error page compares
+  `Accept` qvalues to three decimals. A redirect on a route without a
+  session keeps `App::flash` values for the current response.
+  `TestResponse::assert_cookie` matches only cookie names, not attributes
+  such as `Path` or `HttpOnly`. This landed after the `v3.1.0` tag.
 - **A Live page with several islands on SSE keeps its updates.** When an
   island's first event arrived before its subscribe answer, the browser
   treated it as traffic for an unknown subscription, retired the shared
@@ -874,6 +895,30 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **CORS patterns anchor every alternative.** `allow_origin_patterns`
+  anchored only the first and last alternative of a pattern such as
+  `a|b`, so `https://app.example.evil.test` matched
+  `https://app\.example|...` and got a credentialed allow. Every
+  alternative must now match the whole origin.
+- **Rate limits cannot be sidestepped.** On the Redis limiter, a
+  shorter-window quota sharing a key with a longer one deleted the longer
+  quota's history; history now lasts for the longest window used on the
+  key, as the memory driver already did. An identity-keyed limit read the
+  query string or the body, so `?email=decoy` or a blank `?email=` reached
+  a body address under a fresh quota; both are now read, and a request that
+  names two different addresses shares one `{prefix}:{field}-ambiguous`
+  bucket.
+- **`MimeType` sniffs before it trusts the header.** Script text, or
+  markup hidden after 16 KiB of whitespace, passed an image allowlist on a
+  spoofed `Content-Type`. The header now counts only for types without
+  magic bytes, such as `text/csv`.
+- **An Inertia validation redirect stays on the host.** A same-host
+  `Referer` such as `https://app.test//evil.test/x` sent the redirect to
+  another host; it now falls back to the previous URL.
+- **Signed URLs sign the order of a repeated parameter.** Swapping the
+  values of a repeated key (`?mode=a&mode=b` to `?mode=b&mode=a`) kept the
+  signature valid while changing what the handler read. URLs minted before
+  still verify.
 - **Mail headers and recipients cannot be injected.** Postmark and Mailgun
   received recipient lists joined from unquoted display names, so a name
   such as `attacker@example.com, Victim` added a recipient, and SMTP and
