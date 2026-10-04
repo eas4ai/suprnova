@@ -443,7 +443,17 @@ For full control, use cron syntax:
 .cron("0 */2 * * *")    // Every 2 hours
 .cron("30 4 * * 1-5")   // 4:30 AM on weekdays
 .cron("0 0 1,15 * *")   // 1st and 15th of each month
+.cron("0 9 1-15/7 * *") // 9:00 AM on the 1st, 8th and 15th
 ```
+
+Each field is a comma-separated list of parts. A part is `*`, a value
+`N`, or a range `N-M`, and any of them can take a `/step`; `N/step` runs
+from `N` to the end of the field. A step counts from the first value of
+its part, and for `*` that is the field's first value: `*/2` in the
+day-of-month field is the 1st, 3rd, 5th, and so on, and `*/3` in the
+month field is January, April, July, and October - what cron and
+Laravel mean. The expressions `schedule:list` prints for another
+timezone use the same grammar, so you can schedule one as it reads.
 
 `.cron(...)` **panics** if the expression is malformed (wrong field count,
 unparseable step/range/list). Use `.try_cron(expr)` when the expression is
