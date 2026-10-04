@@ -153,15 +153,30 @@ pub(crate) fn new_bag() -> Arc<Mutex<HashMap<String, Value>>> {
 /// transferred to the session and the current response is discarded by
 /// the client following the `Location` header.
 pub fn transfer_to_session() {
-    let entries = drain();
-    if entries.is_empty() {
+    if !has_pending() {
         return;
     }
+    // Drain inside the session callback, which runs only when a session
+    // is in scope. Draining first and then finding no session dropped the
+    // values the doc above promises stay in the bag.
     crate::session::session_mut(|s| {
-        for (k, v) in entries {
+        for (k, v) in drain() {
             s.flash(&k, v);
         }
     });
+}
+
+/// Whether the current request's flash bag holds anything, without
+/// draining it. Checked before [`transfer_to_session`] opens the session,
+/// because opening it records a session read and an empty bag has nothing
+/// to move.
+fn has_pending() -> bool {
+    FLASH_BAG
+        .try_with(|bag| match lock::lock(bag, "inertia flash bag") {
+            Ok(guard) => !guard.is_empty(),
+            Err(_) => false,
+        })
+        .unwrap_or(false)
 }
 
 /// Collect the receiving request's session `_flash.old.*` entries
