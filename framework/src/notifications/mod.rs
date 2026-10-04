@@ -184,6 +184,15 @@ pub trait DynNotification: Send + Sync {
     /// Object-safe forward to [`Notification::after_sending`]. Invoked by the
     /// worker once per channel that delivered successfully.
     fn after_sending(&self, channel: &str) -> Result<(), FrameworkError>;
+    /// The notification itself, for a channel that renders it through a
+    /// typed hook such as the mail channel's
+    /// [`NotificationMailable::to_mail`](crate::notifications::channels::mail::NotificationMailable::to_mail).
+    /// `data()` is the public payload and need not carry every field the
+    /// rendering reads. The blanket impl returns `Some`; the `None` default
+    /// keeps a hand-written implementation compiling.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }
 
 impl<N: Notification> DynNotification for N {
@@ -198,6 +207,9 @@ impl<N: Notification> DynNotification for N {
     }
     fn after_sending(&self, channel: &str) -> Result<(), FrameworkError> {
         <N as Notification>::after_sending(self, channel)
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 }
 
