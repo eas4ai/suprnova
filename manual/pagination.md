@@ -331,6 +331,10 @@ filter to slice the table deterministically; an arbitrary `ORDER BY
 random_score()` cursor would skip and duplicate rows. If you need a
 non-PK sort, switch to `paginate` / `simple_paginate`.
 
+An `OFFSET` on the builder positions the first page only, the page
+requested without a cursor. Every later page starts at its cursor, so
+an offset never skips rows between two pages.
+
 ### Cursors are encrypted and authenticated
 
 Suprnova cursors are **not** Laravel's base64-JSON plaintext. The wire
@@ -391,6 +395,11 @@ The facade also offers `length_aware_on(conn, ...)` and
 a typed `cursor(query, cursor, per_page, order_col)` form that takes
 the keyset column explicitly - used when the cursor sorts on something
 other than the primary key.
+
+`Pagination::cursor` treats the `Select` the way `cursor_paginate`
+treats a builder: it drops an `ORDER BY` the `Select` already has and
+orders by the keyset column alone, and it applies the `Select`'s
+`OFFSET` to the first page only.
 
 Routing rules match the Eloquent builder. An ambient
 `DB::transaction` is honoured (both the COUNT and the page query run on

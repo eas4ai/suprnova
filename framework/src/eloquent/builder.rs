@@ -5126,7 +5126,10 @@ where
     /// via `CursorPaginator::encode_value` so they can't be forged.
     ///
     /// Any existing `ORDER BY` on the builder is replaced - cursor
-    /// pagination requires a stable total order over the PK.
+    /// pagination requires a stable total order over the PK. An `OFFSET`
+    /// positions the first page only, the one requested without a
+    /// cursor; every later page starts at its cursor, so the offset
+    /// never skips rows between two pages.
     ///
     /// ## Errors
     ///
@@ -5145,13 +5148,18 @@ where
             Some(c) => Some(crate::pagination::CursorPaginator::<M>::decode_value(&c)?),
             None => None,
         };
+        let from_cursor = decoded.is_some();
         let plan = crate::pagination::cursor::plan_scan(decoded);
 
         // Replace any existing ORDER BY with a stable PK sort in the
         // plan's direction - cursor pagination requires a total order
-        // over the keyset column.
-        let mut q = self;
-        q.orders.clear();
+        // over the keyset column. A page reached by a cursor starts at
+        // the cursor alone: an offset kept there would skip rows again
+        // on every page.
+        let mut q = self.reorder();
+        if from_cursor {
+            q.offset = None;
+        }
         let mut q = if plan.order_asc {
             q.order_by_asc(pk)
         } else {
@@ -5287,6 +5295,11 @@ where
     /// later batch (rather than skipping or duplicating, which
     /// [`Self::chunk`]'s OFFSET form is vulnerable to).
     ///
+    /// The walk sets its own order: an `ORDER BY` already on the query is
+    /// dropped, since any other order would make the cursor skip some
+    /// rows and repeat others. An `OFFSET` skips that many rows once,
+    /// before the first batch; every later batch starts at the cursor.
+    ///
     /// ## Key types
     ///
     /// The cursor is the primary key's own value, as
@@ -5362,11 +5375,14 @@ where
         }
         let pk = M::primary_key_name();
         let kind = Self::refuse_keyset_key_by_metadata("chunk_by_id", pk)?;
+        let mut walk = self.reorder_by(pk, Direction::Asc);
+        let mut first_offset = walk.offset.take();
         let mut cursor: Option<Value> = None;
         loop {
-            let mut q = self.clone().order_by_asc(pk).limit(n);
-            if let Some(after) = cursor.take() {
-                q = q.filter_op(pk, ">", after);
+            let mut q = walk.clone().limit(n);
+            match cursor.take() {
+                Some(after) => q = q.filter_op(pk, ">", after),
+                None => q.offset = first_offset.take(),
             }
             let batch = q.get().await?;
             // The next cursor is read, and checked, before `f` sees the
@@ -5544,9 +5560,10 @@ where
     ///
     /// The batches are keyset batches, `pk > cursor ORDER BY pk ASC`,
     /// with the primary key's own value as the cursor, exactly as in
-    /// [`Self::chunk_by_id`]. A single integer key works, and so does a
-    /// single string key, including the UUID and ULID keys of
-    /// `#[model(unique_id = "...")]`.
+    /// [`Self::chunk_by_id`], which also says how an `ORDER BY` or an
+    /// `OFFSET` already on the query is treated. A single integer key
+    /// works, and so does a single string key, including the UUID and ULID
+    /// keys of `#[model(unique_id = "...")]`.
     ///
     /// A key that cannot carry the cursor is refused with
     /// `FrameworkError::internal`, which names the model and the column
@@ -5578,11 +5595,14 @@ where
             }
             let pk = M::primary_key_name();
             let kind = Self::refuse_keyset_key_by_metadata("lazy_by_id", pk)?;
+            let mut walk = builder.reorder_by(pk, Direction::Asc);
+            let mut first_offset = walk.offset.take();
             let mut cursor: Option<Value> = None;
             loop {
-                let mut q = builder.clone().order_by_asc(pk).limit(batch_size);
-                if let Some(after) = cursor.take() {
-                    q = q.filter_op(pk, ">", after);
+                let mut q = walk.clone().limit(batch_size);
+                match cursor.take() {
+                    Some(after) => q = q.filter_op(pk, ">", after),
+                    None => q.offset = first_offset.take(),
                 }
                 let batch = q.get().await?;
                 // The next cursor is read, and checked, before the first

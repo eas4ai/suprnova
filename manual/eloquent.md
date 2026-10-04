@@ -2702,6 +2702,11 @@ so rows inserted mid-iteration with PKs above the cursor land in a
 later batch (or are picked up by a subsequent run) - they never cause
 an original row to skip or duplicate.
 
+The walk sets its own order. An `ORDER BY` already on the query is
+dropped, because any other order would make the cursor skip some rows
+and repeat others. An `OFFSET` on the query skips that many rows once,
+before the first batch; every later batch starts at the cursor.
+
 The cursor is the value of the primary key, in the order of the key.
 These keys work:
 
@@ -2786,7 +2791,8 @@ Override the batch size with `lazy_by_id(500)`. `cursor()` is the
 Laravel name and is a zero-cost alias for `lazy()`.
 
 `lazy()`, `lazy_by_id()` and `cursor()` use the same keyset cursor as
-`chunk_by_id`, so the same keys work and the same keys are refused. The
+`chunk_by_id`, so the same keys work, the same keys are refused, and an
+`ORDER BY` or `OFFSET` on the query is treated the same way. The
 error is the first item of the stream. Refusal by column type happens
 before the first query. A row with a null or mismatched key is refused
 when its batch arrives, before the stream yields any row of that batch.
