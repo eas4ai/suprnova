@@ -207,9 +207,16 @@ impl Translator for FluentTranslator {
         Ok(rendered.into_owned())
     }
 
+    /// A message with attributes but no value counts as absent:
+    /// [`translate`](Translator::translate) has no value to render for it,
+    /// and `Lang::has` promises a real translation.
     fn has(&self, locale: &Locale, key: &str) -> bool {
         let map = self.inner.read().unwrap_or_else(|e| e.into_inner());
-        map.get(locale).is_some_and(|c| c.bundle.has_message(key))
+        map.get(locale).is_some_and(|c| {
+            c.bundle
+                .get_message(key)
+                .is_some_and(|message| message.value().is_some())
+        })
     }
 
     fn available_locales(&self) -> Vec<Locale> {

@@ -218,7 +218,7 @@ locale**, which the middleware bound for this request.
 | `Lang::get_with(key, args)` | `String` | Same, with arguments |
 | `Lang::try_get(key)` | `Result<String, FrameworkError>` | Errors instead of degrading |
 | `Lang::try_get_with(key, args)` | `Result<String, FrameworkError>` | Same, with arguments |
-| `Lang::has(key)` | `bool` | Whether the key resolves for the current locale, or anywhere along its fallback chain |
+| `Lang::has(key)` | `bool` | Whether the key resolves for the current locale, or anywhere along its fallback chain. A message with attributes and no value does not count |
 | `Lang::locale()` | `Locale` | The current locale |
 | `Lang::set_locale(locale)` | `()` | Change it for the rest of this request |
 | `Lang::available_locales()` | `Vec<Locale>` | Every locale with a loaded catalog |

@@ -32,7 +32,11 @@ pub trait Translator: Send + Sync {
         args: &TranslateArgs,
     ) -> Result<String, FrameworkError>;
 
-    /// Whether `locale`'s catalog defines `key`.
+    /// Whether `locale`'s catalog defines `key` with a value
+    /// [`translate`](Self::translate) can render. `Lang::has` relies on it to
+    /// promise a real translation rather than the bare key, so a key that
+    /// exists without a value (a Fluent message with only attributes) is not
+    /// one.
     fn has(&self, locale: &Locale, key: &str) -> bool;
 
     /// Locales with a loaded catalog.

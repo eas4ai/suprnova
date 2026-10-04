@@ -202,6 +202,28 @@ fn reload_if_stale_detects_a_deleted_file() {
     assert!(t.translate(&en, "w", &TranslateArgs::new()).is_err());
 }
 
+/// DRIVERS-026: a message with attributes and no value has nothing
+/// `translate` can render, so `has` must not report it as translatable.
+#[test]
+fn has_is_false_for_a_message_with_attributes_but_no_value() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(
+        tmp.path(),
+        "en",
+        "app.ftl",
+        "login-button =\n    .title = Sign in\nplain = Plain\n",
+    );
+    let t = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
+    let en = Locale::parse("en").unwrap();
+    assert!(
+        t.translate(&en, "login-button", &TranslateArgs::new())
+            .is_err(),
+        "precondition: an attribute-only message has no value to translate"
+    );
+    assert!(!t.has(&en, "login-button"));
+    assert!(t.has(&en, "plain"));
+}
+
 /// `Lang` facade + `__!` macro tests. These bind a process-global
 /// container binding (`App::bind::<dyn Translator>`), and tests within
 /// one integration-test binary run concurrently by default - a later
@@ -251,6 +273,26 @@ mod lang_facade {
             Lang::set_locale(Locale::parse("es").unwrap());
             assert_eq!(Lang::locale().as_str(), "es");
             assert_eq!(Lang::get("greet"), "Hola");
+        })
+        .await;
+    }
+
+    /// DRIVERS-026: `Lang::has` promises `Lang::get` would return a real
+    /// translation; an attribute-only message only ever returns its key.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn lang_has_is_false_for_an_attribute_only_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        super::write_lang(
+            tmp.path(),
+            "en",
+            "app.ftl",
+            "login-button =\n    .title = Sign in\n",
+        );
+        bind_translator(tmp.path());
+        scope_locale(Locale::parse("en").unwrap(), async {
+            assert_eq!(Lang::get("login-button"), "login-button");
+            assert!(!Lang::has("login-button"));
         })
         .await;
     }
