@@ -309,3 +309,38 @@ async fn webpush_channel_propagates_push_service_5xx() {
         "expected upstream status in error: {msg}"
     );
 }
+
+/// The path of a push endpoint is the capability that reaches the browser.
+/// A transport failure (here, nothing listening) must not carry the endpoint
+/// into the error, which the dispatcher logs and `NotificationFailed`
+/// listeners receive.
+#[tokio::test]
+#[serial]
+async fn webpush_channel_transport_error_does_not_carry_the_endpoint() {
+    // Bind and drop a listener so the port is known to refuse connections.
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a free port");
+        listener.local_addr().expect("local addr").port()
+    };
+    let channel = build_channel();
+    let subscription_route = Subscriber {
+        endpoint: format!("http://127.0.0.1:{port}/push/the-capability-token-of-the-browser"),
+    }
+    .route_for("webpush")
+    .expect("subscriber returns a webpush route");
+
+    let err = (&*channel as &dyn Channel)
+        .deliver(&subscription_route, &PingNote as &dyn DynNotification)
+        .await
+        .expect_err("a refused connection surfaces as Err");
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("WebPushChannel"),
+        "expected channel context in error: {msg}"
+    );
+    assert!(
+        !msg.contains("the-capability-token-of-the-browser"),
+        "the endpoint capability must not appear in the error: {msg}"
+    );
+}

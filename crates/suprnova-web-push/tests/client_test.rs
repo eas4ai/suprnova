@@ -531,3 +531,44 @@ async fn allow_unconfined_redirects_follows_explicitly() {
     assert_eq!(resp.status, 201);
     // On drop, `internal` asserts its `.expect(1)` - the redirect was followed.
 }
+
+/// A transport failure must not carry the endpoint, whose path is the
+/// capability that reaches the browser, into the error text that callers
+/// log. reqwest attaches the request URL to its errors.
+#[tokio::test]
+async fn transport_error_text_does_not_carry_the_endpoint() {
+    // Bind and drop a listener so the port is known to refuse connections.
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a free port");
+        listener.local_addr().expect("local addr").port()
+    };
+    let sub = SubscriptionInfo {
+        endpoint: format!("http://127.0.0.1:{port}/push/the-capability-token-of-the-browser"),
+        keys: suprnova_web_push::client::SubscriptionKeys {
+            p256dh: RECEIVER_P256DH.into(),
+            auth: RECEIVER_AUTH.into(),
+        },
+    };
+    let client = WebPushClient::new(
+        VapidSigner::new(VapidKey::generate()),
+        "mailto:a@example.org",
+    )
+    .expect("test subject is a valid mailto: URI")
+    .with_endpoint_policy(EndpointPolicy::AllowAny);
+
+    let err = client
+        .send(&sub, b"hello", ContentEncoding::Aes128Gcm, 60)
+        .await
+        .expect_err("a refused connection is an error");
+    assert!(matches!(err, WebPushError::Http(_)), "got {err:?}");
+    let text = err.to_string();
+    assert!(
+        !text.contains("the-capability-token-of-the-browser"),
+        "the endpoint must not appear in the error: {text}"
+    );
+    let debug = format!("{err:?}");
+    assert!(
+        !debug.contains("the-capability-token-of-the-browser"),
+        "the endpoint must not appear in the debug form either: {debug}"
+    );
+}
