@@ -56,7 +56,10 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use chrono::{NaiveDate, NaiveTime};
-use sea_orm::{DbBackend, FromQueryResult, Statement, TryGetable, Value as SeaValue};
+use sea_orm::{DbBackend, FromQueryResult, Statement, Value as SeaValue};
+
+use crate::database::ColumnValue;
+use crate::database::column_value::unless_null;
 use serde_json::Value;
 
 use crate::database::clauses::{
@@ -2690,17 +2693,8 @@ fn write_value_expression(
         return Ok("NULL".to_owned());
     }
 
-    // A `u64` column on Postgres or SQLite is a signed `BIGINT`: a value
-    // above `i64::MAX` is refused here, naming the column, rather than
-    // bound as text the database would refuse or, on SQLite, store as a
-    // rounded real.
-    if let Some(bound @ SeaValue::BigUnsigned(_)) = binder(column, value) {
-        crate::eloquent::casts::unsigned::refuse_unsigned_overflow(backend, "", column, &bound)
-            .map_err(|problem| FrameworkError::validation(column, problem))?;
-    }
-
     *position += 1;
-    values.push(bind_value(backend, binder, column, value));
+    values.push(bind_value(backend, binder, column, value)?);
     placeholder(backend, *position)
 }
 
@@ -2715,21 +2709,30 @@ fn write_value_expression(
 /// matches the same moments sent without a zone. The connection's session
 /// zone is UTC (sqlx sets `+00:00`), so the wall clock names the same
 /// moment.
-fn bind_value(backend: DbBackend, binder: ColumnBinder, column: &str, value: &Value) -> SeaValue {
-    match binder(column, value) {
+///
+/// A `u64` column on Postgres or SQLite is a signed `BIGINT`, so a value
+/// above `i64::MAX` for it, in a filter or a write, is refused with an
+/// error naming the column before anything is sent: sea-query-sqlx's
+/// binder would panic on it, and as text Postgres would refuse it and
+/// SQLite store it as a rounded real.
+fn bind_value(
+    backend: DbBackend,
+    binder: ColumnBinder,
+    column: &str,
+    value: &Value,
+) -> Result<SeaValue, FrameworkError> {
+    Ok(match binder(column, value) {
         Some(SeaValue::ChronoDateTimeUtc(Some(moment))) if backend == DbBackend::MySql => {
             SeaValue::from(moment.naive_utc())
         }
-        // Only MySQL has unsigned columns. Elsewhere a comparison with a
-        // `u64` above `i64::MAX`, which no signed column holds, binds the
-        // value as text: sea-query-sqlx's binder would panic on the
-        // unsigned one.
-        Some(SeaValue::BigUnsigned(_)) if backend != DbBackend::MySql => {
-            json_value_to_sea_value(value)
+        Some(bound @ SeaValue::BigUnsigned(_)) => {
+            crate::eloquent::casts::unsigned::refuse_unsigned_overflow(backend, "", column, &bound)
+                .map_err(|problem| FrameworkError::validation(column, problem))?;
+            bound
         }
         Some(bound) => bound,
         None => json_value_to_sea_value(value),
-    }
+    })
 }
 
 /// Bind the value of a date-part comparison (`where_date` and its
@@ -2971,7 +2974,7 @@ fn render_exists(
             .unwrap_or_else(|| "=".to_string());
         *n += 1;
         let ph = placeholder(backend, *n)?;
-        values.push(bind_value(backend, spec.binder, col, val));
+        values.push(bind_value(backend, spec.binder, col, val)?);
         // Qualify with the target table when present so the col reads
         // unambiguously in the subquery's WHERE - Laravel's
         // whereRelation always renders the qualified form.
@@ -3059,13 +3062,13 @@ pub(crate) fn render_subquery_term(
         WhereTerm::Eq(col, v) => {
             *n += 1;
             let ph = placeholder(backend, *n)?;
-            values.push(bind_value(backend, binder, col, v));
+            values.push(bind_value(backend, binder, col, v)?);
             format!("{} = {ph}", q(col))
         }
         WhereTerm::Op(col, op, v) => {
             *n += 1;
             let ph = placeholder(backend, *n)?;
-            values.push(bind_value(backend, binder, col, v));
+            values.push(bind_value(backend, binder, col, v)?);
             format!("{} {op} {ph}", q(col))
         }
         WhereTerm::In(col, vs) => {
@@ -3074,7 +3077,7 @@ pub(crate) fn render_subquery_term(
                 .map(|v| {
                     *n += 1;
                     let ph = placeholder(backend, *n)?;
-                    values.push(bind_value(backend, binder, col, v));
+                    values.push(bind_value(backend, binder, col, v)?);
                     Ok(ph)
                 })
                 .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -3090,7 +3093,7 @@ pub(crate) fn render_subquery_term(
                 .map(|v| {
                     *n += 1;
                     let ph = placeholder(backend, *n)?;
-                    values.push(bind_value(backend, binder, col, v));
+                    values.push(bind_value(backend, binder, col, v)?);
                     Ok(ph)
                 })
                 .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -3103,19 +3106,19 @@ pub(crate) fn render_subquery_term(
         WhereTerm::Between(col, a, b) => {
             *n += 1;
             let pa = placeholder(backend, *n)?;
-            values.push(bind_value(backend, binder, col, a));
+            values.push(bind_value(backend, binder, col, a)?);
             *n += 1;
             let pb = placeholder(backend, *n)?;
-            values.push(bind_value(backend, binder, col, b));
+            values.push(bind_value(backend, binder, col, b)?);
             format!("{} BETWEEN {pa} AND {pb}", q(col))
         }
         WhereTerm::NotBetween(col, a, b) => {
             *n += 1;
             let pa = placeholder(backend, *n)?;
-            values.push(bind_value(backend, binder, col, a));
+            values.push(bind_value(backend, binder, col, a)?);
             *n += 1;
             let pb = placeholder(backend, *n)?;
-            values.push(bind_value(backend, binder, col, b));
+            values.push(bind_value(backend, binder, col, b)?);
             format!("{} NOT BETWEEN {pa} AND {pb}", q(col))
         }
         WhereTerm::Null(col) => format!("{} IS NULL", q(col)),
@@ -3354,13 +3357,13 @@ impl<M> Builder<M> {
             WhereTerm::Eq(col, v) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
-                values.push(bind_value(backend, binder, col, v));
+                values.push(bind_value(backend, binder, col, v)?);
                 format!("{col} = {ph}")
             }
             WhereTerm::Op(col, op, v) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
-                values.push(bind_value(backend, binder, col, v));
+                values.push(bind_value(backend, binder, col, v)?);
                 format!("{col} {op} {ph}")
             }
             WhereTerm::In(col, vs) => {
@@ -3369,7 +3372,7 @@ impl<M> Builder<M> {
                     .map(|v| {
                         *n += 1;
                         let ph = placeholder(backend, *n)?;
-                        values.push(bind_value(backend, binder, col, v));
+                        values.push(bind_value(backend, binder, col, v)?);
                         Ok(ph)
                     })
                     .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -3385,7 +3388,7 @@ impl<M> Builder<M> {
                     .map(|v| {
                         *n += 1;
                         let ph = placeholder(backend, *n)?;
-                        values.push(bind_value(backend, binder, col, v));
+                        values.push(bind_value(backend, binder, col, v)?);
                         Ok(ph)
                     })
                     .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -3398,19 +3401,19 @@ impl<M> Builder<M> {
             WhereTerm::Between(col, a, b) => {
                 *n += 1;
                 let pa = placeholder(backend, *n)?;
-                values.push(bind_value(backend, binder, col, a));
+                values.push(bind_value(backend, binder, col, a)?);
                 *n += 1;
                 let pb = placeholder(backend, *n)?;
-                values.push(bind_value(backend, binder, col, b));
+                values.push(bind_value(backend, binder, col, b)?);
                 format!("{col} BETWEEN {pa} AND {pb}")
             }
             WhereTerm::NotBetween(col, a, b) => {
                 *n += 1;
                 let pa = placeholder(backend, *n)?;
-                values.push(bind_value(backend, binder, col, a));
+                values.push(bind_value(backend, binder, col, a)?);
                 *n += 1;
                 let pb = placeholder(backend, *n)?;
-                values.push(bind_value(backend, binder, col, b));
+                values.push(bind_value(backend, binder, col, b)?);
                 format!("{col} NOT BETWEEN {pa} AND {pb}")
             }
             WhereTerm::Null(col) => format!("{} IS NULL", joined_column(joined, col)),
@@ -3534,7 +3537,7 @@ impl<M> Builder<M> {
                     for (idx, v) in vs.iter().enumerate() {
                         *n += 1;
                         let ph = placeholder(backend, *n)?;
-                        values.push(bind_value(backend, self.binder, col, v));
+                        values.push(bind_value(backend, self.binder, col, v)?);
                         cases.push_str(&format!(" WHEN {col} = {ph} THEN {idx}"));
                     }
                     format!("CASE{cases} ELSE {} END", vs.len())
@@ -4783,7 +4786,7 @@ where
     /// Laravel-shape `soleValue($col)` - fetch a single value, succeed
     /// only when one row matches. Variant of [`Self::sole`] that
     /// projects a column.
-    pub async fn sole_value<T: TryGetable>(
+    pub async fn sole_value<T: ColumnValue>(
         mut self,
         col: impl IntoColumn,
     ) -> Result<T, FrameworkError> {
@@ -4803,9 +4806,8 @@ where
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         match rows.len() {
             0 => Err(FrameworkError::not_found("no rows matched")),
-            1 => rows[0]
-                .try_get::<T>("", &col_name)
-                .map_err(|e| FrameworkError::database(e.to_string())),
+            1 => T::from_column(&rows[0], col_name.as_str())
+                .map_err(|e| FrameworkError::database(sea_orm::DbErr::from(e).to_string())),
             _ => Err(FrameworkError::bad_request(
                 "multiple rows matched a sole_value() query",
             )),
@@ -4814,7 +4816,7 @@ where
 
     /// Laravel-shape `valueOrFail($col)` - fetch a single column from
     /// the first matching row, error when no row matches.
-    pub async fn value_or_fail<T: TryGetable>(
+    pub async fn value_or_fail<T: ColumnValue>(
         self,
         col: impl IntoColumn,
     ) -> Result<T, FrameworkError> {
@@ -5579,10 +5581,11 @@ where
         ))
     }
 
-    // Terminal/aggregate type bounds are `TryGetable` - that's the
-    // trait SeaORM's `QueryResult::try_get` uses to convert a column
-    // value into a Rust type. `DeserializeOwned` (the serde bound) is
-    // wrong here because the body reads from `try_get`, not from
+    // Terminal/aggregate type bounds are `ColumnValue` - every SeaORM
+    // `TryGetable` type, the trait `QueryResult::try_get` converts a
+    // column value with, with `u64` and `Option<u64>` read on every
+    // database. `DeserializeOwned` (the serde bound) is wrong here
+    // because the body reads from the row, not from
     // `serde_json::from_value`. Common primitives (i64, f64, String,
     // bool, DateTime<Utc>) implement both, but a user passing a custom
     // type with only one of the two would hit a compile error against
@@ -5590,7 +5593,7 @@ where
 
     /// `SELECT COALESCE(SUM(col), 0)`. Returns `T::default()` on empty
     /// result sets.
-    pub async fn sum<T: TryGetable + Default>(
+    pub async fn sum<T: ColumnValue + Default>(
         self,
         col: impl IntoColumn,
     ) -> Result<T, FrameworkError> {
@@ -5602,7 +5605,7 @@ where
 
     /// `SELECT COALESCE(AVG(col), 0)`. Returns `T::default()` on empty
     /// result sets.
-    pub async fn avg<T: TryGetable + Default>(
+    pub async fn avg<T: ColumnValue + Default>(
         self,
         col: impl IntoColumn,
     ) -> Result<T, FrameworkError> {
@@ -5613,7 +5616,7 @@ where
     }
 
     /// `SELECT MIN(col)`. Returns `None` on empty result sets.
-    pub async fn min<T: TryGetable>(
+    pub async fn min<T: ColumnValue>(
         self,
         col: impl IntoColumn,
     ) -> Result<Option<T>, FrameworkError> {
@@ -5624,7 +5627,7 @@ where
     }
 
     /// `SELECT MAX(col)`. Returns `None` on empty result sets.
-    pub async fn max<T: TryGetable>(
+    pub async fn max<T: ColumnValue>(
         self,
         col: impl IntoColumn,
     ) -> Result<Option<T>, FrameworkError> {
@@ -5634,8 +5637,11 @@ where
             .await
     }
 
-    /// Fetch a single value from the first matching row.
-    pub async fn value<T: TryGetable>(
+    /// Fetch a single value from the first matching row: `None` when no
+    /// row matches or the column is NULL. A value that does not read as
+    /// `T`, a negative one in a `u64` among them, is an error naming the
+    /// column.
+    pub async fn value<T: ColumnValue>(
         self,
         col: impl IntoColumn,
     ) -> Result<Option<T>, FrameworkError> {
@@ -5654,11 +5660,17 @@ where
             .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(row.and_then(|r| r.try_get::<T>("", &col_name).ok()))
+        match row {
+            Some(row) => unless_null::<T>(&row, &col_name)
+                .map_err(|e| FrameworkError::database(e.to_string())),
+            None => Ok(None),
+        }
     }
 
-    /// Fetch a single column from every matching row.
-    pub async fn pluck<T: TryGetable>(
+    /// Fetch a single column from every matching row. A row whose column
+    /// is NULL is left out. A value that does not read as `T`, a negative
+    /// one in a `u64` among them, is an error naming the column.
+    pub async fn pluck<T: ColumnValue>(
         self,
         col: impl IntoColumn,
     ) -> Result<Vec<T>, FrameworkError> {
@@ -5675,14 +5687,21 @@ where
             .query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|r| r.try_get::<T>("", &col_name).ok())
-            .collect())
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            if let Some(value) = unless_null::<T>(row, &col_name)
+                .map_err(|e| FrameworkError::database(e.to_string()))?
+            {
+                out.push(value);
+            }
+        }
+        Ok(out)
     }
 
-    /// Fetch a `HashMap<K, V>` keyed by `key_col`, valued by `val_col`.
-    pub async fn pluck_keyed<K: TryGetable + Eq + Hash, V: TryGetable>(
+    /// Fetch a `HashMap<K, V>` keyed by `key_col`, valued by `val_col`. A
+    /// row with either column NULL is left out; a value that does not
+    /// read as its type is an error naming the column.
+    pub async fn pluck_keyed<K: ColumnValue + Eq + Hash, V: ColumnValue>(
         self,
         key_col: impl IntoColumn,
         val_col: impl IntoColumn,
@@ -5704,7 +5723,10 @@ where
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let mut out = HashMap::new();
         for r in rows {
-            if let (Ok(k), Ok(v)) = (r.try_get::<K>("", &kn), r.try_get::<V>("", &vn)) {
+            let read = |error: sea_orm::DbErr| FrameworkError::database(error.to_string());
+            let key = unless_null::<K>(&r, &kn).map_err(read)?;
+            let value = unless_null::<V>(&r, &vn).map_err(read)?;
+            if let (Some(k), Some(v)) = (key, value) {
                 out.insert(k, v);
             }
         }
@@ -5766,7 +5788,7 @@ where
             .collect()
     }
 
-    async fn aggregate_value<T: TryGetable>(self, expr: &str) -> Result<T, FrameworkError> {
+    async fn aggregate_value<T: ColumnValue>(self, expr: &str) -> Result<T, FrameworkError> {
         self.observe_reads();
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
@@ -5780,11 +5802,15 @@ where
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?
             .ok_or_else(|| FrameworkError::database("aggregate query returned no row"))?;
-        row.try_get::<T>("", AGGREGATE_RESULT_ALIAS)
-            .map_err(|e| FrameworkError::database(format!("aggregate result decode failed: {e}")))
+        T::from_column(&row, AGGREGATE_RESULT_ALIAS).map_err(|e| {
+            FrameworkError::database(format!(
+                "aggregate result decode failed for {expr}: {}",
+                sea_orm::DbErr::from(e)
+            ))
+        })
     }
 
-    async fn aggregate_optional<T: TryGetable>(
+    async fn aggregate_optional<T: ColumnValue>(
         self,
         expr: &str,
     ) -> Result<Option<T>, FrameworkError> {
@@ -5801,8 +5827,12 @@ where
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?
             .ok_or_else(|| FrameworkError::database("aggregate query returned no row"))?;
-        row.try_get::<Option<T>>("", AGGREGATE_RESULT_ALIAS)
-            .map_err(|e| FrameworkError::database(format!("aggregate result decode failed: {e}")))
+        <Option<T>>::from_column(&row, AGGREGATE_RESULT_ALIAS).map_err(|e| {
+            FrameworkError::database(format!(
+                "aggregate result decode failed for {expr}: {}",
+                sea_orm::DbErr::from(e)
+            ))
+        })
     }
 
     // ---- Mass update / delete / upsert / increment_each / decrement_each --
@@ -6353,11 +6383,11 @@ mod tests {
             .with_timezone(&chrono::Utc);
         let value = serde_json::json!("2031-03-14T16:00:00Z");
         assert_eq!(
-            bind_value(DbBackend::MySql, zoned, "created_at", &value),
+            bind_value(DbBackend::MySql, zoned, "created_at", &value).expect("binds"),
             SeaValue::from(moment.naive_utc())
         );
         assert_eq!(
-            bind_value(DbBackend::Postgres, zoned, "created_at", &value),
+            bind_value(DbBackend::Postgres, zoned, "created_at", &value).expect("binds"),
             SeaValue::from(moment),
             "Postgres keeps the zone-aware parameter a timestamptz needs"
         );

@@ -960,6 +960,15 @@ let ids:    Vec<i64>           = User::query().model_keys().await?;
 let sql:    String             = User::filter("...").to_sql();
 ```
 
+`value`, `pluck` and `pluck_keyed` skip a NULL: `value` returns `None`
+and `pluck` leaves the row out. A value that doesn't read as the type you
+name is an error that names the column, rather than a missing row. These
+terminals, the aggregates and `DB::scalar` read `u64` and `Option<u64>` on
+every database, as a model's `u64` field does: on Postgres and SQLite a
+negative value fails the read. On those two databases, a filter that
+compares a `u64` column with a value above `i64::MAX` fails before anything
+is sent, because no row there can hold one.
+
 `to_sql` returns the parameterised SQL the next terminal would emit -
 useful for debugging or building views. The bindings are
 accessible via `.to_sql_with_bindings() -> (String, Vec<Value>)`.

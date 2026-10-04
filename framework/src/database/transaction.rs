@@ -914,6 +914,7 @@ impl ExecutorChoice {
             Box<dyn std::future::Future<Output = Result<T, sea_orm::DbErr>> + Send + 'a>,
         >,
     {
+        refuse_unsigned_parameters(self.backend(), &stmt)?;
         // Fast path: if no observer is active OR we're already inside
         // a listener dispatch, skip the SQL/binding capture entirely.
         if super::events::is_dispatching() || !super::events::query_observation_active() {
@@ -1009,6 +1010,38 @@ impl ExecutorChoice {
             }
         }
     }
+}
+
+/// Refuses a statement whose parameters hold a `u64` above `i64::MAX` on
+/// Postgres or SQLite, naming the parameter, before it is sent.
+///
+/// The query builder refuses such a value for a `u64` column by name
+/// before it builds a statement. A raw statement (`DB::select`,
+/// `DB::scalar`, `DB::statement`) carries the caller's parameters as they
+/// are, and sea-query-sqlx's binders for both databases unwrap the `u64`
+/// to `i64` conversion, so without this the query would panic instead of
+/// failing.
+fn refuse_unsigned_parameters(
+    backend: sea_orm::DbBackend,
+    stmt: &sea_orm::Statement,
+) -> Result<(), sea_orm::DbErr> {
+    let Some(values) = &stmt.values else {
+        return Ok(());
+    };
+    for (position, value) in values.0.iter().enumerate() {
+        if let sea_orm::Value::BigUnsigned(Some(n)) = value
+            && *n > i64::MAX as u64
+        {
+            crate::eloquent::casts::unsigned::refuse_unsigned_overflow(
+                backend,
+                "",
+                &format!("parameter {}", position + 1),
+                value,
+            )
+            .map_err(sea_orm::DbErr::Custom)?;
+        }
+    }
+    Ok(())
 }
 
 /// Refuses an active model that holds a `u64` its table cannot store on
