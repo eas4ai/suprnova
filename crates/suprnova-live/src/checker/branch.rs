@@ -7,7 +7,6 @@
 //! told apart.
 
 use std::borrow::Cow;
-use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -73,20 +72,6 @@ pub(crate) struct Fragment<'c> {
     pub(crate) pieces: Vec<Piece<'c>>,
 }
 
-impl Fragment<'_> {
-    fn text_bytes(&self) -> usize {
-        self.pieces.iter().fold(0usize, |bytes, piece| {
-            bytes.saturating_add(match piece {
-                Piece::Text(text, _) => text.len(),
-                Piece::Choice(choice) => choice
-                    .arms
-                    .iter()
-                    .fold(0usize, |sum, arm| sum.saturating_add(arm.text_bytes())),
-            })
-        })
-    }
-}
-
 /// The complete rendered tree of one component view.
 pub(crate) struct RenderedView<'c> {
     pub(crate) fragment: Fragment<'c>,
@@ -98,7 +83,28 @@ pub(crate) struct RenderedView<'c> {
     pub(crate) branched: bool,
 }
 
-type Overrides<'c> = BTreeMap<String, Option<Fragment<'c>>>;
+/// One definition of a block along an `{% extends %}` chain: its body and
+/// the template that defines it.
+#[derive(Clone, Copy)]
+struct BlockLink<'c, 'a> {
+    nodes: &'c [Box<Node<'a>>],
+    template: &'c TemplateEnv<'a>,
+}
+
+/// Every definition of each block name along an `{% extends %}` chain, the
+/// most derived first. Askama writes the first where the root template
+/// places the block, with the locals there, and the next one at each
+/// `{{ super() }}` inside it.
+type Chain<'c, 'a> = BTreeMap<&'a str, Vec<BlockLink<'c, 'a>>>;
+
+/// The block definition being rendered, so `{{ super() }}` can write the
+/// next one up the chain.
+#[derive(Clone, Copy)]
+struct BlockCursor<'c, 'a> {
+    name: &'a str,
+    links: &'c [BlockLink<'c, 'a>],
+    index: usize,
+}
 
 /// What a macro argument is bound to during one expansion. A string, number,
 /// or boolean literal at the call site is substituted into the macro body, so
@@ -176,6 +182,7 @@ struct Scope<'s, 'a> {
     raw: &'s RawNames,
     caller: Option<&'s CallerContent<'s, 'a>>,
     caller_names: &'s CallerNames,
+    block: Option<BlockCursor<'s, 'a>>,
     macro_depth: usize,
 }
 
@@ -187,7 +194,7 @@ struct CallerContent<'c, 'a> {
     nodes: &'c [Box<Node<'a>>],
     template: &'c TemplateEnv<'a>,
     place: Place<'c, 'a>,
-    overrides: &'c Overrides<'a>,
+    chain: &'c Chain<'c, 'a>,
 }
 
 /// One macro expansion: the definition, the template that defines it, the
@@ -255,13 +262,8 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
     /// Renders the view into one tree, or `None` when a failure left nothing
     /// checkable; that failure has reported itself.
     pub(crate) fn render(mut self, view: &ViewName) -> Option<RenderedView<'checker>> {
-        let fragment = self.render_view(
-            view,
-            &Overrides::new(),
-            &RawNames::new(),
-            &mut Vec::new(),
-            None,
-        )?;
+        let fragment =
+            self.render_view(view, &Chain::new(), &RawNames::new(), &mut Vec::new(), None)?;
         Some(RenderedView {
             fragment,
             files: self.files,
@@ -287,7 +289,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
     fn render_view(
         &mut self,
         view: &ViewName,
-        incoming_overrides: &Overrides<'checker>,
+        chain: &Chain<'_, 'checker>,
         raw: &RawNames,
         stack: &mut Vec<ViewName>,
         site: Option<Site<'_>>,
@@ -371,39 +373,22 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             raw,
             caller: None,
             caller_names: &no_caller,
+            block: None,
             macro_depth: 0,
         };
         let place = Place { view, file, source };
+        // This template's block definitions join the chain behind the more
+        // derived ones already in it.
+        let mut extended: Chain<'_, 'checker> = chain.clone();
+        collect_blocks(env.ast.nodes(), &env, &mut extended);
         let parent = env.ast.nodes().iter().find_map(|node| match node.as_ref() {
             Node::Extends(parent) => Some((parent.path, tag_location(source, node.span()))),
             _ => None,
         });
         let rendered = if let Some((parent, (line, column))) = parent {
             let site = Site { view, line, column };
-            let mut overrides = incoming_overrides.clone();
-            for node in env.ast.nodes() {
-                if let Node::BlockDef(block) = node.as_ref() {
-                    let name = (*block.name).to_owned();
-                    if let Entry::Vacant(entry) = overrides.entry(name) {
-                        let mut fragment = Fragment::default();
-                        let rendered = self
-                            .expand_nodes(
-                                &block.nodes,
-                                &mut fragment,
-                                incoming_overrides,
-                                place,
-                                stack,
-                                &scope,
-                            )
-                            .map(|()| fragment);
-                        entry.insert(rendered);
-                    }
-                }
-            }
             match ViewName::parse(parent) {
-                Ok(parent) => {
-                    self.render_view(&parent, &overrides, &RawNames::new(), stack, Some(site))
-                }
+                Ok(parent) => self.render_view(&parent, &extended, raw, stack, Some(site)),
                 Err(_) => {
                     self.push(
                         DiagnosticCode::MissingTemplate,
@@ -420,7 +405,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             self.expand_nodes(
                 env.ast.nodes(),
                 &mut fragment,
-                incoming_overrides,
+                &extended,
                 place,
                 stack,
                 &scope,
@@ -543,7 +528,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         &mut self,
         nodes: &[Box<Node<'checker>>],
         out: &mut Fragment<'checker>,
-        overrides: &Overrides<'checker>,
+        chain: &Chain<'_, 'checker>,
         place: Place<'_, 'checker>,
         stack: &mut Vec<ViewName>,
         scope: &Scope<'_, 'checker>,
@@ -564,6 +549,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 raw,
                 caller: scope.caller,
                 caller_names,
+                block: scope.block,
                 macro_depth: scope.macro_depth,
             };
             let mut rebound = None;
@@ -587,6 +573,41 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     // Askama writes `{{ show(x) }}` and `{{ ui::show(x) }}` as
                     // macro calls when the name resolves to a macro, so the
                     // body is expanded and checked where the call stands.
+                    // `{{ super() }}` writes the next definition of the block
+                    // being rendered, with the locals here.
+                    if let Expr::Call(call) = strip_groups(expression)
+                        && call.args.is_empty()
+                        && matches!(&**call.path, Expr::Var("super"))
+                    {
+                        match scope.block {
+                            Some(cursor) if cursor.index + 1 < cursor.links.len() => {
+                                self.branched = true;
+                                let next = BlockCursor {
+                                    index: cursor.index + 1,
+                                    ..cursor
+                                };
+                                self.expand_block(
+                                    out,
+                                    next,
+                                    chain,
+                                    stack,
+                                    scope,
+                                    expression.span(),
+                                )?;
+                            }
+                            _ => {
+                                let (line, column) = expression_location(source, expression);
+                                self.push(
+                                    DiagnosticCode::DynamicStructureUnproved,
+                                    DiagnosticSeverity::Unproved,
+                                    view,
+                                    line,
+                                    column,
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     let splices_caller = is_caller_call(expression, scope.caller_names);
                     if !splices_caller
                         && let Expr::Call(call) = strip_groups(expression)
@@ -624,12 +645,13 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             raw: scope.raw,
                             caller: None,
                             caller_names: &no_caller,
+                            block: None,
                             macro_depth: scope.macro_depth,
                         };
                         self.expand_nodes(
                             caller.nodes,
                             out,
-                            caller.overrides,
+                            caller.chain,
                             caller.place,
                             stack,
                             &caller_scope,
@@ -669,7 +691,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     // for every `{% if %}` it carries.
                     if let Some(decided) = decided_branch(node, scope.bindings) {
                         if let Some(nodes) = decided {
-                            self.expand_nodes(nodes, out, overrides, place, stack, scope)?;
+                            self.expand_nodes(nodes, out, chain, place, stack, scope)?;
                         }
                     } else {
                         // A name an `if let` binds shadows a macro argument
@@ -701,7 +723,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             });
                         }
                         let origin = tag_origin(place, node.span());
-                        self.expand_choices(out, &choices, origin, overrides, place, stack, scope)?;
+                        self.expand_choices(out, &choices, origin, chain, place, stack, scope)?;
                     }
                 }
                 Node::Match(node) => {
@@ -722,7 +744,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         })
                         .collect();
                     let origin = tag_origin(place, node.span());
-                    self.expand_choices(out, &choices, origin, overrides, place, stack, scope)?;
+                    self.expand_choices(out, &choices, origin, chain, place, stack, scope)?;
                 }
                 Node::Loop(node) => {
                     let mut names = vec!["loop"];
@@ -745,6 +767,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         raw: loop_raw.as_ref().unwrap_or(scope.raw),
                         caller: scope.caller,
                         caller_names: scope.caller_names,
+                        block: scope.block,
                         macro_depth: scope.macro_depth,
                     };
                     // The loop's own names are bound in its body, not in
@@ -754,7 +777,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         out,
                         (&node.body, &node.else_nodes),
                         origin,
-                        overrides,
+                        chain,
                         place,
                         stack,
                         (&loop_scope, scope),
@@ -767,7 +790,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             let site = Site { view, line, column };
                             let fragment = self.render_view(
                                 &include,
-                                &Overrides::new(),
+                                &Chain::new(),
                                 scope.raw,
                                 stack,
                                 Some(site),
@@ -787,17 +810,36 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         }
                     }
                 }
+                // Askama writes the most derived definition here, with the
+                // locals at this site; a block nested in itself does not
+                // compile and is not expanded again.
                 Node::BlockDef(block) => {
-                    if let Some(fragment) = overrides.get(*block.name) {
-                        self.branched = true;
-                        self.inline(
-                            out,
-                            fragment.as_ref()?,
-                            tag_origin(place, node.span()),
+                    if scope.block.is_some_and(|cursor| cursor.name == *block.name) {
+                        let (line, column) = tag_location(source, node.span());
+                        self.push(
+                            DiagnosticCode::DynamicStructureUnproved,
+                            DiagnosticSeverity::Unproved,
                             view,
-                        )?;
-                    } else {
-                        self.expand_nodes(&block.nodes, out, overrides, place, stack, scope)?;
+                            line,
+                            column,
+                        );
+                        continue;
+                    }
+                    match chain.get(*block.name).filter(|links| !links.is_empty()) {
+                        Some(links) => {
+                            if links.len() > 1 {
+                                self.branched = true;
+                            }
+                            let cursor = BlockCursor {
+                                name: *block.name,
+                                links,
+                                index: 0,
+                            };
+                            self.expand_block(out, cursor, chain, stack, scope, node.span())?;
+                        }
+                        None => {
+                            self.expand_nodes(&block.nodes, out, chain, place, stack, scope)?;
+                        }
                     }
                 }
                 Node::FilterBlock(block) => {
@@ -818,7 +860,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             column,
                         );
                     }
-                    self.expand_nodes(&block.nodes, out, overrides, place, stack, scope)?;
+                    self.expand_nodes(&block.nodes, out, chain, place, stack, scope)?;
                 }
                 // A macro call: the body is walked with the call's literal
                 // arguments bound, the caller content spliced at each
@@ -854,7 +896,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         nodes: &call.nodes,
                         template: scope.template,
                         place,
-                        overrides,
+                        chain,
                     };
                     let invocation = Invocation {
                         definition,
@@ -891,7 +933,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                                 let _ = self.expand_nodes(
                                     block,
                                     &mut discarded,
-                                    overrides,
+                                    chain,
                                     place,
                                     stack,
                                     scope,
@@ -955,6 +997,50 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         Some(())
     }
 
+    /// Expands one definition of a block where the block, or the
+    /// `{{ super() }}` that asks for it, stands: in the defining template,
+    /// with the bindings and raw names of the site. Block nesting counts
+    /// against the include depth limit.
+    fn expand_block(
+        &mut self,
+        out: &mut Fragment<'checker>,
+        cursor: BlockCursor<'_, 'checker>,
+        chain: &Chain<'_, 'checker>,
+        stack: &mut Vec<ViewName>,
+        scope: &Scope<'_, 'checker>,
+        span: Span,
+    ) -> Option<()> {
+        let link = cursor.links.get(cursor.index)?;
+        if scope.macro_depth >= self.limits.max_include_depth() {
+            let (line, column) = tag_location(link.template.source, span);
+            let view = link.template.view.clone();
+            self.push(
+                DiagnosticCode::IncludeDepthLimit,
+                DiagnosticSeverity::Error,
+                &view,
+                line,
+                column,
+            );
+            return None;
+        }
+        let place = Place {
+            view: &link.template.view,
+            file: link.template.file,
+            source: link.template.source,
+        };
+        let no_caller = CallerNames::new();
+        let block_scope = Scope {
+            template: link.template,
+            bindings: scope.bindings,
+            raw: scope.raw,
+            caller: None,
+            caller_names: &no_caller,
+            block: Some(cursor),
+            macro_depth: scope.macro_depth + 1,
+        };
+        self.expand_nodes(link.nodes, out, chain, place, stack, &block_scope)
+    }
+
     /// Expands a macro body where the call stands, with the call's arguments
     /// bound and the defining template's macros in scope, under the include
     /// depth limit, which also bounds macro recursion.
@@ -997,6 +1083,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             raw: &raw,
             caller,
             caller_names: &caller_names,
+            block: None,
             macro_depth: scope.macro_depth + 1,
         };
         let body = Place {
@@ -1004,14 +1091,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             file: template.file,
             source: template.source,
         };
-        self.expand_nodes(
-            &definition.nodes,
-            out,
-            &Overrides::new(),
-            body,
-            stack,
-            &inner,
-        )
+        self.expand_nodes(&definition.nodes, out, &Chain::new(), body, stack, &inner)
     }
 
     /// Renders each arm once into one choice. An arm whose rendering fails
@@ -1025,7 +1105,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         out: &mut Fragment<'checker>,
         choices: &[Choice<'_, 'checker>],
         origin: Origin,
-        overrides: &Overrides<'checker>,
+        chain: &Chain<'_, 'checker>,
         place: Place<'_, 'checker>,
         stack: &mut Vec<ViewName>,
         scope: &Scope<'_, 'checker>,
@@ -1038,18 +1118,12 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 raw: choice.raw.as_ref().unwrap_or(scope.raw),
                 caller: scope.caller,
                 caller_names: scope.caller_names,
+                block: scope.block,
                 macro_depth: scope.macro_depth,
             };
             let mut arm = Fragment::default();
             if self
-                .expand_nodes(
-                    choice.nodes,
-                    &mut arm,
-                    overrides,
-                    place,
-                    stack,
-                    &choice_scope,
-                )
+                .expand_nodes(choice.nodes, &mut arm, chain, place, stack, &choice_scope)
                 .is_some()
             {
                 arms.push(arm);
@@ -1076,7 +1150,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         out: &mut Fragment<'checker>,
         (body, else_nodes): (&[Box<Node<'checker>>], &[Box<Node<'checker>>]),
         origin: Origin,
-        overrides: &Overrides<'checker>,
+        chain: &Chain<'_, 'checker>,
         place: Place<'_, 'checker>,
         stack: &mut Vec<ViewName>,
         (body_scope, else_scope): (&Scope<'_, 'checker>, &Scope<'_, 'checker>),
@@ -1091,9 +1165,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 origin,
                 view,
             )
-            .and_then(|()| {
-                self.expand_nodes(body, &mut repeated, overrides, place, stack, body_scope)
-            })
+            .and_then(|()| self.expand_nodes(body, &mut repeated, chain, place, stack, body_scope))
             .and_then(|()| {
                 self.push_text(
                     &mut repeated,
@@ -1109,7 +1181,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         }
         let mut empty = Fragment::default();
         if self
-            .expand_nodes(else_nodes, &mut empty, overrides, place, stack, else_scope)
+            .expand_nodes(else_nodes, &mut empty, chain, place, stack, else_scope)
             .is_some()
         {
             arms.push(empty);
@@ -1159,20 +1231,6 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
     ) -> Option<()> {
         self.charge(text.len(), origin, view)?;
         out.pieces.push(Piece::Text(text, origin));
-        Some(())
-    }
-
-    /// Appends a copy of an already rendered fragment, caller content or an
-    /// inherited block override, at the tag `origin` that splices it in.
-    fn inline(
-        &mut self,
-        out: &mut Fragment<'checker>,
-        fragment: &Fragment<'checker>,
-        origin: Origin,
-        view: &ViewName,
-    ) -> Option<()> {
-        self.charge(fragment.text_bytes(), origin, view)?;
-        out.pieces.extend(fragment.pieces.iter().cloned());
         Some(())
     }
 
@@ -1230,6 +1288,41 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             column,
             Some(self.component),
         );
+    }
+}
+
+/// Adds every block a template defines, at any depth Askama looks, to the
+/// chain behind the definitions already there.
+fn collect_blocks<'c, 'a>(
+    nodes: &'c [Box<Node<'a>>],
+    template: &'c TemplateEnv<'a>,
+    chain: &mut Chain<'c, 'a>,
+) {
+    for node in nodes {
+        match node.as_ref() {
+            Node::BlockDef(block) => {
+                chain.entry(*block.name).or_default().push(BlockLink {
+                    nodes: &block.nodes,
+                    template,
+                });
+                collect_blocks(&block.nodes, template, chain);
+            }
+            Node::If(node) => {
+                for branch in &node.branches {
+                    collect_blocks(&branch.nodes, template, chain);
+                }
+            }
+            Node::Loop(node) => {
+                collect_blocks(&node.body, template, chain);
+                collect_blocks(&node.else_nodes, template, chain);
+            }
+            Node::Match(node) => {
+                for arm in &node.arms {
+                    collect_blocks(&arm.nodes, template, chain);
+                }
+            }
+            _ => {}
+        }
     }
 }
 

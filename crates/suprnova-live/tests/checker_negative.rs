@@ -892,3 +892,55 @@ fn caller_content_renders_in_the_macro_scope_at_every_splice() {
         );
     }
 }
+/// A child block renders at the parent's block site with the parent's
+/// locals, and `{{ super() }}` writes the next definition up the chain.
+#[test]
+fn inherited_blocks_render_at_the_parent_site_and_super_writes_the_parent_body() {
+    let through_super = check_with(vec![
+        (
+            ROOT_VIEW,
+            "{% extends \"tests/layout.html\" %}{% block content %}<section>{{ super() }}</section>{% endblock %}",
+        ),
+        (
+            "tests/layout.html",
+            "<main>{% block content %}\n<p>{{ notice|safe }}</p>{% endblock %}</main>",
+        ),
+    ]);
+    assert_eq!(
+        locations_of(&through_super, DiagnosticCode::RawSafe),
+        vec![("tests/layout.html".to_owned(), 2, 7)],
+        "{:?}",
+        through_super.diagnostics()
+    );
+    let parent_local = check_with(vec![
+        (
+            ROOT_VIEW,
+            "{% extends \"tests/layout.html\" %}{% block content %}\n<p>{{ banner }}</p>{% endblock %}",
+        ),
+        (
+            "tests/layout.html",
+            "{% let banner = notice|safe %}<main>{% block content %}{% endblock %}</main>",
+        ),
+    ]);
+    assert_eq!(
+        locations_of(&parent_local, DiagnosticCode::RawSafe),
+        vec![(ROOT_VIEW.to_owned(), 2, 7)],
+        "{:?}",
+        parent_local.diagnostics()
+    );
+    let directive = check_with(vec![
+        (
+            ROOT_VIEW,
+            "{% extends \"tests/layout.html\" %}{% block content %}{{ super() }}{% endblock %}",
+        ),
+        (
+            "tests/layout.html",
+            "<main>{% block content %}<button type=\"button\" live:click=\"missing\">Go</button>{% endblock %}</main>",
+        ),
+    ]);
+    assert!(
+        has_code(&directive, DiagnosticCode::UnknownAction),
+        "{:?}",
+        directive.diagnostics()
+    );
+}
