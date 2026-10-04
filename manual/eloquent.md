@@ -965,9 +965,12 @@ and `pluck` leaves the row out. A value that doesn't read as the type you
 name is an error that names the column, rather than a missing row. These
 terminals, the aggregates and `DB::scalar` read `u64` and `Option<u64>` on
 every database, as a model's `u64` field does: on Postgres and SQLite a
-negative value fails the read. On those two databases, a filter that
-compares a `u64` column with a value above `i64::MAX` fails before anything
-is sent, because no row there can hold one.
+negative value fails the read. No row on those two databases can hold a
+`u64` above `i64::MAX`, so a read by one gets its answer without sending
+the value: `find` returns `None` and `find_many` skips it. In a filter,
+`=`, `>`, `>=` and `IN` match no row, and `!=`, `<`, `<=` and `NOT IN`
+match every row whose column is not NULL. MySQL gives the same answer for
+rows that all hold smaller values.
 
 `to_sql` returns the parameterised SQL the next terminal would emit -
 useful for debugging or building views. The bindings are

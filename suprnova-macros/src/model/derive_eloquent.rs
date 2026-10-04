@@ -693,10 +693,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // Comparisons in a query bind through the column's cast, so a native
     // date-time column is compared with a native parameter. Casts that
     // store text or numbers answer `None` and the value binds as it is.
+    // The key binds through its cast too: a `u64` key above `i64::MAX`
+    // then binds as an unsigned number rather than as text, which
+    // Postgres refuses to compare with its `BIGINT`.
     let cast_arms: Vec<TokenStream> = input
         .casts
         .iter()
-        .filter(|(ident, _)| ident != &input.primary_key)
         .map(|(ident, ty)| {
             let name = ident.to_string();
             quote! {

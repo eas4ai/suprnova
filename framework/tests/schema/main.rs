@@ -26,3 +26,4 @@ mod mysql;
 mod postgres;
 mod sqlite;
 mod unsigned_keys;
+mod unsigned_reads;

@@ -332,9 +332,12 @@ pub struct Order {
 The same model runs on Postgres and SQLite, which have no unsigned integers.
 There, `unsigned_id()` creates a signed `BIGINT`, and a `u64` field holds `0`
 to `i64::MAX` (9223372036854775807). Writing a larger value fails with an
-error that names the column, before anything reaches the database. A negative
-value in the column fails the read, also naming the column. The tests of a
-Laravel port can therefore run on the SQLite `TestDatabase`.
+error that names the column, before anything reaches the database. It is a
+database error, so a client gets the generic 500 response and the log gets
+the detail. Reading by a larger value finds nothing, because no row holds
+one: `find` returns `None`, and a route that binds such a key answers 404. A
+negative value in the column fails the read, naming the column. The tests of
+a Laravel port can therefore run on the SQLite `TestDatabase`.
 
 To give every migration Laravel's keys without writing `unsigned_id()`, set
 `unsigned_ids` in the `Cargo.toml` of the package that builds your binary:
