@@ -739,7 +739,7 @@ Additional helpers:
 
 ## Events: `MessageSending` and `MessageSent`
 
-Every successful dispatch fires two framework events:
+Every dispatch fires two framework events, whatever path sent it: `Mail::send`, `Mail::raw` and `Mail::html`, a queued mail when the worker sends it, and a notification sent through the mail channel:
 
 - `MessageSending` - immediately BEFORE the transport call. Listeners observe the message shape (recipients, subject, tags, body-shape flags).
 - `MessageSent` - immediately AFTER a successful transport call. Listeners observe the same shape; failed sends do not emit this event.

@@ -550,6 +550,95 @@ async fn queued_mail_carries_the_context_of_the_code_that_queued_it() {
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn queued_mail_fires_message_sending_and_message_sent() {
+    // The manual promises both events for every successful dispatch.
+    // Changing `send` to `queue` must not silently drop them for audit or
+    // metrics listeners.
+    use suprnova::events::{EventFacade, dispatched};
+    use suprnova::mail::{MessageSending, MessageSent};
+
+    let _events = EventFacade::fake();
+    let capture = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(capture.clone());
+    let _ = suprnova::mail::register_mailable_factory::<WelcomeMail>();
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Mail::to("alice@example.org")
+        .queue(WelcomeMail {
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+    run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: Some(1),
+            queues: Vec::new(),
+        },
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert_eq!(capture.captured().len(), 1, "the queued mail was delivered");
+    let sending = dispatched::<MessageSending>(|e| e.subject == "Welcome, Alice");
+    let sent = dispatched::<MessageSent>(|e| e.subject == "Welcome, Alice");
+    assert_eq!(sending.len(), 1, "MessageSending fires once on the worker");
+    assert_eq!(sent.len(), 1, "MessageSent fires once on the worker");
+    assert_eq!(sent[0].to[0].email, "alice@example.org");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_failed_queued_send_fires_message_sending_but_not_message_sent() {
+    use suprnova::events::{EventFacade, dispatched};
+    use suprnova::mail::transport::{MailTransport, OutgoingMessage};
+    use suprnova::mail::{MessageSending, MessageSent};
+
+    struct Refusing;
+    #[async_trait]
+    impl MailTransport for Refusing {
+        async fn send(&self, _msg: &OutgoingMessage) -> Result<(), FrameworkError> {
+            Err(FrameworkError::internal("provider down"))
+        }
+    }
+
+    let _events = EventFacade::fake();
+    let _ = Mail::set_transport(Arc::new(Refusing));
+    let _ = suprnova::mail::register_mailable_factory::<WelcomeMail>();
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Mail::to("alice@example.org")
+        .queue(WelcomeMail { name: "Bob".into() })
+        .await
+        .unwrap();
+    run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: Some(1),
+            queues: Vec::new(),
+        },
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert_eq!(
+        dispatched::<MessageSending>(|e| e.subject == "Welcome, Bob").len(),
+        1
+    );
+    assert!(
+        dispatched::<MessageSent>(|e| e.subject == "Welcome, Bob").is_empty(),
+        "a failed send must not report MessageSent"
+    );
+}
+
 /// Set only in the child process that
 /// `a_worker_with_no_manual_job_registration_delivers_queued_mail` spawns.
 const SCAFFOLD_WORKER_CHILD: &str = "SUPRNOVA_SCAFFOLD_MAIL_WORKER_CHILD";

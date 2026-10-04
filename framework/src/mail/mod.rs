@@ -104,6 +104,30 @@ fn clear_queue_capture() {
         .clear();
 }
 
+/// Ship `msg` through `transport` with the whole observation contract: the
+/// `MessageSending` event, the `mail.send` span, and `MessageSent` when the
+/// transport accepted the message.
+///
+/// Every path that delivers mail goes through here - `MailBuilder::send`,
+/// `Mail::raw` and `Mail::html`, the `SendMailJob` worker, and the
+/// notification `MailChannel`. The events used to fire only on the first
+/// two, so changing `send` to `queue`, or sending through a notification,
+/// silently dropped them for audit and metrics listeners.
+pub(crate) async fn deliver(
+    transport: &dyn MailTransport,
+    msg: &OutgoingMessage,
+) -> Result<(), FrameworkError> {
+    // Best-effort; cancellation is not modeled - Laravel uses
+    // events->until, which Suprnova's dispatcher doesn't expose. Listeners
+    // observe the pre-send shape.
+    events::fire_sending(msg).await;
+    let result = transport::dispatch_with_telemetry(transport, msg).await;
+    if result.is_ok() {
+        events::fire_sent(msg).await;
+    }
+    result
+}
+
 /// Facade entry point for the mail subsystem. Mirrors Laravel's `Mail`
 /// facade: `Mail::to(...)`, `Mail::raw(...)`, `Mail::fake()`, and the
 /// `always_*` defaults.
@@ -477,15 +501,7 @@ impl MailBuilder {
         // Apply Mail::always_* defaults so the queue/notification/raw
         // paths all converge on identical precedence rules.
         let msg = Mail::apply_always_defaults(msg);
-        // Fire MessageSending event (best-effort; cancellation is not
-        // modeled - Laravel uses events->until, which Suprnova's
-        // dispatcher doesn't expose. Listeners observe pre-send shape.).
-        events::fire_sending(&msg).await;
-        let result = transport::dispatch_with_telemetry(transport.as_ref(), &msg).await;
-        if result.is_ok() {
-            events::fire_sent(&msg).await;
-        }
-        result
+        deliver(transport.as_ref(), &msg).await
     }
 
     /// Build a [`SendMailJob`] and push it onto the queue. The mailable's
@@ -591,12 +607,7 @@ impl MailBuilder {
             return_path: self.return_path,
         };
         let msg = Mail::apply_always_defaults(msg);
-        events::fire_sending(&msg).await;
-        let result = transport::dispatch_with_telemetry(transport.as_ref(), &msg).await;
-        if result.is_ok() {
-            events::fire_sent(&msg).await;
-        }
-        result
+        deliver(transport.as_ref(), &msg).await
     }
 
     fn build_send_job<M: Mailable>(

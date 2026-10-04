@@ -532,3 +532,69 @@ async fn mail_channel_threads_cc_bcc_reply_to_and_attachments_into_outgoing() {
     assert_eq!(msg.attachments[0].content_type, "application/pdf");
     assert_eq!(msg.attachments[0].content, b"%PDF-1.4\nreceipt");
 }
+
+// ============================================================================
+// Mail events: a notification sent by mail is a dispatched mail
+// ============================================================================
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct ObservedNotice;
+
+impl Notification for ObservedNotice {
+    fn notification_name() -> &'static str {
+        "ObservedNotice"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["mail"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("ObservedNotice serializes")
+    }
+}
+
+impl NotificationMailable for ObservedNotice {
+    fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
+        Ok(MailRendering {
+            subject: "Observed notice".into(),
+            text: Some("body".into()),
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_channel_fires_message_sending_and_message_sent() {
+    // The mail manual promises both events for every successful dispatch,
+    // and Laravel's mail channel sends through the mailer, which fires them.
+    use suprnova::events::{EventFacade, dispatched};
+    use suprnova::mail::{MessageSending, MessageSent};
+
+    let _events = EventFacade::fake();
+    let transport = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(transport.clone());
+    let _ = register_mail_renderer::<ObservedNotice>();
+    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
+
+    dispatcher
+        .notify(
+            &User {
+                email: "alice@example.org".into(),
+            },
+            &ObservedNotice,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(transport.captured().len(), 1);
+    assert_eq!(
+        dispatched::<MessageSending>(|e| e.subject == "Observed notice").len(),
+        1,
+        "MessageSending fires for a notification sent by mail"
+    );
+    assert_eq!(
+        dispatched::<MessageSent>(|e| e.subject == "Observed notice").len(),
+        1,
+        "MessageSent fires for a notification sent by mail"
+    );
+}

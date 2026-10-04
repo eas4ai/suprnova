@@ -188,7 +188,11 @@ pub trait MailTransport: Send + Sync {
 /// queue worker in [`SendMailJob`](crate::mail::SendMailJob), and the
 /// notification [`MailChannel`](crate::notifications::channels::mail::MailChannel).
 /// Routing every dispatch through one entrypoint guarantees one span
-/// schema regardless of how the message was produced.
+/// schema regardless of how the message was produced. Those framework
+/// paths reach it through one crate-internal wrapper that also fires
+/// [`MessageSending`](crate::mail::MessageSending) and
+/// [`MessageSent`](crate::mail::MessageSent); this function emits the span
+/// only.
 ///
 /// Fields are kept deliberately minimal (the message *shape*, not its
 /// content).

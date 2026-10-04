@@ -11,7 +11,7 @@
 use crate::error::FrameworkError;
 use crate::mail::address::Attachment;
 use crate::mail::mailable_registry::{self, RenderOutgoingParams};
-use crate::mail::{Address, Mail, dispatch_with_telemetry};
+use crate::mail::{Address, Mail, deliver};
 use crate::queue::Job;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,8 @@ impl Job for SendMailJob {
         // / etc., creating an observable divergence from `Mail::send`.
         let msg = Mail::apply_always_defaults(msg);
         let transport = Mail::current_transport()?;
-        dispatch_with_telemetry(transport.as_ref(), &msg).await
+        // `deliver`, not the bare telemetry wrapper: a queued mail fires
+        // `MessageSending` and `MessageSent` exactly as a direct send does.
+        deliver(transport.as_ref(), &msg).await
     }
 }

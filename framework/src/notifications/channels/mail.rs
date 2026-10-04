@@ -26,7 +26,7 @@
 
 use crate::error::FrameworkError;
 use crate::lock;
-use crate::mail::transport::{OutgoingMessage, dispatch_with_telemetry};
+use crate::mail::transport::OutgoingMessage;
 use crate::mail::{Address, Attachment, Mail};
 use crate::notifications::{Channel, DynNotification, Notification};
 use async_trait::async_trait;
@@ -206,6 +206,9 @@ impl Channel for MailChannel {
         let msg = Mail::apply_always_defaults(msg);
 
         let transport = Mail::current_transport()?;
-        dispatch_with_telemetry(transport.as_ref(), &msg).await
+        // A notification sent by mail is a dispatched mail, so it fires
+        // `MessageSending` and `MessageSent` like any other (Laravel's mail
+        // channel sends through the mailer, which fires them too).
+        crate::mail::deliver(transport.as_ref(), &msg).await
     }
 }
