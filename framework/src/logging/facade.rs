@@ -22,6 +22,23 @@ pub(crate) enum Leaf {
     Sink(Arc<dyn LogSink>, Option<LogLevel>),
 }
 
+impl Leaf {
+    /// The same leaf, keeping only what both its own lowest level and
+    /// `outer`, the level of a stack that lists it, keep.
+    fn within(self, outer: Option<LogLevel>) -> Self {
+        let narrowed = |own: Option<LogLevel>| match (own, outer) {
+            (Some(own), Some(outer)) => Some(own.min(outer)),
+            (own, None) => own,
+            (None, outer) => outer,
+        };
+        match self {
+            Leaf::Stdout(level) => Leaf::Stdout(narrowed(level)),
+            Leaf::Stderr(level) => Leaf::Stderr(narrowed(level)),
+            Leaf::Sink(sink, level) => Leaf::Sink(sink, narrowed(level)),
+        }
+    }
+}
+
 #[derive(Default)]
 struct Registry {
     defined: HashMap<String, LogChannel>,
@@ -157,9 +174,16 @@ fn build(channel: &LogChannel, depth: u8) -> Result<Vec<Leaf>, FrameworkError> {
                     "log stacks nest more than eight deep; a stack probably lists itself",
                 ));
             }
+            // The stack's own level applies on top of each channel's, so a
+            // stack at `Warning` drops info even in a channel that keeps
+            // every level.
             let mut leaves = Vec::new();
             for name in names {
-                leaves.extend(resolve_named(name, depth + 1)?);
+                leaves.extend(
+                    resolve_named(name, depth + 1)?
+                        .into_iter()
+                        .map(|leaf| leaf.within(level)),
+                );
             }
             leaves
         }

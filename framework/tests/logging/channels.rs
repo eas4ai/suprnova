@@ -973,3 +973,46 @@ fn a_sink_that_cannot_write_or_flush_is_reported_once_on_stderr() {
         "a file whose buffered records cannot be flushed, once: {stderr}"
     );
 }
+
+/// DRIVERS-029: a stack's own `.level(...)` applies to every channel it
+/// lists, on top of each channel's own level.
+#[test]
+#[serial]
+fn a_stack_level_drops_the_records_below_it_in_every_channel_it_lists() {
+    let _env = lock_env();
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    let dir = tempfile::tempdir().unwrap();
+    let (open, strict, stacked) = (unique("open"), unique("strict"), unique("stacked"));
+    Log::define(&open, LogChannel::single(dir.path().join("open.log")));
+    Log::define(
+        &strict,
+        LogChannel::single(dir.path().join("strict.log")).level(LogLevel::Error),
+    );
+    let stack = || LogChannel::stack([open.as_str(), strict.as_str()]).level(LogLevel::Warning);
+
+    let logger = Log::build(stack()).unwrap();
+    logger.info("built-info");
+    logger.warning("built-warning");
+    logger.error("built-error");
+
+    Log::define(&stacked, stack());
+    set_env("LOG_CHANNEL", Some(&stacked));
+    let subscriber = build_subscriber(LogConfig::from_env()).unwrap();
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!("default-info");
+        tracing::warn!("default-warning");
+    });
+    Log::flush();
+
+    let open_text = read(&dir.path().join("open.log"));
+    let strict_text = read(&dir.path().join("strict.log"));
+    assert!(
+        !open_text.contains("built-info") && !open_text.contains("default-info"),
+        "the stack's Warning drops info in a channel that keeps every level: {open_text}"
+    );
+    assert!(open_text.contains("built-warning") && open_text.contains("default-warning"));
+    assert!(
+        !strict_text.contains("built-warning") && strict_text.contains("built-error"),
+        "a channel's own stricter level still applies: {strict_text}"
+    );
+}

@@ -96,7 +96,9 @@ only; `tracing`'s events go to the default channel. A logger has
 Laravel's eight levels, from `emergency` to `debug`, and the `*_with`
 methods take a JSON context: each `{key}` in the message is replaced with
 its value, and the context is written beside the message. A channel
-`.level(...)` keeps only the records at that level or above.
+`.level(...)` keeps only the records at that level or above. A stack's
+`.level(...)` applies to every channel it lists, on top of each channel's
+own.
 
 A stack writes each record to every channel it lists, and a channel that
 cannot write, such as a file it cannot open, stops none of the others;
