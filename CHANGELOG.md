@@ -567,8 +567,33 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   decides. Laravel lists such types as acceptable. This landed after the
   `v3.1.0` tag.
 
+- **Vendor HTTP clients no longer follow redirects, and SQS overflow
+  payloads move.** Pinecone and the HTTP mail drivers treat a 3xx as an
+  error. SQS overflow payloads live under
+  `sqs-payloads/<queue>-<digest>/`, so `SQS_OVERFLOW_FLUSH_ON_CLEAR` no
+  longer deletes a same-named queue's payloads from another account or
+  region; payloads written before still read, but `clear` no longer sweeps
+  them. Qdrant ids `"01"`, `"+1"` and non-canonical UUID spellings no longer
+  map to the point of `"1"` or the canonical UUID, so items stored under
+  such ids must be written again. Resend tags go out as `tag_<i>` name and
+  value pairs, and a tag Resend cannot carry is refused before sending.
+  `DynNotification` gains `as_any`, with a default. This landed after the
+  `v3.1.0` tag.
+
 ### Fixed
 
+- **Payments, mail, notifications and queues.** `PhoneNumber` and
+  `CountryCode` validate when deserialized, where invalid values were
+  accepted and `digits()` could panic. `MailFake::assert_not_outgoing`
+  fails when the mailable was sent, not only queued. The `file` mail driver
+  never overwrites a preview written in the same millisecond. Tagged Resend
+  mail is accepted by Resend. Notification mail renders from the
+  notification itself, so `data()` no longer has to hold every field
+  `to_mail` reads. An SQS overflow job whose first send went unanswered
+  keeps its payload when the retries are refused. The Redis queue works
+  with `redis://user:password@...` and `rediss://` URLs, and the broadcast
+  fanout authenticates with the URL's credentials. This landed after the
+  `v3.1.0` tag.
 - **Middleware, sessions, uploads and test helpers.** A middleware group
   reused by two sibling groups no longer fails with `CycleDetected`. A
   `RateLimiter` counter that expired in the middle of a hit gets its expiry
@@ -895,6 +920,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **The mock payment provider refuses unsigned webhooks outside
+  development.** It accepted them when the application registered a
+  production or staging `AppConfig` in code with `APP_ENV` unset; it now
+  requires both the configured environment and `APP_ENV` to be local,
+  development or testing.
+- **Queued notification events carry only `data()`.** The queued
+  `NotificationSending`, `NotificationSent` and `NotificationFailed` events
+  carried the whole serialized notification, including fields kept out of
+  `data()` such as reset tokens.
+- **Vendor API keys stay with their vendor.** Pinecone and the HTTP mail
+  drivers followed redirects, forwarding `Api-Key` and
+  `x-postmark-server-token` to another origin. Web push transport errors no
+  longer carry the subscription endpoint URL into logs and
+  `NotificationFailed`.
 - **CORS patterns anchor every alternative.** `allow_origin_patterns`
   anchored only the first and last alternative of a pattern such as
   `a|b`, so `https://app.example.evil.test` matched
