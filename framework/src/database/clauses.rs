@@ -19,10 +19,10 @@ use sea_orm::{DbBackend, Value as SeaValue};
 
 use crate::FrameworkError;
 use crate::database::db_facade::DbTableBuilder;
-use crate::database::placeholder::placeholder;
+use crate::database::placeholder::typed_placeholder;
 use crate::database::{validate_identifier, validate_sql_operator};
 use crate::eloquent::builder::{IntoVal, rewrite_raw_placeholders, validate_raw_placeholders};
-use crate::eloquent::casts::unsigned::{Settled, beyond_signed};
+use crate::eloquent::casts::unsigned::{beyond_signed, exact_unsigned};
 
 // ---- LIMIT and OFFSET ----------------------------------------------------------
 
@@ -309,8 +309,26 @@ fn bind(
     n: &mut usize,
 ) -> Result<String, FrameworkError> {
     *n += 1;
-    values.push(value.clone());
-    placeholder(backend, *n)
+    let value = exact(backend, value);
+    let ph = typed_placeholder(backend, *n, &value)?;
+    values.push(value);
+    Ok(ph)
+}
+
+/// `value` as the condition binds it. A `u64` above `i64::MAX`, which the
+/// Postgres and SQLite drivers cannot bind, binds as the exact number the
+/// engine compares it as (`exact_unsigned`): `DB::table` does not know its
+/// column's type, so the engine's answer is then its own for whatever the
+/// column holds - none for a `bigint` on Postgres, the stored row for a
+/// `numeric`, the double comparison for a `double precision`, and on
+/// SQLite the affinity of the column, as for a literal.
+fn exact(backend: DbBackend, value: &SeaValue) -> SeaValue {
+    match value {
+        SeaValue::BigUnsigned(Some(n)) if beyond_signed(backend, value) => {
+            exact_unsigned(backend, *n)
+        }
+        value => value.clone(),
+    }
 }
 
 /// Render `conditions` joined with `AND`, binding their values in order.
@@ -359,20 +377,6 @@ fn render_condition(
             binary,
         } => {
             let column_sql = quote_identifier(backend, column);
-            // A u64 no signed column holds - above i64::MAX on Postgres
-            // and SQLite - settles the comparison, as on the model
-            // builder; under LIKE or IS it is compared as its digits.
-            let digits;
-            let value = match value {
-                SeaValue::BigUnsigned(Some(beyond)) if beyond_signed(backend, value) => {
-                    if let Some(settled) = Settled::of_operator(op) {
-                        return Ok(settled.sql(&column_sql));
-                    }
-                    digits = SeaValue::String(Some(beyond.to_string()));
-                    &digits
-                }
-                value => value,
-            };
             let ph = bind(backend, value, values, n)?;
             let op = if *binary {
                 match backend {
@@ -398,21 +402,10 @@ fn render_condition(
                 return Ok(if *negated { "1 = 1" } else { "1 = 0" }.to_owned());
             }
             let column_sql = quote_identifier(backend, column);
-            // A value no signed column holds matches no row, so it leaves
-            // the list; a list left with nothing settles the whole test.
             let placeholders = list
                 .iter()
-                .filter(|value| !beyond_signed(backend, value))
                 .map(|value| bind(backend, value, values, n))
                 .collect::<Result<Vec<_>, _>>()?;
-            if placeholders.is_empty() {
-                let settled = if *negated {
-                    Settled::Always
-                } else {
-                    Settled::Never
-                };
-                return Ok(settled.sql(&column_sql));
-            }
             let not = if *negated { "NOT " } else { "" };
             format!("{column_sql} {not}IN ({})", placeholders.join(", "))
         }
@@ -431,11 +424,10 @@ fn render_condition(
             format!("{} IS {not}NULL", quote_identifier(backend, column))
         }
         Condition::Raw { sql, bindings } => {
-            let rendered = rewrite_raw_placeholders(backend, sql, bindings.len(), *n)?;
-            for value in bindings {
-                *n += 1;
-                values.push(value.clone());
-            }
+            let bound: Vec<SeaValue> = bindings.iter().map(|value| exact(backend, value)).collect();
+            let rendered = rewrite_raw_placeholders(backend, sql, &bound, *n)?;
+            *n += bound.len();
+            values.extend(bound);
             rendered
         }
         Condition::Exists { query, negated } => {

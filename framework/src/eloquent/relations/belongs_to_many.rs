@@ -13,7 +13,8 @@
 //! - `pivot_foreign_key` (pivot column → L): `<snake(parent_struct)>_id`
 //! - `pivot_related_key` (pivot column → R): `<snake(target_struct)>_id`
 //! - `pivot_table`: `<P as EloquentModel>::TABLE`
-//! - `parent_key` / `related_key`: `"id"`
+//! - `parent_key` / `related_key`: the parent's and the related model's
+//!   primary keys
 //!
 //! All four customisable via the macro's `pivot_foreign_key = "..."` /
 //! `pivot_related_key = "..."` / `pivot_table = "..."` / `lk = "..."`
@@ -69,7 +70,7 @@ use crate::eloquent::collection::Collection;
 use crate::eloquent::lazy_loading::LazyLoadGuard;
 use crate::eloquent::model::{Model, json_value_to_sea_value};
 use crate::eloquent::relations::pivot_filters::{PivotFilters, pivot_filter_methods};
-use crate::eloquent::relations::{Relation, RelationKind};
+use crate::eloquent::relations::{ColumnBinder, Relation, RelationKind};
 use crate::error::FrameworkError;
 
 /// Boxed builder-rewrite closure for [`BelongsToMany::with_trashed`] /
@@ -136,11 +137,11 @@ where
     /// Pivot column pointing at the related (`R`). Default:
     /// `<snake(target_struct)>_id`. Override via `pivot_related_key`.
     pivot_related_key: String,
-    /// Parent table's key column. Default `"id"`. Honoured by the
-    /// [`Relation`] impl.
+    /// Parent table's key column. Default: the parent model's primary
+    /// key. Honoured by the [`Relation`] impl.
     parent_key: String,
-    /// Related table's key column. Default `"id"`. Used by the JOIN
-    /// in [`Self::get`].
+    /// Related table's key column. Default: the related model's
+    /// primary key. Used by the JOIN in [`Self::get`].
     related_key: String,
     /// Extra pivot columns to project into `__pivot`. Always includes
     /// the two FK columns implicitly - `pivot_columns` is for the
@@ -227,8 +228,8 @@ where
             pivot_table,
             pivot_foreign_key,
             pivot_related_key,
-            parent_key: "id".into(),
-            related_key: "id".into(),
+            parent_key: L::PRIMARY_KEY.into(),
+            related_key: R::PRIMARY_KEY.into(),
             pivot_columns: Vec::new(),
             with_timestamps: false,
             scope_rewrite: None,
@@ -294,10 +295,9 @@ where
     /// Override the related-side primary-key COLUMN name used by
     /// [`Self::get`]'s IN-set filter and the macro-emitted aggregate
     /// JOIN (`__sn_r.<col> = __sn_p.<pivot_related_key>`). Defaults to
-    /// `"id"`. Set this when the related model declares a non-`id`
-    /// primary key via `#[model(primary_key = "uuid")]` (or similar) -
-    /// without it, `.get()` filters on the wrong column and the
-    /// aggregate JOIN errors with "no such column: __sn_r.id".
+    /// the related model's primary key. Set this when the pivot holds
+    /// another column of the related model, as the macro does for a
+    /// relation that declares `related_key = "..."`.
     ///
     /// Named `related_pk` (not `related_key`) so it doesn't collide
     /// with the existing [`Self::related_key`] builder, which sets the
@@ -319,6 +319,19 @@ where
         crate::database::validate_identifier(&self.pivot_foreign_key)?;
         crate::database::validate_identifier(&self.pivot_related_key)?;
         Ok(())
+    }
+
+    /// The pivot table as the pivot statements address it, with the
+    /// binders that type its columns.
+    fn pivot_target(&self) -> PivotTarget<'_> {
+        PivotTarget {
+            table: &self.pivot_table,
+            foreign_key: &self.pivot_foreign_key,
+            related_key: &self.pivot_related_key,
+            pivot: <P as EloquentModel>::bind_column,
+            parent: (<L as EloquentModel>::bind_column, &self.parent_key),
+            related: (<R as EloquentModel>::bind_column, &self.related_key),
+        }
     }
 
     /// Insert a pivot row linking the parent to `related_id`.
@@ -387,7 +400,6 @@ where
         // default routes correctly outside a tx - pivot tables
         // conventionally live on the parent's database.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
-        let backend = exec.backend();
         let extra = pivot_extras_through_casts::<P>(
             extra,
             &[&self.pivot_foreign_key, &self.pivot_related_key],
@@ -396,10 +408,7 @@ where
             ExecutorChoice::Tx(t, _) => {
                 attach_one(
                     t.as_ref(),
-                    backend,
-                    &self.pivot_table,
-                    &self.pivot_foreign_key,
-                    &self.pivot_related_key,
+                    &self.pivot_target(),
                     &self.parent_key_value,
                     &id,
                     extra,
@@ -410,10 +419,7 @@ where
             ExecutorChoice::Pool(c, _) => {
                 attach_one(
                     c.inner(),
-                    backend,
-                    &self.pivot_table,
-                    &self.pivot_foreign_key,
-                    &self.pivot_related_key,
+                    &self.pivot_target(),
                     &self.parent_key_value,
                     &id,
                     extra,
@@ -455,31 +461,18 @@ where
         // and honours the parent model's `#[model(connection = "...")]`
         // default outside a tx.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
-        let backend = exec.backend();
         match &exec {
             ExecutorChoice::Tx(t, _) => {
                 detach_one(
                     t.as_ref(),
-                    backend,
-                    &self.pivot_table,
-                    &self.pivot_foreign_key,
-                    &self.pivot_related_key,
+                    &self.pivot_target(),
                     &self.parent_key_value,
                     &id,
                 )
                 .await
             }
             ExecutorChoice::Pool(c, _) => {
-                detach_one(
-                    c.inner(),
-                    backend,
-                    &self.pivot_table,
-                    &self.pivot_foreign_key,
-                    &self.pivot_related_key,
-                    &self.parent_key_value,
-                    &id,
-                )
-                .await
+                detach_one(c.inner(), &self.pivot_target(), &self.parent_key_value, &id).await
             }
         }?;
         // Same reasoning as `attach_with`: no explicit-tx override on
@@ -568,26 +561,35 @@ where
         // SELECT current pivot rows: only the related-key column is
         // needed for the diff. Backend-aware placeholder for the
         // single parent-key bind.
-        let select_ph = match backend {
-            DatabaseBackend::Postgres => "$1".to_string(),
-            _ => "?".to_string(),
-        };
-        let select_sql = format!(
-            "SELECT {related_key} AS __sn_related FROM {table} WHERE {fk} = {ph}",
-            related_key = self.pivot_related_key,
-            table = self.pivot_table,
-            fk = self.pivot_foreign_key,
-            ph = select_ph,
-        );
-        let select_stmt = Statement::from_sql_and_values(
+        let target = self.pivot_target();
+        let parent = bind_pivot_comparison(
             backend,
-            &select_sql,
-            vec![json_value_to_sea_value(&self.parent_key_value)],
+            target.typed(
+                target.foreign_key,
+                Some(target.parent),
+                &self.parent_key_value,
+            ),
+            &self.parent_key_value,
         );
-        let rows = exec
-            .query_all(select_stmt)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let rows = match parent {
+            Some(parent) => {
+                let select_ph =
+                    crate::database::placeholder::typed_placeholder(backend, 1, &parent)?;
+                let select_sql = format!(
+                    "SELECT {related_key} AS __sn_related FROM {table} WHERE {fk} = {ph}",
+                    related_key = self.pivot_related_key,
+                    table = self.pivot_table,
+                    fk = self.pivot_foreign_key,
+                    ph = select_ph,
+                );
+                let select_stmt =
+                    Statement::from_sql_and_values(backend, &select_sql, vec![parent]);
+                exec.query_all(select_stmt)
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?
+            }
+            None => Vec::new(),
+        };
 
         // Pull each row's related-key as a JSON value so the diff
         // matches by the same shape as the input set.
@@ -597,11 +599,7 @@ where
             // common shapes; falling back to the textual form covers
             // exotic PKs. The key for the HashMap is always the JSON
             // string form of whatever we recover.
-            if let Ok(n) = r.try_get::<i64>("", "__sn_related") {
-                let v = serde_json::Value::from(n);
-                current_map.insert(v.to_string(), v);
-            } else if let Ok(s) = r.try_get::<String>("", "__sn_related") {
-                let v = serde_json::Value::from(s);
+            if let Some(v) = pivot_key_json(r, "__sn_related") {
                 current_map.insert(v.to_string(), v);
             }
         }
@@ -639,10 +637,7 @@ where
                 for related_id in detach_set.iter() {
                     detach_one(
                         t.as_ref(),
-                        backend,
-                        &self.pivot_table,
-                        &self.pivot_foreign_key,
-                        &self.pivot_related_key,
+                        &self.pivot_target(),
                         &self.parent_key_value,
                         related_id,
                     )
@@ -651,10 +646,7 @@ where
                 for related_id in attach_set.iter() {
                     attach_one(
                         t.as_ref(),
-                        backend,
-                        &self.pivot_table,
-                        &self.pivot_foreign_key,
-                        &self.pivot_related_key,
+                        &self.pivot_target(),
                         &self.parent_key_value,
                         related_id,
                         Vec::new(),
@@ -672,10 +664,7 @@ where
                 for related_id in detach_set.iter() {
                     detach_one(
                         &txn,
-                        backend,
-                        &self.pivot_table,
-                        &self.pivot_foreign_key,
-                        &self.pivot_related_key,
+                        &self.pivot_target(),
                         &self.parent_key_value,
                         related_id,
                     )
@@ -684,10 +673,7 @@ where
                 for related_id in attach_set.iter() {
                     attach_one(
                         &txn,
-                        backend,
-                        &self.pivot_table,
-                        &self.pivot_foreign_key,
-                        &self.pivot_related_key,
+                        &self.pivot_target(),
                         &self.parent_key_value,
                         related_id,
                         Vec::new(),
@@ -767,10 +753,8 @@ where
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let mut related_ids: Vec<serde_json::Value> = Vec::with_capacity(id_rows.len());
         for r in id_rows.iter() {
-            if let Ok(n) = r.try_get::<i64>("", "__sn_related") {
-                related_ids.push(serde_json::Value::from(n));
-            } else if let Ok(s) = r.try_get::<String>("", "__sn_related") {
-                related_ids.push(serde_json::Value::from(s));
+            if let Some(v) = pivot_key_json(r, "__sn_related") {
+                related_ids.push(v);
             }
         }
         if related_ids.is_empty() {
@@ -1001,9 +985,178 @@ where
     unique
 }
 
-/// One pivot extra as the INSERT writes it: the column, and the value
-/// the pivot model stores, or `None` for an explicit SQL `NULL`.
-pub(crate) type PivotExtra = (String, Option<sea_orm::Value>);
+/// The pivot table a pivot statement addresses: its name, its two key
+/// columns, and how a value binds for each column.
+///
+/// A pivot write is a raw statement, so nothing types its values but this:
+/// the pivot model's column binder first, and for the two key columns the
+/// binder of the model whose key the column holds. A `u64` id then binds
+/// as the unsigned number it is, rather than as text, which SQLite stored
+/// as a rounded REAL and Postgres refused after the statement was sent.
+pub(crate) struct PivotTarget<'a> {
+    /// The pivot table.
+    pub(crate) table: &'a str,
+    /// The pivot column that holds the parent's key.
+    pub(crate) foreign_key: &'a str,
+    /// The pivot column that holds the related model's key.
+    pub(crate) related_key: &'a str,
+    /// The pivot model's column binder.
+    pub(crate) pivot: ColumnBinder,
+    /// The parent model's binder and the parent column `foreign_key` holds.
+    pub(crate) parent: (ColumnBinder, &'a str),
+    /// The related model's binder and the related column `related_key`
+    /// holds.
+    pub(crate) related: (ColumnBinder, &'a str),
+}
+
+impl PivotTarget<'_> {
+    /// How `value` binds for the pivot column `column`, as the pivot model
+    /// types the column, or else as the model whose key the column holds
+    /// (`key`) types that key; `None` when neither knows the column.
+    pub(crate) fn typed(
+        &self,
+        column: &str,
+        key: Option<(ColumnBinder, &str)>,
+        value: &serde_json::Value,
+    ) -> Option<sea_orm::Value> {
+        (self.pivot)(column, value)
+            .or_else(|| key.and_then(|(bind, key_column)| bind(key_column, value)))
+    }
+}
+
+/// Bind `value`, written to the pivot column `column` of `table`.
+///
+/// `typed` is the binding the models give the column. A `u64` above
+/// `i64::MAX` for a column Postgres or SQLite stores signed is refused
+/// before anything is sent, as a model's write is, naming the column: the
+/// drivers there cannot bind it, and SQLite would store a rounded REAL. A
+/// value whose column no model types binds by the column's own type
+/// (`bind_large_unsigned`), or as it is.
+pub(crate) async fn bind_pivot_write<C: ConnectionTrait>(
+    conn: &C,
+    table: &str,
+    column: &str,
+    typed: Option<sea_orm::Value>,
+    value: &serde_json::Value,
+) -> Result<sea_orm::Value, FrameworkError> {
+    use crate::eloquent::casts::unsigned::{bind_large_unsigned, exact_unsigned};
+
+    let backend = conn.get_database_backend();
+    match typed {
+        Some(bound) => checked_pivot_value(backend, table, column, bound),
+        None => match value.as_u64() {
+            Some(n) if n > i64::MAX as u64 => {
+                let mut bound = bind_large_unsigned(conn, table, &[(column.to_owned(), n)]).await?;
+                Ok(bound
+                    .remove(column)
+                    .unwrap_or_else(|| exact_unsigned(backend, n)))
+            }
+            _ => Ok(json_value_to_sea_value(value)),
+        },
+    }
+}
+
+/// `bound`, a typed value written to pivot column `column` of `table`, or
+/// the refusal of a `u64` above `i64::MAX` that Postgres or SQLite would
+/// write to a signed column: the drivers there cannot bind it, and SQLite
+/// would store a rounded REAL. The refusal names the column.
+pub(crate) fn checked_pivot_value(
+    backend: DatabaseBackend,
+    table: &str,
+    column: &str,
+    bound: sea_orm::Value,
+) -> Result<sea_orm::Value, FrameworkError> {
+    use crate::eloquent::casts::unsigned::{beyond_signed, refuse_unsigned_overflow};
+
+    if beyond_signed(backend, &bound) {
+        refuse_unsigned_overflow(backend, table, column, &bound)
+            .map_err(FrameworkError::database)?;
+    }
+    Ok(bound)
+}
+
+/// Bind `value`, compared with a pivot column in a pivot statement's
+/// `WHERE`, or `None` when no row can match: a `u64` above `i64::MAX` for a
+/// column Postgres stores signed, which holds only integers. SQLite
+/// compares the value's digits, as it does a literal, so a REAL an older
+/// write left is still found. A column no model types gets the exact
+/// number (`exact_unsigned`).
+pub(crate) fn bind_pivot_comparison(
+    backend: DatabaseBackend,
+    typed: Option<sea_orm::Value>,
+    value: &serde_json::Value,
+) -> Option<sea_orm::Value> {
+    match typed {
+        Some(sea_orm::Value::BigUnsigned(Some(n))) if n > i64::MAX as u64 => match backend {
+            DatabaseBackend::Postgres => None,
+            DatabaseBackend::Sqlite => Some(sea_orm::Value::String(Some(n.to_string()))),
+            _ => Some(sea_orm::Value::BigUnsigned(Some(n))),
+        },
+        Some(bound) => Some(bound),
+        None => Some(match value.as_u64() {
+            Some(n) if n > i64::MAX as u64 => {
+                crate::eloquent::casts::unsigned::exact_unsigned(backend, n)
+            }
+            _ => json_value_to_sea_value(value),
+        }),
+    }
+}
+
+/// A key a pivot row holds, read back as JSON in the shape the caller's ids
+/// have: a signed integer, an unsigned one (MySQL's `BIGINT UNSIGNED`,
+/// which decodes as neither `i64` nor text), or text. `None` for anything
+/// else.
+pub(crate) fn pivot_key_json(
+    row: &sea_orm::QueryResult,
+    column: &str,
+) -> Option<serde_json::Value> {
+    if let Ok(n) = row.try_get::<i64>("", column) {
+        return Some(serde_json::Value::from(n));
+    }
+    if let Ok(n) = row.try_get::<u64>("", column) {
+        return Some(serde_json::Value::from(n));
+    }
+    row.try_get::<String>("", column)
+        .ok()
+        .map(serde_json::Value::from)
+}
+
+/// One pivot extra as the INSERT writes it: the column, and its value.
+pub(crate) type PivotExtra = (String, PivotExtraValue);
+
+/// The value of one pivot extra, as [`pivot_extras_through_casts`]
+/// encodes it.
+pub(crate) enum PivotExtraValue {
+    /// An explicit SQL `NULL`.
+    Null,
+    /// The value the pivot model stores for a column it declares.
+    Stored(sea_orm::Value),
+    /// The value given for a column the pivot model does not declare,
+    /// bound when it is written by the column's own type
+    /// ([`bind_pivot_write`]).
+    Undeclared(serde_json::Value),
+}
+
+/// Bind pivot extra `column`'s `value`, written to `table`: `None` for an
+/// explicit SQL `NULL`. A stored `u64` above `i64::MAX` is refused on
+/// Postgres and SQLite, as a key column's is, and an undeclared column's
+/// value binds by the column's type (see [`bind_pivot_write`]).
+pub(crate) async fn bind_pivot_extra<C: ConnectionTrait>(
+    conn: &C,
+    table: &str,
+    column: &str,
+    value: PivotExtraValue,
+) -> Result<Option<sea_orm::Value>, FrameworkError> {
+    match value {
+        PivotExtraValue::Null => Ok(None),
+        PivotExtraValue::Stored(stored) => {
+            checked_pivot_value(conn.get_database_backend(), table, column, stored).map(Some)
+        }
+        PivotExtraValue::Undeclared(given) => bind_pivot_write(conn, table, column, None, &given)
+            .await
+            .map(Some),
+    }
+}
 
 /// Encode `attach_with`'s extras the way pivot model `P` stores them.
 ///
@@ -1043,19 +1196,23 @@ where
         <<P::Entity as EntityTrait>::Column as Iterable>::iter().find(|c| c.as_str() == name)
     };
     let mut declared = Attrs::new();
-    let mut encoded: Vec<(String, Option<sea_orm::Value>, bool)> = Vec::new();
+    let mut encoded: Vec<(String, PivotExtraValue, bool)> = Vec::new();
     for (key, value) in extra.iter() {
         if framework_columns.contains(&key) {
             continue;
         }
         crate::database::validate_identifier(key)?;
         if value.is_null() {
-            encoded.push((key.to_string(), None, false));
+            encoded.push((key.to_string(), PivotExtraValue::Null, false));
         } else if column_of(key).is_some() {
             declared.insert(key, value.clone());
-            encoded.push((key.to_string(), None, true));
+            encoded.push((key.to_string(), PivotExtraValue::Null, true));
         } else {
-            encoded.push((key.to_string(), Some(json_value_to_sea_value(value)), false));
+            encoded.push((
+                key.to_string(),
+                PivotExtraValue::Undeclared(value.clone()),
+                false,
+            ));
         }
     }
     let active = if declared.is_empty() {
@@ -1075,7 +1232,7 @@ where
             let stored = active.as_ref().map(|am| am.get(column));
             match stored {
                 Some(ActiveValue::Set(stored) | ActiveValue::Unchanged(stored)) => {
-                    Ok((key, Some(stored)))
+                    Ok((key, PivotExtraValue::Stored(stored)))
                 }
                 _ => Err(FrameworkError::internal(format!(
                     "pivot column `{key}` was not encoded by the pivot model"
@@ -1232,18 +1389,18 @@ where
 /// connection-or-transaction handle is taken as a generic `&C: ConnectionTrait`
 /// so the same routine runs against both `DatabaseConnection` and
 /// `DatabaseTransaction`.
-#[allow(clippy::too_many_arguments)]
 async fn attach_one<C: ConnectionTrait>(
     conn: &C,
-    backend: DatabaseBackend,
-    pivot_table: &str,
-    pivot_foreign_key: &str,
-    pivot_related_key: &str,
+    target: &PivotTarget<'_>,
     parent_id: &serde_json::Value,
     related_id: &serde_json::Value,
     extra: Vec<PivotExtra>,
     with_timestamps: bool,
 ) -> Result<(), FrameworkError> {
+    let backend = conn.get_database_backend();
+    let pivot_table = target.table;
+    let pivot_foreign_key = target.foreign_key;
+    let pivot_related_key = target.related_key;
     // Build the column / value lists deterministically:
     //   FK columns first, then `extra` (already encoded through the
     //   pivot model's casts by `pivot_extras_through_casts`, which drops
@@ -1254,12 +1411,31 @@ async fn attach_one<C: ConnectionTrait>(
     // `None` represents an explicit JSON null from pivot extras. Framework-
     // managed IDs and timestamps remain bound values.
     let mut values: Vec<Option<sea_orm::Value>> = vec![
-        Some(json_value_to_sea_value(parent_id)),
-        Some(json_value_to_sea_value(related_id)),
+        Some(
+            bind_pivot_write(
+                conn,
+                pivot_table,
+                pivot_foreign_key,
+                target.typed(pivot_foreign_key, Some(target.parent), parent_id),
+                parent_id,
+            )
+            .await?,
+        ),
+        Some(
+            bind_pivot_write(
+                conn,
+                pivot_table,
+                pivot_related_key,
+                target.typed(pivot_related_key, Some(target.related), related_id),
+                related_id,
+            )
+            .await?,
+        ),
     ];
     for (column, value) in extra {
+        let bound = bind_pivot_extra(conn, pivot_table, &column, value).await?;
         columns.push(column);
-        values.push(value);
+        values.push(bound);
     }
     if with_timestamps {
         let now = crate::clock::now();
@@ -1283,15 +1459,17 @@ async fn attach_one<C: ConnectionTrait>(
         .map(|value| match value {
             Some(value) => {
                 bind_position += 1;
+                let ph = crate::database::placeholder::typed_placeholder(
+                    backend,
+                    bind_position,
+                    &value,
+                )?;
                 bound_values.push(value);
-                match backend {
-                    DatabaseBackend::Postgres => format!("${bind_position}"),
-                    _ => "?".to_string(),
-                }
+                Ok(ph)
             }
-            None => "NULL".to_string(),
+            None => Ok("NULL".to_string()),
         })
-        .collect();
+        .collect::<Result<_, FrameworkError>>()?;
 
     let sql = format!(
         "INSERT INTO {table} ({cols}) VALUES ({phs})",
@@ -1307,36 +1485,37 @@ async fn attach_one<C: ConnectionTrait>(
 }
 
 /// Shared DELETE path used by `detach` / `sync`. Same connection
-/// abstraction as [`attach_one`].
+/// abstraction as [`attach_one`]. An id no pivot row can hold deletes
+/// nothing, and is not sent.
 async fn detach_one<C: ConnectionTrait>(
     conn: &C,
-    backend: DatabaseBackend,
-    pivot_table: &str,
-    pivot_foreign_key: &str,
-    pivot_related_key: &str,
+    target: &PivotTarget<'_>,
     parent_id: &serde_json::Value,
     related_id: &serde_json::Value,
 ) -> Result<(), FrameworkError> {
-    let (ph1, ph2) = match backend {
-        DatabaseBackend::Postgres => ("$1".to_string(), "$2".to_string()),
-        _ => ("?".to_string(), "?".to_string()),
+    let backend = conn.get_database_backend();
+    let parent = bind_pivot_comparison(
+        backend,
+        target.typed(target.foreign_key, Some(target.parent), parent_id),
+        parent_id,
+    );
+    let related = bind_pivot_comparison(
+        backend,
+        target.typed(target.related_key, Some(target.related), related_id),
+        related_id,
+    );
+    let (Some(parent), Some(related)) = (parent, related) else {
+        return Ok(());
     };
+    let ph1 = crate::database::placeholder::typed_placeholder(backend, 1, &parent)?;
+    let ph2 = crate::database::placeholder::typed_placeholder(backend, 2, &related)?;
     let sql = format!(
         "DELETE FROM {table} WHERE {fk} = {ph1} AND {rk} = {ph2}",
-        table = pivot_table,
-        fk = pivot_foreign_key,
-        rk = pivot_related_key,
-        ph1 = ph1,
-        ph2 = ph2,
+        table = target.table,
+        fk = target.foreign_key,
+        rk = target.related_key,
     );
-    let stmt = Statement::from_sql_and_values(
-        backend,
-        &sql,
-        vec![
-            json_value_to_sea_value(parent_id),
-            json_value_to_sea_value(related_id),
-        ],
-    );
+    let stmt = Statement::from_sql_and_values(backend, &sql, vec![parent, related]);
     conn.execute_raw(stmt)
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))?;

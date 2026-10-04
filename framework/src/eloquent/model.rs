@@ -151,17 +151,31 @@ fn table_read_then<E>(table: &str, error: E) -> E {
     error
 }
 
-/// Whether `key` holds a value its column cannot hold on `backend`: a
-/// `u64` above `i64::MAX` on Postgres or SQLite, where the key is a signed
-/// `BIGINT`. No row has such a key, so a lookup by it finds nothing without
-/// asking, and is never sent: sea-query-sqlx's binders there would panic
-/// on the value.
-pub(crate) fn key_beyond_signed(
+/// The values a lookup by `key` sends, or `None` when no row can match.
+///
+/// A key above `i64::MAX` for a column Postgres stores as a signed integer
+/// matches no row there, since such a column holds only integers, so the
+/// lookup is answered without the value, which the driver's binder would
+/// panic on. SQLite compares the key's digits instead, as it does a
+/// literal: an INTEGER key column there can hold a REAL above `i64::MAX`,
+/// and SQLite's own comparison is the true answer.
+pub(crate) fn lookup_key(
     backend: sea_orm::DbBackend,
-    key: &sea_orm::sea_query::ValueTuple,
-) -> bool {
-    key.iter()
-        .any(|value| crate::eloquent::casts::unsigned::beyond_signed(backend, value))
+    key: sea_orm::sea_query::ValueTuple,
+) -> Option<Vec<sea_orm::Value>> {
+    key.into_iter()
+        .map(|value| {
+            if !crate::eloquent::casts::unsigned::beyond_signed(backend, &value) {
+                return Some(value);
+            }
+            match (backend, value) {
+                (sea_orm::DbBackend::Sqlite, sea_orm::Value::BigUnsigned(Some(n))) => {
+                    Some(sea_orm::Value::String(Some(n.to_string())))
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// The savepoint `create_or_first` takes inside a Postgres transaction.
@@ -588,10 +602,10 @@ where
         // the way `find_by_id` would filter it. A key no row can hold finds
         // nothing, as a missing row does.
         let key = sea_orm::sea_query::IntoValueTuple::into_value_tuple(id.into());
-        if key_beyond_signed(exec.backend(), &key) {
+        let Some(key) = lookup_key(exec.backend(), key) else {
             crate::render_cache::collector::observe_table_read(Self::TABLE);
             return Ok(None);
-        }
+        };
         let mut select = Self::Entity::find();
         for (column, value) in <Self::Entity as EntityTrait>::PrimaryKey::iter().zip(key) {
             select = select.filter(column.into_column().eq(value));
@@ -689,14 +703,13 @@ where
         .await
         .map_err(|error| table_read_then(Self::TABLE, error))?;
         // An id no row can hold is not sent; it is skipped like an id
-        // that matches no row.
-        let held: Vec<_> = id_vec
+        // that matches no row. SQLite compares a large one by its digits.
+        let held: Vec<sea_orm::Value> = id_vec
             .iter()
-            .filter(|id| {
-                let key = sea_orm::sea_query::IntoValueTuple::into_value_tuple((*id).clone());
-                !key_beyond_signed(exec.backend(), &key)
+            .filter_map(|id| {
+                let key = sea_orm::sea_query::IntoValueTuple::into_value_tuple(id.clone());
+                lookup_key(exec.backend(), key)?.into_iter().next()
             })
-            .cloned()
             .collect();
         let rows = if held.is_empty() {
             Vec::new()

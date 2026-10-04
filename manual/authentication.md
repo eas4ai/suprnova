@@ -704,7 +704,10 @@ strategy with `.with_id_parser(...)`.
 By default a numeric id binds as an integer and any other id as text. An
 id above `i64::MAX` binds as a `u64`, so a user whose key is Laravel's
 `BIGINT UNSIGNED` `users.id` signs in at any value on MySQL. Postgres and
-SQLite hold no key that large, so there such an id finds no user.
+SQLite hold no integer key that large, so there such an id finds no user.
+A text identifier column that holds the id's digits finds the user on
+every database: `DatabaseUserProvider` reads the column's type for such
+an id and compares the digits as text.
 
 To plug in a custom source (LDAP, an external API), implement
 `UserProvider` directly. `retrieve_by_id` takes the identifier as

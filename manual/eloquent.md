@@ -1003,17 +1003,26 @@ and `pluck` leaves the row out. A value that doesn't read as the type you
 name is an error that names the column, rather than a missing row. These
 terminals, the aggregates and `DB::scalar` read `u64` and `Option<u64>` on
 every database, as a model's `u64` field does: on Postgres and SQLite a
-negative value fails the read. No row on those two databases can hold a
-`u64` above `i64::MAX`, so a read by one gets its answer without sending
-the value: `find` returns `None` and `find_many` skips it. In a filter,
-`=`, `>`, `>=` and `IN` match no row, and `!=`, `<`, `<=` and `NOT IN`
-match every row whose column is not NULL. MySQL gives the same answer for
-rows that all hold smaller values.
+negative value fails the read. A read by a `u64` above `i64::MAX` answers
+what the database holds. On Postgres a signed integer column holds only
+integers, so no row matches and the query gets its answer without
+sending the value: `find` returns `None`, `find_many` skips it, and in a
+filter `=`, `>`, `>=` and `IN` match no row, while `!=`, `<`, `<=` and
+`NOT IN` match every row whose column is not NULL. SQLite compares the
+value's digits, as it does a literal, because an INTEGER column there can
+hold a REAL above `i64::MAX` that raw SQL or an older write left. MySQL
+compares the unsigned number.
 
-The same holds on every database for a column of a narrower integer field
-such as `i64` or `i32`, which can't hold a `u64` above `i64::MAX` either. A
-mass update that writes such a value to one is refused on Postgres and
-SQLite before anything is sent.
+The same holds for a column of a narrower integer field such as `i64` or
+`i32`, which can't hold such a value on any database, and a mass update
+that writes one to it is refused on Postgres and SQLite before anything is
+sent. A column the model doesn't know, such as a joined table's column,
+compares as the number on every database, as with `DB::table`. A mass
+write (`update_all`, `upsert`) to a field that is neither an integer nor
+text, such as a decimal, also takes the value as `DB::table` does: a
+numeric column on Postgres or MySQL stores it exactly, and SQLite refuses
+it for a column of INTEGER or NUMERIC affinity, which would store a
+rounded REAL.
 
 `to_sql` returns the parameterised SQL the next terminal would emit -
 useful for debugging or building views. The bindings are
@@ -1841,6 +1850,14 @@ for r in &roles {
   existing pivot row untouched, extra columns and timestamps included.
   Wrapped in a transaction. Laravel's `syncWithoutDetaching`.
 
+Each id and extra column binds by the type its column has: the pivot
+model's field, or else the key the column holds. On Postgres and SQLite,
+a `u64` above `i64::MAX` written to the pivot fails with an error that
+names the column, and nothing is sent. `detach` of such an id deletes
+nothing on Postgres, and on SQLite it compares the id's digits, as it does
+a literal. On MySQL an unsigned pivot column holds the whole `u64` range,
+and `sync` and `.get()` read its ids back.
+
 `.get()` returns `Vec<R>` with the pivot stamped on each row's
 internal `__pivot` field. The `.pivot::<P>()` accessor downcasts the
 `Arc<dyn Any>` to the pivot type you declared. Calling it with the
@@ -2249,8 +2266,15 @@ The macro emits matching accessors on each model:
   (`None` if the matching `with_sum` / `with_avg` was not called).
 - `<rel>_min_of(col)` / `<rel>_max_of(col)` - return
   `Option<Option<f64>>`: outer `Option` is "was `with_min` /
-  `with_max` called?", inner `Option` is "did SQL return NULL because
-  the group was empty?".
+  `with_max` called?", inner `Option` is "is there a numeric
+  minimum?". It is `None` when the group was empty or the minimum is
+  not a number, such as a date.
+- `<rel>_min_as::<T>(col)` / `<rel>_max_as::<T>(col)` - return
+  `Option<T>`: the minimum or maximum read as `T`, whatever the column's
+  type, as Laravel's `withMax('posts', 'created_at')` attribute holds
+  it. A date or a time reads from its ISO 8601 text, so `T` can be the
+  chrono type of the column. `None` when the call was not made, the
+  group was empty, or the value doesn't read as `T`.
 
 The accessors are the ergonomic surface - read through them rather
 than reaching into `__eager.get_aggregate::<T>(...)` directly. They
@@ -2283,15 +2307,21 @@ match u.posts_min_of("id") {
 
 // Accessor returns `None` when the matching `with_*` was skipped:
 assert!(u.posts_avg_of("score").is_none()); // never called with col="score"
+
+// The latest post's date, as Laravel's withMax('posts', 'created_at'):
+let users = User::with_max(("posts", "created_at")).get().await?;
+let latest: Option<DateTime<Utc>> = users[0].posts_max_as("created_at");
 ```
 
 ### Aggregates and INTEGER columns
 
-SUM over an INTEGER column lands in the cache as `f64`. The
-dispatcher arms try `try_get::<Option<f64>>` first, then fall back to
-`try_get::<Option<i64>>().map(|n| n as f64)` so SQLite's INTEGER-
-preserving COUNT/SUM types don't silently coerce to `0.0`. Read via
-the macro-emitted accessors regardless of the source column type.
+SUM over an INTEGER column lands in the cache as `f64`. The database
+chooses the type of an aggregate: an integer of the column's width, a
+real, or `numeric` / `DECIMAL` (Postgres and MySQL sum and average
+integers that way). The dispatcher reads whichever arrives, and a value
+that is not a number, such as the maximum of a date column, is kept for
+`<rel>_max_as` rather than failing the query. Read via the
+macro-emitted accessors regardless of the source column type.
 
 ### `with_where` predicate routing
 

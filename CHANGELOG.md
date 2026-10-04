@@ -422,8 +422,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   fail to parse as a number. A field name sent more than once keeps its
   last value, where multipart kept the first part (even an empty one) and
   url-encoded forms answered 422 for a duplicate field; names ending in
-  `[]` still collect every value. The requests manual lists what still
-  differs from Laravel. This landed after the `v3.1.0` tag.
+  `[]` still collect every value. A url-encoded or JSON field that is
+  missing or does not parse answers as a validation failure naming every
+  such field (`validation-required`, `validation-integer` and the like),
+  where it was a bare 422 with no `errors`, so an Inertia form gets the
+  usual redirect with each error under its input. `Request::query_into`
+  follows the same rules: an empty value is null, a repeated name keeps its
+  last value, and a name ending in `[]` fills a `Vec` field. A form that
+  sends `_token` more than once is checked against the last one, as Laravel
+  reads it. The requests manual lists what still differs from Laravel. This
+  landed after the `v3.1.0` tag.
 - **The session, remember-me, auth-flow token and ceremony entities read
   whole rows on every column type.** Their time fields are the new public
   `suprnova::StoredDateTime`, which reads `DATETIME`, `TIMESTAMP`,
@@ -738,6 +746,27 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Unsigned keys, relation min and max, and raw bindings on every
+  engine.** `with_min` and `with_max` read 32- and 16-bit integer columns
+  on Postgres, and dates, text and times on every database, without an
+  error; `_min_of` and `_max_of` return `Some(None)` for a value that is not
+  a number, and the new `<rel>_min_as::<T>()` and `<rel>_max_as::<T>()`
+  read the value itself. `DB::table`, raw fragments and joined-table
+  columns compare a `u64` above `i64::MAX` as the database does for the
+  stored data, including a REAL held in an INTEGER column on SQLite, and
+  `DB::table` writes store such a value exactly in numeric and text
+  columns while integer columns, and NUMERIC columns on SQLite, refuse it.
+  `attach`, `attach_with` (extras included), `detach` and `sync` bind pivot
+  ids by their column's type: on Postgres and SQLite a `u64` above
+  `i64::MAX` is refused, naming the column, before anything is sent; on
+  MySQL `sync` no longer duplicates unsigned pivot ids, and
+  `BelongsToMany` and `MorphToMany` `get()` load rows whose pivot column is
+  unsigned, where they returned none. On Postgres, a raw fragment sent
+  first with an integer and later with a value above `i64::MAX` no longer
+  fails with "incorrect binary data format". Model `update_all` and
+  `upsert` of such a value to a field that is neither an integer nor text
+  follow the column, as `DB::table` writes do. This landed after the
+  `v3.1.0` tag (#137).
 - **Durations too long for a date are errors, not panics.** A workflow
   lease or retry backoff too long for a date is refused at boot:
   `WORKFLOW_LOCK_TIMEOUT_SECS` above 253402300799, or
@@ -754,7 +783,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   any other 4xx or 5xx, gets no `XSRF-TOKEN` and writes no session row, so
   it no longer turns into a 500 when the session store is unavailable. A
   cookieless JSON or `HEAD` bootstrap that succeeds still gets its token
-  with its session. This landed after the `v3.1.0` tag.
+  with its session. `SessionMiddleware` marks every session that
+  `SessionStore::read` returns as loaded from the store, so a custom store
+  that builds its sessions with `SessionData::new` no longer gets a write
+  on each successful request through `CsrfMiddleware`. This landed after
+  the `v3.1.0` tag.
 - **Live uploads, private responses and tooling.** Finalized uploads free
   their pending slots when finalization commits, so a session no longer
   runs out of upload capacity until restart, and are reclaimed when they
@@ -870,8 +903,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   key finds its owner by the owner model's primary key instead of `id`, in
   lazy and eager reads, counts and aggregates, `has` and owner touches.
   `has`, `where_has` and `doesnt_have` on a `MorphedByMany` relation work;
-  they named a pivot column that does not exist. This landed after the
-  `v3.1.0` tag.
+  they named a pivot column that does not exist. Every relation key default
+  now comes from the models' primary keys, never a literal `id`:
+  `HasManyThrough` and `HasOneThrough` without `second_local_key` join on
+  the intermediate model's primary key, `MorphMany` and `MorphOne` report
+  their parent key or the declared `lk`, and a `MorphTo` reports its
+  targets' primary key, through the morph registry when the targets
+  differ; `MorphTypeEntry` gains a `primary_key` field. This landed after
+  the `v3.1.0` tag.
 - **Magnetar hashing and sign-up races.** Magnetar password hashing runs on
   Tokio's blocking pool instead of stalling async workers. A magic-link or
   passkey sign-up that loses a race for a new email address answers as the

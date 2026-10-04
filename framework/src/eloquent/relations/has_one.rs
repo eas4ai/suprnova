@@ -3,7 +3,7 @@
 //! Mirrors Laravel's [`hasOne`](https://laravel.com/docs/12.x/eloquent-relationships#one-to-one)
 //! semantics: the child table carries a foreign key pointing at the
 //! parent. Default FK convention: `<parent_snake>_id`. Default LK
-//! (the parent column the FK matches against): `"id"`.
+//! (the parent column the FK matches against): the parent's primary key.
 //!
 //! Chainable - `user.profile().filter("verified", true).first().await?`
 //! flows through the inner [`Builder<R>`]. The dual-API surface

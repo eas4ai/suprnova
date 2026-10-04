@@ -196,6 +196,15 @@ pub fn aggregate_cache_key(name: &str, kind: AggregateKind, column: &str) -> Str
     s
 }
 
+/// The cache key under which `with_min` / `with_max` keep the aggregate's
+/// value as JSON, beside the `f64` cell at `key` (an
+/// [`aggregate_cache_key`]). A date or text minimum has no `f64`, and this
+/// cell is what `<rel>_min_as` / `<rel>_max_as` read. A `:` cannot appear
+/// in a relation or column name, so the key never meets another cell's.
+pub fn aggregate_value_cache_key(key: &str) -> String {
+    format!("{key}:value")
+}
+
 /// The loaded rows of one relation, taken out of every parent's cache
 /// for a nested eager load, and put back when this value drops.
 ///
@@ -261,6 +270,49 @@ impl<P, C> Drop for __TakenRows<'_, '_, P, C> {
     }
 }
 
+/// The key column every one of `keys` names, or `""` when they differ.
+///
+/// A `MorphTo` relation's registry entry names its owner's key column.
+/// The owner model varies by row, so the macro passes every declared
+/// target's primary key: when they agree, that is the key; when they
+/// differ, no one column covers every row and the key is resolved per
+/// row through the morph registry ([`MorphTypeEntry::primary_key`]).
+/// `const` so the registry entry stays a constant initialiser.
+///
+/// **Not part of the public API.** It is `pub` because the macro
+/// expands into user crates.
+#[doc(hidden)]
+pub const fn __shared_key(keys: &[&'static str]) -> &'static str {
+    if keys.is_empty() {
+        return "";
+    }
+    let first = keys[0];
+    let mut index = 1;
+    while index < keys.len() {
+        if !same_str(keys[index], first) {
+            return "";
+        }
+        index += 1;
+    }
+    first
+}
+
+/// `a == b`, usable in a `const fn`.
+const fn same_str(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < a.len() {
+        if a[index] != b[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
 /// ` AND <alias>.<column> IS NULL` when `M` declares soft deletes, and
 /// nothing otherwise: the filter a relation statement written by the
 /// `#[suprnova::model]` macro adds for an intermediate model it joins,
@@ -315,9 +367,10 @@ pub trait Relation {
     type Target;
     /// Compile-time relation kind. Drives the dispatcher's branch.
     const KIND: RelationKind;
-    /// Column name on the parent table used as the join key.
-    /// Defaults to `"id"` in concrete impls; customisable per-relation
-    /// via the macro's `lk = "..."` option.
+    /// Column name on the parent table used as the join key: the
+    /// relation's `lk = "..."` when it declares one, else the parent
+    /// model's primary key. A `MorphTo` names the key of the model its
+    /// row points at, resolved through the morph registry.
     fn parent_key(&self) -> &str;
     /// Column name on the target table that points at the parent.
     ///

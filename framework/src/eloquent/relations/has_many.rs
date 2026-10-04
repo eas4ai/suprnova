@@ -4,7 +4,8 @@
 //! [`hasMany`](https://laravel.com/docs/12.x/eloquent-relationships#one-to-many)
 //! semantics: the child table carries a foreign key pointing at the
 //! parent. Default FK convention: `<parent_snake>_id`. Default LK
-//! (the parent column the FK matches against): `"id"`. Both
+//! (the parent column the FK matches against): the parent's primary
+//! key. Both
 //! customisable through the macro's `fk = "..."` / `lk = "..."`
 //! options.
 //!

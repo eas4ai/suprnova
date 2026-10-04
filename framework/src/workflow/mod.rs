@@ -1431,7 +1431,7 @@ mod tests {
                 Duration::MAX,
                 "test-worker",
                 attempts,
-                chrono::Utc::now().naive_utc(),
+                crate::clock::now().naive_utc(),
             )
             .await
         })

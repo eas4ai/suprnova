@@ -795,15 +795,29 @@ fn skip_dollar_quoted_sql(bytes: &[u8], start: usize) -> Option<usize> {
     Some(bytes.len())
 }
 
+/// `sql`, a raw fragment, with its bind markers in the statement's form:
+/// on Postgres each marker becomes its ordinal after `preceding_bindings`,
+/// and a marker whose value in `bindings` is a `numeric` is cast as
+/// `typed_placeholder` casts it, so a fragment whose text was sent before
+/// with an integer parameter does not reuse that statement.
 pub(crate) fn rewrite_raw_placeholders(
     backend: DbBackend,
     sql: &str,
-    binding_count: usize,
+    bindings: &[SeaValue],
     preceding_bindings: usize,
 ) -> Result<String, FrameworkError> {
-    if binding_count == 0 {
+    if bindings.is_empty() {
         return Ok(sql.to_owned());
     }
+    // The marker of the fragment's `local`-th (1-based) binding.
+    let marker = |local: usize| match bindings.get(local.saturating_sub(1)) {
+        Some(value) => crate::database::placeholder::typed_placeholder(
+            backend,
+            preceding_bindings + local,
+            value,
+        ),
+        None => placeholder(backend, preceding_bindings + local),
+    };
     let scan = scan_raw_placeholders(sql);
     let mut replacements = scan
         .escaped_questions
@@ -816,13 +830,7 @@ pub(crate) fn rewrite_raw_placeholders(
                 scan.portable
                     .iter()
                     .enumerate()
-                    .map(|(offset, position)| {
-                        Ok((
-                            *position,
-                            position + 1,
-                            placeholder(backend, preceding_bindings + offset + 1)?,
-                        ))
-                    })
+                    .map(|(offset, position)| Ok((*position, position + 1, marker(offset + 1)?)))
                     .collect::<Result<Vec<_>, FrameworkError>>()?,
             );
         } else {
@@ -841,11 +849,7 @@ pub(crate) fn rewrite_raw_placeholders(
                             .binary_search(number)
                             .expect("scanned numbered placeholder")
                             + 1;
-                        Ok((
-                            *start,
-                            *end,
-                            placeholder(backend, preceding_bindings + local_position)?,
-                        ))
+                        Ok((*start, *end, marker(local_position)?))
                     })
                     .collect::<Result<Vec<_>, FrameworkError>>()?,
             );
@@ -2809,23 +2813,56 @@ fn write_value_expression(
     }
 
     *position += 1;
-    values.push(bind_value(backend, binder, column, value)?);
-    placeholder(backend, *position)
+    let bound = bind_value(backend, binder, column, value)?;
+    let ph = crate::database::placeholder::typed_placeholder(backend, *position, &bound)?;
+    values.push(bound);
+    Ok(ph)
+}
+
+/// Refuse, before anything is sent, a mass write of a `u64` above
+/// `i64::MAX` to a column of `table` that `binder` does not type, where
+/// the database would store a rounded value: on SQLite, a column of
+/// INTEGER or NUMERIC affinity (see `bind_large_unsigned`). The value
+/// itself binds by [`untyped_value`], as the exact number.
+async fn refuse_rounded_writes<'a>(
+    exec: &crate::database::transaction::ExecutorChoice,
+    table: &str,
+    binder: ColumnBinder,
+    attrs: impl IntoIterator<Item = (&'a str, &'a Value)>,
+) -> Result<(), FrameworkError> {
+    use crate::database::transaction::ExecutorChoice;
+    use crate::eloquent::casts::unsigned::{bind_large_unsigned, large_unsigned_attrs};
+
+    let large = large_unsigned_attrs(
+        attrs
+            .into_iter()
+            .filter(|(column, value)| binder(column, value).is_none()),
+    );
+    if large.is_empty() {
+        return Ok(());
+    }
+    match exec {
+        ExecutorChoice::Tx(t, _) => bind_large_unsigned(t.as_ref(), table, &large).await,
+        ExecutorChoice::Pool(c, _) => bind_large_unsigned(c.inner(), table, &large).await,
+    }
+    .map(|_| ())
 }
 
 /// A value compared with a column, as the statement takes it.
 enum Operand {
     /// Bind this value.
     Bound(SeaValue),
-    /// A `u64` above `i64::MAX` compared with a column that Postgres or
-    /// SQLite stores as a signed `BIGINT`. No row holds it, so the
-    /// comparison is rendered as its outcome rather than sent with a value
-    /// sea-query-sqlx's binder there would panic on.
-    Beyond(u64),
+    /// A `u64` above `i64::MAX` for a column the model knows is a signed
+    /// integer column on this backend (Postgres or SQLite), whose drivers
+    /// cannot bind it. See [`compared_value`] for what a comparison does
+    /// with it; a write of it is refused.
+    BeyondInteger(u64),
 }
 
-/// `value`, compared with `column`, bound through the model's binder, or
-/// as it is when the column's cast has no native form.
+/// `value`, compared with or written to `column`, bound through the
+/// model's binder, or by [`untyped_value`] when the binder does not know
+/// the column: a column of a joined table, or a field the binder has no
+/// arm for.
 ///
 /// On MySQL and MariaDB a zone-aware moment binds as its UTC wall clock.
 /// MariaDB 12.3 matches a `TIMESTAMP` column against an `IN` list of
@@ -2840,25 +2877,58 @@ fn operand(backend: DbBackend, binder: ColumnBinder, column: &str, value: &Value
             SeaValue::from(moment.naive_utc())
         }
         Some(bound) => bound,
-        None => json_value_to_sea_value(value),
+        None => return Operand::Bound(untyped_value(backend, value)),
     };
     match bound {
         SeaValue::BigUnsigned(Some(n))
             if crate::eloquent::casts::unsigned::beyond_signed(backend, &bound) =>
         {
-            Operand::Beyond(n)
+            Operand::BeyondInteger(n)
         }
         bound => Operand::Bound(bound),
     }
 }
 
+/// A JSON value for a column whose type is unknown. A `u64` above
+/// `i64::MAX` binds as the exact number the engine compares it as (see
+/// `exact_unsigned`), so the answer is the engine's own whatever the
+/// column holds; as text, Postgres refused to compare it with a number.
+fn untyped_value(backend: DbBackend, value: &Value) -> SeaValue {
+    match value.as_u64() {
+        Some(n) if n > i64::MAX as u64 => {
+            crate::eloquent::casts::unsigned::exact_unsigned(backend, n)
+        }
+        _ => json_value_to_sea_value(value),
+    }
+}
+
+/// The value a comparison binds, or `None` when the comparison is settled
+/// without one.
+///
+/// A value above `i64::MAX` for a known integer column is settled on
+/// Postgres: its signed integer columns hold only integers, so no row
+/// holds the value, and the constant answer keeps the comparison from
+/// scanning a table an index would have answered. SQLite compares the
+/// value's digits instead, as it does a literal: an INTEGER column there
+/// can hold a REAL above `i64::MAX`, and SQLite's own comparison is the
+/// true answer.
+fn compared_value(backend: DbBackend, operand: Operand) -> Option<SeaValue> {
+    match operand {
+        Operand::Bound(bound) => Some(bound),
+        Operand::BeyondInteger(n) if backend == DbBackend::Sqlite => {
+            Some(SeaValue::String(Some(n.to_string())))
+        }
+        Operand::BeyondInteger(_) => None,
+    }
+}
+
 /// Bind `value`, written to `column`.
 ///
-/// A `u64` column on Postgres or SQLite is a signed `BIGINT`, so a write
-/// of a value above `i64::MAX` to it is refused before anything is sent:
-/// sea-query-sqlx's binder would panic on it. The refusal names the
-/// column, and is a database error, so a client sees the generic 500 body
-/// and the log the detail.
+/// A known integer column on Postgres or SQLite is signed, so a write of
+/// a value above `i64::MAX` to it is refused before anything is sent:
+/// sea-query-sqlx's binder would panic on it, and SQLite would store a
+/// rounded REAL. The refusal names the column, and is a database error,
+/// so a client sees the generic 500 body and the log the detail.
 fn bind_value(
     backend: DbBackend,
     binder: ColumnBinder,
@@ -2867,7 +2937,7 @@ fn bind_value(
 ) -> Result<SeaValue, FrameworkError> {
     match operand(backend, binder, column, value) {
         Operand::Bound(bound) => Ok(bound),
-        Operand::Beyond(n) => {
+        Operand::BeyondInteger(n) => {
             crate::eloquent::casts::unsigned::refuse_unsigned_overflow(
                 backend,
                 "",
@@ -2896,9 +2966,9 @@ impl<'a> Compared<'a> {
     }
 }
 
-/// Render `column op value`. A value no row of the column can hold
-/// settles the comparison; under an operator that does not order numbers
-/// (`LIKE`, `IS`) it binds as its digits, the text those operators
+/// Render `column op value`. A comparison [`compared_value`] settles is
+/// rendered as its outcome; under an operator that does not order numbers
+/// (`LIKE`, `IS`) the value binds as its digits, the text those operators
 /// compare.
 fn render_comparison(
     backend: DbBackend,
@@ -2911,20 +2981,25 @@ fn render_comparison(
 ) -> Result<String, FrameworkError> {
     use crate::eloquent::casts::unsigned::Settled;
 
-    let bound = match operand(backend, binder, column.name, value) {
-        Operand::Bound(bound) => bound,
-        Operand::Beyond(beyond) => match Settled::of_operator(op) {
+    let operand = operand(backend, binder, column.name, value);
+    let digits = match &operand {
+        Operand::BeyondInteger(beyond) => Some(beyond.to_string()),
+        Operand::Bound(_) => None,
+    };
+    let bound = match compared_value(backend, operand) {
+        Some(bound) => bound,
+        None => match Settled::of_operator(op) {
             Some(settled) => return Ok(settled.sql(column.sql)),
-            None => SeaValue::String(Some(beyond.to_string())),
+            None => SeaValue::String(digits),
         },
     };
     *n += 1;
-    let ph = placeholder(backend, *n)?;
+    let ph = crate::database::placeholder::typed_placeholder(backend, *n, &bound)?;
     values.push(bound);
     Ok(format!("{} {op} {ph}", column.sql))
 }
 
-/// Render `column [NOT] IN (...)`. A value no row of the column can hold
+/// Render `column [NOT] IN (...)`. A value whose comparison is settled
 /// matches no row, so it leaves the list; a list left with nothing is the
 /// settled outcome of the whole test.
 fn render_in_list(
@@ -2943,9 +3018,11 @@ fn render_in_list(
     }
     let mut phs = Vec::with_capacity(list.len());
     for value in list {
-        if let Operand::Bound(bound) = operand(backend, binder, column.name, value) {
+        if let Some(bound) = compared_value(backend, operand(backend, binder, column.name, value)) {
             *n += 1;
-            phs.push(placeholder(backend, *n)?);
+            phs.push(crate::database::placeholder::typed_placeholder(
+                backend, *n, &bound,
+            )?);
             values.push(bound);
         }
     }
@@ -2961,9 +3038,9 @@ fn render_in_list(
     Ok(format!("{} {not}IN ({})", column.sql, phs.join(", ")))
 }
 
-/// Render `column [NOT] BETWEEN low AND high`. A low end no row of the
-/// column can hold matches no row; a high end none can hold leaves only
-/// `column >= low` (`< low` when negated).
+/// Render `column [NOT] BETWEEN low AND high`. A settled low end matches no
+/// row; a settled high end leaves only `column >= low` (`< low` when
+/// negated).
 fn render_between(
     backend: DbBackend,
     binder: ColumnBinder,
@@ -2975,29 +3052,26 @@ fn render_between(
 ) -> Result<String, FrameworkError> {
     use crate::eloquent::casts::unsigned::Settled;
 
-    let low = match operand(backend, binder, column.name, low) {
-        Operand::Bound(bound) => bound,
-        Operand::Beyond(_) => {
-            let settled = if negated {
-                Settled::Always
-            } else {
-                Settled::Never
-            };
-            return Ok(settled.sql(column.sql));
-        }
+    let Some(low) = compared_value(backend, operand(backend, binder, column.name, low)) else {
+        let settled = if negated {
+            Settled::Always
+        } else {
+            Settled::Never
+        };
+        return Ok(settled.sql(column.sql));
     };
     *n += 1;
-    let pa = placeholder(backend, *n)?;
+    let pa = crate::database::placeholder::typed_placeholder(backend, *n, &low)?;
     values.push(low);
-    match operand(backend, binder, column.name, high) {
-        Operand::Bound(high) => {
+    match compared_value(backend, operand(backend, binder, column.name, high)) {
+        Some(high) => {
             *n += 1;
-            let pb = placeholder(backend, *n)?;
+            let pb = crate::database::placeholder::typed_placeholder(backend, *n, &high)?;
             values.push(high);
             let not = if negated { "NOT " } else { "" };
             Ok(format!("{} {not}BETWEEN {pa} AND {pb}", column.sql))
         }
-        Operand::Beyond(_) => {
+        None => {
             let op = if negated { "<" } else { ">=" };
             Ok(format!("{} {op} {pa}", column.sql))
         }
@@ -3408,11 +3482,10 @@ pub(crate) fn render_subquery_term(
         }
         WhereTerm::Column(a, b) => format!("{} = {}", q(a), q(b)),
         WhereTerm::Raw(sql, bindings) => {
-            let rendered = rewrite_raw_placeholders(backend, sql, bindings.len(), *n)?;
-            for v in bindings {
-                *n += 1;
-                values.push(json_value_to_sea_value(v));
-            }
+            let bound: Vec<SeaValue> = bindings.iter().map(|v| untyped_value(backend, v)).collect();
+            let rendered = rewrite_raw_placeholders(backend, sql, &bound, *n)?;
+            *n += bound.len();
+            values.extend(bound);
             rendered
         }
         WhereTerm::JsonContains(col, v) => {
@@ -3687,11 +3760,11 @@ impl<M> Builder<M> {
             }
             WhereTerm::Column(a, b) => format!("{a} = {b}"),
             WhereTerm::Raw(sql, bindings) => {
-                let rendered = rewrite_raw_placeholders(backend, sql, bindings.len(), *n)?;
-                for v in bindings {
-                    *n += 1;
-                    values.push(json_value_to_sea_value(v));
-                }
+                let bound: Vec<SeaValue> =
+                    bindings.iter().map(|v| untyped_value(backend, v)).collect();
+                let rendered = rewrite_raw_placeholders(backend, sql, &bound, *n)?;
+                *n += bound.len();
+                values.extend(bound);
                 rendered
             }
             WhereTerm::JsonContains(col, v) => {
@@ -3801,11 +3874,13 @@ impl<M> Builder<M> {
                     for (idx, v) in vs.iter().enumerate() {
                         // A value no row holds matches no row, so its arm
                         // is left out; the others keep their places.
-                        let Operand::Bound(bound) = operand(backend, self.binder, col, v) else {
+                        let operand = operand(backend, self.binder, col, v);
+                        let Some(bound) = compared_value(backend, operand) else {
                             continue;
                         };
                         *n += 1;
-                        let ph = placeholder(backend, *n)?;
+                        let ph =
+                            crate::database::placeholder::typed_placeholder(backend, *n, &bound)?;
                         values.push(bound);
                         cases.push_str(&format!(" WHEN {col} = {ph} THEN {idx}"));
                     }
@@ -6450,6 +6525,7 @@ where
             connection_override.as_deref(),
             move |exec| async move {
                 let backend = exec.backend();
+                refuse_rounded_writes(&exec, M::TABLE, M::bind_column, attrs.iter()).await?;
 
                 let mut values: Vec<SeaValue> = Vec::new();
                 let mut n: usize = 0;
@@ -6760,6 +6836,13 @@ where
             connection_override.as_deref(),
             move |exec| async move {
                 let backend = exec.backend();
+                refuse_rounded_writes(
+                    &exec,
+                    M::TABLE,
+                    M::bind_column,
+                    rows.iter().flat_map(|attrs| attrs.iter()),
+                )
+                .await?;
 
                 let mut values: Vec<SeaValue> = Vec::new();
                 let mut n: usize = 0;
@@ -7059,7 +7142,8 @@ mod tests {
                    AND payload ?? 'flag' AND age >= ? -- ?\n/* ? */";
 
         validate_raw_placeholders(sql, 1).unwrap();
-        let rendered = rewrite_raw_placeholders(DbBackend::Postgres, sql, 1, 4).unwrap();
+        let rendered =
+            rewrite_raw_placeholders(DbBackend::Postgres, sql, &[SeaValue::from(1i64)], 4).unwrap();
 
         assert!(rendered.contains("note = '?'"));
         assert!(rendered.contains("body = $tag$?$tag$"));
@@ -7074,16 +7158,47 @@ mod tests {
         let sql = "age >= $1 AND role = $2";
         validate_raw_placeholders(sql, 2).unwrap();
 
+        let two = [SeaValue::from(1i64), SeaValue::from("admin")];
         assert_eq!(
-            rewrite_raw_placeholders(DbBackend::Postgres, sql, 2, 3).unwrap(),
+            rewrite_raw_placeholders(DbBackend::Postgres, sql, &two, 3).unwrap(),
             "age >= $4 AND role = $5"
         );
 
         let absolute = "age >= $7 AND role = $9 AND fallback_role = $9";
         validate_raw_placeholders(absolute, 2).unwrap();
         assert_eq!(
-            rewrite_raw_placeholders(DbBackend::Postgres, absolute, 2, 3).unwrap(),
+            rewrite_raw_placeholders(DbBackend::Postgres, absolute, &two, 3).unwrap(),
             "age >= $4 AND role = $5 AND fallback_role = $5"
+        );
+    }
+
+    /// A `numeric` binding of a raw fragment is cast on Postgres, as
+    /// `typed_placeholder` casts one, so the fragment's text differs from
+    /// the text it has with an integer binding. Elsewhere markers stay `?`.
+    #[test]
+    fn a_numeric_raw_binding_is_cast_on_postgres() {
+        let numeric = [
+            SeaValue::Decimal(Some(rust_decimal::Decimal::from(u64::MAX))),
+            SeaValue::from(1i64),
+        ];
+        assert_eq!(
+            rewrite_raw_placeholders(DbBackend::Postgres, "big = ? AND id = ?", &numeric, 1)
+                .unwrap(),
+            "big = CAST($2 AS NUMERIC) AND id = $3"
+        );
+        assert_eq!(
+            rewrite_raw_placeholders(
+                DbBackend::Postgres,
+                "big = $1 OR $1 IS NULL",
+                &numeric[..1],
+                0
+            )
+            .unwrap(),
+            "big = CAST($1 AS NUMERIC) OR CAST($1 AS NUMERIC) IS NULL"
+        );
+        assert_eq!(
+            rewrite_raw_placeholders(DbBackend::Sqlite, "big = ? AND id = ?", &numeric, 1).unwrap(),
+            "big = ? AND id = ?"
         );
     }
 

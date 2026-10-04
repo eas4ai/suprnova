@@ -35,6 +35,11 @@ pub struct MorphTypeEntry {
     pub type_name: &'static str,
     /// The SQL table name (`"posts"`).
     pub table: &'static str,
+    /// The model's primary-key column (`"id"`, or what
+    /// `#[model(primary_key = "...")]` declares). A `MorphTo` reads the
+    /// key of a row's owner from here, since the owner model is chosen
+    /// by the type the row names.
+    pub primary_key: &'static str,
     /// `TypeId::of::<T>` thunk - wrapped as `fn() -> TypeId` because
     /// `TypeId` itself isn't a stable const, so it can't be stored
     /// directly in an `inventory::submit!` constant.

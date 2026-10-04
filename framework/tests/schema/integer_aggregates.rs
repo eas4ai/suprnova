@@ -8,6 +8,7 @@
 
 use std::str::FromStr;
 
+use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{DatabaseConnection, DbBackend};
 use sea_orm_migration::prelude::*;
@@ -68,6 +69,9 @@ async fn create_entries(conn: &DatabaseConnection) {
         t.float("weight");
         t.string("tag");
         t.decimal("price", 30, 2).nullable();
+        t.small_integer("tiny").nullable();
+        t.date("due_on").nullable();
+        t.string("logged_at").nullable();
     })
     .await
     .expect("create ia_entries");
@@ -346,6 +350,132 @@ async fn postgres_averages_read_as_f64_and_decimal() {
 #[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
 async fn mysql_averages_read_as_f64_and_decimal() {
     averages_read_as_f64_and_decimal(&connect_mysql().await).await;
+}
+
+/// `with_min` and `with_max` read a 32-bit and a 16-bit integer column, which
+/// Postgres answers as `int4` and `int2`, and a date column, native or
+/// text, on every database. A date has no `f64`, so `_min_of` / `_max_of`
+/// answer `Some(None)` for it, as before, and `_min_as` / `_max_as` read it
+/// as a date. Reading it is never an error. It fails
+/// while the relation aggregate reads only `int8` on Postgres, and while a
+/// date fails the whole query.
+pub async fn relation_min_max_read_every_column(conn: &DatabaseConnection) {
+    create_entries(conn).await;
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(conn.clone()));
+    let owner = IaOwner::create(attrs! { name: "owner" })
+        .await
+        .expect("create an owner");
+    for (small, tiny, due_on, logged_at) in [
+        (3i32, 9i16, "2026-03-04", "2026-01-02T03:04:05+00:00"),
+        (7, 2, "2026-01-02", "2026-05-06T07:08:09+00:00"),
+    ] {
+        run(
+            conn,
+            &format!(
+                "INSERT INTO ia_entries \
+                 (ia_owner_id, amount, hits, small, ratio, weight, tag, tiny, due_on, logged_at) \
+                 VALUES ({}, 0, 0, {small}, 0, 0, 'dated', {tiny}, '{due_on}', '{logged_at}')",
+                owner.id
+            ),
+        )
+        .await
+        .expect("insert an entry");
+    }
+
+    let owners = IaOwner::query()
+        .with_min(("entries", "small"))
+        .with_max(("entries", "small"))
+        .with_min(("entries", "tiny"))
+        .with_max(("entries", "tiny"))
+        .with_min(("entries", "due_on"))
+        .with_max(("entries", "due_on"))
+        .with_max(("entries", "logged_at"))
+        .get()
+        .await
+        .expect("relation aggregates over int4, int2 and date columns");
+    let owner = owners.first().expect("the owner");
+    assert_eq!(
+        owner.entries_min_of("small"),
+        Some(Some(3.0)),
+        "with_min int4"
+    );
+    assert_eq!(
+        owner.entries_max_of("small"),
+        Some(Some(7.0)),
+        "with_max int4"
+    );
+    assert_eq!(
+        owner.entries_min_of("tiny"),
+        Some(Some(2.0)),
+        "with_min int2"
+    );
+    assert_eq!(
+        owner.entries_max_of("tiny"),
+        Some(Some(9.0)),
+        "with_max int2"
+    );
+    assert_eq!(
+        owner.entries_max_of("due_on"),
+        Some(None),
+        "a date has no f64"
+    );
+    assert_eq!(
+        owner.entries_max_of("logged_at"),
+        Some(None),
+        "text has no f64"
+    );
+    let day = |text: &str| NaiveDate::parse_from_str(text, "%Y-%m-%d").expect("a date");
+    assert_eq!(
+        owner.entries_min_as::<NaiveDate>("due_on"),
+        Some(day("2026-01-02")),
+        "with_min of a date column"
+    );
+    assert_eq!(
+        owner.entries_max_as::<NaiveDate>("due_on"),
+        Some(day("2026-03-04")),
+        "with_max of a date column"
+    );
+    assert_eq!(
+        owner.entries_max_as::<DateTime<Utc>>("logged_at"),
+        Some(
+            DateTime::parse_from_rfc3339("2026-05-06T07:08:09+00:00")
+                .expect("a time")
+                .with_timezone(&Utc)
+        ),
+        "with_max of a date-time stored as text"
+    );
+    assert_eq!(
+        owner.entries_max_as::<i64>("small"),
+        Some(7),
+        "a number reads too"
+    );
+    assert_eq!(
+        owner.entries_max_as::<NaiveDate>("small"),
+        None,
+        "a value that does not read as the type"
+    );
+
+    drop_tables(conn, TABLES).await;
+}
+
+#[tokio::test]
+async fn sqlite_relation_min_max_read_every_column() {
+    relation_min_max_read_every_column(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_relation_min_max_read_every_column() {
+    relation_min_max_read_every_column(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_relation_min_max_read_every_column() {
+    relation_min_max_read_every_column(&connect_mysql().await).await;
 }
 
 #[tokio::test]

@@ -15,9 +15,13 @@
 //! refuses one above `i64::MAX` on Postgres and SQLite before the statement
 //! is built, naming the column.
 //!
-//! A read by such a value is not refused: no row of a signed column holds
-//! it, so the answer is known without asking. A lookup by key finds
-//! nothing, and a comparison is settled, true or false for every row.
+//! A read by such a value is not refused. On Postgres no row of a signed
+//! integer column holds it, so a lookup by key finds nothing and a
+//! comparison is answered without the value, true or false for every row.
+//! SQLite compares it by its digits, as it does a literal: an INTEGER
+//! column there can hold a REAL above `i64::MAX`, and its own comparison
+//! is the true answer. A column whose type the query does not know takes
+//! the value as the number the engine compares it as.
 
 use sea_orm::sea_query::{ArrayType, ColumnType, Nullable, ValueType, ValueTypeErr};
 use sea_orm::{ColIdx, DbBackend, DbErr, QueryResult, TryFromU64, TryGetError, TryGetable, Value};
@@ -183,12 +187,163 @@ fn column_name<I: ColIdx>(index: &I) -> String {
     }
 }
 
-/// Whether `value` is a `u64` that `backend` stores in a signed column
-/// and no such column can hold: one above `i64::MAX` on Postgres or
-/// SQLite. MySQL's unsigned columns hold every `u64`.
+/// Whether `value` is a `u64` above `i64::MAX` that `backend` stores in a
+/// signed integer column, Postgres's and SQLite's only kind: no integer
+/// write of it fits, and the drivers there cannot bind it. MySQL's
+/// unsigned columns hold every `u64`.
+///
+/// It says nothing about what such a column already holds. On Postgres a
+/// signed integer column holds only integers, so no row matches the
+/// value. On SQLite an INTEGER column can hold a REAL above `i64::MAX`,
+/// from raw SQL or an older write, so there a comparison binds the value's
+/// digits instead and SQLite answers it.
 pub(crate) fn beyond_signed(backend: DbBackend, value: &Value) -> bool {
     matches!(value, Value::BigUnsigned(Some(n)) if *n > i64::MAX as u64)
         && backend != DbBackend::MySql
+}
+
+/// How a `u64` above `i64::MAX` binds when the type of the column it meets
+/// is unknown - a `DB::table` column, a joined table's column, a raw
+/// fragment - so that the engine compares or stores it as the number it
+/// is, and the answer is the engine's own for whatever the column holds.
+///
+/// - MySQL takes it as an unsigned integer.
+/// - Postgres takes it as `numeric`: a `bigint` or a `double precision`
+///   column compares with a `numeric` exactly, and a `numeric` or `text`
+///   column stores it exactly. Postgres refuses to store it in a `bigint`.
+/// - SQLite takes its digits, to which it applies the column's affinity as
+///   it does to a literal: an INTEGER, REAL or NUMERIC column compares it
+///   as a number, a TEXT column as text.
+pub(crate) fn exact_unsigned(backend: DbBackend, n: u64) -> Value {
+    match backend {
+        DbBackend::Postgres => Value::Decimal(Some(rust_decimal::Decimal::from(n))),
+        DbBackend::Sqlite => Value::String(Some(n.to_string())),
+        _ => Value::BigUnsigned(Some(n)),
+    }
+}
+
+/// How each `u64` above `i64::MAX` in `large`, written to a column of
+/// `table` whose type the write does not know, binds, by column.
+///
+/// MySQL and Postgres take the exact number (see [`exact_unsigned`]):
+/// MySQL stores it in an unsigned column and refuses it for a signed one,
+/// Postgres stores it in a `numeric` or `text` column and refuses it for a
+/// `bigint`. Neither stores a rounded value in an integer column.
+///
+/// SQLite would: it stores digits too large for an integer as a REAL in a
+/// column of INTEGER or NUMERIC affinity, silently. So on SQLite the
+/// columns' affinities are read, only when such a value is written, and a
+/// write to one of those columns is refused before anything is sent, as a
+/// database error naming the column. A TEXT, BLOB or REAL column takes the
+/// digits: as text, or as the nearest REAL a floating-point column holds
+/// for any number.
+pub(crate) async fn bind_large_unsigned<C: sea_orm::ConnectionTrait>(
+    conn: &C,
+    table: &str,
+    large: &[(String, u64)],
+) -> Result<std::collections::HashMap<String, Value>, FrameworkError> {
+    let backend = conn.get_database_backend();
+    let mut bound = std::collections::HashMap::new();
+    if large.is_empty() {
+        return Ok(bound);
+    }
+    let affinities = if backend == DbBackend::Sqlite {
+        sqlite_affinities(conn, table).await?
+    } else {
+        std::collections::HashMap::new()
+    };
+    for (column, n) in large {
+        if backend == DbBackend::Sqlite
+            && let Some(affinity @ ("INTEGER" | "NUMERIC")) =
+                affinities.get(column).map(String::as_str)
+        {
+            return Err(FrameworkError::database(format!(
+                "`{table}.{column}`: {n} is above {}, the largest integer SQLite \
+                 stores exactly; a column of {affinity} affinity would store it as a \
+                 rounded REAL",
+                i64::MAX,
+            )));
+        }
+        bound.insert(column.clone(), exact_unsigned(backend, *n));
+    }
+    Ok(bound)
+}
+
+/// The affinity SQLite gives each column of `table`, from its declared
+/// type, by the rules of section 3.1 of SQLite's datatype documentation.
+async fn sqlite_affinities<C: sea_orm::ConnectionTrait>(
+    conn: &C,
+    table: &str,
+) -> Result<std::collections::HashMap<String, String>, FrameworkError> {
+    let rows = conn
+        .query_all_raw(sea_orm::Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT name, type FROM pragma_table_info(?)",
+            [Value::from(table)],
+        ))
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
+    let mut affinities = std::collections::HashMap::new();
+    for row in rows {
+        let name: String = row
+            .try_get("", "name")
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let declared: String = row
+            .try_get::<Option<String>>("", "type")
+            .map_err(|e| FrameworkError::database(e.to_string()))?
+            .unwrap_or_default()
+            .to_lowercase();
+        let affinity = if declared.contains("int") {
+            "INTEGER"
+        } else if ["char", "clob", "text"]
+            .iter()
+            .any(|t| declared.contains(t))
+        {
+            "TEXT"
+        } else if declared.is_empty() || declared.contains("blob") {
+            "BLOB"
+        } else if ["real", "floa", "doub"]
+            .iter()
+            .any(|t| declared.contains(t))
+        {
+            "REAL"
+        } else {
+            "NUMERIC"
+        };
+        affinities.insert(name, affinity.to_owned());
+    }
+    Ok(affinities)
+}
+
+/// The columns of `attrs` that hold a `u64` above `i64::MAX`, with it.
+pub(crate) fn large_unsigned_attrs<'a>(
+    attrs: impl IntoIterator<Item = (&'a str, &'a serde_json::Value)>,
+) -> Vec<(String, u64)> {
+    attrs
+        .into_iter()
+        .filter_map(|(column, value)| {
+            value
+                .as_u64()
+                .filter(|n| *n > i64::MAX as u64)
+                .map(|n| (column.to_owned(), n))
+        })
+        .collect()
+}
+
+/// How a value compared with, or written to, a text field without a cast
+/// binds: a `u64` above `i64::MAX` as its digits, which is what a text
+/// column holds; anything else as it is (`None`). Without it such a value
+/// would bind as the number it is, which Postgres refuses to compare with
+/// text.
+///
+/// **Not part of the public API.** It is `pub` because the code
+/// `#[suprnova::model]` generates for a model's column binder calls it.
+#[doc(hidden)]
+pub fn __bind_text(value: &serde_json::Value) -> Option<Value> {
+    value
+        .as_u64()
+        .filter(|n| *n > i64::MAX as u64)
+        .map(|n| Value::String(Some(n.to_string())))
 }
 
 /// How a comparison of a signed column with a value above every value it

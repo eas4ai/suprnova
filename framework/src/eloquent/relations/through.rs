@@ -46,8 +46,11 @@
 //!
 //! - `first_key` (column on `B` pointing at `A`): `<snake(A)>_id`
 //! - `second_key` (column on `C` pointing at `B`): `<snake(B)>_id`
-//! - `local_key` (column on `A` matched by `first_key`): `"id"`
-//! - `second_local_key` (column on `B` matched by `second_key`): `"id"`
+//! - `local_key` (column on `A` matched by `first_key`): `A`'s primary
+//!   key
+//! - `second_local_key` (column on `B` matched by `second_key`): `B`'s
+//!   primary key, as Laravel's `secondLocalKey` defaults to the
+//!   intermediate's key name
 //!
 //! All four customisable via the macro's `first_key = "..."` /
 //! `second_key = "..."` / `lk = "..."` / `second_local_key = "..."`
@@ -114,13 +117,13 @@ where
     first_key: String,
     /// Column on `C` pointing at `B`. Default: `<snake(B)>_id`.
     second_key: String,
-    /// Column on `A` matched by `first_key`. Default: `"id"`. Only
-    /// affects the [`Relation::parent_key`] metadata - the runtime
-    /// value was already extracted at construction.
+    /// Column on `A` matched by `first_key`. Default: `A`'s primary
+    /// key. Only affects the [`Relation::parent_key`] metadata - the
+    /// runtime value was already extracted at construction.
     local_key: String,
-    /// Column on `B` matched by `second_key`. Default: `"id"`. Drives
-    /// the `INNER JOIN ... ON C.{second_key} = B.{second_local_key}`
-    /// predicate.
+    /// Column on `B` matched by `second_key`. Default: `B`'s primary
+    /// key. Drives the `INNER JOIN ... ON C.{second_key} =
+    /// B.{second_local_key}` predicate.
     second_local_key: String,
     /// The lazy-loading check [`Self::get`] runs before its query
     /// ([`Self::first`] goes through it). Set by the macro-emitted
@@ -170,8 +173,8 @@ where
             parent_key_value,
             first_key,
             second_key,
-            local_key: "id".into(),
-            second_local_key: "id".into(),
+            local_key: A::PRIMARY_KEY.into(),
+            second_local_key: B::PRIMARY_KEY.into(),
             lazy_load: LazyLoadGuard::default(),
             _phantom: PhantomData,
         }
