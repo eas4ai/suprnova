@@ -314,6 +314,8 @@ async fn oauth_only_initialization_leaves_legacy_session_authority_active() {
             enrollment_session_id: Set(None),
             enrollment_expires_at: Set(None),
             rotation_pending: Set(false),
+            pending_secret: Set(None),
+            pending_recovery_codes: Set(None),
             confirmed_at: Set(Some(now)),
             last_used_timestep: Set(None),
             created_at: Set(Some(now)),
