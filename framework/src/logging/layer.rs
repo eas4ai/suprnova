@@ -206,6 +206,8 @@ where
         };
         for (sink, minimum) in sinks {
             if level.passes(minimum) {
+                // Each sink reports its own failure once on stderr, a
+                // driver's through its `ReportedSink`.
                 let _ = sink.write(&record);
             }
         }

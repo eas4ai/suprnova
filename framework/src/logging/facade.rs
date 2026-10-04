@@ -2,7 +2,8 @@
 
 use super::channel::{ChannelKind, LogChannel, LogLevel, LogRecord, LogSink, facility_number};
 use super::sinks::{
-    FileSink, Rotation, StreamSink, flush_all, register_flushable, replace_placeholders,
+    FileSink, ReportedSink, Rotation, StreamSink, flush_all, register_flushable,
+    replace_placeholders,
 };
 use crate::error::FrameworkError;
 use std::collections::{BTreeMap, HashMap};
@@ -168,7 +169,9 @@ fn build(channel: &LogChannel, depth: u8) -> Result<Vec<Leaf>, FrameworkError> {
                     "the log driver '{driver}' does not exist: add it with Log::extend"
                 ))
             })?;
-            let sink = factory(channel)?;
+            // The driver's failures are reported for it, as the `LogSink`
+            // contract asks of its caller.
+            let sink: Arc<dyn LogSink> = Arc::new(ReportedSink::new(factory(channel)?, driver));
             // A driver may buffer, so it is flushed with the files.
             register_flushable(&sink);
             vec![Leaf::Sink(sink, level)]
@@ -461,6 +464,9 @@ impl Logger {
             context,
         };
         for leaf in &self.leaves {
+            // Every sink reports its own failure once on stderr, a driver's
+            // through its `ReportedSink`, so the result is not needed here:
+            // logging never fails its caller.
             let _ = match leaf {
                 Leaf::Stdout(minimum) if level.passes(*minimum) => {
                     StreamSink::stdout().write(&record)

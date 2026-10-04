@@ -898,3 +898,78 @@ fn a_console_command_flushes_its_records_before_the_process_exits() {
     );
     assert!(read(&file).contains("console-marker"));
 }
+
+// Audit fixes (DRIVERS-028 to DRIVERS-033).
+
+/// A driver sink whose writes fail with `marker`.
+struct FailingWrites(&'static str);
+
+impl LogSink for FailingWrites {
+    fn write(&self, _record: &LogRecord) -> std::io::Result<()> {
+        Err(std::io::Error::other(self.0))
+    }
+}
+
+/// A driver sink that takes every record and then fails to flush them.
+struct FailingFlushes(&'static str);
+
+impl LogSink for FailingFlushes {
+    fn write(&self, _record: &LogRecord) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn flush(&self) -> std::io::Result<()> {
+        Err(std::io::Error::other(self.0))
+    }
+}
+
+/// In a child: write through a driver whose writes fail, a driver whose
+/// flushes fail, and (on Linux) a file on a full device, twice each.
+#[test]
+fn child_writes_through_sinks_that_fail() {
+    if !is_child() {
+        return;
+    }
+    Log::extend("failing-writes", |_| {
+        Ok(Arc::new(FailingWrites("write-refused-marker")) as Arc<dyn LogSink>)
+    });
+    Log::extend("failing-flushes", |_| {
+        Ok(Arc::new(FailingFlushes("flush-refused-marker")) as Arc<dyn LogSink>)
+    });
+    let writes = Log::build(LogChannel::driver("failing-writes")).unwrap();
+    let flushes = Log::build(LogChannel::driver("failing-flushes")).unwrap();
+    #[cfg(target_os = "linux")]
+    let full = Log::build(LogChannel::single("/dev/full")).unwrap();
+    for _ in 0..2 {
+        writes.info("lost");
+        flushes.info("buffered");
+        #[cfg(target_os = "linux")]
+        full.info("buffered");
+        Log::flush();
+    }
+}
+
+/// DRIVERS-028: the `LogSink` contract says the caller reports a write that
+/// fails, once, on stderr. A driver's failed write, a driver's failed flush
+/// and a buffered file's failed flush were all dropped without a word.
+#[test]
+fn a_sink_that_cannot_write_or_flush_is_reported_once_on_stderr() {
+    let output = run_child("channels::child_writes_through_sinks_that_fail", &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("write-refused-marker").count(),
+        1,
+        "a driver's failed write, once: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("flush-refused-marker").count(),
+        1,
+        "a driver's failed flush, once: {stderr}"
+    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        stderr.matches("/dev/full").count(),
+        1,
+        "a file whose buffered records cannot be flushed, once: {stderr}"
+    );
+}

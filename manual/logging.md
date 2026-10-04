@@ -101,7 +101,9 @@ its value, and the context is written beside the message. A channel
 A stack writes each record to every channel it lists, and a channel that
 cannot write, such as a file it cannot open, stops none of the others;
 the failure is reported once on stderr, and the code that logged never
-sees an error. `Log::channels()` lists the channels in use,
+sees an error. That covers a driver's sink that returns an error from
+`write` or `flush`, and buffered lines a file cannot flush, such as on a
+full disk. `Log::channels()` lists the channels in use,
 `Log::forget_channel(name)` closes one, which is resolved again on its
 next use, reopening a file rotated away, and `Log::default_channel()` and
 `Log::set_default_channel(name)` read and move the default.
