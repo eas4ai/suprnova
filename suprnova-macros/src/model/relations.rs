@@ -3059,6 +3059,9 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_map_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_b_table);
                     let __sn_map_rows = __sn_exec.query_all(__sn_map_stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -3972,6 +3975,9 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_table);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -4100,6 +4106,9 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_table);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -4248,6 +4257,10 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_c_table);
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_b_table);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -4382,6 +4395,9 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_table);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -4519,6 +4535,9 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_table);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -4662,6 +4681,9 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_table);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -5055,6 +5077,9 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_table);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -5264,6 +5289,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_pivot);
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_related);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -5457,6 +5486,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_c_table);
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_b_table);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -5637,6 +5670,9 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_table);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -5838,6 +5874,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_pivot);
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_related);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -6042,6 +6082,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_pivot);
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_related);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;

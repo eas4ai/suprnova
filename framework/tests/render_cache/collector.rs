@@ -1195,3 +1195,285 @@ async fn current_tenant_outside_the_middleware_records_a_tenant_read_with_no_val
         "and there is no value to record"
     );
 }
+
+// ---- DATA-033: legacy read wrappers and raw relation reads -----------
+//
+// A cacheable route that reads through the legacy `EntityExt` /
+// `QueryBuilder` surface, or loads a relation count or aggregate, must
+// record every table those reads touched. Each one used to run its query
+// with no observation, so the stored entry depended on nothing a later
+// write to that table advanced, and it was served until it aged out.
+
+/// A plain SeaORM entity over the probe table, the shape an application
+/// that predates `#[model]` reads through `EntityExt` and `QueryBuilder`.
+mod legacy_probe {
+    use suprnova::sea_orm;
+    use suprnova::sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "render_cache_collector_probe")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub name: String,
+        pub amount: f64,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+impl suprnova::database::EntityExt for legacy_probe::Entity {}
+
+/// The identities one read recorded, in a content-bucket scope.
+async fn observed_by<F: std::future::Future>(read: F) -> Vec<DependencyIdentity> {
+    Collector::scope(async move {
+        collector::begin_handler();
+        read.await;
+        collector::current_report().expect("report").observed
+    })
+    .await
+}
+
+#[tokio::test]
+#[serial]
+async fn legacy_entity_and_query_builder_reads_observe_the_table() {
+    use suprnova::database::{EntityExt as _, QueryBuilder};
+
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate(&db).await;
+    Probe::create(attrs!(name: "a", amount: 1.0))
+        .await
+        .expect("create");
+    let table = DependencyIdentity::table(TABLE);
+
+    let reads: Vec<(&str, Vec<DependencyIdentity>)> = vec![
+        (
+            "EntityExt::all",
+            observed_by(async {
+                let _ = legacy_probe::Entity::all().await.expect("all");
+            })
+            .await,
+        ),
+        (
+            "EntityExt::find_by_pk",
+            observed_by(async {
+                let _ = legacy_probe::Entity::find_by_pk(1_i64).await.expect("find");
+            })
+            .await,
+        ),
+        (
+            "EntityExt::count_all",
+            observed_by(async {
+                let _ = legacy_probe::Entity::count_all().await.expect("count");
+            })
+            .await,
+        ),
+        (
+            "EntityExt::first",
+            observed_by(async {
+                let _ = legacy_probe::Entity::first().await.expect("first");
+            })
+            .await,
+        ),
+        (
+            "QueryBuilder::all",
+            observed_by(async {
+                let _ = QueryBuilder::<legacy_probe::Entity>::new()
+                    .all()
+                    .await
+                    .expect("all");
+            })
+            .await,
+        ),
+        (
+            "QueryBuilder::first",
+            observed_by(async {
+                let _ = QueryBuilder::<legacy_probe::Entity>::new()
+                    .first()
+                    .await
+                    .expect("first");
+            })
+            .await,
+        ),
+        (
+            "QueryBuilder::count",
+            observed_by(async {
+                let _ = QueryBuilder::<legacy_probe::Entity>::new()
+                    .count()
+                    .await
+                    .expect("count");
+            })
+            .await,
+        ),
+    ];
+    for (read, observed) in reads {
+        assert!(
+            observed.contains(&table),
+            "{read} must record the table it read, got {observed:?}"
+        );
+    }
+}
+
+#[model(table = "ct_parents", timestamps = false, relations = {
+    children: HasMany<CtChild>,
+    tags: BelongsToMany<CtTag, CtParentTag>,
+    grandchildren: HasManyThrough<CtChild, CtGrandchild>,
+})]
+pub struct CtParent {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "ct_children", timestamps = false)]
+pub struct CtChild {
+    pub id: i64,
+    pub ct_parent_id: i64,
+    pub amount: f64,
+}
+
+#[model(table = "ct_grandchildren", timestamps = false)]
+pub struct CtGrandchild {
+    pub id: i64,
+    pub ct_child_id: i64,
+    pub amount: f64,
+}
+
+#[model(table = "ct_tags", timestamps = false)]
+pub struct CtTag {
+    pub id: i64,
+    pub name: String,
+    pub weight: f64,
+}
+
+#[model(table = "ct_parent_tags", timestamps = false)]
+pub struct CtParentTag {
+    pub id: i64,
+    pub ct_parent_id: i64,
+    pub ct_tag_id: i64,
+}
+
+async fn migrate_relations(db: &TestDatabase) {
+    for sql in [
+        "CREATE TABLE ct_parents (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE ct_children (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         ct_parent_id INTEGER NOT NULL, amount REAL NOT NULL)",
+        "CREATE TABLE ct_grandchildren (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         ct_child_id INTEGER NOT NULL, amount REAL NOT NULL)",
+        "CREATE TABLE ct_tags (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         name TEXT NOT NULL, weight REAL NOT NULL)",
+        "CREATE TABLE ct_parent_tags (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         ct_parent_id INTEGER NOT NULL, ct_tag_id INTEGER NOT NULL)",
+    ] {
+        db.execute_unprepared(sql).await.expect("create table");
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn relation_counts_aggregates_and_through_loads_observe_every_table_they_read() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate_relations(&db).await;
+    let parent = CtParent::create(attrs!(name: "p")).await.expect("parent");
+    let child = CtChild::create(attrs!(ct_parent_id: parent.id, amount: 2.0))
+        .await
+        .expect("child");
+    CtGrandchild::create(attrs!(ct_child_id: child.id, amount: 3.0))
+        .await
+        .expect("grandchild");
+    let tag = CtTag::create(attrs!(name: "t", weight: 4.0))
+        .await
+        .expect("tag");
+    CtParentTag::create(attrs!(ct_parent_id: parent.id, ct_tag_id: tag.id))
+        .await
+        .expect("pivot");
+
+    let children = DependencyIdentity::table("ct_children");
+    let grandchildren = DependencyIdentity::table("ct_grandchildren");
+    let tags = DependencyIdentity::table("ct_tags");
+    let pivot = DependencyIdentity::table("ct_parent_tags");
+
+    let cases: Vec<(&str, Vec<DependencyIdentity>, Vec<&DependencyIdentity>)> = vec![
+        (
+            "HasMany count",
+            observed_by(async {
+                let _ = CtParent::with_count(["children"])
+                    .get()
+                    .await
+                    .expect("count");
+            })
+            .await,
+            vec![&children],
+        ),
+        (
+            "HasMany sum",
+            observed_by(async {
+                let _ = CtParent::with_sum(("children", "amount"))
+                    .get()
+                    .await
+                    .expect("sum");
+            })
+            .await,
+            vec![&children],
+        ),
+        (
+            "BelongsToMany count",
+            observed_by(async {
+                let _ = CtParent::with_count(["tags"]).get().await.expect("count");
+            })
+            .await,
+            vec![&pivot],
+        ),
+        (
+            "BelongsToMany sum",
+            observed_by(async {
+                let _ = CtParent::with_sum(("tags", "weight"))
+                    .get()
+                    .await
+                    .expect("sum");
+            })
+            .await,
+            vec![&pivot, &tags],
+        ),
+        (
+            "HasManyThrough count",
+            observed_by(async {
+                let _ = CtParent::with_count(["grandchildren"])
+                    .get()
+                    .await
+                    .expect("count");
+            })
+            .await,
+            vec![&children, &grandchildren],
+        ),
+        (
+            "HasManyThrough sum",
+            observed_by(async {
+                let _ = CtParent::with_sum(("grandchildren", "amount"))
+                    .get()
+                    .await
+                    .expect("sum");
+            })
+            .await,
+            vec![&children, &grandchildren],
+        ),
+        (
+            "HasManyThrough eager load",
+            observed_by(async {
+                let _ = CtParent::with(["grandchildren"]).get().await.expect("load");
+            })
+            .await,
+            vec![&children, &grandchildren],
+        ),
+    ];
+    for (read, observed, expected) in cases {
+        for table in expected {
+            assert!(
+                observed.contains(table),
+                "{read} must record {table:?}, got {observed:?}"
+            );
+        }
+    }
+}
