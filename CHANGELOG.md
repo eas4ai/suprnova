@@ -414,6 +414,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **New applications' session, remember-me and auth-flow token tables use
+  `DATETIME` on MySQL**, so these columns stay writable past 2038-01-19.
+  Postgres and SQLite are unchanged. This landed after the `v3.1.0` tag.
 - **Two-factor needs two new migrations.** Add
   `suprnova::auth_flows::two_factor::migration_attempts` (the
   `two_factor_attempts` table) and `migration_rotation` (the
@@ -665,6 +668,27 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Sessions and remember-me tokens restore on MySQL and MariaDB.** A
+  scaffolded application's session, remember-me and auth-flow token time
+  columns are `TIMESTAMP` there, and the framework read them as a type the
+  MySQL driver decodes only from `DATETIME`. Every session read failed: a
+  form POST answered 419 and the next page 500, the remember-me cookie
+  never signed anyone back in, and verification and reset links could not
+  be used. The notification inbox and the ceremony store failed the same
+  way, and on Postgres each failed on a `timestamptz` column. They now read
+  `DATETIME`, `TIMESTAMP`, `timestamp`, `timestamptz` and SQLite text, and
+  existing tables need no migration. A notification whose `read_at` does
+  not decode is an error instead of unread. On MySQL, an expiry past
+  2038-01-19 03:14:07 UTC is stored as that moment. This landed after the
+  `v3.1.0` tag.
+- **A new application registers and signs in on every database.** The
+  `users` table and `User` model that `suprnova new` writes disagreed on
+  the time column type, so registering failed on MySQL 8.4, MariaDB and
+  Postgres. The migration now uses `.date_time()` and the model names
+  `AsNaiveDateTime`. An existing application gives its `User` the casts for
+  its columns: the native casts on MySQL and MariaDB, the naive ones on
+  Postgres. See Authentication, "The scaffolded User model". This landed
+  after the `v3.1.0` tag.
 - **Two-factor flows on every engine.** A framework login completed with
   `TwoFactor::complete_challenge` stays signed in under the Magnetar
   engine. The two-factor credentials table and the attempt-counter
