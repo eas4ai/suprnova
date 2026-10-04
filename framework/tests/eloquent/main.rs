@@ -56,6 +56,7 @@ pub mod read_instrumentation;
 pub mod registry;
 pub mod relation_registry;
 pub mod relation_trait;
+pub mod relations_declarations;
 pub mod relations_m2m_tx;
 pub mod relations_morph;
 pub mod relations_morph_custom_type;

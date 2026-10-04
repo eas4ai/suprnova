@@ -1384,7 +1384,10 @@ tx.
 Three-way precedence for routing an operation through a connection:
 
 1. **Builder-level override** - `Builder::with_tx(&tx)` or any
-   `Model::*_with_tx(&tx, ...)` shim. Explicit beats ambient.
+   `Model::*_with_tx(&tx, ...)` shim. Explicit beats ambient. The
+   eager loads of such a query read through the same transaction, and
+   those of an `on(name)` query read from that connection, unless the
+   related model declares a connection of its own.
 2. **The ambient transaction** - installed by `DB::transaction` /
    `DB::transaction_with_attempts` for the closure's task scope.
    A read that names another connection, through `on(name)` or a
@@ -3680,7 +3683,9 @@ impl Prunable for ExpiredSession {
 
 For high-volume tables (audit logs, request logs, expired cache
 entries) `MassPrunable` skips per-row events and runs a single
-`DELETE WHERE …` statement:
+`DELETE WHERE …` statement. It runs where the `prunable()` query routes,
+the same place the `--pretend` count reads: the model's declared
+connection, or the query's own `on(name)` or `with_tx`:
 
 ```rust
 use suprnova::eloquent::MassPrunable;

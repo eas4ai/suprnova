@@ -261,6 +261,23 @@ impl<P, C> Drop for __TakenRows<'_, '_, P, C> {
     }
 }
 
+/// ` AND <alias>.<column> IS NULL` when `M` declares soft deletes, and
+/// nothing otherwise: the filter a relation statement written by the
+/// `#[suprnova::model]` macro adds for an intermediate model it joins,
+/// so a row reached through a trashed intermediate is left out, as the
+/// lazy `HasManyThrough` read leaves it out.
+///
+/// **Not part of the public API.** It is `pub` because the macro
+/// expands into user crates.
+#[doc(hidden)]
+pub fn __soft_delete_guard<M: crate::eloquent::EloquentModel>(alias: &str) -> String {
+    if M::SOFT_DELETES_COLUMN.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {alias}.{} IS NULL", M::SOFT_DELETES_COLUMN)
+    }
+}
+
 /// Collapse a target model's [`EloquentModel::HAS_TIMESTAMPS`] and
 /// [`EloquentModel::UPDATED_AT_COLUMN`] into the single string
 /// [`RelationEntry::related_updated_at_column`] stores: the column
