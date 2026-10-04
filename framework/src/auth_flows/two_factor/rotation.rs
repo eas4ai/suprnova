@@ -16,7 +16,7 @@ use crate::crypto::Crypt;
 use crate::database::DB;
 use crate::error::FrameworkError;
 
-mod rotation {
+mod pending {
     use sea_orm::entity::prelude::*;
 
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -81,10 +81,10 @@ pub(super) async fn store(
     let db = DB::connection().map_err(unavailable)?;
     let transaction = db.inner().begin().await.map_err(unavailable)?;
     let outcome = async {
-        rotation::Entity::delete_by_id(user_id.to_owned())
+        pending::Entity::delete_by_id(user_id.to_owned())
             .exec(&transaction)
             .await?;
-        rotation::Entity::insert(rotation::ActiveModel {
+        pending::Entity::insert(pending::ActiveModel {
             user_id: Set(user_id.to_owned()),
             secret: Set(encrypted_secret),
             recovery_codes: Set(encrypted_recovery),
@@ -108,7 +108,7 @@ pub(super) async fn store(
 /// can have been stored, so a missing table reads as none.
 pub(super) async fn find(user_id: &str) -> Result<Option<PendingRotation>, FrameworkError> {
     let db = DB::connection()?;
-    let row = match rotation::Entity::find_by_id(user_id.to_owned())
+    let row = match pending::Entity::find_by_id(user_id.to_owned())
         .one(db.inner())
         .await
     {
@@ -130,7 +130,7 @@ pub(super) async fn find(user_id: &str) -> Result<Option<PendingRotation>, Frame
 /// Forget the user's pending rotation. A missing table holds none.
 pub(super) async fn discard(user_id: &str) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
-    match rotation::Entity::delete_by_id(user_id.to_owned())
+    match pending::Entity::delete_by_id(user_id.to_owned())
         .exec(db.inner())
         .await
     {
@@ -155,8 +155,8 @@ pub(super) async fn promote(
     let db = DB::connection().map_err(unavailable)?;
     let transaction = db.inner().begin().await.map_err(unavailable)?;
     let outcome = async {
-        let Some(rotation) = rotation::Entity::find_by_id(user_id.to_owned())
-            .filter(rotation::Column::Secret.eq(rotation_ciphertext))
+        let Some(rotation) = pending::Entity::find_by_id(user_id.to_owned())
+            .filter(pending::Column::Secret.eq(rotation_ciphertext))
             .one(&transaction)
             .await?
         else {
@@ -182,9 +182,9 @@ pub(super) async fn promote(
         if replaced.rows_affected != 1 {
             return Ok(false);
         }
-        let removed = rotation::Entity::delete_many()
-            .filter(rotation::Column::UserId.eq(user_id))
-            .filter(rotation::Column::Secret.eq(rotation_ciphertext))
+        let removed = pending::Entity::delete_many()
+            .filter(pending::Column::UserId.eq(user_id))
+            .filter(pending::Column::Secret.eq(rotation_ciphertext))
             .exec(&transaction)
             .await?;
         Ok::<_, DbErr>(removed.rows_affected == 1)
