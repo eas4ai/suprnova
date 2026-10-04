@@ -10,4 +10,5 @@ pub mod ip_based;
 pub mod middleware;
 pub mod production_fail_closed;
 pub mod rate_limit;
+pub mod redis;
 pub mod throttle;
