@@ -405,6 +405,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **`Cache::tags_put` without a TTL applies `CACHE_DEFAULT_TTL`**, as
+  `Cache::put` does. A tagged value that must never expire uses the new
+  `Cache::tags_forever`. This landed after the `v3.1.0` tag.
+- **`DiskExt::temporary_upload_url` returns a `TemporaryUploadUrl`** with
+  `url`, `method` and `headers`, instead of a `String`. An S3 disk with
+  server-side encryption signs headers such as
+  `x-amz-server-side-encryption`, and an upload that did not send them was
+  refused. Use `.url` and send `.headers` with the upload. Its `Debug`
+  output redacts the signature and header values. This landed after the
+  `v3.1.0` tag.
 - **`Queue::bulk` honours debounce.** Every copy of a debounced job pushed
   through `Queue::bulk` used to run. A debounced burst now collapses onto
   its last job, and a job declaring both `debounce_for` and `unique_id` is
@@ -623,6 +633,25 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Cache, maintenance mode and read-through disks.**
+  `Cache::remember_forever` and `Cache::sear` no longer expire after
+  `CACHE_DEFAULT_TTL`, and `down` with `MAINTENANCE_DRIVER=cache` no longer
+  ends by itself after it. On Redis, `Cache::flush` matches `REDIS_PREFIX`
+  literally, so a prefix holding `*`, `?`, `[` or `\` no longer deletes
+  other applications' keys or misses its own, and a value extended with
+  `Cache::touch` is still removed by `Cache::flush_tags`. Tag indexes no
+  longer grow without bound for tags written often and rarely flushed.
+  Concurrent `down` runs with the file driver no longer publish a
+  half-written down file. The production guard for `on_one_server()` checks
+  the bound cache store instead of `CACHE_DRIVER`; a custom shared
+  `CacheStore` overrides the new `locks_are_shared` to return `true`. The
+  cached feature-flag evaluator sees an admin change made during a
+  concurrent miss and holds at most 4096 entries. Read-through promotions
+  stream into the primary instead of holding the object in memory,
+  unpromoted reads fetch only their range, a delete or move during a
+  promotion is not undone within one process, versioned and conditional
+  reads reach the fallback, and a refused move keeps the fallback copy.
+  This landed after the `v3.1.0` tag.
 - **Queues, events and processes.** Cancelling `Transaction::commit()`
   while its COMMIT was in flight could drop its `after_commit` callbacks and
   `push_after_commit_with_tx` jobs although the rows committed; they now
@@ -1043,6 +1072,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **Local disks stay inside their root.** On Unix, a directory inside a
+  local disk root swapped for a symlink during an operation could redirect
+  a read, write, copy, rename, delete, listing or publish outside the root.
+  Every path is now resolved one component at a time without following
+  symlinks, and each operation runs relative to the directory it resolved.
+  This landed after the `v3.1.0` tag.
+- **Cached feature flags stay per identity.** Two identities whose user and
+  team strings joined to the same text could share a cached flag decision.
+  The cache key now keeps each part separate. This landed after the
+  `v3.1.0` tag.
 - **Fanout URL errors no longer print credentials.** A broadcasting fanout
   URL that failed to parse was copied into the error message, password
   included. The error now names the problem without the URL. This landed
