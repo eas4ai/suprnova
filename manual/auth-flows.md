@@ -674,9 +674,10 @@ window.
 The timestep claim is atomic. The stamp lands via a conditional
 `UPDATE … WHERE last_used_timestep IS NULL OR last_used_timestep <
 :current`, and the verify only succeeds when the statement affects
-exactly one row. Two concurrent verifies in the same timestep cannot
-both win: the first flips the column, the second's predicate no
-longer matches, and the second is treated as a replay. A plain
+exactly one row. Two concurrent verifies cannot both win, even when
+they straddle a 30-second boundary: the first flips the column, the
+second's predicate no longer matches, and the second is treated as a
+replay. A plain
 read-modify-write would be a TOCTOU race - both verifies read the
 pre-stamp row, both validate the same code, both stamp, both succeed.
 Concurrent racers are also counted as failed attempts so the

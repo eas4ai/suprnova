@@ -297,7 +297,7 @@ impl TwoFactor {
             .await?
             .ok_or_else(|| FrameworkError::domain("no pending 2FA enrollment", 401))?;
 
-        if !check_code(&secret_b32, code)? {
+        if !check_code(&secret_b32, code, crate::clock::now().timestamp())? {
             record_2fa_failure(user.email()).await;
             return Err(FrameworkError::domain("invalid 2FA code", 401));
         }
@@ -345,9 +345,9 @@ impl TwoFactor {
     /// conditional `UPDATE ... WHERE last_used_timestep IS NULL OR
     /// last_used_timestep < :current`, and the verify only succeeds
     /// when that statement affects exactly one row. Two concurrent
-    /// verifies in the same timestep therefore cannot both win: the
-    /// first flips the column, the second's predicate no longer
-    /// matches and it is treated as a replay. A plain read-modify-write
+    /// verifies therefore cannot both win, even when they straddle a
+    /// timestep boundary: the first flips the column, the second's
+    /// predicate no longer matches and it is treated as a replay. A plain read-modify-write
     /// would be a TOCTOU race - both verifies read the pre-stamp row,
     /// both validate the same code, both stamp - that silently defeats
     /// the guard under concurrency.
@@ -363,79 +363,18 @@ impl TwoFactor {
     /// reset the failed-attempt counter via
     /// `crate::auth_flows::BruteForce::reset_attempts`.
     pub async fn verify<U: TwoFactorUser>(user: &U, code: &str) -> Result<bool, FrameworkError> {
-        let db = DB::connection()?;
-        let Some(row) = entity::Entity::find_by_id(user.user_id().to_string())
-            .one(db.inner())
-            .await
-            .map_err(|e| FrameworkError::internal(format!("two_factor find: {e}")))?
-        else {
-            return Ok(false);
-        };
-        if row.confirmed_at.is_none() {
+        if !Self::is_enabled(user).await? {
             return Ok(false);
         }
-
-        let current_timestep = current_totp_timestep();
-        if let Some(last) = row.last_used_timestep
-            && current_timestep <= last
-        {
-            // Fast-path replay rejection: this user already verified at
-            // or after the current timestep, so refuse ANY code without
-            // even decrypting the secret. This is an optimization and a
-            // UX nicety, NOT the authoritative guard - under concurrency
-            // two verifies can both read the pre-stamp row and pass here.
-            // The atomic claim below is what actually closes the race.
-            // Counted as a failed attempt - replays from an observer
-            // should trip the lockout.
+        // Replays, mismatches and lost claim races all count as failed
+        // attempts - replays from an observer should trip the lockout.
+        let accepted = Self::verify_internal(user, code).await?;
+        if accepted {
+            reset_2fa_failures(user.email()).await;
+        } else {
             record_2fa_failure(user.email()).await;
-            return Ok(false);
         }
-
-        let secret_b32 =
-            Crypt::decrypt_string(crate::crypto::CryptPurpose::TwoFactorSecret, &row.secret)?;
-        if !check_code(&secret_b32, code)? {
-            record_2fa_failure(user.email()).await;
-            return Ok(false);
-        }
-
-        // Atomically claim this timestep. The conditional WHERE turns
-        // check-and-stamp into a single statement: the first verify in a
-        // given timestep flips `last_used_timestep` to `claim_to`, and
-        // any concurrent verify's predicate no longer matches, so it
-        // affects zero rows. This is what makes the replay guard hold
-        // under concurrency - the previous read-modify-write let two
-        // racing verifies both stamp and both succeed (a TOCTOU race).
-        //
-        // `claim_to` is the *forward* edge of the TOTP skew window
-        // (`current + TOTP_SKEW_STEPS`). Stamping the bare `current`
-        // would leave the same code replayable at the next timestep,
-        // because `check_code` accepts codes for [T-1, T, T+1] at server
-        // time T - a captured code from T is still in [T, T+1, T+2] at
-        // T+1, and a bare-current stamp would not block it.
-        let claim_to = current_timestep + TOTP_SKEW_STEPS;
-        let claim = entity::Entity::update_many()
-            .col_expr(entity::Column::LastUsedTimestep, Expr::value(claim_to))
-            .col_expr(entity::Column::UpdatedAt, Expr::value(crate::clock::now()))
-            .filter(entity::Column::UserId.eq(user.user_id()))
-            .filter(
-                Condition::any()
-                    .add(entity::Column::LastUsedTimestep.is_null())
-                    .add(entity::Column::LastUsedTimestep.lt(claim_to)),
-            )
-            .exec(db.inner())
-            .await
-            .map_err(|e| FrameworkError::internal(format!("two_factor replay claim: {e}")))?;
-
-        if claim.rows_affected == 0 {
-            // A concurrent verify in the same timestep beat us to the
-            // claim. Identical outcome to a sequential replay: reject and
-            // count it as a failed attempt.
-            record_2fa_failure(user.email()).await;
-            return Ok(false);
-        }
-
-        reset_2fa_failures(user.email()).await;
-        Ok(true)
+        Ok(accepted)
     }
 
     /// Try to consume one recovery code. Returns `true` if a code
@@ -484,48 +423,10 @@ impl TwoFactor {
         user: &U,
         code: &str,
     ) -> Result<bool, FrameworkError> {
-        let db = DB::connection()?;
-        let Some(row) = entity::Entity::find_by_id(user.user_id().to_string())
-            .one(db.inner())
-            .await
-            .map_err(|e| FrameworkError::internal(format!("two_factor find: {e}")))?
-        else {
+        let Some(current_timestep) = prepare_totp_claim(user.user_id(), code).await? else {
             return Ok(false);
         };
-        if row.confirmed_at.is_none() {
-            return Ok(false);
-        }
-
-        let current_timestep = current_totp_timestep();
-        if let Some(last) = row.last_used_timestep
-            && current_timestep <= last
-        {
-            return Ok(false);
-        }
-
-        let secret_b32 =
-            Crypt::decrypt_string(crate::crypto::CryptPurpose::TwoFactorSecret, &row.secret)?;
-        if !check_code(&secret_b32, code)? {
-            return Ok(false);
-        }
-
-        // Stamp the forward edge of the skew window - see
-        // [`Self::verify`]'s comment block for the full reasoning.
-        let claim_to = current_timestep + TOTP_SKEW_STEPS;
-        let claim = entity::Entity::update_many()
-            .col_expr(entity::Column::LastUsedTimestep, Expr::value(claim_to))
-            .col_expr(entity::Column::UpdatedAt, Expr::value(crate::clock::now()))
-            .filter(entity::Column::UserId.eq(user.user_id()))
-            .filter(
-                Condition::any()
-                    .add(entity::Column::LastUsedTimestep.is_null())
-                    .add(entity::Column::LastUsedTimestep.lt(claim_to)),
-            )
-            .exec(db.inner())
-            .await
-            .map_err(|e| FrameworkError::internal(format!("two_factor replay claim: {e}")))?;
-
-        Ok(claim.rows_affected > 0)
+        claim_totp_timestep(user.user_id(), current_timestep).await
     }
 
     /// Internal silent variant of [`Self::consume_recovery_code`]:
@@ -1171,14 +1072,90 @@ async fn load_secret(user_id: &str) -> Result<Option<String>, FrameworkError> {
     )?))
 }
 
-/// Current server-side TOTP timestep. Used by [`TwoFactor::verify`]
-/// for replay protection - a successful verify stamps the row with
+/// Read the enrollment and check `code` against it at the current timestep.
+///
+/// Returns the timestep the code was checked at when the code may be
+/// claimed, and `None` for a missing or unconfirmed enrollment, a replay the
+/// stored stamp already covers, or a mismatch. The stamp check here reads a
+/// snapshot and is only a fast path: two racing requests can both pass it,
+/// so [`claim_totp_timestep`] repeats it atomically against the same
+/// timestep.
+async fn prepare_totp_claim(user_id: &str, code: &str) -> Result<Option<i64>, FrameworkError> {
+    let db = DB::connection()?;
+    let Some(row) = entity::Entity::find_by_id(user_id.to_string())
+        .one(db.inner())
+        .await
+        .map_err(|e| FrameworkError::internal(format!("two_factor find: {e}")))?
+    else {
+        return Ok(None);
+    };
+    if row.confirmed_at.is_none() {
+        return Ok(None);
+    }
+
+    let now = crate::clock::now().timestamp();
+    let current_timestep = totp_timestep_at(now);
+    if let Some(last) = row.last_used_timestep
+        && current_timestep <= last
+    {
+        return Ok(None);
+    }
+
+    let secret_b32 =
+        Crypt::decrypt_string(crate::crypto::CryptPurpose::TwoFactorSecret, &row.secret)?;
+    if !check_code(&secret_b32, code, now)? {
+        return Ok(None);
+    }
+    Ok(Some(current_timestep))
+}
+
+/// Atomically claim `current_timestep` for `user_id`. Returns `true` for
+/// exactly one caller per covered window.
+///
+/// The conditional WHERE turns check-and-stamp into one statement: the
+/// first verify flips `last_used_timestep` to `claim_to`, and a racing
+/// verify's predicate no longer matches, so it affects zero rows. A plain
+/// read-modify-write would let two racing verifies both stamp and both
+/// succeed.
+///
+/// The predicate compares the stored stamp with `current_timestep`, the
+/// same test the snapshot check in [`prepare_totp_claim`] makes. Comparing
+/// with `claim_to` instead would let a request at T+1 that read the row
+/// before a request at T stamped it (T+1 < T+2) win as well, so one code
+/// would be accepted twice across the boundary.
+///
+/// `claim_to` is the *forward* edge of the TOTP skew window
+/// (`current + TOTP_SKEW_STEPS`). Stamping the bare `current` would leave
+/// the same code replayable at the next timestep, because `check_code`
+/// accepts codes for [T-1, T, T+1] at server time T - a captured code from
+/// T is still in [T, T+1, T+2] at T+1, and a bare-current stamp would not
+/// block it.
+async fn claim_totp_timestep(user_id: &str, current_timestep: i64) -> Result<bool, FrameworkError> {
+    let db = DB::connection()?;
+    let claim_to = current_timestep + TOTP_SKEW_STEPS;
+    let claim = entity::Entity::update_many()
+        .col_expr(entity::Column::LastUsedTimestep, Expr::value(claim_to))
+        .col_expr(entity::Column::UpdatedAt, Expr::value(crate::clock::now()))
+        .filter(entity::Column::UserId.eq(user_id))
+        .filter(
+            Condition::any()
+                .add(entity::Column::LastUsedTimestep.is_null())
+                .add(entity::Column::LastUsedTimestep.lt(current_timestep)),
+        )
+        .exec(db.inner())
+        .await
+        .map_err(|e| FrameworkError::internal(format!("two_factor replay claim: {e}")))?;
+    Ok(claim.rows_affected > 0)
+}
+
+/// The TOTP timestep of a Unix time. Used by [`TwoFactor::verify`]
+/// for replay protection - a successful verify stamps the row from
 /// this value, and subsequent verifies at the same or earlier
 /// timestep are refused even when the code itself would structurally
 /// validate. 30-second step matches the TOTP construction in
 /// [`check_code`] / enrollment.
-fn current_totp_timestep() -> i64 {
-    crate::clock::now().timestamp() / 30
+fn totp_timestep_at(unix_seconds: i64) -> i64 {
+    unix_seconds / 30
 }
 
 /// Best-effort record of a failed 2FA attempt against
@@ -1272,16 +1249,124 @@ async fn is_locked_best_effort(_email: &str) -> bool {
     false
 }
 
-/// Verify a TOTP code against a base32-encoded secret. Centralised so
-/// `confirm` and `verify` share identical parameters (SHA1 / 6
-/// digits / skew=1 / 30s step - matching the enrollment-time
-/// construction).
-fn check_code(secret_b32: &str, code: &str) -> Result<bool, FrameworkError> {
+/// Verify a TOTP code against a base32-encoded secret at `unix_seconds`.
+/// Centralised so `confirm` and `verify` share identical parameters
+/// (SHA1 / 6 digits / skew=1 / 30s step - matching the enrollment-time
+/// construction). The time comes from [`crate::clock::now`], like every
+/// other time read in the framework, so the replay timestep and the code
+/// check see the same instant and a test can move them together.
+fn check_code(secret_b32: &str, code: &str, unix_seconds: i64) -> Result<bool, FrameworkError> {
     let secret_bytes = Secret::Encoded(secret_b32.into())
         .to_bytes()
         .map_err(|e| FrameworkError::internal(format!("decode totp secret: {e}")))?;
     let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes, None, "user".into())
         .map_err(|e| FrameworkError::internal(format!("totp new: {e}")))?;
-    totp.check_current(code)
-        .map_err(|e| FrameworkError::internal(format!("totp check: {e}")))
+    let time = u64::try_from(unix_seconds)
+        .map_err(|_| FrameworkError::internal("totp check: clock is before the Unix epoch"))?;
+    Ok(totp.check(code, time))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Interleavings that the public API cannot pin from outside: each test
+    //! runs one request's read phase, lets a second request finish, then runs
+    //! the first request's write phase.
+
+    use super::*;
+    use crate::testing::{TestClock, TestDatabase};
+    use chrono::{DateTime, Utc};
+
+    struct Migrator;
+
+    impl sea_orm_migration::MigratorTrait for Migrator {
+        fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
+            vec![
+                Box::new(migration::Migration),
+                Box::new(migration_replay::Migration),
+            ]
+        }
+    }
+
+    struct User;
+
+    impl TwoFactorUser for User {
+        fn user_id(&self) -> &str {
+            "interleaved-user"
+        }
+        fn email(&self) -> &str {
+            "interleaved@example.test"
+        }
+    }
+
+    fn ensure_crypt() {
+        if !Crypt::is_initialized() {
+            Crypt::init(crate::EncryptionKey::generate());
+        }
+    }
+
+    fn at(unix_seconds: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(unix_seconds, 0).expect("test time is in range")
+    }
+
+    /// The code the stored secret produces at `unix_seconds`.
+    async fn stored_code_at(unix_seconds: i64) -> String {
+        let db = DB::connection().expect("test connection");
+        let row = entity::Entity::find_by_id(User.user_id().to_owned())
+            .one(db.inner())
+            .await
+            .expect("read enrollment")
+            .expect("enrollment exists");
+        let secret =
+            Crypt::decrypt_string(crate::crypto::CryptPurpose::TwoFactorSecret, &row.secret)
+                .expect("decrypt secret");
+        let bytes = Secret::Encoded(secret).to_bytes().expect("decode secret");
+        TOTP::new(Algorithm::SHA1, 6, 1, 30, bytes, None, "user".into())
+            .expect("totp")
+            .generate(u64::try_from(unix_seconds).expect("positive time"))
+    }
+
+    #[tokio::test]
+    async fn racing_verifications_across_a_timestep_boundary_accept_one_code_once() {
+        ensure_crypt();
+        let _db = TestDatabase::fresh::<Migrator>().await.expect("fresh db");
+
+        // Request A runs in the last second of step S, request B in the
+        // first second of step S+1. Both submit the code of step S, which
+        // the skew window accepts at either time.
+        let step = Utc::now().timestamp() / 30;
+        let a_time = step * 30 + 29;
+        let b_time = (step + 1) * 30;
+        let clock = TestClock::travel_to(at(a_time));
+
+        TwoFactor::enroll(&User).await.expect("enroll");
+        let code = stored_code_at(a_time).await;
+        TwoFactor::confirm(&User, &code).await.expect("confirm");
+
+        // B reads the row before A stamps it, so B's snapshot passes.
+        clock.set(at(b_time));
+        let b_timestep = prepare_totp_claim(User.user_id(), &code)
+            .await
+            .expect("B prepares")
+            .expect("B's snapshot predates A's stamp");
+        assert_eq!(b_timestep, step + 1);
+
+        // A finishes first and stamps the forward edge of its window, S+1.
+        clock.set(at(a_time));
+        assert!(
+            TwoFactor::verify_internal(&User, &code)
+                .await
+                .expect("A verifies"),
+            "A is the first verification of this code"
+        );
+
+        // B's claim now runs against A's stamp. The stamp already covers
+        // B's timestep, so B must lose: one code, one acceptance.
+        clock.set(at(b_time));
+        assert!(
+            !claim_totp_timestep(User.user_id(), b_timestep)
+                .await
+                .expect("B claims"),
+            "a code accepted at step S must not be accepted again at step S+1"
+        );
+    }
 }
