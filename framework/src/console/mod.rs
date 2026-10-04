@@ -2,7 +2,7 @@
 //! builtins.
 //!
 //! Each Suprnova project ships a `console` binary that calls
-//! [`dispatch_argv`] after running its `bootstrap::register()`. Every
+//! [`dispatch_argv_with_init`] with its `bootstrap::register()`. Every
 //! registered command contributes a [`clap::Command`] subcommand to a
 //! single parser tree, so per-command `--help`, typed args, value
 //! parsing, and error messages all come from clap rather than being
@@ -141,22 +141,34 @@ fn build_root() -> clap::Command {
     root
 }
 
-/// Dispatch the process's argv to a registered command. Same as
-/// [`dispatch_argv_with_init`] but with a no-op init callback -
-/// convenient for tests and programmatic callers that don't need
-/// lazy bootstrapping.
+/// Dispatch argv to a registered command and nothing else: no
+/// bootstrap, no framework boot, no wait for queued listeners.
+///
+/// For tests and programmatic callers that set up the process
+/// themselves. A test that faked the queue or the mailer keeps its fake,
+/// because nothing here installs the drivers of the environment over it.
+/// The console binary calls [`dispatch_argv_with_init`] instead.
 pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
-    dispatch_argv_with_init(argv, || async {}).await
+    dispatch(argv, None::<fn() -> std::future::Ready<()>>).await
 }
 
-/// Dispatch the process's argv to a registered command, running
-/// `lazy_init` between clap's argv parse and the matched handler.
+/// Dispatch the process's argv to a registered command, booting the
+/// process the way `Application::run` boots a worker first.
 ///
-/// `lazy_init` runs only when clap matches a real registered
-/// subcommand - help, version, missing-subcommand, and parse-error
-/// paths all skip it. The typical use is to defer expensive
-/// bootstrap (DB connect, queue init, event listener wiring) so
-/// `console --help` doesn't require `DATABASE_URL` to be set.
+/// Between clap's argv parse and the matched handler this runs
+/// `lazy_init` - the application's `config::register_all` and
+/// `bootstrap::register` - and then the framework's own process boot:
+/// the container's `#[injectable]` and `#[service]` inventory, the
+/// `#[policy]` gates, and the runtime drivers (Cache, Localization, the
+/// environment's disks, Queue, RateLimit, Mail). A command therefore
+/// resolves the same services and reaches the same drivers a queued job
+/// does. After the handler returns, the dispatcher waits (up to ten
+/// seconds) for the queued event listeners still running, because the
+/// console's runtime ends when `main` returns and would cut them off.
+///
+/// None of it runs unless clap matches a real registered subcommand -
+/// help, version, missing-subcommand, and parse-error paths all skip
+/// it, so `console --help` doesn't require `DATABASE_URL` to be set.
 ///
 /// The full clap tree (every registered subcommand) is built each
 /// call; clap then parses argv and routes to the right entry.
@@ -172,6 +184,17 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    dispatch(argv, Some(lazy_init)).await
+}
+
+/// The dispatcher both entry points share. `boot` is the application's
+/// bootstrap; when it is given, the framework's process boot follows it
+/// and the queued listeners are awaited after the command.
+async fn dispatch<F, Fut>(argv: Vec<String>, boot: Option<F>) -> Result<(), FrameworkError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     let root = build_root();
     let matches = match root.try_get_matches_from(argv) {
         Ok(m) => m,
@@ -180,13 +203,32 @@ where
 
     if let Some((name, sub_matches)) = matches.subcommand() {
         if let Some(entry) = find(name) {
-            lazy_init().await;
+            let booted = boot.is_some();
+            if let Some(boot) = boot {
+                boot().await;
+                if let Err(e) = crate::app::process_boot::boot_after_hook(
+                    crate::app::process_boot::ProcessBoot::Work,
+                )
+                .await
+                {
+                    let error = FrameworkError::internal(format!("console bootstrap failed: {e}"));
+                    io::error_line(format!("error: {}", error.message()));
+                    crate::logging::Log::flush();
+                    return Err(error);
+                }
+            }
             // One command is one unit of work: it runs in a container scope
             // of its own, so its scoped bindings are built for it and
-            // dropped when it returns. `lazy_init` registers bindings and
+            // dropped when it returns. The boot registers bindings and
             // stays outside.
             let command = (entry.handler)(sub_matches);
             let result = crate::container::scope::run_in_new_scope(command).await;
+            // A queued listener runs as a task of its own, and the console's
+            // runtime ends when `main` returns: an event the command
+            // dispatched last would otherwise be cut off mid-listener.
+            if booted {
+                crate::events::drain_queued_at_shutdown().await;
+            }
             // The file log channels buffer; a command's last records reach
             // the file before the process exits.
             crate::logging::Log::flush();

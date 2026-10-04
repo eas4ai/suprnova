@@ -99,6 +99,8 @@ Tokio runs in `current_thread` flavor - there's no work to parallelize across co
 Two things to notice:
 
 - **Bootstrap is lazy.** The closure passed to `dispatch_argv_with_init` only runs when clap matches a real registered subcommand. `console --help`, `console --version`, missing-subcommand, and parse-error paths all skip it - so `console --help` works on a fresh checkout that doesn't have `DATABASE_URL` set yet.
+- **A command gets what a queued job gets.** After the closure, `dispatch_argv_with_init` boots the rest of the process the way `queue:work` does: the `#[injectable]` and `#[service]` inventory, the `#[policy]` gates, and the runtime drivers (Cache, Localization, the environment's disks, Queue, RateLimit, Mail). A command can resolve an injectable action, write the cache, or check a policy with no setup of its own. A driver whose backend does not come up stops the command with an error, before it runs.
+- **Queued listeners finish.** After the command returns, the dispatcher waits up to ten seconds for the queued event listeners still running, so an event the command dispatches last is handled before the process exits.
 - **`main` doesn't print errors.** `dispatch_argv_with_init` owns all user-facing stderr - it writes the handler's error message as `error: <message>` (unless the error is silent, like a clap parse failure that clap already printed) and prints clap's own help / version / parse-error output. `main` is pure `Result → ExitCode` translation; adding a redundant `eprintln!` would double-print.
 
 If you want a particular command to skip an expensive bootstrap step entirely, gate the step itself on an env var rather than threading a "lazy bootstrap" flag through the framework.
@@ -392,8 +394,8 @@ Console handlers print to stdout for human-readable output. If a downstream tool
 | `suprnova::Command` (derive)              | Register a `clap::Parser`-deriving struct as a typed console command. Pairs with `TypedCommand`. |
 | `suprnova::TypedCommand` (trait)          | Trait with `async fn run(self) -> Result<(), FrameworkError>` - the body of a typed command. |
 | `suprnova::command` (attribute)           | Register an async fn taking `Vec<String>` as a raw-args console command. |
-| `suprnova::console::dispatch_argv(argv)`  | Build the clap parser tree from every registered entry, parse argv, route to the handler. No lazy init - convenient for tests and programmatic callers. |
-| `suprnova::console::dispatch_argv_with_init(argv, init)` | Same as `dispatch_argv` but runs the `init` closure between clap's argv parse and the matched handler. The init only fires when a real subcommand matches - `--help` / `--version` / parse-error paths skip it. This is what the scaffolded `console` binary uses. |
+| `suprnova::console::dispatch_argv(argv)`  | Build the clap parser tree from every registered entry, parse argv, route to the handler. No bootstrap and no framework boot - for tests and programmatic callers that set up the process themselves, so a fake they installed is kept. |
+| `suprnova::console::dispatch_argv_with_init(argv, init)` | Same as `dispatch_argv` but runs the `init` closure, then the framework's process boot (services, policies, runtime drivers), between clap's argv parse and the matched handler, and waits for queued listeners after it. None of it fires unless a real subcommand matches - `--help` / `--version` / parse-error paths skip it. This is what the scaffolded `console` binary uses. |
 | `suprnova::console::set_version(&'static str)` | Register the version string surfaced via `--version` and in `--help`. Call once at the start of `main`. First registration wins. |
 | `suprnova::console::find(name)`           | Look up a registered command by exact name.   |
 | `suprnova::two_column_detail(left, right)` | Render a name, a dot leader, and a status word as one 80-column progress line. Mirrors Laravel's `$this->components->twoColumnDetail(...)`. |

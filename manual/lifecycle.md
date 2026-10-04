@@ -66,13 +66,17 @@ For `serve`, it then:
 8. Hands the router to `Server::from_config(...)`
 9. Calls `server.run()`
 
-Workers (`queue:work`, `workflow:work`, `schedule:run`) and the console
-binary run the same boot path *up to and including* `bootstrap_fn`, so
-they see the same configured services and bound container values - but
+Every other subcommand, and the console binary, runs one shared boot
+after the steps before migrations: your `bootstrap_fn`, then the log
+channels, the container's `#[injectable]` and `#[service]` inventory,
+the `#[policy]` gates, and the runtime drivers the command uses. So a
+worker, a `queue:*` command, `down`, and a console command see the same
+configured services and bound container values as the server - but
 they never call `http_bootstrap_fn`. Only `serve` / `web:run` does. See
 [Application Bootstrap](bootstrap.md) for why: `Inertia::install` fails
 closed when the built frontend manifest is missing, and a worker or
-console image is expected to ship without one.
+console image is expected to ship without one. The migration commands
+run no `bootstrap_fn`, as `serve` runs its migrations before it.
 
 ## 2. Server boot - `server.rs`
 
@@ -232,10 +236,11 @@ through the `Context` system - see [Context](context.md).
 Background workers (`queue:work`, `workflow:work`, `schedule:run`) go
 through:
 
-1. The same boot path (`Config::init`, `bootstrap_runtime_drivers`,
-   your `bootstrap()` function) - **not** `http_bootstrap()`; that hook
-   is server-only, which is what lets a worker image boot without a
-   built frontend manifest
+1. The same boot path (`Config::init`, your `bootstrap()` function,
+   then the container's services, the policies, and the runtime
+   drivers) - **not** `http_bootstrap()`; that hook is server-only,
+   which is what lets a worker image boot without a built frontend
+   manifest
 2. Their own loop that pulls work and runs handlers with the **same
    panic boundary** (`execute_chain_safely` equivalent for each worker
    type)
