@@ -120,6 +120,45 @@ async fn a_second_request_is_an_l0_hit_that_runs_no_handler_and_carries_validato
     assert_eq!(counting_route::renders(), 1);
 }
 
+/// DATA-042: a principal-keyed entry tells the browser to revalidate before
+/// every reuse. The browser keys its HTTP cache by method and URL alone, so
+/// a `max-age` here let it replay the previous account's page to the next
+/// account on the same machine without asking the server, past the auth
+/// guard and the private key both. Revalidation stays cheap: the same
+/// principal presenting the entry's own validator is answered 304 from the
+/// stored entry, with no render.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_private_entry_makes_the_browser_revalidate_before_every_reuse() {
+    let harness = boot_with_render_cache().await;
+    let first = dispatch_get(&harness, "/private/1", &[("x-test-login", "alice")]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(
+        first.header("cache-control"),
+        Some("private, no-cache"),
+        "the render that published the private entry"
+    );
+
+    let hit = dispatch_get(&harness, "/private/1", &[("x-test-login", "alice")]).await;
+    assert_eq!(hit.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1, "the second request is a hit");
+    assert_eq!(
+        hit.header("cache-control"),
+        Some("private, no-cache"),
+        "the hit served from the private entry"
+    );
+
+    let etag = hit.header("etag").expect("etag").to_owned();
+    let revalidated = dispatch_get(
+        &harness,
+        "/private/1",
+        &[("x-test-login", "alice"), ("if-none-match", &etag)],
+    )
+    .await;
+    assert_eq!(revalidated.status, StatusCode::NOT_MODIFIED);
+    assert_eq!(counting_route::renders(), 1, "revalidation runs no handler");
+}
+
 // Ruling R47: gated on the `testing` feature, like `bypass.rs` and
 // `races.rs` - `RenderCache::l0_hot_for_test`, `hot_serves_for_test`,
 // `l0_body_ptr_for_test`, `l0_frame_ptr_for_test`, and
