@@ -688,6 +688,31 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **RenderCache stays coherent under cancellation, races and flags.** A
+  write that was cancelled at its generation advance, including a bulk
+  write, `increment`, a soft delete, restore or force delete, could commit
+  while cached pages stayed current; the write and its advance now share
+  one transaction. An unrelated successful write no longer resumes serving
+  pages whose invalidation failed: the missed invalidation is applied
+  first. A process that wrote before installing RenderCache advances
+  generations after the install. Pages rendered with a flag's compiled
+  default refresh when the first rule for that flag is stored, and a page
+  rendered during `set_flag` or `reload` no longer stays cached with the
+  old answer. `DB::unprepared`, `DB::statement` and `statement_on` with a
+  batch that begins with `SELECT` invalidate cached pages. Pages built from
+  `EntityExt` or `QueryBuilder` reads, relation counts and aggregates, or
+  through-relation loads refresh when those tables change.
+  `RenderCache::advance_epoch` reaches the next request even with another
+  request's authority read in flight. A rebuild that fails after the
+  stale-on-error window closed returns its error instead of the expired
+  entry, a node runs at most one background refresh per key, a cancelled
+  L1 publish can no longer overwrite a newer entry, and L1 sweeps no longer
+  scan the whole store. SQL Live record cleanup no longer deletes a fresh
+  instance or reservation another node just created. Renewing an async
+  subscription from an evicted position is refused, so the membership
+  degrades instead of claiming continuity. The Live tooling helper's
+  timeout ends the call even when a process it started keeps its output
+  open. This landed after the `v3.1.0` tag.
 - **Query builder, pagination and Eloquent.** Paginating, ordering and
   taking `first` of a union works on every engine, and `total` counts its
   rows; as in Laravel, ordering, limit and offset set before `union` apply
@@ -1193,6 +1218,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **RenderCache never stores or reuses a personalized page as shared.**
+  Work a handler joined beside an identity-bound island mount
+  (`tokio::join!`) had its principal, session and table reads dropped from
+  the stitched shell's report, so a personalized shell could be stored as
+  public; those reads now count. `PrivateCached` responses send
+  `Cache-Control: private, no-cache` instead of `private, max-age`, which
+  let a browser show the previous account's page to the next account on
+  the same browser. Oversized Redis hint payloads are dropped before they
+  are copied or queued. This landed after the `v3.1.0` tag.
 - **Redis credentials stay out of the boot log.** When Redis was
   unreachable at boot, the cache error held the whole `REDIS_URL`, password
   included, and `CacheConfig` and `CacheConfigBuilder` printed it when
