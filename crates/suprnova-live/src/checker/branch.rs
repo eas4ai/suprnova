@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use askama_parser::node::{Call, If, Macro, Node};
+use askama_parser::node::{If, Macro, Node};
 use askama_parser::{
     Ast, Expr, Filter, LetValueOrBlock, PathOrIdentifier, Span, Syntax, Target, WithSpan,
 };
@@ -172,6 +172,17 @@ struct Scope<'s, 'a> {
     raw: &'s RawNames,
     caller: Option<&'s Fragment<'a>>,
     macro_depth: usize,
+}
+
+/// One macro expansion: the definition, the template that defines it, the
+/// arguments the call passes, the caller content, if any, and where the
+/// call stands.
+struct Invocation<'i, 'a> {
+    definition: &'i Macro<'a>,
+    template: &'i TemplateEnv<'a>,
+    arguments: &'i [WithSpan<Box<Expr<'a>>>],
+    caller: Option<&'i Fragment<'a>>,
+    span: Span,
 }
 
 /// The tag that brought a template in, `{% include %}`, `{% import %}`, or
@@ -554,6 +565,23 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         offset: offset_u32(expression_start(expression).unwrap_or(0)),
                         literal: false,
                     };
+                    // Askama writes `{{ show(x) }}` and `{{ ui::show(x) }}` as
+                    // macro calls when the name resolves to a macro, so the
+                    // body is expanded and checked where the call stands.
+                    if !is_caller_call(expression)
+                        && let Expr::Call(call) = strip_groups(expression)
+                        && let Some((definition, template)) = expression_macro(scope, call)
+                    {
+                        let invocation = Invocation {
+                            definition,
+                            template,
+                            arguments: &call.args,
+                            caller: None,
+                            span: expression.span(),
+                        };
+                        self.expand_macro(out, invocation, place, stack, scope)?;
+                        continue;
+                    }
                     if is_caller_call(expression) {
                         let Some(caller) = scope.caller else {
                             let (line, column) = expression_location(source, expression);
@@ -782,44 +810,19 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         );
                         continue;
                     }
-                    if scope.macro_depth >= self.limits.max_include_depth() {
-                        let (line, column) = tag_location(source, node.span());
-                        self.push(
-                            DiagnosticCode::IncludeDepthLimit,
-                            DiagnosticSeverity::Error,
-                            view,
-                            line,
-                            column,
-                        );
-                        return None;
-                    }
-                    let bindings = bind_arguments(definition, call, scope.bindings);
-                    let raw = bind_raw_arguments(definition, call, scope.raw);
                     // An empty call block is empty caller content. A caller
                     // that fails to render stops the path, as its failure
                     // would stop the template.
                     let mut caller = Fragment::default();
                     self.expand_nodes(&call.nodes, &mut caller, overrides, place, stack, scope)?;
-                    let inner = Scope {
+                    let invocation = Invocation {
+                        definition,
                         template,
-                        bindings: &bindings,
-                        raw: &raw,
+                        arguments: call.args.as_deref().unwrap_or(&[]),
                         caller: Some(&caller),
-                        macro_depth: scope.macro_depth + 1,
+                        span: node.span(),
                     };
-                    let body = Place {
-                        view: &template.view,
-                        file: template.file,
-                        source: template.source,
-                    };
-                    self.expand_nodes(
-                        &definition.nodes,
-                        out,
-                        &Overrides::new(),
-                        body,
-                        stack,
-                        &inner,
-                    )?;
+                    self.expand_macro(out, invocation, place, stack, scope)?;
                 }
                 // A definition renders nothing where it stands; its body is
                 // walked at each call.
@@ -894,6 +897,59 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             }
         }
         Some(())
+    }
+
+    /// Expands a macro body where the call stands, with the call's arguments
+    /// bound and the defining template's macros in scope, under the include
+    /// depth limit, which also bounds macro recursion.
+    fn expand_macro(
+        &mut self,
+        out: &mut Fragment<'checker>,
+        invocation: Invocation<'_, 'checker>,
+        place: Place<'_, 'checker>,
+        stack: &mut Vec<ViewName>,
+        scope: &Scope<'_, 'checker>,
+    ) -> Option<()> {
+        let Invocation {
+            definition,
+            template,
+            arguments,
+            caller,
+            span,
+        } = invocation;
+        if scope.macro_depth >= self.limits.max_include_depth() {
+            let (line, column) = tag_location(place.source, span);
+            self.push(
+                DiagnosticCode::IncludeDepthLimit,
+                DiagnosticSeverity::Error,
+                place.view,
+                line,
+                column,
+            );
+            return None;
+        }
+        let bindings = bind_arguments(definition, arguments, scope.bindings);
+        let raw = bind_raw_arguments(definition, arguments, scope.raw);
+        let inner = Scope {
+            template,
+            bindings: &bindings,
+            raw: &raw,
+            caller,
+            macro_depth: scope.macro_depth + 1,
+        };
+        let body = Place {
+            view: &template.view,
+            file: template.file,
+            source: template.source,
+        };
+        self.expand_nodes(
+            &definition.nodes,
+            out,
+            &Overrides::new(),
+            body,
+            stack,
+            &inner,
+        )
     }
 
     /// Renders each arm once into one choice. An arm whose rendering fails
@@ -1409,9 +1465,12 @@ fn rebind_raw(raw: &RawNames, names: &[&str], value_is_raw: bool) -> Option<RawN
 /// named ones, then each parameter's default. A literal binds as its text; a
 /// variable that is itself bound in the calling scope carries that binding
 /// through; anything else is dynamic.
-fn bind_arguments(definition: &Macro<'_>, call: &Call<'_>, outer: &Bindings) -> Bindings {
+fn bind_arguments(
+    definition: &Macro<'_>,
+    supplied: &[WithSpan<Box<Expr<'_>>>],
+    outer: &Bindings,
+) -> Bindings {
     let mut bindings = Bindings::new();
-    let supplied: &[_] = call.args.as_deref().unwrap_or(&[]);
     let mut positional = supplied
         .iter()
         .filter(|argument| !matches!(&****argument, Expr::NamedArgument(_, _)));
@@ -1440,9 +1499,12 @@ fn bind_arguments(definition: &Macro<'_>, call: &Call<'_>, outer: &Bindings) -> 
 /// in the calling scope, so the caller's raw names stay visible unless a
 /// parameter shadows one; a parameter is raw when the argument it receives,
 /// or its default, is raw in the calling scope.
-fn bind_raw_arguments(definition: &Macro<'_>, call: &Call<'_>, outer: &RawNames) -> RawNames {
+fn bind_raw_arguments(
+    definition: &Macro<'_>,
+    supplied: &[WithSpan<Box<Expr<'_>>>],
+    outer: &RawNames,
+) -> RawNames {
     let mut raw = outer.clone();
-    let supplied: &[_] = call.args.as_deref().unwrap_or(&[]);
     let mut positional = supplied
         .iter()
         .filter(|argument| !matches!(&****argument, Expr::NamedArgument(_, _)));
@@ -1604,6 +1666,32 @@ fn bound_variable<'b>(expression: &Expr<'_>, bindings: &'b Bindings) -> Option<&
     match expression {
         Expr::Var(name) => bindings.get(*name),
         Expr::Group(inner) => bound_variable(inner, bindings),
+        _ => None,
+    }
+}
+
+/// The expression inside any parentheses around it.
+fn strip_groups<'e, 'a>(expression: &'e Expr<'a>) -> &'e Expr<'a> {
+    match expression {
+        Expr::Group(inner) => strip_groups(inner),
+        other => other,
+    }
+}
+
+/// The macro a call expression names, bare or as `scope::name`, when the
+/// template can see one: Askama writes such a call as the macro's body.
+fn expression_macro<'s, 'a>(
+    scope: &Scope<'s, 'a>,
+    call: &askama_parser::expr::Call<'a>,
+) -> Option<(&'s Macro<'a>, &'s TemplateEnv<'a>)> {
+    match &**call.path {
+        Expr::Var(name) => scope.template.find_macro(None, name),
+        Expr::Path(path) => match path.as_slice() {
+            [module, name] if module.generics.is_none() && name.generics.is_none() => {
+                scope.template.find_macro(Some(&module.name), &name.name)
+            }
+            _ => None,
+        },
         _ => None,
     }
 }

@@ -806,3 +806,64 @@ fn action_directive_arguments_are_checked_against_the_action_signature() {
         malformed.diagnostics()
     );
 }
+
+fn check_with(templates: Vec<(&str, &str)>) -> suprnova_live::checker::CheckReport {
+    let registry = registry();
+    let mut sources: Vec<(suprnova_live::identity::ViewName, String)> = templates
+        .into_iter()
+        .map(|(name, source)| (view(name), source.to_owned()))
+        .collect();
+    sources.push((
+        view(CHILD_VIEW),
+        include_str!("fixtures/checker/pass/child.html").to_owned(),
+    ));
+    let catalog = TemplateCatalog::new(sources).expect("template catalog");
+    TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name())
+}
+
+fn has_code(report: &suprnova_live::checker::CheckReport, code: DiagnosticCode) -> bool {
+    report
+        .diagnostics()
+        .iter()
+        .any(|diagnostic| diagnostic.code() == code)
+}
+
+/// Askama treats `{{ show(x) }}` and `{{ ui::show(x) }}` as a macro call, so
+/// the macro's markup is written there and is checked there.
+#[test]
+fn a_macro_called_as_an_expression_is_expanded_and_checked() {
+    let macro_source = "{% macro show(v) %}\n<p>{{ v|safe }}</p>\n{% endmacro %}";
+    for call in ["{{ show(notice) }}", "{{ (show(notice)) }}"] {
+        let report = check(format!("{macro_source}<section>{call}</section>"));
+        assert_eq!(
+            raw_locations(&report),
+            vec![(2, 7)],
+            "{call}: {:?}",
+            report.diagnostics()
+        );
+    }
+    let directive = check(
+        "{% macro go() %}<button type=\"button\" live:click=\"missing\">Go</button>{% endmacro %}<section>{{ go() }}</section>",
+    );
+    assert!(
+        has_code(&directive, DiagnosticCode::UnknownAction),
+        "{:?}",
+        directive.diagnostics()
+    );
+    let scoped = check_with(vec![
+        (
+            ROOT_VIEW,
+            "{% import \"tests/macros.html\" as ui %}<form live:submit=\"save\">{{ ui::input(\"nope\") }}</form>",
+        ),
+        (
+            "tests/macros.html",
+            include_str!("fixtures/checker/pass/macros.html"),
+        ),
+    ]);
+    assert!(
+        has_code(&scoped, DiagnosticCode::UnknownModel),
+        "{:?}",
+        scoped.diagnostics()
+    );
+}
