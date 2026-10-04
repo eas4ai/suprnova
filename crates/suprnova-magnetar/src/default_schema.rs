@@ -1254,9 +1254,7 @@ pub mod sql_two_factor {
     async fn set_confirmed_in(
         transaction: &mut AuthTransaction<'_>,
         user_id: &str,
-        enrollment_auth_epoch: i64,
-        enrollment_session_id: Option<&str>,
-        enrollment_expires_at: Option<DateTime<Utc>>,
+        snapshot: &EnrollmentActorSnapshot,
         expected_secret: &[u8],
         matched_step: i64,
         at: DateTime<Utc>,
@@ -1268,9 +1266,9 @@ pub mod sql_two_factor {
         else {
             return Ok(false);
         };
-        if enrollment.enrollment_auth_epoch != enrollment_auth_epoch
-            || enrollment.enrollment_session_id.as_deref() != enrollment_session_id
-            || enrollment.enrollment_expires_at != enrollment_expires_at
+        if enrollment.enrollment_auth_epoch != snapshot.auth_epoch
+            || enrollment.enrollment_session_id != snapshot.session_id
+            || enrollment.enrollment_expires_at != snapshot.expires_at
         {
             return Err(stale_actor());
         }
@@ -1483,9 +1481,7 @@ pub mod sql_two_factor {
             at: DateTime<Utc>,
         ) -> Result<bool> {
             let user_id = actor.user_id().to_owned();
-            let enrollment_auth_epoch = actor_epoch(actor)?;
-            let enrollment_session_id = actor.opaque_session_id().map(str::to_owned);
-            let enrollment_expires_at = actor.expires_at();
+            let snapshot = enrollment_actor_snapshot(actor)?;
             let expected_secret = expected_secret.to_vec();
             let storage = SeaOrmStorage::<DefaultAuthSchema>::new(self.0.clone());
             fenced_credential_write(&storage, actor, move |transaction| {
@@ -1493,9 +1489,7 @@ pub mod sql_two_factor {
                     set_confirmed_in(
                         transaction,
                         &user_id,
-                        enrollment_auth_epoch,
-                        enrollment_session_id.as_deref(),
-                        enrollment_expires_at,
+                        &snapshot,
                         &expected_secret,
                         matched_step,
                         at,
