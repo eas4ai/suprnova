@@ -399,6 +399,37 @@ impl UploadStateMachine {
             revision: next_revision,
         })
     }
+
+    /// Atomically fails an exact `Finalizing` revision whose upload expired,
+    /// for ledger-owned cleanup.
+    ///
+    /// `Finalizing` has no expiry edge: a finalization that failed or stalled
+    /// is still `Finalizing` when its upload expires, and no later transition
+    /// can be admitted for an expired upload. Failing it is what lets cleanup
+    /// claim the record instead of holding it forever. Like
+    /// [`Self::expire_for_cleanup`], this authority path consumes no browser
+    /// idempotency history and belongs to a ledger holding its conditional
+    /// record mutation boundary.
+    pub fn fail_for_cleanup(
+        &mut self,
+        expected_revision: UploadRevision,
+    ) -> Result<TransitionOutcome, UploadError> {
+        if expected_revision != self.revision {
+            return Err(UploadError::new(UploadErrorKind::UploadConflict));
+        }
+        if self.state != UploadState::Finalizing {
+            return Err(UploadError::new(UploadErrorKind::InvalidTransition));
+        }
+        let next_state = next_state(self.state, &UploadTransition::Fail)?;
+        let next_revision = self.revision.checked_next()?;
+        self.state = next_state;
+        self.revision = next_revision;
+        Ok(TransitionOutcome {
+            disposition: TransitionDisposition::Applied,
+            state: next_state,
+            revision: next_revision,
+        })
+    }
 }
 
 impl fmt::Debug for UploadStateMachine {

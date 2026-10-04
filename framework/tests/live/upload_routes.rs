@@ -15,18 +15,19 @@ use sha2::{Digest, Sha256};
 use suprnova::auth::Authenticatable;
 use suprnova::container::testing::TestContainer;
 use suprnova::live::testing::{
-    LiveSecurityCheck, inspect_configured_upload_residue_for_test,
+    AdjustableTestClock, LiveSecurityCheck, inspect_configured_upload_residue_for_test,
     inspect_upload_mount_authority_for_test, prepare_live_router_for_test,
-    record_live_security_pass_for_test,
+    prepare_live_router_with_clock_for_test, record_live_security_pass_for_test,
+    run_upload_cleanup_for_test,
 };
 use suprnova::live::{
     BoundedHeaders, CanonicalValue, DirectPartReference, DirectTransferInstruction, DurableUpload,
     DurableUploadId, FailedFinalize, FinalizeRequest, FinalizeToken, LiveComponent, LiveConfig,
     LiveDocument, LiveMount, LiveRegistry, LiveUploadHost, MountFlags, PreparedFinalize,
-    ScanDisposition, ScanInput, TransferMethod, TrustedProviderOrigin, TrustedProviderUrl,
-    UnixMillis, UploadFinalizer, UploadFuture, UploadLimitConfig, UploadLimits, UploadPart,
-    UploadPolicy, UploadReplacement, UploadScan, UploadScanFailure, UploadScanner, UploadType,
-    live,
+    ReadUpload, ScanDisposition, ScanInput, TransferMethod, TrustedProviderOrigin,
+    TrustedProviderUrl, UnixMillis, UploadFinalizer, UploadFuture, UploadHandle, UploadLimitConfig,
+    UploadLimits, UploadPart, UploadPolicy, UploadProvider, UploadReplacement, UploadScan,
+    UploadScanFailure, UploadScanner, UploadType, live,
 };
 use suprnova::view::{AssetSet, DocumentResponseIntent, TrustedHtml, ViewName};
 use suprnova::{
@@ -53,6 +54,23 @@ impl TestUploadFinalizer {
             commit_calls: AtomicUsize::new(0),
         }
     }
+
+    /// A finalizer whose durable commit never succeeds, which leaves its
+    /// upload `Finalizing`.
+    fn fail_every_commit() -> Self {
+        Self {
+            durable: Mutex::new(HashMap::new()),
+            fail_commit_remaining: AtomicUsize::new(usize::MAX),
+            commit_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn durable_outputs(&self) -> usize {
+        self.durable
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
 }
 
 impl UploadFinalizer for TestUploadFinalizer {
@@ -75,7 +93,9 @@ impl UploadFinalizer for TestUploadFinalizer {
     ) -> UploadFuture<'a, Result<DurableUpload, suprnova::live::UploadError>> {
         Box::pin(async move {
             self.commit_calls.fetch_add(1, Ordering::SeqCst);
-            if self.fail_commit_remaining.swap(0, Ordering::SeqCst) != 0 {
+            let remaining = self.fail_commit_remaining.load(Ordering::SeqCst);
+            if remaining == usize::MAX || self.fail_commit_remaining.swap(0, Ordering::SeqCst) != 0
+            {
                 return Err(suprnova::live::UploadError::new(
                     suprnova::live::UploadErrorKind::ProviderUnavailable,
                 ));
@@ -490,6 +510,15 @@ fn semantic_router_and_runtime() -> (Arc<Router>, suprnova::live::LiveRuntime) {
 fn semantic_router_and_runtime_with_host(
     upload_host: LiveUploadHost,
 ) -> (Arc<Router>, suprnova::live::LiveRuntime) {
+    semantic_router_and_runtime_with(upload_host, None)
+}
+
+/// Builds the upload fixture; `clock`, when given, is the runtime's clock, so
+/// a test can move past an upload's expiry.
+fn semantic_router_and_runtime_with(
+    upload_host: LiveUploadHost,
+    clock: Option<Arc<AdjustableTestClock>>,
+) -> (Arc<Router>, suprnova::live::LiveRuntime) {
     App::init();
     App::singleton(upload_host);
     App::singleton(
@@ -576,7 +605,11 @@ fn semantic_router_and_runtime_with_host(
     let router = router
         .try_live_mount(&mount)
         .expect("register route upload mount");
-    let runtime = prepare_live_router_for_test(&router).expect("prepare route upload runtime");
+    let runtime = match clock {
+        Some(clock) => prepare_live_router_with_clock_for_test(&router, clock),
+        None => prepare_live_router_for_test(&router),
+    }
+    .expect("prepare route upload runtime");
     (Arc::new(router), runtime)
 }
 
@@ -2646,4 +2679,417 @@ async fn truncated_control_request() -> hyper::Request<hyper::body::Incoming> {
     request_rx
         .await
         .expect("the server received the truncated request")
+}
+
+/// One day, the engine's maximum temporary-upload age: every upload in these
+/// tests expires this long after it is created.
+const UPLOAD_MAX_AGE_MS: u64 = 24 * 60 * 60 * 1_000;
+
+/// A base64url request identity unique to `tag`.
+fn request_identity(tag: u8) -> String {
+    let bytes: Vec<u8> = (0..16).map(|offset| tag.wrapping_add(offset)).collect();
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Renders the upload fixture document and returns its seed snapshot.
+async fn upload_seed(router: Arc<Router>, middleware: Arc<MiddlewareRegistry>) -> Value {
+    let request = hyper::Request::builder()
+        .uri("/upload-fixture")
+        .body(Full::new(Bytes::new()))
+        .expect("build upload document request");
+    let (status, _, body) = dispatch_shared(router, middleware, request).await;
+    assert_eq!(status, hyper::StatusCode::OK);
+    let document = std::str::from_utf8(&body).expect("upload document UTF-8");
+    let seed = URL_SAFE_NO_PAD
+        .decode(html_attribute(document, "data-suprnova-live-snapshot"))
+        .expect("decode upload seed snapshot");
+    serde_json::from_slice(&seed).expect("parse upload seed snapshot")
+}
+
+/// Runs the `save_avatar` action with `handle` proposed for the avatar, which
+/// finalizes the upload. `tag` keeps each call's request identities unique.
+async fn finalize_avatar(
+    router: Arc<Router>,
+    middleware: Arc<MiddlewareRegistry>,
+    handle: &str,
+    tag: u8,
+) -> (hyper::StatusCode, Bytes) {
+    let seed = upload_seed(Arc::clone(&router), Arc::clone(&middleware)).await;
+    let request = upload_action_request(
+        &seed,
+        handle,
+        &request_identity(tag.wrapping_mul(48)),
+        &request_identity(tag.wrapping_mul(48).wrapping_add(16)),
+        &request_identity(tag.wrapping_mul(48).wrapping_add(32)),
+    );
+    let (status, _, body) = dispatch_shared(router, middleware, request).await;
+    (status, body)
+}
+
+/// Reads one upload's authoritative status through the control route.
+async fn upload_status(
+    router: Arc<Router>,
+    middleware: Arc<MiddlewareRegistry>,
+    handle: &str,
+    grant: &str,
+) -> Value {
+    let (status, _, value) = send_control(
+        router,
+        middleware,
+        json!({
+            "handle": handle,
+            "operation": "status",
+            "protocol_version": 1
+        }),
+        Some(grant),
+    )
+    .await;
+    assert_eq!(status, hyper::StatusCode::OK, "{value}");
+    value
+}
+
+/// ROOT-16: a scope that keeps finalizing uploads never runs out of upload
+/// slots. Each finalized upload used to hold its scope's create-metadata,
+/// provider-binding and quarantine slots until it expired, so the upload
+/// after `LIVE_UPLOAD_MAX_PENDING_FILES` successful ones was refused. The
+/// slots are released when finalization commits.
+#[tokio::test]
+#[serial_test::serial]
+async fn finalized_uploads_release_their_slots_when_finalization_commits() {
+    ensure_crypt();
+    let _container = TestContainer::fake();
+    App::init();
+    App::singleton(
+        LiveConfig::builder()
+            .upload_max_active(2)
+            .upload_max_pending_files(2)
+            .build()
+            .expect("two pending uploads"),
+    );
+    let clock = Arc::new(AdjustableTestClock::new(1_700_000_000_000));
+    let finalizer = Arc::new(TestUploadFinalizer::default());
+    let (router, _) = semantic_router_and_runtime_with(
+        LiveUploadHost::new().with_finalizer(finalizer.clone()),
+        Some(Arc::clone(&clock)),
+    );
+    let middleware = Arc::new(MiddlewareRegistry::new().append(StrictUploadFacts));
+
+    for index in 0..3_u8 {
+        let (handle, grant, _) = create_ready_avatar(
+            Arc::clone(&router),
+            Arc::clone(&middleware),
+            &format!("slot-avatar-{index}"),
+        )
+        .await;
+        let (status, body) =
+            finalize_avatar(Arc::clone(&router), Arc::clone(&middleware), &handle, index).await;
+        assert_eq!(
+            status,
+            hyper::StatusCode::OK,
+            "upload {index}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let finalized = upload_status(
+            Arc::clone(&router),
+            Arc::clone(&middleware),
+            &handle,
+            &grant,
+        )
+        .await;
+        assert_eq!(finalized["state"], "finalized", "upload {index}");
+        assert_eq!(finalized["revision"], "8", "upload {index}");
+        // Two pending files also allow two creations a minute.
+        clock.advance_ms(61_000);
+    }
+    assert_eq!(finalizer.commit_calls.load(Ordering::SeqCst), 3);
+}
+
+/// ROOT-16: without an application finalizer the placeholder can make
+/// nothing durable, so the finalize action leaves the upload `Ready` to
+/// expire instead of holding it in `Finalizing` for work that never comes.
+#[tokio::test]
+#[serial_test::serial]
+async fn without_a_finalizer_the_upload_stays_ready_instead_of_finalizing() {
+    ensure_crypt();
+    let _container = TestContainer::fake();
+    let (router, _) = semantic_router_and_runtime_with_host(LiveUploadHost::new());
+    let middleware = Arc::new(MiddlewareRegistry::new().append(StrictUploadFacts));
+    let (handle, grant, _) = create_ready_avatar(
+        Arc::clone(&router),
+        Arc::clone(&middleware),
+        "unfinalized-avatar",
+    )
+    .await;
+
+    let (status, body) =
+        finalize_avatar(Arc::clone(&router), Arc::clone(&middleware), &handle, 1).await;
+    assert!(
+        !status.is_success(),
+        "nothing can finalize the upload: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let current = upload_status(router, middleware, &handle, &grant).await;
+    assert_eq!(current["state"], "ready", "{current}");
+    assert_eq!(current["revision"], "6", "{current}");
+}
+
+/// ROOT-16: a finalization that never commits leaves its upload
+/// `Finalizing`. Once the upload expires no commit can be admitted, so
+/// cleanup reclaims the record and the quarantined bytes.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_upload_whose_finalization_never_commits_is_reclaimed_after_it_expires() {
+    ensure_crypt();
+    let _container = TestContainer::fake();
+    let clock = Arc::new(AdjustableTestClock::new(1_700_000_000_000));
+    let finalizer = Arc::new(TestUploadFinalizer::fail_every_commit());
+    let (router, runtime) = semantic_router_and_runtime_with(
+        LiveUploadHost::new().with_finalizer(finalizer.clone()),
+        Some(Arc::clone(&clock)),
+    );
+    let middleware = Arc::new(MiddlewareRegistry::new().append(StrictUploadFacts));
+    let (handle, grant, _) = create_ready_avatar(
+        Arc::clone(&router),
+        Arc::clone(&middleware),
+        "stalled-avatar",
+    )
+    .await;
+    let (status, body) =
+        finalize_avatar(Arc::clone(&router), Arc::clone(&middleware), &handle, 2).await;
+    assert!(
+        !status.is_success(),
+        "the commit always fails: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let stalled = upload_status(router, middleware, &handle, &grant).await;
+    assert_eq!(stalled["state"], "finalizing", "{stalled}");
+
+    let early = run_upload_cleanup_for_test(&runtime, &handle)
+        .await
+        .expect("cleanup before expiry");
+    assert_eq!(early.claimed(), 0, "the upload has not expired yet");
+
+    clock.advance_ms(UPLOAD_MAX_AGE_MS);
+    let report = run_upload_cleanup_for_test(&runtime, &handle)
+        .await
+        .expect("cleanup after expiry");
+    assert_eq!(report.claimed(), 1);
+    assert_eq!(report.reclaimed(), 1);
+    assert!(report.residue_is_empty());
+    assert_eq!(finalizer.durable_outputs(), 0);
+}
+
+/// ROOT-16: a finalized upload is kept for its idempotency window, which is
+/// the upload's own expiry, and then cleanup reclaims the record. The
+/// durable output the finalizer committed is untouched.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_finalized_upload_is_reclaimed_when_its_window_closes() {
+    ensure_crypt();
+    let _container = TestContainer::fake();
+    let clock = Arc::new(AdjustableTestClock::new(1_700_000_000_000));
+    let finalizer = Arc::new(TestUploadFinalizer::default());
+    let (router, runtime) = semantic_router_and_runtime_with(
+        LiveUploadHost::new().with_finalizer(finalizer.clone()),
+        Some(Arc::clone(&clock)),
+    );
+    let middleware = Arc::new(MiddlewareRegistry::new().append(StrictUploadFacts));
+    let (handle, grant, _) = create_ready_avatar(
+        Arc::clone(&router),
+        Arc::clone(&middleware),
+        "windowed-avatar",
+    )
+    .await;
+    let (status, body) =
+        finalize_avatar(Arc::clone(&router), Arc::clone(&middleware), &handle, 3).await;
+    assert_eq!(
+        status,
+        hyper::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let finalized = upload_status(router, middleware, &handle, &grant).await;
+    assert_eq!(finalized["state"], "finalized", "{finalized}");
+
+    clock.advance_ms(UPLOAD_MAX_AGE_MS - 1_000);
+    let early = run_upload_cleanup_for_test(&runtime, &handle)
+        .await
+        .expect("cleanup inside the window");
+    assert_eq!(
+        early.claimed(),
+        0,
+        "the finalized record is kept in its window"
+    );
+
+    clock.advance_ms(1_000);
+    let report = run_upload_cleanup_for_test(&runtime, &handle)
+        .await
+        .expect("cleanup after the window");
+    assert_eq!(report.claimed(), 1);
+    assert_eq!(report.reclaimed(), 1);
+    assert!(report.residue_is_empty());
+    assert_eq!(finalizer.durable_outputs(), 1);
+}
+
+/// ROOT-16: a finalizer may keep direct-storage bytes as its durable output,
+/// and the framework cannot tell whether it did. Reclaiming a finalized
+/// direct upload therefore drops the record and keeps the provider's bytes.
+#[tokio::test]
+#[serial_test::serial]
+async fn reclaiming_a_finalized_direct_upload_keeps_the_provider_bytes() {
+    ensure_crypt();
+    let _container = TestContainer::fake();
+    let clock = Arc::new(AdjustableTestClock::new(1_700_000_000_000));
+    let origin = TrustedProviderOrigin::parse("https://uploads.example.test")
+        .expect("trusted direct origin");
+    let direct = Arc::new(
+        DirectProviderConformanceAdapter::new(
+            UploadLimits::new(UploadLimitConfig::reference()).expect("reference upload limits"),
+            origin.clone(),
+        )
+        .expect("direct conformance provider"),
+    );
+    let (router, runtime) = semantic_router_and_runtime_with(
+        LiveUploadHost::new()
+            .with_direct_provider(direct.clone())
+            .with_finalizer(Arc::new(TestUploadFinalizer::default())),
+        Some(Arc::clone(&clock)),
+    );
+    let middleware = Arc::new(MiddlewareRegistry::new().append(StrictUploadFacts));
+    let bytes =
+        Bytes::from_static(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01");
+    let checksum = hex::encode(Sha256::digest(&bytes));
+    let (status, _, created) = send_control(
+        Arc::clone(&router),
+        Arc::clone(&middleware),
+        json!({
+            "field": "avatar",
+            "file": {
+                "lastModified": 1,
+                "name": "kept-direct-avatar.png",
+                "size": bytes.len(),
+                "type": "image/png"
+            },
+            "idempotency_key": "create-kept-direct-avatar",
+            "island": {
+                "component": "tests.upload-route-component",
+                "documentKey": "avatar-document",
+                "slot": "avatar-slot"
+            },
+            "mode": "direct",
+            "operation": "create",
+            "protocol_version": 1
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, hyper::StatusCode::CREATED, "{created}");
+    let handle = created["handle"]
+        .as_str()
+        .expect("direct handle")
+        .to_owned();
+    let grant = created["grant"].as_str().expect("direct grant").to_owned();
+    let wire = created["instruction"]
+        .as_object()
+        .expect("one direct instruction");
+    let headers = wire["headers"]
+        .as_object()
+        .expect("direct headers")
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                value.as_str().expect("direct header value").to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let header_refs = headers
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let expires_at = UnixMillis::new(wire["expires_at"].as_u64().expect("instruction expiry"));
+    let maximum_bytes = wire["maximum_bytes"]
+        .as_u64()
+        .expect("direct maximum bytes");
+    let instruction = DirectTransferInstruction::new(
+        TransferMethod::Put,
+        TrustedProviderUrl::parse(wire["url"].as_str().expect("direct URL"), &origin)
+            .expect("trusted direct URL"),
+        BoundedHeaders::parse(&header_refs).expect("bounded direct headers"),
+        UploadPart::new(
+            u32::try_from(wire["part"].as_u64().expect("direct part")).expect("u32 part"),
+            wire["offset"].as_u64().expect("direct offset"),
+            maximum_bytes,
+        )
+        .expect("direct part range"),
+        DirectPartReference::parse(wire["reference"].as_str().expect("direct reference"))
+            .expect("direct reference"),
+        UnixMillis::new(expires_at.get().saturating_sub(1)),
+        expires_at,
+        usize::try_from(maximum_bytes).expect("direct byte ceiling"),
+    )
+    .expect("reconstruct constrained direct instruction");
+    direct
+        .store_part_for_test(
+            &instruction,
+            &bytes,
+            UnixMillis::new(expires_at.get().saturating_sub(1)),
+        )
+        .expect("provider stores exact instructed part");
+    let (status, _, reported) = send_control(
+        Arc::clone(&router),
+        Arc::clone(&middleware),
+        json!({
+            "expected_revision": "1",
+            "handle": handle,
+            "idempotency_key": "report-kept-direct-avatar-0",
+            "operation": "report_direct_part",
+            "part": 0,
+            "protocol_version": 1,
+            "reference": wire["reference"]
+        }),
+        Some(&grant),
+    )
+    .await;
+    assert_eq!(status, hyper::StatusCode::OK, "{reported}");
+    let (status, _, completed) = send_control(
+        Arc::clone(&router),
+        Arc::clone(&middleware),
+        json!({
+            "expected_revision": "4",
+            "handle": handle,
+            "idempotency_key": "complete-kept-direct-avatar",
+            "operation": "complete",
+            "protocol_version": 1,
+            "whole_checksum": checksum
+        }),
+        Some(&grant),
+    )
+    .await;
+    assert_eq!(status, hyper::StatusCode::OK, "{completed}");
+    assert_eq!(completed["state"], "ready");
+
+    let (status, body) =
+        finalize_avatar(Arc::clone(&router), Arc::clone(&middleware), &handle, 4).await;
+    assert_eq!(
+        status,
+        hyper::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+
+    clock.advance_ms(UPLOAD_MAX_AGE_MS);
+    let report = run_upload_cleanup_for_test(&runtime, &handle)
+        .await
+        .expect("cleanup after the window");
+    assert_eq!(report.claimed(), 1);
+    assert_eq!(report.reclaimed(), 1);
+    assert!(report.residue_is_empty());
+    let parsed = UploadHandle::parse(&handle).expect("direct upload handle");
+    let kept = UploadProvider::read(direct.as_ref(), ReadUpload::new(&parsed, 0, bytes.len()))
+        .await
+        .expect("the direct provider still holds the finalized bytes");
+    assert_eq!(&kept[..], &bytes[..]);
 }

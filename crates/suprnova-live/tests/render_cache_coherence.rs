@@ -210,6 +210,40 @@ fn a_private_cached_response_makes_the_browser_revalidate_before_every_reuse() {
     }
 }
 
+/// Every response that is not offered to shared caches is `private,
+/// no-cache`, whatever its class. A public page behind an auth gate, or a
+/// stitched shell with no islands, carries no per-account bytes, but a
+/// browser that reuses it without asking skips the route's guard for the
+/// whole freshness window, after a logout as much as before it. Only a
+/// route that opted into shared caching (`SMaxAge`) keeps an age.
+#[test]
+fn every_private_response_makes_the_browser_revalidate_before_reuse() {
+    let fresh = FreshnessPolicy::new(60_000, 30_000, 30_000).expect("policy");
+    for class in [
+        RepresentationClass::PublicShared,
+        RepresentationClass::PublicShellStitched,
+        RepresentationClass::PrivateCached,
+    ] {
+        for seed_remaining_ms in [None, Some(20_000)] {
+            assert_eq!(
+                cache_control_value(class, SharedCachePolicy::Private, &fresh, seed_remaining_ms),
+                "private, no-cache",
+                "{class:?} with {seed_remaining_ms:?}"
+            );
+        }
+    }
+    assert_eq!(
+        cache_control_value(
+            RepresentationClass::PublicShared,
+            SharedCachePolicy::SMaxAge { seconds: 300 },
+            &fresh,
+            None
+        ),
+        "public, max-age=60, s-maxage=300",
+        "a route that opted into shared caching keeps its bounded ages"
+    );
+}
+
 #[test]
 fn cache_control_and_vary_agree_with_class_variance_and_seed_deadline() {
     let fresh = FreshnessPolicy::new(60_000, 0, 0).expect("policy");
@@ -220,7 +254,7 @@ fn cache_control_and_vary_agree_with_class_variance_and_seed_deadline() {
             &fresh,
             None
         ),
-        "private, max-age=60"
+        "private, no-cache"
     );
     assert_eq!(
         cache_control_value(
