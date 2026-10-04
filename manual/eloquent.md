@@ -965,7 +965,11 @@ read as a type parameter; for `avg` it is `f64` or `rust_decimal::Decimal`
 (the `AvgValue` trait). Suprnova aliases generated
 aggregate expressions internally so the same typed result is decoded on
 PostgreSQL, MySQL, and SQLite. `sum` and `avg` return zero for an empty
-match set, while `min` and `max` return `None`. An incompatible requested
+match set, while `min` and `max` return `None`. The same holds when no row
+comes back at all - an offset skips the aggregate's one row, as
+`skip(10).count()` does, or a grouped query has no group: `count`, `sum`
+and `avg` return zero and `min` and `max` return `None`, as Laravel's
+`count`, `sum`, `min` and `max` do. An incompatible requested
 Rust type or missing result column is a database error; it is never
 converted into a plausible zero or `None`.
 
@@ -1071,9 +1075,9 @@ let users  = first.union_all(second).get().await?;
 
 As in Laravel, an ordering, a limit, or an offset belongs to the whole
 union when you add it after `union`, and to the first query alone when
-you add it before. `paginate`, `simple_paginate`, `first`, and `count`
-all come after `union`, so they page, take, and count the rows of the
-union:
+you add it before. `paginate`, `simple_paginate`, `cursor_paginate`,
+`first`, and `count` all come after `union`, so they page, take, and
+count the rows of the union; a cursor bounds the rows of every arm:
 
 ```rust
 let page = User::filter("active", true)
@@ -2704,6 +2708,10 @@ User::query().chunk(100, |batch: Collection<User>| async move {
 The closure receives a `Collection<M>` per batch - slice-shape access
 (`.iter()`, indexing) works directly via `Deref`.
 
+`chunk`, `chunk_map`, and `each` keep the query's own `OFFSET` and
+`LIMIT`, as Laravel's `chunk` does: the offset skips rows once, at the
+start of the walk, and the limit caps the rows the whole walk visits.
+
 `chunk` is OFFSET-paginated and **not safe under concurrent inserts**:
 rows inserted before the next batch's offset get skipped; rows deleted
 before the offset get processed twice (whatever shifted into their
@@ -2729,7 +2737,10 @@ an original row to skip or duplicate.
 The walk sets its own order. An `ORDER BY` already on the query is
 dropped, because any other order would make the cursor skip some rows
 and repeat others. An `OFFSET` on the query skips that many rows once,
-before the first batch; every later batch starts at the cursor.
+before the first batch; every later batch starts at the cursor. A
+`LIMIT` on the query caps the rows the whole walk visits, as in
+Laravel's `chunkById`: `.limit(10).chunk_by_id(3, ..)` hands over 3, 3,
+3 and 1 rows.
 
 The cursor is the value of the primary key, in the order of the key.
 These keys work:
