@@ -722,6 +722,25 @@ pub(crate) fn validate_registered_name(value: &LitStr) -> syn::Result<()> {
     Ok(())
 }
 
+/// The name a Rust identifier carries in Live metadata and on the wire:
+/// without its `r#` prefix, and inside the bounded ASCII grammar every Live
+/// field and argument identity uses. A name outside that grammar is a
+/// compile error here rather than a panic when the component registers.
+pub(crate) fn wire_name(ident: &syn::Ident, what: &str) -> syn::Result<String> {
+    let name = ident.unraw().to_string();
+    let valid = name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+    if !valid {
+        return Err(syn::Error::new(
+            ident.span(),
+            format!("{what} names must use ASCII letters, digits and `_`, at most 128 bytes"),
+        ));
+    }
+    Ok(name)
+}
+
 pub(crate) fn contains_reference(ty: &Type) -> bool {
     match ty {
         Type::Reference(_) | Type::Ptr(_) => true,

@@ -46,6 +46,17 @@ fn router() -> Router {
             let empty: Response = Ok(HttpResponse::new());
             empty
         })
+        // Body-less 200 that still carries response policy: a cookie, a
+        // security header, and storage metadata that only described the
+        // empty body.
+        .get("/empty-with-policy", |_req| async {
+            let empty: Response = Ok(HttpResponse::new()
+                .header("Set-Cookie", "theme=dark; Path=/")
+                .header("X-Frame-Options", "DENY")
+                .header("Cache-Control", "public, max-age=600")
+                .header("Content-Type", "text/plain"));
+            empty
+        })
         .put("/save", |_req| async {
             let resp: Response = Redirect::to("/home").into();
             resp
@@ -185,6 +196,42 @@ async fn an_empty_200_on_an_inertia_visit_redirects_to_the_previous_url() {
         headers.get("location").map(String::as_str),
         Some("/dashboard"),
         "the substituted redirect must go to the recorded previous URL, not the fallback"
+    );
+    assert_eq!(headers.get("vary").map(String::as_str), Some("X-Inertia"));
+}
+
+#[tokio::test]
+async fn an_empty_200_redirect_keeps_the_handlers_cookies_and_policy_headers() {
+    // The substitution replaces the body, not what the handler decided.
+    // A cookie it set and a security header an inner middleware added
+    // must reach the browser on the 303. Headers that only described the
+    // empty body (its type, its cache lifetime) must not.
+    let registry = MiddlewareRegistry::new().append(InertiaHeadersMiddleware::new());
+    let addr = spawn_server(router(), registry, 2).await;
+    let (status, headers, _body) =
+        request(addr, "GET", "/empty-with-policy", &[("X-Inertia", "true")]).await;
+
+    assert_eq!(status, 303, "an empty 200 must become a redirect");
+    assert_eq!(headers.get("location").map(String::as_str), Some("/"));
+    assert_eq!(
+        headers.get("set-cookie").map(String::as_str),
+        Some("theme=dark; Path=/"),
+        "the handler's cookie must survive the substitution"
+    );
+    assert_eq!(
+        headers.get("x-frame-options").map(String::as_str),
+        Some("DENY"),
+        "a security header must survive the substitution"
+    );
+    assert_ne!(
+        headers.get("cache-control").map(String::as_str),
+        Some("public, max-age=600"),
+        "the empty body's storage permission must not carry onto the redirect"
+    );
+    assert_ne!(
+        headers.get("content-type").map(String::as_str),
+        Some("text/plain"),
+        "the empty body's content type must not carry onto the redirect"
     );
     assert_eq!(headers.get("vary").map(String::as_str), Some("X-Inertia"));
 }

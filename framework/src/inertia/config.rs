@@ -437,53 +437,35 @@ fn glob_match(pattern: &str, path: &str) -> bool {
     glob_match_inner(pattern.as_bytes(), path.as_bytes())
 }
 
+/// Match by dynamic programming over (pattern position, path position).
+///
+/// A single-backtrack matcher remembers only the most recent star, so a
+/// later `*` overwrites an earlier `**` and a pattern like `**/foo/*`
+/// misses `/a/foo/b/foo/c`, where the `**` has to take `/a/foo/b`. The
+/// table keeps every star's options open. Patterns and paths are short,
+/// so the `O(pattern * path)` cost is a few hundred cells.
 fn glob_match_inner(pat: &[u8], path: &[u8]) -> bool {
-    let (mut pi, mut si) = (0, 0);
-    let (mut star_pi, mut star_si): (Option<usize>, usize) = (None, 0);
-    while si < path.len() {
-        if pi < pat.len() {
-            let c = pat[pi];
-            if c == b'*' {
-                // `**` = match any, including '/'
-                let double = pi + 1 < pat.len() && pat[pi + 1] == b'*';
-                if double {
-                    pi += 2;
-                    star_pi = Some(pi);
-                    star_si = si;
-                    // double-star can match zero chars too
-                    continue;
-                } else {
-                    // single `*` = match anything except '/'
-                    pi += 1;
-                    star_pi = Some(pi);
-                    star_si = si;
-                    continue;
-                }
-            } else if c == path[si] {
-                pi += 1;
-                si += 1;
-                continue;
-            }
-        }
-        if let Some(sp) = star_pi {
-            // Resume the previous star, consume one more char.
-            // For single-`*` we forbid `/` in the consumed window.
-            let one_more = path[star_si];
-            let prev_was_double = sp >= 2 && pat[sp - 1] == b'*' && pat[sp - 2] == b'*';
-            if !prev_was_double && one_more == b'/' {
-                return false;
-            }
-            star_si += 1;
-            si = star_si;
-            pi = sp;
-        } else {
-            return false;
+    let width = path.len() + 1;
+    // `table[pi * width + si]`: does `pat[pi..]` match `path[si..]`?
+    let mut table = vec![false; (pat.len() + 1) * width];
+    table[pat.len() * width + path.len()] = true;
+    for pi in (0..pat.len()).rev() {
+        let double = pat[pi] == b'*' && pi + 1 < pat.len() && pat[pi + 1] == b'*';
+        for si in (0..=path.len()).rev() {
+            let matched = if double {
+                // `**` matches nothing, or one more byte of anything.
+                table[(pi + 2) * width + si] || (si < path.len() && table[pi * width + si + 1])
+            } else if pat[pi] == b'*' {
+                // `*` matches nothing, or one more byte that is not `/`.
+                table[(pi + 1) * width + si]
+                    || (si < path.len() && path[si] != b'/' && table[pi * width + si + 1])
+            } else {
+                si < path.len() && pat[pi] == path[si] && table[(pi + 1) * width + si + 1]
+            };
+            table[pi * width + si] = matched;
         }
     }
-    while pi < pat.len() && pat[pi] == b'*' {
-        pi += 1;
-    }
-    pi == pat.len()
+    table[0]
 }
 
 /// Default Vite dev-server port when `VITE_PORT` is unset.
@@ -1074,6 +1056,21 @@ mod tests {
     fn glob_empty_pattern_matches_only_empty_path() {
         assert!(glob_match("", ""));
         assert!(!glob_match("", "/x"));
+    }
+
+    #[test]
+    fn glob_double_star_still_backtracks_after_a_later_single_star() {
+        // `**` has to absorb `/a/foo/b` so the trailing `*` can take `c`.
+        // A matcher that remembers only the last star loses the `**`
+        // fallback once it passes the single `*`.
+        assert!(glob_match("**/foo/*", "/a/foo/b/foo/c"));
+        assert!(glob_match("/x/**/y/*/z", "/x/1/y/2/y/3/z"));
+        assert!(!glob_match("**/foo/*", "/a/foo/b/foo/c/d"));
+        let config = SsrConfig {
+            excluded_paths: vec!["**/foo/*".to_string()],
+            ..SsrConfig::default()
+        };
+        assert!(config.is_path_excluded("/a/foo/b/foo/c"));
     }
 }
 

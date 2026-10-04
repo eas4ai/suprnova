@@ -538,21 +538,25 @@ async fn build_default_engines(
     // The second factor counts its failures in a store of its own: password
     // sign-in counts against any string it is given as an address, so a
     // shared store would let a registered address reach the second
-    // factor's key.
-    let second_factor_lockout = Arc::new(LockoutService::new(
+    // factor's key. Its keys are not addresses, so its locks never touch a
+    // user row either.
+    let second_factor_lockout = Arc::new(LockoutService::without_user_lock(
         Arc::new(SeaOrmStorage::<DefaultSecondFactorSchema>::new(
             config.connection.clone(),
         )),
-        storage.clone(),
         config.lockout,
     ));
-    let factors = Arc::new(TwoFactorService::new(
-        Arc::new(SqlTwoFactorStore(config.connection.clone())),
-        storage.clone(),
-        second_factor_lockout,
-        encryptor.clone(),
-        config.two_factor,
-    ));
+    // An account holds the framework's TOTP or this factor, never both.
+    let factors = Arc::new(
+        TwoFactorService::new(
+            Arc::new(SqlTwoFactorStore(config.connection.clone())),
+            storage.clone(),
+            second_factor_lockout,
+            encryptor.clone(),
+            config.two_factor,
+        )
+        .with_other_second_factor(Arc::new(super::engine::FrameworkTotpEnrollment)),
+    );
     let verifier = Arc::new(
         PasswordVerifier::new(
             Arc::new(StandardPasswordHashDriver),

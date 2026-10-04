@@ -1,5 +1,10 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
+// Rustdoc link hygiene: a link rustdoc cannot resolve, or a public item
+// linking a private one, fails the JSON rustdoc step of `scripts/gate.sh`
+// instead of scrolling past as a warning.
+#![deny(rustdoc::broken_intra_doc_links)]
+#![deny(rustdoc::private_intra_doc_links)]
 
 //! Framework-neutral authentication engines used by Suprnova's public auth
 //! facades.
