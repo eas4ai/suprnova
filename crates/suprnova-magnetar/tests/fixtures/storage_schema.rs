@@ -699,6 +699,9 @@ impl magnetar::schema::LockoutFields for lockouts::Entity {
 }
 
 impl magnetar::schema::LockoutFields for second_factor_lockouts::Entity {
+    // Second-factor identities are not addresses; see
+    // `LockoutFields::IDENTITY_IS_EMAIL`.
+    const IDENTITY_IS_EMAIL: bool = false;
     fn read_lockout_id(m: &Self::Model) -> String {
         m.id.to_string()
     }

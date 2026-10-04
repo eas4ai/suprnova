@@ -111,9 +111,8 @@ async fn live_world(url: &str, max_failed_attempts: u32) -> LiveWorld {
             ..LockoutConfig::default()
         },
     ));
-    let second_factor_lockout = Arc::new(LockoutService::new(
+    let second_factor_lockout = Arc::new(LockoutService::without_user_lock(
         Arc::new(SeaOrmStorage::<DefaultSecondFactorSchema>::new(db.clone())),
-        storage.clone(),
         LockoutConfig {
             max_failed_attempts,
             ..LockoutConfig::default()

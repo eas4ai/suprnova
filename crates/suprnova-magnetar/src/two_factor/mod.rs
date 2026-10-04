@@ -170,6 +170,12 @@ impl TwoFactorService {
     /// against any string it is given as an address; sharing its store let
     /// a registered decoy address equal to [`lockout_identity`] clear the
     /// second factor's failures, and failed sign-ins as it lock them.
+    ///
+    /// Build it with [`LockoutService::without_user_lock`] over a store whose
+    /// [`crate::schema::LockoutFields::IDENTITY_IS_EMAIL`] is `false`, as
+    /// that table's is: the keys are not addresses, so the second factor's
+    /// locks and unlocks must never stamp or clear the user row whose
+    /// address happens to equal one.
     pub fn new(
         store: Arc<dyn TwoFactorStore>,
         users: Arc<dyn UserStore>,
