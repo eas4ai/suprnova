@@ -554,7 +554,12 @@ Built-in validators in `suprnova::http::upload::validators`:
   The client's `Content-Type` counts only for bytes that carry no magic
   (`text/csv`, `application/json`), never for a type that has some: bytes
   that aren't a PNG don't pass as `image/png` whatever the header claims.
-  Markup and script text is refused before the header is read.
+  Markup and script text is refused before the header is read. SVG is the
+  exception, being markup: an allowlist that names `image/svg+xml` accepts
+  a file whose root element is `<svg>` (after an optional XML declaration,
+  comments and doctype), and refuses any other text declared as SVG. An
+  SVG can carry script, so serve uploaded ones as attachments or from
+  another origin.
 - `()` - no-op; `UploadedFile<()>` accepts any bytes.
 
 Validators compose as tuples: `(ImageFile, MaxSize<5_242_880>)` runs both,

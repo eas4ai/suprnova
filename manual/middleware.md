@@ -443,7 +443,14 @@ route builders and `group!` of the `routes!` macro. The name is one of:
 |---|---|
 | `auth` | The alias `auth`. |
 | `throttle:60,1` | The alias `throttle`, called with the arguments `["60", "1"]`. Arguments follow the colon, separated by commas, and spaces around a name or an argument are trimmed. |
-| `api` | Every middleware of the group `api`, in order. A group wins over an alias of the same name. |
+| `api` | Every middleware of the group `api`, in order, each once. A group wins over an alias of the same name. |
+
+A group lists each middleware once, where it first appears, as Laravel's
+`uniqueMiddleware` does. When two nested groups both include a third, or
+a group names the same alias twice, the repeat is dropped, so a
+`throttle:60,1` in a shared group counts one hit per request. The alias
+and its arguments identify the middleware: `throttle:60,1` and
+`throttle:30,1` are two.
 
 A route resolves the name when it is registered, which is at boot. A name
 that no alias or group carries, an alias that takes no arguments but is

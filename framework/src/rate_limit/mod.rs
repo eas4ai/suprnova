@@ -310,11 +310,14 @@ use std::sync::Arc;
 ///
 /// # Where the identity is read from
 ///
-/// `field` is read from the query string and from a buffered form body -
-/// so one key function serves `POST /resend?email=…` and a form-encoded
-/// `POST /password/request` alike. Reading the body requires
-/// [`RateLimitMiddleware::key_reads_body`]; without it the body half is
-/// simply skipped. A blank value in one place does not hide the other.
+/// `field` is read from the query string and from a buffered body - a
+/// form field, or a top-level string field of a JSON object - so one key
+/// function serves `POST /resend?email=…`, a form-encoded
+/// `POST /password/request` and a JSON login alike. Reading the body
+/// requires [`RateLimitMiddleware::key_reads_body`]; without it the body
+/// half is simply skipped. A blank value in one place does not hide the
+/// other, and a JSON field that is no string (a number, an array, an
+/// object) names nobody.
 ///
 /// # Ambiguous requests
 ///
@@ -427,7 +430,8 @@ enum Identity {
     Absent,
 }
 
-/// Read `field` from the query string and from a buffered form body.
+/// Read `field` from the query string and from a buffered body (see
+/// [`body_field`]).
 ///
 /// Blank counts as absent - a blank value is not an identity, and treating
 /// it as one would hand every caller who sends `field=` the same free
@@ -437,13 +441,39 @@ enum Identity {
 fn read_identity(request: &Request, field: &str) -> Identity {
     let present = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
     let query = present(request.query_param(field));
-    let body = present(request.cached_form_field(field));
+    let body = present(body_field(request, field));
     match (query, body) {
         (Some(query), Some(body)) if normalise_identity(&query) != normalise_identity(&body) => {
             Identity::Ambiguous
         }
         (Some(value), _) | (None, Some(value)) => Identity::Named(value),
         (None, None) => Identity::Absent,
+    }
+}
+
+/// `field` from a buffered body: a form field, or a top-level string field
+/// of a JSON object.
+///
+/// A JSON route used to have no body identity at all. It was keyed on the
+/// caller's IP, and a `?field=` decoy moved each request into a fresh
+/// bucket while the handler acted on the address in the JSON. Only a
+/// top-level string counts, because that is what a handler deserialises
+/// into a `String` field; a repeated key resolves to its last value, as
+/// `serde_json` reads it.
+fn body_field(request: &Request, field: &str) -> Option<String> {
+    if let Some(value) = request.cached_form_field(field) {
+        return Some(value);
+    }
+    if !request.is_json() {
+        return None;
+    }
+    let bytes = request.cached_body()?;
+    match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(serde_json::Value::Object(mut object)) => match object.remove(field) {
+            Some(serde_json::Value::String(value)) => Some(value),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
