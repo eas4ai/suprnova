@@ -26,7 +26,10 @@ use crate::plugin::{
 };
 use crate::schema::AuthSchema;
 use crate::sessions::RememberFacade;
-use crate::storage::{CredentialActor, MethodStore, NewUser, UserRecord, UserStore};
+use crate::storage::{
+    CredentialActor, MethodStore, NewUser, SignUpAccount, UserRecord, UserStore,
+    create_or_find_existing,
+};
 use crate::{Error, Result};
 
 use super::{Gate, acquire, bad_request, body_string, generic_ok, request_metadata, unavailable};
@@ -193,31 +196,24 @@ impl PasswordAuthProvider for PasswordAuthService {
                 user_id: existing.user_id,
             });
         }
-        let created = match self
-            .users
-            .create_user(NewUser {
+        // A concurrent registration that created the account between the
+        // lookup above and this insert answers as any known address does.
+        let account = create_or_find_existing(
+            self.users.as_ref(),
+            NewUser {
                 email: email.clone(),
                 password_hash: Some(hash),
-            })
-            .await
-        {
-            Ok(created) => created,
-            // A concurrent registration created the account between the
-            // lookup above and this insert, and the store refused a second
-            // one. Answer as for any known address.
-            Err(conflict @ Error::Conflict { .. }) => {
-                return match self.users.find_by_email(&email).await? {
-                    Some(existing) => Ok(RegistrationOutcome::Existing {
-                        user_id: existing.user_id,
-                    }),
-                    None => Err(conflict),
-                };
-            }
-            Err(error) => return Err(error),
-        };
-        Ok(RegistrationOutcome::Created {
-            user_id: created.user_id,
-            email,
+            },
+        )
+        .await?;
+        Ok(match account {
+            SignUpAccount::Created(created) => RegistrationOutcome::Created {
+                user_id: created.user_id,
+                email,
+            },
+            SignUpAccount::Existing(existing) => RegistrationOutcome::Existing {
+                user_id: existing.user_id,
+            },
         })
     }
 

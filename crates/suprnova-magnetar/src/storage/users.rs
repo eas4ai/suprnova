@@ -79,6 +79,39 @@ pub trait UserStore: Send + Sync {
     ) -> Result<()>;
 }
 
+/// What a sign-up's insert came to: the account it created, or the account
+/// a concurrent sign-up created first.
+pub(crate) enum SignUpAccount {
+    /// The insert created this account.
+    Created(UserRecord),
+    /// Another sign-up created the account for this address first.
+    Existing(UserRecord),
+}
+
+/// Create the account `input` describes, or answer with the account a
+/// concurrent sign-up created first.
+///
+/// Sign-ups look an address up and then insert. Two racing for one new
+/// address both miss the lookup, and a store with a unique email index
+/// refuses the second insert with [`Error::Conflict`]. The loser reads the
+/// address back and continues as for any address already on file, so the
+/// race never reaches the caller as an error. A conflict with no account to
+/// read back stays an error.
+pub(crate) async fn create_or_find_existing(
+    users: &dyn UserStore,
+    input: NewUser,
+) -> Result<SignUpAccount> {
+    let email = input.email.clone();
+    match users.create_user(input).await {
+        Ok(created) => Ok(SignUpAccount::Created(created)),
+        Err(conflict @ Error::Conflict { .. }) => match users.find_by_email(&email).await? {
+            Some(existing) => Ok(SignUpAccount::Existing(existing)),
+            None => Err(conflict),
+        },
+        Err(error) => Err(error),
+    }
+}
+
 fn record<S>(model: &<S::User as EntityBinding>::Model) -> UserRecord
 where
     S: AuthSchema,
