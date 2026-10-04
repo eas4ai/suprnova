@@ -561,6 +561,8 @@ The same precedence applies on the queue path: queued mailables go through `appl
 
 Every dispatched message can carry Laravel-style provider hints - tags, metadata key/values, RFC-2076 priority, custom MIME headers, and a Sender / bounce-to address. They forward to the HTTP providers' native fields (Postmark `Tag` / `Metadata` / `Headers`, SES `EmailTags` plus `Content.Simple.Headers`, SendGrid `categories` / `custom_args` / `headers`, Mailgun `o:tag` / `v:` / `h:`, Resend `tags` / `headers`) and to SMTP as RFC 5322 headers.
 
+On SMTP, the return path also becomes the envelope sender (`MAIL FROM`), which is the address bounces are sent to. The `From` header and the recipients do not change.
+
 Every transport checks custom headers the same way before it sends. A header name must be printable ASCII with no space or `:` (the RFC 5322 field-name grammar), so CR, LF, and NUL - the bytes that turn one header into two - are refused. A header value may hold any text except CR, LF, and NUL; long values are folded for you. On SMTP, the `file` driver, and Resend, a metadata key becomes part of an `X-Metadata-<key>` header name and follows the same rule. A message that breaks a rule fails with an error and is not sent.
 
 On SES specifically, headers ride whichever content shape the message uses:

@@ -147,6 +147,53 @@ fn commands_starting(log: &SinkLog, prefix: &str) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn smtp_return_path_sets_the_envelope_sender() {
+    // Bounces go to the SMTP envelope sender (MAIL FROM), not to a
+    // `Return-Path:` header, which the final MTA replaces anyway.
+    let (sink, port) = SmtpSink::start().await;
+    let transport = SmtpMailTransport::unencrypted("127.0.0.1", port).unwrap();
+    let mut msg = sink_message();
+    msg.return_path = Some(Address::new("bounces@example.test").with_name("Bounces"));
+
+    transport.send(&msg).await.unwrap();
+
+    let log = sink.snapshot();
+    assert_eq!(
+        commands_starting(&log, "MAIL FROM"),
+        ["MAIL FROM:<bounces@example.test>"]
+    );
+    assert_eq!(
+        commands_starting(&log, "RCPT TO"),
+        [
+            "RCPT TO:<to@example.test>",
+            "RCPT TO:<cc@example.test>",
+            "RCPT TO:<bcc@example.test>",
+        ],
+        "the return path must not change who receives the message"
+    );
+    assert_eq!(log.data.len(), 1);
+    assert!(
+        log.data[0].contains("From: author@example.test"),
+        "{}",
+        log.data[0]
+    );
+    assert!(!log.data[0].contains("Bcc:"), "{}", log.data[0]);
+}
+
+#[tokio::test]
+async fn smtp_without_a_return_path_sends_from_the_author() {
+    let (sink, port) = SmtpSink::start().await;
+    let transport = SmtpMailTransport::unencrypted("127.0.0.1", port).unwrap();
+
+    transport.send(&sink_message()).await.unwrap();
+
+    assert_eq!(
+        commands_starting(&sink.snapshot(), "MAIL FROM"),
+        ["MAIL FROM:<author@example.test>"]
+    );
+}
+
+#[tokio::test]
 async fn smtp_refuses_a_header_that_would_inject_another_header() {
     // lettre writes a header name verbatim, so a CR/LF in it starts a new
     // header (here a `Reply-To` that diverts replies to the attacker).

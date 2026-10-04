@@ -3,6 +3,7 @@
 use crate::error::FrameworkError;
 use crate::mail::transport::{MailTransport, OutgoingMessage};
 use async_trait::async_trait;
+use lettre::address::Envelope;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 
@@ -62,8 +63,22 @@ impl MailTransport for SmtpMailTransport {
             .multipart(multipart)
             .map_err(|e| FrameworkError::internal(format!("smtp build message: {e}")))?;
 
+        // lettre derives the envelope sender (MAIL FROM) from `Sender` or
+        // `From` and never from `Return-Path`. Bounces go to the envelope
+        // sender, and the final MTA replaces any `Return-Path:` header with
+        // it, so a return path has to be set on the envelope to take effect.
+        // The recipients stay the ones lettre derived from To, Cc and Bcc.
+        let envelope = match &msg.return_path {
+            Some(return_path) => Envelope::new(
+                Some(crate::mail::wire::mailbox("SMTP", return_path)?.email),
+                email.envelope().to().to_vec(),
+            )
+            .map_err(|e| FrameworkError::internal(format!("smtp envelope: {e}")))?,
+            None => email.envelope().clone(),
+        };
+
         self.inner
-            .send(email)
+            .send_raw(&envelope, &email.formatted())
             .await
             .map_err(|e| FrameworkError::internal(format!("smtp send: {e}")))?;
         Ok(())
