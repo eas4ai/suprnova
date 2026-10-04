@@ -118,7 +118,7 @@ listeners. The bridge between the event dispatcher and the
 
 The trait that names "the thing that fans out a message to all
 WebSocket subscribers of a channel" - the in-memory implementation
-(`InMemoryBroadcastHub`) is the default; the sea-streamer
+(`InMemoryBroadcastHub`) is the default; the Redis stream
 implementation (`SeaStreamerBroadcastHub`) is the multi-process
 production deployment. See [Broadcasting - Multi-Process Fanout](broadcasting.md#multi-process-fanout).
 

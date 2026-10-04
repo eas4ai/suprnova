@@ -89,7 +89,7 @@ domains. The rows marked **not built** and **by design no** are the gaps.
 |---|---|---|---|
 | Artisan Console | Per-app `console` binary built from `#[command]` + `#[derive(Command)]` | shipped | [Console](console.md). `cargo run --bin console <subcommand>` |
 | Tinker (REPL) | No REPL | by design no | Write a one-off `cargo run --bin xxx` script or a `#[suprnova_test]` |
-| Broadcasting | `BroadcastHub` + `Channel` / `PrivateChannel` / `PresenceChannel` + `Broadcastable` | shipped | sea-streamer fanout for multi-node. [Broadcasting](broadcasting.md) |
+| Broadcasting | `BroadcastHub` + `Channel` / `PrivateChannel` / `PresenceChannel` + `Broadcastable` | shipped | Redis stream fanout for multi-node. [Broadcasting](broadcasting.md) |
 | Cache | `Cache::get/put/forget/remember/rememberForever/increment/...` + `InMemoryCache`, `RedisCache` | shipped | Atomic ops + tagged cache + cache locks (`LockGuard`). [Cache](cache.md) |
 | Collections | `eloquent::Collection<M>` with Laravel-shape methods | shipped | Derefs to a `[M]` slice, so slice idioms work; `into_vec()` for `Vec` ones. [Collections](eloquent-collections.md) |
 | Concurrency | Tokio everywhere - `tokio::spawn`, `tokio::join!`, `tokio::select!` | shipped | The whole framework is async. The Laravel `Concurrency::run([...])` facade doesn't ship; Tokio is the answer |
