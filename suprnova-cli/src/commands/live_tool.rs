@@ -15,7 +15,7 @@ use std::io::BufRead;
 use std::process::Stdio;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -863,6 +863,9 @@ fn exchange(
     let mut child = command
         .spawn()
         .map_err(|error| ToolFailure::Spawn(error.to_string()))?;
+    // One deadline for the whole call: reading the exchange and waiting for
+    // the helper to exit share it (ROOT-38).
+    let deadline = Instant::now() + timeout;
     // The group no longer receives the terminal's Ctrl+C, so it is
     // forwarded for as long as the helper runs.
     #[cfg(unix)]
@@ -876,7 +879,7 @@ fn exchange(
         let result = consume_protocol(std::io::BufReader::new(stdout), operation, protocol);
         let _ = sender.send(result);
     });
-    let parsed = match receiver.recv_timeout(timeout) {
+    let parsed = match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         Ok(result) => result,
         Err(_) => {
             kill_helper(&mut child);
@@ -890,14 +893,28 @@ fn exchange(
             return Err(ToolFailure::Timeout(timeout.as_secs()));
         }
     };
-    if parsed.is_err() {
+    let status = if parsed.is_err() {
         // The exchange is already void; never wait on a child that may keep
         // writing into a closed pipe or otherwise refuse to exit.
         kill_helper(&mut child);
-    }
-    let status = child
-        .wait()
-        .map_err(|error| ToolFailure::Read(error.to_string()))?;
+        child
+            .wait()
+            .map_err(|error| ToolFailure::Read(error.to_string()))?
+    } else {
+        // The reader stops at the end of stdout, and the helper can close
+        // stdout and keep running. Its exit is waited for under the same
+        // deadline, never without one (ROOT-38).
+        match wait_until(&mut child, deadline)
+            .map_err(|error| ToolFailure::Read(error.to_string()))?
+        {
+            Some(status) => status,
+            None => {
+                kill_helper(&mut child);
+                let _ = child.wait();
+                return Err(ToolFailure::Timeout(timeout.as_secs()));
+            }
+        }
+    };
     let _ = reader.join();
     match parsed {
         Ok(session) => {
@@ -910,6 +927,24 @@ fn exchange(
             Err(ToolFailure::MissingHelper(status.code()))
         }
         Err(error) => Err(error),
+    }
+}
+
+/// Waits for `child` to exit, until `deadline`. `None` means it was still
+/// running then.
+fn wait_until(
+    child: &mut std::process::Child,
+    deadline: Instant,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(None);
+        }
+        thread::sleep(left.min(Duration::from_millis(10)));
     }
 }
 
@@ -1057,6 +1092,42 @@ mod tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("the call returns within its own timeout, not when the stray process exits");
         assert!(timed_out, "the call reports the helper timeout");
+    }
+
+    /// ROOT-38: the helper timeout also bounds the wait for the helper to
+    /// exit after a complete, valid exchange. The reader ends at the end of
+    /// stdout, and the helper can close stdout and keep running: the call
+    /// then waited on the helper with no bound at all. The shell writes a
+    /// valid exchange, closes its stdout, and becomes a sleeper that never
+    /// exits.
+    #[cfg(unix)]
+    #[test]
+    fn the_helper_timeout_bounds_the_exit_wait_after_a_complete_exchange() {
+        let mut command = std::process::Command::new("sh");
+        command.args([
+            "-c",
+            "printf '%s\\n' \
+             '{\"protocol\":2,\"sequence\":0,\"operation\":\"check\",\"framework\":\"t\",\"assets\":null,\"body\":{\"kind\":\"begin\"}}' \
+             '{\"protocol\":2,\"sequence\":1,\"operation\":\"check\",\"framework\":\"t\",\"assets\":null,\"body\":{\"kind\":\"end\",\"payload\":{\"status\":\"ok\",\"error\":null}}}'; \
+             exec >&-; exec sleep 30",
+        ]);
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = exchange(
+                command,
+                Operation::Check,
+                PROTOCOL_VERSION,
+                Duration::from_millis(300),
+            );
+            let _ = done_tx.send(matches!(result, Err(ToolFailure::Timeout(_))));
+        });
+        let timed_out = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the call returns within its own timeout, not when the helper exits");
+        assert!(
+            timed_out,
+            "a helper that never exits is a timeout, even after a valid exchange"
+        );
     }
 
     /// ROOT-38: a helper timeout kills every process the helper started,
