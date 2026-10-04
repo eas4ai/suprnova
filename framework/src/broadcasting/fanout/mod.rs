@@ -1,8 +1,8 @@
-//! Cross-process broadcasting fanout via sea-streamer.
+//! Cross-process broadcasting fanout over Redis Streams.
 //!
 //! This module is only compiled when the `broadcasting-fanout` feature is
 //! enabled. Apps that don't need multi-process fanout depend on `suprnova`
-//! without this feature and pay no sea-streamer cost.
+//! without this feature and do not compile it.
 //!
 //! # Usage
 //!
@@ -18,7 +18,7 @@
 //!
 //! # async fn ex() {
 //! let hub = Arc::new(
-//!     SeaStreamerBroadcastHub::new("stdio://", "my-app-broadcast")
+//!     SeaStreamerBroadcastHub::new("redis://127.0.0.1:6379", "my-app-broadcast")
 //!         .await
 //!         .expect("connect"),
 //! );

@@ -26,3 +26,14 @@ pub(crate) fn open(url: &str) -> redis::RedisResult<redis::Client> {
     ensure_crypto_provider();
     redis::Client::open(url)
 }
+
+/// Whether `name` can name a Redis stream the framework writes: at most 249
+/// ASCII letters, digits, `.`, `_` or `-`. The rule is the one sea-streamer
+/// applied when the queue and the broadcast fanout went through it, so every
+/// stream name an application already uses stays valid.
+pub(crate) fn is_valid_stream_key(name: &str) -> bool {
+    name.len() <= 249
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}

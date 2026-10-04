@@ -68,7 +68,9 @@
 //! whose fate the driver cannot know, such as one whose send timed out, is
 //! left on the disk, and so is one whose send was refused after an earlier
 //! try timed out or met a fault of the service: that try may have left a
-//! message in the queue.
+//! message in the queue. A retry after such a try carries a copy of the
+//! payload at a new path, so when SQS took both tries each message owns
+//! its payload, and acknowledging one cannot leave the other unreadable.
 //!
 //! The payloads of a queue live under `sqs-payloads/<name>-<digest>/`, where
 //! the digest is of the whole queue URL, so same-named queues in different
@@ -633,46 +635,99 @@ impl SqsQueueDriver {
     }
 
     /// [`Self::request`], also reporting whether any try may have been
-    /// carried out by SQS without the driver learning it. A send that ends
-    /// in a refusal after such a try may still have left a message in the
-    /// queue, so a payload it points at must stay.
+    /// carried out by SQS without the driver learning it.
     async fn request_tracked(&self, action: &str, body: &Value) -> Attempted {
-        // Serialized once; each try sends the same shared bytes rather than
-        // a copy of them.
-        let payload = match serde_json::to_vec(body) {
-            Ok(payload) => bytes::Bytes::from(payload),
-            Err(error) => {
+        let payload = match encode_body(action, body) {
+            Ok(payload) => payload,
+            Err(failure) => {
                 return Attempted {
-                    outcome: Err(Failure::NotSent(FrameworkError::internal(format!(
-                        "SQS {action}: encode: {error}"
-                    )))),
+                    outcome: Err(failure),
                     maybe_acted: false,
                 };
             }
         };
-        let mut tries = 0;
-        let mut maybe_acted = false;
+        let mut retry = Retry::default();
         loop {
-            tries += 1;
             let outcome = self.request_once(action, &payload).await;
-            if let Err(failure) = &outcome {
-                maybe_acted |= failure.may_have_acted();
+            match retry.after(&outcome) {
+                Next::Done => {
+                    return Attempted {
+                        outcome,
+                        maybe_acted: retry.maybe_acted,
+                    };
+                }
+                Next::Again { .. } => retry.wait().await,
             }
-            let again = match &outcome {
-                Err(Failure::Refused(error)) => error.is_retryable(),
-                Err(Failure::Unknown(_)) => true,
-                _ => false,
-            };
-            if !again || tries >= MAX_TRIES {
+        }
+    }
+
+    /// Send `messages` with `action`, the request built by `build`, trying
+    /// again as [`Self::request`] does.
+    ///
+    /// A try SQS may have carried out may have left messages in the queue
+    /// that point at the overflow payloads of `messages`, and a retry SQS
+    /// takes as well leaves a second message for each. A message deletes
+    /// its payload when it is acknowledged, so two messages must never
+    /// share one: before the try after such a try, every payload is copied
+    /// to a new path and `messages` point at the copies. The payloads the
+    /// earlier try carried stay on the disk, and `maybe_acted` then speaks
+    /// for the copies alone. When a copy cannot be made, the send stops
+    /// with the last outcome.
+    async fn send_with_own_payloads(
+        &self,
+        action: &'static str,
+        queue_url: &str,
+        messages: &mut [Outgoing],
+        build: fn(&str, &[Outgoing]) -> Value,
+    ) -> Attempted {
+        let mut payload = match encode_body(action, &build(queue_url, messages)) {
+            Ok(payload) => payload,
+            Err(failure) => {
                 return Attempted {
-                    outcome,
-                    maybe_acted,
+                    outcome: Err(failure),
+                    maybe_acted: false,
                 };
             }
-            // 100 ms, then 200 ms, each with up to 50 ms of jitter so workers
-            // throttled together do not retry together.
-            let jitter = (Uuid::new_v4().as_u128() % 50) as u64;
-            tokio::time::sleep(Duration::from_millis(100 * (1 << (tries - 1)) + jitter)).await;
+        };
+        let mut retry = Retry::default();
+        loop {
+            let outcome = self.request_once(action, &payload).await;
+            match retry.after(&outcome) {
+                Next::Done => {
+                    return Attempted {
+                        outcome,
+                        maybe_acted: retry.maybe_acted,
+                    };
+                }
+                Next::Again { may_have_acted } => {
+                    if may_have_acted && messages.iter().any(|message| message.pointer.is_some()) {
+                        let copied = match self.copy_overflows(queue_url, messages).await {
+                            Ok(()) => encode_body(action, &build(queue_url, messages))
+                                .map_err(|failure| failure.into_error(action)),
+                            Err(error) => Err(error),
+                        };
+                        match copied {
+                            Ok(copies) => {
+                                payload = copies;
+                                retry.fresh_payloads();
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    action,
+                                    "SQS: could not copy the overflow payloads for a retry after \
+                                     a try without an answer; the send stops and the payloads stay"
+                                );
+                                return Attempted {
+                                    outcome,
+                                    maybe_acted: retry.maybe_acted,
+                                };
+                            }
+                        }
+                    }
+                    retry.wait().await;
+                }
+            }
         }
     }
 
@@ -803,12 +858,11 @@ impl SqsQueueDriver {
     /// by at most 15 minutes, writing it to the overflow disk when it is too
     /// large for one message.
     async fn send(&self, queue_url: &str, envelope: &Envelope) -> Result<(), FrameworkError> {
-        let message = self.encode(queue_url, envelope).await?;
-        let mut request = json!({ "QueueUrl": queue_url, "MessageBody": message.body });
-        if message.delay > 0 {
-            request["DelaySeconds"] = json!(message.delay);
-        }
-        let attempted = self.request_tracked("SendMessage", &request).await;
+        let mut message = [self.encode(queue_url, envelope).await?];
+        let attempted = self
+            .send_with_own_payloads("SendMessage", queue_url, &mut message, send_message_request)
+            .await;
+        let [message] = message;
         let outcome = attempted
             .outcome
             .and_then(|reply| match reply["MessageId"].as_str() {
@@ -847,6 +901,59 @@ impl SqsQueueDriver {
         }
     }
 
+    /// `message` pointing at a copy of its overflow payload, at a new path,
+    /// for a retry after a try SQS may have carried out. The payload it
+    /// pointed at stays: a message from that try may point at it.
+    async fn copy_overflow(
+        &self,
+        queue_url: &str,
+        message: &Outgoing,
+    ) -> Result<Outgoing, FrameworkError> {
+        let (Some(overflow), Some(path)) = (&self.overflow, &message.pointer) else {
+            return Err(FrameworkError::internal(
+                "SQS: a message without an overflow payload has nothing to copy",
+            ));
+        };
+        let operator = overflow.operator()?;
+        let bytes = operator.read(path).await.map_err(|error| {
+            FrameworkError::internal(format!(
+                "SQS: could not read the overflow payload '{path}' to copy it: {error}"
+            ))
+        })?;
+        let copy = overflow_path(queue_url);
+        operator.write(&copy, bytes).await.map_err(|error| {
+            FrameworkError::internal(format!(
+                "SQS: could not write a copy of the overflow payload: {error}"
+            ))
+        })?;
+        tracing::warn!(
+            path = path.as_str(),
+            copy = copy.as_str(),
+            "SQS: a send got no answer, so its retry carries a copy of the overflow payload; \
+             the original stays in case SQS holds a message that points at it"
+        );
+        Ok(Outgoing {
+            body: pointer_body(&copy),
+            delay: message.delay,
+            pointer: Some(copy),
+        })
+    }
+
+    /// Point every message of `messages` that carries an overflow payload
+    /// at a copy of it. See [`Self::copy_overflow`].
+    async fn copy_overflows(
+        &self,
+        queue_url: &str,
+        messages: &mut [Outgoing],
+    ) -> Result<(), FrameworkError> {
+        for message in messages.iter_mut() {
+            if message.pointer.is_some() {
+                *message = self.copy_overflow(queue_url, message).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// The message for `envelope`: its body, or a pointer to the overflow
     /// payload it was written to, and its `DelaySeconds`.
     async fn encode(
@@ -859,11 +966,7 @@ impl SqsQueueDriver {
             .map_err(|error| FrameworkError::internal(format!("SQS: encode the job: {error}")))?;
         let (body, pointer) = match &self.overflow {
             Some(overflow) if overflow.always || body.len() >= MAX_MESSAGE_BYTES => {
-                let path = format!(
-                    "{OVERFLOW_ROOT}/{}/{}.json",
-                    queue_key(queue_url),
-                    Uuid::new_v4()
-                );
+                let path = overflow_path(queue_url);
                 overflow
                     .operator()?
                     .write(&path, body.into_bytes())
@@ -873,7 +976,7 @@ impl SqsQueueDriver {
                             "SQS: could not write the job to the overflow disk: {error}"
                         ))
                     })?;
-                (json!({ POINTER_KEY: path }).to_string(), Some(path))
+                (pointer_body(&path), Some(path))
             }
             None if body.len() > MAX_MESSAGE_BYTES => {
                 return Err(FrameworkError::internal(format!(
@@ -917,23 +1020,19 @@ impl SqsQueueDriver {
             }
         }
 
-        for (number, chunk) in chunks.iter().enumerate() {
-            let entries: Vec<Value> = chunk
-                .iter()
-                .enumerate()
-                .map(|(index, message)| {
-                    let mut entry = json!({ "Id": index.to_string(), "MessageBody": message.body });
-                    if message.delay > 0 {
-                        entry["DelaySeconds"] = json!(message.delay);
-                    }
-                    entry
-                })
-                .collect();
-            let request = json!({ "QueueUrl": queue_url, "Entries": entries });
+        for number in 0..chunks.len() {
             let Attempted {
                 outcome,
                 maybe_acted,
-            } = self.request_tracked("SendMessageBatch", &request).await;
+            } = self
+                .send_with_own_payloads(
+                    "SendMessageBatch",
+                    queue_url,
+                    &mut chunks[number],
+                    batch_request,
+                )
+                .await;
+            let chunk = &chunks[number];
             // The messages of this batch SQS did not take, and the failure.
             // After a try that may have been carried out, an entry the last
             // try rejected may be in the queue from that earlier try, so no
@@ -1373,6 +1472,114 @@ fn delay_secs(available_at: DateTime<Utc>) -> u64 {
         Ok(wait) => seconds(wait, MAX_DELAY_SECS),
         Err(_) => 0,
     }
+}
+
+/// A new, unique path for an overflow payload of the queue at `queue_url`.
+fn overflow_path(queue_url: &str) -> String {
+    format!(
+        "{OVERFLOW_ROOT}/{}/{}.json",
+        queue_key(queue_url),
+        Uuid::new_v4()
+    )
+}
+
+/// The body of a message that points at the overflow payload at `path`.
+fn pointer_body(path: &str) -> String {
+    json!({ POINTER_KEY: path }).to_string()
+}
+
+/// The `SendMessage` request that sends the one message of `messages` to
+/// `queue_url`.
+fn send_message_request(queue_url: &str, messages: &[Outgoing]) -> Value {
+    let mut request = json!({ "QueueUrl": queue_url });
+    if let Some(message) = messages.first() {
+        request["MessageBody"] = json!(message.body);
+        if message.delay > 0 {
+            request["DelaySeconds"] = json!(message.delay);
+        }
+    }
+    request
+}
+
+/// `body` serialized once, so each try sends the same shared bytes rather
+/// than a copy of them.
+fn encode_body(action: &str, body: &Value) -> Result<bytes::Bytes, Failure> {
+    serde_json::to_vec(body)
+        .map(bytes::Bytes::from)
+        .map_err(|error| {
+            Failure::NotSent(FrameworkError::internal(format!(
+                "SQS {action}: encode: {error}"
+            )))
+        })
+}
+
+/// The retry policy of one request: a throttled request, a fault of the
+/// service, or no answer is tried again, up to three tries in all, and the
+/// policy remembers whether any try may have been carried out.
+#[derive(Default)]
+struct Retry {
+    tries: u32,
+    maybe_acted: bool,
+}
+
+/// What [`Retry::after`] decided.
+enum Next {
+    /// The outcome stands.
+    Done,
+    /// Try again; `may_have_acted` says whether SQS may have carried out
+    /// the try just made.
+    Again { may_have_acted: bool },
+}
+
+impl Retry {
+    /// Record one try's `outcome` and say whether to try again.
+    fn after(&mut self, outcome: &Result<Value, Failure>) -> Next {
+        self.tries += 1;
+        let may_have_acted = matches!(outcome, Err(failure) if failure.may_have_acted());
+        self.maybe_acted |= may_have_acted;
+        let again = match outcome {
+            Err(Failure::Refused(error)) => error.is_retryable(),
+            Err(Failure::Unknown(_)) => true,
+            _ => false,
+        };
+        if again && self.tries < MAX_TRIES {
+            Next::Again { may_have_acted }
+        } else {
+            Next::Done
+        }
+    }
+
+    /// The payloads the next try carries are copies no earlier try carried.
+    fn fresh_payloads(&mut self) {
+        self.maybe_acted = false;
+    }
+
+    /// Wait before the next try: 100 ms, then 200 ms, each with up to 50 ms
+    /// of jitter so workers throttled together do not retry together.
+    async fn wait(&self) {
+        let jitter = (Uuid::new_v4().as_u128() % 50) as u64;
+        tokio::time::sleep(Duration::from_millis(
+            100 * (1 << (self.tries.saturating_sub(1))) + jitter,
+        ))
+        .await;
+    }
+}
+
+/// The `SendMessageBatch` request that sends `chunk` to `queue_url`, each
+/// entry named by its index.
+fn batch_request(queue_url: &str, chunk: &[Outgoing]) -> Value {
+    let entries: Vec<Value> = chunk
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let mut entry = json!({ "Id": index.to_string(), "MessageBody": message.body });
+            if message.delay > 0 {
+                entry["DelaySeconds"] = json!(message.delay);
+            }
+            entry
+        })
+        .collect();
+    json!({ "QueueUrl": queue_url, "Entries": entries })
 }
 
 /// A directory name for the queue at `queue_url`: its last path segment,
