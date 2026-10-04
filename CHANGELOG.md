@@ -418,6 +418,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   it was `i64` whatever the field said. A `key_type` that disagrees with
   that field fails to compile, naming both. This landed after the `v3.1.0`
   tag (#137).
+- **`pluck`, `value` and the aggregates read every key type, and say why a
+  value does not read.** `pluck`, `pluck_keyed`, `value`, `value_or_fail`,
+  `sole_value`, `sum`, `avg`, `min`, `max` and `DB::scalar` take any type
+  that implements the new `ColumnValue` trait, which every type SeaORM
+  reads already does, and `u64`, which they now read on SQLite and
+  Postgres too. A generic caller bound by `TryGetable` needs `ColumnValue`
+  instead. `pluck`, `pluck_keyed` and `value` used to drop a row whose
+  value did not decode, so `pluck::<u64>` returned an empty list; they
+  still skip a NULL, and any other value that does not decode is an error
+  naming the column. This landed after the `v3.1.0` tag (#137).
 - **The combobox submits the chosen option's value.** A selection used to
   write the option's label into the one bound field, so the value each
   option carries never reached the server. `suprnova.combobox` now binds
