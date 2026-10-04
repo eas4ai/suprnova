@@ -324,8 +324,8 @@ pub(crate) fn jpeg_frame(bytes: &[u8]) -> Option<JpegFrame> {
         match marker {
             // End of image before a scan, or a hierarchical frame header.
             0xD9 | 0xC5..=0xC7 | 0xCD..=0xCF => return None,
-            // SOI and RSTn carry no payload.
-            0xD8 | 0xD0..=0xD7 => {}
+            // RST0-7 (0xD0 to 0xD7) and SOI (0xD8) carry no payload.
+            0xD0..=0xD8 => {}
             // The frame headers the decoder takes: SOF0-3, SOF9-11.
             0xC0..=0xC3 | 0xC9..=0xCB => {
                 if frame.is_some() {
