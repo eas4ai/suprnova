@@ -193,14 +193,21 @@ fn encode_ulid_lowercase(buf: &[u8; 16]) -> String {
 /// Is `value` a valid lowercase Crockford-base32 ULID? Length must be
 /// exactly 26 and every character must appear in [`CROCKFORD`]
 /// (case-insensitive - Laravel emits lowercase but lib readers may
-/// accept either).
+/// accept either). Twenty-six characters carry 130 bits and a ULID is
+/// 128, so the first character carries three bits and stops at `7`.
 fn is_valid_ulid(value: &str) -> bool {
     if value.len() != 26 {
         return false;
     }
-    value
+    let first_fits = value
         .bytes()
-        .all(|b| CROCKFORD.contains(&b.to_ascii_uppercase()))
+        .next()
+        .and_then(|b| CROCKFORD.iter().position(|&c| c == b.to_ascii_uppercase()))
+        .is_some_and(|index| index <= 0b111);
+    first_fits
+        && value
+            .bytes()
+            .all(|b| CROCKFORD.contains(&b.to_ascii_uppercase()))
 }
 
 #[cfg(test)]
