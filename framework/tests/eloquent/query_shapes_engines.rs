@@ -352,6 +352,61 @@ async fn json_containment() {
     );
 }
 
+/// Aggregates whose offset skips the one row they return answer as Laravel
+/// does: `count` and `sum` 0, `min` and `max` none, and `avg` the 0 this
+/// builder's `avg` returns for an empty set. A grouped query over no rows
+/// returns no row either. All of these used to fail with "aggregate query
+/// returned no row".
+async fn aggregates_when_no_row_comes_back() {
+    fn fail<T>(e: FrameworkError) -> T {
+        panic!("an aggregate with no row: {e}")
+    }
+    assert_eq!(items().skip(1).count().await.unwrap_or_else(fail), 0);
+    assert_eq!(items().skip(10).count().await.unwrap_or_else(fail), 0);
+    assert_eq!(
+        items()
+            .skip(10)
+            .sum::<i64>("score")
+            .await
+            .unwrap_or_else(fail),
+        0
+    );
+    assert_eq!(
+        items()
+            .skip(10)
+            .avg::<f64>("score")
+            .await
+            .unwrap_or_else(fail),
+        0.0
+    );
+    assert_eq!(
+        items()
+            .skip(10)
+            .min::<i64>("score")
+            .await
+            .unwrap_or_else(fail),
+        None
+    );
+    assert_eq!(
+        items()
+            .skip(10)
+            .max::<i64>("score")
+            .await
+            .unwrap_or_else(fail),
+        None
+    );
+    assert_eq!(
+        items()
+            .filter("grp", "none")
+            .group_by("grp")
+            .count()
+            .await
+            .unwrap_or_else(fail),
+        0,
+        "no group, no row"
+    );
+}
+
 /// A cursor bounds the whole union, on every page and in both directions.
 /// It used to filter the first query only, so the page after 1 and 2 of
 /// `b UNION a` was 1 and 2 again: the arm holding them was never bounded.
@@ -420,6 +475,12 @@ async fn sqlite_aggregates_ignore_the_projection() {
 async fn sqlite_create_or_first_inside_a_transaction() {
     let _fx = seeded_sqlite().await;
     create_or_first_inside_a_transaction().await;
+}
+
+#[tokio::test]
+async fn sqlite_aggregates_when_no_row_comes_back() {
+    let _fx = seeded_sqlite().await;
+    aggregates_when_no_row_comes_back().await;
 }
 
 #[cfg(feature = "testing")]
@@ -535,12 +596,28 @@ async fn mysql_json_containment() {
     finish(fx).await;
 }
 
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
+async fn postgres_aggregates_when_no_row_comes_back() {
+    let fx = live("PG_TEST_URL", DatabaseBackend::Postgres).await;
+    aggregates_when_no_row_comes_back().await;
+    finish(fx).await;
+}
+
 #[cfg(feature = "testing")]
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
 async fn postgres_cursor_pages_walk_the_whole_union() {
     let fx = live("PG_TEST_URL", DatabaseBackend::Postgres).await;
     cursor_pages_walk_the_whole_union().await;
+    finish(fx).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_aggregates_when_no_row_comes_back() {
+    let fx = live("MYSQL_TEST_URL", DatabaseBackend::MySql).await;
+    aggregates_when_no_row_comes_back().await;
     finish(fx).await;
 }
 

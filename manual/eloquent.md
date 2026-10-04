@@ -965,7 +965,11 @@ read as a type parameter; for `avg` it is `f64` or `rust_decimal::Decimal`
 (the `AvgValue` trait). Suprnova aliases generated
 aggregate expressions internally so the same typed result is decoded on
 PostgreSQL, MySQL, and SQLite. `sum` and `avg` return zero for an empty
-match set, while `min` and `max` return `None`. An incompatible requested
+match set, while `min` and `max` return `None`. The same holds when no row
+comes back at all - an offset skips the aggregate's one row, as
+`skip(10).count()` does, or a grouped query has no group: `count`, `sum`
+and `avg` return zero and `min` and `max` return `None`, as Laravel's
+`count`, `sum`, `min` and `max` do. An incompatible requested
 Rust type or missing result column is a database error; it is never
 converted into a plausible zero or `None`.
 

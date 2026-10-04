@@ -5236,7 +5236,9 @@ where
         Ok(!self.exists().await?)
     }
 
-    /// `SELECT COUNT(*) FROM ...`.
+    /// `SELECT COUNT(*) FROM ...`. 0 when no row comes back, as when an
+    /// offset skips the count's one row: Laravel's `count` returns 0 there
+    /// too.
     pub async fn count(self) -> Result<i64, FrameworkError> {
         self.aggregate_value::<i64>("COUNT(*)").await
     }
@@ -6264,7 +6266,14 @@ where
             .collect()
     }
 
-    async fn aggregate_value<T: ColumnValue>(self, expr: &str) -> Result<T, FrameworkError> {
+    /// Run an aggregate that always has a value. No row comes back when an
+    /// offset skips the aggregate's one row, or a grouped query has no
+    /// group; the aggregate of no rows is then `T::default()`, the 0 that
+    /// Laravel's `count` and `sum` return there.
+    async fn aggregate_value<T: ColumnValue + Default>(
+        self,
+        expr: &str,
+    ) -> Result<T, FrameworkError> {
         self.observe_reads();
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
@@ -6275,13 +6284,17 @@ where
         let row = exec
             .query_one(stmt)
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?
-            .ok_or_else(|| FrameworkError::database("aggregate query returned no row"))?;
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let Some(row) = row else {
+            return Ok(T::default());
+        };
         read_aggregate::<T>(&row, AGGREGATE_RESULT_ALIAS).map_err(|e| {
             FrameworkError::database(format!("aggregate result decode failed for {expr}: {e}"))
         })
     }
 
+    /// Run an aggregate that may have no value, `MIN` or `MAX`. No row
+    /// back means no value, as Laravel's `min` and `max` return null.
     async fn aggregate_optional<T: ColumnValue>(
         self,
         expr: &str,
@@ -6296,8 +6309,10 @@ where
         let row = exec
             .query_one(stmt)
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?
-            .ok_or_else(|| FrameworkError::database("aggregate query returned no row"))?;
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
         <Option<T>>::from_column(&row, AGGREGATE_RESULT_ALIAS).map_err(|e| {
             FrameworkError::database(format!(
                 "aggregate result decode failed for {expr}: {}",
