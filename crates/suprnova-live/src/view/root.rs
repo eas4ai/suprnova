@@ -293,6 +293,7 @@ mod tests {
             lazy_complete: false,
             flags: Vec::new(),
             stream: None,
+            action_parameters: None,
         }
     }
 
