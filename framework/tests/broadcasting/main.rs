@@ -13,3 +13,4 @@ pub mod pusher;
 #[cfg(feature = "broadcasting-fanout")]
 #[path = "../support/redis_server.rs"]
 mod redis_server;
+pub mod teardown;

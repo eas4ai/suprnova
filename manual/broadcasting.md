@@ -620,7 +620,9 @@ When a client successfully subscribes to a presence channel the hub:
    forwarder - receives it; clients filter the self-join by comparing
    the joining member's identity to their own.
 
-When a subscriber disconnects or sends an unsubscribe frame:
+When a subscriber disconnects or sends an unsubscribe frame, or its
+connection is cancelled (the server aborts WebSocket connections that
+outlast its shutdown drain):
 
 4. The hub publishes a `presence.left` event with the departing
    member's data. Every remaining subscriber receives it.

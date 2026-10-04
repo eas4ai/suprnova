@@ -1937,11 +1937,9 @@ impl Router {
     /// [`WsConfig`]: crate::ws::WsConfig
     pub fn match_ws(&self, path: &str) -> Option<WsMatch> {
         self.ws_routes.at(path).ok().map(|m| {
-            let params: HashMap<String, String> = m
-                .params
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
+            // Same contract as an HTTP capture: match the raw path, hand
+            // the handler the percent-decoded value.
+            let params = decode_matched_params(m.params.iter());
             let (pattern, handler, middleware, config) = m.value;
             WsMatch {
                 handler: handler.clone(),

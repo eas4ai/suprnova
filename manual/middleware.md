@@ -392,7 +392,9 @@ register_terminable(AuditLogTerminator);
 ```
 
 The server iterates registered terminables in registration order after
-every response (4xx and 5xx included) and awaits each one. Errors are
+every response (4xx and 5xx included) and awaits each one. A WebSocket
+upgrade counts as a response: its terminables see status 101, or the
+status that refused the upgrade. Errors are
 logged via `tracing::error!` and swallowed - the response has already
 left the building, so there's nobody left to surface them to.
 
