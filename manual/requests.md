@@ -1002,6 +1002,8 @@ let acceptable = req.acceptable_content_types();
 
 `accepts(&[ty])` matches both bare types and `application/<vendor>+json`-style suffixes. `accepts_any_content_type()` returns true when there is no Accept header or the top preference is `*/*`.
 
+A type the header weights `q=0` is refused, as RFC 9110 defines it: `acceptable_content_types()` leaves it out, and `accepts`, `prefers`, `wants_json` and `expects_json` treat it as unwanted. The most specific matching range decides, so `Accept: */*, application/json;q=0` accepts HTML and refuses JSON. Laravel lists a `q=0` type as acceptable; Suprnova follows the RFC instead.
+
 ### Query string
 
 ```rust

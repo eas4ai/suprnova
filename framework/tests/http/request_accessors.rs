@@ -873,6 +873,80 @@ async fn wants_json_top_preference() {
     assert!(!req.wants_json());
 }
 
+/// `q=0` means "not acceptable" (RFC 9110 12.4.2). A type the client
+/// refused must not be reported as accepted, preferred or wanted, alone
+/// or beside an acceptable type.
+#[tokio::test]
+async fn a_type_refused_with_q_zero_is_not_accepted() {
+    let req = build_request(
+        hyper::Request::builder()
+            .uri("/")
+            .header("Accept", "application/json;q=0")
+            .header("X-Requested-With", "XMLHttpRequest"),
+        "",
+    )
+    .await;
+    assert!(!req.accepts_json());
+    assert!(!req.accepts(&["application/json"]));
+    assert_eq!(req.prefers(&["application/json"]), None);
+    assert!(!req.wants_json());
+    assert!(req.acceptable_content_types().is_empty());
+    assert!(
+        !req.accepts_any_content_type(),
+        "a header that refuses JSON does not accept any content type"
+    );
+    assert!(!req.expects_json());
+
+    let req = build_request(
+        hyper::Request::builder()
+            .uri("/")
+            .header("Accept", "application/json;q=0, text/html"),
+        "",
+    )
+    .await;
+    assert!(!req.accepts_json());
+    assert!(req.accepts_html());
+    assert!(!req.wants_json());
+    assert_eq!(
+        req.prefers(&["application/json", "text/html"]).as_deref(),
+        Some("text/html")
+    );
+    assert_eq!(
+        req.acceptable_content_types(),
+        vec!["text/html".to_string()]
+    );
+}
+
+/// The most specific matching range decides a type's weight (RFC 9110
+/// 12.5.1), so a wildcard does not re-admit a type refused by name.
+#[tokio::test]
+async fn a_wildcard_does_not_readmit_a_type_refused_by_name() {
+    let req = build_request(
+        hyper::Request::builder()
+            .uri("/")
+            .header("Accept", "*/*, application/json;q=0"),
+        "",
+    )
+    .await;
+    assert!(!req.accepts_json());
+    assert!(req.accepts_html());
+    assert!(req.accepts(&["application/json", "text/html"]));
+    assert_eq!(
+        req.prefers(&["application/json", "text/html"]).as_deref(),
+        Some("text/html")
+    );
+
+    let req = build_request(
+        hyper::Request::builder()
+            .uri("/")
+            .header("Accept", "application/*, application/json;q=0"),
+        "",
+    )
+    .await;
+    assert!(!req.accepts_json());
+    assert!(req.accepts(&["application/xml"]));
+}
+
 #[tokio::test]
 async fn user_agent_returns_header_value() {
     let req = build_request(
