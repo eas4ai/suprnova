@@ -134,6 +134,11 @@ Cache::forget("session:42").await?;
 Cache::flush().await?;
 ```
 
+On Redis, `flush` deletes the keys that start with `REDIS_PREFIX`, matched
+literally: a prefix with glob characters such as `*`, `?`, or `[` matches only
+itself. An empty prefix matches every key in the Redis database, so `flush`
+then empties the whole database.
+
 `Cache::pull` is **not** atomic - it's a `get` followed by a `forget`,
 same shape as Laravel's `Repository::pull`. For atomic dequeue use
 `Cache::lock` (see below).

@@ -22,6 +22,24 @@ fn namespaced_key(prefix: &str, namespace: &str, key: &str) -> String {
     format!("{prefix}\0{namespace}:{key}")
 }
 
+/// Escape `literal` so a Redis glob pattern matches it character for
+/// character.
+///
+/// `SCAN MATCH` reads `*`, `?`, `[`, `]` and `\` as pattern syntax. The
+/// prefix is stored literally, so it has to be matched literally too: an
+/// unescaped `[ab]` matches `a` or `b` and never the stored `[ab]`, and a
+/// trailing `\` escapes the `*` that was meant to follow it.
+fn glob_escape(literal: &str) -> String {
+    let mut escaped = String::with_capacity(literal.len());
+    for c in literal.chars() {
+        if matches!(c, '*' | '?' | '[' | ']' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
 fn data_key(prefix: &str, key: &str) -> String {
     if key.starts_with('\0') {
         namespaced_key(prefix, "data", key)
@@ -338,9 +356,11 @@ impl CacheStore for RedisCache {
         // SCAN beats KEYS for production: incremental cursor iteration
         // avoids blocking the Redis server on a single O(N) pass. We
         // batch DEL per page so very large keyspaces don't build one
-        // giant argument list. The MATCH glob is anchored to our prefix
-        // so we never touch other applications' keys.
-        let pattern = format!("{}*", self.prefix);
+        // giant argument list. The MATCH glob is anchored to our prefix,
+        // escaped so it matches literally, so we never touch other
+        // applications' keys. An empty prefix has nothing to anchor to and
+        // matches the whole database.
+        let pattern = format!("{}*", glob_escape(&self.prefix));
         let mut cursor: u64 = 0;
         loop {
             // SCAN is a pure read; the DEL below is not, and is deliberately
@@ -617,6 +637,12 @@ mod tests {
         assert_ne!(data_key(prefix, "\0lock:job"), lock_key);
         assert_ne!(data_key(prefix, "\0tag:users"), tag_key);
         assert_ne!(data_key(prefix, "\0key_tags:stored-key"), key_tags_key);
+    }
+
+    #[test]
+    fn glob_escape_quotes_every_pattern_character() {
+        assert_eq!(glob_escape("plain:"), "plain:");
+        assert_eq!(glob_escape("app[1]:*?\\"), "app\\[1\\]:\\*\\?\\\\");
     }
 
     #[test]
