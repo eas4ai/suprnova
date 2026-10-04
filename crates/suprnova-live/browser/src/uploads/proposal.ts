@@ -19,13 +19,11 @@ export interface UploadProposalContext {
   write(value: JsonValue): boolean;
 }
 
-const MAX_DECLARATION_ELEMENTS = 4_096;
-const MAX_DECLARATION_ATTRIBUTES = 64;
-
 export function declaresUploadField(root: Element, field: string): boolean {
   validateUploadField(field);
+  // The whole island is searched: a cap on elements or attributes here made
+  // an upload field in a large island read as undeclared and refused it.
   const pending: Element[] = [root];
-  let scanned = 0;
   let declared = false;
   let modelConflict = false;
   try {
@@ -33,13 +31,6 @@ export function declaresUploadField(root: Element, field: string): boolean {
       const element = pending.pop();
       if (element === undefined) break;
       if (element !== root && element.matches(ISLAND_ROOT_SELECTOR)) continue;
-      scanned += 1;
-      if (
-        scanned > MAX_DECLARATION_ELEMENTS ||
-        element.attributes.length > MAX_DECLARATION_ATTRIBUTES
-      ) {
-        return false;
-      }
       for (const attribute of element.attributes) {
         if (attribute.name === "live:upload" && attribute.value === field) declared = true;
         if (

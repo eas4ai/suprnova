@@ -1,4 +1,17 @@
-import { parseCanonicalJson, type JsonObject, type JsonValue } from "./canonical.js";
+import {
+  CanonicalError,
+  parseCanonicalJson,
+  type JsonObject,
+  type JsonValue,
+} from "./canonical.js";
+import {
+  limitBreach,
+  SERVER_DEFAULT_LIMITS,
+  utf8Length,
+  type LiveLimitBreach,
+  type LiveLimitName,
+  type LiveLimits,
+} from "./limits.js";
 import type {
   ErrorCategory,
   RecoveryInstruction,
@@ -22,46 +35,95 @@ import {
 
 const MAX_U64 = 18_446_744_073_709_551_615n;
 
-function utf8Length(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
-}
-
-/// Message counts the browser admits, the counts the framework's server
-/// configures in `ProtocolLimits` (`framework/src/live/runtime.rs`); a
-/// browser bound below the server's refused traffic the server accepts
-/// (LIVE-028).
-export const MAX_MODEL_PROPOSALS = 128;
-export const MAX_OPERATIONS = 128;
-export const MAX_ACTION_ARGUMENTS = 128;
-export const MAX_VALIDATION_ENTRIES = 128;
-export const MAX_EVENTS = 128;
-export const MAX_EFFECTS = 128;
-export const MAX_EXTENSIONS = 128;
-
+/// A protocol message failed validation. When a configured limit tripped,
+/// `liveLimit` names it and the message says which setting to raise; `code`
+/// stays the stable machine value either way.
 export class ProtocolValidationError extends Error {
-  public constructor(public readonly code: string) {
-    super(code);
+  public readonly liveLimit: LiveLimitBreach | null;
+
+  public constructor(
+    public readonly code: string,
+    breach: LiveLimitBreach | null = null,
+  ) {
+    super(breach === null ? code : `${breach.message} (${code})`);
     this.name = "ProtocolValidationError";
+    this.liveLimit = breach;
   }
 }
 
-export function validateUpdateRequest(text: string): void {
+function overLimit(
+  code: string,
+  limit: LiveLimitName,
+  measured: number,
+  limits: LiveLimits,
+  subject?: string,
+): never {
+  throw new ProtocolValidationError(
+    code,
+    limitBreach(limit, measured, limits[limit], subject === undefined ? {} : { subject }),
+  );
+}
+
+/// Parses one Live message under the configured JSON limits, reporting a
+/// tripped depth or entry limit with its setting. Responses carry content the
+/// server already bounded, so only the request side counts entries.
+function parseLiveJson(text: string, limits: LiveLimits, countEntries: boolean): JsonValue {
   try {
-    validateUpdateRequestUnchecked(text);
+    return parseCanonicalJson(text, {
+      maxDepth: limits.maxJsonDepth,
+      ...(countEntries ? { maxEntries: limits.maxJsonEntries } : {}),
+    });
+  } catch (error: unknown) {
+    if (error instanceof CanonicalError && error.code === "input_too_deep") {
+      throw new ProtocolValidationError(
+        "protocol_input_too_deep",
+        limitBreach("maxJsonDepth", limits.maxJsonDepth + 1, limits.maxJsonDepth, {
+          atLeast: true,
+        }),
+      );
+    }
+    if (error instanceof CanonicalError && error.code === "too_many_entries") {
+      throw new ProtocolValidationError(
+        "protocol_too_many_entries",
+        limitBreach("maxJsonEntries", limits.maxJsonEntries + 1, limits.maxJsonEntries, {
+          atLeast: true,
+        }),
+      );
+    }
+    throw error;
+  }
+}
+
+/// Validates one request before it leaves the browser, against the server's
+/// configured limits, so an over-limit request fails here with the setting to
+/// raise instead of as a refusal from the server.
+export function validateUpdateRequest(
+  text: string,
+  limits: LiveLimits = SERVER_DEFAULT_LIMITS,
+): void {
+  try {
+    validateUpdateRequestUnchecked(text, limits);
   } catch (error: unknown) {
     throw normalizeProtocolError(error);
   }
 }
 
-function validateUpdateRequestUnchecked(text: string): void {
-  const root = asRecord(parseCanonicalJson(text));
+function validateUpdateRequestUnchecked(text: string, limits: LiveLimits): void {
+  const bytes = utf8Length(text);
+  if (bytes > limits.maxRequestBytes) {
+    overLimit("protocol_input_too_large", "maxRequestBytes", bytes, limits);
+  }
+  const root = asRecord(parseLiveJson(text, limits, true));
   const version = asU16(root["protocol_version"]);
-  if (version === 1) validateUpdateRequestV1(root);
-  else if (version === 2) validateUpdateRequestV2(root);
+  if (version === 1) validateUpdateRequestV1(root, limits);
+  else if (version === 2) validateUpdateRequestV2(root, limits);
   else throw new ProtocolValidationError("unsupported_protocol_version");
 }
 
-function validateUpdateRequestV1(root: Readonly<Record<string, unknown>>): void {
+function validateUpdateRequestV1(
+  root: Readonly<Record<string, unknown>>,
+  limits: LiveLimits,
+): void {
   requireExactKeys(root, [
     "base_revision",
     "component",
@@ -86,10 +148,17 @@ function validateUpdateRequestV1(root: Readonly<Record<string, unknown>>): void 
   textIdentity(root["component"]);
   binaryIdentity(root["correlation_id"], 16, 32);
   binaryIdentity(root["idempotency_key"], 16, 32);
-  validateExtensions(asRecord(root["extensions"]));
+  validateExtensions(asRecord(root["extensions"]), "maxRequestItems", limits);
   const modelProposals = asRecord(root["model_proposals"]);
-  if (Object.keys(modelProposals).length > MAX_MODEL_PROPOSALS) {
-    throw new ProtocolValidationError("too_many_model_proposals");
+  const proposalCount = Object.keys(modelProposals).length;
+  if (proposalCount > limits.maxRequestItems) {
+    overLimit(
+      "too_many_model_proposals",
+      "maxRequestItems",
+      proposalCount,
+      limits,
+      "model proposals",
+    );
   }
   for (const field of Object.keys(modelProposals)) textIdentity(field);
   const snapshot = asRecord(root["snapshot"]);
@@ -108,8 +177,9 @@ function validateUpdateRequestV1(root: Readonly<Record<string, unknown>>): void 
   }
   asRecord(snapshot["envelope"]);
   const operations = asArray(root["operations"]);
-  if (operations.length === 0 || operations.length > MAX_OPERATIONS) {
-    throw new ProtocolValidationError("too_many_operations");
+  if (operations.length === 0) throw new ProtocolValidationError("too_many_operations");
+  if (operations.length > limits.maxRequestItems) {
+    overLimit("too_many_operations", "maxRequestItems", operations.length, limits, "operations");
   }
   let invoked = false;
   const synchronized = new Set<string>();
@@ -128,53 +198,71 @@ function validateUpdateRequestV1(root: Readonly<Record<string, unknown>>): void 
       invoked = true;
       textIdentity(operation["name"]);
       const arguments_ = asRecord(operation["arguments"]);
-      if (Object.keys(arguments_).length > MAX_ACTION_ARGUMENTS) {
-        throw new ProtocolValidationError("too_many_action_arguments");
+      const argumentCount = Object.keys(arguments_).length;
+      if (argumentCount > limits.maxRequestItems) {
+        overLimit(
+          "too_many_action_arguments",
+          "maxRequestItems",
+          argumentCount,
+          limits,
+          "action arguments",
+        );
       }
       for (const name of Object.keys(arguments_)) textIdentity(name);
     } else throw new ProtocolValidationError("incompatible_operation_batch");
   }
 }
 
-export function validateUpdateResponse(text: string): void {
+/// Validates one response under the server's configured limits. Without them
+/// it applies the server's defaults, never anything tighter.
+export function validateUpdateResponse(
+  text: string,
+  limits: LiveLimits = SERVER_DEFAULT_LIMITS,
+): void {
   try {
-    validateUpdateResponseUnchecked(text);
+    validateUpdateResponseUnchecked(text, limits);
   } catch (error: unknown) {
     throw normalizeProtocolError(error);
   }
 }
 
-export function parseUpdateResponse(text: string): ValidatedResponse {
+export function parseUpdateResponse(
+  text: string,
+  limits: LiveLimits = SERVER_DEFAULT_LIMITS,
+): ValidatedResponse {
   try {
-    return parseUpdateResponseUnchecked(text);
+    return parseUpdateResponseUnchecked(text, limits);
   } catch (error: unknown) {
     throw normalizeProtocolError(error);
   }
 }
 
-function parseUpdateResponseUnchecked(text: string): ValidatedResponse {
-  const root = asRecord(parseCanonicalJson(text));
+function parseUpdateResponseUnchecked(text: string, limits: LiveLimits): ValidatedResponse {
+  const root = asRecord(parseLiveJson(text, limits, false));
   const version = asU16(root["protocol_version"]);
   if (version === 1) {
-    validateUpdateResponseV1(root);
+    validateUpdateResponseV1(root, limits);
     return materializeResponse(root, 1);
   }
   if (version === 2) {
-    validateUpdateResponseV2(root);
+    validateUpdateResponseV2(root, limits);
     return materializeResponse(root, 2);
   }
   throw new ProtocolValidationError("unsupported_protocol_version");
 }
 
-function validateUpdateResponseUnchecked(text: string): void {
-  const root = asRecord(parseCanonicalJson(text));
+function validateUpdateResponseUnchecked(text: string, limits: LiveLimits): void {
+  const root = asRecord(parseLiveJson(text, limits, false));
   const version = asU16(root["protocol_version"]);
-  if (version === 1) validateUpdateResponseV1(root);
-  else if (version === 2) validateUpdateResponseV2(root);
+  if (version === 1) validateUpdateResponseV1(root, limits);
+  else if (version === 2) validateUpdateResponseV2(root, limits);
   else throw new ProtocolValidationError("unsupported_protocol_version");
 }
 
-function validateUpdateResponseV1(root: Readonly<Record<string, unknown>>): void {
+function validateUpdateResponseV1(
+  root: Readonly<Record<string, unknown>>,
+  limits: LiveLimits,
+): void {
   requireExactKeys(
     root,
     [
@@ -192,12 +280,19 @@ function validateUpdateResponseV1(root: Readonly<Record<string, unknown>>): void
     throw new ProtocolValidationError("unsupported_protocol_version");
   }
   binaryIdentity(root["correlation_id"], 16, 32);
-  const effects = validateEmissions(root["effects"], MAX_EFFECTS);
-  const events = validateEmissions(root["events"], MAX_EVENTS);
-  validateExtensions(asRecord(root["extensions"]));
+  const effects = validateEmissions(root["effects"], limits, "effects");
+  const events = validateEmissions(root["events"], limits, "events");
+  validateExtensions(asRecord(root["extensions"]), "maxResponseItems", limits);
   const validation = asRecord(root["validation"]);
-  if (Object.keys(validation).length > MAX_VALIDATION_ENTRIES) {
-    throw new ProtocolValidationError("protocol_too_many_entries");
+  const validationCount = Object.keys(validation).length;
+  if (validationCount > limits.maxResponseItems) {
+    overLimit(
+      "protocol_too_many_entries",
+      "maxResponseItems",
+      validationCount,
+      limits,
+      "validation entries",
+    );
   }
   const outcome = asString(root["outcome"]);
   if (!["accepted", "duplicate", "rejected", "refresh_required", "fatal"].includes(outcome)) {
@@ -224,7 +319,7 @@ function validateUpdateResponseV1(root: Readonly<Record<string, unknown>>): void
   const render = root["render"];
   if (acceptedRevision !== undefined) decimalIdentity(acceptedRevision);
   if (snapshot !== undefined) asRecord(snapshot);
-  if (render !== undefined) validateRender(render);
+  if (render !== undefined) validateRender(render, limits);
   const committed =
     acceptedRevision !== undefined &&
     snapshot !== undefined &&
@@ -256,7 +351,10 @@ function validateUpdateResponseV1(root: Readonly<Record<string, unknown>>): void
   if (!accepted) validateRecovery(outcome, recovery, validation);
 }
 
-function validateUpdateRequestV2(root: Readonly<Record<string, unknown>>): void {
+function validateUpdateRequestV2(
+  root: Readonly<Record<string, unknown>>,
+  limits: LiveLimits,
+): void {
   requireExactKeys(root, [
     "base_revision",
     "child_parameters",
@@ -282,10 +380,17 @@ function validateUpdateRequestV2(root: Readonly<Record<string, unknown>>): void 
   textIdentity(root["component"]);
   binaryIdentity(root["correlation_id"], 16, 32);
   binaryIdentity(root["idempotency_key"], 16, 32);
-  validateExtensions(asRecord(root["extensions"]));
+  validateExtensions(asRecord(root["extensions"]), "maxRequestItems", limits);
   const modelProposals = asRecord(root["model_proposals"]);
-  if (Object.keys(modelProposals).length > MAX_MODEL_PROPOSALS) {
-    throw new ProtocolValidationError("too_many_model_proposals");
+  const proposalCount = Object.keys(modelProposals).length;
+  if (proposalCount > limits.maxRequestItems) {
+    overLimit(
+      "too_many_model_proposals",
+      "maxRequestItems",
+      proposalCount,
+      limits,
+      "model proposals",
+    );
   }
   for (const field of Object.keys(modelProposals)) textIdentity(field);
   validateSnapshot(root["snapshot"], baseRevision);
@@ -299,8 +404,9 @@ function validateUpdateRequestV2(root: Readonly<Record<string, unknown>>): void 
   }
 
   const operations = asArray(root["operations"]);
-  if (operations.length === 0 || operations.length > MAX_OPERATIONS) {
-    throw new ProtocolValidationError("too_many_operations");
+  if (operations.length === 0) throw new ProtocolValidationError("too_many_operations");
+  if (operations.length > limits.maxRequestItems) {
+    overLimit("too_many_operations", "maxRequestItems", operations.length, limits, "operations");
   }
   let invoked = false;
   let lifecycle: "params_changed" | "lazy_complete" | "fresh_render" | undefined;
@@ -325,8 +431,15 @@ function validateUpdateRequestV2(root: Readonly<Record<string, unknown>>): void 
       invoked = true;
       textIdentity(operation["name"]);
       const arguments_ = asRecord(operation["arguments"]);
-      if (Object.keys(arguments_).length > MAX_ACTION_ARGUMENTS) {
-        throw new ProtocolValidationError("too_many_action_arguments");
+      const argumentCount = Object.keys(arguments_).length;
+      if (argumentCount > limits.maxRequestItems) {
+        overLimit(
+          "too_many_action_arguments",
+          "maxRequestItems",
+          argumentCount,
+          limits,
+          "action arguments",
+        );
       }
       for (const name of Object.keys(arguments_)) textIdentity(name);
     } else if (kind === "sync_model" || kind === "invoke_action") {
@@ -361,7 +474,10 @@ function validateSnapshot(value: unknown, baseRevision: bigint): void {
   asRecord(snapshot["envelope"]);
 }
 
-function validateUpdateResponseV2(root: Readonly<Record<string, unknown>>): void {
+function validateUpdateResponseV2(
+  root: Readonly<Record<string, unknown>>,
+  limits: LiveLimits,
+): void {
   requireExactKeys(
     root,
     [
@@ -381,12 +497,19 @@ function validateUpdateResponseV2(root: Readonly<Record<string, unknown>>): void
     throw new ProtocolValidationError("unsupported_protocol_version");
   }
   binaryIdentity(root["correlation_id"], 16, 32);
-  const effects = validateEmissions(root["effects"], MAX_EFFECTS);
-  const events = validateEmissions(root["events"], MAX_EVENTS);
-  validateExtensions(asRecord(root["extensions"]));
+  const effects = validateEmissions(root["effects"], limits, "effects");
+  const events = validateEmissions(root["events"], limits, "events");
+  validateExtensions(asRecord(root["extensions"]), "maxResponseItems", limits);
   const validation = asRecord(root["validation"]);
-  if (Object.keys(validation).length > MAX_VALIDATION_ENTRIES) {
-    throw new ProtocolValidationError("protocol_too_many_entries");
+  const validationCount = Object.keys(validation).length;
+  if (validationCount > limits.maxResponseItems) {
+    overLimit(
+      "protocol_too_many_entries",
+      "maxResponseItems",
+      validationCount,
+      limits,
+      "validation entries",
+    );
   }
   const outcome = asString(root["outcome"]);
   if (!["accepted", "duplicate", "rejected", "refresh_required", "fatal"].includes(outcome)) {
@@ -394,8 +517,14 @@ function validateUpdateResponseV2(root: Readonly<Record<string, unknown>>): void
   }
 
   const childDeliveries = asArray(root["child_deliveries"]);
-  if (childDeliveries.length > 8) {
-    throw new ProtocolValidationError("protocol_too_many_entries");
+  if (childDeliveries.length > limits.maxResponseItems) {
+    overLimit(
+      "protocol_too_many_entries",
+      "maxResponseItems",
+      childDeliveries.length,
+      limits,
+      "child deliveries",
+    );
   }
   for (const raw of childDeliveries) {
     const delivery = asRecord(raw);
@@ -428,7 +557,7 @@ function validateUpdateResponseV2(root: Readonly<Record<string, unknown>>): void
   const render = root["render"];
   if (acceptedRevision !== undefined) decimalIdentity(acceptedRevision);
   if (snapshot !== undefined) asRecord(snapshot);
-  if (render !== undefined) validateRender(render);
+  if (render !== undefined) validateRender(render, limits);
   const committed =
     acceptedRevision !== undefined &&
     snapshot !== undefined &&
@@ -613,10 +742,14 @@ function freezeJson(value: JsonValue): JsonValue {
   return Object.freeze(result);
 }
 
-function validateEmissions(value: unknown, maximum: number): readonly unknown[] {
+function validateEmissions(
+  value: unknown,
+  limits: LiveLimits,
+  subject: string,
+): readonly unknown[] {
   const emissions = asArray(value);
-  if (emissions.length > maximum) {
-    throw new ProtocolValidationError("protocol_too_many_entries");
+  if (emissions.length > limits.maxResponseItems) {
+    overLimit("protocol_too_many_entries", "maxResponseItems", emissions.length, limits, subject);
   }
   for (const raw of emissions) {
     const emission = asRecord(raw);
@@ -626,13 +759,14 @@ function validateEmissions(value: unknown, maximum: number): readonly unknown[] 
   return emissions;
 }
 
-function validateRender(value: unknown): void {
+function validateRender(value: unknown, limits: LiveLimits): void {
   const render = asRecord(value);
   const kind = asString(render["kind"]);
   if (kind === "html") {
     requireExactKeys(render, ["html", "kind"]);
-    if (utf8Length(asString(render["html"])) > 32 * 1_024) {
-      throw new ProtocolValidationError("protocol_input_too_large");
+    const bytes = utf8Length(asString(render["html"]));
+    if (bytes > limits.maxHtmlBytes) {
+      overLimit("protocol_input_too_large", "maxHtmlBytes", bytes, limits);
     }
   } else if (kind === "no_render") requireExactKeys(render, ["kind"]);
   else throw new ProtocolValidationError("response_outcome_mismatch");
@@ -811,10 +945,16 @@ function requireOperationKeys(
   }
 }
 
-function validateExtensions(value: Readonly<Record<string, unknown>>): void {
+function validateExtensions(
+  value: Readonly<Record<string, unknown>>,
+  limit: "maxRequestItems" | "maxResponseItems",
+  limits: LiveLimits,
+): void {
   const names = Object.keys(value);
+  if (names.length > limits[limit]) {
+    overLimit("invalid_protocol_extension", limit, names.length, limits, "extensions");
+  }
   if (
-    names.length > MAX_EXTENSIONS ||
     names.some(
       (name) => !name.startsWith("x_") || name.length > 64 || !/^[A-Za-z0-9_.-]+$/u.test(name),
     )

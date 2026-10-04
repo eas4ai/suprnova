@@ -102,9 +102,9 @@ function integrity(value) {
   return `sha256-${sha256(value)}`;
 }
 
-const externalModuleIntegrity = "sha256-AhH6iNsa7HdOSjZw8DUKrRxJ1UKoGBzy4s1RiUcTPX4=";
+const externalModuleIntegrity = "sha256-FKhuAOCxkzbJ6s/XZzKeTheNi4IUy2nNxuho1BYguk4=";
 const externalClassicBootIntegrity = "sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=";
-const externalClassicRuntimeIntegrity = "sha256-NvZ1PgNiaw402QNxliu9vFNa2SwONyqixB+I7ZsnG5o=";
+const externalClassicRuntimeIntegrity = "sha256-VR5c4C0I6tRgnMG3bfpL5d0RbpAqnfeitzTooglGjgY=";
 
 function requireReviewedIntegrity(value, expected, name) {
   if (integrity(value) !== expected) throw new Error(`${name}_integrity_drift`);
@@ -119,7 +119,7 @@ function externalModuleScript(variant = "plain") {
   }
   if (variant === "integrity") {
     requireReviewedIntegrity(externalModuleBootSource, externalModuleIntegrity, "module_boot");
-    return '<script type="module" src="/test-boot/module.js" integrity="sha256-AhH6iNsa7HdOSjZw8DUKrRxJ1UKoGBzy4s1RiUcTPX4=" crossorigin="anonymous"></script>';
+    return '<script type="module" src="/test-boot/module.js" integrity="sha256-FKhuAOCxkzbJ6s/XZzKeTheNi4IUy2nNxuho1BYguk4=" crossorigin="anonymous"></script>';
   }
   throw new Error("unsupported_external_module_script_variant");
 }
@@ -156,7 +156,7 @@ function hashOnlyClassicDocument() {
   requireReviewedIntegrity(externalClassicBootSource, externalClassicBootIntegrity, "classic_boot");
   return document(
     island(),
-    '<script src="/assets/suprnova-live.classic.js" integrity="sha256-NvZ1PgNiaw402QNxliu9vFNa2SwONyqixB+I7ZsnG5o=" crossorigin="anonymous"></script><script src="/test-boot/classic.js" integrity="sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=" crossorigin="anonymous"></script>',
+    '<script src="/assets/suprnova-live.classic.js" integrity="sha256-VR5c4C0I6tRgnMG3bfpL5d0RbpAqnfeitzTooglGjgY=" crossorigin="anonymous"></script><script src="/test-boot/classic.js" integrity="sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=" crossorigin="anonymous"></script>',
   );
 }
 
@@ -177,6 +177,9 @@ function nestedMarkup(depth, body) {
   return result;
 }
 
+// A large initial island: deep nesting, thousands of controls, hundreds of
+// attributes on one element and a megabyte of text. The server rendered all
+// of it, so every directive binds, the last button included.
 function hostileInitialLimits() {
   const attributes = Array.from({ length: 257 }, (_, index) => `data-hostile-${index}="x"`).join(
     " ",
@@ -298,6 +301,24 @@ export function stimulusChild() {
   });
 }
 
+// The page limits the framework server writes into the configuration element,
+// at its defaults (framework/src/live/config.rs).
+export const SERVER_DEFAULT_LIMIT_CONFIG = Object.freeze({
+  max_html_bytes: 16_777_216,
+  max_json_depth: 32,
+  max_json_entries: 1_000_000,
+  max_request_bytes: 16_777_216,
+  max_request_items: 65_536,
+  max_response_bytes: 16_777_216,
+  max_response_items: 65_536,
+  morph_deadline_ms: 0,
+  morph_max_attributes: 10_000_000,
+  morph_max_attributes_per_element: 4_096,
+  morph_max_depth: 512,
+  morph_max_keys: 1_000_000,
+  morph_max_nodes: 1_000_000,
+});
+
 function config(overrides = {}) {
   return `<script id="suprnova-live-config" type="application/json">${JSON.stringify({
     asset_identity: "suprnova-live-test-v1",
@@ -305,10 +326,10 @@ function config(overrides = {}) {
     endpoint: "/live",
     max_parallel_per_island: 1,
     max_queued_per_island: 8,
-    max_response_bytes: 1_048_576,
     protocol: { maximum: 2, minimum: 1 },
-    request_timeout_ms: 5_000,
+    request_timeout_ms: 60_000,
     runtime_contract_version: 1,
+    ...SERVER_DEFAULT_LIMIT_CONFIG,
     ...overrides,
   })}</script>`;
 }
@@ -1059,9 +1080,12 @@ export const scenarios = Object.freeze({
   hostileMalformedUtf8: { html: hostileScenario("hostile-malformed-utf8") },
   hostileHugeJson: { html: hostileScenario("hostile-huge-json") },
   hostilePrototypeKey: { html: hostileScenario("hostile-prototype-key") },
+  // The morph's depth limit is the server's configured value; this page sets
+  // it to 128 so a 129-deep render is over the configured limit.
   hostileExtremeMorph: {
-    html: hostileScenario("hostile-extreme-morph", { max_response_bytes: 4_194_304 }),
+    html: hostileScenario("hostile-extreme-morph", { morph_max_depth: 128 }),
   },
+  largeTableMorph: { html: hostileScenario("large-table-morph") },
   hostileDuplicateIdentity: { html: hostileScenario("hostile-duplicate-identity") },
   hostileInitialLimits: { html: hostileInitialLimits() },
   lifecycle: { html: lifecycleScenario() },

@@ -1,11 +1,13 @@
-import { canonicalize, type JsonValue } from "../canonical.js";
+import type { JsonValue } from "../canonical.js";
+import { JSON_DEPTH_CEILING } from "../limits.js";
 
-const MAX_SCHEMA_DEPTH = 12;
-const MAX_SCHEMA_ENTRIES = 256;
-const MAX_PAYLOAD_DEPTH = 16;
-const MAX_PAYLOAD_ENTRIES = 256;
-const MAX_PAYLOAD_BYTES = 16 * 1024;
-const MAX_STRING_BYTES = 4 * 1024;
+// An extension payload is either an effect the server returned or a call the
+// application makes; the application's own schema (`maxBytes`, `maxItems`)
+// is the size policy, and there is no runtime-wide byte, entry or string cap
+// on top of it. Schemas and payloads are walked recursively, so their depth is
+// guarded at the ceiling no server configuration exceeds.
+const MAX_SCHEMA_DEPTH = JSON_DEPTH_CEILING;
+const MAX_PAYLOAD_DEPTH = JSON_DEPTH_CEILING;
 const FIELD_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/u;
 const FORBIDDEN_FIELDS = new Set(["__proto__", "constructor", "prototype"]);
 
@@ -33,10 +35,6 @@ export class PayloadValidationError extends Error {
   }
 }
 
-interface Budget {
-  entries: number;
-}
-
 function exactKeys(value: object, allowed: readonly string[]): void {
   const keys = Object.keys(value);
   if (keys.some((key) => !allowed.includes(key))) {
@@ -48,21 +46,12 @@ function boundedInteger(value: unknown, minimum: number, maximum: number): value
   return Number.isSafeInteger(value) && Number(value) >= minimum && Number(value) <= maximum;
 }
 
-function compile(
-  input: unknown,
-  depth: number,
-  budget: Budget,
-  seen: WeakSet<object>,
-): PayloadSchema {
+function compile(input: unknown, depth: number, seen: WeakSet<object>): PayloadSchema {
   if (depth > MAX_SCHEMA_DEPTH || input === null || typeof input !== "object") {
     throw new PayloadValidationError("payload_schema_invalid");
   }
   if (seen.has(input)) throw new PayloadValidationError("payload_schema_cycle");
   seen.add(input);
-  budget.entries += 1;
-  if (budget.entries > MAX_SCHEMA_ENTRIES) {
-    throw new PayloadValidationError("payload_schema_limit");
-  }
   const candidate = input as Readonly<Record<string, unknown>>;
   try {
     switch (candidate["type"]) {
@@ -74,8 +63,9 @@ function compile(
         return Object.freeze({ type: candidate["type"] });
       case "string": {
         exactKeys(candidate, ["type", "maxBytes"]);
-        const maxBytes = candidate["maxBytes"] ?? MAX_STRING_BYTES;
-        if (!boundedInteger(maxBytes, 0, MAX_STRING_BYTES)) {
+        const maxBytes = candidate["maxBytes"];
+        if (maxBytes === undefined) return Object.freeze({ type: "string" });
+        if (!boundedInteger(maxBytes, 0, Number.MAX_SAFE_INTEGER)) {
           throw new PayloadValidationError("payload_schema_limit");
         }
         return Object.freeze({ type: "string", maxBytes });
@@ -83,12 +73,12 @@ function compile(
       case "array": {
         exactKeys(candidate, ["type", "items", "maxItems"]);
         const maxItems = candidate["maxItems"];
-        if (!boundedInteger(maxItems, 0, MAX_PAYLOAD_ENTRIES)) {
+        if (!boundedInteger(maxItems, 0, Number.MAX_SAFE_INTEGER)) {
           throw new PayloadValidationError("payload_schema_limit");
         }
         return Object.freeze({
           type: "array",
-          items: compile(candidate["items"], depth + 1, budget, seen),
+          items: compile(candidate["items"], depth + 1, seen),
           maxItems,
         });
       }
@@ -107,10 +97,7 @@ function compile(
         }
         const propertyRecord = properties as Readonly<Record<string, unknown>>;
         const names = Object.keys(propertyRecord);
-        if (
-          names.length > MAX_SCHEMA_ENTRIES ||
-          names.some((name) => !FIELD_NAME.test(name) || FORBIDDEN_FIELDS.has(name))
-        ) {
+        if (names.some((name) => !FIELD_NAME.test(name) || FORBIDDEN_FIELDS.has(name))) {
           throw new PayloadValidationError("payload_schema_invalid");
         }
         const required: string[] = [...requiredInput];
@@ -125,7 +112,7 @@ function compile(
         for (const name of names) {
           const property = propertyRecord[name];
           if (property === undefined) throw new PayloadValidationError("payload_schema_invalid");
-          compiled[name] = compile(property, depth + 1, budget, seen);
+          compiled[name] = compile(property, depth + 1, seen);
         }
         return Object.freeze({
           type: "object",
@@ -143,19 +130,14 @@ function compile(
 }
 
 export function compilePayloadSchema(input: PayloadSchema): PayloadSchema {
-  return compile(input, 0, { entries: 0 }, new WeakSet());
+  return compile(input, 0, new WeakSet());
 }
 
 function stringBytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
-function visitJson(
-  value: unknown,
-  depth: number,
-  budget: Budget,
-  seen: WeakSet<object>,
-): JsonValue {
+function visitJson(value: unknown, depth: number, seen: WeakSet<object>): JsonValue {
   if (depth > MAX_PAYLOAD_DEPTH) throw new PayloadValidationError("payload_too_deep");
   if (value === null || typeof value === "boolean") return value;
   if (typeof value === "number") {
@@ -164,25 +146,14 @@ function visitJson(
     }
     return Object.is(value, -0) ? 0 : value;
   }
-  if (typeof value === "string") {
-    if (stringBytes(value) > MAX_STRING_BYTES) {
-      throw new PayloadValidationError("payload_string_limit");
-    }
-    return value;
-  }
+  if (typeof value === "string") return value;
   if (typeof value !== "object") throw new PayloadValidationError("payload_invalid_type");
   if (seen.has(value)) throw new PayloadValidationError("payload_cycle");
   seen.add(value);
   try {
     if (Array.isArray(value)) {
       const result: JsonValue[] = [];
-      for (const item of value) {
-        budget.entries += 1;
-        if (budget.entries > MAX_PAYLOAD_ENTRIES) {
-          throw new PayloadValidationError("payload_entry_limit");
-        }
-        result.push(visitJson(item, depth + 1, budget, seen));
-      }
+      for (const item of value) result.push(visitJson(item, depth + 1, seen));
       return Object.freeze(result);
     }
     const prototype = Object.getPrototypeOf(value) as unknown;
@@ -192,11 +163,7 @@ function visitJson(
     const result = Object.create(null) as Record<string, JsonValue>;
     for (const key of Object.keys(value)) {
       if (FORBIDDEN_FIELDS.has(key)) throw new PayloadValidationError("payload_invalid_field");
-      budget.entries += 1;
-      if (budget.entries > MAX_PAYLOAD_ENTRIES) {
-        throw new PayloadValidationError("payload_entry_limit");
-      }
-      result[key] = visitJson(Reflect.get(value, key), depth + 1, budget, seen);
+      result[key] = visitJson(Reflect.get(value, key), depth + 1, seen);
     }
     return Object.freeze(result);
   } finally {
@@ -205,11 +172,7 @@ function visitJson(
 }
 
 export function boundedJsonValue(value: unknown): JsonValue {
-  const normalized = visitJson(value, 0, { entries: 0 }, new WeakSet());
-  if (stringBytes(canonicalize(normalized)) > MAX_PAYLOAD_BYTES) {
-    throw new PayloadValidationError("payload_byte_limit");
-  }
-  return normalized;
+  return visitJson(value, 0, new WeakSet());
 }
 
 function validateShape(schema: PayloadSchema, value: JsonValue): JsonValue {
@@ -229,7 +192,10 @@ function validateShape(schema: PayloadSchema, value: JsonValue): JsonValue {
       }
       return value;
     case "string":
-      if (typeof value !== "string" || stringBytes(value) > (schema.maxBytes ?? MAX_STRING_BYTES)) {
+      if (
+        typeof value !== "string" ||
+        (schema.maxBytes !== undefined && stringBytes(value) > schema.maxBytes)
+      ) {
         throw new PayloadValidationError("payload_schema_mismatch");
       }
       return value;

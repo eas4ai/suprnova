@@ -21,7 +21,6 @@ const PRESENTATION_DIRECTIVES = new Set([
   "show",
 ]);
 const SAFE_SCOPE_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-const MAX_SCOPES_PER_ISLAND = 256;
 
 export interface SignalContinuity {
   readonly identity: string;
@@ -236,7 +235,9 @@ export class SignalRuntime {
   }
 
   #createScope(record: IslandRecord, state: RecordSignals, owned: OwnedDirective): void {
-    if (state.scopes.size >= MAX_SCOPES_PER_ISLAND || state.scopes.has(owned.element)) {
+    // One scope per `live:signals` element the server rendered, with no
+    // per-island count cap.
+    if (state.scopes.has(owned.element)) {
       this.#rejectDirective();
       return;
     }

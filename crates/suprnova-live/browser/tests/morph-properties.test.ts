@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
 import { parseIslandMetadata, IslandMetadataError } from "../src/islands/metadata.js";
+import { SERVER_DEFAULT_LIMITS } from "../src/limits.js";
 import { DocumentLifecycle } from "../src/lifecycle/document.js";
 import { ResourceLedgerImpl } from "../src/lifecycle/resources.js";
 import { preflightIslandMorph } from "../src/morph/preflight.js";
@@ -19,7 +20,6 @@ const METADATA_DETAILS = [
   "attribute",
   "identity",
   "lazy_complete",
-  "metadata_limit",
   "protocol",
   "revision",
   "root_marker",
@@ -35,7 +35,7 @@ const CONFIG: RuntimeConfig = Object.freeze({
   endpoint: new URL("https://app.example.test/_suprnova/live"),
   credentials: "same-origin",
   requestTimeoutMs: 15_000,
-  maxResponseBytes: 1_048_576,
+  limits: SERVER_DEFAULT_LIMITS,
   maxQueuedPerIsland: 16,
   maxParallelPerIsland: 1,
   assetIdentity: "property-runtime-v1",
@@ -137,12 +137,15 @@ describe("morph and metadata properties", () => {
     );
   });
 
-  it("rejects a root with an unbounded total attribute set before snapshot parsing", () => {
+  it("checks a root's metadata grammar, not its size, however many attributes it has", () => {
+    // The server rendered the root under its own limits; a size cap here sent
+    // large islands to an invalid state.
     const attributes: Record<string, string> = { ...BASE_METADATA };
-    for (let index = 0; index < 257; index += 1) attributes[`aria-property-${String(index)}`] = "";
+    for (let index = 0; index < 2_000; index += 1)
+      attributes[`aria-property-${String(index)}`] = "";
     const root = element(new FakeDocument(), "section", attributes);
     expect(() => parseIslandMetadata(root as unknown as Element, CONFIG)).toThrow(
-      expect.objectContaining({ detail: "metadata_limit" }),
+      expect.objectContaining({ detail: "snapshot" }),
     );
   });
 });

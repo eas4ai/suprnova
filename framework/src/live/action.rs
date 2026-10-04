@@ -16,10 +16,10 @@ use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::child::ChildParameterEligibilityErrorKind;
 use suprnova_live::clock::Clock;
 use suprnova_live::endpoint::{
-    AcceptedResponseSealer, EndpointErrorKind, EndpointFuture, EndpointKernel, EndpointKernelError,
-    LiveEndpointRequest, LiveEndpointResponse, ParsedLiveMediaType, RequestCachePolicy,
-    VerifiedEndpointExecutionRequest, VerifiedEndpointRequest, VerifiedEndpointSnapshot,
-    dispatch_execution_result,
+    AcceptedResponseSealer, EndpointError, EndpointErrorKind, EndpointFuture, EndpointKernel,
+    EndpointKernelError, LiveEndpointRequest, LiveEndpointResponse, ParsedLiveMediaType,
+    RequestCachePolicy, VerifiedEndpointExecutionRequest, VerifiedEndpointRequest,
+    VerifiedEndpointSnapshot, dispatch_execution_result,
 };
 use suprnova_live::execution::{
     ActionExecutionRequest, ExecutionResult, ExecutionService, ExecutionTracePort,
@@ -47,6 +47,7 @@ use suprnova_live::upload::{
 };
 use suprnova_live::validation::{BagPolicy, ValidationEngine, ValidationPort};
 
+use super::LiveLimitExceeded;
 use crate::{FrameworkError, Request, Response};
 
 /// Builds a same-route URL reflection intent from bounded typed query state.
@@ -191,13 +192,27 @@ pub(crate) async fn handle(request: Request) -> Response {
         Ok(runtime) => runtime,
         Err(error) => return failure_response(EndpointErrorKind::KernelUnavailable, &error),
     };
-    let mut request = match request
-        .buffer_body(runtime.config().max_request_bytes())
-        .await
-    {
+    let max_request_bytes = runtime.config().max_request_bytes();
+    let declared_bytes = request
+        .header("content-length")
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let mut request = match request.buffer_body(max_request_bytes).await {
         Ok(request) => request,
         Err(error) if error.status_code() == 413 => {
-            return error_response(EndpointErrorKind::RequestTooLarge);
+            // A declared length is the real size; a streamed body stops at the
+            // limit, so all that is known is that it went past it.
+            let breach = match declared_bytes {
+                Some(bytes) if bytes > max_request_bytes as u64 => {
+                    LiveLimitExceeded::request_bytes(bytes, max_request_bytes as u64, false)
+                }
+                _ => LiveLimitExceeded::request_bytes(
+                    max_request_bytes as u64 + 1,
+                    max_request_bytes as u64,
+                    true,
+                ),
+            };
+            tracing::warn!(limit = %breach, "Live request was refused");
+            return failure_response(EndpointErrorKind::RequestTooLarge, &breach);
         }
         Err(error) => return failure_response(EndpointErrorKind::KernelUnavailable, &error),
     };
@@ -210,7 +225,7 @@ pub(crate) async fn handle(request: Request) -> Response {
     );
     let selection = match runtime.inspect_mount(&body, media) {
         Ok(selection) => selection,
-        Err(error) => return failure_response(error.kind(), &error),
+        Err(error) => return endpoint_failure(&error),
     };
     let upload_context = match runtime.validate_upload_action_context(&request, &selection) {
         Ok(context) => context,
@@ -237,9 +252,16 @@ pub(crate) async fn handle(request: Request) -> Response {
         Err(error) => return failure_response(error.kind(), &error),
     };
     let (service, completion) = runtime.endpoint_service(upload_context);
-    let response = service.handle(endpoint_request).await;
+    let (response, failure) = service.handle_reported(endpoint_request).await;
     let completed = response.status.is_success();
     let projected = project_response(response);
+    if let Some(breach) = failure.and_then(|error| size_breach(&error)) {
+        tracing::warn!(limit = %breach, "Live response was refused");
+        return match projected {
+            Ok(response) => Ok(response.with_error_report_from(&breach)),
+            Err(response) => Err(response.with_error_report_from(&breach)),
+        };
+    }
     if !completed || projected.is_err() {
         return projected;
     }
@@ -257,6 +279,37 @@ fn normalize_media(request: &Request) -> Result<ParsedLiveMediaType, EndpointErr
         .header("content-type")
         .ok_or(EndpointErrorKind::UnsupportedMediaType)?;
     ParsedLiveMediaType::parse(content_type).map_err(|error| error.kind())
+}
+
+/// The configured limit an endpoint failure went over, named by its setting.
+fn size_breach(error: &EndpointError) -> Option<LiveLimitExceeded> {
+    let size = error.size()?;
+    let (measured, configured) = (size.measured as u64, size.configured as u64);
+    match error.kind() {
+        EndpointErrorKind::RequestTooLarge => Some(LiveLimitExceeded::request_bytes(
+            measured,
+            configured,
+            size.at_least,
+        )),
+        EndpointErrorKind::ResponseTooLarge => Some(LiveLimitExceeded::response_bytes(
+            measured,
+            configured,
+            size.at_least,
+        )),
+        _ => None,
+    }
+}
+
+/// [`failure_response`] for an endpoint error, reporting a size breach by the
+/// setting it went over instead of a bare kind.
+fn endpoint_failure(error: &EndpointError) -> Response {
+    match size_breach(error) {
+        Some(breach) => {
+            tracing::warn!(limit = %breach, "Live request was refused");
+            failure_response(error.kind(), &breach)
+        }
+        None => failure_response(error.kind(), error),
+    }
 }
 
 fn error_response(kind: EndpointErrorKind) -> Response {
@@ -405,12 +458,33 @@ impl SuprnovaEndpointKernel {
         if let ExecutionResult::RefreshRequired(refresh) = &result
             && let Some(cause) = refresh.cause()
         {
-            tracing::warn!(
-                component = request.component().as_str(),
-                reason = ?refresh.reason(),
-                cause = ?cause,
-                "Live operation failed and the browser must refresh the island"
-            );
+            // A render over the island HTML limit also names the setting to
+            // raise, with both sizes; every other cause stays closed.
+            let limit = match cause {
+                suprnova_live::execution::ExecutionFailure::ViewTooLarge(size) => {
+                    Some(LiveLimitExceeded::html_bytes(
+                        size.measured as u64,
+                        size.configured as u64,
+                        size.at_least,
+                    ))
+                }
+                _ => None,
+            };
+            match limit {
+                Some(limit) => tracing::warn!(
+                    component = request.component().as_str(),
+                    reason = ?refresh.reason(),
+                    cause = ?cause,
+                    limit = %limit,
+                    "Live operation failed and the browser must refresh the island"
+                ),
+                None => tracing::warn!(
+                    component = request.component().as_str(),
+                    reason = ?refresh.reason(),
+                    cause = ?cause,
+                    "Live operation failed and the browser must refresh the island"
+                ),
+            }
         }
         dispatch_execution_result(request.request(), result)
     }
@@ -1053,6 +1127,49 @@ const fn child_eligibility_kernel_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_oversized_request_reports_the_limit_its_size_and_the_key() {
+        use suprnova_live::endpoint::LiveEndpointConfig;
+        use suprnova_live::protocol::{ProtocolLimitConfig, ProtocolLimits};
+        use suprnova_live::snapshot::SnapshotLimits;
+
+        let input = InputLimits::new(64, 8, 64, 64).expect("small input limits");
+        let protocol = ProtocolLimits::new(ProtocolLimitConfig {
+            input,
+            max_snapshot_bytes: 64,
+            max_html_bytes: 64,
+            max_model_proposals: 1,
+            max_operations: 1,
+            max_arguments: 1,
+            max_validation_entries: 1,
+            max_events: 1,
+            max_effects: 1,
+            max_extensions: 1,
+        })
+        .expect("small protocol limits");
+        let snapshot = SnapshotLimits::new(input, 0, 1, 1, 1, 1).expect("small snapshot limits");
+        let config = LiveEndpointConfig::new(protocol, snapshot).expect("endpoint config");
+        let media = ParsedLiveMediaType::parse(
+            "application/vnd.suprnova.live+json; charset=utf-8; version=1",
+        )
+        .expect("the Live media type");
+        let error = config
+            .inspect_mount(&[b'x'; 100], media)
+            .expect_err("a body over the configured limit");
+        let response = endpoint_failure(&error);
+        let (Ok(response) | Err(response)) = response;
+        assert_eq!(response.status_code(), 413);
+        let report = response
+            .error_report()
+            .expect("the refusal carries a report");
+        let message = report.chain().first().expect("one message");
+        assert_eq!(
+            message,
+            "Suprnova Live request size limit exceeded: measured 100 bytes, configured 64 bytes. \
+             Raise LIVE_MAX_REQUEST_BYTES in the application's .env file to allow it."
+        );
+    }
 
     #[test]
     fn child_eligibility_errors_conceal_authority_rejections_but_preserve_provider_failure() {

@@ -65,7 +65,7 @@ use suprnova_live::validation::ValidationEngine;
 use suprnova_live::view::{RenderLimits, ViewRenderer};
 use uuid::Uuid;
 
-use super::async_updates::{AsyncErrorKind, AsyncState};
+use super::async_updates::{AsyncErrorKind, AsyncLimits, AsyncState};
 use super::context::SubscriptionCapabilities;
 use super::ports::subscription::{FixedSubscriptionBaseline, SuprnovaSubscriptionRegistry};
 use super::{LedgerDriver, LiveConfig, LiveRegistry};
@@ -504,7 +504,7 @@ impl LiveRuntime {
             return Ok(runtime);
         }
 
-        let config = App::resolve::<LiveConfig>().unwrap_or_default();
+        let config = LiveConfig::resolve()?;
         let registry =
             App::resolve::<LiveRegistry>().unwrap_or_else(|_| LiveRegistry::builder().build());
         let candidates = RuntimeProviderCandidates::production(&registry)?;
@@ -1640,11 +1640,19 @@ impl LiveRuntime {
             .map_err(|error| {
                 // The framework error carries no engine detail, so the closed engine kinds are
                 // recorded here for an operator.
-                tracing::warn!(
-                    kind = ?error.kind(),
-                    cause = ?error.cause(),
-                    "Live public mount was rejected"
-                );
+                match mount_limit(error.cause()) {
+                    Some(limit) => tracing::warn!(
+                        kind = ?error.kind(),
+                        cause = ?error.cause(),
+                        limit = %limit,
+                        "Live public mount was rejected"
+                    ),
+                    None => tracing::warn!(
+                        kind = ?error.kind(),
+                        cause = ?error.cause(),
+                        "Live public mount was rejected"
+                    ),
+                }
                 FrameworkError::internal("Live public mount was rejected")
             })
     }
@@ -1662,11 +1670,19 @@ impl LiveRuntime {
             .map_err(|error| {
                 // The framework error carries no engine detail, so the closed engine kinds are
                 // recorded here for an operator.
-                tracing::warn!(
-                    kind = ?error.kind(),
-                    cause = ?error.cause(),
-                    "Live private mount was rejected"
-                );
+                match mount_limit(error.cause()) {
+                    Some(limit) => tracing::warn!(
+                        kind = ?error.kind(),
+                        cause = ?error.cause(),
+                        limit = %limit,
+                        "Live private mount was rejected"
+                    ),
+                    None => tracing::warn!(
+                        kind = ?error.kind(),
+                        cause = ?error.cause(),
+                        "Live private mount was rejected"
+                    ),
+                }
                 FrameworkError::internal("Live private mount was rejected")
             })
     }
@@ -1708,6 +1724,23 @@ impl LiveRuntime {
                 && Arc::strong_count(&self.graph.ports.subscription_credentials) > 0,
             async_state: Arc::strong_count(&self.graph.async_state) > 0,
         }
+    }
+}
+
+/// A mount refused because its render went over the island HTML limit,
+/// named by the setting to raise.
+fn mount_limit(
+    cause: Option<suprnova_live::mount::MountFailure>,
+) -> Option<super::LiveLimitExceeded> {
+    match cause? {
+        suprnova_live::mount::MountFailure::ViewTooLarge(size) => {
+            Some(super::LiveLimitExceeded::html_bytes(
+                size.measured as u64,
+                size.configured as u64,
+                size.at_least,
+            ))
+        }
+        _ => None,
     }
 }
 
@@ -1760,6 +1793,21 @@ fn topic_segment(value: &str) -> bool {
 /// instead of a second, hand-copied literal.
 pub(crate) const PUBLIC_SEED_MAX_AGE_MS: u64 = 86_400_000;
 
+/// The bounds one island render runs under: the configured island HTML limit
+/// for its body, the response item limit for its assets, mounts and children,
+/// and the request limit for the snapshots it embeds, which come back in
+/// requests.
+fn island_render_limits(config: LiveConfig) -> Result<RenderLimits, FrameworkError> {
+    RenderLimits::new(
+        config.max_html_bytes(),
+        config.max_response_items(),
+        config.max_response_items(),
+        config.max_response_items(),
+        config.max_request_bytes(),
+    )
+    .map_err(|_| live_boot_error())
+}
+
 fn assemble_runtime(
     config: LiveConfig,
     registry: LiveRegistry,
@@ -1773,11 +1821,15 @@ fn assemble_runtime(
         ledger_driver,
         ports,
     } = candidates.finalize()?;
+    // Every bound below is a configured limit (`LiveConfig`), never a fixed
+    // number: a string inside a request cannot outgrow the request, the
+    // snapshot comes back in every request, and the island HTML is its own
+    // setting apart from the response around it.
     let input = InputLimits::new(
         config.max_request_bytes(),
-        32,
-        8_192,
-        config.max_request_bytes().min(1024 * 1024),
+        config.max_json_depth(),
+        config.max_json_entries(),
+        config.max_request_bytes(),
     )
     .map_err(|_| live_boot_error())?;
     let snapshot_limits = SnapshotLimits::new(
@@ -1792,30 +1844,29 @@ fn assemble_runtime(
     let protocol_limits = ProtocolLimits::new(ProtocolLimitConfig {
         input,
         max_snapshot_bytes: config.max_request_bytes(),
-        max_html_bytes: config.max_response_bytes(),
-        max_model_proposals: 128,
-        max_operations: 128,
-        max_arguments: 128,
-        max_validation_entries: 128,
-        max_events: 128,
-        max_effects: 128,
-        max_extensions: 128,
+        max_html_bytes: config.max_html_bytes(),
+        max_model_proposals: config.max_request_items(),
+        max_operations: config.max_request_items(),
+        max_arguments: config.max_request_items(),
+        max_validation_entries: config.max_response_items(),
+        max_events: config.max_response_items(),
+        max_effects: config.max_response_items(),
+        max_extensions: config.max_response_items(),
     })
     .map_err(|_| live_boot_error())?;
     let endpoint_config = LiveEndpointConfig::new(protocol_limits, snapshot_limits.clone())
         .and_then(|endpoint| endpoint.with_max_response_bytes(config.max_response_bytes()))
         .map_err(|_| live_boot_error())?;
-    let render_limits = RenderLimits::new(
-        config.max_response_bytes(),
-        128,
-        128,
-        128,
-        config.max_response_bytes().min(512 * 1024),
+    let renderer =
+        ViewRenderer::new(island_render_limits(config)?).map_err(|_| live_boot_error())?;
+    let proposal_limits = ProposalLimits::new(
+        config.max_request_items(),
+        config.max_response_items(),
+        input,
     )
     .map_err(|_| live_boot_error())?;
-    let renderer = ViewRenderer::new(render_limits).map_err(|_| live_boot_error())?;
-    let proposal_limits = ProposalLimits::new(128, 32, input).map_err(|_| live_boot_error())?;
-    let validation_engine = ValidationEngine::new(128).map_err(|_| live_boot_error())?;
+    let validation_engine =
+        ValidationEngine::new(config.max_response_items()).map_err(|_| live_boot_error())?;
     let engine_registry = Arc::new(registry.engine().clone());
     let promotion_limits = PromotionLimits::new(PromotionLimitConfig {
         max_seed_bytes: config.max_request_bytes(),
@@ -1850,7 +1901,7 @@ fn assemble_runtime(
             ),
             snapshot_limits.clone(),
             renderer,
-            config.max_response_bytes(),
+            config.max_html_bytes(),
         )
         .map_err(|_| live_boot_error())?
         .with_island_stream_directive(),
@@ -1866,7 +1917,7 @@ fn assemble_runtime(
             ),
             snapshot_limits.clone(),
             renderer,
-            MountLimits::new(604_800_000, 8, config.max_response_bytes(), 64)
+            MountLimits::new(604_800_000, 8, config.max_html_bytes(), 64)
                 .map_err(|_| live_boot_error())?,
         )
         .map_err(|_| live_boot_error())?
@@ -1890,6 +1941,7 @@ fn assemble_runtime(
         build_key_ring()?,
         Arc::clone(&clock),
         Arc::clone(&engine_registry),
+        AsyncLimits::from_config(config),
     )?;
 
     Ok(LiveRuntime {

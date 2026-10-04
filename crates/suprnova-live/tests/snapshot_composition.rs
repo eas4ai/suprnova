@@ -32,18 +32,6 @@ fn composition_limits() -> SnapshotLimits {
     .expect("snapshot limits are valid")
 }
 
-fn large_composition_limits() -> SnapshotLimits {
-    SnapshotLimits::new(
-        InputLimits::new(256 * 1024, 8, 4_096, 512).expect("canonical limits are valid"),
-        50,
-        10_000,
-        20_000,
-        8,
-        8,
-    )
-    .expect("snapshot limits are valid")
-}
-
 fn indexed_instance(index: usize) -> InstanceId {
     let mut value = [0xe0; 16];
     value[0..2].copy_from_slice(&(index as u16).to_be_bytes());
@@ -394,7 +382,15 @@ fn duplicate_ambiguous_and_excessive_lineage_fails_before_snapshot_signing() {
         SnapshotErrorKind::InvalidExtension
     );
 
-    let children = (0..=MAX_COMPOSITION_LINEAGE_CHILDREN_V1)
+    // A list of row components records every child: the old cap of 256 is
+    // gone, and the snapshot's configured byte and entry limits bound the
+    // lineage instead (see the byte budget test below). The engine ceiling is
+    // its collection ceiling.
+    assert_eq!(
+        MAX_COMPOSITION_LINEAGE_CHILDREN_V1,
+        suprnova_live::limits::HARD_MAX_COLLECTION_ITEMS
+    );
+    let children = (0..1_000)
         .map(|index| {
             child_lineage(
                 parent_instance.clone(),
@@ -404,12 +400,13 @@ fn duplicate_ambiguous_and_excessive_lineage_fails_before_snapshot_signing() {
                 1,
             )
         })
-        .collect();
+        .collect::<Vec<_>>();
     assert_eq!(
         CompositionLineageV1::new(None, children)
-            .expect_err("first child above the cardinality bound is rejected")
-            .kind(),
-        SnapshotErrorKind::InvalidExtension
+            .expect("a thousand children are recorded")
+            .children()
+            .len(),
+        1_000
     );
 }
 
@@ -417,31 +414,50 @@ fn duplicate_ambiguous_and_excessive_lineage_fails_before_snapshot_signing() {
 fn composition_byte_budget_and_unknown_extension_compatibility_are_explicit() {
     let keys = key_ring();
     let schemas = schema_set();
-    let large_limits = large_composition_limits();
+    // Room for many entries, so the snapshot's 256 KiB byte limit is the bound
+    // the composition extension meets.
+    let byte_limited = SnapshotLimits::new(
+        InputLimits::new(256 * 1024, 8, 100_000, 512).expect("canonical limits are valid"),
+        50,
+        10_000,
+        20_000,
+        8,
+        8,
+    )
+    .expect("snapshot limits are valid");
+    let lineage_with = |parent: &InstanceId, revision: Revision, count: usize| {
+        let children = (0..count)
+            .map(|index| {
+                let prefix = format!("k{index:04}-");
+                let key = format!("{prefix}{}", "a".repeat(128 - prefix.len()));
+                child_lineage(parent.clone(), revision, &key, indexed_instance(index), 1)
+            })
+            .collect();
+        CompositionLineageV1::new(None, children).expect("the children are distinct")
+    };
+
+    // 400 children, past the old cap of 256, fit inside the byte limit.
+    let mut fitting_fields = instance_fields(&keys);
+    let fitting = lineage_with(&fitting_fields.instance_id, fitting_fields.revision, 400);
+    fitting_fields
+        .set_composition_lineage(fitting)
+        .expect("lineage installs");
+    InstanceBodyV1::new(fitting_fields, &schemas, &byte_limited)
+        .expect("400 children fit the snapshot's configured byte limit");
+
+    // 1,200 children of 128-byte keys are past it.
     let mut oversized_fields = instance_fields(&keys);
-    let parent_instance = oversized_fields.instance_id.clone();
-    let parent_revision = oversized_fields.revision;
-    let children = (0..MAX_COMPOSITION_LINEAGE_CHILDREN_V1)
-        .map(|index| {
-            let prefix = format!("k{index:03}-");
-            let key = format!("{prefix}{}", "a".repeat(128 - prefix.len()));
-            child_lineage(
-                parent_instance.clone(),
-                parent_revision,
-                &key,
-                indexed_instance(index),
-                1,
-            )
-        })
-        .collect();
+    let oversized = lineage_with(
+        &oversized_fields.instance_id,
+        oversized_fields.revision,
+        1_200,
+    );
     oversized_fields
-        .set_composition_lineage(
-            CompositionLineageV1::new(None, children).expect("cardinality remains bounded"),
-        )
+        .set_composition_lineage(oversized)
         .expect("lineage installs");
     assert_eq!(
-        InstanceBodyV1::new(oversized_fields, &schemas, &large_limits)
-            .expect_err("composition extension has an independent byte budget")
+        InstanceBodyV1::new(oversized_fields, &schemas, &byte_limited)
+            .expect_err("the composition extension is bounded by the snapshot's byte limit")
             .kind(),
         SnapshotErrorKind::InvalidExtension
     );

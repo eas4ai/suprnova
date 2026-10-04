@@ -177,9 +177,11 @@ describe("Live-owned morph preflight", () => {
     expect(() => preflight(fixture, html)).toThrow(MorphPreflightError);
   });
 
-  it("enforces key syntax, bytes, count, uniqueness, and nested-key agreement", () => {
+  it("enforces key syntax, length, count, uniqueness, and nested-key agreement", () => {
     const invalidCases = [
-      [withLimits({ maxKeyBytes: 4 }), [{ "data-suprnova-live-key": "abcde" }]],
+      // The key alphabet is ASCII with at most 128 characters: the grammar the
+      // server's checker shares, not a configurable size.
+      [DEFAULT_MORPH_LIMITS, [{ "data-suprnova-live-key": "a".repeat(129) }]],
       [withLimits({ maxKeys: 1 }), [{ id: "one" }, { id: "two" }]],
       [
         DEFAULT_MORPH_LIMITS,
@@ -193,6 +195,19 @@ describe("Live-owned morph preflight", () => {
       for (const child of children) child.ownerDocument = fixture.replacementDocument;
       expect(() => preflight(fixture)).toThrow(MorphPreflightError);
     }
+
+    const countDocument = new FakeDocument();
+    const counted = [{ id: "one" }, { id: "two" }].map((value) =>
+      element(countDocument, "div", value),
+    );
+    const countFixture = morphFixture({
+      limits: withLimits({ maxKeys: 1 }),
+      replacementChildren: counted,
+    });
+    for (const child of counted) child.ownerDocument = countFixture.replacementDocument;
+    expect(() => preflight(countFixture)).toThrow(
+      /morph key count limit exceeded: measured 2 keyed elements, configured 1 keyed elements\. Raise LIVE_MORPH_MAX_KEYS/u,
+    );
 
     const nestedDocument = new FakeDocument();
     const nested = element(nestedDocument, "article", {

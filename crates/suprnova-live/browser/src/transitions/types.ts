@@ -1,4 +1,3 @@
-export const MAX_TRANSITION_TARGETS = 64;
 export const MAX_TRANSITION_NAME_BYTES = 64;
 export const MAX_TRANSITION_DURATION_MS = 5_000;
 

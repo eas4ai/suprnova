@@ -1,12 +1,7 @@
 // @generated from iteration-004-conformance.ts; do not edit.
 
 // src/canonical.ts
-var DEFAULT_CANONICAL_LIMITS = {
-  maxBytes: 64 * 1024,
-  maxDepth: 32,
-  maxEntries: 2048,
-  maxStringBytes: 16 * 1024
-};
+var DEFAULT_CANONICAL_LIMITS = Object.freeze({ maxDepth: 32 });
 var CanonicalError = class extends Error {
   constructor(code) {
     super(code);
@@ -20,8 +15,9 @@ var Parser = class {
     this.limits = limits;
     this.index = 0;
     this.entries = 0;
-    this.bytes = new TextEncoder().encode(text).byteLength;
-    if (this.bytes > limits.maxBytes) throw new CanonicalError("input_too_large");
+    if (limits.maxBytes !== void 0 && new TextEncoder().encode(text).byteLength > limits.maxBytes) {
+      throw new CanonicalError("input_too_large");
+    }
   }
   parse() {
     this.space();
@@ -65,7 +61,7 @@ var Parser = class {
         }
         if (typeof decoded !== "string") throw new CanonicalError("invalid_json");
         if (hasLoneSurrogate(decoded)) throw new CanonicalError("invalid_json");
-        if (new TextEncoder().encode(decoded).byteLength > this.limits.maxStringBytes) {
+        if (this.limits.maxStringBytes !== void 0 && new TextEncoder().encode(decoded).byteLength > this.limits.maxStringBytes) {
           throw new CanonicalError("string_too_long");
         }
         return decoded;
@@ -141,7 +137,9 @@ var Parser = class {
   }
   bumpEntry() {
     this.entries += 1;
-    if (this.entries > this.limits.maxEntries) throw new CanonicalError("too_many_entries");
+    if (this.limits.maxEntries !== void 0 && this.entries > this.limits.maxEntries) {
+      throw new CanonicalError("too_many_entries");
+    }
   }
   space() {
     for (; ; ) {
@@ -190,6 +188,52 @@ function canonicalize(value) {
   throw new CanonicalError("serialization_failed");
 }
 
+// src/limits.ts
+var MIB = 1024 * 1024;
+var SERVER_DEFAULT_LIMITS = Object.freeze({
+  maxRequestBytes: 16 * MIB,
+  maxResponseBytes: 16 * MIB,
+  maxHtmlBytes: 16 * MIB,
+  maxJsonDepth: 32,
+  maxJsonEntries: 1e6,
+  maxRequestItems: 65536,
+  maxResponseItems: 65536,
+  morphMaxNodes: 1e6,
+  morphMaxDepth: 512,
+  morphMaxKeys: 1e6,
+  morphMaxAttributes: 1e7,
+  morphMaxAttributesPerElement: 4096,
+  morphDeadlineMs: 0
+});
+var JSON_DEPTH_CEILING = 64;
+var DESCRIPTORS = Object.freeze({
+  maxRequestBytes: { key: "LIVE_MAX_REQUEST_BYTES", label: "request size", unit: "bytes" },
+  maxResponseBytes: { key: "LIVE_MAX_RESPONSE_BYTES", label: "response size", unit: "bytes" },
+  maxHtmlBytes: { key: "LIVE_MAX_HTML_BYTES", label: "island HTML size", unit: "bytes" },
+  maxJsonDepth: { key: "LIVE_MAX_JSON_DEPTH", label: "JSON nesting depth", unit: "levels" },
+  maxJsonEntries: {
+    key: "LIVE_MAX_JSON_ENTRIES",
+    label: "request JSON entry count",
+    unit: "entries"
+  },
+  maxRequestItems: { key: "LIVE_MAX_REQUEST_ITEMS", label: "request item count", unit: "items" },
+  maxResponseItems: { key: "LIVE_MAX_RESPONSE_ITEMS", label: "response item count", unit: "items" },
+  morphMaxNodes: { key: "LIVE_MORPH_MAX_NODES", label: "morph node count", unit: "nodes" },
+  morphMaxDepth: { key: "LIVE_MORPH_MAX_DEPTH", label: "morph nesting depth", unit: "levels" },
+  morphMaxKeys: { key: "LIVE_MORPH_MAX_KEYS", label: "morph key count", unit: "keyed elements" },
+  morphMaxAttributes: {
+    key: "LIVE_MORPH_MAX_ATTRIBUTES",
+    label: "morph attribute count",
+    unit: "attributes"
+  },
+  morphMaxAttributesPerElement: {
+    key: "LIVE_MORPH_MAX_ATTRIBUTES_PER_ELEMENT",
+    label: "morph attributes-per-element count",
+    unit: "attributes"
+  },
+  morphDeadlineMs: { key: "LIVE_MORPH_DEADLINE_MS", label: "morph deadline", unit: "ms" }
+});
+
 // src/signals/name.ts
 var SIGNAL_NAME_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/u;
 function isSignalName(value) {
@@ -202,13 +246,7 @@ var MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 var OPERATION_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
 var SIGNAL_SCOPE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 var SUBSCRIPTION_ID = /^[A-Za-z0-9_-]{16,128}$/u;
-var ASYNC_LIMITS = Object.freeze({
-  maxBytes: 64 * 1024,
-  maxDepth: 8,
-  maxEntries: 1024,
-  maxStringBytes: 4096
-});
-var MAX_PAYLOAD_BYTES = 32 * 1024;
+var ASYNC_LIMITS = Object.freeze({ maxDepth: JSON_DEPTH_CEILING });
 var AsyncEnvelopeError = class extends Error {
   constructor(code) {
     super(code);
@@ -295,9 +333,6 @@ function targetValid(target) {
 function payload(value, membership2) {
   const fields = record(value, "async_payload_invalid");
   const kind = string(fields["kind"], "async_payload_invalid");
-  if (new TextEncoder().encode(canonicalize(fields)).byteLength > MAX_PAYLOAD_BYTES) {
-    fail("async_payload_too_large");
-  }
   switch (kind) {
     case "refresh": {
       exact(fields, ["kind", "name"], "async_payload_invalid");
@@ -1039,9 +1074,6 @@ var RUNTIME_STIMULUS_ADAPTER_FORMAT = /* @__PURE__ */ Symbol.for(
   "suprnova.live.feature.stimulus-adapter.v1"
 );
 var MAXIMUM_DISPOSERS = 64;
-var MAXIMUM_DRIVER_ISLANDS = 256;
-var MAXIMUM_SCANNED_ELEMENTS = 4096;
-var MAXIMUM_FEATURE_DIRECTIVES = 2048;
 var UPLOADS = /* @__PURE__ */ new WeakMap();
 var ASYNC = /* @__PURE__ */ new WeakMap();
 function callback(owner, property, required) {
@@ -1172,25 +1204,19 @@ function* featureElements(root, node = root) {
 function queryFeatureDirectiveOwnership(root, parser, capability, diagnose) {
   if (typeof parser !== "function") return Object.freeze([]);
   const found = [];
-  let scanned = 0;
   try {
     for (const element of featureElements(root)) {
-      scanned += 1;
-      if (scanned > MAXIMUM_SCANNED_ELEMENTS) break;
       const attributes = [];
-      let inspectedAttributes = 0;
       for (const attribute of element.attributes) {
-        inspectedAttributes += 1;
-        if (inspectedAttributes > MAX_PRESENT_DIRECTIVES) {
-          diagnose("resource_exhausted");
-          return Object.freeze([]);
-        }
         const name = attribute.name;
         if (name.startsWith("live:")) attributes.push({ name, value: attribute.value });
       }
+      if (attributes.length > MAX_PRESENT_DIRECTIVES) {
+        diagnose("resource_exhausted");
+        return Object.freeze([]);
+      }
       const names = Object.freeze(attributes.map(({ name }) => name));
       for (const attribute of attributes) {
-        if (found.length >= MAXIMUM_FEATURE_DIRECTIVES) return Object.freeze(found);
         const directive = parser(attribute.name, attribute.value, names);
         if (directive.ok && directive.capability === capability) {
           found.push(Object.freeze({ attributeName: attribute.name, directive, element }));
@@ -1511,10 +1537,6 @@ function createOptionalFeatureDriver() {
     if (event === 1) {
       if (state !== 1 || value === null || !("element" in value)) return false;
       if (islands.has(value.element)) return true;
-      if (islands.size >= MAXIMUM_DRIVER_ISLANDS) {
-        report2("resource_exhausted");
-        return false;
-      }
       const island = [value, 0];
       islands.set(value.element, island);
       for (const entry of [...entries]) if (entry !== null) connect(entry, island);
@@ -1686,14 +1708,8 @@ function createOptionalFeatureDriver() {
 
 // src/runtime/limits.ts
 var RUNTIME_CONFIG_LIMITS = Object.freeze({
-  maxBytes: 16384,
-  maxDepth: 8,
-  maxEntries: 64,
-  maxStringBytes: 2048,
-  minRequestTimeoutMs: 100,
-  maxRequestTimeoutMs: 12e4,
-  minResponseBytes: 1024,
-  maxResponseBytes: 4194304,
+  minRequestTimeoutMs: 1,
+  maxRequestTimeoutMs: 2147483647,
   maxQueuedPerIsland: 64,
   maxParallelPerIsland: 8,
   maxAllowedOrigins: 32,
@@ -1750,6 +1766,17 @@ var DIAGNOSTIC_DETAILS = [
   "connected",
   "disconnected"
 ];
+function defaultConsole() {
+  const candidate = Reflect.get(globalThis, "console");
+  return candidate !== null && typeof candidate === "object" && typeof Reflect.get(candidate, "error") === "function" ? candidate : null;
+}
+function printBreach(mode, console, breach) {
+  if (mode === "off" || console === null) return;
+  try {
+    console.error(breach.message);
+  } catch {
+  }
+}
 function contains(values, candidate) {
   return typeof candidate === "string" && values.some((value) => value === candidate);
 }
@@ -1761,6 +1788,7 @@ var RuntimeDiagnostics = class {
   #mode;
   #maximum;
   #emit;
+  #console;
   #entries = [];
   #sequence;
   constructor(options) {
@@ -1779,6 +1807,10 @@ var RuntimeDiagnostics = class {
     this.#maximum = maximum;
     this.#sequence = sequence;
     this.#emit = options.emit;
+    this.#console = options.console === void 0 ? defaultConsole() : options.console;
+  }
+  limit(breach) {
+    printBreach(this.#mode, this.#console, breach);
   }
   record(input, unsafeContext) {
     void unsafeContext;

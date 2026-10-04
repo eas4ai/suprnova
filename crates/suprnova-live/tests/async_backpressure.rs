@@ -4093,19 +4093,13 @@ async fn invalid_policy_and_document_bounds_fail_before_delivery() {
     .expect_err("async document item cap");
     assert_eq!(invalid_items.close_code(), AsyncCloseCode::InvalidPolicy);
 
-    let invalid_bytes = BoundedDocumentTransportSession::new(
-        fixture.document(
-            origin.clone(),
-            DocumentTransportKind::ServerSentEvents,
-            0x8b,
-            1,
-        ),
-        ResourceBounds::new(1, MAX_ASYNC_BUFFER_BYTES + 1).expect("shared generic byte bounds"),
-        PermitPool::new(1).expect("permit"),
-        policy(),
-    )
-    .expect_err("async document byte cap");
-    assert_eq!(invalid_bytes.close_code(), AsyncCloseCode::InvalidPolicy);
+    // The async byte ceiling is the shared resource ceiling (1 GiB), so a
+    // queue above it cannot even be described; the configured per-document
+    // limit applies below it.
+    assert!(
+        ResourceBounds::new(1, MAX_ASYNC_BUFFER_BYTES + 1).is_err(),
+        "the shared resource ceiling refuses a queue above the async ceiling"
+    );
 
     let invalid_fanout = BoundedDocumentTransportSession::new(
         fixture.document(origin, DocumentTransportKind::ServerSentEvents, 0x8c, 1),

@@ -441,6 +441,39 @@ var. The issuer falls back to `"Suprnova"` when `APP_NAME` is unset.
 |---|---|---|---|
 | `SUPRNOVA_FRONTEND` | `svelte` | `String` (`svelte`, `react`, `vue`) | Active frontend. Case-insensitive. Drives `Frontend::detect_from_env()`, the default Vite entry point, and the page-component extension search order at compile time. Unknown or unset values fall back to `svelte`. |
 
+## Live
+
+Every limit Live runs under is one of these keys. The server's configuration is
+the only source: the bootstrap writes each value into the page, and the browser
+runtime applies the value it reads there, never a smaller one of its own.
+Values are plain whole numbers, with bytes written out (`16777216`, not
+`16MiB`). `Config::init` reads every key at boot, so a value that is not a
+whole number, or that breaks its rule, fails boot with the key, the value and
+the rule in the message. `LiveConfig::builder()` sets the same limits in code;
+see [Live](live.md#limits).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `LIVE_MAX_REQUEST_BYTES` | `16777216` (16 MiB) | `usize` (bytes, 1 to 1073741824) | One Live request body, the signed snapshot included. It must be at least `LIVE_MAX_RESPONSE_BYTES`, because a response's snapshot comes back in the next request. The browser checks each request against it before sending. |
+| `LIVE_MAX_RESPONSE_BYTES` | `16777216` (16 MiB), or `LIVE_MAX_REQUEST_BYTES` when that is smaller | `usize` (bytes) | One Live response body: the island HTML as an escaped JSON string, the snapshot, events and effects. The browser reads the response under it. Set it above `LIVE_MAX_HTML_BYTES` when an island renders close to the HTML limit. |
+| `LIVE_MAX_HTML_BYTES` | `16777216` (16 MiB), or `LIVE_MAX_RESPONSE_BYTES` when that is smaller | `usize` (bytes) | One island render's HTML, apart from the response around it. The server refuses a render over it, and the morph refuses an island over it. |
+| `LIVE_MAX_JSON_DEPTH` | `32` | `usize` (levels, 1 to 64) | Container nesting in Live JSON. The parsers are recursive, so 64 is the stack ceiling. |
+| `LIVE_MAX_JSON_ENTRIES` | `1000000` | `usize` (entries, 1 to 100000000) | Array elements plus object members in one request. A parsed entry costs memory beyond its bytes, so this bounds what a request of many tiny entries can grow into. |
+| `LIVE_MAX_REQUEST_ITEMS` | `65536` | `usize` (items, 1 to 16777216) | Items in one request collection: model proposals, operations, action arguments. |
+| `LIVE_MAX_RESPONSE_ITEMS` | `65536` | `usize` (items, 1 to 16777216) | Items in one response collection: validation entries, events, effects, extensions, child deliveries, and the assets, mounts and child components of one render. |
+| `LIVE_MAX_CONTEXT_LIFETIME_MS` | `30000` | `u64` (ms, 1 to 300000) | How long one trusted request context stays valid. |
+| `LIVE_REQUEST_TIMEOUT_MS` | `60000` | `u32` (ms, 1 to 2147483647) | How long the browser waits for one Live response, body included. A 16 MiB response over a 5 Mbit/s link takes about 27 seconds. |
+| `LIVE_MAX_QUEUED_PER_ISLAND` | `8` | `u8` (1 to 64) | Requests one island queues. |
+| `LIVE_MAX_PARALLEL_PER_ISLAND` | `1` | `u8` (1 to 8, at most the queue) | Requests one island runs at once. |
+| `LIVE_MORPH_MAX_NODES` | `1000000` | `u32` (nodes, 1 to 1073741824) | Nodes in one rendered island the browser morphs. |
+| `LIVE_MORPH_MAX_DEPTH` | `512` | `u32` (levels, 1 to 4096) | Element nesting in one rendered island. The morph walks the tree recursively, and browsers' HTML parsers stop nesting at 512. |
+| `LIVE_MORPH_MAX_KEYS` | `1000000` | `u32` (keyed elements, 1 to 1073741824) | Keyed elements (`live:key`, `id`, nested islands) in one rendered island. |
+| `LIVE_MORPH_MAX_ATTRIBUTES` | `10000000` | `u32` (attributes, 1 to 1073741824) | Attributes across one rendered island. |
+| `LIVE_MORPH_MAX_ATTRIBUTES_PER_ELEMENT` | `4096`, or `LIVE_MORPH_MAX_ATTRIBUTES` when that is smaller | `u32` (attributes) | Attributes on one rendered element. The morph's cost for one element grows with the square of its attribute count. |
+| `LIVE_MORPH_DEADLINE_MS` | `0` (no deadline) | `u32` (ms, 0 to 2147483647) | How long one morph may run before the browser abandons it. The morph runs synchronously, so a deadline can only stop work that already held the page and changed part of the island; set one only when a failed update is better than a long one. |
+| `LIVE_ASYNC_MAX_PAYLOAD_BYTES` | `1048576` (1 MiB), or `LIVE_ASYNC_MAX_BUFFER_BYTES` when that is smaller | `usize` (bytes, 1 to 16777216) | One asynchronous event payload. Publishing a larger one fails with the limit named. |
+| `LIVE_ASYNC_MAX_BUFFER_BYTES` | `16777216` (16 MiB) | `usize` (bytes, 1 to 1073741824) | What one open document's delivery queue, and one subscription's replay log, may hold in server memory while the browser catches up. It must be at least `LIVE_ASYNC_MAX_PAYLOAD_BYTES`. |
+
 ## Maintenance Mode
 
 | Var | Default | Type | Purpose |

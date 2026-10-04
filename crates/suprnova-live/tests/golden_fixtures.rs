@@ -298,12 +298,19 @@ fn version_four_encoded_cases_are_canonical_and_within_exact_limits() {
     let uploads = fixture_version(FixtureVersion::V4, "upload-protocol.json");
     assert_codec_semantics(&uploads, "codec_cases", [16_384, 8, 64, 4_096], None);
 
+    // The async v1 profile is the engine's ceilings; the configured payload
+    // and queue limits apply below them on the server.
     let asynchronous = fixture_version(FixtureVersion::V4, "async-envelope.json");
     assert_codec_semantics(
         &asynchronous,
         "envelope_cases",
-        [65_536, 8, 1_024, 4_096],
-        Some(32_768),
+        [
+            suprnova_live::async_updates::MAX_ASYNC_ENVELOPE_BYTES as u64,
+            suprnova_live::limits::HARD_MAX_DEPTH as u64,
+            suprnova_live::async_updates::MAX_ASYNC_ENVELOPE_ENTRIES as u64,
+            suprnova_live::async_updates::MAX_ASYNC_PAYLOAD_BYTES as u64,
+        ],
+        Some(suprnova_live::async_updates::MAX_ASYNC_PAYLOAD_BYTES as u64),
     );
 }
 

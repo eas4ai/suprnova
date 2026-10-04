@@ -10,8 +10,6 @@ export interface RestoreCompatibilityResult {
   readonly reason: RestoreIncompatibility | null;
 }
 
-const MAX_RESTORE_ISLANDS = 256;
-
 function incompatible(reason: RestoreIncompatibility): RestoreCompatibilityResult {
   return Object.freeze({ compatible: false, reason });
 }
@@ -33,8 +31,9 @@ export function validateDocumentRestore(
   ) {
     return incompatible("protocol");
   }
+  // Every island the restored page holds is checked; a count cap sent a page
+  // with many islands to a full reload.
   const islands = document.querySelectorAll(ISLAND_ROOT_SELECTOR);
-  if (islands.length > MAX_RESTORE_ISLANDS) return incompatible("island");
   try {
     for (const island of islands) parseIslandMetadata(island, current);
   } catch {

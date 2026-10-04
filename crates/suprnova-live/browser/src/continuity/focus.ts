@@ -1,11 +1,5 @@
 import type { MorphIdentityEntry, MorphPlan } from "../morph/types.js";
-import {
-  ContinuityError,
-  type ContinuityBudget,
-  type ContinuityLimits,
-  type FocusContinuity,
-  type SelectionRecord,
-} from "./types.js";
+import { ContinuityError, type FocusContinuity, type SelectionRecord } from "./types.js";
 
 const MAX_SELECTION_PATH_DEPTH = 32;
 const FOCUS_FALLBACK_SELECTOR = "[data-suprnova-live-focus-fallback]";
@@ -97,12 +91,7 @@ function contenteditableSelection(plan: MorphPlan): SelectionRecord | null {
   });
 }
 
-export function captureSelections(
-  plan: MorphPlan,
-  limits: ContinuityLimits,
-  budget: ContinuityBudget,
-): readonly SelectionRecord[] {
-  void budget;
+export function captureSelections(plan: MorphPlan): readonly SelectionRecord[] {
   const records: SelectionRecord[] = [];
   for (const entry of plan.identity.entries) {
     const element = entry.current;
@@ -123,7 +112,6 @@ export function captureSelections(
   }
   const contenteditable = contenteditableSelection(plan);
   if (contenteditable !== null) records.push(contenteditable);
-  if (records.length > limits.maxSelections) throw new ContinuityError("resource_exhausted");
   return Object.freeze(records);
 }
 

@@ -29,7 +29,7 @@ mod support;
 const HANDLE: &str = "018f47c1-2af0-7cc4-a001-000000000001";
 const OTHER_HANDLE: &str = "018f47c1-2af0-7cc4-a001-000000000002";
 const ROOT_SENTINEL: &[u8; 32] = b"task4-upload-secret-never-leak-1";
-const MAX_WEBSOCKET_ENVELOPE_BYTES: usize = 65_536;
+const MAX_WEBSOCKET_ENVELOPE_BYTES: usize = suprnova_live::async_updates::MAX_ASYNC_ENVELOPE_BYTES;
 
 fn fingerprint(byte: u8) -> [u8; 32] {
     [byte; 32]

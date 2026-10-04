@@ -3,14 +3,26 @@
 use std::error::Error;
 use std::fmt;
 
-/// Hard ceiling for one iteration 001 control or snapshot input.
-pub const HARD_MAX_INPUT_BYTES: usize = 16 * 1024 * 1024;
-/// Hard ceiling for JSON container nesting.
+/// Hard ceiling for one control or snapshot input. A message is held in
+/// memory whole while it is parsed, so this keeps it to one bounded
+/// allocation; the configured limit (16 MiB by default in the framework)
+/// applies first.
+pub const HARD_MAX_INPUT_BYTES: usize = 1024 * 1024 * 1024;
+/// Hard ceiling for JSON container nesting. The canonical parser and
+/// serializer are recursive, so this is their stack guard.
 pub const HARD_MAX_DEPTH: usize = 64;
-/// Hard ceiling for total array elements plus object members.
-pub const HARD_MAX_ENTRIES: usize = 100_000;
-/// Hard ceiling for one decoded JSON string.
-pub const HARD_MAX_STRING_BYTES: usize = 1024 * 1024;
+/// Hard ceiling for total array elements plus object members. A parsed entry
+/// costs memory beyond its bytes, so the configured entry limit bounds that
+/// amplification; this ceiling only keeps the configuration finite.
+pub const HARD_MAX_ENTRIES: usize = 100_000_000;
+/// Hard ceiling for one decoded JSON string. A string cannot be longer than
+/// the input it is decoded from, so this is the input ceiling.
+pub const HARD_MAX_STRING_BYTES: usize = HARD_MAX_INPUT_BYTES;
+/// Hard ceiling for the items in one protocol collection: model proposals,
+/// operations, arguments, validation issues, events, effects, and the
+/// assets, mounts and children of one render. Each item is bounded work; the
+/// configured limit applies first, and this keeps the configuration finite.
+pub const HARD_MAX_COLLECTION_ITEMS: usize = 16 * 1024 * 1024;
 
 /// Validated byte, depth, collection, and string limits for an input boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,6 +57,20 @@ impl InputLimits {
             max_entries,
             max_string_bytes,
         })
+    }
+
+    /// Returns the engine's hard ceilings. Generated component code encodes
+    /// and decodes one state field under these, because the configured limits
+    /// apply where it matters: when the whole snapshot is encoded and when a
+    /// request is parsed.
+    #[must_use]
+    pub const fn ceiling() -> Self {
+        Self {
+            max_bytes: HARD_MAX_INPUT_BYTES,
+            max_depth: HARD_MAX_DEPTH,
+            max_entries: HARD_MAX_ENTRIES,
+            max_string_bytes: HARD_MAX_STRING_BYTES,
+        }
     }
 
     /// Returns the locked upload protocol-v1 input limits.
@@ -83,15 +109,29 @@ impl InputLimits {
     }
 }
 
+/// The framework's defaults (`LIVE_MAX_REQUEST_BYTES`, `LIVE_MAX_JSON_DEPTH`,
+/// `LIVE_MAX_JSON_ENTRIES`), sized for large modern pages.
 impl Default for InputLimits {
     fn default() -> Self {
         Self {
-            max_bytes: 64 * 1024,
+            max_bytes: 16 * 1024 * 1024,
             max_depth: 32,
-            max_entries: 2_048,
-            max_string_bytes: 16 * 1024,
+            max_entries: 1_000_000,
+            max_string_bytes: 16 * 1024 * 1024,
         }
     }
+}
+
+/// How far one value went over a configured size limit, so the host can name
+/// the limit, both values and the setting to change instead of a bare code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SizeBreach {
+    /// The size measured, or where measuring stopped when `at_least` is set.
+    pub measured: usize,
+    /// The configured limit the value went over.
+    pub configured: usize,
+    /// The measurement stopped at the limit, so the real size is larger.
+    pub at_least: bool,
 }
 
 /// A configured input limit was zero or exceeded an engine hard ceiling.

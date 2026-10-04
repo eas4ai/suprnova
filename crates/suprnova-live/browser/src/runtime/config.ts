@@ -1,4 +1,5 @@
-import { CanonicalError, parseCanonicalJson } from "../canonical.js";
+import { CanonicalError, DEFAULT_CANONICAL_LIMITS, parseCanonicalJson } from "../canonical.js";
+import { validLiveLimits, type LiveLimits } from "../limits.js";
 import { RUNTIME_CONFIG_LIMITS, boundedInteger } from "./limits.js";
 import type { BootstrapOptions, RuntimeConfig } from "./types.js";
 
@@ -9,17 +10,35 @@ export const NAVIGATION_RUNTIME_LIMITS = Object.freeze({
   maxPrefetchTargets: 256,
 });
 
+// Every page limit the server configures, by its configuration-element key.
+// The element is the only place the browser learns them (spec 09).
+const LIMIT_KEYS = Object.freeze({
+  max_html_bytes: "maxHtmlBytes",
+  max_json_depth: "maxJsonDepth",
+  max_json_entries: "maxJsonEntries",
+  max_request_bytes: "maxRequestBytes",
+  max_request_items: "maxRequestItems",
+  max_response_bytes: "maxResponseBytes",
+  max_response_items: "maxResponseItems",
+  morph_deadline_ms: "morphDeadlineMs",
+  morph_max_attributes: "morphMaxAttributes",
+  morph_max_attributes_per_element: "morphMaxAttributesPerElement",
+  morph_max_depth: "morphMaxDepth",
+  morph_max_keys: "morphMaxKeys",
+  morph_max_nodes: "morphMaxNodes",
+} as const satisfies Readonly<Record<string, keyof LiveLimits>>);
+
 const CONFIG_KEYS = [
   "asset_identity",
   "credentials",
   "endpoint",
   "max_parallel_per_island",
   "max_queued_per_island",
-  "max_response_bytes",
   "protocol",
   "request_timeout_ms",
   "runtime_contract_version",
-] as const;
+  ...Object.keys(LIMIT_KEYS),
+].sort();
 const PROTOCOL_KEYS = ["maximum", "minimum"] as const;
 
 export type RuntimeConfigErrorCode =
@@ -118,9 +137,7 @@ function approvedOrigins(options: BootstrapOptions): ReadonlySet<string> {
 }
 
 function endpoint(value: unknown, document: Document, options: BootstrapOptions): URL {
-  if (typeof value !== "string" || value.length > RUNTIME_CONFIG_LIMITS.maxStringBytes) {
-    throw new RuntimeConfigError("config_endpoint");
-  }
+  if (typeof value !== "string") throw new RuntimeConfigError("config_endpoint");
   if (hasUnsafeUrlText(value)) throw new RuntimeConfigError("config_endpoint");
   let base: URL;
   let parsed: URL;
@@ -158,6 +175,21 @@ function parseProtocol(value: unknown): Readonly<{ minimum: 1 | 2; maximum: 1 | 
   return Object.freeze({ minimum, maximum });
 }
 
+/// Reads the server's page limits. The server validated them when it booted;
+/// a value that is not a positive integer, or a set whose nested pairs do not
+/// nest, means the element was not written by a matching server.
+function parseLimits(config: Readonly<Record<string, unknown>>): LiveLimits {
+  const limits: Record<string, number> = {};
+  for (const [key, name] of Object.entries(LIMIT_KEYS)) {
+    const value = config[key];
+    if (typeof value !== "number") throw new RuntimeConfigError("config_limit");
+    limits[name] = value;
+  }
+  const parsed = Object.freeze(limits) as unknown as LiveLimits;
+  if (!validLiveLimits(parsed)) throw new RuntimeConfigError("config_limit");
+  return parsed;
+}
+
 function protocolVersion(value: unknown): value is 1 | 2 {
   return value === 1 || value === 2;
 }
@@ -176,7 +208,7 @@ export function parseRuntimeConfig(
   const text = element.textContent;
   let parsed: unknown;
   try {
-    parsed = parseCanonicalJson(text, RUNTIME_CONFIG_LIMITS);
+    parsed = parseCanonicalJson(text, DEFAULT_CANONICAL_LIMITS);
   } catch (error: unknown) {
     throw configFailure(error);
   }
@@ -201,16 +233,10 @@ export function parseRuntimeConfig(
   ) {
     throw new RuntimeConfigError("config_timeout");
   }
-  const maxResponseBytes = config["max_response_bytes"];
-  if (
-    !boundedInteger(
-      maxResponseBytes,
-      RUNTIME_CONFIG_LIMITS.minResponseBytes,
-      RUNTIME_CONFIG_LIMITS.maxResponseBytes,
-    )
-  ) {
+  if (!boundedInteger(config["max_response_bytes"], 1, Number.MAX_SAFE_INTEGER)) {
     throw new RuntimeConfigError("config_response_limit");
   }
+  const limits = parseLimits(config);
   const maxQueuedPerIsland = config["max_queued_per_island"];
   if (!boundedInteger(maxQueuedPerIsland, 1, RUNTIME_CONFIG_LIMITS.maxQueuedPerIsland)) {
     throw new RuntimeConfigError("config_queue_limit");
@@ -237,7 +263,7 @@ export function parseRuntimeConfig(
     endpoint: endpoint(config["endpoint"], document, options),
     credentials,
     requestTimeoutMs,
-    maxResponseBytes,
+    limits,
     maxQueuedPerIsland,
     maxParallelPerIsland,
     assetIdentity,

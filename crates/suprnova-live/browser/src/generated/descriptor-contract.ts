@@ -7,7 +7,7 @@ export const DESCRIPTOR_SCHEMA_VERSION = 2;
 
 // Reviewed v4 fixture-manifest identity used to generate this contract.
 export const DESCRIPTOR_FIXTURE_MANIFEST_SHA256 =
-  "f87634f9033ee07303dcc3b1f252873e6f86343a7a90cfa33d4d0a8e74c79618";
+  "0a875c7b8890b14a38a9993452ec1425ffaf273d0a0492ac6635deddcc11b7f8";
 
 // Browser-visible field names of one registered-event contract entry.
 export const DESCRIPTOR_EVENT_FIELDS = {

@@ -32,7 +32,6 @@ import {
 const DEFAULT_UPLOAD_ENDPOINT = "/__live/upload";
 const DEFAULT_ACTIVE_UPLOADS = 4;
 const DEFAULT_MANAGER_BYTES = 256 * 1024;
-const MAX_UPLOAD_RESPONSE_BYTES = 16 * 1024;
 
 export interface UploadFeatureOptions {
   readonly application?: UploadApplicationPort;
@@ -116,30 +115,24 @@ function controlBody(request: UploadTransportRequest): Readonly<Record<string, u
   }
 }
 
-async function boundedResponse(response: Response): Promise<UploadTransportResponse> {
+// An upload control response is the framework server's own small typed reply
+// on its reserved route; the browser reads it whole and checks its shape. A
+// byte cap of the browser's own protected nothing the server's reply needs.
+async function controlResponse(response: Response): Promise<UploadTransportResponse> {
   const declaredLength = response.headers.get("Content-Length");
-  if (
-    declaredLength !== null &&
-    (!/^(?:0|[1-9][0-9]*)$/u.test(declaredLength) ||
-      Number(declaredLength) > MAX_UPLOAD_RESPONSE_BYTES)
-  ) {
+  if (declaredLength !== null && !/^(?:0|[1-9][0-9]*)$/u.test(declaredLength)) {
     throw new UploadHttpError("upload_transport_failed");
   }
   const reader = response.body?.getReader();
   if (reader === undefined) throw new UploadHttpError("upload_transport_failed");
   // The chunks are kept as they arrive and joined only when there are several,
-  // into an array of exactly their length. A control response is a few
-  // hundred bytes, almost always one chunk, and allocating the 16 KiB limit for
-  // every one of them was the limit's worth of memory per request.
+  // into an array of exactly their length: a control response is a few hundred
+  // bytes, almost always one chunk.
   const chunks: Uint8Array[] = [];
   let length = 0;
   for (;;) {
     const item = await reader.read();
     if (item.done) break;
-    if (item.value.byteLength > MAX_UPLOAD_RESPONSE_BYTES - length) {
-      await reader.cancel();
-      throw new UploadHttpError("upload_transport_failed");
-    }
     chunks.push(item.value);
     length += item.value.byteLength;
   }
@@ -215,7 +208,7 @@ export class FetchUploadTransport implements UploadTransport {
           : "upload_transport_failed",
       );
     }
-    return boundedResponse(response);
+    return controlResponse(response);
   }
 }
 

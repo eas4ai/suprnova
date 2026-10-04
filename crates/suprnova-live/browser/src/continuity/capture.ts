@@ -3,14 +3,7 @@ import type { SignalContinuity } from "../signals/lifecycle.js";
 import { captureFocus, captureSelections } from "./focus.js";
 import { captureControls } from "./forms.js";
 import { captureScroll } from "./scroll.js";
-import {
-  consumeContinuityBytes,
-  ContinuityError,
-  DEFAULT_CONTINUITY_LIMITS,
-  type CompositionRecord,
-  type ContinuityLimits,
-  type ContinuityRecord,
-} from "./types.js";
+import { ContinuityError, type CompositionRecord, type ContinuityRecord } from "./types.js";
 
 interface ActiveComposition {
   data: string;
@@ -67,7 +60,6 @@ export class CompositionTracker {
 
 export interface ContinuityCaptureInput {
   readonly composition: CompositionTracker;
-  readonly limits?: ContinuityLimits;
   readonly signalScopes: readonly SignalContinuity[];
 }
 
@@ -75,24 +67,17 @@ export function captureContinuity(
   plan: MorphPlan,
   input: ContinuityCaptureInput,
 ): ContinuityRecord {
-  const limits = input.limits ?? DEFAULT_CONTINUITY_LIMITS;
-  const budget = { bytes: 0, limit: limits.maxRetainedBytes };
   const focus = captureFocus(plan);
-  const controls = captureControls(plan, limits, budget);
-  const selections = captureSelections(plan, limits, budget);
+  const controls = captureControls(plan);
+  const selections = captureSelections(plan);
   const composition = input.composition.capture(plan);
-  if (composition !== null) consumeContinuityBytes(budget, composition.data);
-  for (const scope of input.signalScopes) {
-    consumeContinuityBytes(budget, scope.identity);
-    consumeContinuityBytes(budget, JSON.stringify(scope.values));
-  }
   return Object.freeze({
     composition,
     controls,
     focusElement: focus.element,
     focusedKey: focus.focusedKey,
     focusVisible: focus.focusVisible,
-    scroll: captureScroll(plan, limits),
+    scroll: captureScroll(plan),
     selections,
     signalScopes: Object.freeze([...input.signalScopes]),
   });

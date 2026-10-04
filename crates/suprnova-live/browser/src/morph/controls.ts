@@ -1,4 +1,5 @@
 import { parseDirective } from "../directives/parser.js";
+import { limitBreach, LiveLimitError } from "../limits.js";
 import type { IdentityPlan, MorphLimits } from "./types.js";
 import type { TeleportTargetPort } from "./teleport.js";
 
@@ -43,15 +44,9 @@ function directiveName(name: string): string | null {
   return name.slice(5).split(".", 1)[0] ?? null;
 }
 
-function utf8Length(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
-}
-
-function stableKey(element: Element, limits: MorphLimits): string {
+function stableKey(element: Element): string {
   const key = stableKeyOf(element);
-  if (key === null || !SAFE_KEY.test(key) || utf8Length(key) > limits.maxKeyBytes) {
-    return fail("key_invalid");
-  }
+  if (key === null || !SAFE_KEY.test(key)) return fail("key_invalid");
   return key;
 }
 
@@ -68,12 +63,12 @@ function descendantAuthority(element: Element): boolean {
         return true;
       }
     }
-    stack.push(...candidate.children);
+    for (const item of candidate.children) stack.push(item);
   }
   return false;
 }
 
-function controlFor(element: Element, limits: MorphLimits): MorphControl | null {
+function controlFor(element: Element): MorphControl | null {
   const attributes = [...element.attributes];
   const controls = attributes.filter((attribute) => {
     const name = directiveName(attribute.name);
@@ -87,7 +82,7 @@ function controlFor(element: Element, limits: MorphLimits): MorphControl | null 
   const names = attributes.map(({ name }) => name);
   const parsed = parseDirective(attribute.name, attribute.value, names);
   if (!parsed.ok) return fail(parsed.code);
-  const key = stableKey(element, limits);
+  const key = stableKey(element);
   switch (parsed.name) {
     case "preserve":
       if (parsed.modifiers.length !== 1 || parsed.modifiers[0] !== "self") {
@@ -136,7 +131,7 @@ function sameControl(current: MorphControl, replacement: MorphControl): boolean 
   return true;
 }
 
-function scanControls(root: Element, limits: MorphLimits): Map<string, ControlCandidate> {
+function scanControls(root: Element): Map<string, ControlCandidate> {
   const controls = new Map<string, ControlCandidate>();
   const stack: Readonly<{ element: Element; mobileAncestor: boolean }>[] = [...root.children]
     .reverse()
@@ -146,7 +141,7 @@ function scanControls(root: Element, limits: MorphLimits): Map<string, ControlCa
     if (entry === undefined) break;
     const { element, mobileAncestor } = entry;
     if (element.hasAttribute(ISLAND_ATTRIBUTE)) continue;
-    const control = controlFor(element, limits);
+    const control = controlFor(element);
     if (
       control !== null &&
       mobileAncestor &&
@@ -178,13 +173,11 @@ function containedBy(candidate: Element, ancestor: Element): boolean {
   return false;
 }
 
-function externalIdentity(element: Element, limits: MorphLimits): string | null {
+function externalIdentity(element: Element): string | null {
   const id = element.getAttribute("id");
-  if (id !== null && (!SAFE_KEY.test(id) || utf8Length(id) > limits.maxKeyBytes)) {
-    fail("active_teleport_identity");
-  }
+  if (id !== null && !SAFE_KEY.test(id)) fail("active_teleport_identity");
   const liveKey = stableKeyOf(element);
-  if (liveKey !== null) return `live_key:${stableKey(element, limits)}`;
+  if (liveKey !== null) return `live_key:${stableKey(element)}`;
   return id === null ? null : `id:${id}`;
 }
 
@@ -194,14 +187,18 @@ function externalIdentities(root: Element, limits: MorphLimits): ReadonlyMap<str
   while (stack.length > 0) {
     const element = stack.pop();
     if (element === undefined) break;
-    const token = externalIdentity(element, limits);
+    const token = externalIdentity(element);
     if (token !== null) {
-      if (identities.has(token) || identities.size >= limits.maxKeys) {
-        fail("active_teleport_identity");
+      if (identities.has(token)) fail("active_teleport_identity");
+      if (identities.size >= limits.maxKeys) {
+        throw new LiveLimitError(
+          "morph_control_active_teleport_identity",
+          limitBreach("morphMaxKeys", identities.size + 1, limits.maxKeys),
+        );
       }
       identities.set(token, element);
     }
-    stack.push(...element.children);
+    for (const item of element.children) stack.push(item);
   }
   return identities;
 }
@@ -215,14 +212,13 @@ export function planMorphControls(
   currentRoot: Element,
   replacementRoot: Element,
   identity: IdentityPlan,
-  limits: MorphLimits,
   teleports?: TeleportTargetPort,
 ): MorphControlPlan {
-  const current = scanControls(currentRoot, limits);
-  const replacement = scanControls(replacementRoot, limits);
+  const current = scanControls(currentRoot);
+  const replacement = scanControls(replacementRoot);
   const activeElements = new Set<Element>();
   for (const active of teleports?.active?.(currentRoot) ?? []) {
-    const control = controlFor(active.node, limits);
+    const control = controlFor(active.node);
     const existing = current.get(active.key);
     if (
       control?.kind !== "teleport" ||

@@ -222,6 +222,20 @@ impl LiveEndpointService {
         }
     }
 
+    /// Handles one request like [`Self::handle`] and also returns the failure
+    /// behind an error response, so the host can report it. The response is
+    /// the same closed mapping either way; the failure never reaches the
+    /// browser.
+    pub async fn handle_reported(
+        &self,
+        request: LiveEndpointRequest,
+    ) -> (LiveEndpointResponse, Option<EndpointError>) {
+        match self.try_handle(request).await {
+            Ok(response) => (response, None),
+            Err(error) => (self.error_response(error), Some(error)),
+        }
+    }
+
     /// Converts a normalization failure into the endpoint's closed HTTP mapping.
     #[must_use]
     pub fn error_response(&self, error: EndpointError) -> LiveEndpointResponse {
@@ -236,7 +250,11 @@ impl LiveEndpointService {
             return Err(EndpointError::new(EndpointErrorKind::MethodNotAllowed));
         }
         if request.body.len() > self.config.max_request_bytes() {
-            return Err(EndpointError::new(EndpointErrorKind::RequestTooLarge));
+            return Err(EndpointError::too_large(
+                EndpointErrorKind::RequestTooLarge,
+                request.body.len(),
+                self.config.max_request_bytes(),
+            ));
         }
         let now = self
             .clock
@@ -356,7 +374,11 @@ impl LiveEndpointService {
             return Err(EndpointError::new(EndpointErrorKind::SnapshotRejected));
         }
         if body.len() > self.config.max_response_bytes() {
-            return Err(EndpointError::new(EndpointErrorKind::ResponseTooLarge));
+            return Err(EndpointError::too_large(
+                EndpointErrorKind::ResponseTooLarge,
+                body.len(),
+                self.config.max_response_bytes(),
+            ));
         }
         let response = parse_versioned_update_response(&body, self.config.protocol())
             .map_err(|_| EndpointError::new(EndpointErrorKind::InvalidKernelResponse))?;
@@ -376,7 +398,11 @@ impl LiveEndpointService {
         let encoded = encode_versioned_update_response(&response, self.config.protocol())
             .map_err(|_| EndpointError::new(EndpointErrorKind::InvalidKernelResponse))?;
         if encoded.len() > self.config.max_response_bytes() {
-            return Err(EndpointError::new(EndpointErrorKind::ResponseTooLarge));
+            return Err(EndpointError::too_large(
+                EndpointErrorKind::ResponseTooLarge,
+                encoded.len(),
+                self.config.max_response_bytes(),
+            ));
         }
         Ok(LiveEndpointResponse::complete(
             dispatch.outcome.status(),

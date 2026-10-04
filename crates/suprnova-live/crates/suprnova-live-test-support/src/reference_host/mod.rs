@@ -1705,7 +1705,7 @@ async fn fresh_render_scenario(
 <html lang="en">
 <head><meta charset="utf-8"><title>Reference fresh render</title></head>
 <body>
-<script id="suprnova-live-config" type="application/json">{{"asset_identity":"reference-host","credentials":"same-origin","endpoint":"/__live/async/poll","max_parallel_per_island":1,"max_queued_per_island":8,"max_response_bytes":65536,"protocol":{{"maximum":2,"minimum":2}},"request_timeout_ms":5000,"runtime_contract_version":1}}</script>
+<script id="suprnova-live-config" type="application/json">{{"asset_identity":"reference-host","credentials":"same-origin","endpoint":"/__live/async/poll","max_html_bytes":16777216,"max_json_depth":32,"max_json_entries":1000000,"max_parallel_per_island":1,"max_queued_per_island":8,"max_request_bytes":16777216,"max_request_items":65536,"max_response_bytes":16777216,"max_response_items":65536,"morph_deadline_ms":0,"morph_max_attributes":10000000,"morph_max_attributes_per_element":4096,"morph_max_depth":512,"morph_max_keys":1000000,"morph_max_nodes":1000000,"protocol":{{"maximum":2,"minimum":2}},"request_timeout_ms":60000,"runtime_contract_version":1}}</script>
 {island}
 <script type="module" src="{REFERENCE_FRESH_RENDER_DRIVER}"></script>
 </body>

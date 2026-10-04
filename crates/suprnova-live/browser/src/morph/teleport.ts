@@ -63,7 +63,7 @@ function walk(root: Element): readonly Element[] {
     if (element === undefined) break;
     if (element.hasAttribute(ISLAND_ATTRIBUTE)) continue;
     elements.push(element);
-    stack.push(...element.children);
+    for (const item of element.children) stack.push(item);
   }
   return elements;
 }
@@ -74,7 +74,7 @@ function containsNestedIsland(root: Element): boolean {
     const element = stack.pop();
     if (element === undefined) break;
     if (element.hasAttribute(ISLAND_ATTRIBUTE)) return true;
-    stack.push(...element.children);
+    for (const item of element.children) stack.push(item);
   }
   return false;
 }

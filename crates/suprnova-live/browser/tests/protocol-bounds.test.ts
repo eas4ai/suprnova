@@ -3,11 +3,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { canonicalize, type JsonValue } from "../src/canonical.js";
+import { SERVER_DEFAULT_LIMITS, type LiveLimits } from "../src/limits.js";
 import {
-  MAX_EVENTS,
-  MAX_MODEL_PROPOSALS,
-  MAX_OPERATIONS,
-  MAX_VALIDATION_ENTRIES,
   ProtocolValidationError,
   validateUpdateRequest,
   validateUpdateResponse,
@@ -16,10 +13,11 @@ import { refusedRequestDiagnostic } from "../src/transport/fetch.js";
 import { LiveTransportError } from "../src/transport/state.js";
 
 // LIVE-028: the browser admits the message counts the framework's server
-// configures in ProtocolLimits (128 each). The browser had refused more than
-// eight proposals, operations and events and more than sixteen validation
-// entries, so a ten-field form never submitted against a server that
-// accepted it.
+// configures. The browser had refused more than eight proposals, operations
+// and events and more than sixteen validation entries, so a ten-field form
+// never submitted against a server that accepted it. Since 2026-10-04 the
+// counts are the server's LIVE_MAX_REQUEST_ITEMS and LIVE_MAX_RESPONSE_ITEMS,
+// read from the boot configuration, never a browser constant.
 
 type Json = Record<string, JsonValue>;
 
@@ -64,14 +62,17 @@ function refusal(action: () => void): string | null {
   }
 }
 
+function limits(overrides: Partial<LiveLimits>): LiveLimits {
+  return Object.freeze({ ...SERVER_DEFAULT_LIMITS, ...overrides });
+}
+
 describe("LIVE-028: the browser admits the framework's protocol counts", () => {
-  it("bounds every count at the framework's 128", () => {
-    expect([MAX_MODEL_PROPOSALS, MAX_OPERATIONS, MAX_VALIDATION_ENTRIES, MAX_EVENTS]).toEqual([
-      128, 128, 128, 128,
-    ]);
+  it("defaults every count to the server's default, far above the old 128", () => {
+    expect(SERVER_DEFAULT_LIMITS.maxRequestItems).toBe(65_536);
+    expect(SERVER_DEFAULT_LIMITS.maxResponseItems).toBe(65_536);
   });
 
-  it("sends a submit of ten fields, and of 127, and refuses 128 fields plus the action", () => {
+  it("sends a submit of ten fields and of 1,000, and refuses one over the configured count", () => {
     expect(
       refusal(() => {
         validateUpdateRequest(submitRequest(10));
@@ -79,17 +80,34 @@ describe("LIVE-028: the browser admits the framework's protocol counts", () => {
     ).toBeNull();
     expect(
       refusal(() => {
-        validateUpdateRequest(submitRequest(127));
+        validateUpdateRequest(submitRequest(1_000));
       }),
     ).toBeNull();
     expect(
       refusal(() => {
-        validateUpdateRequest(submitRequest(128));
+        validateUpdateRequest(submitRequest(127), limits({ maxRequestItems: 128 }));
+      }),
+    ).toBeNull();
+    expect(
+      refusal(() => {
+        validateUpdateRequest(submitRequest(128), limits({ maxRequestItems: 128 }));
       }),
     ).toBe("too_many_operations");
   });
 
-  it("accepts a response with seventeen validation entries and nine events, and refuses 129", () => {
+  it("names the request item setting when a submit is over it", () => {
+    let message = "";
+    try {
+      validateUpdateRequest(submitRequest(128), limits({ maxRequestItems: 128 }));
+    } catch (error: unknown) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("request item count limit exceeded (operations)");
+    expect(message).toContain("measured 129 items, configured 128 items");
+    expect(message).toContain("LIVE_MAX_REQUEST_ITEMS");
+  });
+
+  it("accepts a response with 1,000 validation entries and events, and refuses one over", () => {
     expect(
       refusal(() => {
         validateUpdateResponse(responseWith(17, 9));
@@ -97,19 +115,35 @@ describe("LIVE-028: the browser admits the framework's protocol counts", () => {
     ).toBeNull();
     expect(
       refusal(() => {
-        validateUpdateResponse(responseWith(128, 128));
+        validateUpdateResponse(responseWith(1_000, 1_000));
       }),
     ).toBeNull();
     expect(
       refusal(() => {
-        validateUpdateResponse(responseWith(129, 0));
+        validateUpdateResponse(responseWith(129, 0), limits({ maxResponseItems: 128 }));
       }),
     ).toBe("protocol_too_many_entries");
     expect(
       refusal(() => {
-        validateUpdateResponse(responseWith(0, 129));
+        validateUpdateResponse(responseWith(0, 129), limits({ maxResponseItems: 128 }));
       }),
     ).toBe("protocol_too_many_entries");
+  });
+
+  it("refuses a request over the configured byte limit, naming LIVE_MAX_REQUEST_BYTES", () => {
+    const text = submitRequest(10);
+    let error: unknown = null;
+    try {
+      validateUpdateRequest(text, limits({ maxRequestBytes: 64 }));
+    } catch (caught: unknown) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(ProtocolValidationError);
+    expect((error as ProtocolValidationError).code).toBe("protocol_input_too_large");
+    expect((error as Error).message).toContain(
+      `measured ${String(new TextEncoder().encode(text).byteLength)} bytes, configured 64 bytes`,
+    );
+    expect((error as Error).message).toContain("LIVE_MAX_REQUEST_BYTES");
   });
 });
 
@@ -118,6 +152,18 @@ describe("LIVE-028: the browser admits the framework's protocol counts", () => {
 // keeps its transport diagnostic.
 describe("LIVE-030: an oversized request is a resource limit", () => {
   it("classifies a bound refusal as resource_limit and nothing else", () => {
+    expect(
+      refusedRequestDiagnostic(
+        (() => {
+          try {
+            validateUpdateRequest(submitRequest(10), limits({ maxRequestBytes: 64 }));
+          } catch (error: unknown) {
+            return error;
+          }
+          return null;
+        })(),
+      ),
+    ).toMatchObject({ code: "resource_limit" });
     for (const code of [
       "too_many_model_proposals",
       "too_many_operations",

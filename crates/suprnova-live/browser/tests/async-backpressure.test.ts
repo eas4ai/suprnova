@@ -142,19 +142,22 @@ describe("browser async bounded pressure", () => {
     expect(documentQueue.current()).toEqual({ queuedBytes: 0, queuedEvents: 0 });
   });
 
-  it("accepts the exact document byte cap and rejects one byte over without leaking", () => {
+  it("counts bytes with no byte cap and refuses the 65th queued event without leaking", () => {
+    // The depth is the server's per-document queue depth; bytes are bounded by
+    // the server's configured payload and buffer limits, not here.
     const documentQueue = new AsyncDocumentQueueBudget();
-    expect(documentQueue.reserve(8, 256 * 1024)).toBe(true);
+    expect(documentQueue.reserve(8, 64 * 1024 * 1024)).toBe(true);
     expect(documentQueue.current()).toEqual({
-      queuedBytes: 256 * 1024,
+      queuedBytes: 64 * 1024 * 1024,
       queuedEvents: 8,
     });
+    expect(documentQueue.reserve(56, 1)).toBe(true);
     expect(documentQueue.reserve(1, 1)).toBe(false);
     expect(documentQueue.current()).toEqual({
-      queuedBytes: 256 * 1024,
-      queuedEvents: 8,
+      queuedBytes: 64 * 1024 * 1024 + 1,
+      queuedEvents: 64,
     });
-    documentQueue.release(8, 256 * 1024);
+    documentQueue.release(64, 64 * 1024 * 1024 + 1);
     expect(documentQueue.current()).toEqual({ queuedBytes: 0, queuedEvents: 0 });
   });
 

@@ -5,6 +5,7 @@ use crate::clock::{ClockError, ClockErrorKind};
 use crate::component::composition::{CompositionError, CompositionErrorKind};
 use crate::component::{LifecycleError, LifecycleErrorKind};
 use crate::ledger::{LedgerError, LedgerErrorKind};
+use crate::limits::SizeBreach;
 use crate::random::{RandomError, RandomErrorKind};
 use crate::registry::{RegistryError, RegistryErrorKind};
 use crate::snapshot::{SnapshotError, SnapshotErrorKind};
@@ -38,6 +39,9 @@ pub enum MountFailure {
     /// The view subsystem refused the rendered fragment, the mount metadata, or the assembled
     /// island root.
     View(ViewErrorKind),
+    /// The rendered island HTML was over the configured byte limit; the sizes
+    /// let the host name the limit and the setting to raise.
+    ViewTooLarge(SizeBreach),
     /// The instance ledger refused to create the instance authority.
     Ledger(LedgerErrorKind),
 }
@@ -92,7 +96,10 @@ impl MountCause for LifecycleError {
 
 impl MountCause for ViewError {
     fn mount_failure(&self) -> MountFailure {
-        MountFailure::View(self.kind())
+        match self.size() {
+            Some(size) => MountFailure::ViewTooLarge(size),
+            None => MountFailure::View(self.kind()),
+        }
     }
 }
 

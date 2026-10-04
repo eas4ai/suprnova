@@ -258,7 +258,8 @@ async fn oversized_live_body_is_rejected_before_protocol_or_component_work() {
             "content-type",
             "application/vnd.suprnova.live+json; charset=utf-8; version=1",
         )
-        .body(Full::new(Bytes::from(vec![b'x'; 1024 * 1024 + 1])))
+        // One byte over the default LIVE_MAX_REQUEST_BYTES (16 MiB).
+        .body(Full::new(Bytes::from(vec![b'x'; 16 * 1024 * 1024 + 1])))
         .expect("build request");
     let (status, headers, body) = dispatch_one(
         Router::new().try_live().expect("install Live routes"),

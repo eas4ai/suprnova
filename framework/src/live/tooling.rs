@@ -434,7 +434,7 @@ fn walk_templates(
 
 fn run_inspect(emitter: &mut Emitter<'_>) -> Result<(), ToolingError> {
     let registry = App::resolve::<LiveRegistry>().ok();
-    let config = App::resolve::<LiveConfig>().unwrap_or_default();
+    let config = LiveConfig::resolve().unwrap_or_default();
     let upload_host = App::resolve::<LiveUploadHost>().ok();
     let runtime = LiveRuntime::bind().ok();
     let readiness = runtime.as_ref().map(|runtime| {

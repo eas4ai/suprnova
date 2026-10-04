@@ -455,40 +455,20 @@ describe("browser SSE authorization adapters", () => {
     await Promise.resolve();
   });
 
-  it("fails a bearer stream closed when one SSE record exceeds the envelope bound", async () => {
-    let signalFailure: ((reason: string) => void) | undefined;
-    const failed = new Promise<string>((resolve) => {
-      signalFailure = resolve;
-    });
-    const oversized = new TextEncoder().encode(`data:${"x".repeat(65_537)}\n\n`);
-    const ports = new BrowserAsyncTransportPorts({
-      eventSource: vi.fn<BrowserAsyncTransportOptions["eventSource"]>(),
-      fetch: vi.fn<typeof globalThis.fetch>(() =>
-        Promise.resolve(
-          new Response(
-            new ReadableStream<Uint8Array>({
-              start(controller) {
-                controller.enqueue(oversized);
-                controller.close();
-              },
-            }),
-            { headers: { "Content-Type": "text/event-stream" } },
-          ),
-        ),
+  it("delivers one SSE record far past the old 64 KiB bound, split across chunks", async () => {
+    // The server encodes each envelope under LIVE_ASYNC_MAX_PAYLOAD_BYTES; the
+    // record reader has no size limit of its own.
+    const payload = "x".repeat(2 * 1024 * 1024);
+    const record = new TextEncoder().encode(`data:${payload}\n\n`);
+    const chunks = Array.from({ length: 32 }, (_, index) =>
+      record.subarray(
+        Math.floor((index * record.byteLength) / 32),
+        Math.floor(((index + 1) * record.byteLength) / 32),
       ),
-      membershipTimeoutMs: 5_000,
-      sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
-      timers: new FakeTimers().port,
-      webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
-    });
-
-    ports.eventSource(
-      connectRequest(Object.freeze({ credential: "bounded-bearer", kind: "bearer" as const }), {
-        failed: (reason) => signalFailure?.(reason),
-      }),
     );
-
-    await expect(failed).resolves.toBe("protocol_invalid");
+    const result = await deliver(chunks, 1);
+    expect(result.failure).toBeNull();
+    expect(result.messages).toEqual([payload]);
   });
 
   /** Streams `chunks` to a bearer SSE port and resolves with what it delivered. */

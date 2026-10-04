@@ -1,11 +1,11 @@
 //! Independent bounds for Live control envelopes and their nested payload classes.
 
-use crate::limits::InputLimits;
+use crate::limits::{HARD_MAX_COLLECTION_ITEMS, HARD_MAX_INPUT_BYTES, InputLimits};
 
 use super::{ProtocolError, ProtocolErrorKind};
 
-const MAX_NESTED_BYTES: usize = 16 * 1024 * 1024;
-const MAX_COLLECTION_ITEMS: usize = 4_096;
+const MAX_NESTED_BYTES: usize = HARD_MAX_INPUT_BYTES;
+const MAX_COLLECTION_ITEMS: usize = HARD_MAX_COLLECTION_ITEMS;
 
 /// Raw protocol policy values validated by [`ProtocolLimits`].
 #[derive(Clone, Debug, Eq, PartialEq)]

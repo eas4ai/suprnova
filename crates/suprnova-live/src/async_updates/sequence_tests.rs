@@ -591,12 +591,14 @@ fn server_authored_envelopes_require_the_current_registered_context() {
     .expect_err("signal schema must match current registration");
     assert_eq!(signal.kind(), AsyncEnvelopeErrorKind::UnregisteredPayload);
 
+    // The ceiling is the engine's payload ceiling; the configured payload
+    // limit of the delivery policy is lower and applies when it is queued.
     let oversized = RegisteredBrowserEvent::new(
         &context,
         BrowserOperationName::parse("orders.updated").expect("event name"),
         1,
         EventTarget::SelfIsland,
-        CanonicalValue::String("x".repeat(32_769)),
+        CanonicalValue::String("x".repeat(super::MAX_ASYNC_PAYLOAD_BYTES + 1)),
     )
     .expect_err("server-authored payloads must be bounded before envelope construction");
     assert_eq!(oversized.kind(), AsyncEnvelopeErrorKind::StringTooLong);
@@ -979,10 +981,22 @@ fn byte_depth_entry_string_and_payload_limits_are_enforced() {
 }
 
 #[test]
-fn production_entry_and_replay_limits_accept_exactly_1024_and_reject_1025() {
+fn entry_limits_accept_exactly_their_count_and_replay_accepts_1024_and_rejects_1025() {
     const ENVELOPE_ENTRY_OVERHEAD: usize = 12;
-    assert_eq!(MAX_ASYNC_ENVELOPE_ENTRIES, 1_024);
-    let exact_nested_entries = MAX_ASYNC_ENVELOPE_ENTRIES - ENVELOPE_ENTRY_OVERHEAD;
+    const ENTRY_LIMIT: usize = 1_024;
+    // The production codec's entry count is the engine ceiling: the server
+    // encodes only its own envelopes, under its configured payload limit. The
+    // entry bound itself is exercised with a profile that sets it to 1,024.
+    assert_eq!(MAX_ASYNC_ENVELOPE_ENTRIES, crate::limits::HARD_MAX_ENTRIES);
+    let entry_limited = AsyncCodecLimits::new(
+        super::MAX_ASYNC_ENVELOPE_BYTES,
+        crate::limits::HARD_MAX_DEPTH,
+        ENTRY_LIMIT,
+        super::MAX_ASYNC_PAYLOAD_BYTES,
+        super::MAX_ASYNC_PAYLOAD_BYTES,
+    )
+    .expect("a 1,024-entry codec profile");
+    let exact_nested_entries = ENTRY_LIMIT - ENVELOPE_ENTRY_OVERHEAD;
 
     let exact_array = (0..exact_nested_entries)
         .map(|_| "0")
@@ -999,7 +1013,7 @@ fn production_entry_and_replay_limits_accept_exactly_1024_and_reject_1025() {
         let payload = format!(
             "{{\"event\":\"orders.updated\",\"kind\":\"browser_event\",\"payload\":{nested},\"schema_version\":1,\"target\":\"self\"}}"
         );
-        let result = decode_async_envelope(&wire(&payload, 4, 41), &limits(), &context());
+        let result = decode_async_envelope(&wire(&payload, 4, 41), &entry_limited, &context());
         assert_eq!(result.map(|_| ()).map_err(|error| error.kind()), expected);
     }
 
@@ -1018,7 +1032,7 @@ fn production_entry_and_replay_limits_accept_exactly_1024_and_reject_1025() {
         let payload = format!(
             "{{\"event\":\"orders.updated\",\"kind\":\"browser_event\",\"payload\":{nested},\"schema_version\":1,\"target\":\"self\"}}"
         );
-        let result = decode_async_envelope(&wire(&payload, 4, 41), &limits(), &context());
+        let result = decode_async_envelope(&wire(&payload, 4, 41), &entry_limited, &context());
         assert_eq!(result.map(|_| ()).map_err(|error| error.kind()), expected);
     }
 

@@ -12,8 +12,8 @@ use crate::snapshot::state::FieldCategory;
 
 use super::{BindingIssue, BindingIssueKind, ModelCodec, ModelPath, PathErrorKind};
 
-const HARD_MAX_PROPOSALS: usize = 4_096;
-const HARD_MAX_ISSUES: usize = 1_024;
+const HARD_MAX_PROPOSALS: usize = crate::limits::HARD_MAX_COLLECTION_ITEMS;
+const HARD_MAX_ISSUES: usize = crate::limits::HARD_MAX_COLLECTION_ITEMS;
 
 /// Lossless pre-application state of one browser proposal.
 #[derive(Clone, Debug, Eq, PartialEq)]

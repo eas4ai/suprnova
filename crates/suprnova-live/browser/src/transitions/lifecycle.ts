@@ -1,7 +1,6 @@
 import { KEYED_SELECTOR, stableKeyOf } from "../morph/keys.js";
 import type { MorphIdentityEntry, MorphPlan } from "../morph/types.js";
 import {
-  MAX_TRANSITION_TARGETS,
   type TransitionCancelReason,
   type TransitionCompletion,
   type TransitionHandle,
@@ -118,9 +117,6 @@ export function prepareMorphTransitions(plan: MorphPlan): MorphTransitions {
       if (entry.current === null) throw new Error("transition_identity_invalid");
       before.push(target(entry.current, transition));
     } else after.push(Object.freeze({ entry, spec: transition }));
-    if (before.length + after.length > MAX_TRANSITION_TARGETS) {
-      throw new Error("transition_target_limit");
-    }
   }
   return Object.freeze({
     after: (root: HTMLElement) =>

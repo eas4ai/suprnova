@@ -13,8 +13,8 @@ interface RegisteredTarget {
   readonly target: SignalTarget;
 }
 
-const MAX_SIGNAL_TARGETS = 4_096;
-const MAX_SIGNAL_FLUSH_TARGETS = 4_096;
+// Targets have no count cap: each is one binding the server rendered, and the
+// flush cap this had skipped every target past the 4,096th without a word.
 
 function documentOrder(left: SignalTarget, right: SignalTarget): number {
   if (left.element === right.element) return 0;
@@ -36,7 +36,6 @@ export class SignalGraph {
 
   register(scope: LocalSignalScope, signal: string, target: SignalTarget): VoidFunction {
     if (this.#disposed) throw new Error("signal_graph_disposed");
-    if (this.#registrations.size >= MAX_SIGNAL_TARGETS) throw new Error("signal_target_limit");
     const owner = scope.owner(signal);
     const registration = { owner, signal, target };
     target.apply();
@@ -68,10 +67,7 @@ export class SignalGraph {
     const bySignal = this.#byOwner.get(scope);
     if (bySignal === undefined) return;
     for (const name of names) {
-      for (const registration of bySignal.get(name) ?? []) {
-        if (this.#pending.size >= MAX_SIGNAL_FLUSH_TARGETS) break;
-        this.#pending.add(registration);
-      }
+      for (const registration of bySignal.get(name) ?? []) this.#pending.add(registration);
     }
     if (this.#pending.size === 0 || this.#scheduled) return;
     this.#scheduled = true;

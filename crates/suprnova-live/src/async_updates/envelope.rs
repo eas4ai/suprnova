@@ -29,7 +29,14 @@ const MAX_SUBSCRIPTION_ID_BYTES: usize = 32;
 const MIN_SUBSCRIPTION_ID_BYTES: usize = 16;
 const MAX_PRESENTATION_SIGNALS: usize = 64;
 /// Maximum total array elements plus object members in async protocol v1.
-pub const MAX_ASYNC_ENVELOPE_ENTRIES: usize = 1_024;
+pub const MAX_ASYNC_ENVELOPE_ENTRIES: usize = crate::limits::HARD_MAX_ENTRIES;
+/// Room for the envelope around one payload: the subscription, stream,
+/// position and protocol fields, all short identities.
+const ASYNC_ENVELOPE_OVERHEAD_BYTES: usize = 4 * 1024;
+/// Ceiling on one complete async envelope: the payload ceiling plus the
+/// envelope around it.
+pub const MAX_ASYNC_ENVELOPE_BYTES: usize =
+    super::MAX_ASYNC_PAYLOAD_BYTES + ASYNC_ENVELOPE_OVERHEAD_BYTES;
 const ENVELOPE_KEYS: [&str; 5] = [
     "payload",
     "position",
@@ -156,12 +163,23 @@ impl AsyncCodecLimits {
         })
     }
 
-    /// Returns the locked protocol-v1 envelope profile shared by the v4 corpus.
+    /// Returns the protocol-v1 envelope profile shared by the v4 corpus.
+    ///
+    /// These are ceilings, not the operating limits: the server encodes only
+    /// its own envelopes, and the configured payload and queue limits of the
+    /// delivery policy apply first. Nesting stays at the parser's stack
+    /// ceiling.
     #[must_use]
     pub fn v1() -> Self {
-        match Self::new(65_536, 8, MAX_ASYNC_ENVELOPE_ENTRIES, 4_096, 32_768) {
+        match Self::new(
+            MAX_ASYNC_ENVELOPE_BYTES,
+            crate::limits::HARD_MAX_DEPTH,
+            MAX_ASYNC_ENVELOPE_ENTRIES,
+            super::MAX_ASYNC_PAYLOAD_BYTES,
+            super::MAX_ASYNC_PAYLOAD_BYTES,
+        ) {
             Ok(limits) => limits,
-            Err(_) => unreachable!("locked async limits are below engine ceilings"),
+            Err(_) => unreachable!("async ceilings are below engine ceilings"),
         }
     }
 
@@ -1352,6 +1370,13 @@ pub struct AsyncEnvelope {
 }
 
 impl AsyncEnvelope {
+    /// Returns the canonical byte length of this envelope's payload, the size
+    /// the delivery policy's payload limit is measured against, so a host can
+    /// report how far over its limit a payload went.
+    pub fn canonical_payload_len(&self) -> Result<usize, AsyncEnvelopeError> {
+        canonical_async_payload_len(self)
+    }
+
     /// Creates one server-authored v1 envelope bound to current membership.
     pub fn new(
         context: &AsyncEnvelopeContext,

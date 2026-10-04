@@ -3,10 +3,7 @@ import { decodeSnapshotPublicView, type SnapshotForm } from "./snapshot-view.js"
 
 export const ISLAND_ROOT_SELECTOR = "[data-suprnova-live-island]";
 export const ISLAND_STATUS_ATTRIBUTE = "data-suprnova-live-status";
-export const MAX_ISLANDS_PER_DOCUMENT = 10_000;
 
-const MAX_METADATA_UNITS = 131_072;
-const MAX_METADATA_ATTRIBUTES = 256;
 const MAX_IDENTITY_UNITS = 128;
 const MAX_UNSIGNED_64 = 18_446_744_073_709_551_615n;
 const SAFE_TEXT_IDENTITY = /^[A-Za-z0-9._:/-]+$/u;
@@ -78,20 +75,10 @@ function revision(value: string | null): bigint {
   return parsed;
 }
 
-function metadataUnits(element: Element): number {
-  if (element.attributes.length > MAX_METADATA_ATTRIBUTES) return MAX_METADATA_UNITS + 1;
-  let units = 0;
-  for (const attribute of element.attributes) {
-    if (!attribute.name.startsWith("data-suprnova-live-")) continue;
-    units += attribute.name.length + attribute.value.length;
-    if (units > MAX_METADATA_UNITS) return units;
-  }
-  return units;
-}
-
+// The root's metadata, the signed snapshot above all, is what the server
+// rendered under its own limits; the browser checks its grammar, not its size.
 function validateAttributeSet(element: Element): void {
   if (element.getAttribute("data-suprnova-live-island") !== "") fail("root_marker");
-  if (metadataUnits(element) > MAX_METADATA_UNITS) fail("metadata_limit");
   for (const required of REQUIRED_ATTRIBUTES)
     if (!element.hasAttribute(required)) fail("attribute");
   for (const attribute of element.attributes) {
@@ -129,7 +116,7 @@ export function parseIslandMetadata(element: Element, config: RuntimeConfig): Is
   if (encodedSnapshot === null) fail("snapshot");
   let view;
   try {
-    view = decodeSnapshotPublicView(encodedSnapshot);
+    view = decodeSnapshotPublicView(encodedSnapshot, config.limits.maxJsonDepth);
   } catch {
     return fail("snapshot");
   }

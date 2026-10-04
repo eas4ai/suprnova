@@ -17,7 +17,6 @@ import type {
 
 const MAX_LOGICAL_SUBSCRIPTIONS = 256;
 const MAX_PENDING_HANDSHAKES_PER_ORIGIN = 1_024;
-const MAX_SSE_RECORD_BYTES = 65_536;
 const MAX_WEBSOCKET_ACK_BYTES = 512;
 // Reserved versioned routes of the framework host: one SSE reader per document
 // transport and one same-origin WebSocket per document transport.
@@ -195,16 +194,14 @@ function findRecordEnd(bytes: Uint8Array, from: number): number {
   return -1;
 }
 
-/** The most an incomplete record may hold while the rest of it arrives. */
-const MAX_SSE_CARRY_BYTES = MAX_SSE_RECORD_BYTES + 512;
-
 /**
  * Splits a server-sent event stream into records. A record wholly inside a
  * network chunk is decoded from a view of that chunk; only a record a chunk
  * leaves unfinished is carried, in a buffer that grows by doubling. Joining
  * every chunk onto the bytes held before, and slicing the rest off after
- * every record, copied the stream over and over. The size limit applies to
- * each record, so a chunk of many small records is read whole.
+ * every record, copied the stream over and over. A record has no size limit
+ * of its own here: the server encoded its envelope under its configured
+ * payload limit (`LIVE_ASYNC_MAX_PAYLOAD_BYTES`).
  */
 class SseRecordReader {
   #carry = new Uint8Array(0);
@@ -230,7 +227,6 @@ class SseRecordReader {
         }
         recordEnd = carried + inChunk;
       }
-      if (recordEnd > MAX_SSE_RECORD_BYTES) throw new Error("async_sse_record_too_large");
       if (recordEnd > carried) this.#append(chunk.subarray(0, recordEnd - carried));
       record(this.#carry.subarray(0, recordEnd));
       this.#carryLength = 0;
@@ -240,7 +236,6 @@ class SseRecordReader {
     for (;;) {
       const end = findRecordEnd(view, start);
       if (end < 0) break;
-      if (end - start > MAX_SSE_RECORD_BYTES) throw new Error("async_sse_record_too_large");
       record(view.subarray(start, end));
       start = end + 2;
     }
@@ -254,11 +249,8 @@ class SseRecordReader {
 
   #append(bytes: Uint8Array): void {
     const length = this.#carryLength + bytes.byteLength;
-    if (length > MAX_SSE_CARRY_BYTES) throw new Error("async_sse_record_too_large");
     if (length > this.#carry.byteLength) {
-      const grown = new Uint8Array(
-        Math.min(MAX_SSE_CARRY_BYTES, Math.max(length, this.#carry.byteLength * 2, 256)),
-      );
+      const grown = new Uint8Array(Math.max(length, this.#carry.byteLength * 2, 256));
       grown.set(this.#carry.subarray(0, this.#carryLength));
       this.#carry = grown;
     }
@@ -288,8 +280,6 @@ function decodeSseRecord(bytes: Uint8Array): string | null {
       throw new Error("async_sse_record_invalid");
     }
   }
-  // The record is at most MAX_SSE_RECORD_BYTES, and `data` is part of it,
-  // so its UTF-8 length cannot exceed the limit: no need to encode it again.
   if (data === null) throw new Error("async_sse_record_invalid");
   return data;
 }

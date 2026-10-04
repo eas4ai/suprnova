@@ -1,8 +1,9 @@
 {
   "schema_version": 1,
   "element": {"id": "suprnova-live-config", "type": "application/json", "maximum_count": 1},
-  "required_keys": ["asset_identity", "credentials", "endpoint", "max_parallel_per_island", "max_queued_per_island", "max_response_bytes", "protocol", "request_timeout_ms", "runtime_contract_version"],
-  "bounds": {"bytes": 16384, "depth": 8, "entries": 64, "request_timeout_ms": [100, 120000], "max_response_bytes": [1024, 4194304], "max_queued_per_island": [1, 64], "max_parallel_per_island": [1, 8]},
+  "required_keys": ["asset_identity", "credentials", "endpoint", "max_html_bytes", "max_json_depth", "max_json_entries", "max_parallel_per_island", "max_queued_per_island", "max_request_bytes", "max_request_items", "max_response_bytes", "max_response_items", "morph_deadline_ms", "morph_max_attributes", "morph_max_attributes_per_element", "morph_max_depth", "morph_max_keys", "morph_max_nodes", "protocol", "request_timeout_ms", "runtime_contract_version"],
+  "bounds": {"depth": 32, "request_timeout_ms": [1, 2147483647], "max_queued_per_island": [1, 64], "max_parallel_per_island": [1, 8]},
+  "limits": "server_configured",
   "credentials": ["same-origin", "include"],
   "cross_origin_authority": "bootstrap_options_only"
 }

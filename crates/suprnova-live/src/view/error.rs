@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt;
 
 use crate::identity::ViewName;
+use crate::limits::SizeBreach;
 
 /// Closed reason a view did not produce an accepted render result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,22 +65,39 @@ impl ViewErrorKind {
     }
 }
 
-/// Redacted rendering error that retains only a validated source identity.
+/// Redacted rendering error that retains only a validated source identity
+/// and, for a body over its limit, the measured and configured sizes.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ViewError {
     kind: ViewErrorKind,
     view: Option<ViewName>,
+    size: Option<SizeBreach>,
 }
 
 impl ViewError {
     pub(crate) const fn new(kind: ViewErrorKind) -> Self {
-        Self { kind, view: None }
+        Self {
+            kind,
+            view: None,
+            size: None,
+        }
     }
 
     pub(crate) fn at(kind: ViewErrorKind, view: &ViewName) -> Self {
         Self {
             kind,
             view: Some(view.clone()),
+            size: None,
+        }
+    }
+
+    /// A body over the configured byte limit, with both sizes kept so the
+    /// host can say which setting to raise.
+    pub(crate) fn body_too_large(view: &ViewName, size: SizeBreach) -> Self {
+        Self {
+            kind: ViewErrorKind::BodyTooLarge,
+            view: Some(view.clone()),
+            size: Some(size),
         }
     }
 
@@ -87,6 +105,12 @@ impl ViewError {
     #[must_use]
     pub const fn kind(&self) -> ViewErrorKind {
         self.kind
+    }
+
+    /// Returns the measured and configured sizes of a body over its limit.
+    #[must_use]
+    pub const fn size(&self) -> Option<SizeBreach> {
+        self.size
     }
 }
 
@@ -96,6 +120,15 @@ impl fmt::Display for ViewError {
         if let Some(view) = &self.view {
             formatter.write_str(":")?;
             formatter.write_str(view.as_str())?;
+        }
+        if let Some(size) = self.size {
+            write!(
+                formatter,
+                " (measured {}{} bytes, configured {} bytes)",
+                if size.at_least { "at least " } else { "" },
+                size.measured,
+                size.configured
+            )?;
         }
         Ok(())
     }

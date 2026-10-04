@@ -396,7 +396,7 @@ fn expand_definition(
 
             fn render_generated_view(
                 &self,
-                _context: &::suprnova::live::__private::component::RenderContext<'_>,
+                context: &::suprnova::live::__private::component::RenderContext<'_>,
                 metadata: &::suprnova::live::__private::metadata::ComponentMetadata,
             ) -> ::std::result::Result<
                 ::suprnova::live::__private::view::IslandRender,
@@ -407,6 +407,7 @@ fn expand_definition(
                     #(#visible_view_values,)*
                 };
                 ::suprnova::live::__private::component::generated::render_component_view(
+                    context,
                     metadata,
                     &template,
                 )

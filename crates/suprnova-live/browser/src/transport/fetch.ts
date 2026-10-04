@@ -2,6 +2,7 @@ import type { RuntimeScheduler, TransportPort } from "../runtime/ports.js";
 import type { IslandRecord } from "../islands/record.js";
 import type { RuntimeDiagnosticInput, RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
 import type { RuntimePorts } from "../runtime/ports.js";
+import { breachOf, type LiveLimits } from "../limits.js";
 import type { RuntimeConfig } from "../runtime/types.js";
 import type { SchedulerTicket } from "../scheduler/types.js";
 import { ProtocolValidationError } from "../protocol.js";
@@ -21,7 +22,8 @@ export interface LiveFetchOptions {
   readonly endpoint: URL;
   readonly credentials: "same-origin" | "include";
   readonly requestTimeoutMs: number;
-  readonly maxResponseBytes: number;
+  /// The server's configured limits; the response is read under them.
+  readonly limits: LiveLimits;
   readonly transport: TransportPort;
   readonly scheduler: RuntimeScheduler;
   readonly isOnline: () => boolean;
@@ -86,7 +88,7 @@ export async function fetchLiveRequest(
       signal: controller.signal,
     });
     state.beginRead();
-    const result = await readLiveResponse(request, response, options.maxResponseBytes);
+    const result = await readLiveResponse(request, response, options.limits);
     if (aborted(options.signal)) throw new LiveTransportError("aborted");
     if (controller.signal.aborted) throw state.interruption(options.isOnline);
     state.settle();
@@ -114,7 +116,11 @@ const DEFAULT_RETRY_POLICY: RetryPolicy = Object.freeze({
 /// network failure (LIVE-030). Other errors keep their transport meaning.
 export function refusedRequestDiagnostic(error: unknown): RuntimeDiagnosticInput | null {
   if (!(error instanceof ProtocolValidationError)) return null;
-  if (!error.code.startsWith("too_many_") && error.code !== "protocol_too_many_entries") {
+  if (
+    error.liveLimit === null &&
+    !error.code.startsWith("too_many_") &&
+    error.code !== "protocol_too_many_entries"
+  ) {
     return null;
   }
   return {
@@ -161,7 +167,7 @@ export class LiveTransportCoordinator {
   readonly #config: RuntimeConfig;
   readonly #ports: RuntimePorts;
   readonly #diagnostics: RuntimeDiagnosticSink;
-  readonly #builder = new LiveRequestBuilder();
+  readonly #builder: LiveRequestBuilder;
   readonly #work = new Map<IslandRecord, IslandTransportWork>();
   readonly #responseObserver: LiveResponseObserver;
   #disposed = false;
@@ -177,6 +183,7 @@ export class LiveTransportCoordinator {
     this.#ports = ports;
     this.#diagnostics = diagnostics;
     this.#responseObserver = responseObserver;
+    this.#builder = new LiveRequestBuilder(config.limits);
   }
 
   connect(record: IslandRecord): void {
@@ -267,7 +274,7 @@ export class LiveTransportCoordinator {
             credentials: this.#config.credentials,
             endpoint: this.#config.endpoint,
             isOnline: () => this.#ports.connectivity.isOnline(),
-            maxResponseBytes: this.#config.maxResponseBytes,
+            limits: this.#config.limits,
             requestTimeoutMs: this.#config.requestTimeoutMs,
             scheduler: this.#ports.scheduler,
             ...(signal === undefined ? {} : { signal }),
@@ -323,6 +330,8 @@ export class LiveTransportCoordinator {
       record.scheduler.finish(ticket, failure.kind === "aborted" ? "canceled" : "rejected");
       const diagnostic = refusedRequestDiagnostic(error) ?? transportFailureDiagnostic(failure);
       if (diagnostic !== null) this.#diagnostics.record(diagnostic);
+      const breach = breachOf(error);
+      if (breach !== null) this.#diagnostics.limit?.(breach);
       this.#pump(record);
     }
   }

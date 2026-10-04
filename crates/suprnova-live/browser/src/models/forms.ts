@@ -23,7 +23,9 @@ import {
 import { MISSING, immutableModelValue, isMissing, modelValuesEqual } from "./value.js";
 
 const MODEL_DIRECTIVE_NAMES = new Set(["model"]);
-const MAX_BINDINGS_PER_ISLAND = 512;
+// Bindings, typed fields and their timers have no per-island cap: each is one
+// `live:model` the server rendered, and what a submit sends is checked against
+// the server's request limits when the request is built.
 
 export interface ModelBatchSample {
   readonly field: string;
@@ -139,7 +141,6 @@ export class ModelFormRuntime {
     const fields = new Set<string>();
     for (const owned of directives) {
       if (owned.directive.name !== "model" || this.#bindings.has(owned.directive)) continue;
-      if (bindings.size >= MAX_BINDINGS_PER_ISLAND) throw new Error("model_binding_limit");
       const binding: ModelBinding = Object.freeze({
         identity: this.#nextBindingIdentity(record, owned.directive.value),
         owned,
@@ -205,7 +206,6 @@ export class ModelFormRuntime {
       this.#typedFields.set(record, fields);
     }
     if (!fields.has(field)) {
-      if (fields.size >= MAX_BINDINGS_PER_ISLAND) throw new Error("model_binding_limit");
       fields.add(field);
       this.#state(record).register(field);
     }
@@ -393,7 +393,7 @@ export class ModelFormRuntime {
   #timing(record: IslandRecord): ModelTimingCoordinator {
     let timing = this.#timings.get(record);
     if (timing === undefined) {
-      timing = new ModelTimingCoordinator(this.#clock, this.#scheduler, MAX_BINDINGS_PER_ISLAND);
+      timing = new ModelTimingCoordinator(this.#clock, this.#scheduler);
       this.#timings.set(record, timing);
     }
     return timing;

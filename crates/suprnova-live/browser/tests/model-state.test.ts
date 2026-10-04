@@ -204,20 +204,32 @@ describe("per-island model state", () => {
     ).toThrow("intent_model_proposal_invalid");
   });
 
-  it("shares one bounded JSON-node budget across the complete proposal batch", () => {
+  it("carries a large proposal batch and guards only the copy's depth", () => {
+    // A batch's size is checked against the server's request limits when the
+    // request is built; the intent itself only guards its recursive copy.
     const source = Object.freeze({ eventType: "submit" }) as unknown as IntentSource;
-    const large = Array.from({ length: 1_100 }, () => 1);
+    const large = Array.from({ length: 50_000 }, () => 1);
+    const intent = new ServerIntent(
+      source,
+      [
+        Object.freeze({ field: "first", kind: "sync_model" }),
+        Object.freeze({ field: "second", kind: "sync_model" }),
+      ],
+      null,
+      { first: large, second: large },
+      { first: 1n, second: 1n },
+    );
+    expect(intent.modelProposals["first"]).toHaveLength(50_000);
+    let deep: JsonValue = 1;
+    for (let index = 0; index < 70; index += 1) deep = [deep];
     expect(
       () =>
         new ServerIntent(
           source,
-          [
-            Object.freeze({ field: "first", kind: "sync_model" }),
-            Object.freeze({ field: "second", kind: "sync_model" }),
-          ],
+          [Object.freeze({ field: "first", kind: "sync_model" })],
           null,
-          { first: large, second: large },
-          { first: 1n, second: 1n },
+          { first: deep },
+          { first: 1n },
         ),
     ).toThrow("intent_json_limit");
   });

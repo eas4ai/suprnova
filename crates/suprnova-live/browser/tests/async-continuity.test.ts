@@ -180,7 +180,9 @@ describe("browser asynchronous subscription continuity", () => {
     expect(applied).toEqual([]);
   });
 
-  it("rejects a replay transcript whose aggregate bytes exceed the document bound", () => {
+  it("applies a replay transcript larger than the old 256 KiB browser bound", () => {
+    // The server bounds what it holds in flight (LIVE_ASYNC_MAX_BUFFER_BYTES);
+    // the browser applies the transcript it is sent.
     const membership = {
       ...authorized(),
       presentationSignals: Object.freeze([
@@ -207,8 +209,8 @@ describe("browser asynchronous subscription continuity", () => {
       }),
     );
 
-    expect(() => subscription.receiveReplay(transcript)).toThrow("async_replay_too_large");
-    expect(subscription.position()).toEqual(position(4n, 40n));
+    expect(() => subscription.receiveReplay(transcript)).not.toThrow();
+    expect(subscription.position()).toEqual(position(4n, 49n));
   });
 
   it("claims current after a complete validated reconnect replay and not socket open", () => {
@@ -294,11 +296,13 @@ describe("browser asynchronous subscription continuity", () => {
     expect(browserEvent).toHaveBeenCalledOnce();
   });
 
-  it("bounds payloads by canonical UTF-8 bytes rather than UTF-16 code units", () => {
+  it("accepts a multibyte payload past the old 32 KiB browser bound", () => {
+    // The server encodes each payload under LIVE_ASYNC_MAX_PAYLOAD_BYTES; the
+    // browser has no payload cap of its own.
     const { subscription } = fixture();
     const astralPayload = Array.from({ length: 9 }, () => "💥".repeat(1_000));
 
-    expect(() =>
+    expect(
       subscription.receive(
         envelope(
           position(4n, 41n),
@@ -311,10 +315,10 @@ describe("browser asynchronous subscription continuity", () => {
           }),
         ),
       ),
-    ).toThrow("async_payload_too_large");
+    ).toBe("applied");
   });
 
-  it("accepts the exact UTF-8 payload boundary and rejects the first multibyte overflow", () => {
+  it("accepts the old 32 KiB boundary and the first multibyte past it", () => {
     const fields = {
       event: "orders.updated",
       kind: "browser_event",
@@ -341,9 +345,9 @@ describe("browser asynchronous subscription continuity", () => {
       { dispatch: () => "observed" },
       { now: () => 1_000 },
     );
-    expect(() =>
-      overflow.receive(envelope(position(4n, 41n), fields as unknown as AsyncPayload)),
-    ).toThrow("async_payload_too_large");
+    expect(overflow.receive(envelope(position(4n, 41n), fields as unknown as AsyncPayload))).toBe(
+      "applied",
+    );
   });
 
   it("retains the applied position but requires proof after restored authorization", () => {

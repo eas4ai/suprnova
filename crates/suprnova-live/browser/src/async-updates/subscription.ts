@@ -17,8 +17,11 @@ import type {
 } from "./types.js";
 import type { FreshRenderCompletion } from "../features/contract.js";
 
-const MAX_REPLAY_BYTES = 256 * 1024;
-const MAX_DOCUMENT_QUEUED_BYTES = 256 * 1024;
+// The document queue holds envelopes until their island can apply them. Its
+// depth is the server's per-document delivery queue depth, a protocol
+// constant; bytes are not counted here because the server encoded each
+// envelope under its configured payload limit (`LIVE_ASYNC_MAX_PAYLOAD_BYTES`)
+// and bounds what it holds in flight (`LIVE_ASYNC_MAX_BUFFER_BYTES`).
 const MAX_DOCUMENT_QUEUED_EVENTS = 64;
 
 export interface ReplayOutcome {
@@ -76,12 +79,7 @@ export class AsyncDocumentQueueBudget implements AsyncQueueAdmissionPort {
     ) {
       throw new Error("async_document_queue_admission_invalid");
     }
-    if (
-      this.#queuedEvents + events > MAX_DOCUMENT_QUEUED_EVENTS ||
-      this.#queuedBytes + bytes > MAX_DOCUMENT_QUEUED_BYTES
-    ) {
-      return false;
-    }
+    if (this.#queuedEvents + events > MAX_DOCUMENT_QUEUED_EVENTS) return false;
     this.#queuedEvents += events;
     this.#queuedBytes += bytes;
     return true;
@@ -509,10 +507,7 @@ export class AsyncSubscription {
     this.#assertCurrentAuthority();
     if (encoded.length === 0 || encoded.length > 1_024) throw new Error("async_replay_invalid");
     let replayBytes = 0;
-    for (const value of encoded) {
-      replayBytes += new TextEncoder().encode(value).byteLength;
-      if (replayBytes > MAX_REPLAY_BYTES) throw new Error("async_replay_too_large");
-    }
+    for (const value of encoded) replayBytes += new TextEncoder().encode(value).byteLength;
     const transcript = encoded.map((value) => decodeAsyncEnvelope(value, this.#authorization));
     if (transcript.some(({ payload }) => payload.kind === "complete")) {
       throw new Error("async_replay_invalid");
@@ -587,11 +582,6 @@ export class AsyncSubscription {
       return "authoritative_no_tail";
     }
     if (encoded.length > 1_024) throw new Error("async_replay_invalid");
-    let replayBytes = 0;
-    for (const value of encoded) {
-      replayBytes += new TextEncoder().encode(value).byteLength;
-      if (replayBytes > MAX_REPLAY_BYTES) throw new Error("async_replay_too_large");
-    }
     const transcript = encoded.map((value) => decodeAsyncEnvelope(value, authorization));
     if (transcript.some(({ payload }) => payload.kind === "complete")) {
       throw new Error("async_replay_invalid");

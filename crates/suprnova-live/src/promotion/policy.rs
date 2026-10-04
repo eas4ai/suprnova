@@ -9,7 +9,7 @@ use crate::identity::{
 
 use super::{PromotionError, PromotionErrorKind};
 
-const MAX_SEED_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SEED_BYTES: usize = crate::limits::HARD_MAX_INPUT_BYTES;
 const MAX_WINDOW_MS: u64 = 3_600_000;
 const MAX_PROMOTIONS_PER_WINDOW: usize = 100_000;
 const MAX_OUTSTANDING: usize = 100_000;

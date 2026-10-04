@@ -102,14 +102,17 @@ fn browser_production_boundaries_forbid_dynamic_execution_and_client_authority()
     let metadata =
         std::fs::read_to_string(repository_root().join("browser/src/islands/metadata.ts"))
             .expect("metadata source");
-    for required_bound in [
-        "MAX_METADATA_ATTRIBUTES",
-        "MAX_METADATA_UNITS",
-        "MAX_IDENTITY_UNITS",
-    ] {
+    // Identities keep their grammar bound. The root's metadata, the signed
+    // snapshot above all, is server-rendered under the server's configured
+    // limits, so the browser has no size cap of its own on it (2026-10-04).
+    assert!(
+        metadata.contains("MAX_IDENTITY_UNITS"),
+        "missing metadata bound: MAX_IDENTITY_UNITS"
+    );
+    for removed_cap in ["MAX_METADATA_ATTRIBUTES", "MAX_METADATA_UNITS"] {
         assert!(
-            metadata.contains(required_bound),
-            "missing metadata bound: {required_bound}"
+            !metadata.contains(removed_cap),
+            "the browser must not cap server-rendered metadata: {removed_cap}"
         );
     }
 

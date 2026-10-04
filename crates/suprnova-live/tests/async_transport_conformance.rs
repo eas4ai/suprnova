@@ -14,7 +14,7 @@ use suprnova_live::async_updates::{
     AsyncPolicy, AsyncTransportError, AsyncTransportErrorKind, AsyncTransportFuture,
     AuthorizedTransportSubscription, BoundedDocumentTransportSession, CloseDisposition,
     CompletionReason, DocumentAuthorizationScope, DocumentTransportHandle, DocumentTransportKind,
-    DocumentTransportLimits, DocumentTransportSession, Heartbeat,
+    DocumentTransportLimits, DocumentTransportSession, Heartbeat, MAX_ASYNC_ENVELOPE_BYTES,
     MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, RegisteredRefresh, ResolvedAsyncDelivery,
     SequenceDegradation, SequenceDisposition, SseEncoder, SseMembershipControl,
     SseResponseContract, StreamErrorCode, SubscriptionMode, VerifiedOrigin,
@@ -3219,7 +3219,9 @@ async fn websocket_codec_round_trips_envelopes_and_rejects_hostile_frames_and_me
         ),
         "WebSocketFrame::Text { bytes: 19, final_fragment: true }"
     );
-    let oversized_envelope = vec![b' '; 65_537];
+    // The envelope frame ceiling is the payload ceiling plus the envelope
+    // around it; the configured payload limit applies below it on the server.
+    let oversized_envelope = vec![b' '; MAX_ASYNC_ENVELOPE_BYTES + 1];
     assert_eq!(
         codec
             .decode_envelope(
@@ -3233,7 +3235,7 @@ async fn websocket_codec_round_trips_envelopes_and_rejects_hostile_frames_and_me
             .kind(),
         AsyncTransportErrorKind::FrameTooLarge
     );
-    let invalid_utf8_at_envelope_limit = vec![0xff; 65_536];
+    let invalid_utf8_at_envelope_limit = vec![0xff; MAX_ASYNC_ENVELOPE_BYTES];
     assert_eq!(
         codec
             .decode_envelope(
@@ -3247,7 +3249,7 @@ async fn websocket_codec_round_trips_envelopes_and_rejects_hostile_frames_and_me
             .kind(),
         AsyncTransportErrorKind::UnsupportedFrame
     );
-    let oversized_invalid_utf8_envelope = vec![0xff; 65_537];
+    let oversized_invalid_utf8_envelope = vec![0xff; MAX_ASYNC_ENVELOPE_BYTES + 1];
     assert_eq!(
         codec
             .decode_envelope(
@@ -3261,7 +3263,10 @@ async fn websocket_codec_round_trips_envelopes_and_rejects_hostile_frames_and_me
             .kind(),
         AsyncTransportErrorKind::FrameTooLarge
     );
-    for payload in [vec![b'a'; 1_048_576], vec![0xff; 1_048_576]] {
+    for payload in [
+        vec![b'a'; 2 * MAX_ASYNC_ENVELOPE_BYTES],
+        vec![0xff; 2 * MAX_ASYNC_ENVELOPE_BYTES],
+    ] {
         assert_eq!(
             codec
                 .decode_envelope(
@@ -3389,7 +3394,10 @@ async fn websocket_codec_round_trips_envelopes_and_rejects_hostile_frames_and_me
             .kind(),
         AsyncTransportErrorKind::FrameTooLarge
     );
-    for payload in [vec![b'a'; 1_048_576], vec![0xff; 1_048_576]] {
+    for payload in [
+        vec![b'a'; 2 * MAX_ASYNC_ENVELOPE_BYTES],
+        vec![0xff; 2 * MAX_ASYNC_ENVELOPE_BYTES],
+    ] {
         assert_eq!(
             codec
                 .decode_control(WebSocketFrame::Text {
