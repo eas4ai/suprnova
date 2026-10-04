@@ -327,6 +327,18 @@ export const SERVER_DEFAULT_LIMIT_CONFIG = Object.freeze({
   upload_max_pending_files: 1_024,
 });
 
+// The Rust reference host runs the engine's reference upload profile
+// (`UploadLimitConfig::reference()`), so a page it serves describes that
+// profile: the browser takes its upload limits from this element, and a page
+// that claimed the framework defaults would send chunks the host refuses.
+const REFERENCE_UPLOAD_LIMIT_CONFIG = Object.freeze({
+  upload_chunk_bytes: 262_144,
+  upload_max_active: 8,
+  upload_max_file_bytes: 67_108_864,
+  upload_max_pending_bytes: 268_435_456,
+  upload_max_pending_files: 128,
+});
+
 function config(overrides = {}) {
   return `<script id="suprnova-live-config" type="application/json">${JSON.stringify({
     asset_identity: "suprnova-live-test-v1",
@@ -1051,7 +1063,7 @@ function iteration004Scenario(searchParams = new URLSearchParams()) {
       <a href="/scenario/iteration004Destination">Ordinary destination</a>
       <form action="/scenario/iteration004Destination" method="get"><button type="submit">Continue ordinarily</button></form>`,
     scripts,
-    { endpoint: "/__live/async/poll" },
+    { endpoint: "/__live/async/poll", ...REFERENCE_UPLOAD_LIMIT_CONFIG },
   );
   return page.replace(
     '<html lang="en">',
