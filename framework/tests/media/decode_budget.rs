@@ -177,13 +177,13 @@ fn frame(left: u16, top: u16, width: u16, height: u16, index: u8) -> Frame {
 #[serial_test::serial]
 async fn an_animated_gif_decodes_as_its_first_frame() {
     // A red first frame, then fifty green 1x1 frames over its corner. All
-    // frames together need 51 canvases; the budget below holds four, and the
+    // frames together need 51 canvases; the budget below holds five, and the
     // pipeline only ever uses the first one.
-    let mut frames = vec![frame(0, 0, 32, 32, 0)];
+    let mut frames = vec![frame(0, 0, 256, 256, 0)];
     frames.extend((0..50).map(|_| frame(0, 0, 1, 1, 1)));
-    let animation = gif(32, 32, frames);
+    let animation = gif(256, 256, frames);
     let _config = ConfigGuard::set(ImageConfig {
-        max_alloc_bytes: 4 * 32 * 32 * 4,
+        max_alloc_bytes: 5 * 256 * 256 * 4,
         ..ImageConfig::default()
     });
 
@@ -194,7 +194,7 @@ async fn an_animated_gif_decodes_as_its_first_frame() {
             .dimensions()
             .await
             .expect("the first frame decodes"),
-        (32, 32)
+        (256, 256)
     );
     assert_eq!(
         image
@@ -297,6 +297,160 @@ async fn a_stored_file_over_the_cap_is_refused() {
         ..ImageConfig::default()
     });
     let err = Image::from_disk("budget", "big.png")
+        .to_bytes()
+        .await
+        .expect_err("the stored file is larger than the cap");
+    assert!(err.to_string().contains("limit"), "got: {err}");
+}
+
+/// A storage layer whose `stat` reports no content length, as a service that
+/// omits it does. OpenDAL then reports a size of zero.
+#[cfg(feature = "testing")]
+mod unknown_length {
+    use std::sync::Arc;
+
+    use opendal::raw::{
+        Layer, OpCopier, OpCopy, OpCreateDir, OpList, OpPresign, OpRead, OpRename, OpStat, OpWrite,
+        RpCreateDir, RpPresign, RpRename, RpStat, Service, ServiceInfo, Servicer, oio,
+    };
+    use opendal::{Capability, Metadata, OperationContext, Result};
+
+    #[derive(Debug, Clone, Copy)]
+    pub(super) struct UnknownLength;
+
+    impl Layer for UnknownLength {
+        fn apply_service(&self, inner: Servicer) -> Servicer {
+            Arc::new(UnknownLengthService { inner })
+        }
+    }
+
+    #[derive(Debug)]
+    struct UnknownLengthService {
+        inner: Servicer,
+    }
+
+    impl Service for UnknownLengthService {
+        type Reader = oio::Reader;
+        type Writer = oio::Writer;
+        type Lister = oio::Lister;
+        type Deleter = oio::Deleter;
+        type Copier = oio::Copier;
+
+        fn info(&self) -> ServiceInfo {
+            self.inner.info()
+        }
+
+        fn capability(&self) -> Capability {
+            self.inner.capability()
+        }
+
+        async fn create_dir(
+            &self,
+            ctx: &OperationContext,
+            path: &str,
+            args: OpCreateDir,
+        ) -> Result<RpCreateDir> {
+            self.inner.create_dir(ctx, path, args).await
+        }
+
+        async fn stat(&self, ctx: &OperationContext, path: &str, args: OpStat) -> Result<RpStat> {
+            let mode = self
+                .inner
+                .stat(ctx, path, args)
+                .await?
+                .into_metadata()
+                .mode();
+            Ok(RpStat::new(Metadata::new(mode)))
+        }
+
+        fn read(&self, ctx: &OperationContext, path: &str, args: OpRead) -> Result<Self::Reader> {
+            self.inner.read(ctx, path, args)
+        }
+
+        fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
+            self.inner.write(ctx, path, args)
+        }
+
+        fn delete(&self, ctx: &OperationContext) -> Result<Self::Deleter> {
+            self.inner.delete(ctx)
+        }
+
+        fn list(&self, ctx: &OperationContext, path: &str, args: OpList) -> Result<Self::Lister> {
+            self.inner.list(ctx, path, args)
+        }
+
+        fn copy(
+            &self,
+            ctx: &OperationContext,
+            from: &str,
+            to: &str,
+            args: OpCopy,
+            opts: OpCopier,
+        ) -> Result<Self::Copier> {
+            self.inner.copy(ctx, from, to, args, opts)
+        }
+
+        async fn rename(
+            &self,
+            ctx: &OperationContext,
+            from: &str,
+            to: &str,
+            args: OpRename,
+        ) -> Result<RpRename> {
+            self.inner.rename(ctx, from, to, args).await
+        }
+
+        async fn presign(
+            &self,
+            ctx: &OperationContext,
+            path: &str,
+            args: OpPresign,
+        ) -> Result<RpPresign> {
+            self.inner.presign(ctx, path, args).await
+        }
+    }
+}
+
+#[cfg(feature = "testing")]
+#[tokio::test]
+#[serial_test::serial]
+async fn a_stored_file_of_unknown_length_is_read_up_to_the_cap() {
+    use suprnova::DiskExt;
+
+    let _guard = suprnova::Storage::fake();
+    suprnova::Storage::register_memory_with("unknown-length", |operator| {
+        operator.layer(unknown_length::UnknownLength)
+    });
+    let disk = suprnova::Storage::disk("unknown-length").expect("disk");
+    let png = Image::from_bytes(crate::image_processing::RED_PNG_1X1)
+        .resize(6, 4)
+        .to_format(OutputFormat::Png)
+        .to_bytes()
+        .await
+        .expect("fixture build");
+    disk.put("image.png", png).await.expect("seed");
+    assert_eq!(
+        disk.size("image.png").await.expect("stat"),
+        0,
+        "the fixture only means something if the size is unknown"
+    );
+
+    // A size of zero is "unknown", not "empty": the object still reads.
+    let dimensions = Image::from_disk("unknown-length", "image.png")
+        .dimensions()
+        .await
+        .expect("an object whose length is unknown still decodes");
+    assert_eq!(dimensions, (6, 4));
+
+    // And the read still stops at the cap.
+    let mut oversized = PNG_SIGNATURE.to_vec();
+    oversized.resize(256 * 1024, 0);
+    disk.put("big.png", oversized).await.expect("seed");
+    let _config = ConfigGuard::set(ImageConfig {
+        max_alloc_bytes: 64 * 1024,
+        ..ImageConfig::default()
+    });
+    let err = Image::from_disk("unknown-length", "big.png")
         .to_bytes()
         .await
         .expect_err("the stored file is larger than the cap");

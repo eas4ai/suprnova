@@ -229,7 +229,7 @@ Suprnova refuses that before allocating anything.
 | Var | Default | Purpose |
 |---|---|---|
 | `IMAGE_MAX_DIMENSION` | `16384` | Cap on width and height in pixels |
-| `IMAGE_MAX_ALLOC_BYTES` | `268435456` (256 MiB) | Cap on the decoded RGBA footprint, and on the size of the source file itself |
+| `IMAGE_MAX_ALLOC_BYTES` | `268435456` (256 MiB) | Cap on the memory one decode may allocate, and on the size of the source file itself |
 | `IMAGE_MAGICK_TIMEOUT_SECS` | `30` | Wall-clock ceiling on one ImageMagick invocation (`magick` driver only) |
 
 The framework parses the input's own header - a few dozen bytes, no
@@ -248,8 +248,46 @@ more, and the default driver bounds that too:
   pipeline only uses the first frame. A first frame larger than the
   GIF's logical screen is refused before it is decoded.
 - A file or stored source is read no further than
-  `IMAGE_MAX_ALLOC_BYTES`, even when the size its filesystem reports is
-  wrong, as it is for a pipe.
+  `IMAGE_MAX_ALLOC_BYTES`, even when the size its storage reports is
+  wrong or missing, as it is for a pipe.
+
+### What a decode costs
+
+`IMAGE_MAX_ALLOC_BYTES` is the most memory one decode may allocate, not
+only the size of the decoded image. Decoders hold more than the pixels
+they return: an inflated PNG next to its unfiltered rows, a progressive
+JPEG's coefficients, the canvases a GIF frame is composed on. So the
+default driver works out, from the image's headers, how many bytes its
+decode will allocate, and refuses the image when that is over the limit.
+The refusal names the estimate:
+
+```text
+image exceeds configured decode limits: decoding this 6000x4000 image/jpeg
+needs about 436792745 bytes, over the IMAGE_MAX_ALLOC_BYTES limit of 268435456
+```
+
+As a guide, a decode needs about this many times width x height x 4
+bytes:
+
+| Format | Times |
+|---|---|
+| PNG, 8-bit grey or palette | 1.3 |
+| PNG, 8-bit RGB or RGBA | 2.5 to 5 |
+| PNG, 16-bit | 8 to 9.5 |
+| GIF | 3.3 to 3.6 |
+| JPEG, grey | 1.3 to 1.7 |
+| JPEG, colour | 2.6 to 4.7 (progressive and 4:4:4 at the top) |
+| WebP | 1.7 to 2.6 |
+| BMP | 1.1 to 2.1 |
+
+So the default 256 MiB decodes a 12-megapixel photo in every format but
+16-bit PNG, and not every 24-megapixel one: a progressive 4:4:4 JPEG at
+6000x4000 needs about 440 MB. Raise `IMAGE_MAX_ALLOC_BYTES` if your users
+upload images that large.
+
+One cost is not in the estimate: the prefix-code tables of a lossless
+WebP. Their number comes from the compressed data rather than from any
+header, so only the decode itself can count them.
 
 A limit hit is a 4xx-shaped `FrameworkError::param`, because oversized
 input is a client problem, not a server fault.

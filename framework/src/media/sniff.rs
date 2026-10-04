@@ -246,11 +246,16 @@ fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((be_u32(bytes, 16)?, be_u32(bytes, 20)?))
 }
 
-/// Walk the marker segments to the first Start-Of-Frame, which is where JPEG
-/// declares its size. The loop is bounded so a file made entirely of
-/// well-formed empty segments cannot spin.
-fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    let mut pos = 2usize; // past the SOI
+/// Walk JPEG marker segments from `pos`, returning the offset and marker of
+/// the first segment `wanted` accepts. The walk ends with `None` at the end
+/// of the image, at a byte that starts no marker, and at a scan nobody asked
+/// for, because entropy-coded data follows a scan header. The loop is
+/// bounded so a file made entirely of well-formed empty segments cannot spin.
+fn jpeg_find_marker(
+    bytes: &[u8],
+    mut pos: usize,
+    wanted: impl Fn(u8) -> bool,
+) -> Option<(usize, u8)> {
     for _ in 0..1024 {
         // Segments are 0xFF-prefixed; fill bytes are legal padding.
         while bytes.get(pos) == Some(&0xFF) && bytes.get(pos + 1) == Some(&0xFF) {
@@ -260,22 +265,14 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
             return None;
         }
         let marker = *bytes.get(pos + 1)?;
+        if wanted(marker) {
+            return Some((pos, marker));
+        }
         match marker {
             // Standalone markers: no payload length follows.
-            0x01 | 0xD0..=0xD7 => {
-                pos += 2;
-                continue;
-            }
-            // End of image, or the start of entropy-coded scan data. Either
-            // way there is no SOF ahead of us any more.
+            0x01 | 0xD0..=0xD7 => pos += 2,
+            // End of image, or the start of entropy-coded scan data.
             0xD9 | 0xDA => return None,
-            // SOF0..SOF15, minus the three markers that share the range but
-            // are not frame headers: DHT (C4), JPG (C8), DAC (CC).
-            0xC0..=0xCF if marker != 0xC4 && marker != 0xC8 && marker != 0xCC => {
-                let height = be_u16(bytes, pos + 5)?;
-                let width = be_u16(bytes, pos + 7)?;
-                return Some((u32::from(width), u32::from(height)));
-            }
             _ => {
                 let length = usize::from(be_u16(bytes, pos + 2)?);
                 if length < 2 {
@@ -288,18 +285,94 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
+/// SOF0..SOF15, minus the three markers that share the range but are not
+/// frame headers: DHT (C4), JPG (C8), DAC (CC).
+fn is_jpeg_frame_header(marker: u8) -> bool {
+    (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
+}
+
+/// Walk the marker segments to the first Start-Of-Frame, which is where JPEG
+/// declares its size.
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let (pos, _) = jpeg_find_marker(bytes, 2, is_jpeg_frame_header)?;
+    let height = be_u16(bytes, pos + 5)?;
+    let width = be_u16(bytes, pos + 7)?;
+    Some((u32::from(width), u32::from(height)))
+}
+
+/// What a JPEG's frame header and first scan header declare: everything that
+/// sizes the decoder's buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct JpegFrame {
+    /// The Start-Of-Frame marker, which names the coding process.
+    pub(crate) marker: u8,
+    /// Bits per sample.
+    pub(crate) precision: u8,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    /// Components the frame declares.
+    pub(crate) components: u8,
+    /// (horizontal, vertical) sampling factors of the first four components.
+    pub(crate) sampling: [(u8, u8); 4],
+    /// Identifiers of the first four components. `R`, `G`, `B` mark samples
+    /// stored as RGB rather than YCbCr.
+    pub(crate) ids: [u8; 4],
+    /// Components in the first scan, when the walk reached one. A first scan
+    /// with every component is what lets a sequential decode skip the
+    /// coefficient buffers.
+    pub(crate) first_scan: Option<u8>,
+}
+
+/// Read a JPEG's first frame header and the component count of its first
+/// scan header. No decode: the frame header sits before any entropy-coded
+/// data, and so does the first scan header.
+pub(crate) fn jpeg_frame(bytes: &[u8]) -> Option<JpegFrame> {
+    let (pos, marker) = jpeg_find_marker(bytes, 2, is_jpeg_frame_header)?;
+    let length = usize::from(be_u16(bytes, pos + 2)?);
+    let components = *bytes.get(pos + 9)?;
+    let mut sampling = [(0u8, 0u8); 4];
+    let mut ids = [0u8; 4];
+    for index in 0..usize::from(components).min(4) {
+        // Each component: identifier, sampling factors, quantization table.
+        let at = pos + 10 + 3 * index;
+        ids[index] = *bytes.get(at)?;
+        let packed = *bytes.get(at + 1)?;
+        sampling[index] = (packed >> 4, packed & 0x0F);
+    }
+    let after = pos.checked_add(2)?.checked_add(length)?;
+    let first_scan = jpeg_find_marker(bytes, after, |marker| marker == 0xDA)
+        .and_then(|(scan, _)| bytes.get(scan + 4).copied());
+    Some(JpegFrame {
+        marker,
+        precision: *bytes.get(pos + 4)?,
+        width: u32::from(be_u16(bytes, pos + 7)?),
+        height: u32::from(be_u16(bytes, pos + 5)?),
+        components,
+        sampling,
+        ids,
+        first_scan,
+    })
+}
+
 /// The logical screen descriptor follows the 6-byte version signature.
 fn gif_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((u32::from(le_u16(bytes, 6)?), u32::from(le_u16(bytes, 8)?)))
 }
 
-/// Where a GIF's first image sits on its logical screen.
+/// Where a GIF's first image sits on its logical screen, and what decoding
+/// it reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GifFrame {
     pub(crate) left: u16,
     pub(crate) top: u16,
     pub(crate) width: u16,
     pub(crate) height: u16,
+    /// Rows are stored in interlaced order, which the decoder reorders
+    /// through a second index buffer.
+    pub(crate) interlaced: bool,
+    /// Total LZW bytes in the frame's data sub-blocks, which the decoder
+    /// gathers into one buffer before decompressing.
+    pub(crate) data_len: usize,
 }
 
 impl GifFrame {
@@ -319,6 +392,8 @@ impl GifFrame {
 /// extension's first block: wherever that decoder finds the first image, this
 /// finds the same one. `None` when the stream ends, reaches its trailer, or
 /// breaks that grammar first, which are the cases that decoder refuses too.
+/// The walk reads on through the frame's color table and data sub-blocks,
+/// which the decoder needs whole as well.
 pub(crate) fn gif_first_frame(bytes: &[u8]) -> Option<GifFrame> {
     // The signature and Logical Screen Descriptor take 13 bytes. A Global
     // Color Table of 3 * 2^(n + 1) bytes follows when the top bit of the
@@ -330,13 +405,24 @@ pub(crate) fn gif_first_frame(bytes: &[u8]) -> Option<GifFrame> {
     }
     loop {
         match *bytes.get(pos)? {
-            // Image Descriptor: left, top, width, height.
+            // Image Descriptor: left, top, width, height, packed fields. A
+            // Local Color Table follows when the packed field's top bit is
+            // set, then the LZW minimum code size and the data sub-blocks.
             0x2C => {
+                let packed = *bytes.get(pos + 9)?;
+                let mut data = pos + 10;
+                if packed & 0x80 != 0 {
+                    data += 3 << ((packed & 0x07) + 1);
+                }
+                bytes.get(data)?;
+                let data_len = sub_blocks_len(bytes, data + 1)?;
                 return Some(GifFrame {
                     left: le_u16(bytes, pos + 1)?,
                     top: le_u16(bytes, pos + 3)?,
                     width: le_u16(bytes, pos + 5)?,
                     height: le_u16(bytes, pos + 7)?,
+                    interlaced: packed & 0x40 != 0,
+                    data_len,
                 });
             }
             // Extension introducer, then a label byte.
@@ -385,6 +471,22 @@ fn skip_sub_blocks(bytes: &[u8], mut pos: usize) -> Option<usize> {
     }
 }
 
+/// The total payload of a run of GIF data sub-blocks, which must end with
+/// its zero-length terminator inside `bytes`.
+fn sub_blocks_len(bytes: &[u8], mut pos: usize) -> Option<usize> {
+    let mut total = 0usize;
+    loop {
+        let len = usize::from(*bytes.get(pos)?);
+        pos += 1;
+        if len == 0 {
+            return Some(total);
+        }
+        bytes.get(pos..pos + len)?;
+        pos += len;
+        total += len;
+    }
+}
+
 /// BMP carries its size in the DIB header, whose layout depends on its own
 /// declared length. The legacy 12-byte BITMAPCOREHEADER uses `u16` fields;
 /// every later version uses `i32`, where a negative height means the rows are
@@ -397,6 +499,68 @@ fn bmp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     let width = le_u32(bytes, 18)? as i32;
     let height = le_u32(bytes, 22)? as i32;
     Some((width.unsigned_abs(), height.unsigned_abs()))
+}
+
+/// What a BMP's DIB header declares beyond its size: the fields that pick the
+/// decoder's buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BmpLayout {
+    pub(crate) bits_per_pixel: u16,
+    /// `biCompression`: 1 and 2 are the run-length encodings.
+    pub(crate) compression: u32,
+    /// Palette entries the header declares (`biClrUsed`, or the full table
+    /// for its bit depth), before the decoder checks them against the data.
+    pub(crate) palette_entries: u64,
+    /// Bytes per palette entry on disk: 3 for BITMAPCOREHEADER, else 4.
+    pub(crate) palette_entry_bytes: u64,
+}
+
+/// Read the DIB header fields [`BmpLayout`] names. The legacy 12-byte
+/// BITMAPCOREHEADER has no compression or palette-count fields.
+pub(crate) fn bmp_layout(bytes: &[u8]) -> Option<BmpLayout> {
+    let dib_size = le_u32(bytes, 14)?;
+    let (bits_per_pixel, compression, colors_used, palette_entry_bytes) = if dib_size == 12 {
+        (le_u16(bytes, 24)?, 0, 0, 3)
+    } else {
+        (
+            le_u16(bytes, 28)?,
+            le_u32(bytes, 30)?,
+            le_u32(bytes, 46)?,
+            4,
+        )
+    };
+    let palette_entries = match bits_per_pixel {
+        1 | 4 | 8 if colors_used == 0 => 1u64 << bits_per_pixel,
+        1 | 4 | 8 => u64::from(colors_used),
+        _ => 0,
+    };
+    Some(BmpLayout {
+        bits_per_pixel,
+        compression,
+        palette_entries,
+        palette_entry_bytes,
+    })
+}
+
+/// Which bitstreams a WebP carries, anywhere in its container: what decides
+/// which of the decoder's paths runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WebpLayout {
+    /// A `VP8L` chunk: the decoder takes the lossless path.
+    pub(crate) lossless: bool,
+    /// A `VP8 ` chunk: the lossy path, when there is no `VP8L`.
+    pub(crate) lossy: bool,
+    /// An `ALPH` chunk: a separate alpha plane next to a lossy image.
+    pub(crate) alpha: bool,
+}
+
+/// Walk a WebP's chunks for the bitstreams it carries. Same walk, and same
+/// bounds, as the dimension gate; a walk that gives up reports what it saw,
+/// and the gate has already refused such a file.
+pub(crate) fn webp_layout(bytes: &[u8]) -> WebpLayout {
+    let mut walk = Walk::default();
+    walk_riff_chunks(bytes, 12, 0, &mut walk);
+    walk.layout
 }
 
 /// WebP declares its size in up to three different places, and the gate has to
@@ -524,6 +688,8 @@ struct Walk {
     /// True when the walk stopped at one of its own bounds rather than at the
     /// end of the data, so nothing can be concluded about what lies beyond.
     gave_up: bool,
+    /// The bitstream kinds seen so far.
+    layout: WebpLayout,
 }
 
 impl Walk {
@@ -570,8 +736,15 @@ fn walk_riff_chunks(bytes: &[u8], mut pos: usize, depth: u32, walk: &mut Walk) {
         let chunk_end = payload.saturating_add(size as usize).min(bytes.len());
         let chunk = bytes.get(..chunk_end).unwrap_or(bytes);
         match fourcc {
-            b"VP8 " => walk.widen(vp8_dimensions(chunk, payload)),
-            b"VP8L" => walk.widen(vp8l_dimensions(chunk, payload)),
+            b"VP8 " => {
+                walk.layout.lossy = true;
+                walk.widen(vp8_dimensions(chunk, payload));
+            }
+            b"VP8L" => {
+                walk.layout.lossless = true;
+                walk.widen(vp8l_dimensions(chunk, payload));
+            }
+            b"ALPH" => walk.layout.alpha = true,
             // Bound the descent to this frame's payload too, so a sub-walk
             // cannot run on into its siblings and spend their budget.
             b"ANMF" => walk_riff_chunks(chunk, payload + 16, depth + 1, walk),
@@ -668,13 +841,16 @@ mod tests {
         gif
     }
 
-    /// An Image Descriptor for `width x height` at `left, top`.
+    /// An Image Descriptor for `width x height` at `left, top`, with no
+    /// Local Color Table, followed by an LZW minimum code size and three
+    /// bytes of data in one sub-block.
     fn image_descriptor(left: u16, top: u16, width: u16, height: u16) -> Vec<u8> {
         let mut block = vec![0x2C];
         for value in [left, top, width, height] {
             block.extend_from_slice(&value.to_le_bytes());
         }
         block.push(0);
+        block.extend_from_slice(&[2, 3, 0xAA, 0xBB, 0xCC, 0]);
         block
     }
 
@@ -705,11 +881,35 @@ mod tests {
                 top: 3,
                 width: 8,
                 height: 9,
+                interlaced: false,
+                data_len: 3,
             }
         );
         assert!(frame.fits(16, 16));
         assert!(!frame.fits(9, 16), "2 + 8 overruns a 9-wide screen");
         assert!(!frame.fits(16, 11), "3 + 9 overruns an 11-high screen");
+    }
+
+    #[test]
+    fn the_first_gif_frame_reports_interlacing_and_its_data_length() {
+        let mut gif = gif_head();
+        let mut descriptor = vec![0x2C];
+        for value in [0u16, 0, 4, 4] {
+            descriptor.extend_from_slice(&value.to_le_bytes());
+        }
+        // Local Color Table of 2^(0 + 1) = 2 entries, interlaced.
+        descriptor.push(0x80 | 0x40);
+        descriptor.extend_from_slice(&[0u8; 6]);
+        // Minimum code size, then sub-blocks of 4 and 2 bytes.
+        descriptor.extend_from_slice(&[2, 4, 1, 2, 3, 4, 2, 5, 6, 0]);
+        gif.extend_from_slice(&descriptor);
+        let frame = gif_first_frame(&gif).expect("the first frame");
+        assert!(frame.interlaced);
+        assert_eq!(frame.data_len, 6);
+
+        // Data sub-blocks that run past the end of the stream.
+        gif.truncate(gif.len() - 4);
+        assert_eq!(gif_first_frame(&gif), None);
     }
 
     #[test]
@@ -866,6 +1066,126 @@ mod tests {
     fn jpeg_scan_start_without_a_frame_header_is_an_error() {
         let jpeg = [0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x02];
         assert!(header_dimensions(InputFormat::Jpeg, &jpeg).is_err());
+    }
+
+    /// SOI, an APP0 segment, then a progressive frame header (SOF2) for a
+    /// 4:2:0 YCbCr 640x480 image, a DHT segment, and a scan header naming
+    /// `scan_components` components.
+    fn progressive_jpeg(scan_components: u8) -> Vec<u8> {
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00];
+        jpeg.extend_from_slice(&[0xFF, 0xC2, 0x00, 0x11, 8]);
+        jpeg.extend_from_slice(&480u16.to_be_bytes());
+        jpeg.extend_from_slice(&640u16.to_be_bytes());
+        jpeg.extend_from_slice(&[3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+        jpeg.extend_from_slice(&[0xFF, 0xC4, 0x00, 0x04, 0x00, 0x00]);
+        jpeg.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, scan_components]);
+        jpeg
+    }
+
+    #[test]
+    fn a_jpeg_frame_reads_its_coding_components_and_first_scan() {
+        let frame = jpeg_frame(&progressive_jpeg(3)).expect("a frame header");
+        assert_eq!(frame.marker, 0xC2);
+        assert_eq!(frame.precision, 8);
+        assert_eq!((frame.width, frame.height), (640, 480));
+        assert_eq!(frame.components, 3);
+        assert_eq!(frame.ids[..3], [1, 2, 3]);
+        assert_eq!(frame.sampling[..3], [(2, 2), (1, 1), (1, 1)]);
+        assert_eq!(frame.first_scan, Some(3));
+
+        assert_eq!(
+            jpeg_frame(&progressive_jpeg(1)).map(|frame| frame.first_scan),
+            Some(Some(1))
+        );
+
+        // A frame header with no scan header after it still reads.
+        let mut no_scan = progressive_jpeg(3);
+        no_scan.truncate(no_scan.len() - 5);
+        assert_eq!(
+            jpeg_frame(&no_scan).map(|frame| frame.first_scan),
+            Some(None)
+        );
+
+        // A frame header cut off inside its component list does not.
+        let mut cut = progressive_jpeg(3);
+        cut.truncate(8 + 15);
+        assert_eq!(jpeg_frame(&cut), None);
+    }
+
+    #[test]
+    fn a_bmp_layout_reads_both_header_generations() {
+        // BITMAPINFOHEADER (40): 8 bits a pixel, RLE8, 16 palette entries.
+        let mut bmp = Vec::from(*b"BM");
+        bmp.extend_from_slice(&[0u8; 12]);
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&4i32.to_le_bytes());
+        bmp.extend_from_slice(&2i32.to_le_bytes());
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&8u16.to_le_bytes());
+        bmp.extend_from_slice(&1u32.to_le_bytes());
+        bmp.extend_from_slice(&[0u8; 12]);
+        bmp.extend_from_slice(&16u32.to_le_bytes());
+        bmp.extend_from_slice(&[0u8; 4]);
+        assert_eq!(
+            bmp_layout(&bmp),
+            Some(BmpLayout {
+                bits_per_pixel: 8,
+                compression: 1,
+                palette_entries: 16,
+                palette_entry_bytes: 4,
+            })
+        );
+
+        // No colors-used count means the whole table for the bit depth.
+        bmp[46..50].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            bmp_layout(&bmp).map(|layout| layout.palette_entries),
+            Some(256)
+        );
+
+        // BITMAPCOREHEADER (12): 4 bits a pixel, three-byte palette entries.
+        let mut core = Vec::from(*b"BM");
+        core.extend_from_slice(&[0u8; 12]);
+        core.extend_from_slice(&12u32.to_le_bytes());
+        core.extend_from_slice(&7u16.to_le_bytes());
+        core.extend_from_slice(&3u16.to_le_bytes());
+        core.extend_from_slice(&1u16.to_le_bytes());
+        core.extend_from_slice(&4u16.to_le_bytes());
+        assert_eq!(
+            bmp_layout(&core),
+            Some(BmpLayout {
+                bits_per_pixel: 4,
+                compression: 0,
+                palette_entries: 16,
+                palette_entry_bytes: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn a_webp_layout_names_its_bitstreams() {
+        let lossless = webp(&[chunk(b"VP8L", &vp8l_payload(3, 2))]);
+        assert_eq!(
+            webp_layout(&lossless),
+            WebpLayout {
+                lossless: true,
+                lossy: false,
+                alpha: false,
+            }
+        );
+        let lossy_with_alpha = webp(&[
+            chunk(b"VP8X", &vp8x_payload(6, 8)),
+            chunk(b"ALPH", &[0]),
+            chunk(b"VP8 ", &vp8_payload(6, 8)),
+        ]);
+        assert_eq!(
+            webp_layout(&lossy_with_alpha),
+            WebpLayout {
+                lossless: false,
+                lossy: true,
+                alpha: true,
+            }
+        );
     }
 
     #[test]

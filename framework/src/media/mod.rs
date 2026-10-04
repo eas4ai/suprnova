@@ -50,11 +50,13 @@
 //! [`ImageConfig`] and the `sniff` module for why the framework does this
 //! itself rather than delegating to a codec.
 //!
-//! A header can declare a small image over data that asks for far more, so
-//! the default driver also bounds what its decoders allocate: PNG pixel data
-//! that inflates past what its header declares is refused at that point,
-//! and only the first frame of a GIF is decoded. Path and disk sources are
-//! read no further than the same `IMAGE_MAX_ALLOC_BYTES` cap.
+//! Decoders allocate more than the RGBA they return, so the default driver
+//! also estimates, from the headers, how many bytes the whole decode will
+//! allocate, and refuses the image when that is over `IMAGE_MAX_ALLOC_BYTES`.
+//! It bounds what the headers cannot show as well: PNG pixel data that
+//! inflates past what its header declares is refused at that point, and only
+//! the first frame of a GIF is decoded. Path and disk sources are read no
+//! further than the same cap.
 
 mod driver;
 mod magick;
@@ -80,7 +82,7 @@ pub use oxideav::OxideAvImageDriver;
 /// bounding the decoded buffer to something a server can survive.
 pub const DEFAULT_IMAGE_MAX_DIMENSION: u32 = 16_384;
 
-/// Default cap on the decoded RGBA footprint of a single image, in bytes.
+/// Default cap on the bytes decoding a single image may allocate.
 pub const DEFAULT_IMAGE_MAX_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Default wall-clock ceiling on one ImageMagick invocation, in seconds.
@@ -131,7 +133,7 @@ impl ImageDriverKind {
 ///
 /// - `IMAGE_MAX_DIMENSION` - cap on width and height in pixels
 ///   (default 16384).
-/// - `IMAGE_MAX_ALLOC_BYTES` - cap on the decoded RGBA footprint
+/// - `IMAGE_MAX_ALLOC_BYTES` - cap on the bytes one decode may allocate
 ///   (default 256 MiB).
 ///
 /// Out-of-range values clamp with a warning rather than failing boot: a
@@ -141,7 +143,14 @@ impl ImageDriverKind {
 pub struct ImageConfig {
     /// Maximum width or height, in pixels, of a decoded image.
     pub max_dimension: u32,
-    /// Maximum decoded RGBA footprint, in bytes.
+    /// Most bytes decoding one image may allocate.
+    ///
+    /// Every driver checks the decoded RGBA footprint (four bytes a pixel)
+    /// against it before decoding, and so does every resize target. The
+    /// built-in driver also estimates the whole decode per format, since its
+    /// decoders hold more than the RGBA they return, and refuses an image
+    /// whose estimate is over it. The `magick` driver hands it to
+    /// ImageMagick's own memory limits. Source files are capped at it too.
     pub max_alloc_bytes: u64,
     /// Wall-clock seconds an ImageMagick invocation may run for.
     ///
@@ -390,24 +399,7 @@ impl Image {
     where
         S: futures_util::Stream<Item = std::io::Result<Bytes>> + Send,
     {
-        use futures_util::TryStreamExt;
-
-        let cap = config().max_alloc_bytes;
-        let mut collected: Vec<u8> = Vec::new();
-        let mut stream = std::pin::pin!(stream);
-        while let Some(chunk) = stream
-            .try_next()
-            .await
-            .map_err(|e| FrameworkError::internal(format!("image stream read failed: {e}")))?
-        {
-            if collected.len() as u64 + chunk.len() as u64 > cap {
-                return Err(FrameworkError::param(format!(
-                    "image exceeds configured decode limits: stream is larger than the \
-                     IMAGE_MAX_ALLOC_BYTES limit of {cap}"
-                )));
-            }
-            collected.extend_from_slice(&chunk);
-        }
+        let collected = collect_capped(stream, config().max_alloc_bytes, 0, "stream").await?;
         Ok(Self::from_bytes(collected))
     }
 
@@ -627,13 +619,67 @@ fn check_source_size(len: u64, cap: u64, source: &str) -> Result<(), FrameworkEr
     Ok(())
 }
 
+/// Append `data` to `buffer`, growing it by doubling but never to a capacity
+/// past `limit`.
+///
+/// `Vec`'s own growth doubles past what is needed, so a buffer filled to just
+/// over half the cap would reserve close to twice the cap. Callers check the
+/// length against `limit` first, so the clamp is always enough room.
+fn extend_within(buffer: &mut Vec<u8>, data: &[u8], limit: usize) {
+    let needed = buffer.len().saturating_add(data.len());
+    if needed > buffer.capacity() {
+        let grown = buffer
+            .capacity()
+            .saturating_mul(2)
+            .max(needed)
+            .min(limit.max(needed));
+        buffer.reserve_exact(grown - buffer.len());
+    }
+    buffer.extend_from_slice(data);
+}
+
+/// Collect a byte stream, refusing it once it passes `cap` bytes.
+///
+/// `capacity_hint` is a size reported before the read, already checked
+/// against the cap; zero means unknown.
+async fn collect_capped<S>(
+    stream: S,
+    cap: u64,
+    capacity_hint: u64,
+    source: &str,
+) -> Result<Vec<u8>, FrameworkError>
+where
+    S: futures_util::Stream<Item = std::io::Result<Bytes>>,
+{
+    use futures_util::TryStreamExt;
+
+    let limit = usize::try_from(cap).unwrap_or(usize::MAX);
+    let mut collected = Vec::with_capacity(usize::try_from(capacity_hint.min(cap)).unwrap_or(0));
+    let mut stream = std::pin::pin!(stream);
+    while let Some(chunk) = stream
+        .try_next()
+        .await
+        .map_err(|e| FrameworkError::internal(format!("image {source} read failed: {e}")))?
+    {
+        if collected.len() as u64 + chunk.len() as u64 > cap {
+            return Err(FrameworkError::param(format!(
+                "image exceeds configured decode limits: {source} is larger than the \
+                 IMAGE_MAX_ALLOC_BYTES limit of {cap}"
+            )));
+        }
+        extend_within(&mut collected, &chunk, limit);
+    }
+    Ok(collected)
+}
+
 /// Read a file, reading no more than one byte past `cap`.
 ///
 /// The size the filesystem reports refuses an oversized file before any of
 /// it is read, but it is not the size of what a read returns: a FIFO or a
 /// device reports zero, and a file can grow between the check and the read.
 /// So the read itself stops one byte past the cap, and that byte is what
-/// tells an oversized source from one that fits exactly.
+/// tells an oversized source from one that fits exactly. The buffer grows
+/// within the same bound, never to twice it.
 fn read_file_capped(path: &Path, cap: u64) -> Result<Vec<u8>, FrameworkError> {
     use std::io::Read;
 
@@ -651,10 +697,20 @@ fn read_file_capped(path: &Path, cap: u64) -> Result<Vec<u8>, FrameworkError> {
         }
         Err(_) => 0,
     };
-    let mut bytes = Vec::with_capacity(usize::try_from(reported).unwrap_or(0));
-    file.take(cap.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(read_failed)?;
+    let limit = cap.saturating_add(1);
+    let limit_len = usize::try_from(limit).unwrap_or(usize::MAX);
+    let mut bytes = Vec::with_capacity(usize::try_from(reported.min(limit)).unwrap_or(0));
+    let mut reader = file.take(limit);
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        let read = match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(read_failed(e)),
+        };
+        extend_within(&mut bytes, &chunk[..read], limit_len);
+    }
     check_source_size(bytes.len() as u64, cap, "the file")?;
     Ok(bytes)
 }
@@ -673,21 +729,28 @@ async fn read_source(source: Source) -> Result<Vec<u8>, FrameworkError> {
         Source::Disk { disk, path } => {
             use crate::DiskExt;
             let handle = crate::Storage::disk(&disk)?;
-            // One stat bounds the read: the read asks for exactly the length
-            // the stat reported, so an object that grows or is replaced after
-            // the check cannot make it read more than the cap.
-            let size = handle.size(&path).await?;
-            check_source_size(size, cap, "the stored file")?;
-            if size == 0 {
-                return Ok(Vec::new());
-            }
-            let bytes = handle
-                .read_with(&path)
-                .range(0..size)
+            // A reported size over the cap is refused without reading. The
+            // report is only a hint: OpenDAL reports zero when a service
+            // omits the length, and an object can change after the stat. So
+            // the read streams to the end of the object and stops at the cap,
+            // whatever the stat said.
+            let reported = match handle.size(&path).await {
+                Ok(size) => {
+                    check_source_size(size, cap, "the stored file")?;
+                    size
+                }
+                Err(_) => 0,
+            };
+            let storage_error =
+                |e: opendal::Error| FrameworkError::internal(format!("storage read({path}): {e}"));
+            let stream = handle
+                .reader(&path)
                 .await
-                .map_err(|e| FrameworkError::internal(format!("storage read({path}): {e}")))?
-                .to_vec();
-            Ok(bytes)
+                .map_err(storage_error)?
+                .into_bytes_stream(..)
+                .await
+                .map_err(storage_error)?;
+            collect_capped(stream, cap, reported, "stored file").await
         }
     }
 }
