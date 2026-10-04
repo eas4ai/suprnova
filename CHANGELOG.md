@@ -895,8 +895,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   key finds its owner by the owner model's primary key instead of `id`, in
   lazy and eager reads, counts and aggregates, `has` and owner touches.
   `has`, `where_has` and `doesnt_have` on a `MorphedByMany` relation work;
-  they named a pivot column that does not exist. This landed after the
-  `v3.1.0` tag.
+  they named a pivot column that does not exist. Every relation key default
+  now comes from the models' primary keys, never a literal `id`:
+  `HasManyThrough` and `HasOneThrough` without `second_local_key` join on
+  the intermediate model's primary key, `MorphMany` and `MorphOne` report
+  their parent key or the declared `lk`, and a `MorphTo` reports its
+  targets' primary key, through the morph registry when the targets
+  differ; `MorphTypeEntry` gains a `primary_key` field. This landed after
+  the `v3.1.0` tag.
 - **Magnetar hashing and sign-up races.** Magnetar password hashing runs on
   Tokio's blocking pool instead of stalling async workers. A magic-link or
   passkey sign-up that loses a race for a new email address answers as the
