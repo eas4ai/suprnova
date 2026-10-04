@@ -406,8 +406,10 @@ across the join, fall back to two explicit relation hops.
 Through relations filter both the intermediate and the target by their
 soft-delete column when those models declare `#[model(soft_deletes)]`,
 matching Laravel's `hasManyThrough`: trashed rows on either side stay
-out of the join. Eager loads (`with(["posts"])`), counts and aggregates
-of a Through relation leave out the same rows.
+out of the join. The target's global scopes apply too, as they do to
+`Post::query()`; the intermediate is filtered by its soft-delete column
+only. Eager loads (`with(["posts"])`), counts and aggregates of a
+Through relation leave out the same rows.
 
 To include trashed rows, query the two hops yourself: load the
 intermediate models through their own relation, then query the target

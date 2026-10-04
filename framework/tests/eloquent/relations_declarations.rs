@@ -1003,3 +1003,79 @@ async fn has_on_a_many_to_many_joins_the_declared_related_key() {
     let decorated = RdMember::query().has("medals").get().await.unwrap();
     assert_eq!(labels(decorated.iter().map(|m| &m.name)), vec!["decorated"]);
 }
+
+// ---- The lazy through read applies the target's scopes ------------------
+
+#[model(table = "rd_regions", relations = {
+    reports: HasManyThrough<RdResident, RdReport>,
+})]
+pub struct RdRegion {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "rd_residents")]
+pub struct RdResident {
+    pub id: i64,
+    pub rd_region_id: i64,
+    pub name: String,
+}
+
+#[model(table = "rd_reports")]
+pub struct RdReport {
+    pub id: i64,
+    pub rd_resident_id: i64,
+    pub visible: i64,
+    pub words: i64,
+}
+
+/// Hides the reports that are not visible.
+pub struct RdVisibleReports;
+
+impl GlobalScope<RdReport> for RdVisibleReports {
+    fn apply(&self, query: Builder<RdReport>) -> Builder<RdReport> {
+        query.filter("visible", 1_i64)
+    }
+}
+
+/// `region.reports().get()` and `.count()` apply the target model's
+/// global scopes, as the eager load and `with_count` do.
+#[tokio::test]
+async fn lazy_through_reads_apply_the_targets_global_scopes() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for sql in [
+        "CREATE TABLE rd_regions (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE rd_residents (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            rd_region_id INTEGER NOT NULL, name TEXT NOT NULL)",
+        "CREATE TABLE rd_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            rd_resident_id INTEGER NOT NULL, visible INTEGER NOT NULL, words INTEGER NOT NULL)",
+        "INSERT INTO rd_regions (id, name) VALUES (1, 'north')",
+        "INSERT INTO rd_residents (id, rd_region_id, name) VALUES (1, 1, 'resident')",
+        "INSERT INTO rd_reports (rd_resident_id, visible, words) VALUES (1, 1, 10), (1, 0, 99)",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+    ScopeRegistry::register::<RdReport, _>(RdVisibleReports);
+
+    let region = RdRegion::find(1).await.unwrap().unwrap();
+    let lazy: Vec<i64> = region
+        .reports()
+        .get()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.words)
+        .collect();
+    assert_eq!(lazy, vec![10], "the hidden report is not read");
+    assert_eq!(region.reports().count().await.unwrap(), 1);
+
+    let eager = RdRegion::query()
+        .with(["reports"])
+        .with_count(["reports"])
+        .get()
+        .await
+        .unwrap();
+    let words: Vec<i64> = eager[0].reports_loaded().iter().map(|r| r.words).collect();
+    assert_eq!(words, vec![10], "the eager load agrees with the lazy read");
+    assert_eq!(eager[0].reports_count(), 1);
+}
