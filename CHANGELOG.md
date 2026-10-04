@@ -688,6 +688,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Magnetar hashing and sign-up races.** Magnetar password hashing runs on
+  Tokio's blocking pool instead of stalling async workers. A magic-link or
+  passkey sign-up that loses a race for a new email address answers as the
+  existing account instead of failing. This landed after the `v3.1.0` tag.
 - **RenderCache stays coherent under cancellation, races and flags.** A
   write that was cancelled at its generation advance, including a bulk
   write, `increment`, a soft delete, restore or force delete, could commit
@@ -1282,6 +1286,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   served from cache to a visitor without that sign-in. A second token guard
   over another provider answered with the first guard's user. Each now
   reads the user of the route's own guard through that guard's provider.
+  Live gated actions, uploads and subscriptions, `EmailVerification::verify`
+  and the Pusher user and presence endpoints do the same: behind
+  `AuthMiddleware::for_guard(name)` they act for that guard's user, as
+  `<guard>:<id>` (default-guard principals are unchanged), a named guard's
+  logout ends that guard's Live memberships, and a stream with a
+  `:principal` topic is refused behind a non-default guard.
 - **Encoded cookie names cannot stand in for prefixed cookies.** A cookie
   named `%5F%5FHost-suprnova_session` resumed the `__Host-` session; a
   prefix that appears only after decoding is now dropped.
@@ -1289,7 +1299,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   Changing the account's email no longer lets an old link verify the new
   address.
 - **Password reset checks the token before hashing.** A dead or made-up
-  token made the server compute an Argon2id hash first.
+  token made the server compute an Argon2id hash first, in the framework's
+  reset flow and in Magnetar's `PasswordManagementService`.
 - **A session that loses its Magnetar authority ends its Live
   memberships** on this node, so it stops receiving events.
 - **An image cannot allocate past its decode budget.** A crafted PNG
