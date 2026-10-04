@@ -162,7 +162,9 @@ pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
 /// `#[policy]` gates, and the runtime drivers (Cache, Localization, the
 /// environment's disks, Queue, RateLimit, Mail). A command therefore
 /// resolves the same services and reaches the same drivers a queued job
-/// does. After the handler returns, the dispatcher waits (up to ten
+/// does. A driver that does not come up is reported on stderr and does
+/// not stop the command, which may use none of them; a worker refuses to
+/// start instead. After the handler returns, the dispatcher waits (up to ten
 /// seconds) for the queued event listeners still running, because the
 /// console's runtime ends when `main` returns and would cut them off.
 ///
@@ -207,7 +209,7 @@ where
             if let Some(boot) = boot {
                 boot().await;
                 if let Err(e) = crate::app::process_boot::boot_after_hook(
-                    crate::app::process_boot::ProcessBoot::Work,
+                    crate::app::process_boot::ProcessBoot::Console,
                 )
                 .await
                 {

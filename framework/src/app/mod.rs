@@ -2441,6 +2441,30 @@ mod worker_boot_order_tests {
         ));
     }
 
+    /// The console reports a driver that does not boot and goes on with the
+    /// rest; a worker refuses to start. Production with a mail driver that
+    /// delivers nothing is a mail boot that fails on purpose.
+    #[tokio::test]
+    #[serial]
+    async fn the_console_reports_a_driver_that_does_not_boot_and_goes_on() {
+        let _env = EnvGuard::set(&[
+            ("APP_ENV", "production"),
+            ("RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION", "true"),
+            ("MAIL_DRIVER", "log"),
+            ("MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION", "false"),
+        ]);
+
+        let worker = process_boot::boot_after_hook(ProcessBoot::Work).await;
+        let console = process_boot::boot_after_hook(ProcessBoot::Console).await;
+        crate::queue::Queue::set_driver(std::sync::Arc::new(
+            crate::queue::memory::MemoryQueueDriver::new(),
+        ));
+
+        let error = worker.expect_err("a worker refuses to start without its mail driver");
+        assert!(error.to_string().contains("MAIL"), "{error}");
+        console.expect("the console goes on, and a command that sends mail fails when it does");
+    }
+
     // Every subcommand but `serve` boots through `boot_process` with the
     // value `Commands::boot` gives it. The tests below parse each
     // subcommand's argv, boot what it names, and look at what came up:

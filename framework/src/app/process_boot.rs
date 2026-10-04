@@ -44,8 +44,16 @@ pub(crate) enum ProcessBoot {
     Maintenance,
     /// The core and every runtime driver: Cache, Localization, the
     /// environment's disks, Queue, RateLimit, Mail. The workers, the queue
-    /// commands, `schedule:run`, and the console binary.
+    /// commands, and `schedule:run`. A driver whose backend does not come up
+    /// stops the boot: these processes exist to do work through them.
     Work,
+    /// The core and every runtime driver, for the console binary. A driver
+    /// that does not come up is reported on stderr and does not stop the
+    /// boot. A console command is often a one-off that uses none of the
+    /// drivers, and a mail driver missing its key must not block `db:seed`;
+    /// a command that does use the broken driver fails when it reaches it,
+    /// after the report has named the cause.
+    Console,
 }
 
 /// Boot what `boot` names, after the application's `bootstrap` hook ran.
@@ -72,22 +80,61 @@ pub(crate) async fn boot_after_hook(boot: ProcessBoot) -> Result<(), BootError> 
     match boot {
         ProcessBoot::Migrations | ProcessBoot::Core => {}
         ProcessBoot::Maintenance => bootstrap_maintenance_drivers().await?,
-        ProcessBoot::Work => bootstrap_runtime_drivers().await?,
+        ProcessBoot::Work => bootstrap_runtime_drivers(false).await?,
+        ProcessBoot::Console => bootstrap_runtime_drivers(true).await?,
     }
     Ok(())
 }
 
 /// Every runtime driver, in the order `Server::run` boots them.
-async fn bootstrap_runtime_drivers() -> Result<(), BootError> {
-    crate::cache::Cache::bootstrap().await?;
+///
+/// `report_failures` turns a driver that does not come up into a warning
+/// on stderr and the log, and goes on with the next one; otherwise the
+/// first failure is the boot's error.
+async fn bootstrap_runtime_drivers(report_failures: bool) -> Result<(), BootError> {
+    let settle = |driver: &str, outcome: Result<(), BootError>| -> Result<(), BootError> {
+        match outcome {
+            Err(e) if report_failures => {
+                tracing::warn!(driver, error = %e, "a runtime driver did not boot");
+                crate::console::error_line(format!(
+                    "warning: the {driver} driver did not boot: {e}"
+                ));
+                Ok(())
+            }
+            outcome => outcome,
+        }
+    };
+    settle(
+        "cache",
+        crate::cache::Cache::bootstrap().await.map_err(Into::into),
+    )?;
     #[cfg(feature = "localization")]
-    crate::localization::Localization::bootstrap().await?;
+    settle(
+        "localization",
+        crate::localization::Localization::bootstrap()
+            .await
+            .map_err(Into::into),
+    )?;
     // The disks first: the `sqs` queue driver checks its overflow disk.
     #[cfg(feature = "filesystem")]
-    crate::filesystem::bootstrap_from_env()?;
-    crate::queue::bootstrap_from_env().await?;
-    crate::rate_limit::bootstrap_from_env().await?;
-    crate::mail::boot::bootstrap_from_env()?;
+    settle(
+        "filesystem",
+        crate::filesystem::bootstrap_from_env().map_err(Into::into),
+    )?;
+    settle(
+        "queue",
+        crate::queue::bootstrap_from_env().await.map_err(Into::into),
+    )?;
+    settle(
+        "rate limit",
+        crate::rate_limit::bootstrap_from_env()
+            .await
+            .map_err(Into::into),
+    )?;
+    settle(
+        "mail",
+        crate::mail::boot::bootstrap_from_env().map_err(Into::into),
+    )?;
     Ok(())
 }
 
