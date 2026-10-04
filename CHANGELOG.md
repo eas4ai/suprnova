@@ -414,6 +414,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **The session, remember-me, auth-flow token and ceremony entities read
+  whole rows on every column type.** Their time fields are the new public
+  `suprnova::StoredDateTime`, which reads `DATETIME`, `TIMESTAMP`,
+  `timestamp`, `timestamptz` and SQLite text, instead of `NaiveDateTime`,
+  which failed on `TIMESTAMP` and `timestamptz`. Set them with `.into()`
+  and read them with `.naive_utc()` or `.and_utc()`. This landed after the
+  `v3.1.0` tag.
 - **Magnetar rotations and second-factor lockouts.** Magnetar's
   `re_enroll` keeps the confirmed second factor gating sign-in until a code
   from the new secret confirms the rotation; the rotation waits in new
@@ -721,6 +728,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Scaffolded apps on MySQL 8.4 and Postgres, and dates past 2038.** The
+  auth-flow token table's hash is `VARCHAR(64)`; MySQL 8.4 refused the
+  UNIQUE key on the old `TEXT` column (error 1170), so a new app's
+  migration stopped at the fourth step and the app could not boot. Run
+  `migrate` again on an app that stopped there. The `--api` starter's
+  `app_users` time columns are `timestamp with time zone` on Postgres and
+  `DATETIME` on MySQL, which its `User` model and Magnetar read; an
+  existing API app on Postgres converts them with the `ALTER TABLE` in the
+  CLI chapter. The notifications and RenderCache ledger migrations create
+  `DATETIME`, so writes keep working after 2038-01-19 on MySQL; tables
+  created before keep `TIMESTAMP` and still work. A remember-me, auth-flow
+  token or ceremony lifetime too large for a date is an error instead of a
+  panic. This landed after the `v3.1.0` tag.
 - **Generated routes and types, Inertia props and JSON:API.**
   `generate-types --routes` applies `group!` path and name prefixes, gives
   each repeated-handler alias its own helper, percent-encodes path values
