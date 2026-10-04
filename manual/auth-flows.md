@@ -703,7 +703,8 @@ The counter is the framework's `two_factor_attempts` table, keyed by the
 user id. It is separate from the per-email password lockout that
 `BruteForce` and `LoginThrottleMiddleware` use: a successful password
 check does not clear second-factor failures, and the lock works with no
-Magnetar engine installed. A wrong code fires `AccountLocked` once, on
+Magnetar engine installed. `complete_challenge` is the exception that needs
+the engine: it resolves the pending user, and returns it, through Magnetar. A wrong code fires `AccountLocked` once, on
 the failure that sets the lock. `TwoFactor::unlock(&user)` clears the
 counter early and fires `AccountUnlocked` when a lock was in effect.
 
@@ -712,7 +713,7 @@ Two settings shape the lock:
 | Var | Default | Meaning |
 |---|---|---|
 | `TWO_FACTOR_MAX_ATTEMPTS` | `5` | Failures inside the window that lock the second factor. |
-| `TWO_FACTOR_LOCKOUT_MINUTES` | `15` | How long each attempt counts. A lock lifts once the failure that completed it is this old. |
+| `TWO_FACTOR_LOCKOUT_MINUTES` | `15` | How long each attempt counts. The window slides: a failure stops counting this long after it happened, so a lock lifts once the oldest failure still counted is this old. |
 
 Both must be whole numbers of at least 1, and the window at most 43200
 minutes (thirty days): a longer window reaches back past the timestamp

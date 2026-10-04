@@ -281,6 +281,13 @@ the one just submitted, but that answer differs from the one `Accepted` can
 give, so it shows that the address was free. Answer both variants the same way
 when registration must not reveal which addresses have accounts.
 
+The two outcomes cost nearly, not exactly, the same. Both hash the submitted
+password, the expensive step, before the address is looked up, and both read
+an account back. Only a new address writes a row, so over many requests the
+response time can still tell a free address from a taken one where a write is
+slow. Registration goes through the auth abuse limiter, which keeps that kind
+of probing slow; don't rely on the timing alone to hide an address.
+
 ### Why Suprnova diverges
 
 Laravel's starter kits validate registration with a `unique:users` rule, which

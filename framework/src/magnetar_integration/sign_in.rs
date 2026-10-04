@@ -57,6 +57,9 @@ impl SignInOutcome {
 /// Signing a [`Self::Created`] account in at once is safe, because its
 /// password is the one just submitted, but that answer differs from the one
 /// [`Self::Accepted`] can give, so it shows that an address was free.
+///
+/// Both outcomes hash the password and read an account back, so they take
+/// nearly the same time; only a new address also writes a row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[must_use = "a registration must be answered the same way for both variants"]
 pub enum Registration {

@@ -1142,7 +1142,14 @@ where
             RegistrationOutcome::Created { user_id, .. } => Ok(Registration::Created(
                 self.users.user_for_id(&user_id).await?,
             )),
-            RegistrationOutcome::Existing { .. } => Ok(Registration::Accepted),
+            RegistrationOutcome::Existing { user_id } => {
+                // Both outcomes have hashed the password, the expensive
+                // step. Read the existing account back as a new one is read
+                // back, so a taken address costs what a free one does short
+                // of the row write; the result is not used either way.
+                let _ = self.users.user_for_id(&user_id).await;
+                Ok(Registration::Accepted)
+            }
         }
     }
     /// Mint one plaintext magic-link token through Magnetar's single-use

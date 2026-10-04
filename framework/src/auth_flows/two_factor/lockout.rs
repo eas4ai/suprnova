@@ -112,8 +112,9 @@ impl TwoFactorLockout {
         self.max_attempts
     }
 
-    /// How long each attempt counts. A lock lifts once the failure that
-    /// completed it is this old.
+    /// How long each attempt counts. The window slides: an attempt stops
+    /// counting this long after it was made, so a lock lifts once the
+    /// oldest failure still counted is this old.
     #[must_use]
     pub const fn window(self) -> chrono::Duration {
         self.window
