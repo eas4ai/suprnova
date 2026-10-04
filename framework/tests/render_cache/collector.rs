@@ -431,7 +431,10 @@ async fn a_sibling_future_joined_beside_a_pending_slot_reads_into_the_content_bu
     );
     assert!(report.context.principal_material.contains("alice"));
     assert!(report.context.session_read);
-    assert_eq!(report.slot_reads, 1, "only the island's own read is a slot read");
+    assert_eq!(
+        report.slot_reads, 1,
+        "only the island's own read is a slot read"
+    );
     assert!(report.gate.observed.is_empty());
 }
 
