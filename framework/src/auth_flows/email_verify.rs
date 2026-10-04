@@ -201,6 +201,10 @@ impl EmailVerification {
     /// active [`UserProvider`](crate::auth::UserProvider), and return the
     /// user's id.
     ///
+    /// The token must belong to the user of the route's guard - the guard
+    /// the last `AuthMiddleware` checked, or the default guard - and is
+    /// checked and stamped through that guard's provider.
+    ///
     /// Single-use: a second `verify` on the same token returns an error (the
     /// [`TokenStore`] stamps `used_at` atomically). An invalid or expired
     /// token also errors.
@@ -232,7 +236,9 @@ impl EmailVerification {
     /// - The "no provider configured" error from the active-user-provider
     ///   resolver when no `UserProvider` is registered.
     pub async fn verify(token: &str) -> Result<String, FrameworkError> {
-        let actor_user_id = crate::Auth::id().ok_or_else(|| {
+        // The route's user: behind `AuthMiddleware::for_guard(name)`, that
+        // guard's user, never the default guard's user in the same session.
+        let actor_user_id = crate::Auth::route_user_id().await?.ok_or_else(|| {
             FrameworkError::bad_request("authenticated email verification is required")
         })?;
         let owner = TokenStore::owner(token, TokenPurpose::EmailVerification).await?;
@@ -241,7 +247,7 @@ impl EmailVerification {
                 "invalid or expired verification token",
             ));
         }
-        let provider = active_user_provider()?;
+        let provider = crate::Auth::route_user_provider()?;
         let current_email = provider.verification_email(&actor_user_id).await?;
         if !current_email.is_some_and(|email| bound_to_mailbox(token, &email)) {
             return Err(FrameworkError::bad_request(

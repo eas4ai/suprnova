@@ -883,10 +883,14 @@ routes! {
 - `500` when `PusherAuth` is not bound, when an encrypted channel is
   requested without a master key, or when `member_info` fails.
 
-A presence member's `user_id` is `Auth::id()`, and its `user_info` is
-the channel's `member_info`. `pusher_user_auth` signs
-`{"id": <Auth::id()>}` for pusher-js user authentication and answers
-`403` for a guest.
+A presence member's `user_id` is the route's user, and its `user_info`
+is the channel's `member_info`. `pusher_user_auth` signs `{"id": <the
+route's user>}` for pusher-js user authentication and answers `403` for
+a guest. The route's user is the user of the guard the last
+`AuthMiddleware` checked: the bare id for the default guard, as
+`Auth::id()` reports it, and `<guard>:<id>` behind
+`AuthMiddleware::for_guard(..)` naming another guard. A user of another
+guard in the same session never stands in for it.
 
 ### Connect with Laravel Echo
 

@@ -639,16 +639,31 @@ async fn call(
     path: &'static str,
     body: Body,
 ) -> (u16, Value) {
+    let middleware = MiddlewareRegistry::new().append(ActingAs(user));
+    call_through(auth, || {}, middleware, path, body).await
+}
+
+/// POST one request to `path` through `middleware`, with `auth` bound (or
+/// nothing bound) and `install` run first in the request's container scope,
+/// and return the status and the JSON body.
+async fn call_through(
+    auth: Option<suprnova::PusherAuth>,
+    install: fn(),
+    middleware: MiddlewareRegistry,
+    path: &'static str,
+    body: Body,
+) -> (u16, Value) {
     TestContainer::scope(async move {
         if let Some(auth) = auth {
             TestContainer::singleton(auth);
         }
+        install();
         let router: Router = Router::new()
             .post("/broadcasting/auth", pusher_channel_auth)
             .post("/broadcasting/user-auth", pusher_user_auth)
             .into();
         let router = Arc::new(router);
-        let middleware = Arc::new(MiddlewareRegistry::new().append(ActingAs(user)));
+        let middleware = Arc::new(middleware);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = TestContainer::spawn(async move {
@@ -1156,4 +1171,108 @@ async fn pusher_user_auth_rejects_an_invalid_socket_id() {
     .await;
     assert_eq!(status, 422, "{body}");
     assert!(body["errors"]["socket_id"].is_array(), "{body}");
+}
+
+// ---- the route's guard ----
+
+/// A user known by its id alone.
+struct GuardUser(&'static str);
+
+impl suprnova::Authenticatable for GuardUser {
+    fn get_auth_identifier(&self) -> String {
+        self.0.to_owned()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
+        self
+    }
+}
+
+/// Resolves nobody: the users below are signed in through `set_user`.
+struct NoLookups;
+
+#[async_trait]
+impl suprnova::UserProvider for NoLookups {
+    async fn retrieve_by_id(
+        &self,
+        _id: &str,
+    ) -> Result<Option<Arc<dyn suprnova::Authenticatable>>, suprnova::FrameworkError> {
+        Ok(None)
+    }
+}
+
+/// Registers the session guards `web` (the default) and `admin`.
+fn install_web_and_admin_guards() {
+    let config =
+        suprnova::AuthConfig::new("web").guard("admin", suprnova::GuardConfig::session("admins"));
+    TestContainer::singleton(suprnova::AuthManager::new(config));
+    suprnova::Auth::register_provider("users", Arc::new(NoLookups)).unwrap();
+    suprnova::Auth::register_provider("admins", Arc::new(NoLookups)).unwrap();
+}
+
+/// Signs web user 7 in on the default guard and admin 9 on `admin`.
+struct WebAndAdmin;
+
+#[async_trait]
+impl Middleware for WebAndAdmin {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        suprnova::Auth::guard("web")?
+            .set_user(Arc::new(GuardUser("7")))
+            .await;
+        suprnova::Auth::guard("admin")?
+            .set_user(Arc::new(GuardUser("9")))
+            .await;
+        next(request).await
+    }
+}
+
+/// The Pusher endpoints behind `AuthMiddleware::new().for_guard("admin")`.
+fn admin_route() -> MiddlewareRegistry {
+    MiddlewareRegistry::new()
+        .append(ActingAs(None))
+        .append(WebAndAdmin)
+        .append(suprnova::AuthMiddleware::new().for_guard("admin"))
+}
+
+/// Behind a second guard, the user authentication and presence endpoints
+/// sign that guard's user as `admin:9`, never the default guard's user in
+/// the same session.
+#[tokio::test]
+async fn pusher_endpoints_sign_the_route_guards_user() {
+    let hub = hub_with_master_key();
+    let (status, body) = call_through(
+        Some(hub.auth()),
+        install_web_and_admin_guards,
+        admin_route(),
+        "/broadcasting/user-auth",
+        Body::Form(vec![("socket_id", SOCKET_ID)]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let user_data = body["user_data"].as_str().expect("user_data is a string");
+    assert_eq!(
+        serde_json::from_str::<Value>(user_data).unwrap(),
+        json!({ "id": "admin:9" })
+    );
+
+    let (status, body) = call_through(
+        Some(hub.auth()),
+        install_web_and_admin_guards,
+        admin_route(),
+        "/broadcasting/auth",
+        channel_form("presence-chat"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let channel_data = body["channel_data"]
+        .as_str()
+        .expect("channel_data is a string");
+    assert_eq!(
+        serde_json::from_str::<Value>(channel_data).unwrap()["user_id"],
+        json!("admin:9")
+    );
 }
