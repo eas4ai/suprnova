@@ -11,7 +11,10 @@
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 pub mod data;
+pub mod files;
 pub mod http;
+pub mod images;
 pub mod jobs;
 pub mod media;
+pub mod sqs;
 pub mod support;
