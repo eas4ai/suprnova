@@ -61,12 +61,21 @@
 //!
 //! Across processes nothing is shared, so the storage itself decides. A delete
 //! and a move remove the fallback copy first and the primary copy second. A
-//! promotion publishes first and then checks that the fallback still holds the
-//! object it fetched; when it does not, the promotion withdraws the copy it
-//! published. Either the check runs before the delete removed the fallback
-//! copy - and then the delete's own primary step removes the promoted copy -
-//! or it runs after, and the promotion removes it itself. The delete wins
-//! either way, on any node, with no coordination service.
+//! promotion checks that the fallback still holds the object it fetched
+//! immediately before it publishes, and discards its own unpublished bytes
+//! when it does not. It checks again after it publishes. A delete that
+//! removed the fallback copy before the second check either still has its
+//! primary step to run, which removes the promoted copy, or ran that step
+//! before the publish, and then the promotion withdraws its copy itself.
+//!
+//! A withdrawal deletes only the exact object the promotion wrote, so a
+//! writer that replaced it never loses its write. That takes a primary that
+//! names each write by version and deletes one version on request, as a
+//! versioned object store does. Elsewhere opendal has no delete that is
+//! conditional on what the path holds, so the promotion keeps its copy and
+//! logs a warning instead. On those primaries a delete on another node that
+//! completes in the moment between the promotion's last check and its
+//! publish can leave the promoted copy behind.
 
 use super::streaming::WriterGuard;
 use futures::TryStreamExt;
@@ -278,6 +287,7 @@ impl Layer for ReadThroughLayer {
             throw_on_promotion_failure: self.throw_on_promotion_failure,
             promote_conditionally: capability.write_with_if_not_exists,
             promote_atomically: capability.rename,
+            withdraw_by_version: capability.delete_with_version,
             publications: Arc::clone(&self.publications),
         })
     }
@@ -301,6 +311,9 @@ pub(crate) struct ReadThroughService {
     promote_conditionally: bool,
     /// Whether the primary can publish a promotion with an atomic `rename`.
     promote_atomically: bool,
+    /// Whether the primary can delete one version of an object, which is
+    /// what lets a promotion withdraw exactly the copy it wrote.
+    withdraw_by_version: bool,
     /// Keeps a promotion from republishing a path a delete or move removed.
     publications: Arc<Publications>,
 }
@@ -393,6 +406,7 @@ impl Service for ReadThroughService {
             throw_on_promotion_failure: self.throw_on_promotion_failure,
             promote_conditionally: self.promote_conditionally,
             promote_atomically: self.promote_atomically,
+            withdraw_by_version: self.withdraw_by_version,
             publications: Arc::clone(&self.publications),
             promotion_failed: AtomicBool::new(false),
         })
@@ -663,6 +677,8 @@ pub(crate) struct ReadThroughReader {
     promote_conditionally: bool,
     /// Whether the promotion can be published with an atomic `rename`.
     promote_atomically: bool,
+    /// Whether the primary can delete one version of an object.
+    withdraw_by_version: bool,
     /// Keeps a promotion from republishing a path a delete or move removed.
     publications: Arc<Publications>,
     /// Set once a promotion for this read has failed. A chunked read asks
@@ -690,15 +706,6 @@ enum Promotion {
     Superseded,
 }
 
-/// What a promotion put on the primary, kept to recognize that copy later.
-struct Published {
-    /// The metadata the primary reported when the copy was written.
-    metadata: Metadata,
-    /// The bytes written, counted here because not every backend reports a
-    /// length when a write closes.
-    len: u64,
-}
-
 /// Whether `now` describes the same fallback object as `fetched`, by the
 /// strongest identity both carry: an ETag, a version, a modification time
 /// with the length, or the length alone.
@@ -718,18 +725,74 @@ fn same_source(fetched: &Metadata, now: &Metadata) -> bool {
     }
 }
 
-/// Whether `found` on the primary is still the copy `published` put there,
-/// rather than one a writer put there since.
-fn is_published_copy(published: &Published, found: &Metadata) -> bool {
-    if let (Some(a), Some(b)) = (published.metadata.etag(), found.etag()) {
-        return a == b;
-    }
-    if found.content_length() != published.len {
-        return false;
-    }
-    match (published.metadata.last_modified(), found.last_modified()) {
-        (Some(a), Some(b)) => a == b,
-        _ => true,
+/// The check a promotion makes after it publishes, and the withdrawal that
+/// follows when the fallback no longer holds what it fetched.
+///
+/// It owns everything it needs so it can run on a task of its own: the
+/// published copy has to be checked and, if need be, withdrawn even when the
+/// read that promoted it is cancelled half-way.
+struct Confirmation {
+    primary: Operator,
+    fallback: Operator,
+    path: String,
+    /// The fallback object's metadata from before the fetch.
+    fetched: Metadata,
+    /// The version that names the published copy, when the primary reports
+    /// one and can delete a single version. `None` means the copy cannot be
+    /// withdrawn without risking a writer's newer object.
+    version: Option<String>,
+}
+
+impl Confirmation {
+    /// Check the fallback, and withdraw the published copy when it no
+    /// longer holds the object.
+    ///
+    /// A fallback that cannot be asked counts as one that no longer holds the
+    /// object wherever the copy can be withdrawn exactly: a promotion lost to
+    /// a transient fault costs only a later re-read. Where it cannot, the
+    /// copy is kept and served, since the fallback held the same object just
+    /// before the publish.
+    async fn run(self) -> Result<Promotion> {
+        let still_cold = match self.fallback.stat(&self.path).await {
+            Ok(now) => Ok(same_source(&self.fetched, &now)),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        };
+        match (still_cold, self.version) {
+            (Ok(true), _) => Ok(Promotion::OnPrimary),
+            (_, Some(version)) => {
+                // A versioned delete removes this one object. A writer that
+                // replaced it holds a different version and keeps it.
+                let options = DeleteOptions {
+                    version: Some(version),
+                    recursive: false,
+                };
+                match self.primary.delete_options(&self.path, options).await {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+                Ok(Promotion::Superseded)
+            }
+            (Ok(false), None) => {
+                tracing::warn!(
+                    path = %self.path,
+                    "read-through promotion published a copy whose fallback object went away \
+                     while it published; the primary cannot delete that one copy by version, \
+                     so it is kept rather than risk deleting a newer write"
+                );
+                Ok(Promotion::Superseded)
+            }
+            (Err(e), None) => {
+                tracing::warn!(
+                    path = %self.path,
+                    error = %e,
+                    "read-through promotion could not re-check the fallback after it \
+                     published; keeping the copy, which the fallback held just before"
+                );
+                Ok(Promotion::OnPrimary)
+            }
+        }
     }
 }
 
@@ -900,6 +963,9 @@ impl ReadThroughReader {
     ///
     /// Either way the publish runs through [`Publications::publish`], and a
     /// promotion that a delete or move of the path overtook discards its bytes.
+    /// So does one whose fallback object went away while it streamed, which
+    /// is how a delete on another node shows: the fallback is asked again
+    /// just before the publish.
     async fn promote(&self, metadata: &Metadata) -> Result<Promotion> {
         let claim = self.publications.claim(&self.path);
         // Recorded before the first byte is fetched: a delete that removes the
@@ -918,10 +984,17 @@ impl ReadThroughReader {
                 writer,
             )
             .preserve_destination();
-            let len = match self.stream_into(guard.writer()).await {
-                Ok(len) => len,
+            if let Err(e) = self.stream_into(guard.writer()).await {
+                return guard.settle(Err(e)).await;
+            }
+            match self.still_holds(metadata).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    guard.cleanup().await;
+                    return Ok(Promotion::Superseded);
+                }
                 Err(e) => return guard.settle(Err(e)).await,
-            };
+            }
             // The close is the publish on these backends, so it is what runs
             // under the coordination.
             let closed = self
@@ -931,11 +1004,13 @@ impl ReadThroughReader {
             return match closed {
                 Ok(Some(written)) => {
                     guard.settle(Ok::<(), Error>(())).await?;
-                    let published = Published {
-                        metadata: written,
-                        len,
-                    };
-                    self.confirm_or_withdraw(metadata, &published).await
+                    // The write is the publish here, so the version it
+                    // reports names the object now at the path.
+                    let version = written
+                        .version()
+                        .filter(|_| self.withdraw_by_version)
+                        .map(str::to_owned);
+                    self.confirm_or_withdraw(metadata, version).await
                 }
                 Ok(None) => {
                     guard.cleanup().await;
@@ -962,16 +1037,22 @@ impl ReadThroughReader {
             &staged,
             writer,
         );
-        let staged_result: Result<Published> = async {
-            let len = self.stream_into(guard.writer()).await?;
-            let metadata = guard.writer().close().await?;
-            Ok(Published { metadata, len })
+        let staged_result: Result<Metadata> = async {
+            self.stream_into(guard.writer()).await?;
+            guard.writer().close().await
         }
         .await;
-        let staged_copy = match staged_result {
-            Ok(staged_copy) => staged_copy,
+        if let Err(e) = staged_result {
+            return guard.settle(Err(e)).await;
+        }
+        match self.still_holds(metadata).await {
+            Ok(true) => {}
+            Ok(false) => {
+                guard.cleanup().await;
+                return Ok(Promotion::Superseded);
+            }
             Err(e) => return guard.settle(Err(e)).await,
-        };
+        }
 
         let published = self
             .publications
@@ -988,7 +1069,10 @@ impl ReadThroughReader {
         match published {
             Ok(Some(true)) => {
                 guard.settle(Ok::<(), Error>(())).await?;
-                self.confirm_or_withdraw(metadata, &staged_copy).await
+                // A version the staged write reported names the staged
+                // object, not what the rename published, so it proves
+                // nothing about the copy at the path.
+                self.confirm_or_withdraw(metadata, None).await
             }
             Ok(Some(false)) => {
                 guard.cleanup().await;
@@ -1017,43 +1101,56 @@ impl ReadThroughReader {
         }
     }
 
+    /// Whether the fallback still holds the object this promotion fetched.
+    /// Asked just before the promotion publishes, so a delete or a move on
+    /// another node that removed the fallback copy while the bytes streamed
+    /// is seen before anything reaches the path.
+    async fn still_holds(&self, fetched: &Metadata) -> Result<bool> {
+        match self.fallback.stat(&self.path).await {
+            Ok(now) => Ok(same_source(fetched, &now)),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// After this promotion published, check that the fallback still holds
     /// the object it fetched, and withdraw the published copy when it does
-    /// not.
+    /// not. `version` names the published copy when the primary can delete
+    /// that one version; see [`Confirmation`].
     ///
-    /// This is what keeps a delete or a move on another node from being
-    /// undone. Both remove the fallback copy before the primary copy, so this
-    /// check either runs before the fallback copy went - and the delete's
-    /// primary step, still to come, removes the promoted copy - or after it,
-    /// and the promotion removes its own copy here. A fallback that cannot be
-    /// asked counts as one that no longer holds the object: a promotion lost
-    /// to a transient fault is only a later re-read, while a promotion kept
-    /// against a delete is a deleted object back on the primary.
+    /// This closes the moment between the check in [`Self::still_holds`] and
+    /// the publish. A delete or a move on another node removes the fallback
+    /// copy before the primary copy, so this check either runs before the
+    /// fallback copy went - and the delete's primary step, still to come,
+    /// removes the promoted copy - or after it, and the promotion withdraws
+    /// its own copy here.
     ///
-    /// The withdrawal removes only the copy this promotion wrote, recognized
-    /// by the metadata the primary reported for it, so a writer that put a
-    /// new object at the path in the meantime keeps it.
+    /// The check runs on a task of its own and this awaits it. A read
+    /// cancelled now would otherwise drop the check with it, and leave the
+    /// copy of a deleted object on the primary.
     async fn confirm_or_withdraw(
         &self,
         fetched: &Metadata,
-        published: &Published,
+        version: Option<String>,
     ) -> Result<Promotion> {
-        let still_cold = match self.fallback.stat(&self.path).await {
-            Ok(now) => same_source(fetched, &now),
-            Err(_) => false,
+        let confirmation = Confirmation {
+            primary: self.primary.clone(),
+            fallback: self.fallback.clone(),
+            path: self.path.clone(),
+            fetched: fetched.clone(),
+            version,
         };
-        if still_cold {
-            return Ok(Promotion::OnPrimary);
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle.spawn(confirmation.run()).await.map_err(|e| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    "read-through promotion check did not finish",
+                )
+                .set_source(e)
+            })?,
+            // Foreign executors have no runtime to spawn onto.
+            Err(_) => confirmation.run().await,
         }
-        match self.primary.stat(&self.path).await {
-            Ok(found) if is_published_copy(published, &found) => {
-                self.primary.delete(&self.path).await?;
-            }
-            Ok(_) => {}
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-        Ok(Promotion::Superseded)
     }
 
     /// The write options a promotion runs under, carrying the fallback
@@ -1330,9 +1427,30 @@ mod tests {
         /// path answers as missing even where the fixed body would have
         /// answered, so a delete on the stub is observable afterwards.
         deleted: Mutex<std::collections::HashSet<String>>,
+        /// When set, every `stat` hands the test a release down this channel
+        /// and answers only once the test sends or drops it. A test acts at
+        /// the stat it cares about by looking at the disks, not by counting
+        /// calls.
+        stat_hook: Mutex<Option<StatHook>>,
+        /// Held by the next delete until the test releases it.
+        delete_gate: Mutex<Option<ReadGate>>,
+        /// Told after every delete, so a test can wait for one that runs on
+        /// a task it does not own.
+        deleted_once: tokio::sync::Notify,
+        /// The version each stored path was last written under, on a disk
+        /// that keeps versions.
+        versions: Mutex<std::collections::HashMap<String, String>>,
+        /// How many versions the disk has handed out.
+        next_version: Mutex<u64>,
     }
 
-    /// Stops one read part-way so a test can act while it is in flight.
+    /// The sending end of [`Journal::stat_hook`].
+    type StatHook = tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>;
+
+    /// The receiving end of [`Journal::stat_hook`]: one release per held stat.
+    type HeldStats = tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<()>>;
+
+    /// Stops one call part-way so a test can act while it is in flight.
     struct ReadGate {
         /// Told when the read reaches the gate.
         entered: tokio::sync::oneshot::Sender<()>,
@@ -1346,12 +1464,28 @@ mod tests {
         }
     }
 
-    /// Wait at the journal's gate, if a test set one.
+    /// Wait at the journal's read gate, if a test set one.
     async fn pass_read_gate(journal: &Journal) {
-        let gate = locked(&journal.read_gate).take();
+        pass_gate(&journal.read_gate).await;
+    }
+
+    /// Wait at `gate`, if a test set it.
+    async fn pass_gate(gate: &Mutex<Option<ReadGate>>) {
+        let gate = locked(gate).take();
         if let Some(gate) = gate {
             let _ = gate.entered.send(());
             let _ = gate.release.await;
+        }
+    }
+
+    /// Wait for the test to release this stat, if it holds stats.
+    async fn pass_stat_hook(journal: &Journal) {
+        let hook = locked(&journal.stat_hook).clone();
+        if let Some(hook) = hook {
+            let (release, released) = tokio::sync::oneshot::channel();
+            if hook.send(release).is_ok() {
+                let _ = released.await;
+            }
         }
     }
 
@@ -1460,6 +1594,9 @@ mod tests {
         /// Hand an opened stream out in pieces of this many bytes, the way a
         /// network body arrives, instead of in one buffer.
         stream_piece: Option<usize>,
+        /// Keep a version for every write, report it, and delete a single
+        /// version on request, the way a versioned object store does.
+        versions: bool,
     }
 
     /// A disk that answers from a fixed body and records what it is asked for.
@@ -1603,6 +1740,7 @@ mod tests {
 
     struct StubWriter {
         fails: bool,
+        versions: bool,
         path: String,
         body: Vec<Buffer>,
         journal: Arc<Journal>,
@@ -1637,7 +1775,17 @@ mod tests {
                 .collect();
             locked(&self.journal.deleted).remove(&self.path);
             locked(&self.journal.stored).insert(self.path.clone(), body);
-            Ok(Metadata::new(EntryMode::FILE))
+            let mut metadata = Metadata::new(EntryMode::FILE);
+            if self.versions {
+                let version = {
+                    let mut next = locked(&self.journal.next_version);
+                    *next += 1;
+                    format!("v{next}")
+                };
+                locked(&self.journal.versions).insert(self.path.clone(), version.clone());
+                metadata.set_version(&version);
+            }
+            Ok(metadata)
         }
 
         async fn abort(&mut self) -> Result<()> {
@@ -1653,20 +1801,32 @@ mod tests {
     }
 
     impl oio::Delete for StubDeleter {
-        async fn delete(&mut self, path: &str, _args: OpDelete) -> Result<()> {
+        async fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
             let attempt = {
                 let mut deletes = locked(&self.journal.deletes);
                 deletes.push(path.to_owned());
                 deletes.len() - 1
             };
+            pass_gate(&self.journal.delete_gate).await;
             if attempt < self.failures {
                 return Err(Error::new(
                     ErrorKind::Unexpected,
                     "the stub disk cannot delete right now",
                 ));
             }
-            locked(&self.journal.stored).remove(path);
-            locked(&self.journal.deleted).insert(path.to_owned());
+            // A versioned delete removes that one version: when the path now
+            // holds a newer one, the newer one stays.
+            let current = locked(&self.journal.versions).get(path).cloned();
+            let removes = match args.version() {
+                Some(version) => current.as_deref() == Some(version),
+                None => true,
+            };
+            if removes {
+                locked(&self.journal.stored).remove(path);
+                locked(&self.journal.versions).remove(path);
+                locked(&self.journal.deleted).insert(path.to_owned());
+            }
+            self.journal.deleted_once.notify_one();
             Ok(())
         }
 
@@ -1698,6 +1858,7 @@ mod tests {
                 delete: true,
                 rename: self.spec.renames,
                 rename_with_if_not_exists: self.spec.renames_conditionally,
+                delete_with_version: self.spec.versions,
                 read_with_version: true,
                 read_with_if_match: true,
                 read_with_if_none_match: true,
@@ -1727,6 +1888,9 @@ mod tests {
                 stats.push(path.to_owned());
                 stats.len() - 1
             };
+            // Before anything is read, so what the test changes while it
+            // holds the stat is what the stat answers.
+            pass_stat_hook(&self.journal).await;
             if self.spec.stat_fails
                 || self
                     .spec
@@ -1751,6 +1915,9 @@ mod tests {
                         Metadata::new(EntryMode::FILE).with_content_length(contents.len() as u64);
                     if let Some(content_type) = self.spec.content_type {
                         metadata.set_content_type(content_type);
+                    }
+                    if let Some(version) = locked(&self.journal.versions).get(path) {
+                        metadata.set_version(version);
                     }
                     Ok(RpStat::new(metadata))
                 }
@@ -1784,12 +1951,14 @@ mod tests {
                 WriteBehavior::Refuse => Err(unsupported()),
                 WriteBehavior::FailAfterOpen => Ok(StubWriter {
                     fails: true,
+                    versions: self.spec.versions,
                     path: path.to_owned(),
                     body: Vec::new(),
                     journal: Arc::clone(&self.journal),
                 }),
                 WriteBehavior::Accept => Ok(StubWriter {
                     fails: false,
+                    versions: self.spec.versions,
                     path: path.to_owned(),
                     body: Vec::new(),
                     journal: Arc::clone(&self.journal),
@@ -2892,6 +3061,194 @@ mod tests {
                 .expect("the move landed")
                 .to_vec(),
             b"cold bytes"
+        );
+    }
+
+    /// Make every `stat` on `journal`'s disk wait for the test. Each one
+    /// sends a release down the returned channel and answers once the test
+    /// sends or drops it.
+    fn hold_stats(journal: &Journal) -> HeldStats {
+        let (hook, held) = tokio::sync::mpsc::unbounded_channel();
+        *locked(&journal.stat_hook) = Some(hook);
+        held
+    }
+
+    /// Let held fallback stats through until one runs while the primary
+    /// holds `path`: the check a promotion makes after it publishes. Returns
+    /// that stat's release, still unsent, and stops holding later stats.
+    async fn hold_the_confirmation(
+        held: &mut HeldStats,
+        fallback: &Journal,
+        primary: &Operator,
+        path: &str,
+    ) -> tokio::sync::oneshot::Sender<()> {
+        loop {
+            let release = held
+                .recv()
+                .await
+                .expect("the promotion checks the fallback after it publishes");
+            if primary.exists(path).await.expect("exists answers") {
+                *locked(&fallback.stat_hook) = None;
+                return release;
+            }
+            let _ = release.send(());
+        }
+    }
+
+    /// The fallback holds `cold bytes` under `cold.txt`.
+    fn cold_fallback() -> (Operator, Arc<Journal>) {
+        StubDisk::operator(StubSpec {
+            contents: Some("cold bytes"),
+            ..Default::default()
+        })
+    }
+
+    /// A primary that keeps a version per write and can delete one version.
+    fn versioned_primary() -> (Operator, Arc<Journal>) {
+        StubDisk::operator(StubSpec {
+            writes: WriteBehavior::Accept,
+            versions: true,
+            ..Default::default()
+        })
+    }
+
+    /// Sol review: a withdrawal never removes what a writer put on the
+    /// primary after the promotion published, even an object of the same
+    /// size on a primary that reports nothing else about it. The withdrawal
+    /// used to take an equal length as proof that the object was its own
+    /// copy, and deleted the writer's object.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_withdrawal_leaves_a_same_sized_replacement_alone() {
+        let primary = memory();
+        let (fallback, fallback_journal) = cold_fallback();
+        let mut held = hold_stats(&fallback_journal);
+        let assets = primary.clone().layer(ReadThroughLayer::new(
+            primary.clone(),
+            fallback,
+            true,
+            false,
+        ));
+
+        let reader = tokio::spawn({
+            let assets = assets.clone();
+            async move { assets.read("cold.txt").await }
+        });
+        let confirmation =
+            hold_the_confirmation(&mut held, &fallback_journal, &primary, "cold.txt").await;
+        primary
+            .write("cold.txt", "COLD BYTES")
+            .await
+            .expect("a writer replaces the promoted copy");
+        // The fallback copy is gone, so the promotion wants its copy back.
+        locked(&fallback_journal.deleted).insert("cold.txt".to_owned());
+        let _ = confirmation.send(());
+        let _ = reader.await.expect("the read task");
+
+        assert_eq!(
+            &primary
+                .read("cold.txt")
+                .await
+                .expect("the writer's object is still on the primary")
+                .to_vec(),
+            b"COLD BYTES",
+            "the withdrawal deleted an object a writer had put on the primary"
+        );
+    }
+
+    /// Sol review: a withdrawal removes only the version the promotion
+    /// wrote, so a writer that replaces the object after the withdrawal
+    /// decided to run keeps its object. The withdrawal used to check the
+    /// primary and then delete the path outright, so whatever replaced the
+    /// copy in between went instead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_withdrawal_deletes_only_the_version_the_promotion_wrote() {
+        let (primary, primary_journal) = versioned_primary();
+        let (fallback, fallback_journal) = cold_fallback();
+        let mut held = hold_stats(&fallback_journal);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *locked(&primary_journal.delete_gate) = Some(ReadGate {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        let assets = primary.clone().layer(ReadThroughLayer::new(
+            primary.clone(),
+            fallback,
+            true,
+            false,
+        ));
+
+        let reader = tokio::spawn({
+            let assets = assets.clone();
+            async move { assets.read("cold.txt").await }
+        });
+        let confirmation =
+            hold_the_confirmation(&mut held, &fallback_journal, &primary, "cold.txt").await;
+        locked(&fallback_journal.deleted).insert("cold.txt".to_owned());
+        let _ = confirmation.send(());
+        entered_rx
+            .await
+            .expect("the withdrawal reaches the primary's delete");
+        primary
+            .write("cold.txt", "COLD BYTES")
+            .await
+            .expect("a writer replaces the promoted copy");
+        release_tx.send(()).expect("release the withdrawal");
+        let _ = reader.await.expect("the read task");
+
+        assert_eq!(
+            &primary
+                .read("cold.txt")
+                .await
+                .expect("the writer's object is still on the primary")
+                .to_vec(),
+            b"COLD BYTES",
+            "the withdrawal deleted an object a writer put on the primary after it decided to \
+             run"
+        );
+    }
+
+    /// DRIVERS-019, Sol review: a read cancelled while its promotion checks
+    /// the fallback still withdraws the copy when that check finds the
+    /// object deleted. The check ran on the read's own task, so cancelling
+    /// the read dropped it and left a deleted object on the primary.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_read_still_withdraws_a_promotion_a_delete_overtook() {
+        let (primary, primary_journal) = versioned_primary();
+        let (fallback, fallback_journal) = cold_fallback();
+        let mut held = hold_stats(&fallback_journal);
+        let assets = primary.clone().layer(ReadThroughLayer::new(
+            primary.clone(),
+            fallback,
+            true,
+            false,
+        ));
+
+        let reader = tokio::spawn({
+            let assets = assets.clone();
+            async move { assets.read("cold.txt").await }
+        });
+        let confirmation =
+            hold_the_confirmation(&mut held, &fallback_journal, &primary, "cold.txt").await;
+        // Another node deleted the object: its fallback copy first, then the
+        // primary's, before this promotion published.
+        locked(&fallback_journal.deleted).insert("cold.txt".to_owned());
+        reader.abort();
+        let _ = reader.await;
+        assert!(
+            confirmation.send(()).is_ok(),
+            "the check died with the cancelled read, so nothing withdraws the copy of a \
+             deleted object"
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            primary_journal.deleted_once.notified(),
+        )
+        .await
+        .expect("the withdrawal runs to the end after the read is cancelled");
+        assert!(
+            !primary.exists("cold.txt").await.expect("exists answers"),
+            "the promotion left a deleted object on the primary"
         );
     }
 }

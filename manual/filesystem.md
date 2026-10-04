@@ -670,11 +670,23 @@ undone by it, on one node or across several. Within one process, the promotion
 publishes only if no delete or move of its path ran after it started fetching;
 otherwise it discards its staged copy. Across processes nothing is shared, so
 the storage decides: a delete and a move remove the fallback copy before the
-primary copy, and a promotion checks the fallback again after it publishes.
-When the object is gone or has changed, the promotion removes the copy it
-published, unless a writer has replaced it since. Two limits remain. Between
-that publish and that check, a reader on another node can see the object for a
-moment. A process that stops between the two leaves its copy on the primary.
+primary copy, and a promotion checks the fallback again just before it
+publishes and once more after. When the first check finds the object gone or
+changed, the promotion discards its unpublished bytes. When the second one
+does, the promotion withdraws the copy it published. A cancelled read still
+finishes that check.
+
+A withdrawal never deletes a writer's object. It removes only the exact copy
+the promotion wrote, and that needs a primary that names each write by version
+and can delete one version, such as an S3 bucket with versioning enabled. On
+any other primary - a local directory, memory, or an unversioned bucket - the
+promotion keeps its copy and logs a warning, because OpenDAL has no delete
+that checks what the path holds. Three limits remain. On those primaries, a
+delete on another node that completes in the moment between the promotion's
+last check and its publish can leave the promoted copy on the primary. Between
+the publish and the check after it, a reader on another node can see the
+object for a moment. A process that stops between the two leaves its copy on
+the primary.
 
 A versioned or conditional read reaches the fallback even when the primary
 cannot express the version or condition. The primary's refusal applies only
