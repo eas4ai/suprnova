@@ -1159,6 +1159,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **Redis credentials stay out of the boot log.** When Redis was
+  unreachable at boot, the cache error held the whole `REDIS_URL`, password
+  included, and `CacheConfig` and `CacheConfigBuilder` printed it when
+  debug-formatted. The error now names only the host and port or socket
+  path, and the configurations print the URL as `redis://<redacted>`. This
+  landed after the `v3.1.0` tag.
 - **Second-factor codes are rate limited and single use.**
   `TwoFactor::verify` and `consume_recovery_code` ignored the account
   lockout, so a caller with the password could guess TOTP codes without
