@@ -967,3 +967,55 @@ fn a_let_chain_binding_carries_a_raw_value() {
         report.diagnostics()
     );
 }
+/// Askama writes a path call as given and passes a `Safe` value through, so
+/// a raw wrapper or a filter function called directly is raw output; a
+/// filter the checker does not know, or a Rust macro, is unproved.
+#[test]
+fn raw_wrappers_called_directly_are_raw_and_unknown_filters_are_unproved() {
+    for output in [
+        "askama::filters::Safe(notice)",
+        "askama::filters::HtmlSafeOutput(notice)",
+        "askama::filters::MaybeSafe::Safe(notice)",
+        "askama::filters::linebreaks(notice)?",
+        "filters::safe(notice, askama::filters::Html)?",
+    ] {
+        let report = check(format!("<section>\n<p>{{{{ {output} }}}}</p></section>"));
+        assert_eq!(
+            raw_locations(&report),
+            vec![(2, 7)],
+            "{output}: {:?}",
+            report.diagnostics()
+        );
+    }
+    for output in [
+        "notice|markdown",
+        "notice|crate::filters::render",
+        "format!(\"{}\", notice)",
+    ] {
+        let report = check(format!("<section>\n<p>{{{{ {output} }}}}</p></section>"));
+        let unproved: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.code() == DiagnosticCode::DynamicStructureUnproved
+                    && diagnostic.severity() == DiagnosticSeverity::Unproved
+            })
+            .map(|diagnostic| (diagnostic.line(), diagnostic.column()))
+            .collect();
+        assert_eq!(
+            unproved,
+            vec![(2, 7)],
+            "{output}: {:?}",
+            report.diagnostics()
+        );
+    }
+    for output in [
+        "notice|upper",
+        "notice|trusted_html",
+        "notice|join(\", \")",
+        "items.len()",
+    ] {
+        let report = check(format!("<section><p>{{{{ {output} }}}}</p></section>"));
+        assert!(report.is_proved(), "{output}: {:?}", report.diagnostics());
+    }
+}

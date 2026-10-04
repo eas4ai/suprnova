@@ -133,6 +133,65 @@ const HTML_ESCAPERS: &[&str] = &[
     "askama", "html", "htm", "j2", "jinja", "jinja2", "rinja", "svg", "xml",
 ];
 
+/// Names that write their argument unescaped when called directly: the
+/// wrappers Askama's escaper passes through, and the filter functions whose
+/// filter form escapes first but whose direct call does not.
+const RAW_CALLEES: &[&str] = &[
+    "Safe",
+    "MaybeSafe",
+    "HtmlSafeOutput",
+    "safe",
+    "escape",
+    "e",
+    "linebreaks",
+    "linebreaksbr",
+    "paragraphbreaks",
+];
+
+/// Filters whose output the checker can classify: Askama 0.16's builtins
+/// and the framework's own. Any other filter is application code that may
+/// return a value Askama writes unescaped.
+const KNOWN_FILTERS: &[&str] = &[
+    "assigned_or",
+    "capitalize",
+    "center",
+    "default",
+    "defined_or",
+    "deref",
+    "e",
+    "escape",
+    "filesizeformat",
+    "fmt",
+    "format",
+    "indent",
+    "join",
+    "json",
+    "linebreaks",
+    "linebreaksbr",
+    "live_key",
+    "live_key_digest",
+    "lower",
+    "lowercase",
+    "paragraphbreaks",
+    "pluralize",
+    "ref",
+    "reject",
+    "safe",
+    "title",
+    "titlecase",
+    "tojson",
+    "trim",
+    "truncate",
+    "trusted_html",
+    "unique",
+    "upper",
+    "uppercase",
+    "urlencode",
+    "urlencode_strict",
+    "value",
+    "wordcount",
+];
+
 /// A parsed template with the templates it imports, so a macro body can call
 /// the macros its own template can see, whichever template it was called from.
 struct TemplateEnv<'a> {
@@ -565,6 +624,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     }
                 }
                 Node::Expr(_, expression) => {
+                    self.check_expression(place, expression);
                     let origin = Origin {
                         file: place.file,
                         offset: offset_u32(expression_start(expression).unwrap_or(0)),
@@ -685,6 +745,13 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     self.push_text(out, Cow::Borrowed(marker), origin, view)?;
                 }
                 Node::If(node) => {
+                    for cond in node
+                        .branches
+                        .iter()
+                        .filter_map(|branch| branch.cond.as_ref())
+                    {
+                        self.check_expression(place, &cond.expr);
+                    }
                     // A condition the macro's literal arguments decide is not
                     // a branch: only the arm they select is rendered, so a
                     // library macro called many times does not add a choice
@@ -723,6 +790,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     }
                 }
                 Node::Match(node) => {
+                    self.check_expression(place, &node.expr);
                     let value_is_raw = expression_is_raw(&node.expr, scope.raw);
                     let choices: Vec<Choice<'_, '_>> = node
                         .arms
@@ -743,6 +811,10 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     self.expand_choices(out, &choices, origin, chain, place, stack, scope)?;
                 }
                 Node::Loop(node) => {
+                    self.check_expression(place, &node.iter);
+                    if let Some(cond) = &node.cond {
+                        self.check_expression(place, cond);
+                    }
                     let mut names = vec!["loop"];
                     bound_names(&node.var, &mut names);
                     let shadowed = shadowed_bindings(scope.bindings, &names);
@@ -888,6 +960,9 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         );
                         continue;
                     }
+                    for argument in call.args.as_deref().unwrap_or(&[]) {
+                        self.check_expression(place, argument);
+                    }
                     let caller = CallerContent {
                         nodes: &call.nodes,
                         template: scope.template,
@@ -917,7 +992,10 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     };
                     let value_is_raw = reassigned_raw
                         || match &node.val {
-                            LetValueOrBlock::Value(value) => expression_is_raw(value, scope.raw),
+                            LetValueOrBlock::Value(value) => {
+                                self.check_expression(place, value);
+                                expression_is_raw(value, scope.raw)
+                            }
                             // Askama renders a `{% set %}` block into a
                             // string and escapes that string where it is
                             // written, so the name holds escaped text. A raw
@@ -973,6 +1051,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 // `{% mut x = value %}` and the compound forms leave `x` raw
                 // when the assigned value is raw; a raw `x` stays raw.
                 Node::Compound(compound) => {
+                    self.check_expression(place, &compound.op.rhs);
                     if expression_is_raw(&compound.op.rhs, scope.raw)
                         && let Some(name) = assigned_name(&compound.op.lhs)
                         && let Some(raw) = rebind_raw(scope.raw, &[name], true)
@@ -991,6 +1070,26 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             }
         }
         Some(())
+    }
+
+    /// Reports an expression the checker cannot classify: one that applies a
+    /// filter outside [`KNOWN_FILTERS`], which may return a value Askama
+    /// writes unescaped, or that expands a Rust macro.
+    fn check_expression(
+        &mut self,
+        place: Place<'_, 'checker>,
+        expression: &WithSpan<Box<Expr<'_>>>,
+    ) {
+        if expression_is_unclassified(expression) {
+            let (line, column) = expression_location(place.source, expression);
+            self.push(
+                DiagnosticCode::DynamicStructureUnproved,
+                DiagnosticSeverity::Unproved,
+                place.view,
+                line,
+                column,
+            );
+        }
     }
 
     /// Expands one definition of a block where the block, or the
@@ -1385,9 +1484,46 @@ fn expression_is_raw(expression: &Expr<'_>, raw: &RawNames) -> bool {
     match expression {
         Expr::Var(name) => raw.contains(*name),
         Expr::Filter(filter) => filter_writes_raw(filter, raw),
+        // Askama writes a path call as given and passes a `Safe` value
+        // through its escaper, so a raw wrapper or a filter function named
+        // directly writes its argument unescaped.
+        Expr::Call(call) if names_raw_callee(&call.path) => true,
+        Expr::Struct(structure) if names_raw_callee(&structure.path) => true,
+        Expr::Path(path) if path_names_raw_callee(path) => true,
         other => sub_expressions(other)
             .into_iter()
             .any(|inner| expression_is_raw(inner, raw)),
+    }
+}
+
+fn names_raw_callee(callee: &Expr<'_>) -> bool {
+    match callee {
+        Expr::Var(name) => RAW_CALLEES.contains(name),
+        Expr::Path(path) => path_names_raw_callee(path),
+        _ => false,
+    }
+}
+
+fn path_names_raw_callee(path: &[askama_parser::PathComponent<'_>]) -> bool {
+    path.last()
+        .is_some_and(|component| RAW_CALLEES.contains(&*component.name))
+}
+
+/// Whether the expression applies a filter outside [`KNOWN_FILTERS`],
+/// a filter named by path included, or expands a Rust macro.
+fn expression_is_unclassified(expression: &Expr<'_>) -> bool {
+    match expression {
+        Expr::Filter(filter) => {
+            !matches!(&filter.name, PathOrIdentifier::Identifier(name) if KNOWN_FILTERS.contains(&**name))
+                || filter
+                    .arguments
+                    .iter()
+                    .any(|argument| expression_is_unclassified(argument))
+        }
+        Expr::RustMacro(..) => true,
+        other => sub_expressions(other)
+            .into_iter()
+            .any(|inner| expression_is_unclassified(inner)),
     }
 }
 
@@ -1486,10 +1622,19 @@ fn expression_location(source: &str, expression: &WithSpan<Box<Expr<'_>>>) -> (u
 
 fn expression_start(expression: &WithSpan<Box<Expr<'_>>>) -> Option<usize> {
     let own = expression.span().byte_range().map(|range| range.start);
+    // A Rust macro is spanned from its `!`; its path comes before that.
+    let macro_path = match &***expression {
+        Expr::RustMacro(path, _) => path
+            .first()
+            .and_then(|segment| segment.span().byte_range())
+            .map(|range| range.start),
+        _ => None,
+    };
     sub_expressions(expression)
         .into_iter()
         .filter_map(expression_start)
         .chain(own)
+        .chain(macro_path)
         .min()
 }
 
