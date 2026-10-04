@@ -336,10 +336,14 @@ fn a_second_token_guard_never_answers_with_the_first_guards_user() {
 
     RT.block_on(TestContainer::scope(async {
         install_two_token_guards();
-        Auth::password()
+        let registration = Auth::password()
             .register("two-token-guards@example.com", "TwoGuards1!")
             .await
             .unwrap();
+        assert!(
+            matches!(registration, suprnova::Registration::Created(_)),
+            "a fresh address registers a new account"
+        );
         let (_user, magnetar_session) = Auth::password()
             .authenticate("two-token-guards@example.com", "TwoGuards1!", None, None)
             .await
