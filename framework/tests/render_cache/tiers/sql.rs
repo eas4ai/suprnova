@@ -1475,6 +1475,79 @@ async fn live_mysql_record_creation_and_cas_conflict() {
     assert_eviction_reads_the_soonest_and_removes_by_version().await;
 }
 
+/// DATA-040: a record creation that loses the race on the unique key
+/// inside a host transaction leaves that transaction usable. The winner
+/// inserts first and holds its row uncommitted; the host's locking read
+/// cannot see it, so the host's insert waits on the key and then fails
+/// when the winner commits. On Postgres a failed statement aborts the
+/// transaction unless it ran under a savepoint, and the store used to
+/// report the lost race with the host's transaction left aborted, so the
+/// host's next statement failed.
+async fn assert_a_raced_creation_leaves_the_host_transaction_usable() {
+    use std::time::Duration;
+
+    let store = Arc::new(SqlInstanceRecordStore::new());
+    let key = instance_key(0x51);
+    let expires_at = store_deadline(60_000).await;
+    let (inserted, wait_for_insert) = tokio::sync::oneshot::channel::<()>();
+
+    let winner = DB::transaction({
+        let store = Arc::clone(&store);
+        let key = key.clone();
+        move |_tx| {
+            Box::pin(async move {
+                let created = store
+                    .insert_if_absent(&key, b"winner", expires_at)
+                    .await
+                    .map_err(|e| FrameworkError::internal(format!("winner insert: {e}")))?;
+                let _ = inserted.send(());
+                // Hold the row uncommitted while the host's insert waits on it.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                Ok::<bool, FrameworkError>(created)
+            })
+        }
+    });
+    let host = DB::transaction({
+        let store = Arc::clone(&store);
+        let key = key.clone();
+        move |_tx| {
+            Box::pin(async move {
+                let _ = wait_for_insert.await;
+                let created = store
+                    .insert_if_absent(&key, b"host", expires_at)
+                    .await
+                    .map_err(|e| FrameworkError::internal(format!("host insert: {e}")))?;
+                let after = DB::select("SELECT 1 AS one", Vec::<sea_orm::Value>::new()).await?;
+                Ok::<(bool, usize), FrameworkError>((created, after.len()))
+            })
+        }
+    });
+    let (winner, host) = tokio::join!(winner, host);
+
+    assert!(
+        winner.expect("the winner commits"),
+        "the winner creates the record"
+    );
+    let (created, rows) = host.expect("the host's transaction survives the lost race");
+    assert!(!created, "the host reports the key as held");
+    assert_eq!(rows, 1, "the host's next statement runs");
+    let stored = store.load(&key).await.expect("load").expect("the record");
+    assert_eq!(stored.bytes, b"winner".to_vec());
+}
+
+#[tokio::test]
+#[ignore = "requires live Postgres; run with --ignored postgres_"]
+async fn postgres_a_raced_record_creation_leaves_the_host_transaction_usable() {
+    let url = std::env::var("PG_TEST_URL")
+        .expect("set PG_TEST_URL to a disposable Postgres - this test drops and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("Postgres test DB not reachable - check PG_TEST_URL");
+    let _guard = reset_and_migrate(conn).await;
+
+    assert_a_raced_creation_leaves_the_host_transaction_usable().await;
+}
+
 // --- End to end: two nodes over one database ---
 //
 // Everything above proves one adapter against one database. What follows
