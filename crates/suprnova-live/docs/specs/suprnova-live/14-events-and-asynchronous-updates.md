@@ -182,21 +182,36 @@ Acceptance criteria:
 - After presentation failure, the exact active membership retains its physical
   document-transport identity, subscription identity, prior authenticated
   transport generation, and descriptor binding as a local degraded-lane fence.
-  Frames for only that same physical group and known lane are discarded while
-  successor acknowledgment is pending. Suspend, replacement, removal, or close
-  clears the fence, so a replacement group cannot inherit it merely because its
-  numeric generation collides; foreign, never-authenticated, wrong-group,
-  wrong-generation, or wrong-binding traffic retains the physical
+  Until its successor's subscribe control is sent, frames for only that same
+  physical group and known lane are discarded; the successor lane carries every
+  position after its own baseline. Once that control is sent, the next rule
+  holds them instead. Suspend, replacement, removal, or close clears the
+  fence, so a replacement group cannot inherit it merely because its numeric
+  generation collides. Outside that hold, foreign, never-authenticated,
+  wrong-group, wrong-generation, or wrong-binding traffic retains the physical
   authorization-failure contract.
-- An SSE record for a membership whose subscribe control is still settling on
-  the current physical generation is held inert, within the document's
-  queued-event limit, and applied in arrival order once that exact
-  acknowledgment authenticates the membership. A rejected, timed-out, or
-  cancelled control drops it. The control travels as an HTTP request beside the
-  event stream, so a host that commits the membership and then delivers its
-  first record can have that record arrive first. A WebSocket acknowledgment
-  travels ahead of the membership's data on the same socket, so a WebSocket
-  record that precedes it still fails the physical transport.
+- An SSE record for a membership whose subscribe control, initial or successor,
+  is still settling on the current physical generation is held inert and
+  charged to the document's queued-event budget
+  (`LIVE_ASYNC_MAX_QUEUED_EVENTS`), the same budget its islands' queues use.
+  Once that exact acknowledgment authenticates the membership, the held records
+  are applied in arrival order through the same routing checks as a record
+  arriving then, ahead of later records. A rejected, timed-out, cancelled, or
+  stale-committed control drops them and returns their budget. The control
+  travels as an HTTP request beside the event stream, so a host that commits
+  the membership and then delivers its first record can have that record
+  arrive first; answering the control before delivering does not change that,
+  because the browser settles the answer on its own exchange. The hold takes
+  precedence over the degraded-lane fence. Envelopes carry no descriptor
+  binding, so a successor's first record and an old-lane record the host sent
+  before removing that lane look alike: a held position at or before the
+  successor's baseline is stale to it, and a later one is the same event of the
+  subscription's stream that the successor lane carries. A full budget reports
+  `LIVE_ASYNC_MAX_QUEUED_EVENTS` with the measured and configured values and
+  fails the physical transport as lost, so its memberships reconnect. A
+  WebSocket acknowledgment travels ahead of the membership's data on the same
+  socket, so a WebSocket record that precedes it still fails the physical
+  transport.
 - Fresh-render scheduler exhaustion is a distinct `resource_exhausted`
   presentation outcome. It degrades and reauthorizes only the exact membership,
   reports one bounded resource diagnostic, activates the signed hybrid fallback,
@@ -646,8 +661,15 @@ UX flow:
   answer that authenticates the membership. Failing that record as lost
   authorization retired the whole document transport and degraded every island
   on it, with no reconnect. The record now stays inert until the exact
-  acknowledgment for that membership and generation settles, bounded by the
-  document's queued-event limit; WebSocket ordering is unchanged.
+  acknowledgment for that membership and generation settles. The hold also
+  covers a degraded lane's successor control and takes precedence over the
+  degraded-lane fence, which would otherwise discard the successor's first
+  record and turn the next one into a gap that reconnects every island. Held
+  records share the document's queued-event budget; a full budget reports
+  `LIVE_ASYNC_MAX_QUEUED_EVENTS` and reconnects the transport. Reordering the
+  host's answer ahead of delivery was rejected: the answer and the stream are
+  separate exchanges, and the browser settles the answer several tasks after
+  it arrives. WebSocket ordering is unchanged.
 - 2026-10-04 -- Replay memory is bounded per subscription and per process:
   `LIVE_ASYNC_MAX_REPLAY_BYTES` (4 MiB) bounds one subscription's log, which
   shared the 16 MiB per-document queue limit before, and

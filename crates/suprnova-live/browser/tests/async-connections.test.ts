@@ -10,6 +10,7 @@ import {
   type DocumentTransportConnectRequest,
   type EventSourcePort,
 } from "../src/async-updates/connections.js";
+import { AsyncDocumentQueueBudget } from "../src/async-updates/subscription.js";
 import type { AuthorizedLogicalSubscription, StreamPosition } from "../src/async-updates/types.js";
 import { eventLoopBarrier } from "./support/event-loop-barrier.js";
 
@@ -137,6 +138,10 @@ class DeferredAcknowledgmentEventSource implements EventSourcePort {
 }
 
 function deferredAcknowledgmentHarness(maxQueuedEvents?: number) {
+  const queueAdmission =
+    maxQueuedEvents === undefined
+      ? undefined
+      : new AsyncDocumentQueueBudget(maxQueuedEvents, maxQueuedEvents);
   const sources: DeferredAcknowledgmentEventSource[] = [];
   const timers = new FakeTimers();
   const port = (request: DocumentTransportConnectRequest) => {
@@ -146,7 +151,7 @@ function deferredAcknowledgmentHarness(maxQueuedEvents?: number) {
   };
   const pool = new DocumentConnectionPool({
     handshakeScheduler: new OriginHandshakeScheduler(8),
-    ...(maxQueuedEvents === undefined ? {} : { maxQueuedEvents }),
+    ...(queueAdmission === undefined ? {} : { queueAdmission }),
     randomness: { number: () => 0.5 },
     timers: timers.port,
     transports: { eventSource: port, webSocket: port },

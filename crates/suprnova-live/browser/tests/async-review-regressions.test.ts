@@ -220,7 +220,7 @@ describe("reviewed reconnect authority", () => {
     expect(sources[0]?.close).not.toHaveBeenCalled();
   });
 
-  it("quarantines exact degraded-lane frames while successor attachment is pending", async () => {
+  it("quarantines exact degraded-lane frames, then holds them while the successor's answer settles", async () => {
     const { pool, sources } = harness();
     const successor = authorization(1, { descriptorBinding: "binding-1-successor" });
     const first = sink(() => Promise.resolve(successor));
@@ -237,8 +237,13 @@ describe("reviewed reconnect authority", () => {
     sources[0]?.subscribe.mockImplementationOnce(() => pendingAcknowledgment);
 
     firstHandle.presentationFailed();
-    await settle();
+    // The successor is still being authorized, so this is the old lane's
+    // record, and the successor lane carries everything after its baseline.
     sources[0]?.emit(heartbeat(1, 1));
+    await settle();
+    // The successor control is settling: its first record can overtake its
+    // answer, and is held rather than discarded.
+    sources[0]?.emit(heartbeat(1, 2));
 
     expect(first.envelope).not.toHaveBeenCalled();
     expect(first.state).toHaveBeenLastCalledWith("connecting");
@@ -255,10 +260,10 @@ describe("reviewed reconnect authority", () => {
       }),
     );
     await settle();
-    sources[0]?.emit(heartbeat(1, 2));
+    sources[0]?.emit(heartbeat(1, 3));
 
     expect(first.state).toHaveBeenLastCalledWith("current");
-    expect(first.envelope).toHaveBeenCalledExactlyOnceWith(heartbeat(1, 2));
+    expect(first.envelope.mock.calls).toEqual([[heartbeat(1, 2)], [heartbeat(1, 3)]]);
     expect(second.state).toHaveBeenLastCalledWith("current");
     expect(sources[0]?.close).not.toHaveBeenCalled();
   });
@@ -314,9 +319,11 @@ describe("reviewed reconnect authority", () => {
     expect(sources[1]?.close).not.toHaveBeenCalled();
     expect(first.envelope).not.toHaveBeenCalled();
 
-    // The record overtakes the replacement's successor acknowledgment. An
-    // inherited quarantine would drop it silently; instead it is held inert
-    // and applied once that acknowledgment authenticates the membership.
+    // The record overtakes the replacement's successor acknowledgment and is
+    // held, then applied once that acknowledgment authenticates the
+    // membership. This pins the fence's group identity and its clearing on
+    // suspend and close together: either alone keeps a replacement group from
+    // inheriting the fence, so only removing both makes this test fail.
     sources[1]?.emit(heartbeat(1, 1));
 
     expect(sources[1]?.close).not.toHaveBeenCalled();
