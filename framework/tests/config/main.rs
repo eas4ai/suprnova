@@ -8,4 +8,5 @@ mod env_lock;
 #[path = "../support/env_snapshot.rs"]
 mod env_snapshot;
 pub mod session_table;
+pub mod two_factor_lockout;
 pub mod typed_config;

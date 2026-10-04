@@ -1260,3 +1260,50 @@ async fn enroll_never_replaces_a_confirmed_secret() {
     assert_eq!(stored_secret(&db, &user.id).await, confirmed);
     assert!(TwoFactor::is_enabled(&user).await.unwrap());
 }
+
+/// The threshold is configuration: `TWO_FACTOR_MAX_ATTEMPTS=3` locks the
+/// second factor at the third failure.
+#[test]
+fn a_lowered_threshold_locks_at_that_count() {
+    let _env = crate::env_lock::lock_env();
+    let _snap = crate::env_snapshot::EnvSnapshot::capture(&["TWO_FACTOR_MAX_ATTEMPTS"]);
+    crate::env_snapshot::set_env("TWO_FACTOR_MAX_ATTEMPTS", Some("3"));
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async {
+            ensure_crypt();
+            let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+            let (user, resp) = enrolled_user("lowered-threshold").await;
+
+            for _ in 0..3 {
+                assert!(!TwoFactor::verify(&user, "000000").await.unwrap());
+            }
+            let error = TwoFactor::verify(&user, &totp_code_for(&resp.otpauth_url))
+                .await
+                .expect_err("the fourth attempt is refused at a threshold of 3");
+            assert_eq!(error.status_code(), 429);
+        });
+}
+
+/// A lockout built in code and bound in the container wins over the
+/// environment.
+#[tokio::test]
+async fn a_lockout_bound_in_code_sets_the_threshold() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    suprnova::testing::TestContainer::singleton(
+        suprnova::auth_flows::TwoFactorLockout::new(2, 15).expect("valid lockout"),
+    );
+    let (user, resp) = enrolled_user("code-threshold").await;
+
+    for _ in 0..2 {
+        assert!(!TwoFactor::verify(&user, "000000").await.unwrap());
+    }
+    let error = TwoFactor::verify(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .expect_err("the third attempt is refused at a threshold of 2");
+    assert_eq!(error.status_code(), 429);
+}

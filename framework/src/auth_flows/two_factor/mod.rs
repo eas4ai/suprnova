@@ -25,6 +25,7 @@
 
 mod attempts;
 pub mod entity;
+pub mod lockout;
 pub mod migration;
 pub mod migration_attempts;
 pub mod migration_replay;
@@ -45,6 +46,8 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, EntityTrait, QueryFilter,
 };
 use totp_rs::{Algorithm, Secret, TOTP};
+
+pub use lockout::TwoFactorLockout;
 
 const ISSUER_ENV: &str = "APP_NAME";
 const DEFAULT_ISSUER: &str = "Suprnova";
@@ -357,7 +360,9 @@ impl TwoFactor {
     /// the code is read - the counter every proof path of this facade
     /// shares, [`Self::complete_challenge`] included. A wrong code, a
     /// replay or a lost claim race turns the reservation into a failed
-    /// attempt. Five failures inside fifteen minutes lock the second factor
+    /// attempt. The configured number of failures inside the configured
+    /// window ([`TwoFactorLockout`]: five in fifteen minutes by default)
+    /// lock the second factor
     /// until they age out or [`Self::unlock`] clears them. A locked user is
     /// refused before any code is evaluated, so the right code cannot open
     /// it either, and parallel guesses cannot all pass one status read. A

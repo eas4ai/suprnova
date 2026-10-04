@@ -673,7 +673,8 @@ Every method that checks a code or a recovery code - `verify`,
 `regenerate_recovery_codes` and `complete_challenge` - reserves one
 attempt in the second-factor counter before it reads the code. A wrong
 code turns the reservation into a failure. Five failures inside fifteen
-minutes lock the second factor: every one of those methods then returns
+minutes (both configurable, see below) lock the second factor: every one
+of those methods then returns
 `429 Too Many Requests` without evaluating the code, so the right code
 cannot open a locked account either. A correct code clears the failures,
 and parallel guesses cannot all pass one status read. When the counter
@@ -687,6 +688,25 @@ check does not clear second-factor failures, and the lock works with no
 Magnetar engine installed. A wrong code fires `AccountLocked` once, on
 the failure that sets the lock. `TwoFactor::unlock(&user)` clears the
 counter early and fires `AccountUnlocked` when a lock was in effect.
+
+Two settings shape the lock:
+
+| Var | Default | Meaning |
+|---|---|---|
+| `TWO_FACTOR_MAX_ATTEMPTS` | `5` | Failures inside the window that lock the second factor. |
+| `TWO_FACTOR_LOCKOUT_MINUTES` | `15` | How long each attempt counts. A lock lifts once the failure that completed it is this old. |
+
+Both must be whole numbers of at least 1. `Config::init` checks them at
+boot, so a zero or malformed value stops the app with the variable named.
+To set them in code instead, bind a `TwoFactorLockout`, which wins over the
+environment:
+
+```rust
+use suprnova::App;
+use suprnova::auth_flows::TwoFactorLockout;
+
+App::singleton(TwoFactorLockout::new(3, 30)?);
+```
 
 `enroll` returns plaintext recovery codes **exactly once**. There is
 no API to retrieve them later - the encrypted column is one-way from
@@ -896,7 +916,8 @@ single-use.
 
 **Brute-force linkage.** Failed challenge codes feed the second-factor
 counter, the same one bare `TwoFactor::verify` uses. An attacker
-grinding the challenge form trips `AccountLocked` after five failures.
+grinding the challenge form trips `AccountLocked` after the configured
+number of failures (`TWO_FACTOR_MAX_ATTEMPTS`, default 5).
 A single bad submission counts as **one** failed attempt even though
 `complete_challenge` tries both the TOTP and recovery-code forms. Signing
 in with the password again does not clear the count.

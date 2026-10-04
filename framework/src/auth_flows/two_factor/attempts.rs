@@ -6,8 +6,9 @@
 //! proof that could not be evaluated deletes only its own row. Admission
 //! counts pending and failed rows together, so parallel guesses cannot all
 //! pass one status read, and a success never deletes another request's
-//! pending row. Rows older than [`attempt_window`] no longer count, which
-//! also retires the reservation of a request that died before it settled.
+//! pending row. Rows older than the configured window
+//! ([`super::TwoFactorLockout`]) no longer count, which also retires the
+//! reservation of a request that died before it settled.
 //!
 //! The counter belongs to the second factor alone. A successful password
 //! check does not touch it, so wrong codes cannot be washed out by signing
@@ -20,19 +21,18 @@ use sea_orm::{
     QueryFilter, TransactionTrait,
 };
 
+use super::TwoFactorLockout;
 use super::entity as credentials;
 use crate::database::DB;
 use crate::error::FrameworkError;
 
-/// Failed second-factor attempts inside [`attempt_window`] that lock every
-/// proof path of the facade. The same default as Magnetar's password
-/// lockout.
-pub(crate) const MAX_FAILED_ATTEMPTS: u64 = 5;
-
-/// How long an attempt counts. A lock therefore lifts once the failure that
-/// completed it is this old.
-pub(crate) fn attempt_window() -> chrono::Duration {
-    chrono::Duration::minutes(15)
+/// The oldest attempt time that still counts under `lockout`.
+fn window_floor(
+    now: chrono::DateTime<chrono::Utc>,
+    lockout: TwoFactorLockout,
+) -> chrono::DateTime<chrono::Utc> {
+    now.checked_sub_signed(lockout.window())
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
 }
 
 mod attempt {
@@ -127,20 +127,21 @@ where
 
 /// Reserve one attempt for `user_id`, or report it locked.
 pub(crate) async fn admit(user_id: &str) -> Result<Admission, FrameworkError> {
+    let lockout = TwoFactorLockout::resolve()?;
     let owner = user_id.to_owned();
     locked(user_id, move |transaction| {
         Box::pin(async move {
             let now = crate::clock::now();
             attempt::Entity::delete_many()
                 .filter(attempt::Column::UserId.eq(owner.as_str()))
-                .filter(attempt::Column::AttemptedAt.lte(now - attempt_window()))
+                .filter(attempt::Column::AttemptedAt.lte(window_floor(now, lockout)))
                 .exec(transaction)
                 .await?;
             let counted = attempt::Entity::find()
                 .filter(attempt::Column::UserId.eq(owner.as_str()))
                 .count(transaction)
                 .await?;
-            if counted >= MAX_FAILED_ATTEMPTS {
+            if counted >= u64::from(lockout.max_attempts()) {
                 return Ok(Admission::Locked);
             }
             let id = uuid::Uuid::new_v4().to_string();
@@ -160,6 +161,7 @@ pub(crate) async fn admit(user_id: &str) -> Result<Admission, FrameworkError> {
 
 /// The reserved attempt's code was wrong: count it as a failure.
 pub(crate) async fn record_failure(reservation: &Reservation) -> Result<Failure, FrameworkError> {
+    let lockout = TwoFactorLockout::resolve()?;
     let id = reservation.id.clone();
     let owner = reservation.user_id.clone();
     locked(&reservation.user_id, move |transaction| {
@@ -173,14 +175,15 @@ pub(crate) async fn record_failure(reservation: &Reservation) -> Result<Failure,
             let failed_attempts = attempt::Entity::find()
                 .filter(attempt::Column::UserId.eq(owner.as_str()))
                 .filter(attempt::Column::Failed.eq(true))
-                .filter(attempt::Column::AttemptedAt.gt(crate::clock::now() - attempt_window()))
+                .filter(attempt::Column::AttemptedAt.gt(window_floor(crate::clock::now(), lockout)))
                 .count(transaction)
                 .await?;
             // Admission never lets pending and failed rows exceed the
             // maximum, so the settle that reaches it is the one that locks.
             Ok(Failure {
                 failed_attempts,
-                locked_now: settled.rows_affected > 0 && failed_attempts >= MAX_FAILED_ATTEMPTS,
+                locked_now: settled.rows_affected > 0
+                    && failed_attempts >= u64::from(lockout.max_attempts()),
             })
         })
     })
@@ -223,20 +226,21 @@ pub(crate) async fn release(reservation: &Reservation) -> Result<(), FrameworkEr
 
 /// Forget every attempt of `user_id`. Returns whether the user was locked.
 pub(crate) async fn clear(user_id: &str) -> Result<bool, FrameworkError> {
+    let lockout = TwoFactorLockout::resolve()?;
     let owner = user_id.to_owned();
     locked(user_id, move |transaction| {
         Box::pin(async move {
             let failed_attempts = attempt::Entity::find()
                 .filter(attempt::Column::UserId.eq(owner.as_str()))
                 .filter(attempt::Column::Failed.eq(true))
-                .filter(attempt::Column::AttemptedAt.gt(crate::clock::now() - attempt_window()))
+                .filter(attempt::Column::AttemptedAt.gt(window_floor(crate::clock::now(), lockout)))
                 .count(transaction)
                 .await?;
             attempt::Entity::delete_many()
                 .filter(attempt::Column::UserId.eq(owner.as_str()))
                 .exec(transaction)
                 .await?;
-            Ok(failed_attempts >= MAX_FAILED_ATTEMPTS)
+            Ok(failed_attempts >= u64::from(lockout.max_attempts()))
         })
     })
     .await
