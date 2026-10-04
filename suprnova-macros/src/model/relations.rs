@@ -904,11 +904,19 @@ fn emit_relation_inventory(
                     .unwrap_or_else(|| morph_type_of(input)),
                 _ => String::new(),
             };
-            // For MorphedByMany the pivot's <parent>_id column points
-            // at the related, and the morph column points at the
-            // parent (the morph side). Swap parent/related pivot keys.
+            // For MorphedByMany the pivot column that points at this
+            // (parent) model is its `pivot_foreign_key`, defaulted to
+            // `<snake(parent)>_id` as the relation method defaults it,
+            // and the morph column points at the related model (the
+            // morph side). It used to default to `<snake(target)>_id`,
+            // a column the pivot does not have, so `has` failed.
             let (pivot_parent_col, pivot_related_col) = match rel.kind {
-                RelationKindAttr::MorphedByMany => (related_col.clone(), morph_col.clone()),
+                RelationKindAttr::MorphedByMany => {
+                    let parent_col = pivot_fk_override(rel)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| default_has_fk(&parent_struct_name));
+                    (parent_col, morph_col.clone())
+                }
                 _ => (morph_col.clone(), related_col.clone()),
             };
             return emit_inventory_token(&InventoryFields {
