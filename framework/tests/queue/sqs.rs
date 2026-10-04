@@ -982,8 +982,74 @@ async fn a_refusal_after_an_unanswered_send_keeps_the_payload() {
     assert_eq!(reservation.envelope.payload, sent.payload);
 }
 
+/// SQS took the first try but the reply was lost, and took the retry too:
+/// two messages carry the job. Each must point at a payload of its own, so
+/// acknowledging one does not leave the other unreadable.
+#[tokio::test]
+async fn a_send_taken_twice_gives_each_message_its_own_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script_accept_then_drop("AmazonSQS.SendMessage");
+    let sent = large_envelope();
+    driver
+        .push(sent.clone())
+        .await
+        .expect("the retry was answered");
+    let messages = fake.messages(&url("default"));
+    assert_eq!(messages.len(), 2, "both tries left a message");
+    assert_ne!(
+        messages[0].body, messages[1].body,
+        "the two messages point at different payloads"
+    );
+
+    for _ in 0..2 {
+        let reservation = driver
+            .pop(VISIBILITY)
+            .await
+            .expect("each copy can be read")
+            .expect("each copy is there");
+        assert_eq!(reservation.envelope.payload, sent.payload);
+        driver.ack(&reservation.token).await.unwrap();
+    }
+    assert_eq!(
+        stored_payloads().await,
+        0,
+        "each acknowledgement deleted its own payload"
+    );
+}
+
+#[tokio::test]
+async fn a_batch_taken_twice_gives_each_message_its_own_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script_accept_then_drop("AmazonSQS.SendMessageBatch");
+    let sent = large_envelope();
+    driver
+        .bulk_push(vec![sent.clone()])
+        .await
+        .expect("the retry was answered");
+    assert_eq!(fake.messages(&url("default")).len(), 2);
+
+    for _ in 0..2 {
+        let reservation = driver
+            .pop(VISIBILITY)
+            .await
+            .expect("each copy can be read")
+            .expect("each copy is there");
+        assert_eq!(reservation.envelope.payload, sent.payload);
+        driver.ack(&reservation.token).await.unwrap();
+    }
+    assert_eq!(stored_payloads().await, 0);
+}
+
 /// A fault of the service (5xx) does not say SQS did not take the message,
-/// so a send that ends in one keeps its payload.
+/// so a send that ends in one keeps its payload. Each retry after a fault
+/// carries a copy of its own, so each of the three tries keeps the payload
+/// it carried.
 #[tokio::test]
 async fn a_send_that_ends_in_a_service_fault_keeps_the_payload() {
     let (_env, _restore, fake) = setup!("default");
@@ -1000,7 +1066,7 @@ async fn a_send_that_ends_in_a_service_fault_keeps_the_payload() {
         .push(large_envelope())
         .await
         .expect_err("three faults");
-    assert_eq!(stored_payloads().await, 1);
+    assert_eq!(stored_payloads().await, 3);
 }
 
 /// The batch form of the same sequence: the first `SendMessageBatch` was
