@@ -6,6 +6,10 @@
 //! for tests; deterministic in production because each Job has exactly
 //! one registration site.
 //!
+//! The framework's own jobs - `SendMailJob` behind `Mail::queue` and
+//! `SendNotificationJob` behind `Notify::queue` - are in the registry from
+//! the start, so an application never registers a type it did not write.
+//!
 //! # At-least-once delivery and job idempotency
 //!
 //! Redis-backed queue drivers cannot make `nack` atomic - the
@@ -39,9 +43,10 @@ use crate::queue::retry::{delay_after_failure, next_delay};
 use crate::telemetry::Metrics;
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use std::any::TypeId;
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -77,14 +82,41 @@ struct Registration {
     /// just to ask would put a decode on the path of every popped envelope -
     /// including the ones whose decode is the thing that fails.
     unique_until_processing: bool,
+    /// The registered `Job` type. Registering the same type again installs
+    /// an identical dispatcher, so only a different type under a taken name
+    /// reroutes messages and is worth a warning.
+    job_type: TypeId,
 }
 
-static REGISTRY: RwLock<Option<HashMap<String, Registration>>> = RwLock::new(None);
+static REGISTRY: LazyLock<RwLock<HashMap<String, Registration>>> =
+    LazyLock::new(|| RwLock::new(framework_jobs()));
 
-/// Register `J` so the worker can dispatch envelopes carrying its
-/// `job_name`. Last-write-wins; re-registering the same name replaces
-/// the prior dispatcher and emits a `warn` trace event.
-pub fn register_job<J: Job>() {
+/// The jobs the framework itself pushes, present before any application
+/// code runs.
+///
+/// `Mail::queue` and `Mail::later` push [`SendMailJob`](crate::mail::SendMailJob)
+/// and `Notify::queue` pushes
+/// [`SendNotificationJob`](crate::notifications::notify_job::SendNotificationJob).
+/// An application never writes either type, so it cannot be expected to
+/// register them. Without these entries a worker would dead-letter every
+/// queued mail and notification as `unknown job`, and the `sync` driver
+/// would fail the push itself.
+fn framework_jobs() -> HashMap<String, Registration> {
+    use crate::mail::SendMailJob;
+    use crate::notifications::notify_job::SendNotificationJob;
+    HashMap::from([
+        (
+            SendMailJob::job_name().to_string(),
+            registration_for::<SendMailJob>(),
+        ),
+        (
+            SendNotificationJob::job_name().to_string(),
+            registration_for::<SendNotificationJob>(),
+        ),
+    ])
+}
+
+fn registration_for<J: Job>() -> Registration {
     let dispatcher: Dispatcher = Arc::new(|payload: serde_json::Value| {
         Box::pin(async move {
             let job: J = serde_json::from_value(payload)
@@ -93,34 +125,45 @@ pub fn register_job<J: Job>() {
         })
     });
     let middleware: MiddlewareFactory = Arc::new(|| J::middleware());
-    let unique_until_processing = J::unique_until_processing();
+    Registration {
+        dispatcher,
+        middleware,
+        unique_until_processing: J::unique_until_processing(),
+        job_type: TypeId::of::<J>(),
+    }
+}
+
+/// Register `J` so the worker can dispatch envelopes carrying its
+/// `job_name`. Last-write-wins; replacing a different type registered under
+/// the same name emits a `warn` trace event. Registering the same type again
+/// is harmless and quiet, which keeps an application's now-redundant
+/// `register_job::<SendMailJob>()` from warning on every boot.
+pub fn register_job<J: Job>() {
+    let registration = registration_for::<J>();
     // Hot-path registry: recover in place on poison so a panic in any
     // other job's registration doesn't kill the inventory-drain at
     // process boot. The critical section is a single HashMap insert.
     let mut g = REGISTRY.write().unwrap_or_else(|e| e.into_inner());
     let name = J::job_name();
-    let map = g.get_or_insert_with(HashMap::new);
-    if map
-        .insert(
-            name.to_string(),
-            Registration {
-                dispatcher,
-                middleware,
-                unique_until_processing,
-            },
-        )
-        .is_some()
-    {
-        // Keep last-writer-wins (tests rely on re-registration) but make it
-        // observable: silently rerouting in-flight messages is a foot-gun in
-        // production where the same `job_name` should have exactly one
-        // registration site.
-        tracing::warn!(
-            job = name,
-            "register_job replaced an existing dispatcher for this job_name; \
-             duplicate registration may indicate inventory + manual registration \
-             of the same job (last writer wins)"
-        );
+    match g.insert(name.to_string(), registration) {
+        Some(previous) if previous.job_type == TypeId::of::<J>() => {
+            tracing::debug!(
+                job = name,
+                "register_job: this job type was already registered under this job_name"
+            );
+        }
+        Some(_) => {
+            // Keep last-writer-wins (tests rely on re-registration) but make
+            // it observable: silently rerouting in-flight messages to another
+            // type is a foot-gun in production, where the same `job_name`
+            // should have exactly one registration site.
+            tracing::warn!(
+                job = name,
+                "register_job replaced the dispatcher of a different job type \
+                 under this job_name (last writer wins)"
+            );
+        }
+        None => {}
     }
 }
 
@@ -132,10 +175,7 @@ pub async fn dispatch_by_name(
 ) -> Result<(), FrameworkError> {
     let dispatcher = {
         let g = lock::read(&REGISTRY, "queue job registry")?;
-        let map = g
-            .as_ref()
-            .ok_or_else(|| FrameworkError::internal(format!("unknown job: {name}")))?;
-        map.get(name)
+        g.get(name)
             .map(|r| r.dispatcher.clone())
             .ok_or_else(|| FrameworkError::internal(format!("unknown job: {name}")))?
     };
@@ -149,9 +189,7 @@ fn middleware_for(name: &str) -> Vec<Arc<dyn JobMiddleware>> {
         Ok(g) => g,
         Err(_) => return Vec::new(),
     };
-    g.as_ref()
-        .and_then(|m| m.get(name).map(|r| (r.middleware)()))
-        .unwrap_or_default()
+    g.get(name).map(|r| (r.middleware)()).unwrap_or_default()
 }
 
 /// Whether the job registered under `name` opted into
@@ -164,8 +202,8 @@ pub(crate) fn job_is_unique_until_processing(name: &str) -> bool {
     let Ok(g) = lock::read(&REGISTRY, "queue job registry") else {
         return false;
     };
-    g.as_ref()
-        .and_then(|m| m.get(name).map(|r| r.unique_until_processing))
+    g.get(name)
+        .map(|r| r.unique_until_processing)
         .unwrap_or(false)
 }
 
@@ -392,16 +430,14 @@ where
 /// Return all registered job names. Used by admin inspectors and
 /// `cargo run --bin app -- jobs:list` (Phase 6B).
 pub fn registered_job_names() -> Vec<String> {
-    REGISTRY
+    let mut names: Vec<String> = REGISTRY
         .read()
         .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .map(|m| {
-            let mut v: Vec<_> = m.keys().cloned().collect();
-            v.sort();
-            v
-        })
-        .unwrap_or_default()
+        .keys()
+        .cloned()
+        .collect();
+    names.sort();
+    names
 }
 
 // ============================================================================
@@ -1785,6 +1821,17 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use uuid::Uuid;
+
+    /// Nothing in this crate calls `register_job` for the framework's own
+    /// jobs, so their presence here comes from the registry seed alone.
+    #[test]
+    fn the_framework_jobs_are_registered_before_any_register_job_call() {
+        let names = registered_job_names();
+        for job in ["Suprnova::SendMail", "Suprnova::SendNotification"] {
+            assert!(names.iter().any(|n| n == job), "{job} missing: {names:?}");
+            assert!(middleware_for(job).is_empty(), "{job} has no middleware");
+        }
+    }
 
     /// Ordered record of every settlement-visible operation, shared by all
     /// the fakes in one test.

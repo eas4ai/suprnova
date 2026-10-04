@@ -59,6 +59,10 @@ impl From<(&str, &str)> for Address {
     }
 }
 
+/// Human-readable `Name <email>` for logs and test output. This is not a wire
+/// format: the name is written unquoted, so a comma in it would read as a
+/// second address. Transports serialize addresses through `mail::wire`,
+/// which quotes the name.
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.name {

@@ -7,9 +7,9 @@
 //! force the multipart switch.
 
 use crate::error::FrameworkError;
-use crate::mail::address::Address;
 use crate::mail::http_provider::{err, read_error_body, shared_client};
 use crate::mail::transport::{MailTransport, OutgoingMessage};
+use crate::mail::wire;
 use async_trait::async_trait;
 use std::borrow::Cow;
 
@@ -55,26 +55,6 @@ impl MailgunMailTransport {
     }
 }
 
-fn join(addrs: &[Address]) -> String {
-    addrs
-        .iter()
-        .map(|a| a.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Reject a caller-supplied header name that would inject into multipart
-/// `Content-Disposition` or corrupt a form-encoded body. CR, LF, and NUL
-/// are the injection characters; any name containing them is rejected.
-fn validate_header_name(name: &str) -> Result<(), FrameworkError> {
-    if name.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
-        return Err(FrameworkError::param(format!(
-            "Mailgun: header name contains illegal character (CR, LF, or NUL): {name:?}"
-        )));
-    }
-    Ok(())
-}
-
 /// One form field: a name, mostly static, and a value borrowed from the
 /// message wherever the message already holds it.
 type FormField<'a> = (Cow<'static, str>, Cow<'a, str>);
@@ -89,7 +69,13 @@ type FormField<'a> = (Cow<'static, str>, Cow<'a, str>);
 /// * `v:<name>` - message variables (Mailgun's metadata mechanism)
 /// * `h:<header-name>` - custom MIME headers
 /// * `h:X-Priority` - used by Mailgun for explicit priority
+///
+/// Mailgun reads `to`, `cc`, `bcc` and `h:Reply-To` as comma-separated
+/// lists, so every address goes through [`wire::mailbox_list`], which quotes
+/// each display name. [`wire::check_message`] refuses CR, LF and NUL in the
+/// caller's header names and values before they become `h:` fields.
 fn build_form_fields(msg: &OutgoingMessage) -> Result<Vec<FormField<'_>>, FrameworkError> {
+    wire::check_message("Mailgun", msg)?;
     // Sized to the fields this message has, and borrowing every value the
     // message already holds: the subject, the bodies, the tags and the
     // header and variable values are encoded straight from the message
@@ -106,16 +92,25 @@ fn build_form_fields(msg: &OutgoingMessage) -> Result<Vec<FormField<'_>>, Framew
         + usize::from(msg.priority.is_some())
         + usize::from(msg.return_path.is_some());
     let mut form: Vec<FormField<'_>> = Vec::with_capacity(count);
-    form.push(("from".into(), msg.from.to_string().into()));
-    form.push(("to".into(), join(&msg.to).into()));
+    form.push((
+        "from".into(),
+        wire::mailbox_text("Mailgun", &msg.from)?.into(),
+    ));
+    form.push(("to".into(), wire::mailbox_list("Mailgun", &msg.to)?.into()));
     if !msg.cc.is_empty() {
-        form.push(("cc".into(), join(&msg.cc).into()));
+        form.push(("cc".into(), wire::mailbox_list("Mailgun", &msg.cc)?.into()));
     }
     if !msg.bcc.is_empty() {
-        form.push(("bcc".into(), join(&msg.bcc).into()));
+        form.push((
+            "bcc".into(),
+            wire::mailbox_list("Mailgun", &msg.bcc)?.into(),
+        ));
     }
     if !msg.reply_to.is_empty() {
-        form.push(("h:Reply-To".into(), join(&msg.reply_to).into()));
+        form.push((
+            "h:Reply-To".into(),
+            wire::mailbox_list("Mailgun", &msg.reply_to)?.into(),
+        ));
     }
     form.push(("subject".into(), msg.subject.as_str().into()));
     if let Some(h) = &msg.html {
@@ -131,14 +126,13 @@ fn build_form_fields(msg: &OutgoingMessage) -> Result<Vec<FormField<'_>>, Framew
         form.push((format!("v:{k}").into(), v.as_str().into()));
     }
     for (k, v) in &msg.headers {
-        validate_header_name(k)?;
         form.push((format!("h:{k}").into(), v.as_str().into()));
     }
     if let Some(p) = msg.priority {
         form.push(("h:X-Priority".into(), p.to_string().into()));
     }
     if let Some(rp) = &msg.return_path {
-        form.push(("h:Return-Path".into(), rp.to_string().into()));
+        form.push(("h:Return-Path".into(), wire::email("Mailgun", rp)?.into()));
     }
     Ok(form)
 }

@@ -47,7 +47,7 @@ impl FileMailTransport {
 #[async_trait]
 impl MailTransport for FileMailTransport {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
-        let builder = crate::mail::mime::base_builder(msg)?;
+        let builder = crate::mail::mime::base_builder("file", msg)?;
         // `true`: a message with neither body would otherwise produce a
         // zero-part `multipart/alternative`, which no mail client opens.
         // The guard is enabled here and nowhere else so SMTP's wire output

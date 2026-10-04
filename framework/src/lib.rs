@@ -516,6 +516,10 @@ pub use auth_flows::{
 };
 #[doc(hidden)]
 pub use clap as __clap;
+/// The mail serializer for transport authors: quoted mailbox text, bare
+/// emails, and the header and message checks every built-in transport uses.
+/// See [`mail::wire`].
+pub use mail::wire as mail_wire;
 pub use mail::{
     Address, Attachment, Mail, MailBuilder, MailFake, Mailable, MessageSending, MessageSent,
     OutgoingMessage, QueuedSnapshot, SendMailJob,

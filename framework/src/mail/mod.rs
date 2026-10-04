@@ -18,6 +18,7 @@ pub mod sendgrid;
 pub mod ses;
 pub mod smtp;
 pub mod transport;
+pub mod wire;
 
 pub use address::{Address, Attachment};
 pub use events::{MessageSending, MessageSent};
@@ -101,6 +102,34 @@ fn clear_queue_capture() {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
+}
+
+/// Validate `msg` and ship it through `transport` with the whole
+/// observation contract: the `MessageSending` event, the `mail.send` span,
+/// and `MessageSent` when the transport accepted the message.
+///
+/// Every path that delivers mail goes through here - `MailBuilder::send`,
+/// `Mail::raw` and `Mail::html`, the `SendMailJob` worker, and the
+/// notification `MailChannel`. The events used to fire only on the first
+/// two, so changing `send` to `queue`, or sending through a notification,
+/// silently dropped them for audit and metrics listeners.
+pub(crate) async fn deliver(
+    transport: &dyn MailTransport,
+    msg: &OutgoingMessage,
+) -> Result<(), FrameworkError> {
+    // Validate before anything observes the message, so a custom transport,
+    // the `Mail::fake` capture and `MessageSending` listeners only ever see
+    // a message production would send, already in its wire form.
+    let msg = wire::prepare(transport.name(), msg)?;
+    // Best-effort; cancellation is not modeled - Laravel uses
+    // events->until, which Suprnova's dispatcher doesn't expose. Listeners
+    // observe the pre-send shape.
+    events::fire_sending(&msg).await;
+    let result = transport::dispatch_with_telemetry(transport, &msg).await;
+    if result.is_ok() {
+        events::fire_sent(&msg).await;
+    }
+    result
 }
 
 /// Facade entry point for the mail subsystem. Mirrors Laravel's `Mail`
@@ -409,6 +438,16 @@ impl MailBuilder {
     /// Render `mailable` and dispatch to the bound transport.
     pub async fn send<M: Mailable>(self, mailable: M) -> Result<(), FrameworkError> {
         let transport = Mail::current_transport()?;
+        // Apply Mail::always_* defaults so the queue/notification/raw
+        // paths all converge on identical precedence rules.
+        let msg = Mail::apply_always_defaults(self.into_outgoing(&mailable)?);
+        deliver(transport.as_ref(), &msg).await
+    }
+
+    /// Render `mailable` and merge the builder's hints into the message a
+    /// transport receives. Shared by `send`, and by `queue` and `later`,
+    /// which validate the same message before they push.
+    fn into_outgoing<M: Mailable>(self, mailable: &M) -> Result<OutgoingMessage, FrameworkError> {
         let from = self
             .from_override
             .clone()
@@ -456,7 +495,7 @@ impl MailBuilder {
             None => mailable.render_subject()?,
         };
 
-        let msg = OutgoingMessage {
+        Ok(OutgoingMessage {
             from,
             to: self.to,
             cc: self.cc,
@@ -471,20 +510,7 @@ impl MailBuilder {
             priority,
             headers,
             return_path,
-        };
-
-        // Apply Mail::always_* defaults so the queue/notification/raw
-        // paths all converge on identical precedence rules.
-        let msg = Mail::apply_always_defaults(msg);
-        // Fire MessageSending event (best-effort; cancellation is not
-        // modeled - Laravel uses events->until, which Suprnova's
-        // dispatcher doesn't expose. Listeners observe pre-send shape.).
-        events::fire_sending(&msg).await;
-        let result = transport::dispatch_with_telemetry(transport.as_ref(), &msg).await;
-        if result.is_ok() {
-            events::fire_sent(&msg).await;
-        }
-        result
+        })
     }
 
     /// Build a [`SendMailJob`] and push it onto the queue. The mailable's
@@ -495,8 +521,11 @@ impl MailBuilder {
     ///
     /// Fails fast (push-time) if the mailable defines neither
     /// `html_template_source` nor `text_template_source` - mirrors
-    /// `MailBuilder::send`'s empty-body guard.
+    /// `MailBuilder::send`'s empty-body guard - or if the message breaks a
+    /// [`wire::check_message`] rule, so the caller gets the error instead of
+    /// a worker failing the job on every attempt.
     pub async fn queue<M: Mailable>(self, mailable: M) -> Result<(), FrameworkError> {
+        self.check_queueable(&mailable)?;
         let overrides = self.envelope_overrides(&mailable);
         let job = self.build_send_job(mailable, None)?;
         // Mirror to MailFake's queued buffer when a fake guard is active
@@ -526,6 +555,7 @@ impl MailBuilder {
         delay: std::time::Duration,
         mailable: M,
     ) -> Result<(), FrameworkError> {
+        self.check_queueable(&mailable)?;
         let overrides = self.envelope_overrides(&mailable);
         let job = self.build_send_job(mailable, Some(delay))?;
         if crate::mail::queue_fake_active() {
@@ -542,6 +572,15 @@ impl MailBuilder {
             return Ok(());
         }
         crate::queue::Queue::later_with(delay, job, overrides).await
+    }
+
+    /// Build the message a direct send would deliver and validate it, so a
+    /// queued mail that can never be sent is refused to the caller now
+    /// instead of failing on the worker `max_tries` times. Covers the
+    /// empty-body guard too.
+    fn check_queueable<M: Mailable>(&self, mailable: &M) -> Result<(), FrameworkError> {
+        let msg = Mail::apply_always_defaults(self.clone().into_outgoing(mailable)?);
+        wire::check_message("Mail::queue", &msg)
     }
 
     /// Resolve this push's `EnvelopeOverrides` (Design note 6).
@@ -590,12 +629,7 @@ impl MailBuilder {
             return_path: self.return_path,
         };
         let msg = Mail::apply_always_defaults(msg);
-        events::fire_sending(&msg).await;
-        let result = transport::dispatch_with_telemetry(transport.as_ref(), &msg).await;
-        if result.is_ok() {
-            events::fire_sent(&msg).await;
-        }
-        result
+        deliver(transport.as_ref(), &msg).await
     }
 
     fn build_send_job<M: Mailable>(
@@ -603,18 +637,8 @@ impl MailBuilder {
         mailable: M,
         _delay_hint: Option<std::time::Duration>,
     ) -> Result<SendMailJob, FrameworkError> {
-        // Match `MailBuilder::send`'s guard exactly: call the trait-level
-        // `render_html`/`render_text` so a Mailable that overrides those
-        // methods (e.g. produces a pre-rendered body without setting a
-        // template source) is accepted here too.
-        let html = mailable.render_html()?;
-        let text = mailable.render_text()?;
-        if html.is_none() && text.is_none() {
-            return Err(FrameworkError::internal(format!(
-                "mail: {} has no text or html body - define text_template_source or html_template_source on the Mailable",
-                M::mailable_name()
-            )));
-        }
+        // The empty-body guard ran in `check_queueable`, through the same
+        // `into_outgoing` render `MailBuilder::send` uses.
         let payload = serde_json::to_value(&mailable)
             .map_err(|e| FrameworkError::internal(format!("Mail::queue encode: {e}")))?;
         Ok(SendMailJob {

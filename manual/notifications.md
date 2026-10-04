@@ -438,6 +438,8 @@ register_notification_factory::<OrderShipped>()?;
 Notify::queue(&user, OrderShipped { tracking }).await?;
 ```
 
+The worker already knows `SendNotificationJob`: the framework registers its own job, so you register factories and never call `register_job` for it.
+
 At dispatch time the worker:
 
 1. Looks up the notification factory by `notification_name`
