@@ -81,8 +81,11 @@ deployment policy. The independent replay transcript limit is the configured
 64 event names per subscription, across the two closed transport modes.
 Descriptors live at most 300 seconds, fallback polling is 1-300 seconds with at
 most 100 percent configured jitter, and reconnect attempts are capped at 16.
-Canonical envelopes are 64 KiB with 32 KiB payloads. The server document queue
-is 64 events/256 KiB and owns at most 128 logical memberships. The browser
+A canonical envelope's payload is at most the configured
+`LIVE_ASYNC_MAX_PAYLOAD_BYTES` (1 MiB by default). The server document queue
+holds `LIVE_ASYNC_MAX_QUEUED_EVENTS` events (4,096 by default) and
+`LIVE_ASYNC_MAX_BUFFER_BYTES` (16 MiB by default), and owns at most 128 logical
+memberships. The browser
 connection pool applies its own 256-membership ceiling, one physical transport
 per compatible document key, eight concurrent WebSocket handshakes per origin,
 and one queued plus one in-flight refresh per island.

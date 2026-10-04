@@ -216,12 +216,13 @@ const semanticRequirements = new Map([
       },
       {
         id: "async_document_backpressure",
-        pattern: /bounded to 64 unapplied envelopes and 256 KiB/u,
+        pattern:
+          /bounded to the configured `LIVE_ASYNC_MAX_QUEUED_EVENTS`[\s\S]{0,200}`LIVE_ASYNC_MAX_BUFFER_BYTES`/u,
       },
       {
         id: "async_fanout_replay_distinction",
         pattern:
-          /effective end-to-end event fanout ceiling is 256[\s\S]{0,600}replay transcript limit is 1,024/u,
+          /effective end-to-end event fanout ceiling is 256[\s\S]{0,600}replay transcript limit is the configured\s+`LIVE_ASYNC_MAX_REPLAY_EVENTS`/u,
       },
       {
         id: "async_freeze_offline_lifecycle",
@@ -278,7 +279,7 @@ const semanticRequirements = new Map([
       {
         id: "operations_fanout_replay_distinction",
         pattern:
-          /effective end-to-end event fanout ceiling is 256[\s\S]{0,600}replay transcript limit is 1,024/u,
+          /effective end-to-end event fanout ceiling is 256[\s\S]{0,600}replay transcript limit is the configured\s+`LIVE_ASYNC_MAX_REPLAY_EVENTS`/u,
       },
       {
         id: "operations_warning_policy",

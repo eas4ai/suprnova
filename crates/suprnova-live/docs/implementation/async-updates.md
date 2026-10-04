@@ -88,9 +88,10 @@ presentation-signal writes are separate typed payload kinds and enter the
 ordinary island scheduler.
 
 Async envelope protocol v1 recognizes `refresh`, `browser_event`,
-`presentation_signal`, `heartbeat`, `complete`, and `error`. Canonical envelopes
-are limited to 64 KiB, nested depth 8, 1,024 object entries, 4,096-byte strings,
-and a 32 KiB payload. Invalid or oversized input closes or degrades the affected
+`presentation_signal`, `heartbeat`, `complete`, and `error`. A canonical
+envelope's payload is at most the configured `LIVE_ASYNC_MAX_PAYLOAD_BYTES` (1 MiB
+by default), and its nesting is bounded by the canonical parser's depth guard;
+there is no separate byte, entry or string cap. Invalid or oversized input closes or degrades the affected
 delivery scope with a safe typed code; payload contents do not enter logs.
 
 ## Subscription authorization
