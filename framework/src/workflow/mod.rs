@@ -202,6 +202,21 @@ pub async fn start_named(name: &str, input: &str) -> Result<WorkflowHandle, Fram
     store::insert_workflow(name, input, config.max_attempts).await
 }
 
+/// Start the workflow [`crate::start_workflow!`] names: by the path the compiler
+/// resolved when a workflow is registered under it, else by the path as
+/// written.
+#[doc(hidden)]
+pub async fn start_resolved(
+    resolved: &str,
+    written: &str,
+    input: &str,
+) -> Result<WorkflowHandle, FrameworkError> {
+    if registry::find_strict(resolved)?.is_some() {
+        return start_named(resolved, input).await;
+    }
+    start_named(written, input).await
+}
+
 /// Workflow worker daemon
 pub struct WorkflowWorker {
     config: Arc<WorkflowConfig>,
@@ -554,7 +569,14 @@ async fn process_claimed_workflow(
     Ok(())
 }
 
-/// Enqueue a workflow by function name with serialized args
+/// Enqueue a workflow by its function path, with serialized args.
+///
+/// The path is resolved the way Rust resolves it - through an import, a
+/// re-export, `crate::`, `self::` or `super::` - so it names the workflow
+/// `#[workflow]` registered under its defining module. The macro used to
+/// stringify the path and look the text up, so only the defining module's
+/// bare name or the full crate-named path worked, and any other valid
+/// path enqueued nothing and failed "not registered".
 ///
 /// Example:
 /// ```rust,no_run
@@ -569,16 +591,22 @@ async fn process_claimed_workflow(
 macro_rules! start_workflow {
     ($workflow:path $(, $arg:expr)* $(,)?) => {{
         async {
-            let __name = stringify!($workflow);
-            let __name = if __name.contains("::") {
-                __name.to_string()
+            // The compiler's name for the function's own type is its
+            // defining path, wherever the caller reached it from.
+            let __resolved = ::std::any::type_name_of_val(&$workflow);
+            // The text as written, under the caller's module when it is a
+            // bare name: what this macro used to look up, kept for a
+            // workflow declared inside a function body, whose type name
+            // carries that function and its registration does not.
+            let __written = stringify!($workflow).replace(' ', "");
+            let __written = if __written.contains("::") {
+                __written
             } else {
-                format!("{}::{}", module_path!(), __name)
+                format!("{}::{}", module_path!(), __written)
             };
-            let __name = __name.replace(' ', "");
             let __input = ::suprnova::serde_json::to_string(&( $($arg,)* ))
                 .map_err(|e| ::suprnova::FrameworkError::internal(format!("Workflow input serialize error: {}", e)))?;
-            ::suprnova::workflow::start_named(&__name, &__input).await
+            ::suprnova::workflow::start_resolved(__resolved, &__written, &__input).await
         }
     }};
 }
@@ -1122,6 +1150,43 @@ mod tests {
         assert!(outputs[0].is_some(), "the run records its output");
         assert_ne!(outputs[0], outputs[1], "each run builds a value of its own");
         assert_eq!(RUN_SCOPED_BUILT.load(Ordering::SeqCst), 2);
+    }
+
+    /// A workflow declared in a module of its own, for the path tests below.
+    pub mod billing_flows {
+        use super::*;
+
+        #[workflow]
+        pub async fn settle_invoice(id: i32) -> Result<i32, FrameworkError> {
+            Ok(id)
+        }
+    }
+
+    /// `start_workflow!` takes a path the way Rust resolves it: through an
+    /// import, from `crate::`, or relative with `self::`. It used to
+    /// stringify the path and look the text up, so only the defining
+    /// module's bare name or the full crate-named path was registered;
+    /// every other valid path enqueued nothing and failed "not registered".
+    #[tokio::test]
+    async fn start_workflow_resolves_the_paths_rust_resolves() {
+        use billing_flows::settle_invoice;
+
+        let _db = setup_db().await;
+        let expected = format!("{}::billing_flows::settle_invoice", module_path!());
+
+        let imported = start_workflow!(settle_invoice, 1)
+            .await
+            .expect("an imported workflow starts");
+        let from_crate = start_workflow!(crate::workflow::tests::billing_flows::settle_invoice, 2)
+            .await
+            .expect("a crate:: path starts");
+        let relative = start_workflow!(self::billing_flows::settle_invoice, 3)
+            .await
+            .expect("a self:: path starts");
+        for handle in [imported, from_crate, relative] {
+            let record = store::get_workflow_record(handle.id()).await.unwrap();
+            assert_eq!(record.name, expected);
+        }
     }
 
     #[tokio::test]

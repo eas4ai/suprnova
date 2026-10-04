@@ -42,7 +42,9 @@ let handle = start_workflow!(welcome_flow, 123).await?;
 
 The macro serialises the arguments to JSON, inserts a row in the
 `workflows` table, and returns a [`WorkflowHandle`](#waiting-on-results)
-identifying the enqueued instance. A separate worker process picks the
+identifying the enqueued instance. It takes the workflow's path the way
+Rust resolves it: a bare name, an imported name, a re-export, or a path
+from `crate::`, `self::`, or `super::` all start the same workflow. A separate worker process picks the
 row up, runs the body, and persists each step's output as it goes.
 
 `#[workflow]` collects the function into the workflow inventory under
