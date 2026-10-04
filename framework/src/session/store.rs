@@ -413,10 +413,18 @@ impl SessionData {
         next
     }
 
-    /// Decrement a numeric session value. Mirrors Laravel's
-    /// `Store::decrement` (`Store.php:459-462`).
+    /// Decrement a numeric session value, saturating at the `i64` bounds
+    /// like [`Self::increment`]. Mirrors Laravel's `Store::decrement`
+    /// (`Store.php:459-462`).
+    ///
+    /// Subtracts directly rather than incrementing by `-amount`:
+    /// `i64::MIN` has no negation, so that form panics with overflow
+    /// checks on and subtracts the wrong way without them.
     pub fn decrement(&mut self, key: &str, amount: i64) -> i64 {
-        self.increment(key, -amount)
+        let cur: i64 = self.get(key).unwrap_or(0);
+        let next = cur.saturating_sub(amount);
+        self.put(key, next);
+        next
     }
 
     /// Get-or-compute-and-put. Mirrors Laravel's `Store::remember`

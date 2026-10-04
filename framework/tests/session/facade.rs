@@ -67,6 +67,23 @@ async fn decrement_is_increment_negated() {
     assert_eq!(s.decrement("count", 3), 7);
 }
 
+/// `i64::MIN` has no negation, so decrementing by it cannot be an
+/// increment by `-amount`. It saturates like every other overflowing
+/// amount instead of panicking (or, without overflow checks, subtracting
+/// the wrong way).
+#[tokio::test]
+async fn decrement_by_the_minimum_amount_saturates_instead_of_overflowing() {
+    let mut s = data();
+    assert_eq!(s.decrement("count", i64::MIN), i64::MAX);
+    assert_eq!(s.get::<i64>("count"), Some(i64::MAX));
+
+    s.put("count", -5i64);
+    assert_eq!(s.decrement("count", i64::MIN), i64::MAX - 4);
+
+    s.put("count", i64::MIN + 1);
+    assert_eq!(s.decrement("count", 2), i64::MIN);
+}
+
 #[tokio::test]
 async fn remember_runs_default_on_miss_and_skips_on_hit() {
     let mut s = data();
