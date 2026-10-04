@@ -33,23 +33,36 @@ pub fn is_child() -> bool {
 /// a child process, and fail unless it ran and passed.
 ///
 /// Sync tests only: it takes the environment lock through its blocking
-/// entry point.
+/// entry point. An async test uses `own_process_async::delegate`.
 pub fn run_alone(name: &str) {
     let child = {
         // The child inherits the environment. Another test can be between
         // setting a variable and restoring it; the lock waits that out.
         let _env = crate::env_lock::lock_env();
-        Command::new(std::env::current_exe().expect("current test executable"))
-            .args(["--exact", name, "--nocapture"])
-            .env(OWN_PROCESS, "1")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+        child_command(name)
             .spawn()
             .expect("spawn the child process")
     };
     let output = child
         .wait_with_output()
         .expect("wait for the child process");
+    assert_child_passed(&output);
+}
+
+/// The command that runs the test `name` alone in a child of this test
+/// binary, with stdout and stderr captured for [`assert_child_passed`].
+pub fn child_command(name: &str) -> Command {
+    let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+    command
+        .args(["--exact", name, "--nocapture"])
+        .env(OWN_PROCESS, "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+/// Fail unless the child ran exactly one test and passed it.
+pub fn assert_child_passed(output: &std::process::Output) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

@@ -207,6 +207,14 @@ fn response_cookie(headers: &hyper::HeaderMap, name: &str) -> String {
 
 #[tokio::test]
 async fn installed_engine_remember_hydration_rotates_and_binds_both_sessions() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "installed_engine_remember_hydration_rotates_and_binds_both_sessions",
+    )
+    .await
+    {
+        return;
+    }
     let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
     let connection = magnetar_connection().await;
 
@@ -439,6 +447,14 @@ async fn installed_engine_remember_hydration_rotates_and_binds_both_sessions() {
 
 #[tokio::test]
 async fn failed_remembered_session_issuance_returns_a_successor_cookie_for_retry() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "failed_remembered_session_issuance_returns_a_successor_cookie_for_retry",
+    )
+    .await
+    {
+        return;
+    }
     let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
     let connection = magnetar_connection().await;
 
@@ -594,6 +610,14 @@ async fn failed_remembered_session_issuance_returns_a_successor_cookie_for_retry
 
 #[tokio::test]
 async fn failed_framework_session_write_retires_the_unpersisted_opaque_session() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "failed_framework_session_write_retires_the_unpersisted_opaque_session",
+    )
+    .await
+    {
+        return;
+    }
     let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
     let _connection = magnetar_connection().await;
     let user = Auth::password()
@@ -667,11 +691,27 @@ async fn failed_framework_session_write_retires_the_unpersisted_opaque_session()
 
 #[tokio::test]
 async fn handler_identity_transition_retires_a_retryable_successor() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "handler_identity_transition_retires_a_retryable_successor",
+    )
+    .await
+    {
+        return;
+    }
     identity_transition_retires_a_retryable_successor(TransitionTarget::SameUser).await;
 }
 
 #[tokio::test]
 async fn handler_transition_to_another_account_retires_a_retryable_successor() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "handler_transition_to_another_account_retires_a_retryable_successor",
+    )
+    .await
+    {
+        return;
+    }
     identity_transition_retires_a_retryable_successor(TransitionTarget::AnotherAccount).await;
 }
 
@@ -821,6 +861,14 @@ async fn identity_transition_retires_a_retryable_successor(target: TransitionTar
 
 #[tokio::test]
 async fn installed_engine_rejects_default_guard_identity_without_compatibility_user_id() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "installed_engine_rejects_default_guard_identity_without_compatibility_user_id",
+    )
+    .await
+    {
+        return;
+    }
     let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
     let _connection = magnetar_connection().await;
     let store = Arc::new(MemorySessionStore::default());
@@ -903,6 +951,14 @@ async fn installed_engine_rejects_default_guard_identity_without_compatibility_u
 
 #[tokio::test]
 async fn installed_engine_fresh_binding_clears_hydrated_identity_carrier() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "installed_engine_fresh_binding_clears_hydrated_identity_carrier",
+    )
+    .await
+    {
+        return;
+    }
     let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
     let _connection = magnetar_connection().await;
     let previous = Auth::password()
