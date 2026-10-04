@@ -1428,6 +1428,22 @@ where
         password: SecretString,
     ) -> Result<PasswordResetFlowOutcome> {
         validate_password(password.expose_secret())?;
+        // Refuse a token that is not live before hashing the candidate
+        // password. The target hash is a deliberately slow Argon2id mint, so
+        // without this check any caller could buy one per request with an
+        // empty or made-up token. The refusal is the one the consuming step
+        // gives for such a token, which still decides for a live one.
+        let token_is_live = self
+            .binding
+            .storage()
+            .check(PresentedToken(token.clone()), PASSWORD_RESET_PURPOSE)
+            .await?;
+        if !token_is_live {
+            return Err(Error::NotFound {
+                resource: "token".to_owned(),
+                identifier: PASSWORD_RESET_PURPOSE.to_owned(),
+            });
+        }
         let password_hash = self.password_verifier.mint_target(&password)?;
         let commit = self
             .first_email_proof

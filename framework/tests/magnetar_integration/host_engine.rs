@@ -2801,3 +2801,97 @@ async fn create_application_auth_tables(connection: &sea_orm::DatabaseConnection
             .expect("create application-owned auth table");
     }
 }
+
+/// Counts the hashes minted through it and delegates the work to the
+/// standard driver.
+struct CountingHashDriver {
+    mints: std::sync::atomic::AtomicUsize,
+}
+
+impl magnetar::password::PasswordHashDriver for CountingHashDriver {
+    fn verify(&self, call: &magnetar::password::VerificationCall<'_>) -> MagnetarResult<bool> {
+        StandardPasswordHashDriver.verify(call)
+    }
+
+    fn mint(
+        &self,
+        profile: &magnetar::password::HashWorkProfile,
+        password: &secrecy::SecretString,
+    ) -> MagnetarResult<String> {
+        self.mints.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        StandardPasswordHashDriver.mint(profile, password)
+    }
+}
+
+/// IDENTITY-035: completing a reset with a token that is not live fails
+/// before the engine spends a password hash on the candidate password. Any
+/// caller could otherwise make the server mint an Argon2id hash per request
+/// with an empty or made-up token.
+#[tokio::test]
+async fn a_reset_with_a_token_that_is_not_live_mints_no_password_hash() {
+    let connection = Database::connect("sqlite::memory:")
+        .await
+        .expect("connect application-owned SQLite database");
+    create_application_auth_tables(&connection).await;
+    let binding = MagnetarBinding::<FrameworkAuthSchema>::new(connection);
+    let storage = Arc::new(SeaOrmStorage::<FrameworkAuthSchema>::new(
+        binding.database().clone(),
+    ));
+    let driver = Arc::new(CountingHashDriver {
+        mints: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let password_verifier = Arc::new(
+        PasswordVerifier::new(driver.clone(), fast_hash_config())
+            .expect("counting password verifier"),
+    );
+    let engine = MagnetarHostEngine::new(MagnetarHostEngineParts {
+        binding,
+        session_store: Arc::new(FrameworkSessionStore {
+            database: storage.database().clone(),
+        }),
+        remember_store: Arc::new(magnetar::default_schema::sql_stores::SqlRememberStore(
+            storage.database().clone(),
+        )),
+        ceremonies: storage.clone(),
+        factors: Arc::new(FrameworkFactorVerifier::enrolled()),
+        password: Arc::new(PasswordAuthService::new(
+            storage.clone(),
+            storage.clone(),
+            password_verifier.clone(),
+        )),
+        password_lockout: Arc::new(RecordingPasswordLockout::default()),
+        first_email_proof: Arc::new(FrameworkFirstProofStore {
+            storage: storage.clone(),
+        }),
+        password_verifier,
+        encryptor: Arc::new(AeadEncryptor::new([7; 32])),
+        session_config: OpaqueConfig::default(),
+        users: Arc::new(FrameworkUsers {
+            database: storage.database().clone(),
+        }),
+        lifecycle_deliveries: Arc::new(SqliteLifecycleDeduplication {
+            database: storage.database().clone(),
+        }),
+        lifecycle_lease_duration: suprnova::chrono::Duration::seconds(30),
+    })
+    .expect("compose a real host engine");
+
+    let before = driver.mints.load(std::sync::atomic::Ordering::SeqCst);
+    for token in ["", "not-a-live-reset-token"] {
+        let result = engine
+            .complete_password_reset(
+                secrecy::SecretString::from(token.to_owned()),
+                secrecy::SecretString::from("correct horse battery staple".to_owned()),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "a token that is not live must not reset a password"
+        );
+    }
+    assert_eq!(
+        driver.mints.load(std::sync::atomic::Ordering::SeqCst),
+        before,
+        "the engine must reject the token before it mints a hash of the candidate password"
+    );
+}
