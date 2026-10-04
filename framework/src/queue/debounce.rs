@@ -123,14 +123,24 @@ pub(crate) fn first_dispatched_key(key: &str) -> String {
 /// oversight. Returns `max_wait_exceeded == true` when the burst has been
 /// deferring the run for at least `max_wait`, in which case the caller queues
 /// the job with no delay at all.
+///
+/// `after` is the place an earlier dispatch in the same call reserved for
+/// this key. [`Queue::bulk`](crate::queue::Queue::bulk) claims its windows
+/// together after one write, so its later jobs have to be placed after its
+/// earlier ones rather than after a claim that has not landed yet.
 pub(crate) async fn acquire(
     key: &str,
     window: Duration,
     max_wait: Option<Duration>,
+    after: Option<u64>,
 ) -> Result<Debounced, FrameworkError> {
     let ttl = lock_ttl(window);
     let claimed = current_owner(key).await?;
-    let place = claimed.as_deref().and_then(place).unwrap_or(0);
+    let place = claimed
+        .as_deref()
+        .and_then(place)
+        .unwrap_or(0)
+        .max(after.unwrap_or(0));
     let max_wait_exceeded = max_wait_exceeded(key, ttl, max_wait).await?;
     Ok(Debounced {
         owner: format!("{}:{}", place.saturating_add(1), uuid::Uuid::new_v4()),

@@ -1499,3 +1499,59 @@ async fn the_first_dispatch_stamp_outlives_the_max_wait() {
          measured against it"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Queue::bulk honors a declared window (DRIVERS-064)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+async fn bulk_collapses_a_debounced_burst_onto_its_last_job() {
+    cache_init();
+    SYNC_ORDER_RUNS.store(0, Ordering::SeqCst);
+    SYNC_ORDER_LAST_REVISION.store(0, Ordering::SeqCst);
+    register_job::<SyncOrder>();
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::bulk(
+        (1..=3)
+            .map(|revision| SyncOrder {
+                order_id: 613,
+                revision,
+            })
+            .collect(),
+    )
+    .await
+    .expect("bulk");
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        worker_cfg(),
+        CancellationToken::new(),
+    ));
+    settle(|| SYNC_ORDER_RUNS.load(Ordering::SeqCst) > 0).await;
+    handle.abort();
+    assert_eq!(
+        SYNC_ORDER_RUNS.load(Ordering::SeqCst),
+        1,
+        "a debounced job pushed in bulk ran every copy"
+    );
+    assert_eq!(SYNC_ORDER_LAST_REVISION.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+#[serial]
+async fn bulk_refuses_a_job_declaring_debounce_and_uniqueness() {
+    cache_init();
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let err = Queue::bulk(vec![ConfusedJob, ConfusedJob])
+        .await
+        .expect_err("bulk must refuse the conflicting declarations too");
+    assert!(
+        err.to_string().contains("debounce_for") && err.to_string().contains("unique_id"),
+        "{err}"
+    );
+    assert_eq!(driver.size().await.expect("size"), 0);
+}

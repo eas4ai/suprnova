@@ -681,9 +681,15 @@ the queue, so the work already queued still runs.
 
 The [`sync` driver](#drivers) has no worker, so it runs every dispatch inline
 and nothing is ever collapsed. Laravel's sync driver behaves the same way.
-`Queue::bulk` pushes at the driver level and does not arm a window either, so a
-debounced job pushed in bulk runs every copy. Laravel's `Queue::bulk` skips its
-own debounce acquisition for the same reason.
+`Queue::bulk` arms each job's window in order and claims it once the driver
+accepts the batch, so a debounced burst pushed in one call collapses onto its
+last job, as separate pushes do.
+
+#### Why Suprnova diverges
+
+Laravel's `Queue::bulk` skips debouncing, so a debounced job pushed in bulk
+runs every copy. In Suprnova the window is a property of the job, declared by
+`debounce_for`, so it holds however the job reaches the queue.
 
 Set the window at the call site instead when it belongs to the caller:
 
