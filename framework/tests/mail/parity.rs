@@ -502,6 +502,61 @@ async fn fake_assert_not_queued_panics_when_one_matches() {
     fake.assert_not_queued("ParityWelcome");
 }
 
+/// `assert_not_outgoing` is the composite check: a mailable that was sent
+/// directly, with nothing queued, is outgoing and must fail it.
+#[tokio::test]
+#[serial]
+#[should_panic(expected = "expected NO sent or queued ParityWelcome")]
+async fn fake_assert_not_outgoing_panics_when_the_mailable_was_sent() {
+    let _ = Mail::forget_always();
+    let fake = Mail::fake();
+    Mail::to("alice@example.org")
+        .send(WelcomeWithHints {
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+    fake.assert_queued_count(0);
+    fake.assert_not_outgoing("ParityWelcome");
+}
+
+#[tokio::test]
+#[serial]
+#[should_panic(expected = "expected NO sent or queued ParityWelcome")]
+async fn fake_assert_not_outgoing_panics_when_the_mailable_was_queued() {
+    let _ = Mail::forget_always();
+    let _ = register_mailable_factory::<WelcomeWithHints>();
+    let fake = Mail::fake();
+    Mail::to("alice@example.org")
+        .queue(WelcomeWithHints {
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+    fake.assert_not_outgoing("ParityWelcome");
+}
+
+/// Mail sent under another name, or through `Mail::raw`, does not count
+/// against the named mailable.
+#[tokio::test]
+#[serial]
+async fn fake_assert_not_outgoing_passes_for_other_mail() {
+    let _ = Mail::forget_always();
+    let fake = Mail::fake();
+    Mail::to("alice@example.org")
+        .send(WelcomeWithHints {
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+    Mail::raw("plain message", |b| {
+        b.to("bob@example.org").subject("ParityWelcome")
+    })
+    .await
+    .unwrap();
+    fake.assert_not_outgoing("PasswordReset");
+}
+
 #[tokio::test]
 #[serial]
 #[should_panic(expected = "expected NO messages sent")]

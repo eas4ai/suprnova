@@ -11,7 +11,7 @@
 use crate::error::FrameworkError;
 use crate::mail::address::Attachment;
 use crate::mail::mailable_registry::{self, RenderOutgoingParams};
-use crate::mail::{Address, Mail, deliver};
+use crate::mail::{Address, Mail, deliver, record_sent_name};
 use crate::queue::Job;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -99,6 +99,8 @@ impl Job for SendMailJob {
         let transport = Mail::current_transport()?;
         // `deliver`, not the bare telemetry wrapper: a queued mail fires
         // `MessageSending` and `MessageSent` exactly as a direct send does.
-        deliver(transport.as_ref(), &msg).await
+        deliver(transport.as_ref(), &msg).await?;
+        record_sent_name(&self.mailable_name);
+        Ok(())
     }
 }
