@@ -155,6 +155,22 @@ pub(crate) fn record_host_sign_in_epoch(user_id: &str, auth_epoch: u64) {
     });
 }
 
+/// The auth epoch a framework login in this request recorded for
+/// `user_id`, if one did. `TwoFactor::start_challenge` carries it into the
+/// challenge instead of reading the epoch again after the password check.
+pub(crate) fn recorded_host_sign_in_epoch(user_id: &str) -> Option<u64> {
+    IDENTITY_TRANSITION
+        .try_with(|transition| {
+            crate::lock::recover(transition)
+                .signed_in
+                .as_ref()
+                .filter(|signed_in| signed_in.user_id == user_id)
+                .and_then(|signed_in| signed_in.auth_epoch)
+        })
+        .ok()
+        .flatten()
+}
+
 pub(crate) fn register_pending_opaque_session(
     pending: PendingOpaqueSession,
 ) -> Result<(), FrameworkError> {

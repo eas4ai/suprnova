@@ -203,10 +203,18 @@ framework's word for who signed in, and no Magnetar plugin can reach it.
   and issues no remember-me credential. `Auth::login_id` cannot await the engine, so its refusal arrives
   at the end of the request, which then stores nothing and retires a
   remember-me credential issued during it.
-- **Auth epochs.** The session is issued at the auth epoch read when the
-  credential was checked. A password reset or "sign out everywhere" between
-  `TwoFactor::start_challenge` and `complete_challenge` therefore cancels the
-  challenge with `401` before its code is read.
+- **Auth epochs.** `Auth::attempt` issues the session at the auth epoch read
+  with the password, and carries that epoch into `TwoFactor::start_challenge`
+  rather than reading it again. A password reset or "sign out everywhere"
+  that commits after the password was read therefore cancels the sign-in
+  with `401`, and one between `start_challenge` and `complete_challenge`
+  cancels the challenge with `401` before its code is read. The epoch comes
+  from the same row read as the password hash when the user model returns it
+  from `Authenticatable::auth_epoch`; otherwise the session guard reads it
+  right after looking the user up and before checking the password.
+  They never see a password elsewhere: `Auth::login_id` reads the epoch when
+  the request commits, and a `start_challenge` after the application's own
+  password check reads it when it runs.
 - **Remember-me.** The factor check covers remember-me credentials issued
   during these logins. A credential issued later with
   `Auth::issue_remember_cookie` is not checked: Magnetar treats a remembered

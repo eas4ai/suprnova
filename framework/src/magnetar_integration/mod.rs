@@ -1004,6 +1004,15 @@ pub(crate) async fn admit_host_sign_in(user_id: &str) -> Result<Option<u64>, Fra
         .map_err(host_sign_in_error)
 }
 
+/// The refusal of a sign-in whose auth epoch moved after its credential was
+/// read: a password reset or "sign out everywhere" committed in between.
+pub(crate) fn expired_host_sign_in() -> FrameworkError {
+    FrameworkError::domain(
+        "the sign-in expired because the account's sessions were revoked; sign in again",
+        401,
+    )
+}
+
 /// Map an engine refusal of a framework login to the error the request
 /// answers with.
 ///
@@ -1020,10 +1029,7 @@ pub(crate) fn host_sign_in_error(error: magnetar::Error) -> FrameworkError {
             "this account has a second factor that this sign-in did not verify; sign in through Auth::password()",
             409,
         ),
-        magnetar::Error::InvalidInput { .. } => FrameworkError::domain(
-            "the sign-in expired because the account's sessions were revoked; sign in again",
-            401,
-        ),
+        magnetar::Error::InvalidInput { .. } => expired_host_sign_in(),
         magnetar::Error::NotFound { .. } => FrameworkError::internal(
             "the signed-in id is not a Magnetar user; with the Magnetar engine installed, the default guard's user provider must resolve Magnetar user ids",
         ),

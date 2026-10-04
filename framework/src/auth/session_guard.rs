@@ -84,6 +84,107 @@ impl SessionGuard {
         self.remember_ttl_minutes = minutes;
         self
     }
+
+    /// Log `user` in, issuing its Magnetar session, when the engine is
+    /// installed, at `recorded_epoch`: the auth epoch read with the user's
+    /// password. A login with no password read passes `None` and is issued
+    /// at the epoch current now.
+    ///
+    /// The engine is asked first, before anything changes or any event
+    /// fires: it refuses an account whose second factor this login did not
+    /// prove, and reports the current epoch. A current epoch past the
+    /// recorded one means a password reset or "sign out everywhere"
+    /// committed after the password was read, so the login is refused with
+    /// `401`. The recorded epoch, never one read later, is what the session
+    /// is issued at.
+    async fn login_at_epoch(
+        &self,
+        user: Arc<dyn Authenticatable>,
+        remember: bool,
+        recorded_epoch: Option<u64>,
+    ) -> Result<(), FrameworkError> {
+        let user_id = user.get_auth_identifier();
+        let host_auth_epoch = if self.name == Auth::default_guard_name() {
+            let current = crate::magnetar_integration::admit_host_sign_in(&user_id).await?;
+            match (recorded_epoch, current) {
+                (Some(recorded), Some(current)) if recorded != current => {
+                    return Err(crate::magnetar_integration::expired_host_sign_in());
+                }
+                (Some(recorded), Some(_)) => Some(recorded),
+                (_, current) => current,
+            }
+        } else {
+            None
+        };
+        Auth::flush_pending_remember_revocations().await?;
+        let remember_to_revoke = Auth::prepare_guard_remember_identity_replacement(&self.name);
+
+        if let Some((previous_user_id, selector)) = remember_to_revoke {
+            Auth::revoke_remember_selector(&self.name, &previous_user_id, &selector).await?;
+        }
+
+        // Committing the session identity is the login boundary. It rotates
+        // the session id and CSRF token before installing the authenticated
+        // principal. Everything below is post-commit observation or an
+        // optional remembered-login enhancement and therefore cannot turn the
+        // committed identity transition into a reported failure. Final store
+        // persistence remains SessionMiddleware's fail-closed responsibility.
+        Auth::login_guard_id(&self.name, user_id.clone())?;
+        if let Some(auth_epoch) = host_auth_epoch {
+            crate::session::middleware::record_host_sign_in_epoch(&user_id, auth_epoch);
+        }
+        let remembered = if remember {
+            match Auth::issue_remember_cookie_for_guard(
+                &self.name,
+                &user_id,
+                self.remember_ttl_minutes,
+            )
+            .await
+            {
+                Ok(()) => true,
+                Err(_) => {
+                    tracing::warn!(
+                        target: "suprnova::auth",
+                        "remember-me issuance failed; completing login without a remembered session"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        // Cache the resolved user for the rest of the request.
+        request_state::set_guard_user(&self.name, user);
+        request_state::set_guard_via_remember(&self.name, false);
+
+        if EventFacade::dispatch_best_effort(events::Login {
+            guard: self.name.clone(),
+            user_id: user_id.clone(),
+            remember: remembered,
+        })
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                target: "suprnova::auth",
+                "post-commit Login event delivery was incomplete"
+            );
+        }
+        if EventFacade::dispatch_best_effort(events::Authenticated {
+            guard: self.name.clone(),
+            user_id,
+        })
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                target: "suprnova::auth",
+                "post-commit Authenticated event delivery was incomplete"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -142,9 +243,29 @@ impl StatefulGuard for SessionGuard {
 
         let creds = credentials.as_value();
         if let Some(user) = self.provider.retrieve_by_credentials(&creds).await? {
+            // With the Magnetar engine installed, the sign-in is issued at
+            // the auth epoch read with the password, so a reset that commits
+            // after the password was read cancels it. Take the epoch from the
+            // provider's own read when it has one; otherwise read it now,
+            // before the password check. An engine refusal is held until the
+            // password is checked, so it never answers for a wrong password.
+            let admission = if self.name == Auth::default_guard_name() {
+                Some(
+                    crate::magnetar_integration::admit_host_sign_in(&user.get_auth_identifier())
+                        .await,
+                )
+            } else {
+                None
+            };
             if self.provider.validate_credentials(&*user, &creds).await? {
-                // login() fires Login + Authenticated.
-                self.login(user.clone(), remember).await?;
+                let recorded_epoch = match admission {
+                    Some(Err(error)) => return Err(error),
+                    Some(Ok(current)) => user.auth_epoch().or(current),
+                    None => None,
+                };
+                // login_at_epoch() fires Login + Authenticated.
+                self.login_at_epoch(user.clone(), remember, recorded_epoch)
+                    .await?;
                 // The caller just proved the password, so stamp the
                 // confirmation window. Without this, reauth-gated actions
                 // (passkey enrollment against an existing account - see
@@ -239,85 +360,7 @@ impl StatefulGuard for SessionGuard {
         user: Arc<dyn Authenticatable>,
         remember: bool,
     ) -> Result<(), FrameworkError> {
-        let user_id = user.get_auth_identifier();
-        // With the Magnetar engine installed, the default guard's login
-        // needs a Magnetar session. Ask the engine first, before anything
-        // changes or any event fires: it refuses an account whose second
-        // factor this login did not prove, and returns the auth epoch the
-        // session is issued at once the request commits.
-        let host_auth_epoch = if self.name == Auth::default_guard_name() {
-            crate::magnetar_integration::admit_host_sign_in(&user_id).await?
-        } else {
-            None
-        };
-        Auth::flush_pending_remember_revocations().await?;
-        let remember_to_revoke = Auth::prepare_guard_remember_identity_replacement(&self.name);
-
-        if let Some((previous_user_id, selector)) = remember_to_revoke {
-            Auth::revoke_remember_selector(&self.name, &previous_user_id, &selector).await?;
-        }
-
-        // Committing the session identity is the login boundary. It rotates
-        // the session id and CSRF token before installing the authenticated
-        // principal. Everything below is post-commit observation or an
-        // optional remembered-login enhancement and therefore cannot turn the
-        // committed identity transition into a reported failure. Final store
-        // persistence remains SessionMiddleware's fail-closed responsibility.
-        Auth::login_guard_id(&self.name, user_id.clone())?;
-        if let Some(auth_epoch) = host_auth_epoch {
-            crate::session::middleware::record_host_sign_in_epoch(&user_id, auth_epoch);
-        }
-        let remembered = if remember {
-            match Auth::issue_remember_cookie_for_guard(
-                &self.name,
-                &user_id,
-                self.remember_ttl_minutes,
-            )
-            .await
-            {
-                Ok(()) => true,
-                Err(_) => {
-                    tracing::warn!(
-                        target: "suprnova::auth",
-                        "remember-me issuance failed; completing login without a remembered session"
-                    );
-                    false
-                }
-            }
-        } else {
-            false
-        };
-
-        // Cache the resolved user for the rest of the request.
-        request_state::set_guard_user(&self.name, user);
-        request_state::set_guard_via_remember(&self.name, false);
-
-        if EventFacade::dispatch_best_effort(events::Login {
-            guard: self.name.clone(),
-            user_id: user_id.clone(),
-            remember: remembered,
-        })
-        .await
-        .is_err()
-        {
-            tracing::warn!(
-                target: "suprnova::auth",
-                "post-commit Login event delivery was incomplete"
-            );
-        }
-        if EventFacade::dispatch_best_effort(events::Authenticated {
-            guard: self.name.clone(),
-            user_id,
-        })
-        .await
-        .is_err()
-        {
-            tracing::warn!(
-                target: "suprnova::auth",
-                "post-commit Authenticated event delivery was incomplete"
-            );
-        }
-        Ok(())
+        self.login_at_epoch(user, remember, None).await
     }
 
     async fn login_using_id(

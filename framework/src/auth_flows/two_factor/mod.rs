@@ -641,6 +641,10 @@ impl TwoFactor {
         // whose remember-me rows to delete, but the slot has to go
         // first for fail-closed safety.
         let saved_id = crate::auth::Auth::id();
+        // The auth epoch `Auth::attempt` read with the password in this
+        // request, if it signed this user in. Read before the auth slot is
+        // cleared, which forgets it.
+        let recorded_epoch = crate::session::middleware::recorded_host_sign_in_epoch(&user_id);
 
         // STEP 1: Tear down auth state. Pending and authed are
         // mutually exclusive - clear the auth slot, the request-
@@ -673,12 +677,23 @@ impl TwoFactor {
         }
 
         // STEP 3: With the Magnetar engine installed, the promoted login
-        // will need a Magnetar session. Record the auth epoch the password
+        // will need a Magnetar session. Carry the auth epoch the password
         // was checked at, so a password reset or sign-out-everywhere during
         // the challenge cancels it, and refuse now an account the engine
-        // cannot sign in this way.
+        // cannot sign in this way. The epoch is the one `Auth::attempt` read
+        // with the password; only a caller that checked the password itself
+        // gets the epoch current now. A current epoch past the recorded one
+        // means a reset already committed, and the challenge is refused.
         match crate::magnetar_integration::admit_host_sign_in(&user_id).await {
-            Ok(auth_epoch) => {
+            Ok(current) => {
+                let auth_epoch = match (recorded_epoch, current) {
+                    (Some(recorded), Some(current)) if recorded != current => {
+                        Self::cancel_challenge();
+                        return Err(crate::magnetar_integration::expired_host_sign_in());
+                    }
+                    (Some(recorded), Some(_)) => Some(recorded),
+                    (_, current) => current,
+                };
                 crate::session::middleware::set_two_factor_pending_epoch(auth_epoch);
                 Ok(())
             }

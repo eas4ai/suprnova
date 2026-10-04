@@ -56,6 +56,10 @@ static ACCOUNTS: Mutex<Vec<Account>> = Mutex::new(Vec::new());
 /// Numbers the accounts, so every test's addresses are its own.
 static NEXT_ACCOUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Accounts whose auth epoch moves while the provider checks their
+/// password: a password reset that commits during the check.
+static RESET_DURING_CHECK: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 /// The Magnetar database, for the tests that change engine state behind
 /// the facades' back.
 static CONNECTION: OnceCell<sea_orm::DatabaseConnection> = OnceCell::const_new();
@@ -228,10 +232,22 @@ impl UserProvider for AccountProvider {
 
     async fn validate_credentials(
         &self,
-        _user: &dyn Authenticatable,
+        user: &dyn Authenticatable,
         credentials: &serde_json::Value,
     ) -> Result<bool, FrameworkError> {
-        Ok(credentials.get("password").and_then(|v| v.as_str()) == Some(PASSWORD))
+        let valid = credentials.get("password").and_then(|v| v.as_str()) == Some(PASSWORD);
+        let id = user.get_auth_identifier();
+        let reset = RESET_DURING_CHECK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&id);
+        if valid && reset {
+            magnetar_sql(&format!(
+                "UPDATE app_users SET auth_epoch = auth_epoch + 1 WHERE id = {id}"
+            ))
+            .await;
+        }
+        Ok(valid)
     }
 }
 
@@ -918,4 +934,67 @@ async fn a_magnetar_second_factor_refuses_a_remembered_login_up_front() {
         .await
         .expect("query remember rows");
     assert!(remembered.is_empty(), "no remember credential was issued");
+}
+
+/// Make a password reset commit for `account` while the provider checks its
+/// password, on every sign-in from now on.
+fn reset_during_password_check(account: &Account) {
+    RESET_DURING_CHECK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(account.id.clone());
+}
+
+/// A password reset that commits while the password is being checked: the
+/// password checked is the one the reset replaced, so the sign-in must not
+/// survive it. The session is issued at the epoch read with the password,
+/// never at one read after.
+#[tokio::test]
+async fn a_password_reset_during_the_password_check_cancels_the_sign_in() {
+    let account = setup().await;
+    reset_during_password_check(&account);
+    let mut browser = Browser::open().await;
+
+    let (status, body) = browser
+        .get(
+            "/login",
+            &[("x-email", &account.email), ("x-password", PASSWORD)],
+        )
+        .await;
+
+    assert_ne!((status, body.as_str()), (200, "signed in"));
+    assert_eq!(browser.whoami().await, "guest");
+    assert_eq!(session_count(&account).await, 0);
+}
+
+/// The same reset during the password check of an account with framework
+/// TOTP: the challenge that would follow is refused, and the confirmation
+/// code cannot complete a sign-in either.
+#[tokio::test]
+async fn a_password_reset_during_the_password_check_cancels_the_challenge() {
+    let account = setup().await;
+    let enrollment = TwoFactor::enroll(&account).await.expect("enroll");
+    confirm_earlier(&account, &enrollment.otpauth_url).await;
+    reset_during_password_check(&account);
+    let mut browser = Browser::open().await;
+
+    let (status, body) = browser
+        .get(
+            "/login",
+            &[("x-email", &account.email), ("x-password", PASSWORD)],
+        )
+        .await;
+    assert_ne!(
+        (status, body.as_str()),
+        (200, "signed in"),
+        "the reset sign-in is not completed without a challenge"
+    );
+    let code = current_code(&enrollment.otpauth_url);
+    let (status, _body) = browser
+        .get("/two-factor-challenge", &[("x-code", &code)])
+        .await;
+
+    assert_ne!(status, 200, "no challenge for the reset sign-in completes");
+    assert_eq!(browser.whoami().await, "guest");
+    assert_eq!(session_count(&account).await, 0);
 }
