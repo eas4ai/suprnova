@@ -1142,8 +1142,11 @@ let q: SearchQuery = req.query_into()?;
 ```
 
 `query_into` reads the query as a form body reads: `?page=` leaves `page`
-`None`, `?q=a&q=b` gives `b`, and `?tags[]=a&tags[]=b` fills `tags`. A
-query that doesn't read answers `422` with a message.
+`None`, `?q=a&q=b` gives `b`, and `?tags[]=a&tags[]=b` fills `tags`. A field
+that is missing or doesn't parse answers as a form request's does: a `422`
+whose `errors` names each such field with its catalog message, so an
+Inertia visit is redirected back with them. A query that fails for another
+reason answers `422` with a message.
 
 ### Route metadata
 

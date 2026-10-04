@@ -1090,6 +1090,29 @@ async fn query_into_reads_a_bool_as_forms_send_it() {
 }
 
 #[tokio::test]
+async fn a_query_that_does_not_read_names_each_field_in_errors() {
+    match search("sort=&page=abc&exact=maybe").await {
+        Err(suprnova::FrameworkError::Validation(errors)) => {
+            let mut keys: Vec<(&str, &str)> = errors
+                .errors
+                .iter()
+                .map(|(field, messages)| (field.as_str(), messages[0].key.as_ref()))
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    ("exact", "validation-boolean"),
+                    ("page", "validation-integer"),
+                    ("sort", "validation-required"),
+                ]
+            );
+        }
+        other => panic!("expected validation errors, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn query_into_keeps_an_empty_value_as_a_null_key() {
     let req = build_request(
         hyper::Request::builder()

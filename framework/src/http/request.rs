@@ -1129,10 +1129,19 @@ impl Request {
     /// last value; and a name that ends in `[]` is a list under the name
     /// without the brackets, so `?tags[]=a&tags[]=b` fills a `tags:
     /// Vec<String>` field.
+    ///
+    /// A field that is missing or does not parse answers as a form
+    /// request's does: a validation failure whose `errors` names each such
+    /// field with a catalog message, so an Inertia visit is redirected back
+    /// with the errors. Any other failure is a 422 that words it.
     pub fn query_into<T: DeserializeOwned>(&self) -> Result<T, FrameworkError> {
         let q = self.query().unwrap_or("");
-        crate::http::input::parse_form_input(q.as_bytes())
-            .map_err(|e| FrameworkError::domain(format!("query parse: {e}"), 422))
+        crate::http::input::parse_form_input(q.as_bytes()).map_err(|error| match error {
+            crate::http::input::InputError::Fields(errors) => FrameworkError::Validation(errors),
+            crate::http::input::InputError::Other(message) => {
+                FrameworkError::domain(format!("query parse: {message}"), 422)
+            }
+        })
     }
 
     /// Returns the matched route pattern (e.g. `/users/{id}`) when the
