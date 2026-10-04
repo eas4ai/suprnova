@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { resetReferenceUploadsBetweenTests } from "./support/reference-host.js";
+
 const REFERENCE_ORIGIN = "http://127.0.0.1:4175";
 const CORE_RUNTIME_RESOURCES = Object.freeze({
   authorization: 0,
@@ -22,6 +24,10 @@ const ASYNC_RUNTIME_RESOURCES = Object.freeze({
   listener: 5,
   timer: 1,
   transport: 1,
+});
+
+test.beforeEach(async ({ request }) => {
+  await resetReferenceUploadsBetweenTests(request);
 });
 
 function expectedRuntimeResources(projectName: string, asynchronous: boolean) {

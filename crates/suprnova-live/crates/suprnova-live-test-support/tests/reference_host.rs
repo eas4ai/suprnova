@@ -1251,6 +1251,39 @@ async fn upload_creation_window_reset_requires_a_quiescent_test_host() {
     assert_eq!(host.inspection_handle().snapshot().open_timers, 0);
     let (status, _, _) = request(&host, Method::POST, reset, &[], Bytes::new()).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // An upload a finished browser test left unfinished keeps the strict
+    // reset refusing; the reset the suite runs between tests cancels it
+    // first (LIVE-039).
+    let (status, _, abandoned) = json_request(
+        &host,
+        Method::POST,
+        "/__live/uploads",
+        json!({
+            "field": "avatar",
+            "filename": "abandoned.txt",
+            "content_type": "text/plain",
+            "expected_bytes": 1,
+            "mode": "file"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{abandoned}");
+    assert_eq!(host.inspection_handle().snapshot().active_uploads, 1);
+    let (status, _, _) = request(&host, Method::POST, reset, &[], Bytes::new()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _, _) = request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/reset-between-tests",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(host.inspection_handle().snapshot().active_uploads, 0);
+    let (status, _, _) = request(&host, Method::POST, reset, &[], Bytes::new()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
     host.shutdown().await.expect("clean upload-window shutdown");
 }
 
