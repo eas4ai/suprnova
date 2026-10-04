@@ -1,4 +1,5 @@
 import { inspectAsyncEnvelopeSubscription } from "./envelope.js";
+import { AsyncDocumentQueueBudget, type AsyncQueueAdmissionPort } from "./subscription.js";
 import {
   canonicalize,
   parseCanonicalJson,
@@ -138,6 +139,13 @@ export interface DocumentConnectionPoolOptions {
   readonly authorizationScheduler?: DocumentAuthorizationScheduler;
   readonly handshakeScheduler: OriginHandshakeScheduler;
   readonly handshakeTimeoutMs?: number;
+  /**
+   * The document's queue budget (`LIVE_ASYNC_MAX_QUEUED_EVENTS`), shared with
+   * its islands. SSE records held while their memberships' controls settle
+   * are charged to it, so held and queued envelopes together stay within the
+   * one configured limit, and a refusal is reported as that limit.
+   */
+  readonly queueAdmission?: AsyncQueueAdmissionPort;
   readonly randomness: AsyncRandomness;
   readonly reauthorizationConcurrency?: number;
   readonly reauthorizationTimeoutMs?: number;
@@ -1099,6 +1107,15 @@ interface ReauthorizationCompletion {
 
 interface MembershipAttachmentCompletion {
   settle: ((acknowledgment: unknown) => void) | null;
+  /** The physical generation the control was sent on. */
+  readonly transportGeneration: number;
+  /**
+   * SSE records for this membership that arrived before its control
+   * settled, in arrival order, each with the bytes charged to the document's
+   * queue budget. They stay inert until the acknowledgment authenticates the
+   * membership, and are dropped if it never does.
+   */
+  readonly overtaking: { readonly bytes: number; readonly encoded: string }[];
 }
 
 function completeMembershipAttachment(
@@ -1218,6 +1235,7 @@ export class DocumentConnectionPool {
   readonly #authorizationScheduler: DocumentAuthorizationScheduler | null;
   readonly #handshakes: OriginHandshakeScheduler;
   readonly #handshakeTimeoutMs: number;
+  readonly #queueAdmission: AsyncQueueAdmissionPort;
   readonly #randomness: AsyncRandomness;
   readonly #reauthorizationConcurrency: number;
   readonly #reauthorizationTimeoutMs: number;
@@ -1250,6 +1268,7 @@ export class DocumentConnectionPool {
     this.#authorizationScheduler = options.authorizationScheduler ?? null;
     this.#handshakes = options.handshakeScheduler;
     this.#handshakeTimeoutMs = handshakeTimeout;
+    this.#queueAdmission = options.queueAdmission ?? new AsyncDocumentQueueBudget();
     this.#randomness = options.randomness;
     this.#reauthorizationConcurrency = concurrency;
     this.#reauthorizationTimeoutMs = timeout;
@@ -1564,6 +1583,12 @@ export class DocumentConnectionPool {
     const membership = group.memberships.get(subscriptionId);
     if (membership === undefined || !membership.active || membership.group !== group) return;
     if (membership.authenticatedTransportGeneration !== generation) {
+      const held = this.#holdOvertakingRecord(group, membership, generation, encoded);
+      if (held === "held") return;
+      if (held === "refused") {
+        this.#failed(group, generation, "transport_lost");
+        return;
+      }
       if (
         membership.logicallyDegraded &&
         membership.quarantinedGroup === group &&
@@ -1580,6 +1605,66 @@ export class DocumentConnectionPool {
     } catch {
       this.#safeState(membership, "degraded");
     }
+  }
+
+  /**
+   * Holds an SSE record that overtook its membership's acknowledgment.
+   *
+   * SSE membership controls are HTTP requests beside the event stream, so a
+   * host that commits a membership and then delivers its first record, a
+   * heartbeat or an event published meanwhile, can have that record reach the
+   * browser before the control's response does. Answering the control first
+   * does not order them: they are separate exchanges, and the browser
+   * settles the answer several tasks after its response arrives. The record
+   * is not authority: it stays inert until the exact acknowledgment for this
+   * membership and generation settles. Failing it as lost authorization
+   * would retire the whole document transport, every sibling island with it,
+   * with no reconnect.
+   *
+   * A degraded lane's successor control settles the same way, so the hold
+   * takes precedence over the degraded-lane fence while it does. Envelopes
+   * carry no descriptor binding, so the successor's first record and a
+   * record the host sent on the old lane before removing it look alike. Both
+   * are safe to hold: a position at or before the successor's baseline is
+   * stale to it and ignored, and a later one is the same event of the
+   * subscription's stream that the successor lane carries, so a duplicate is
+   * ignored too. Discarding them instead could drop the successor's first
+   * record, and the next one would arrive as a gap.
+   *
+   * Held records count against the document's queue budget. When it is full
+   * the budget reports `LIVE_ASYNC_MAX_QUEUED_EVENTS`, and the caller fails
+   * the transport as lost so its memberships reconnect. A WebSocket
+   * acknowledgment travels in order on the socket ahead of the membership's
+   * data, so a WebSocket record that precedes it still fails closed.
+   */
+  #holdOvertakingRecord(
+    group: PhysicalGroup,
+    membership: LogicalMembership,
+    generation: number,
+    encoded: string,
+  ): "held" | "refused" | "unsettled" {
+    const attachment = membership.attachmentCompletion;
+    if (
+      group.key.transport !== "sse" ||
+      attachment?.transportGeneration !== generation ||
+      attachment.settle === null
+    ) {
+      return "unsettled";
+    }
+    const bytes = new TextEncoder().encode(encoded).byteLength;
+    if (!this.#queueAdmission.reserve(1, bytes)) return "refused";
+    attachment.overtaking.push(Object.freeze({ bytes, encoded }));
+    return "held";
+  }
+
+  /** Empties a control's held records and returns their queue budget. */
+  #releaseOvertaking(completion: MembershipAttachmentCompletion): readonly string[] {
+    const held = completion.overtaking.splice(0);
+    if (held.length !== 0) {
+      const bytes = held.reduce((total, record) => total + record.bytes, 0);
+      this.#queueAdmission.release(held.length, bytes);
+    }
+    return held.map(({ encoded }) => encoded);
   }
 
   #failed(group: PhysicalGroup, generation: number, reason: DocumentTransportFailure): void {
@@ -2108,7 +2193,11 @@ export class DocumentConnectionPool {
       this.#failed(group, transportGeneration, "authorization_lost");
       return;
     }
-    const completion: MembershipAttachmentCompletion = { settle: null };
+    const completion: MembershipAttachmentCompletion = {
+      overtaking: [],
+      settle: null,
+      transportGeneration,
+    };
     completion.settle = (acknowledgment) => {
       this.#settleMembershipAttachment(
         completion,
@@ -2148,6 +2237,31 @@ export class DocumentConnectionPool {
   }
 
   #settleMembershipAttachment(
+    completion: MembershipAttachmentCompletion,
+    group: PhysicalGroup,
+    membership: LogicalMembership,
+    transportGeneration: number,
+    membershipGeneration: number,
+    acknowledgment: unknown,
+  ): void {
+    if (completion.settle === null) return;
+    const overtaking = this.#releaseOvertaking(completion);
+    this.#authenticateMembershipAttachment(
+      completion,
+      group,
+      membership,
+      transportGeneration,
+      membershipGeneration,
+      acknowledgment,
+    );
+    if (membership.authenticatedTransportGeneration !== transportGeneration) return;
+    // Applied exactly as if each had arrived now: the same routing rechecks
+    // the generation and membership for every record, in arrival order, and
+    // ahead of any record the stream delivers after this acknowledgment.
+    for (const encoded of overtaking) this.#message(group, transportGeneration, encoded);
+  }
+
+  #authenticateMembershipAttachment(
     completion: MembershipAttachmentCompletion,
     group: PhysicalGroup,
     membership: LogicalMembership,
@@ -2223,7 +2337,10 @@ export class DocumentConnectionPool {
   #cancelMembershipAttachment(membership: LogicalMembership): void {
     const completion = membership.attachmentCompletion;
     membership.attachmentCompletion = null;
-    if (completion !== null) completion.settle = null;
+    if (completion !== null) {
+      completion.settle = null;
+      this.#releaseOvertaking(completion);
+    }
   }
 
   #discardPendingAuthorization(membership: LogicalMembership): void {
