@@ -592,8 +592,28 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `match` on `ContentError` needs the two arms. The same file listed twice
   is still allowed. This landed after the `v3.1.0` tag.
 
+- **`IMAGE_MAX_ALLOC_BYTES` bounds the whole decode, and defaults to 1
+  GiB.** It used to bound only the decoded RGBA size, so a decoder could
+  allocate several times the limit while it worked. It now covers every
+  buffer a decode and its source read hold, measured per format (the cost
+  table is in `manual/images.md`), and the default rose from 256 MiB to 1
+  GiB so a 48-megapixel photo in any 8-bit format still decodes. JPEGs
+  decode through `zune-jpeg` (pinned at `0.5.16-rc2`, the first release that
+  decodes every Huffman and arithmetic sampling correctly); lossless JPEGs
+  still decode through `oxideav-mjpeg` and are refused by name above 67
+  million samples. This landed after the `v3.1.0` tag.
+
 ### Fixed
 
+- **Images decode correctly at the sizes the framework allows.** JPEGs
+  above about 22 megapixels decoded on no driver; they now decode up to the
+  budget. JPEG colours were off by about 6 levels, arithmetic-coded,
+  odd-sized 4:2:0 and 4:2:2, 4:4:0 and 4:1:1 JPEGs decoded wrong or not at
+  all, and small progressive JPEGs could fail. GIFs from ImageMagick and
+  Pillow decode, and the GIFs the default driver writes open in other
+  software. The `magick` driver processes and sizes only the first frame of
+  an animation, as the default driver does, and reports a GIF's logical
+  screen as its size. This landed after the `v3.1.0` tag.
 - **Localization.** `Accept-Language` negotiation honours q-values:
   `en;q=0.1, fr` picks `fr`, and a language sent with `q=0` is never
   chosen. `DATETIME()` formats in the catalog's own locale. A catalog edit
@@ -955,6 +975,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **An image cannot allocate past its decode budget.** A crafted PNG
+  inflated past `IMAGE_MAX_ALLOC_BYTES`, a lossless WebP's prefix-code
+  tables were unbounded, a JPEG could be measured at one frame header and
+  decoded at another, and path and disk sources were read into memory
+  before the size check. Each is now counted against the budget before the
+  memory is taken.
 - **The mock payment provider refuses unsigned webhooks outside
   development.** It accepted them when the application registered a
   production or staging `AppConfig` in code with `APP_ENV` unset; it now
