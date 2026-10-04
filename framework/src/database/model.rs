@@ -18,10 +18,10 @@
 //! rollbacks.
 
 use async_trait::async_trait;
-use sea_orm::sea_query::{FromValueTuple, IntoValueTuple, ValueTuple};
+use sea_orm::sea_query::IntoValueTuple;
 use sea_orm::{
-    ActiveModelBehavior, ActiveModelTrait, EntityTrait, IntoActiveModel, ModelTrait,
-    PaginatorTrait, PrimaryKeyTrait, TryIntoModel,
+    ActiveModelBehavior, ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, Iterable,
+    ModelTrait, PaginatorTrait, PrimaryKeyToColumn, PrimaryKeyTrait, QueryFilter, TryIntoModel,
 };
 
 use crate::database::transaction::ExecutorChoice;
@@ -41,13 +41,6 @@ where
     f(exec)
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))
-}
-
-/// The key `E` takes back from the value tuple it was checked as.
-fn key_from_tuple<E: EntityTrait>(
-    key: ValueTuple,
-) -> <E::PrimaryKey as PrimaryKeyTrait>::ValueType {
-    FromValueTuple::from_value_tuple(key)
 }
 
 /// Mirror of [`with_read_executor`] for write terminals. Skips the
@@ -186,13 +179,16 @@ where
     {
         let key = IntoValueTuple::into_value_tuple(id.into());
         let exec = ExecutorChoice::resolve_read(None, None, None).await?;
-        // A key no row can hold, a u64 above i64::MAX on Postgres or
-        // SQLite, finds nothing. It is never sent: the drivers' binders
-        // there panic on it.
-        if crate::eloquent::model::key_beyond_signed(exec.backend(), &key) {
+        // A key no row can hold, a u64 above i64::MAX on Postgres, finds
+        // nothing and is never sent: the driver's binder panics on it.
+        // SQLite compares such a key by its digits.
+        let Some(key) = crate::eloquent::model::lookup_key(exec.backend(), key) else {
             return Ok(None);
+        };
+        let mut query = Self::find();
+        for (column, value) in Self::PrimaryKey::iter().zip(key) {
+            query = query.filter(column.into_column().eq(value));
         }
-        let query = Self::find_by_id(key_from_tuple::<Self>(key));
         match exec {
             ExecutorChoice::Tx(t, _) => query.one(t.as_ref()).await,
             ExecutorChoice::Pool(c, _) => query.one(c.inner()).await,
@@ -516,10 +512,13 @@ where
         crate::render_cache::orm::atomic(None, || async move {
             let exec = ExecutorChoice::resolve_write(None, None, None).await?;
             // A key no row can hold deletes nothing, and is never sent.
-            if crate::eloquent::model::key_beyond_signed(exec.backend(), &key) {
+            let Some(key) = crate::eloquent::model::lookup_key(exec.backend(), key) else {
                 return Ok(0);
+            };
+            let mut stmt = Self::delete_many();
+            for (column, value) in Self::PrimaryKey::iter().zip(key) {
+                stmt = stmt.filter(column.into_column().eq(value));
             }
-            let stmt = Self::delete_by_id(key_from_tuple::<Self>(key));
             let result = match exec {
                 ExecutorChoice::Tx(t, _) => stmt.exec(t.as_ref()).await,
                 ExecutorChoice::Pool(c, _) => stmt.exec(c.inner()).await,

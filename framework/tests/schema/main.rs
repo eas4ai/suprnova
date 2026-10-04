@@ -28,6 +28,7 @@ mod postgres;
 mod signed_columns;
 mod sqlite;
 mod unsigned_auth;
+mod unsigned_exact;
 mod unsigned_keys;
 mod unsigned_keyset;
 mod unsigned_reads;

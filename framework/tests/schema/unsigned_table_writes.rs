@@ -3,8 +3,10 @@
 //! An attribute map carries a number as JSON, and a JSON `u64` above
 //! `i64::MAX` used to bind as text: Postgres refused the statement and
 //! SQLite stored a rounded real. MySQL's unsigned columns hold the value
-//! exactly; Postgres and SQLite have no integer column that holds it, so
-//! the write is refused there before anything is sent, as a model's is.
+//! exactly. Postgres and SQLite have no integer column that holds it:
+//! Postgres refuses the exact number for a `bigint` column itself, and
+//! SQLite, which would store a rounded REAL, has the write refused before
+//! it is sent. Nothing is stored either way.
 
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use serial_test::serial;
@@ -38,10 +40,11 @@ async fn stored_quantity(conn: &DatabaseConnection, label: &str) -> Option<Strin
 }
 
 /// On Postgres and SQLite `insert` and `update` of a `u64` above
-/// `i64::MAX` fail with a database error naming the column, nothing is
-/// sent, and nothing is stored. On MySQL both store the exact value. It
-/// fails while the value binds as text, which SQLite stores as a rounded
-/// real and Postgres refuses only after the statement is sent.
+/// `i64::MAX` to an integer column fail with a database error and store
+/// nothing: SQLite's, which names the column, comes before the write is
+/// sent, and Postgres refuses the exact number itself. On MySQL both store
+/// the exact value. It fails while the value binds as text, which SQLite
+/// stores as a rounded real.
 pub async fn table_writes_beyond_a_signed_column(conn: &DatabaseConnection) {
     create_tables(conn).await;
     let _guard = TestContainer::fake();
@@ -88,21 +91,31 @@ pub async fn table_writes_beyond_a_signed_column(conn: &DatabaseConnection) {
         .update(attrs! { quantity: below })
         .await
         .expect_err("no signed column holds u64::MAX - 1");
-    assert!(
-        DB::get_query_log().expect("query log").is_empty(),
-        "nothing reached the database"
-    );
+    let sent: Vec<String> = DB::get_query_log()
+        .expect("query log")
+        .into_iter()
+        .map(|query| query.sql)
+        .collect();
     DB::disable_query_log().expect("disable the query log");
-    for (operation, error, value) in [("insert", insert, top), ("update", update, below)] {
-        let message = error.to_string();
+    if conn.get_database_backend() == DbBackend::Sqlite {
         assert!(
-            message.contains("uk_orders.quantity") && message.contains(&value.to_string()),
-            "{operation}: the error names the column and the value: {message}"
+            sent.iter()
+                .all(|sql| !sql.contains("INSERT") && !sql.contains("UPDATE")),
+            "SQLite refuses before the write is sent: {sent:?}"
         );
+    }
+    for (operation, error, value) in [("insert", insert, top), ("update", update, below)] {
         assert!(
             matches!(error, suprnova::FrameworkError::Database(_)),
             "{operation}: a database error, which a client sees as a generic 500: {error:?}"
         );
+        if conn.get_database_backend() == DbBackend::Sqlite {
+            let message = error.to_string();
+            assert!(
+                message.contains("uk_orders.quantity") && message.contains(&value.to_string()),
+                "{operation}: the error names the column and the value: {message}"
+            );
+        }
     }
     assert_eq!(count(conn, "uk_orders").await, rows, "nothing was inserted");
     assert_eq!(

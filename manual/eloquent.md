@@ -978,17 +978,21 @@ and `pluck` leaves the row out. A value that doesn't read as the type you
 name is an error that names the column, rather than a missing row. These
 terminals, the aggregates and `DB::scalar` read `u64` and `Option<u64>` on
 every database, as a model's `u64` field does: on Postgres and SQLite a
-negative value fails the read. No row on those two databases can hold a
-`u64` above `i64::MAX`, so a read by one gets its answer without sending
-the value: `find` returns `None` and `find_many` skips it. In a filter,
-`=`, `>`, `>=` and `IN` match no row, and `!=`, `<`, `<=` and `NOT IN`
-match every row whose column is not NULL. MySQL gives the same answer for
-rows that all hold smaller values.
+negative value fails the read. A read by a `u64` above `i64::MAX` answers
+what the database holds. On Postgres a signed integer column holds only
+integers, so no row matches and the query gets its answer without
+sending the value: `find` returns `None`, `find_many` skips it, and in a
+filter `=`, `>`, `>=` and `IN` match no row, while `!=`, `<`, `<=` and
+`NOT IN` match every row whose column is not NULL. SQLite compares the
+value's digits, as it does a literal, because an INTEGER column there can
+hold a REAL above `i64::MAX` that raw SQL or an older write left. MySQL
+compares the unsigned number.
 
-The same holds on every database for a column of a narrower integer field
-such as `i64` or `i32`, which can't hold a `u64` above `i64::MAX` either. A
-mass update that writes such a value to one is refused on Postgres and
-SQLite before anything is sent.
+The same holds for a column of a narrower integer field such as `i64` or
+`i32`, which can't hold such a value on any database, and a mass update
+that writes one to it is refused on Postgres and SQLite before anything is
+sent. A column the model doesn't know, such as a joined table's column,
+compares as the number on every database, as with `DB::table`.
 
 `to_sql` returns the parameterised SQL the next terminal would emit -
 useful for debugging or building views. The bindings are
