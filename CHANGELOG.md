@@ -8,6 +8,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Action directives pass arguments.** `live:click="remove(42)"` and
+  `live:click="rename('draft', true)"` send literal arguments to the
+  action's parameters in declared order; before, every action directive
+  sent none, so an action with parameters could not be called from a
+  template. Only literals are accepted (numbers, quoted strings, `true`,
+  `false`, `null`), and `live:check` reports a wrong count or a literal of
+  the wrong type at its line and column. The island root lists each
+  action's parameter names in `data-suprnova-live-actions`.
 - **Heap profiling.** With the framework's `heap-profiling` feature an
   application profiles its heap with dhat: the framework installs dhat's
   allocator, `#[suprnova::main]` starts the profiler, and a command that
@@ -388,6 +396,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **`live:check` finds unescaped output wherever a template writes it.**
+  It read `|safe` from an expression's text and skipped `{% let %}`, so
+  `{% let y = x|safe %}{{ y }}`, `x|safe|lower` and `escape("none")`
+  passed. It now reads the parsed template and follows a raw value through
+  `let` and `set`, macro arguments, macros called as expressions, caller
+  content, inherited blocks and `super()`, loops, `if let`, let chains and
+  `match`, to the place it is written. A filter outside Askama's builtins
+  and the framework's, a Rust macro in an expression, and a dynamic value
+  in an unquoted attribute, an `on*` attribute or `script` or `style` text
+  are reported as unproved, so a view that passed before can now need a
+  change.
+- **`live:check` handles views with many conditionals.** It counted every
+  combination of `if` blocks, so eight independent ones exceeded its limit;
+  each conditional's branches are now checked once. Its limits are sized
+  for real templates (4 MiB of source, 262,144 nodes) and configurable.
+- **`live:check` reports the real column.** Directive and markup
+  diagnostics reported column 1; they now point at the attribute or tag,
+  in the template that wrote it.
 - **A workflow step can take an integer argument.** `#[workflow_step]`
   handed the step's body to the workflow context in a closure that borrowed
   its arguments, and the context needs one it can keep, so a step taking a
