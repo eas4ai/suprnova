@@ -305,6 +305,19 @@ pub trait OAuthProvider: Send + Sync {
     /// Parse and verify an already-fetched provider response into a
     /// [`VerifiedProviderIdentity`]. Never performs I/O.
     async fn resolve_identity(&self, response: ProviderResponse) -> OAuthResult<ProviderIdentity>;
+    /// The URL of the account's picture, read from the same already-fetched
+    /// response [`OAuthProvider::resolve_identity`] parses. Never performs
+    /// I/O.
+    ///
+    /// A defaulted method rather than a [`VerifiedProviderIdentity`] field,
+    /// so a provider written before it keeps compiling and reports no
+    /// picture. Return `None` when the profile has no picture or an empty
+    /// one; a missing picture never fails sign-in. The value is untrusted
+    /// profile data copied as the provider reported it: an application
+    /// checks it (scheme, length) before it renders, fetches or stores it.
+    fn avatar_url(&self, _response: &ProviderResponse) -> Option<String> {
+        None
+    }
     /// Revoke a token via the provider's dossier-defined revocation
     /// request, sent through the injected [`RevocationTransport`].
     async fn revoke(&self, token: &str, hint: TokenHint) -> OAuthResult<()>;

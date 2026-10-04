@@ -19,11 +19,15 @@
 //!   every client, confidential or not (the 09 engine default already
 //!   matches).
 //! - **Identity source**: a `GET` the host performs against
-//!   `https://api.twitter.com/2/users/me`, whose body wraps the profile in
-//!   a `data` object (`{"data":{"id":...,"username":...,"name":...}}`, X
-//!   API v2 documentation). **X never supplies a reliable email** without a
-//!   separate elevated-access grant this crate does not model
-//!   (`docs/specs/suprnova-magnetar/10-providers.md`): this provider always
+//!   `https://api.twitter.com/2/users/me?user.fields=profile_image_url`,
+//!   whose body wraps the profile in a `data` object
+//!   (`{"data":{"id":...,"username":...,"name":...,"profile_image_url":...}}`,
+//!   X API v2 documentation). X returns only `id`, `name` and `username`
+//!   unless `user.fields` names more; `profile_image_url` is the account
+//!   picture [`OAuthProvider::avatar_url`] reports. **X never supplies a
+//!   reliable email** without a separate elevated-access grant this crate
+//!   does not model (`docs/specs/suprnova-magnetar/10-providers.md`): this
+//!   provider always
 //!   resolves `email: None`, `email_verified: false`, so every X sign-in
 //!   drives [`crate::oauth::identity::IdentityResolver`]'s
 //!   `EmailCompletionRequired` outcome by design, not as a fallback for a
@@ -51,7 +55,7 @@ use crate::oauth::request_shape::{AuthorizationRequestShape, TokenRequestShape};
 
 const AUTHORIZATION_ENDPOINT: &str = "https://twitter.com/i/oauth2/authorize";
 const TOKEN_ENDPOINT: &str = "https://api.twitter.com/2/oauth2/token";
-const USERINFO_ENDPOINT: &str = "https://api.twitter.com/2/users/me";
+const USERINFO_ENDPOINT: &str = "https://api.twitter.com/2/users/me?user.fields=profile_image_url";
 const REVOCATION_ENDPOINT: &str = "https://api.twitter.com/2/oauth2/revoke";
 
 /// Route-level configuration for the X provider.
@@ -79,6 +83,7 @@ struct XUsersMeEnvelope {
 struct XUsersMeData {
     id: Option<String>,
     name: Option<String>,
+    profile_image_url: Option<String>,
 }
 
 /// The X `OAuthProvider` plugin.
@@ -181,6 +186,17 @@ impl OAuthProvider for XOAuthProvider {
             email_verified: false,
             display_name: data.name,
         })
+    }
+
+    fn avatar_url(&self, response: &ProviderResponse) -> Option<String> {
+        let ProviderResponse::UserInfo { body } = response else {
+            return None;
+        };
+        let envelope: XUsersMeEnvelope = serde_json::from_str(body).ok()?;
+        envelope
+            .data?
+            .profile_image_url
+            .filter(|url| !url.trim().is_empty())
     }
 
     async fn revoke(&self, token: &str, hint: TokenHint) -> OAuthResult<()> {

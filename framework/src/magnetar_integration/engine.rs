@@ -1797,6 +1797,20 @@ pub trait MagnetarOAuthAuthEngine: Send + Sync {
         &self,
         input: MagnetarOAuthCallback,
     ) -> std::result::Result<VerifiedProviderIdentity, HostOAuthError>;
+    /// Complete only provider proof, and also return the account picture URL
+    /// the provider read from the same profile response
+    /// ([`magnetar::oauth::OAuthProvider::avatar_url`]).
+    ///
+    /// Defaulted so an engine written before avatars keeps compiling: it
+    /// delegates to [`Self::oauth_verify_identity`] and reports no picture.
+    async fn oauth_verify_identity_with_avatar(
+        &self,
+        input: MagnetarOAuthCallback,
+    ) -> std::result::Result<(VerifiedProviderIdentity, Option<String>), HostOAuthError> {
+        self.oauth_verify_identity(input)
+            .await
+            .map(|identity| (identity, None))
+    }
 }
 
 /// Concrete OAuth execution assembled from the installed host engine.
@@ -1941,7 +1955,7 @@ where
     ) -> std::result::Result<VerifiedProviderIdentity, HostOAuthError> {
         self.callback_identity(input)
             .await
-            .map(|(identity, _, _)| identity)
+            .map(|(identity, _, _, _)| identity)
     }
 
     /// Execute grant, provider identity resolution, and the factor gate where
@@ -1951,7 +1965,7 @@ where
         input: MagnetarOAuthCallback,
     ) -> std::result::Result<MagnetarOAuthCompletion, HostOAuthError> {
         let metadata = input.metadata.clone();
-        let (identity, intent, actor) = self.callback_identity(input).await?;
+        let (identity, _, intent, actor) = self.callback_identity(input).await?;
         let outcome = self
             .identity
             .resolve(identity.clone(), intent.clone(), actor, metadata.clone())
@@ -2058,6 +2072,7 @@ where
     ) -> std::result::Result<
         (
             VerifiedProviderIdentity,
+            Option<String>,
             OAuthIntent,
             Option<CredentialActor>,
         ),
@@ -2148,11 +2163,16 @@ where
                 })?,
             }
         };
+        // Read before `resolve_identity` takes the response. An empty URL
+        // is no picture, whichever provider reported it.
+        let avatar_url = provider
+            .avatar_url(&response)
+            .filter(|url| !url.trim().is_empty());
         provider
             .resolve_identity(response)
             .await
             .map_err(HostOAuthError::Protocol)
-            .map(|identity| (identity, intent, actor))
+            .map(|identity| (identity, avatar_url, intent, actor))
     }
 
     fn provider_config(
@@ -2211,5 +2231,14 @@ where
         input: MagnetarOAuthCallback,
     ) -> std::result::Result<VerifiedProviderIdentity, HostOAuthError> {
         self.verify_identity(input).await
+    }
+
+    async fn oauth_verify_identity_with_avatar(
+        &self,
+        input: MagnetarOAuthCallback,
+    ) -> std::result::Result<(VerifiedProviderIdentity, Option<String>), HostOAuthError> {
+        self.callback_identity(input)
+            .await
+            .map(|(identity, avatar_url, _, _)| (identity, avatar_url))
     }
 }

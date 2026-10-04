@@ -50,7 +50,9 @@
 //!   endpoint, verified via JWKS
 //!   (`https://appleid.apple.com/auth/keys`) through
 //!   [`apple::jwks::AppleJwksClient`]/[`apple::user::get_user_info_from_id_token`].
-//!   Apple has no userinfo endpoint.
+//!   Apple has no userinfo endpoint, and neither the ID token nor the
+//!   `form_post` user data carries a picture, so this provider keeps the
+//!   default [`OAuthProvider::avatar_url`], which reports none.
 //! - **Email/name availability**: both are supplied only on the account's
 //!   first authorization and never resent
 //!   (`docs/specs/suprnova-magnetar/10-providers.md`: "Apple returns

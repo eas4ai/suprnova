@@ -7,7 +7,8 @@
 //! - **Endpoints**: authorize
 //!   `https://www.facebook.com/{version}/dialog/oauth`, token
 //!   `https://graph.facebook.com/{version}/oauth/access_token`, identity
-//!   `https://graph.facebook.com/{version}/me`, de-authorize
+//!   `https://graph.facebook.com/{version}/me?fields=id,name,email,picture`,
+//!   de-authorize
 //!   `https://graph.facebook.com/{version}/me/permissions`, where
 //!   `{version}` is [`FacebookProviderConfig::graph_api_version`]
 //!   (default `v26.0`, the current Graph API release per Meta's own
@@ -37,14 +38,17 @@
 //!   when Facebook silently ignores them costs nothing either way, so the
 //!   engine default is kept rather than guessed away.
 //! - **Identity source**: a Graph API `GET` the host performs against
-//!   `https://graph.facebook.com/{version}/me?fields=id,name,email` (Meta's
-//!   Graph API User reference,
+//!   `https://graph.facebook.com/{version}/me?fields=id,name,email,picture`
+//!   (Meta's Graph API User reference,
 //!   `developers.facebook.com/docs/graph-api/reference/user/`, verified
-//!   live 2026-08-19). Facebook's Graph API only ever returns a
-//!   user-confirmed email address (Meta's documented policy since 2016), so
-//!   this provider treats a present `email` as verified and an absent one
-//!   as unverified/absent -- there is no separate `email_verified` field to
-//!   read.
+//!   live 2026-08-19). The request must name its fields: a bare `/me`
+//!   returns only `id` and `name`, so neither the email nor the picture
+//!   would arrive. `picture.data.url` is the account picture
+//!   [`OAuthProvider::avatar_url`] reports. Facebook's Graph API only ever
+//!   returns a user-confirmed email address (Meta's documented policy since
+//!   2016), so this provider treats a present `email` as verified and an
+//!   absent one as unverified/absent -- there is no separate
+//!   `email_verified` field to read.
 //! - **Refresh**: **not** RFC 6749 `refresh_token`-grant shaped. Facebook
 //!   extends token lifetime via a separate long-lived-token exchange
 //!   (`grant_type=fb_exchange_token`), which [`RefreshPolicy`] does not
@@ -76,6 +80,10 @@ use crate::oauth::request_shape::{AuthorizationRequestShape, TokenRequestShape};
 /// default; hosts should override it directly rather than wait for a
 /// crate update once Meta rotates the current release.
 pub const DEFAULT_GRAPH_API_VERSION: &str = "v26.0";
+
+/// The profile fields the identity request names. Without a `fields`
+/// parameter the Graph API returns only `id` and `name`.
+const PROFILE_FIELDS: &str = "id,name,email,picture";
 
 /// Route-level configuration for the Facebook provider.
 #[derive(Clone, Debug)]
@@ -112,13 +120,25 @@ impl Default for FacebookProviderConfig {
     }
 }
 
-/// The raw shape of Facebook's Graph API `/me?fields=id,name,email`
-/// response.
+/// The raw shape of Facebook's Graph API
+/// `/me?fields=id,name,email,picture` response.
 #[derive(Deserialize)]
 struct FacebookUser {
     id: Option<String>,
     name: Option<String>,
     email: Option<String>,
+    picture: Option<FacebookPicture>,
+}
+
+/// The Graph API `picture` field, which wraps the picture in `data`.
+#[derive(Deserialize)]
+struct FacebookPicture {
+    data: Option<FacebookPictureData>,
+}
+
+#[derive(Deserialize)]
+struct FacebookPictureData {
+    url: Option<String>,
 }
 
 /// The Facebook `OAuthProvider` plugin.
@@ -181,6 +201,14 @@ impl OAuthProvider for FacebookOAuthProvider {
             email_verified,
             display_name: user.name,
         })
+    }
+
+    fn avatar_url(&self, response: &ProviderResponse) -> Option<String> {
+        let ProviderResponse::UserInfo { body } = response else {
+            return None;
+        };
+        let user: FacebookUser = serde_json::from_str(body).ok()?;
+        user.picture?.data?.url.filter(|url| !url.trim().is_empty())
     }
 
     async fn revoke(&self, token: &str, hint: TokenHint) -> OAuthResult<()> {
@@ -252,7 +280,7 @@ impl OAuthProvider for FacebookOAuthProvider {
                 .clone()
                 .unwrap_or_else(|| {
                     format!(
-                        "https://graph.facebook.com/{}/me",
+                        "https://graph.facebook.com/{}/me?fields={PROFILE_FIELDS}",
                         self.config.graph_api_version
                     )
                 }),

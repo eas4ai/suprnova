@@ -43,7 +43,8 @@
 //!   live 2026-08-19), wrapped in `{"data":{"user":{...}},"error":{...}}`.
 //!   **TikTok's user-info schema has no email field at all** (not merely
 //!   omitted -- it does not exist), so this provider always resolves
-//!   `email: None`, `email_verified: false`.
+//!   `email: None`, `email_verified: false`. The requested `avatar_url`
+//!   field is the account picture [`OAuthProvider::avatar_url`] reports.
 //! - **Refresh**: supported; [`ClientAuthentication::RequestBody`], no
 //!   extra required scopes (arctic `tiktok.rs`'s `refresh_access_token`).
 //!   TikTok **rotates** refresh tokens on every refresh call: "the
@@ -109,6 +110,7 @@ struct TikTokUserInfoData {
 struct TikTokUser {
     open_id: Option<String>,
     display_name: Option<String>,
+    avatar_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -209,6 +211,18 @@ impl OAuthProvider for TikTokOAuthProvider {
             email_verified: false,
             display_name: user.display_name,
         })
+    }
+
+    fn avatar_url(&self, response: &ProviderResponse) -> Option<String> {
+        let ProviderResponse::UserInfo { body } = response else {
+            return None;
+        };
+        let envelope: TikTokUserInfoEnvelope = serde_json::from_str(body).ok()?;
+        envelope
+            .data?
+            .user?
+            .avatar_url
+            .filter(|url| !url.trim().is_empty())
     }
 
     async fn revoke(&self, token: &str, hint: TokenHint) -> OAuthResult<()> {
