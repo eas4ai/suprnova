@@ -20,7 +20,9 @@
 //! - **Identity source**: a userinfo `GET` the host performs against
 //!   `https://www.googleapis.com/oauth2/v3/userinfo`
 //!   (`framework/src/torii_integration/oauth.rs`'s well-known table), which
-//!   this provider parses for `sub`/`email`/`email_verified`/`name`.
+//!   this provider parses for `sub`/`email`/`email_verified`/`name`, and
+//!   for `picture`, the account picture [`OAuthProvider::avatar_url`]
+//!   reports.
 //!   `email_verified` is honored exactly as Google reports it: an
 //!   unverified email is *not* filtered out here -- 09's engine centralizes
 //!   the "unverified == absent" policy in
@@ -75,6 +77,7 @@ struct GoogleUserInfo {
     #[serde(default)]
     email_verified: bool,
     name: Option<String>,
+    picture: Option<String>,
 }
 
 /// The Google `OAuthProvider` plugin.
@@ -137,6 +140,14 @@ impl OAuthProvider for GoogleOAuthProvider {
             email_verified: info.email_verified,
             display_name: info.name,
         })
+    }
+
+    fn avatar_url(&self, response: &ProviderResponse) -> Option<String> {
+        let ProviderResponse::UserInfo { body } = response else {
+            return None;
+        };
+        let info: GoogleUserInfo = serde_json::from_str(body).ok()?;
+        info.picture.filter(|url| !url.trim().is_empty())
     }
 
     async fn revoke(&self, token: &str, hint: TokenHint) -> OAuthResult<()> {
