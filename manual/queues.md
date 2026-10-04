@@ -1440,7 +1440,7 @@ as a `String` since `FrameworkError` doesn't derive `Clone`.
 | `JobDebounced` | the worker dropped an envelope a newer debounced dispatch superseded |
 | `JobProcessing` | worker popped, about to dispatch |
 | `JobProcessed` | handler returned `Ok` |
-| `JobAttempted` | every terminal settlement (success, fail, timeout) |
+| `JobAttempted` | every terminal settlement (success, fail, timeout, deleted by middleware, dropped as superseded by a newer debounced dispatch) |
 | `JobExceptionOccurred` | handler returned `Err`, will retry |
 | `JobReleasedAfterException` | retry-after-error re-enqueue happened |
 | `JobReleased` | middleware-driven release (no failure) |

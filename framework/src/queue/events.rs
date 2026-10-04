@@ -110,7 +110,8 @@ impl Event for JobProcessed {
 }
 
 /// Fired immediately after a job attempt resolves to a terminal outcome
-/// (success / fail / timeout - not retry). Mirrors
+/// (success / fail / timeout / deleted by middleware / dropped as a
+/// superseded debounced dispatch - not retry). Mirrors
 /// `Illuminate\Queue\Events\JobAttempted`. Distinct from [`JobProcessed`]:
 /// `JobAttempted` fires for every terminal settlement, while
 /// `JobProcessed` only fires on a clean success.

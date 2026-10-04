@@ -413,6 +413,15 @@ async fn a_superseded_envelope_is_dropped_and_reports_it() {
         0,
         "the superseded envelope is acknowledged, not left to be redelivered"
     );
+    // Sol review of DRIVERS-054: the dropped envelope is a settled attempt
+    // too, as it is in Laravel, where the worker fires JobAttempted for it.
+    assert_eq!(
+        dispatched_count::<suprnova::queue::events::JobAttempted>(
+            |e| e.job.job_name == "queue_debounce::ReportSupersession"
+        ),
+        2,
+        "both envelopes settled: the one that ran and the one that was dropped"
+    );
 }
 
 // ---------------------------------------------------------------------------
