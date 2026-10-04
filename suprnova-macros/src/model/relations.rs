@@ -710,13 +710,18 @@ fn emit_relation_inventory(
         },
     };
 
-    // Target primary key - used by the existence engine to render
-    // `pivot.related = target.<pk>` joins. Read from the related model's
-    // `const PRIMARY_KEY` so models with `primary_key = "uuid"` join
-    // through the correct column. MorphTo has no single target table
-    // and no single PK column; emit `""` as the sentinel.
+    // Target key - used by the existence engine to render
+    // `pivot.related = target.<key>` joins. A many-to-many joins on the
+    // column its pivot's related key holds, the declared `related_key`
+    // or else the related model's `const PRIMARY_KEY`, as its reads do
+    // (`related_key_expr`). Every other kind reads the related model's
+    // primary key. MorphTo has no single target table and no single PK
+    // column; emit `""` as the sentinel.
     let target_primary_key_expr: TokenStream = match rel.kind {
         RelationKindAttr::MorphTo => quote! { "" },
+        RelationKindAttr::BelongsToMany
+        | RelationKindAttr::MorphToMany
+        | RelationKindAttr::MorphedByMany => related_key_expr(rel, target_ty),
         _ => quote! {
             <#target_ty as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY
         },
@@ -766,9 +771,14 @@ fn emit_relation_inventory(
         },
     };
 
-    // Parent key (PK on the OWNER's side). LK override applies to the
-    // has-family relations. BelongsTo's "parent_key" maps to the OWNED
-    // model's PK column ("id" by default). All others default to "id".
+    // Parent key (the key on the OWNER's side). For the has-family
+    // relations it is this model's column the relation matches its
+    // foreign key against: the `lk` override, else this model's primary
+    // key - the same column `local_key_ident` reads for the relation's
+    // own queries. A model keyed on `uid` correlates `has("kids")` on
+    // `uid`, not on an `id` column it may not have. BelongsTo's
+    // "parent_key" maps to the OWNED model's key column ("id" by
+    // default).
     let parent_key_str = match rel.kind {
         RelationKindAttr::HasOne
         | RelationKindAttr::HasMany
@@ -778,7 +788,9 @@ fn emit_relation_inventory(
         | RelationKindAttr::MorphToMany
         | RelationKindAttr::MorphedByMany
         | RelationKindAttr::HasOneThrough
-        | RelationKindAttr::HasManyThrough => lk_override(rel).unwrap_or("id").to_string(),
+        | RelationKindAttr::HasManyThrough => lk_override(rel)
+            .unwrap_or(input.primary_key.as_str())
+            .to_string(),
         // BelongsTo: parent_key is the COLUMN on the related table the
         // child's FK references (defaults to "id").
         RelationKindAttr::BelongsTo => lk_override(rel).unwrap_or("id").to_string(),

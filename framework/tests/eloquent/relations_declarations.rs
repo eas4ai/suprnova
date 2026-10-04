@@ -927,3 +927,79 @@ async fn factory_rows_join_the_surrounding_transaction() {
         "the rollback removed them"
     );
 }
+
+// ---- The existence engine reads the declared keys -----------------------
+
+#[model(table = "rd_keyed_parents", primary_key = "uid", relations = {
+    kids: HasMany<RdKeyedKid> { fk = "parent_uid" },
+})]
+pub struct RdKeyedParent {
+    pub uid: i64,
+    pub name: String,
+}
+
+#[model(table = "rd_keyed_kids")]
+pub struct RdKeyedKid {
+    pub id: i64,
+    pub parent_uid: i64,
+    pub label: String,
+}
+
+/// `has` and `where_has` correlate a has-family relation on the parent's
+/// primary key, whatever its name. They used to name a column `id`.
+#[tokio::test]
+async fn has_and_where_has_correlate_on_the_parents_primary_key() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for sql in [
+        "CREATE TABLE rd_keyed_parents (uid INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        "CREATE TABLE rd_keyed_kids (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            parent_uid INTEGER NOT NULL, label TEXT NOT NULL)",
+        "INSERT INTO rd_keyed_parents (uid, name) VALUES (1, 'with a kid'), (2, 'without')",
+        "INSERT INTO rd_keyed_kids (parent_uid, label) VALUES (1, 'tall')",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+
+    let with_kids = RdKeyedParent::query().has("kids").get().await.unwrap();
+    assert_eq!(
+        labels(with_kids.iter().map(|p| &p.name)),
+        vec!["with a kid"]
+    );
+    let with_tall_kids = RdKeyedParent::query()
+        .where_has::<RdKeyedKid, _>("kids", |q| q.filter("label", "tall"))
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(
+        labels(with_tall_kids.iter().map(|p| &p.name)),
+        vec!["with a kid"]
+    );
+    let without = RdKeyedParent::query()
+        .doesnt_have("kids")
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(labels(without.iter().map(|p| &p.name)), vec!["without"]);
+}
+
+/// `has` on a many-to-many joins the pivot's related key to the declared
+/// `related_key`, as the relation reads do, not to the related model's
+/// primary key.
+#[tokio::test]
+async fn has_on_a_many_to_many_joins_the_declared_related_key() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for sql in [
+        "CREATE TABLE rd_members (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE rd_medals (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL, \
+            label TEXT NOT NULL)",
+        "CREATE TABLE rd_member_medal (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            rd_member_id INTEGER NOT NULL, medal_code TEXT NOT NULL)",
+        "INSERT INTO rd_members (id, name) VALUES (1, 'decorated'), (2, 'plain')",
+        "INSERT INTO rd_medals (id, code, label) VALUES (1, 'gold', 'Gold'), (2, 'silver', 'Silver')",
+        "INSERT INTO rd_member_medal (rd_member_id, medal_code) VALUES (1, 'silver')",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+    let decorated = RdMember::query().has("medals").get().await.unwrap();
+    assert_eq!(labels(decorated.iter().map(|m| &m.name)), vec!["decorated"]);
+}
