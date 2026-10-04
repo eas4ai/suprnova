@@ -197,6 +197,17 @@ async fn session_plain_logout_handler(_request: Request) -> Response {
     }
 }
 
+/// Logs the `admin` guard out the way an application's admin logout route
+/// does: the session survives, only that guard's user is cleared. A test
+/// that serves it registers an `admin` session guard first.
+async fn session_admin_logout_handler(_request: Request) -> Response {
+    let guard = Auth::stateful_guard("admin")?;
+    match guard.logout().await {
+        Ok(()) => Ok(HttpResponse::json(json!({ "ok": true }))),
+        Err(error) => Err(HttpResponse::json(json!({ "error": error.to_string() }))),
+    }
+}
+
 /// Ends the browser's session the way an application's logout route does.
 async fn session_logout_handler(_request: Request) -> Response {
     match Auth::logout_and_invalidate().await {
@@ -241,6 +252,9 @@ fn build_router() -> Router {
         .into();
     let router: Router = router
         .post("/session/logout-plain", session_plain_logout_handler)
+        .into();
+    let router: Router = router
+        .post("/session/logout-admin", session_admin_logout_handler)
         .into();
     router
         .try_live()

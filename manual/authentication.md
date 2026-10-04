@@ -571,8 +571,9 @@ from it is never stored under the default guard's key and never served to a
 visitor who lacks that guard's sign-in. See [Render
 cache](render-cache.md).
 
-Live's gated actions read the session identity, not the guard. See
-[Live](live.md#security-boundaries).
+Live's gated actions, uploads and subscriptions ask their gates about the
+same principal: the route's user, the bare id for the default guard and
+`<guard>:<id>` for any other. See [Live](live.md#security-boundaries).
 
 ### Why Suprnova diverges
 

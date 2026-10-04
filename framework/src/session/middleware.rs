@@ -1475,6 +1475,15 @@ impl SessionMiddleware {
                 if !valid {
                     session.remove_auth_guard(&guard_name);
                     crate::auth::request_state::clear_guard_user(&guard_name);
+                    // This guard's Live memberships were issued to its
+                    // principal and end with its user, as on its logout.
+                    if let Some(user_id) = expected_user_id {
+                        crate::live::revocation::session_deauthenticated(
+                            session.id.as_bytes(),
+                            &crate::auth::Auth::guard_principal(&guard_name, &user_id),
+                        )
+                        .await;
+                    }
                 }
             }
         }

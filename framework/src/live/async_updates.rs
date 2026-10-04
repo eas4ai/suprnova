@@ -709,6 +709,9 @@ impl AsyncState {
     }
 
     /// Issues one new signed subscription for a validated mount context.
+    ///
+    /// `principal` is the route's principal the request was authorized for
+    /// (see `ports::route_principal`); every delivery re-authorizes it.
     #[allow(
         clippy::too_many_arguments,
         reason = "issuance keeps every independently trusted authority input explicit"
@@ -723,6 +726,7 @@ impl AsyncState {
         origin: VerifiedOrigin,
         baseline: StreamPosition,
         session_id: Option<String>,
+        principal: String,
     ) -> Result<IssuedView, AsyncErrorKind> {
         let now = self.now()?;
         let expires_at = UnixMillis::new(now.get().saturating_add(SUBSCRIPTION_LIFETIME_MS));
@@ -907,7 +911,7 @@ impl AsyncState {
                 binding_text,
                 previous_binding: None,
                 authorized: Arc::new(authorized),
-                principal: crate::auth::guard::Auth::id(),
+                principal: Some(principal),
                 session: context.host_scope_facts().session().cloned(),
                 session_id: session_id
                     .filter(|candidate| crate::session::is_valid_session_id(candidate)),

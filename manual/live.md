@@ -368,11 +368,23 @@ a `409` for a stale or tampered snapshot carries no body, and production
 messages never include snapshots, tokens, cookies, or rendered HTML.
 
 Gated actions, uploads, subscriptions and the principal of an asynchronous
-membership read the session identity (`Auth::id()`), not a guard. A user that
-only a guard of your application knows (see [Authentication](authentication.md))
-can mount a component behind `AuthMiddleware::for_guard(..)`, but the gate
-refuses its actions, uploads and subscriptions, because the session holds no
-identity for it. To use gated Live actions, sign the user in to the session.
+membership read the route's user: the user of the guard the last
+`AuthMiddleware` on the Live routes checked. The principal string your Live
+gates receive is the bare id for the default guard, as `Auth::id()` reports
+it, so a default-guard application sees the value it always saw. Behind
+`AuthMiddleware::for_guard(..)` naming any other guard - a second session
+guard, a token guard, or a guard of your application (see
+[Authentication](authentication.md)) - it is `<guard>:<id>`, such as
+`admin:9`. A user of another guard in the same session never stands in for
+the route's user, and a route whose guard has no user is refused.
+
+A `:principal` topic parameter takes the same value. A `<guard>:<id>`
+principal is not a topic segment, so behind a guard other than the default a
+stream with a `:principal` topic does not resolve, and its subscription is
+refused rather than bound to another guard's user. Give such a stream topics
+that name their audience another way. Logging the guard out, or its
+Magnetar session failing validation, ends that guard's memberships on this
+node, as a default-guard logout does.
 
 ## Uploads
 
