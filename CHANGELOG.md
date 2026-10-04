@@ -405,6 +405,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **`Queue::bulk` honours debounce.** Every copy of a debounced job pushed
+  through `Queue::bulk` used to run. A debounced burst now collapses onto
+  its last job, and a job declaring both `debounce_for` and `unique_id` is
+  refused, as `Queue::push` does. Laravel's `bulk` skips debounce; the
+  queues manual explains the difference. This landed after the `v3.1.0`
+  tag.
 - **Multipart failures answer as validation errors under the field's
   input name.** A missing field, a text part that does not parse as its
   type or is not UTF-8, a part of the wrong kind, and a file a validator
@@ -617,6 +623,31 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Queues, events and processes.** Cancelling `Transaction::commit()`
+  while its COMMIT was in flight could drop its `after_commit` callbacks and
+  `push_after_commit_with_tx` jobs although the rows committed; they now
+  always run. A queued listener that dispatches another queued event no
+  longer hangs queued event dispatch, `drain_queued` waits for and counts
+  listeners admitted while it drains, and `EventDispatcher::defer` buffers
+  only its own dispatcher's events. A debounced dispatch claims its window
+  only after its envelope is queued, so a failed or cancelled dispatch can
+  no longer get queued work dropped as superseded, and `max_debounce_wait`
+  longer than the debounce token's lifetime forces a run again. Batches on
+  the `sync` driver finish and fire their callbacks, a batch whose dispatch
+  failed part way fires `catch` and `finally` once its queued jobs settle,
+  and two concurrent first batch dispatches no longer lose one batch's
+  tracking. `JobAttempted` fires for jobs that fail or time out terminally.
+  A cache error while `ThrottlesExceptions` clears its counter no longer
+  fails a completed job. A cancelled memory-queue `pop`, delayed `nack` or
+  `release` keeps the job. `FailoverQueueDriver` counts a driver registered
+  under two labels once. An after-commit `push_unique` whose job fails to
+  serialize releases its lease. A started process whose child left its
+  group can no longer have its timeout, `stop()` or drop signal an
+  unrelated process group. This landed after the `v3.1.0` tag.
+- **A Fluent message named `NUMBER` or `DATETIME` keeps the function
+  callable.** Such a message broke every `NUMBER(...)` or `DATETIME(...)`
+  call in its catalog. The message keeps its key and the functions still
+  format. This landed after the `v3.1.0` tag.
 - **Presence channels and WebSocket upgrades.** A presence channel whose
   last member left stayed in memory, so parameterized presence channels grew
   with churn; empty channels are now removed. A connection aborted at
