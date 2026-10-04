@@ -3816,6 +3816,42 @@ impl<M> Builder<M> {
         Ok((sql, values))
     }
 
+    /// Render an aggregate terminal: `expr` over the rows this query
+    /// selects, aliased so the terminal can read it back.
+    ///
+    /// A query with a union or a `HAVING` is aggregated as a derived
+    /// table with its projection kept, so the aggregate reads the rows the
+    /// query returns - one per union row, one per group that passes the
+    /// `HAVING` - as Laravel's `aggregate` does. Any other query has its
+    /// projection replaced by the aggregate: `select(...)` chooses what a
+    /// row returns, and an aggregate returns one value. Its ordering is
+    /// dropped too unless it is grouped, since an ordering cannot change
+    /// the value and Postgres and MySQL refuse one over a column that is
+    /// neither grouped nor aggregated.
+    pub(crate) fn render_aggregate_for(
+        &self,
+        backend: DbBackend,
+        table: &str,
+        expr: &str,
+    ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
+        let aliased = format!("{expr} AS {AGGREGATE_RESULT_ALIAS}");
+        let this = self.effective();
+        if this.unions.is_empty() && this.having_terms.is_empty() {
+            let mut flat = this.into_owned();
+            flat.select_cols = None;
+            flat.select_raw = None;
+            if flat.group_by.is_empty() {
+                flat.orders.clear();
+            }
+            return flat.render_select_for(backend, table, &aliased);
+        }
+        let (inner, values) = this.render_select_for(backend, table, "*")?;
+        Ok((
+            format!("SELECT {aliased} FROM ({inner}) AS __suprnova_aggregate_subquery"),
+            values,
+        ))
+    }
+
     /// Render a COUNT-shaped SELECT against this builder.
     ///
     /// Two shapes depending on the builder's structure:
@@ -6112,8 +6148,7 @@ where
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
-        let aliased_expr = format!("{expr} AS {AGGREGATE_RESULT_ALIAS}");
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, &aliased_expr)?;
+        let (sql, vals) = self.render_aggregate_for(backend, M::TABLE, expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
             .query_one(stmt)
@@ -6134,8 +6169,7 @@ where
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
-        let aliased_expr = format!("{expr} AS {AGGREGATE_RESULT_ALIAS}");
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, &aliased_expr)?;
+        let (sql, vals) = self.render_aggregate_for(backend, M::TABLE, expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
             .query_one(stmt)

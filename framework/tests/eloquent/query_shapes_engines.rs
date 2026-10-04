@@ -186,6 +186,15 @@ async fn unions_page_count_and_order() {
     assert_eq!(all.total, 4, "UNION ALL keeps the duplicate");
     assert_eq!(all.data.len(), 4);
 
+    assert_eq!(
+        a_or_b()
+            .count()
+            .await
+            .unwrap_or_else(|e| panic!("count of a union: {e}")),
+        4,
+        "count() counts the union's rows"
+    );
+
     // Set before `union`, the ordering and the limit keep the first query
     // to its highest id.
     let head_limited = items()
@@ -235,6 +244,64 @@ async fn offset_without_limit_skips_rows() {
         .map(|row| row.get_int("id").expect("an integer id"))
         .collect();
     assert_eq!(table_ids, vec![5, 6]);
+}
+
+/// DATA-007: an aggregate replaces the query's projection and ignores its
+/// ordering, and a query with HAVING is aggregated over its groups.
+async fn aggregates_ignore_the_projection() {
+    assert_eq!(
+        items()
+            .select(["id"])
+            .count()
+            .await
+            .unwrap_or_else(|e| panic!("count after select: {e}")),
+        6
+    );
+    assert_eq!(
+        items()
+            .select_raw("grp")
+            .filter("grp", "a")
+            .count()
+            .await
+            .unwrap_or_else(|e| panic!("count after select_raw: {e}")),
+        2
+    );
+    assert_eq!(
+        items()
+            .select(["id"])
+            .sum::<i64>("score")
+            .await
+            .unwrap_or_else(|e| panic!("sum after select: {e}")),
+        210
+    );
+    assert_eq!(
+        items()
+            .select(["grp"])
+            .max::<i64>("score")
+            .await
+            .unwrap_or_else(|e| panic!("max after select: {e}")),
+        Some(60)
+    );
+    assert_eq!(
+        items()
+            .order_by_asc("grp")
+            .count()
+            .await
+            .unwrap_or_else(|e| panic!("count of an ordered query: {e}")),
+        6,
+        "an ordering does not reach the aggregate"
+    );
+    assert_eq!(
+        items()
+            .select(["grp"])
+            .group_by("grp")
+            .having_op("grp", "<>", "c")
+            .count()
+            .await
+            .unwrap_or_else(|e| panic!("count with HAVING: {e}")),
+        2,
+        "with HAVING the count is the number of groups that pass it"
+    );
 }
 
 /// DATA-052: inside a transaction, `create_or_first` that loses to an
@@ -312,6 +379,12 @@ async fn sqlite_offset_without_limit_skips_rows() {
 }
 
 #[tokio::test]
+async fn sqlite_aggregates_ignore_the_projection() {
+    let _fx = seeded_sqlite().await;
+    aggregates_ignore_the_projection().await;
+}
+
+#[tokio::test]
 async fn sqlite_create_or_first_inside_a_transaction() {
     let _fx = seeded_sqlite().await;
     create_or_first_inside_a_transaction().await;
@@ -353,6 +426,14 @@ async fn postgres_offset_without_limit_skips_rows() {
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
+async fn postgres_aggregates_ignore_the_projection() {
+    let fx = live("PG_TEST_URL", DatabaseBackend::Postgres).await;
+    aggregates_ignore_the_projection().await;
+    finish(fx).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
 async fn postgres_create_or_first_inside_a_transaction() {
     let fx = live("PG_TEST_URL", DatabaseBackend::Postgres).await;
     create_or_first_inside_a_transaction().await;
@@ -388,6 +469,14 @@ async fn mysql_random_order_runs() {
 async fn mysql_offset_without_limit_skips_rows() {
     let fx = live("MYSQL_TEST_URL", DatabaseBackend::MySql).await;
     offset_without_limit_skips_rows().await;
+    finish(fx).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_aggregates_ignore_the_projection() {
+    let fx = live("MYSQL_TEST_URL", DatabaseBackend::MySql).await;
+    aggregates_ignore_the_projection().await;
     finish(fx).await;
 }
 
