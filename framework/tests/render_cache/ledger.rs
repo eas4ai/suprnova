@@ -603,6 +603,31 @@ async fn live_mysql_concurrent_advances_in_opposite_order_do_not_deadlock() {
     assert_concurrent_opposite_order_advances_do_not_deadlock().await;
 }
 
+/// The ledger stamps `updated_at` and `committed_at` with the server's
+/// current time. MySQL refuses to store a `TIMESTAMP` after 2038-01-19, so
+/// the migration creates `DATETIME`, which holds a time past it.
+#[tokio::test]
+#[ignore = "requires live MySQL; run with --ignored live_mysql"]
+async fn live_mysql_ledger_rows_hold_times_past_2038() {
+    use sea_orm::ConnectionTrait;
+    let url = std::env::var("MYSQL_TEST_URL")
+        .expect("set MYSQL_TEST_URL to a disposable MySQL - this test drops and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("MySQL test DB not reachable - check MYSQL_TEST_URL");
+    let _guard = reset_and_migrate(conn.clone()).await;
+    for sql in [
+        "INSERT INTO suprnova_render_generations (identity, generation, epoch, updated_at) \
+         VALUES ('after-2038', 1, 1, '2040-06-01 12:00:00')",
+        "INSERT INTO suprnova_render_generation_log (identity, generation, epoch, committed_at) \
+         VALUES ('after-2038', 1, 1, '2040-06-01 12:00:00')",
+    ] {
+        conn.execute_unprepared(sql)
+            .await
+            .unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires live MySQL; run with --ignored live_mysql"]
 async fn live_mysql_generation_ledger_advances_and_reads() {
