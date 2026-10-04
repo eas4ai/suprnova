@@ -226,7 +226,8 @@ impl HtmlFacts {
     }
 
     /// Whether the rest of the view checks the same on both: the same open
-    /// elements, loop depth, and teleports. Everything else merges.
+    /// elements, loop depth, and teleports, and submit forms whose fields
+    /// fit one request even taken together. Everything else merges.
     fn same_structure(&self, other: &Self) -> bool {
         self.stopped == other.stopped
             && self.loop_depth == other.loop_depth
@@ -242,6 +243,12 @@ impl HtmlFacts {
                 .iter()
                 .zip(&other.teleports)
                 .all(|(left, right)| left.target == right.target && left.owner == right.owner)
+            && self.submit_forms.iter().all(|(form, fields)| {
+                other.submit_forms.get(form).is_none_or(|theirs| {
+                    fields.fields == theirs.fields
+                        || fields.fields.union(&theirs.fields).count() <= MAX_SUBMIT_FORM_FIELDS
+                })
+            })
     }
 
     /// Folds another path's facts into these. A key or id either path
@@ -692,9 +699,10 @@ impl ViewCheck<'_, '_, '_> {
     /// Counts the distinct model fields under the enclosing `live:submit`
     /// form and reports the form once past what one request carries. A
     /// submit proposes every model control of its form, so a larger form
-    /// has no working Live submit (LIVE-029). Merged paths count the fields
-    /// any of them binds, so a form is never proved under the bound when one
-    /// path exceeds it. Returns the form the element's descendants inherit.
+    /// has no working Live submit (LIVE-029). States merge only while the
+    /// fields their paths bind fit the bound together, so a count over it
+    /// is one path's own. Returns the form the element's descendants
+    /// inherit.
     fn observe_submit_form(
         &mut self,
         facts: &mut HtmlFacts,

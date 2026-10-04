@@ -743,3 +743,42 @@ fn the_branch_limit_names_the_conditional_that_crossed_it() {
         report.diagnostics()
     );
 }
+
+/// The submit bound counts the fields one path binds: two arms binding 64
+/// different fields each, and one more after them, is 65 on every path.
+#[test]
+fn the_submit_bound_counts_one_path_not_the_union_of_arms() {
+    let limits = CheckerLimits::new(256 * 1024, 8_192, 16, 128, 32_768, 2_048, 256, 1_024)
+        .expect("checker limits within the engine maxima");
+    let controls = |prefix: &str, count: usize| {
+        (0..count)
+            .map(|index| {
+                format!(r#"<input aria-label="{prefix}{index}" live:model="{prefix}_{index}">"#)
+            })
+            .collect::<String>()
+    };
+    let form = |tail: usize| {
+        format!(
+            r#"<form live:submit.prevent="save">{{% if wide %}}{}{{% else %}}{}{{% endif %}}{}</form>"#,
+            controls("left", 64),
+            controls("right", 64),
+            controls("tail", tail)
+        )
+    };
+    let within = check(&form(1), limits);
+    assert!(
+        located(&within, DiagnosticCode::SubmitProposalLimit).is_empty(),
+        "{:?}",
+        within
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.code() != DiagnosticCode::UnknownModel)
+            .collect::<Vec<_>>()
+    );
+    let over = check(&form(64), limits);
+    assert_eq!(
+        located(&over, DiagnosticCode::SubmitProposalLimit).len(),
+        1,
+        "a path binding 128 fields is still refused"
+    );
+}
