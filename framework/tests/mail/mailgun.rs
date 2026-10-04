@@ -75,7 +75,9 @@ async fn mailgun_maps_4xx_to_framework_error() {
 
     let transport = MailgunMailTransport::with_endpoint("test-key", "example.com", server.uri());
     let _ = Mail::set_transport(Arc::new(transport));
-    let err = Mail::to("not-an-email")
+    // A well-formed address: a malformed one is now refused before the
+    // request, and this test is about mapping the provider's own 4xx.
+    let err = Mail::to("rejected@example.org")
         .send(M::default())
         .await
         .unwrap_err();

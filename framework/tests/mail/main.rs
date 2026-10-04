@@ -21,3 +21,4 @@ pub mod ses;
 pub mod smtp;
 pub mod telemetry;
 pub mod template;
+pub mod wire_safety;

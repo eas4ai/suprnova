@@ -4,6 +4,7 @@ use crate::error::FrameworkError;
 use crate::mail::address::Address;
 use crate::mail::http_provider::{err, read_error_body, shared_client};
 use crate::mail::transport::{MailTransport, OutgoingMessage};
+use crate::mail::wire;
 use async_trait::async_trait;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -109,6 +110,10 @@ fn to_sg(addr: &Address) -> SgAddress {
 impl MailTransport for SendGridMailTransport {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
         use base64::Engine;
+        // SendGrid takes each address as structured `{email, name}`, so no
+        // name shares a string with a list separator. The shared check still
+        // runs, so a message SendGrid accepts is one every transport accepts.
+        wire::check_message("SendGrid", msg)?;
 
         // SendGrid v3 enforces RFC 1341 ordering: text/plain MUST precede
         // text/html in the `content` array, or the API returns 400. Do not

@@ -54,7 +54,7 @@ impl SmtpMailTransport {
 #[async_trait]
 impl MailTransport for SmtpMailTransport {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
-        let builder = crate::mail::mime::base_builder(msg)?;
+        let builder = crate::mail::mime::base_builder("SMTP", msg)?;
         // `false`: SMTP keeps the exact body shape it has always produced,
         // including the zero-part alternative for a message with no bodies.
         let multipart = crate::mail::mime::build_body(msg, false)?;

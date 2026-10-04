@@ -1,9 +1,9 @@
 //! Postmark HTTP transport. POSTs JSON to <https://api.postmarkapp.com/email>.
 
 use crate::error::FrameworkError;
-use crate::mail::address::Address;
 use crate::mail::http_provider::{err, read_error_body, shared_client};
 use crate::mail::transport::{MailTransport, OutgoingMessage};
+use crate::mail::wire;
 use async_trait::async_trait;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -122,18 +122,15 @@ struct PostmarkAttachment<'a> {
     content_type: &'a str,
 }
 
-fn join(addrs: &[Address]) -> String {
-    addrs
-        .iter()
-        .map(|a| a.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 #[async_trait]
 impl MailTransport for PostmarkMailTransport {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
         use base64::Engine;
+        // Postmark reads `To`, `Cc`, `Bcc` and `ReplyTo` as comma-separated
+        // lists, so every display name must be quoted or a comma in it adds
+        // a recipient. `check_message` also refuses CR, LF and NUL in the
+        // caller's headers before they reach the `Headers` array.
+        wire::check_message("Postmark", msg)?;
         let attachments: Vec<PostmarkAttachment> = msg
             .attachments
             .iter()
@@ -162,11 +159,11 @@ impl MailTransport for PostmarkMailTransport {
         }
 
         let body = PostmarkBody {
-            from: msg.from.to_string(),
-            to: join(&msg.to),
-            cc: join(&msg.cc),
-            bcc: join(&msg.bcc),
-            reply_to: join(&msg.reply_to),
+            from: wire::mailbox_text("Postmark", &msg.from)?,
+            to: wire::mailbox_list("Postmark", &msg.to)?,
+            cc: wire::mailbox_list("Postmark", &msg.cc)?,
+            bcc: wire::mailbox_list("Postmark", &msg.bcc)?,
+            reply_to: wire::mailbox_list("Postmark", &msg.reply_to)?,
             subject: &msg.subject,
             html_body: msg.html.as_deref(),
             text_body: msg.text.as_deref(),

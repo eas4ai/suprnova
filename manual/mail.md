@@ -308,6 +308,8 @@ Mail::to("alice@example.org")
 
 `Address` accepts `&str`, `String`, and `(name, email)` tuples; `Mail::to(...)` accepts anything `Into<Address>`.
 
+Every transport writes an address the same way. The display name is quoted whenever it holds a comma, a quote, an `@`, or angle brackets, so a name such as `Doe, Jane`, or a name a user typed into their profile, stays one recipient on every provider. The email itself must be exactly one address. The send fails with an error, and nothing is sent, when the email is not one address (for example `a@example.com, b@example.com`) or the display name contains a line break or another control character.
+
 ## Attachments
 
 ```rust
@@ -558,6 +560,8 @@ The same precedence applies on the queue path: queued mailables go through `appl
 ## Tags, Metadata, Priority, Headers, Return-Path
 
 Every dispatched message can carry Laravel-style provider hints - tags, metadata key/values, RFC-2076 priority, custom MIME headers, and a Sender / bounce-to address. They forward to the HTTP providers' native fields (Postmark `Tag` / `Metadata` / `Headers`, SES `EmailTags` plus `Content.Simple.Headers`, SendGrid `categories` / `custom_args` / `headers`, Mailgun `o:tag` / `v:` / `h:`, Resend `tags` / `headers`) and to SMTP as RFC 5322 headers.
+
+Every transport checks custom headers the same way before it sends. A header name must be printable ASCII with no space or `:` (the RFC 5322 field-name grammar), so CR, LF, and NUL - the bytes that turn one header into two - are refused. A header value may hold any text except CR, LF, and NUL; long values are folded for you. On SMTP, the `file` driver, and Resend, a metadata key becomes part of an `X-Metadata-<key>` header name and follows the same rule. A message that breaks a rule fails with an error and is not sent.
 
 On SES specifically, headers ride whichever content shape the message uses:
 `Content.Simple.Headers` for a plain message, real MIME header lines for a

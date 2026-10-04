@@ -26,15 +26,15 @@
 //! rather than a choice made here.
 
 use crate::error::FrameworkError;
-use crate::mail::address::Address;
 use crate::mail::http_provider::{err, read_error_body, shared_client};
 use crate::mail::transport::{MailTransport, OutgoingMessage};
+use crate::mail::wire;
 use async_trait::async_trait;
 use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, sign};
 use aws_sigv4::sign::v4::SigningParams;
-use lettre::message::header::{HeaderName, HeaderValue};
+use lettre::message::header::HeaderName;
 use lettre::message::{
-    Attachment as LettreAttachment, Mailbox, Message, MultiPart, SinglePart, header::ContentType,
+    Attachment as LettreAttachment, Message, MultiPart, SinglePart, header::ContentType,
 };
 use serde::Serialize;
 use std::time::SystemTime;
@@ -347,56 +347,32 @@ struct SesBodyContent {
     text: Option<SesData>,
 }
 
-fn addrs_only(a: &[Address]) -> Vec<String> {
-    a.iter().map(|x| x.to_string()).collect()
-}
-
 /// Reject a caller-supplied header name that is not safe on either SES
 /// content path. One rule, not two: a name accepted here is accepted by
-/// `custom_header` below (the raw MIME path's `HeaderName::new_from_ascii`)
-/// as well, so acceptance never depends on whether the message happens to
-/// carry an attachment.
+/// the raw MIME path's [`wire::mime_header`] as well, so acceptance never
+/// depends on whether the message happens to carry an attachment.
 ///
 /// Two checks make up that one rule:
-/// - CR, LF and NUL are the injection characters - a caller-supplied
-///   string containing one turns into a second header on the raw path, or
-///   corrupts the `Content.Simple.Headers` list. Mirrors the identical
-///   guard in `mail/mailgun.rs`, which is the only other transport that
-///   has one.
-/// - Everything `HeaderName::new_from_ascii` itself rejects - an empty
-///   name, a name over 76 bytes, a non-ASCII byte, or a `:` or space in
-///   the name - is rejected here too. That check does not see CR/LF/NUL:
-///   they are valid ASCII bytes, so the first check is still needed.
+/// - [`wire::check_header_name`], the RFC 5322 field-name grammar every
+///   transport uses. It refuses CR, LF and NUL - a caller-supplied string
+///   containing one turns into a second header on the raw path, or corrupts
+///   the `Content.Simple.Headers` list - and also an empty name, a non-ASCII
+///   byte, or a `:` or space in the name.
+/// - `HeaderName::new_from_ascii`, which the raw path needs to build the
+///   header, and which adds one limit of its own: at most 76 bytes.
 ///
 /// Applied before the content branch, not inside it: attachments are the
 /// only thing that switches SES from `Simple` to `Raw`, and a message that
 /// is rejected with an attachment but accepted without one would be the
 /// worst possible shape for this check.
 fn validate_header_name(name: &str) -> Result<(), FrameworkError> {
-    if name.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
-        return Err(FrameworkError::param(format!(
-            "SES: header name contains illegal character (CR, LF, or NUL): {name:?}"
-        )));
-    }
+    wire::check_header_name("SES", name)?;
     HeaderName::new_from_ascii(name.to_string()).map_err(|_| {
         FrameworkError::param(format!(
-            "SES: invalid header name (must be non-empty, at most 76 bytes, ASCII, \
-             and free of ':' and spaces): {name:?}"
+            "SES: invalid header name (must be at most 76 bytes): {name:?}"
         ))
     })?;
     Ok(())
-}
-
-/// Build a lettre header from a caller-supplied name/value pair for the raw
-/// MIME path. `validate_header_name` above enforces the identical rule
-/// up front, so `HeaderName::new_from_ascii` here should never actually
-/// reject anything it hasn't already rejected - this call exists to
-/// produce the `HeaderName` type `raw_header` needs, not as a second gate.
-/// Same helper, same shape, as `mail/smtp.rs`.
-fn custom_header(name: &str, value: &str) -> Result<HeaderValue, FrameworkError> {
-    let header_name = HeaderName::new_from_ascii(name.to_string())
-        .map_err(|e| FrameworkError::internal(format!("SES header name {name}: {e}")))?;
-    Ok(HeaderValue::new(header_name, value.to_string()))
 }
 
 fn uri_host(endpoint: &str) -> String {
@@ -409,29 +385,21 @@ fn uri_host(endpoint: &str) -> String {
         .unwrap_or_default()
 }
 
-fn address_to_mailbox(a: &Address) -> Result<Mailbox, FrameworkError> {
-    let parsed: lettre::Address = a
-        .email
-        .parse()
-        .map_err(|e| FrameworkError::internal(format!("SES parse address {}: {e}", a.email)))?;
-    Ok(Mailbox::new(a.name.clone(), parsed))
-}
-
 fn build_mime(msg: &OutgoingMessage) -> Result<Vec<u8>, FrameworkError> {
     let mut builder = Message::builder()
-        .from(address_to_mailbox(&msg.from)?)
+        .from(wire::mailbox("SES", &msg.from)?)
         .subject(&msg.subject);
     for a in &msg.to {
-        builder = builder.to(address_to_mailbox(a)?);
+        builder = builder.to(wire::mailbox("SES", a)?);
     }
     for a in &msg.cc {
-        builder = builder.cc(address_to_mailbox(a)?);
+        builder = builder.cc(wire::mailbox("SES", a)?);
     }
     for a in &msg.bcc {
-        builder = builder.bcc(address_to_mailbox(a)?);
+        builder = builder.bcc(wire::mailbox("SES", a)?);
     }
     for a in &msg.reply_to {
-        builder = builder.reply_to(address_to_mailbox(a)?);
+        builder = builder.reply_to(wire::mailbox("SES", a)?);
     }
 
     // Caller-set headers ride the envelope here exactly as they do on the
@@ -447,7 +415,7 @@ fn build_mime(msg: &OutgoingMessage) -> Result<Vec<u8>, FrameworkError> {
         if is_ses_control_header(name) {
             continue;
         }
-        builder = builder.raw_header(custom_header(name, value)?);
+        builder = builder.raw_header(wire::mime_header("SES", name, value)?);
     }
 
     let mut alternative = MultiPart::alternative().build();
@@ -490,8 +458,10 @@ impl MailTransport for SesMailTransport {
         // Validate once, ahead of the content branch, so the verdict does not
         // depend on whether this particular message happens to have an
         // attachment. `validate_header_name` enforces the same rule
-        // `build_mime`'s `HeaderName::new_from_ascii` would apply on the raw
-        // path - one rule for both content shapes, not two.
+        // `build_mime`'s `wire::mime_header` would apply on the raw path -
+        // one rule for both content shapes, not two. `check_message` covers
+        // the addresses and the header values.
+        wire::check_message("SES", msg)?;
         for (name, _) in &msg.headers {
             validate_header_name(name)?;
         }
@@ -581,17 +551,21 @@ impl MailTransport for SesMailTransport {
             .and_then(parse_list_management)
             .or_else(|| self.list_management.clone());
 
+        let feedback_forwarding_email_address = match &msg.return_path {
+            Some(rp) => Some(wire::path("SES", rp)?),
+            None => None,
+        };
         let body = SesBody {
-            from_email_address: msg.from.to_string(),
+            from_email_address: wire::mailbox_text("SES", &msg.from)?,
             destination: SesDestination {
-                to: addrs_only(&msg.to),
-                cc: addrs_only(&msg.cc),
-                bcc: addrs_only(&msg.bcc),
+                to: wire::mailbox_texts("SES", &msg.to)?,
+                cc: wire::mailbox_texts("SES", &msg.cc)?,
+                bcc: wire::mailbox_texts("SES", &msg.bcc)?,
             },
-            reply_to_addresses: addrs_only(&msg.reply_to),
+            reply_to_addresses: wire::mailbox_texts("SES", &msg.reply_to)?,
             content,
             email_tags,
-            feedback_forwarding_email_address: msg.return_path.as_ref().map(|a| a.to_string()),
+            feedback_forwarding_email_address,
             configuration_set_name,
             list_management_options,
             tenant_name,

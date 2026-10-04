@@ -18,6 +18,7 @@ pub mod sendgrid;
 pub mod ses;
 pub mod smtp;
 pub mod transport;
+pub(crate) mod wire;
 
 pub use address::{Address, Attachment};
 pub use events::{MessageSending, MessageSent};

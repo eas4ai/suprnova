@@ -2,9 +2,9 @@
 //! `Authorization: Bearer <api-key>`.
 
 use crate::error::FrameworkError;
-use crate::mail::address::Address;
 use crate::mail::http_provider::{err, read_error_body, shared_client};
 use crate::mail::transport::{MailTransport, OutgoingMessage};
+use crate::mail::wire;
 use async_trait::async_trait;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -84,14 +84,11 @@ struct RsTag<'a> {
     name: &'a str,
 }
 
-fn addr_str(a: &Address) -> String {
-    a.to_string()
-}
-
 #[async_trait]
 impl MailTransport for ResendMailTransport {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
         use base64::Engine;
+        wire::check_message("Resend", msg)?;
         let attachments: Vec<RsAttachment> = msg
             .attachments
             .iter()
@@ -110,7 +107,11 @@ impl MailTransport for ResendMailTransport {
         let tags: Vec<RsTag> = msg.tags.iter().map(|t| RsTag { name: t }).collect();
         let mut headers: BTreeMap<String, String> = BTreeMap::new();
         for (k, v) in &msg.metadata {
-            headers.insert(format!("X-Metadata-{k}"), v.clone());
+            // The metadata key becomes part of a header name, so it is held
+            // to the header-name rule. Caller headers were checked above.
+            let name = format!("X-Metadata-{k}");
+            wire::check_header("Resend", &name, v)?;
+            headers.insert(name, v.clone());
         }
         for (k, v) in &msg.headers {
             headers.insert(k.clone(), v.clone());
@@ -120,11 +121,11 @@ impl MailTransport for ResendMailTransport {
         }
 
         let body = RsBody {
-            from: addr_str(&msg.from),
-            to: msg.to.iter().map(addr_str).collect(),
-            cc: msg.cc.iter().map(addr_str).collect(),
-            bcc: msg.bcc.iter().map(addr_str).collect(),
-            reply_to: msg.reply_to.iter().map(addr_str).collect(),
+            from: wire::mailbox_text("Resend", &msg.from)?,
+            to: wire::mailbox_texts("Resend", &msg.to)?,
+            cc: wire::mailbox_texts("Resend", &msg.cc)?,
+            bcc: wire::mailbox_texts("Resend", &msg.bcc)?,
+            reply_to: wire::mailbox_texts("Resend", &msg.reply_to)?,
             subject: &msg.subject,
             html: msg.html.as_deref(),
             text: msg.text.as_deref(),
