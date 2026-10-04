@@ -3,6 +3,17 @@
   gap: var(--sn-space-2);
 }
 
+/* The space below it in a plain form. The selector weighs nothing, so a
+   container that spaces its parts with a gap clears it with any rule. */
+:where(.sn-radio-group) {
+  margin-block-end: var(--sn-density-field-gap);
+}
+
+/* The group's gap alone spaces its options. */
+.sn-radio-group > * {
+  margin-block: 0;
+}
+
 .sn-radio {
   display: flex;
   align-items: center;

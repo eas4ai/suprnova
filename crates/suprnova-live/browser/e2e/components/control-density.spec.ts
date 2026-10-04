@@ -192,18 +192,28 @@ test("the form controls are no larger than the suprnova.app form fields", async 
 // controls in a fieldset, whose grid gap spaces its parts; the components
 // that put their label in their own grid or row; and plain labels around a
 // checkbox and a radio button, with no component class.
+// A standalone checkbox and switch, then a radio group and a checkbox group
+// of two options each, as their macros render them.
+const CHOICES = (prefix: string): string =>
+  `<label class="sn-checkbox"><input class="sn-checkbox-input" id="${prefix}_agree" name="${prefix}_agree" type="checkbox"> <span>I agree to the terms</span></label>
+<label class="sn-switch"><input class="sn-switch-input" id="${prefix}_news" name="${prefix}_news" type="checkbox" role="switch"> <span>Send me the newsletter</span></label>
+<fieldset class="sn-radio-group" id="${prefix}_plan"><legend>Plan</legend><label class="sn-radio"><input class="sn-radio-input" name="${prefix}_plan" type="radio" value="starter"> <span>Starter</span></label><label class="sn-radio"><input class="sn-radio-input" name="${prefix}_plan" type="radio" value="team"> <span>Team</span></label></fieldset>
+<fieldset class="sn-checkbox-group" id="${prefix}_topics"><legend>Topics</legend><label class="sn-checkbox"><input class="sn-checkbox-input" name="${prefix}_topics" type="checkbox" value="releases"> <span>Releases</span></label><label class="sn-checkbox"><input class="sn-checkbox-input" name="${prefix}_topics" type="checkbox" value="security"> <span>Security advisories</span></label></fieldset>`;
+
 const RHYTHM = `<main style="padding: 1.5rem; max-inline-size: 40rem">
 <form id="flow">
 ${field("flow_name", "Name", `<input class="sn-input" id="flow_name" name="flow_name" type="text">`, "", "Enter your name.")}
 ${field("flow_password", "Password", `<input class="sn-input" id="flow_password" name="flow_password" type="password">`, "At least 12 characters.")}
 ${field("flow_email", "Email", `<input class="sn-input" id="flow_email" name="flow_email" type="email">`)}
+${CHOICES("flow")}
+${field("flow_city", "City", `<input class="sn-input" id="flow_city" name="flow_city" type="text">`)}
+<label class="sn-label" for="flow_nick">Nickname</label><input class="sn-input" id="flow_nick" name="flow_nick" type="text">
 </form>
 <form><fieldset class="sn-fieldset" id="grouped"><legend>Account</legend>
 ${field("set_name", "Name", `<input class="sn-input" id="set_name" name="set_name" type="text">`, "The server reads it on every change.")}
 ${field("set_email", "Email", `<input class="sn-input" id="set_email" name="set_email" type="email">`)}
-<fieldset class="sn-radio-group" id="set_plan"><legend>Plan</legend><label class="sn-radio"><input class="sn-radio-input" name="set_plan" type="radio" value="starter"> <span>Starter</span></label></fieldset>
-<label class="sn-checkbox"><input class="sn-checkbox-input" id="set_agree" name="set_agree" type="checkbox"> <span>I agree to the terms</span></label>
-<label class="sn-switch"><input class="sn-switch-input" id="set_news" name="set_news" type="checkbox" role="switch"> <span>Send me the newsletter</span></label>
+${CHOICES("set")}
+<label class="sn-label" for="set_nick">Nickname</label><input class="sn-input" id="set_nick" name="set_nick" type="text">
 ${field("set_city", "City", `<input class="sn-input" id="set_city" name="set_city" type="text">`)}
 </fieldset></form>
 <sn-input-otp class="sn-otp" data-sn-length="6"><label class="sn-otp-label" for="code">One-time code</label><input class="sn-input sn-otp-input" id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" spellcheck="false" autocapitalize="off" required><span class="sn-otp-cells" aria-hidden="true"><span class="sn-otp-cell" data-sn-index="1"></span><span class="sn-otp-cell" data-sn-index="2"></span></span></sn-input-otp>
@@ -248,6 +258,9 @@ test("fields and their labels sit no farther apart than on the suprnova.app form
     return {
       flow: between(visibleChildren("#flow")),
       fieldset: between(visibleChildren("#grouped")),
+      options: ["#flow_plan", "#flow_topics", "#set_plan", "#set_topics"].map(
+        (group) => between(visibleChildren(group))[0],
+      ),
       labelGaps: {
         otp: gap(".sn-otp-label", "#code"),
         upload: gap(".sn-upload-label", "#attachment"),
@@ -267,15 +280,14 @@ test("fields and their labels sit no farther apart than on the suprnova.app form
     };
   });
 
-  expect(measured.flow).toHaveLength(2);
-  expect(measured.fieldset).toHaveLength(5);
-  const over = [
-    ...measured.flow.map((space, index) => ["flow field", index, space] as const),
-    ...measured.fieldset.map((space, index) => ["fieldset part", index, space] as const),
-  ]
-    .filter(([, , space]) => space > SITE.fieldGap)
-    .map(([where, index, space]) => `${where} ${String(index)} to the next: ${String(space)}`);
-  expect.soft(over).toEqual([]);
+  // Every part of a form, a field, a checkbox, a switch or a group, sits
+  // 12 px from the next, in plain flow and in a fieldset, under the site's
+  // 14 px. A label macro sits 6 px above the input after it.
+  expect(SITE.fieldGap).toBeGreaterThanOrEqual(12);
+  expect.soft(measured.flow, "plain flow").toEqual([12, 12, 12, 12, 12, 12, 12, 12, 6]);
+  expect.soft(measured.fieldset, "fieldset").toEqual([12, 12, 12, 12, 12, 12, 6, 12]);
+  // The options in a group keep the group's own 8 px.
+  expect.soft(measured.options, "group options").toEqual([8, 8, 8, 8]);
 
   // A label in its component's own grid or row sits as close to its control
   // as a field label does, and the parts below it keep their 8 px.
