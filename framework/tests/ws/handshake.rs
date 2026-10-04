@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use suprnova::http::Request;
 use suprnova::ws::{OriginPolicy, WebSocketHandler, WsConfig, WsSocket};
-use suprnova::{FrameworkError, MiddlewareRegistry, Router};
+use suprnova::{FrameworkError, Middleware, MiddlewareRegistry, Next, Response, Router};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -39,6 +39,26 @@ impl WebSocketHandler for ParamHandler {
         let id = req.param("id").unwrap_or("<missing>").to_string();
         socket.send_text(id).await?;
         Ok(())
+    }
+}
+
+/// Lets the upgrade through, then decorates the success response the way
+/// a session middleware does: cookies plus a custom header. It also tries
+/// to overwrite the fields the handshake owns, which must not break it.
+struct DecoratingMiddleware;
+
+#[async_trait]
+impl Middleware for DecoratingMiddleware {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let response = next(request).await?;
+        Ok(response
+            .header("Set-Cookie", "session=abc; Path=/; HttpOnly")
+            .header("Set-Cookie", "XSRF-TOKEN=xyz; Path=/")
+            .header("X-Handshake-Probe", "kept")
+            .header("Sec-WebSocket-Accept", "bogus")
+            .header("Connection", "close")
+            .header("Upgrade", "h2c")
+            .header("Content-Length", "99"))
     }
 }
 
@@ -123,6 +143,69 @@ async fn subprotocol_echo_uses_the_client_spelling() {
             .get("sec-websocket-protocol")
             .and_then(|v| v.to_str().ok()),
         Some("CHAT")
+    );
+
+    ws.send(Message::text("ping")).await.expect("send");
+    let reply = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("reply in time")
+        .expect("a frame")
+        .expect("a valid frame");
+    assert_eq!(reply, Message::text("echo: ping"));
+}
+
+/// ROOT-17: headers a middleware adds to a successful upgrade reach the
+/// client on the 101. A session middleware that starts or regenerates a
+/// session appends its `Set-Cookie` there; dropping it persists a session
+/// id the browser never receives. The fields the handshake owns stay the
+/// upgrade's own, so the client still completes the handshake.
+#[tokio::test]
+async fn successful_upgrade_carries_middleware_response_headers() {
+    let port = spawn_server(Router::new().ws_with_middleware_and_config(
+        "/ws/handshake/headers",
+        EchoHandler,
+        vec![suprnova::middleware::into_boxed(DecoratingMiddleware)],
+        open_config(),
+    ))
+    .await;
+
+    let url = format!("ws://127.0.0.1:{port}/ws/handshake/headers");
+    let (mut ws, response) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("the handshake fields stay the upgrade's own, so the client accepts it");
+
+    let cookies: Vec<&str> = response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    assert_eq!(
+        cookies,
+        vec!["session=abc; Path=/; HttpOnly", "XSRF-TOKEN=xyz; Path=/"],
+        "every Set-Cookie the middleware appended must reach the client"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-handshake-probe")
+            .and_then(|v| v.to_str().ok()),
+        Some("kept")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("upgrade")
+            .and_then(|v| v.to_str().ok()),
+        Some("websocket")
+    );
+    assert!(
+        response.headers().get("content-length").is_none(),
+        "a 101 carries no body framing"
+    );
+    assert!(
+        response.headers().get("x-request-id").is_some(),
+        "the upgrade still echoes its request id"
     );
 
     ws.send(Message::text("ping")).await.expect("send");

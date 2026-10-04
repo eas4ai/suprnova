@@ -1408,7 +1408,7 @@ async fn handle_ws_upgrade(
     // abort the upgrade rather than re-panicking inside the per-connection
     // task - one poisoned upgrade must not cascade into the accept loop or
     // other in-flight connections.
-    let mut suprnova_req = {
+    let (mut suprnova_req, middleware_headers) = {
         let captured: Arc<Mutex<Option<Request>>> = Arc::new(Mutex::new(None));
         let captured_for_terminator = captured.clone();
 
@@ -1528,9 +1528,14 @@ async fn handle_ws_upgrade(
             return http_response.into_hyper();
         }
 
+        // The chain let the upgrade through. Its success response is not
+        // sent - the 101 below is - but the headers middleware put on it
+        // are, by `copy_middleware_headers_onto_handshake`.
+        let middleware_headers = http_response.into_hyper().into_parts().0.headers;
+
         match lock::lock(&captured, "ws upgrade terminator capture") {
             Ok(mut guard) => match guard.take() {
-                Some(req) => req,
+                Some(req) => (req, middleware_headers),
                 None => {
                     // Middleware chain returned 2xx without ever
                     // invoking `next(req)`. That's a programming bug
@@ -1575,6 +1580,8 @@ async fn handle_ws_upgrade(
     // moved into the session task below: the handler owns the request and
     // may drop it long before the socket closes.
     let connection_holds = suprnova_req.take_connection_holds();
+
+    copy_middleware_headers_onto_handshake(response.headers_mut(), &middleware_headers);
 
     // Echo X-Request-Id on the 101 handshake response so the upgrade GET
     // stays correlatable with logs, the same contract as the HTTP path.
@@ -1777,6 +1784,61 @@ async fn handle_ws_upgrade(
     }
 
     convert_response_body(response)
+}
+
+/// Copy the headers the middleware chain put on its success response
+/// onto the 101 that completes a WebSocket upgrade.
+///
+/// The chain runs against the upgrade GET like against any request, and
+/// its success response is what a session or cookie middleware decorates:
+/// a new or regenerated session's `Set-Cookie` goes there. The upgrade
+/// builds the 101 itself, so without this copy those headers never reach
+/// the client, and a session id is persisted that the browser never gets.
+///
+/// Every field is copied with all its values, so repeated `Set-Cookie`
+/// lines survive, except the ones [`handshake_owns_header`] names.
+fn copy_middleware_headers_onto_handshake(
+    handshake: &mut hyper::HeaderMap,
+    middleware: &hyper::HeaderMap,
+) {
+    for name in middleware.keys() {
+        if handshake_owns_header(name) {
+            continue;
+        }
+        handshake.remove(name);
+        for value in middleware.get_all(name) {
+            handshake.append(name.clone(), value.clone());
+        }
+    }
+}
+
+/// Whether the 101 of a WebSocket upgrade keeps its own value of `name`
+/// rather than the middleware's.
+///
+/// `Connection`, `Upgrade` and the `Sec-WebSocket-*` fields make the 101 a
+/// valid handshake; a middleware value would break it. The body framing
+/// and content fields describe the chain's placeholder body, and a 101
+/// has none. `Keep-Alive`, `Proxy-Connection`, `TE` and `Trailer` belong
+/// to the connection, not to the response.
+fn handshake_owns_header(name: &hyper::header::HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "upgrade"
+            | "sec-websocket-accept"
+            | "sec-websocket-protocol"
+            | "sec-websocket-extensions"
+            | "sec-websocket-key"
+            | "sec-websocket-version"
+            | "content-length"
+            | "content-type"
+            | "content-encoding"
+            | "transfer-encoding"
+            | "keep-alive"
+            | "proxy-connection"
+            | "te"
+            | "trailer"
+    )
 }
 
 /// A Live request that cannot be prepared ends as a closed 500. The visitor
