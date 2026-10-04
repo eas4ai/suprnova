@@ -1,3 +1,11 @@
+// Every test here runs against one SeaORM backend; with none enabled the
+// helpers below have no caller.
+#![cfg(any(
+    feature = "seaorm-sqlite",
+    feature = "seaorm-postgres",
+    feature = "seaorm-mysql"
+))]
+
 use chrono::{Duration, Utc};
 use futures_util::future::FutureExt;
 use magnetar::default_schema::DefaultAuthSchema;
