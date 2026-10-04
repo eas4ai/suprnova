@@ -30,7 +30,10 @@ use secrecy::{ExposeSecret, SecretString};
 use async_trait::async_trait;
 use magnetar::{
     Error, Result,
-    auth::{FactorGate, FactorVerifier, OpaqueFactorGate, SignInDecision, VerifiedPrincipal},
+    auth::{
+        AuthenticationContext, FactorGate, FactorVerifier, OpaqueFactorGate, SignInDecision,
+        SignInMethod, VerifiedPrincipal,
+    },
     crypto::Encryptor,
     first_email_proof::{FirstEmailProofMutation, FirstEmailProofStore},
     passkey::{
@@ -677,6 +680,67 @@ pub struct MagnetarHostEngineParts<
     /// Positive lease interval for one lifecycle forward attempt.
     pub lifecycle_lease_duration: chrono::Duration,
 }
+/// The resource of the conflict [`FrameworkTotpGate`] refuses with; the
+/// facades answer it with `409`.
+pub(crate) const FRAMEWORK_SECOND_FACTOR: &str = "framework second factor";
+
+/// The factor gate Magnetar's own sign-ins go through: password, magic
+/// link, passkey, OAuth and device approval.
+///
+/// Those sign-ins never read the framework's own TOTP in
+/// `two_factor_credentials`, so this gate refuses, before any session or
+/// challenge exists, an account that has it, the way the framework logins
+/// refuse an account with a Magnetar factor. Such an account signs in
+/// through the application's login and `TwoFactor::complete_challenge`.
+/// A remembered sign-in passes: Magnetar treats a remember credential as
+/// proof of every factor, and the framework issues one only after a full
+/// sign-in. Host sign-ins never come here; they call the concrete gate.
+struct FrameworkTotpGate<C, F, O>
+where
+    C: CeremonyStore,
+    F: FactorVerifier,
+    O: OpaqueSessionStore,
+{
+    inner: Arc<OpaqueFactorGate<C, F, O>>,
+}
+
+#[async_trait]
+impl<C, F, O> FactorGate for FrameworkTotpGate<C, F, O>
+where
+    C: CeremonyStore,
+    F: FactorVerifier,
+    O: OpaqueSessionStore,
+{
+    async fn complete_sign_in(
+        &self,
+        principal: VerifiedPrincipal,
+        context: AuthenticationContext,
+    ) -> Result<SignInDecision> {
+        if !matches!(principal.method(), SignInMethod::Remembered) {
+            let gated = crate::auth_flows::TwoFactor::gates_sign_in(principal.user_id())
+                .await
+                .map_err(|error| Error::DependencyUnavailable {
+                    dependency: "framework two-factor store".to_owned(),
+                    message: error.to_string(),
+                })?;
+            if gated {
+                return Err(Error::Conflict {
+                    resource: FRAMEWORK_SECOND_FACTOR.to_owned(),
+                    message: "this account has the application's two-factor authentication, \
+                              which this sign-in does not verify; sign in through the \
+                              application's login and its two-factor challenge"
+                        .to_owned(),
+                });
+            }
+        }
+        self.inner.complete_sign_in(principal, context).await
+    }
+
+    async fn complete_challenge(&self, selector: &str, code: &str) -> Result<SessionGrant> {
+        self.inner.complete_challenge(selector, code).await
+    }
+}
+
 /// Concrete application composition for Magnetar password, factor, and session
 /// execution.
 ///
@@ -702,6 +766,9 @@ pub struct MagnetarHostEngine<
     ceremonies: Arc<C>,
     session_provider: Arc<OpaqueSessionProvider<O>>,
     factor_gate: Arc<OpaqueFactorGate<C, F, O>>,
+    /// The gate Magnetar's own sign-ins go through; see
+    /// [`FrameworkTotpGate`].
+    sign_in_gate: Arc<dyn FactorGate>,
     remember: RememberSignInService<SeaOrmStorage<S>>,
     encryptor: Arc<dyn Encryptor>,
     magic_links: MagicLinkService,
@@ -756,20 +823,23 @@ where
             Arc::clone(&encryptor),
             Arc::clone(&session_provider),
         ));
+        let sign_in_gate: Arc<dyn FactorGate> = Arc::new(FrameworkTotpGate {
+            inner: Arc::clone(&factor_gate),
+        });
         let remember = RememberSignInService::new(
             Arc::new(RememberService::new(
                 remember_store,
                 chrono::Duration::days(30),
             )?),
             Arc::new(SeaOrmStorage::<S>::new(binding.database().clone())),
-            factor_gate.clone(),
+            Arc::clone(&sign_in_gate),
         );
         let magic_storage = Arc::new(SeaOrmStorage::<S>::new(binding.database().clone()));
         let magic_links = MagicLinkService::new(
             magic_storage.clone(),
             magic_storage,
             first_email_proof.clone(),
-            factor_gate.clone(),
+            Arc::clone(&sign_in_gate),
             RegistrationPolicy::Open,
         );
         let lifecycle =
@@ -781,6 +851,7 @@ where
             ceremonies,
             session_provider,
             factor_gate,
+            sign_in_gate,
             remember,
             encryptor,
             magic_links,
@@ -837,7 +908,7 @@ where
         S::Ceremony: CeremonyFields,
     {
         let storage = Arc::new(SeaOrmStorage::<S>::new(self.binding.database().clone()));
-        let factor_gate: Arc<dyn FactorGate> = self.factor_gate.clone();
+        let factor_gate = Arc::clone(&self.sign_in_gate);
         let service = PasskeyAuthService::new(
             config,
             storage.clone(),
@@ -1029,7 +1100,7 @@ where
     ) -> Result<HostSignInDecision> {
         let context = principal.context().clone();
         match self
-            .factor_gate
+            .sign_in_gate
             .complete_sign_in(principal, context)
             .await?
         {
@@ -1991,9 +2062,9 @@ where
     providers: OAuthProviderRegistry,
     provider_config: HashMap<&'static str, MagnetarOAuthProviderSettings>,
     transport: Arc<dyn HttpTransport>,
-    factor_gate: Arc<OpaqueFactorGate<C, F, O>>,
+    factor_gate: Arc<dyn FactorGate>,
     users: Arc<A>,
-    _schema: PhantomData<S>,
+    _schema: PhantomData<(S, C, F, O)>,
 }
 
 #[cfg(feature = "magnetar-oauth")]
@@ -2040,7 +2111,7 @@ where
             providers: config.providers,
             provider_config: config.provider_config,
             transport: config.transport,
-            factor_gate: Arc::clone(&self.factor_gate),
+            factor_gate: Arc::clone(&self.sign_in_gate),
             users: Arc::clone(&self.users),
             _schema: PhantomData,
         })

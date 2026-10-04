@@ -104,6 +104,11 @@ impl PasswordAuth {
 
 pub(super) fn map_magnetar_password_error(error: magnetar::Error) -> FrameworkError {
     match error {
+        magnetar::Error::Conflict { resource, message }
+            if resource == super::engine::FRAMEWORK_SECOND_FACTOR =>
+        {
+            FrameworkError::domain(message, 409)
+        }
         magnetar::Error::Conflict { message, .. }
         | magnetar::Error::NotFound {
             identifier: message,

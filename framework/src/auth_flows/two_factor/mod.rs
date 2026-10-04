@@ -554,6 +554,29 @@ impl TwoFactor {
         Self::is_enabled_by_id(user.user_id()).await
     }
 
+    /// Whether the framework's TOTP must stop a sign-in of `user_id` that
+    /// did not go through [`Self::complete_challenge`]: Magnetar's own
+    /// sign-ins never read `two_factor_credentials`.
+    ///
+    /// An application without a default database connection, or without
+    /// the two-factor tables, has no framework TOTP, so the answer there is
+    /// `false`; any other failure is returned.
+    pub(crate) async fn gates_sign_in(user_id: &str) -> Result<bool, FrameworkError> {
+        let Ok(db) = DB::connection() else {
+            return Ok(false);
+        };
+        match entity::Entity::find_by_id(user_id.to_string())
+            .one(db.inner())
+            .await
+        {
+            Ok(row) => Ok(row.is_some_and(|row| row.confirmed_at.is_some())),
+            Err(error) if names_missing_credentials_table(&error.to_string()) => Ok(false),
+            Err(error) => Err(FrameworkError::internal(format!(
+                "two_factor find: {error}"
+            ))),
+        }
+    }
+
     /// Returns `true` when an active (confirmed) 2FA enrollment
     /// exists for `user_id`.
     ///
@@ -1115,6 +1138,15 @@ impl TwoFactor {
 
         Ok(())
     }
+}
+
+/// Whether a database error reports `two_factor_credentials` as missing.
+fn names_missing_credentials_table(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("two_factor_credentials")
+        && (message.contains("no such table")
+            || message.contains("does not exist")
+            || message.contains("doesn't exist"))
 }
 
 /// Persist the secret and recovery codes of a new, unconfirmed enrollment.

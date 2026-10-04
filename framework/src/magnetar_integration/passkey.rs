@@ -83,6 +83,11 @@ fn map_error(error: magnetar::Error) -> FrameworkError {
                 status_code: 401,
             }
         }
+        magnetar::Error::Conflict { resource, message }
+            if resource == super::engine::FRAMEWORK_SECOND_FACTOR =>
+        {
+            FrameworkError::domain(message, 409)
+        }
         magnetar::Error::Conflict { message, .. }
         | magnetar::Error::NotFound {
             identifier: message,

@@ -205,6 +205,15 @@ framework's word for who signed in, and no Magnetar plugin can reach it.
   and issues no remember-me credential. `Auth::login_id` cannot await the engine, so its refusal arrives
   at the end of the request, which then stores nothing and retires a
   remember-me credential issued during it.
+- **Framework TOTP.** The reverse holds too. Magnetar's own sign-ins -
+  `Auth::password()`, `Auth::magic_link()`, `Auth::passkey()` and
+  `Auth::oauth()` - never read the framework's `TwoFactor` table, so each of
+  them refuses an account with confirmed framework TOTP with `409` before a
+  session or challenge exists. That account signs in through the
+  application's login and `TwoFactor::complete_challenge`. A remembered
+  sign-in still passes, because a remember-me credential is issued only
+  after a full sign-in. An account with both a Magnetar factor and framework
+  TOTP is refused by every path until one of them is disabled.
 - **Auth epochs.** `Auth::attempt` issues the session at the auth epoch read
   with the password, and carries that epoch into `TwoFactor::start_challenge`
   rather than reading it again. A password reset or "sign out everywhere"

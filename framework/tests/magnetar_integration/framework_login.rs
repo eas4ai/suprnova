@@ -681,10 +681,13 @@ async fn a_password_success_does_not_clear_second_factor_failures() {
                 other => panic!("unexpected verify outcome: {other:?}"),
             }
         }
-        Auth::password()
+        // The password is right; the framework TOTP then refuses the
+        // Magnetar sign-in itself.
+        let refused = Auth::password()
             .authenticate(&account.email, PASSWORD, None, None)
             .await
-            .expect("the password is right");
+            .expect_err("a Magnetar sign-in does not verify the framework TOTP");
+        assert_eq!(refused.status_code(), 409);
     }
     assert_eq!(evaluated, 5, "the counter locks at the threshold");
     assert_eq!(refused, 3, "every later guess is refused");
@@ -1092,4 +1095,109 @@ async fn auth_once_refuses_an_account_with_a_magnetar_second_factor() {
         .get("/once-using-id", &[("x-user-id", &account.id)])
         .await;
     assert_eq!(status, 409, "Auth::once_using_id: {body}");
+}
+
+// ---- Magnetar sign-ins honor the framework's own TOTP -----------------------
+//
+// The framework's TOTP lives in `two_factor_credentials`, which Magnetar's
+// own sign-ins never read. Each of them must refuse an account that has it
+// up front, as the framework logins refuse an account with a Magnetar
+// factor, rather than sign it in with one factor.
+
+/// Give `account` confirmed framework TOTP.
+async fn enable_framework_totp(account: &Account) {
+    let enrollment = TwoFactor::enroll(account).await.expect("enroll");
+    confirm_earlier(account, &enrollment.otpauth_url).await;
+}
+
+#[tokio::test]
+async fn framework_totp_refuses_a_magnetar_password_sign_in() {
+    let account = setup().await;
+    enable_framework_totp(&account).await;
+
+    let outcome = Auth::password()
+        .authenticate(&account.email, PASSWORD, None, None)
+        .await;
+
+    assert!(
+        matches!(&outcome, Err(error) if error.status_code() == 409),
+        "{:?}",
+        outcome.map(|(user, _)| user.id)
+    );
+    assert_eq!(session_count(&account).await, 0);
+}
+
+#[tokio::test]
+async fn framework_totp_refuses_a_magnetar_magic_link_sign_in() {
+    let account = setup().await;
+    enable_framework_totp(&account).await;
+    let token = Auth::magic_link()
+        .send(&account.email, "https://app.test/magic")
+        .await
+        .expect("mint a magic link");
+
+    let outcome = suprnova::session::session_scope_for_test(
+        suprnova::session::new_session_slot_for_test(),
+        async { Auth::magic_link().consume(&token).await },
+    )
+    .await;
+
+    assert!(
+        matches!(&outcome, Err(error) if error.status_code() == 409),
+        "{:?}",
+        outcome.map(|(user, _)| user.id)
+    );
+    assert_eq!(session_count(&account).await, 0);
+}
+
+#[tokio::test]
+async fn framework_totp_refuses_a_magnetar_passkey_sign_in() {
+    setup().await;
+    let email = unique_email("passkey");
+    let origin = url::Url::parse("http://localhost").expect("test WebAuthn origin");
+    let mut authenticator = webauthn_authenticator_rs::WebauthnAuthenticator::new(
+        webauthn_authenticator_rs::softpasskey::SoftPasskey::new(true),
+    );
+    let slot = suprnova::session::new_session_slot_for_test();
+    let registration = suprnova::session::session_scope_for_test(slot.clone(), async {
+        Auth::passkey().begin_registration(&email).await
+    })
+    .await
+    .expect("begin passkey registration");
+    let response = authenticator
+        .do_registration(origin.clone(), registration.raw_options)
+        .expect("software authenticator registers");
+    let user = suprnova::session::session_scope_for_test(slot, async {
+        Auth::passkey().finish_registration(&email, response).await
+    })
+    .await
+    .expect("register a passkey-only account");
+    let account = Account {
+        id: user.id.to_string(),
+        email: email.clone(),
+    };
+    enable_framework_totp(&account).await;
+
+    let slot = suprnova::session::new_session_slot_for_test();
+    let authentication = suprnova::session::session_scope_for_test(slot.clone(), async {
+        Auth::passkey().begin_authentication(&email).await
+    })
+    .await
+    .expect("begin passkey authentication");
+    let response = authenticator
+        .do_authentication(origin, authentication.raw_options)
+        .expect("software authenticator asserts");
+    let outcome = suprnova::session::session_scope_for_test(slot, async {
+        Auth::passkey()
+            .finish_authentication(&email, response)
+            .await
+    })
+    .await;
+
+    assert!(
+        matches!(&outcome, Err(error) if error.status_code() == 409),
+        "{:?}",
+        outcome.map(|(user, _)| user.id)
+    );
+    assert_eq!(session_count(&account).await, 0);
 }
