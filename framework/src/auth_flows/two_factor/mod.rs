@@ -269,7 +269,9 @@ impl TwoFactor {
     ///   confirmed.
     /// - `FrameworkError::domain(.., 429)` while wrong codes have locked
     ///   the second factor (see [`Self::verify`]), and `.., 503` when the
-    ///   attempt store fails.
+    ///   attempt store fails before the confirmation commits. A failure to
+    ///   settle the attempt after it commits is logged, not returned: the
+    ///   second factor is live, and [`TwoFactorEnrolled`] fires.
     pub async fn confirm<U: TwoFactorUser>(user: &U, code: &str) -> Result<(), FrameworkError> {
         let enrollment = load_secret(user.user_id())
             .await?
@@ -284,7 +286,8 @@ impl TwoFactor {
         // Confirmation is throttled like every other code-checking path:
         // without it the 6-digit TOTP of a pending enrollment could be
         // ground online.
-        let confirmed = settle_attempt(user.user_id(), user.email(), || async {
+        let attempt = ProofAttempt::admit(user.user_id(), user.email()).await?;
+        let stamped = async {
             let now = crate::clock::now();
             if !check_code(&enrollment.secret_b32, code, now.timestamp())? {
                 return Ok(false);
@@ -303,10 +306,27 @@ impl TwoFactor {
                 ));
             }
             Ok(true)
-        })
-        .await?;
-        if !confirmed {
-            return Err(FrameworkError::domain("invalid 2FA code", 401));
+        }
+        .await;
+        match stamped {
+            Ok(true) => {
+                // The confirmation has committed. A failure to settle the
+                // attempt after it must not report the live second factor as
+                // not enabled: the reservation stays counted until it ages
+                // out, which errs toward a lock, and the error is logged.
+                if let Err(error) = attempt.accepted().await {
+                    tracing::error!(
+                        error = %error,
+                        "a two-factor confirmation committed but its attempt could not be settled; \
+                         the attempt stays counted until the window passes"
+                    );
+                }
+            }
+            Ok(false) => {
+                attempt.rejected().await?;
+                return Err(FrameworkError::domain("invalid 2FA code", 401));
+            }
+            Err(error) => return Err(attempt.abandon(error).await),
         }
 
         // Discard dispatch errors - the confirmation has already

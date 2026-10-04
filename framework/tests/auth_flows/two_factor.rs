@@ -1366,3 +1366,37 @@ async fn the_confirmation_code_cannot_be_used_again() {
         "the confirmation code is not accepted a second time"
     );
 }
+
+/// The confirmation committed, then the attempt bookkeeping after it
+/// failed. The enrollment is confirmed all the same, so the caller hears
+/// so and `TwoFactorEnrolled` fires; an error here would report a live
+/// second factor as not enabled.
+#[tokio::test]
+async fn a_committed_confirmation_survives_a_failed_attempt_settle() {
+    ensure_crypt();
+    let db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let _events = suprnova::EventFacade::fake();
+    let user = FakeUser {
+        id: "confirmed-then-unsettled".into(),
+        email: "confirmed-then-unsettled@example.com".into(),
+    };
+    let resp = TwoFactor::enroll(&user).await.expect("enroll");
+    db.execute_unprepared(
+        "CREATE TRIGGER refuse_attempt_settle BEFORE DELETE ON two_factor_attempts \
+         BEGIN SELECT RAISE(ABORT, 'injected attempt settle failure'); END",
+    )
+    .await
+    .unwrap();
+
+    TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .expect("a committed confirmation is reported as one");
+
+    assert!(TwoFactor::is_enabled(&user).await.unwrap());
+    assert_eq!(
+        suprnova::events::testing::dispatched_count::<
+            suprnova::auth_flows::events::TwoFactorEnrolled,
+        >(|enrolled| enrolled.user_id == user.id),
+        1
+    );
+}
