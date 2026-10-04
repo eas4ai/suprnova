@@ -31,7 +31,8 @@
 //! value that does not parse, a file a validator refuses - answers 422
 //! with [`ValidationErrors`] under the field's input name, so a form can
 //! show it under the field. A limit on the whole request - the body's
-//! byte cap, the part ceiling, a field's `max_count` - answers 413.
+//! byte cap, the part ceiling, a field's `max_count`, a text part's
+//! in-memory limit - answers 413.
 
 use crate::error::{FrameworkError, ValidationErrors};
 use crate::validation::message::ValidationMessage;
@@ -114,6 +115,11 @@ pub fn global_max_multipart_body_bytes() -> usize {
 /// `tempfile::NamedTempFile` so the framework never materialises an
 /// arbitrarily large body in RAM.
 ///
+/// A text part cannot spill: form text must fit in memory, so a text part
+/// over this value answers 413, as a body over its cap does. Lowering the
+/// threshold to keep less of each file in memory lowers the largest text
+/// field accepted with it.
+///
 /// Setting `0` is special: it means "use [`DEFAULT_UPLOAD_SPILL_THRESHOLD`]".
 /// Setting `usize::MAX` effectively disables spilling (every part is
 /// buffered fully - only do this if you're certain about your body cap).
@@ -183,9 +189,9 @@ pub fn global_max_multipart_parts() -> usize {
 /// since process start.
 ///
 /// A monotonically increasing process-global counter, useful as an
-/// upload-pressure signal. Oversized *text* parts are rejected at the
-/// in-memory spill threshold and never spill, so this counter reflects
-/// only file parts that legitimately exceeded the threshold.
+/// upload-pressure signal. Oversized *text* parts are rejected with HTTP
+/// 413 at the in-memory spill threshold and never spill, so this counter
+/// reflects only file parts that legitimately exceeded the threshold.
 pub fn upload_tempfiles_spilled_total() -> usize {
     UPLOAD_TEMPFILES_SPILLED.load(Ordering::SeqCst)
 }
@@ -208,8 +214,10 @@ pub struct MultipartLimits<'a> {
     /// against many-tiny-parts flooding.
     pub max_parts: usize,
     /// Per-part in-memory byte threshold before a file part spills to a
-    /// temp file. A text part that crosses this threshold is rejected
-    /// (HTTP 400) rather than spilled.
+    /// temp file. A text part that crosses this threshold is rejected with
+    /// HTTP 413 rather than spilled, at the chunk that crossed it: like the
+    /// byte cap, it bounds the request's memory, so it is not a field
+    /// error.
     pub spill_threshold: usize,
     /// Per-field count ceilings keyed by wire field name. When a field
     /// reaches its ceiling, the next part carrying that name is rejected
@@ -464,11 +472,26 @@ pub enum MultipartValue {
     },
     /// Text part - a non-file field carrying its UTF-8 value.
     Text(String),
+    /// Text part whose bytes are not UTF-8, as sent. Kept apart from
+    /// `Text` rather than refused, because the parser cannot tell which key
+    /// the failure belongs under: the extractor reports it under the
+    /// field's input name with its type's key, as it does text that does
+    /// not parse.
+    NonUtf8Text(Vec<u8>),
 }
 
-/// Internal: the parser's per-part output before classification into
-/// `MultipartValue::File` vs `MultipartValue::Text`. Keeps the
-/// inner-loop signature small.
+/// Internal: what `collect_part` read from one part. A text part never
+/// leaves memory, so only a file part carries a backing that may be a temp
+/// file.
+enum Collected {
+    /// A text part's bytes, before they are checked as UTF-8.
+    Text(Vec<u8>),
+    /// A file part.
+    File(CollectedPart),
+}
+
+/// Internal: a file part as the parser read it, before it becomes a
+/// `MultipartValue::File`. Keeps the inner-loop signature small.
 struct CollectedPart {
     backing: PartBacking,
     size: u64,
@@ -478,20 +501,12 @@ struct CollectedPart {
 
 /// Internal: the byte buffer underlying a `CollectedPart`. Either an
 /// in-memory `Vec<u8>` (for small parts) or a `NamedTempFile` (for
-/// spilled parts). Converted to [`UploadedFileBacking`] (file) or a
-/// `String` (text) at the end of `collect_part`.
+/// spilled parts). Converted to [`UploadedFileBacking`] by the parse loop.
 enum PartBacking {
     Memory(Vec<u8>),
     Disk(NamedTempFile),
 }
 
-/// Stream a single part out of `field`, spilling to a temp file once
-/// the accumulated buffer crosses `spill_threshold` bytes.
-///
-/// Updates `*budget.used` after each chunk and short-circuits with a
-/// 413 if the running total exceeds `budget.cap`. Validators see the
-/// bounded sniff buffer + current accumulated size and may also
-/// short-circuit.
 /// Translate a multer error into a `FrameworkError`, distinguishing "the
 /// client sent something malformed" (400) from "we cut the stream off
 /// ourselves for exceeding the raw byte cap" (413).
@@ -532,6 +547,13 @@ struct BodyBudget<'a> {
     raw_cap_tripped: &'a AtomicBool,
 }
 
+/// Stream a single part out of `field`, spilling a file part to a temp file
+/// once the accumulated buffer crosses `spill_threshold` bytes.
+///
+/// Updates `*budget.used` after each chunk and short-circuits with a 413 if
+/// the running total exceeds `budget.cap`, or if a text part crosses
+/// `spill_threshold`. Validators see the bounded sniff buffer + current
+/// accumulated size and may also short-circuit.
 async fn collect_part<F>(
     field: &mut multer::Field<'_>,
     name: &str,
@@ -539,7 +561,8 @@ async fn collect_part<F>(
     spill_threshold: usize,
     budget: &mut BodyBudget<'_>,
     is_text: bool,
-) -> Result<CollectedPart, FrameworkError>
+    check_chunks: bool,
+) -> Result<Collected, FrameworkError>
 where
     F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
 {
@@ -583,16 +606,20 @@ where
                 if mem.len() > spill_threshold {
                     // A text part must fit in memory: the spill threshold
                     // is a sizing hint for opaque file payloads, not for
-                    // arbitrary form fields. Reject an oversized text part
+                    // arbitrary form fields. Refuse an oversized text part
                     // here, the moment it crosses the threshold, instead
-                    // of streaming the rest to a temp file only to reject
-                    // it after the part is fully consumed.
+                    // of streaming the rest to a temp file only to refuse
+                    // it after the part is fully consumed. It bounds the
+                    // request's memory, as the body cap does, so it is a
+                    // request-wide 413 rather than a field error; the body
+                    // cap, checked above, answers when one chunk crosses
+                    // both.
                     if is_text {
                         return Err(FrameworkError::Domain {
                             message: format!(
-                                "text field '{name}' exceeded the {spill_threshold}-byte in-memory limit; reject as oversized"
+                                "text field '{name}' exceeds the {spill_threshold}-byte in-memory limit (cap)"
                             ),
-                            status_code: 400,
+                            status_code: 413,
                         });
                     }
                     UPLOAD_TEMPFILES_SPILLED.fetch_add(1, Ordering::SeqCst);
@@ -626,8 +653,17 @@ where
         // size (MaxSize) consult size. Fires AFTER the body cap so a
         // 413 from the cap takes precedence when one chunk crosses both.
         // Returning here reads no further chunk, and drops the spill file
-        // this part was writing.
-        per_field_validator(name, &sniff, size)?;
+        // this part was writing. Only for a part the caller checks: see
+        // [`Checked`].
+        if check_chunks {
+            per_field_validator(name, &sniff, size)?;
+        }
+    }
+
+    if is_text {
+        // The loop refuses a text part at the threshold, before it could
+        // spill, so all of its bytes are in `mem`.
+        return Ok(Collected::Text(mem));
     }
 
     let inferred_extension = if sniff.is_empty() {
@@ -651,12 +687,12 @@ where
         PartBacking::Memory(mem)
     };
 
-    Ok(CollectedPart {
+    Ok(Collected::File(CollectedPart {
         backing,
         size,
         sniff,
         inferred_extension,
-    })
+    }))
 }
 
 /// Stream the body of `req` into a `MultipartPayload`, capped at
@@ -674,12 +710,17 @@ where
 /// so it fires even when no validator has been configured for the
 /// field (e.g. `UploadedFile<()>` or plain `Option<String>` fields).
 ///
+/// A text part whose bytes are not UTF-8 is not an error here: it arrives
+/// as [`MultipartValue::NonUtf8Text`], so the caller, which knows the
+/// field's type, decides how to report it.
+///
 /// # Errors
 ///
 /// - 400 if the request is malformed (missing content-type, bad boundary)
 /// - 413 if a declared `Content-Length`, the accumulated body size, the
 ///   number of parts, or the parts of one field (`per_field_max_counts`)
-///   exceed the configured ceiling, before the body is read further
+///   exceed the configured ceiling, or a text part exceeds
+///   `spill_threshold`, before the body is read further
 /// - 422 [`FrameworkError::Validation`] when `per_field_validator` refuses
 ///   a file with [`FrameworkError::invalid_upload`]: the message goes under
 ///   the part's input name, a trailing `[]` replaced by the part's
@@ -693,6 +734,61 @@ where
 pub async fn parse_multipart_streaming_with_limits<F>(
     req: crate::http::Request,
     limits: MultipartLimits<'_>,
+    per_field_validator: F,
+) -> Result<MultipartPayload, FrameworkError>
+where
+    F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
+{
+    parse_parts(req, limits, Checked::EveryPart, per_field_validator).await
+}
+
+/// The parse `#[derive(MultipartRequest)]` runs: as
+/// [`parse_multipart_streaming_with_limits`], except that
+/// `per_file_validator` sees only the parts the extractor takes as files,
+/// so the check of a field's file can fail the request only for a file
+/// that field would hold.
+///
+/// A text part is never checked as a file: the extractor reports it where
+/// a file belongs (`validation-file`). A field that holds one file, named
+/// in `single_files`, takes the first part of its name that does not leave
+/// the file out; every later part of that name is skipped, neither checked
+/// nor kept, so it never reaches memory or a temp file.
+#[doc(hidden)]
+pub async fn parse_multipart_for_extractor<F>(
+    req: crate::http::Request,
+    limits: MultipartLimits<'_>,
+    single_files: &[&str],
+    per_file_validator: F,
+) -> Result<MultipartPayload, FrameworkError>
+where
+    F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
+{
+    parse_parts(
+        req,
+        limits,
+        Checked::TakenFiles { single_files },
+        per_file_validator,
+    )
+    .await
+}
+
+/// Which parts the chunk validator is called for.
+enum Checked<'a> {
+    /// Every part, text or file: the contract of the public parsers, whose
+    /// caller sees the wire name alone.
+    EveryPart,
+    /// The file parts the extractor takes (see
+    /// [`parse_multipart_for_extractor`]).
+    TakenFiles {
+        /// The wire names of the fields that hold one file.
+        single_files: &'a [&'a str],
+    },
+}
+
+async fn parse_parts<F>(
+    req: crate::http::Request,
+    limits: MultipartLimits<'_>,
+    checked: Checked<'_>,
     mut per_field_validator: F,
 ) -> Result<MultipartPayload, FrameworkError>
 where
@@ -815,6 +911,12 @@ where
         per_field_max_counts.iter().copied().collect();
     let mut seen_for: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut part_count: usize = 0;
+    // Under `Checked::TakenFiles`, whether each field that holds one file
+    // has taken its part, by its position in `single_files`.
+    let mut file_taken = match &checked {
+        Checked::EveryPart => Vec::new(),
+        Checked::TakenFiles { single_files } => vec![false; single_files.len()],
+    };
 
     while let Some(mut field) = multipart
         .next_field()
@@ -863,6 +965,24 @@ where
             });
         }
 
+        // Which chunks the validator sees, and, for a field that holds one
+        // file, skip a part once the field has taken one: multer passes over
+        // the part's bytes, which still count toward the raw byte cap.
+        let (check_chunks, single_file) = match &checked {
+            Checked::EveryPart => (true, None),
+            Checked::TakenFiles { single_files } => {
+                let single_file = single_files.iter().position(|single| *single == name);
+                if single_file.is_some_and(|at| file_taken.get(at).copied().unwrap_or(false)) {
+                    continue;
+                }
+                (file_name.is_some(), single_file)
+            }
+        };
+
+        // Classification: presence of `filename=` in Content-Disposition
+        // is the canonical marker of a file part. Text parts may carry
+        // a `Content-Type`, so we don't use `mime.is_some()` as the
+        // discriminator.
         let collected = collect_part(
             &mut field,
             &name,
@@ -874,6 +994,7 @@ where
                 raw_cap_tripped: &raw_cap_tripped,
             },
             file_name.is_none(),
+            check_chunks,
         )
         .await
         .map_err(|err| match err {
@@ -885,44 +1006,35 @@ where
             other => other,
         })?;
 
-        // Classification: presence of `filename=` in Content-Disposition
-        // is the canonical marker of a file part. Text parts may carry
-        // a `Content-Type`, so we don't use `mime.is_some()` as the
-        // discriminator.
-        let value = if file_name.is_some() {
-            let backing = match collected.backing {
-                PartBacking::Memory(v) => UploadedFileBacking::Memory(Bytes::from(v)),
-                PartBacking::Disk(t) => UploadedFileBacking::Disk(t),
-            };
-            MultipartValue::File {
-                backing,
-                size: collected.size,
-                file_name,
-                content_type: mime,
-                inferred_extension: collected.inferred_extension,
-                sniff: collected.sniff,
-            }
-        } else {
-            // Text parts must fit in memory - the spill threshold is a
-            // sizing hint for opaque file payloads, not arbitrary form
-            // fields. A multi-MiB text field is an attack signal: reject
-            // with 400.
-            let buf: Vec<u8> = match collected.backing {
-                PartBacking::Memory(v) => v,
-                PartBacking::Disk(_) => {
-                    return Err(FrameworkError::Domain {
-                        message: format!(
-                            "text field '{name}' exceeded spill threshold ({spill_threshold} bytes); reject as oversized"
-                        ),
-                        status_code: 400,
-                    });
+        let value = match collected {
+            Collected::File(part) => {
+                let backing = match part.backing {
+                    PartBacking::Memory(v) => UploadedFileBacking::Memory(Bytes::from(v)),
+                    PartBacking::Disk(t) => UploadedFileBacking::Disk(t),
+                };
+                MultipartValue::File {
+                    backing,
+                    size: part.size,
+                    file_name,
+                    content_type: mime,
+                    inferred_extension: part.inferred_extension,
+                    sniff: part.sniff,
                 }
-            };
-            MultipartValue::Text(String::from_utf8(buf).map_err(|_| FrameworkError::Domain {
-                message: format!("text field '{name}' is not valid UTF-8"),
-                status_code: 400,
-            })?)
+            }
+            Collected::Text(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => MultipartValue::Text(text),
+                Err(not_utf8) => MultipartValue::NonUtf8Text(not_utf8.into_bytes()),
+            },
         };
+
+        // The field takes the first part that does not leave its file out,
+        // as `take_file` reads it.
+        if let Some(at) = single_file
+            && !leaves_file_out(&value)
+            && let Some(taken) = file_taken.get_mut(at)
+        {
+            *taken = true;
+        }
 
         payload.fields.push((name, value));
     }
@@ -1123,7 +1235,8 @@ pub enum FieldFailure {
     Format,
     /// A text part where a file belongs (`validation-file`).
     File,
-    /// A file part where text belongs (`validation-string`).
+    /// A file part where text belongs, or a part that is not UTF-8 for a
+    /// `String` field, which reads any other text (`validation-string`).
     String,
 }
 
@@ -1190,14 +1303,29 @@ pub enum Taken<T> {
     Invalid,
 }
 
+/// Whether `value` is how a client leaves a file out: an empty text part
+/// (Inertia's `null` file) or a file part with no file name and no bytes
+/// (an empty file input). One rule for both the extractor and the parser,
+/// so the part the parser checks for a field that holds one file is the
+/// part the extractor takes.
+fn leaves_file_out(value: &MultipartValue) -> bool {
+    match value {
+        MultipartValue::Text(text) => text.is_empty(),
+        MultipartValue::NonUtf8Text(_) => false,
+        MultipartValue::File {
+            size, file_name, ..
+        } => *size == 0 && file_name.as_deref().is_none_or(str::is_empty),
+    }
+}
+
 /// Turn one part into a file field's value.
 ///
 /// An empty text part (Inertia's `null` file) and a file part with no file
 /// name and no bytes (an empty file input) are how clients leave a file
 /// out, so they are [`Taken::Absent`], never an empty file a validator
-/// would refuse. Other text is a failure, as is a file `validator` refuses
-/// with [`FrameworkError::invalid_upload`]; both are filed under the
-/// part's key. Any other validator error is returned.
+/// would refuse. Other text, UTF-8 or not, is a failure, as is a file
+/// `validator` refuses with [`FrameworkError::invalid_upload`]; both are
+/// filed under the part's key. Any other validator error is returned.
 #[doc(hidden)]
 pub fn take_file<V: UploadValidator>(
     validator: &V,
@@ -1206,15 +1334,14 @@ pub fn take_file<V: UploadValidator>(
     index: usize,
     errors: &mut ValidationErrors,
 ) -> Result<Taken<UploadedFile<V>>, FrameworkError> {
+    if leaves_file_out(&value) {
+        return Ok(Taken::Absent);
+    }
     match value {
-        MultipartValue::Text(text) if text.is_empty() => Ok(Taken::Absent),
-        MultipartValue::Text(_) => {
+        MultipartValue::Text(_) | MultipartValue::NonUtf8Text(_) => {
             add_field_failure(errors, name, Some(index), FieldFailure::File);
             Ok(Taken::Invalid)
         }
-        MultipartValue::File {
-            size: 0, file_name, ..
-        } if file_name.as_deref().is_none_or(str::is_empty) => Ok(Taken::Absent),
         MultipartValue::File {
             backing,
             size,
@@ -1247,8 +1374,9 @@ pub fn take_file<V: UploadValidator>(
 /// required one is missing, as Laravel's `ConvertEmptyStringsToNull` makes
 /// them. A type that can hold empty text, such as `String`, keeps it, as a
 /// `FormRequest` does for a JSON `""` or a urlencoded `name=`. Other text
-/// that does not parse files `failure`, the key for `T`'s kind; a file
-/// part files [`FieldFailure::String`].
+/// that does not parse files `failure`, the key for `T`'s kind, and so does
+/// a part that is not UTF-8, which parses as no type; a file part files
+/// [`FieldFailure::String`].
 #[doc(hidden)]
 pub fn take_text<T>(
     value: MultipartValue,
@@ -1267,6 +1395,10 @@ pub fn take_text<T>(
                 Taken::Invalid
             }
         },
+        MultipartValue::NonUtf8Text(_) => {
+            add_field_failure(errors, name, Some(index), failure);
+            Taken::Invalid
+        }
         MultipartValue::File { .. } => {
             add_field_failure(errors, name, Some(index), FieldFailure::String);
             Taken::Invalid

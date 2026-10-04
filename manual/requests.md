@@ -537,6 +537,11 @@ missing value: an `Option` field is `None`, a required field reports
 field keeps the empty string, as a `FormRequest` does for a JSON `""` or a
 urlencoded `name=`.
 
+A field that holds one value, rather than a `Vec`, is decided by the first
+part of its name that isn't missing in this sense. If that part doesn't
+parse, the field reports that one error, and any later part of the name is
+ignored.
+
 Built-in validators in `suprnova::http::upload::validators`:
 
 - `MaxSize<N>` - stops reading the body at the chunk that takes the file
@@ -569,11 +574,17 @@ validation catalog by its key:
 | A required field is missing | `validation-required` |
 | Text that doesn't parse as an integer, a float or a `bool` field | `validation-integer`, `validation-numeric`, `validation-boolean` |
 | Text that doesn't parse as any other type | `validation-format` |
+| Bytes that aren't UTF-8 for a `String` field | `validation-string` |
 | A text part where a file belongs | `validation-file` |
 | A file part where text belongs | `validation-string` |
 | A file over `MaxSize<N>`, the limit in kilobytes as Laravel words it | `validation-max-file` |
 | A file `ImageFile` refuses | `validation-image` |
 | A file `MimeType<L>` refuses, with the allowed types | `validation-mimetypes` |
+
+A text part whose bytes aren't UTF-8, as a page served in a legacy
+encoding can send, doesn't parse as any type: a `String` field reports
+`validation-string`, and any other field the key its type reports for text
+that doesn't parse.
 
 To change a message, define its key in your own catalog:
 
@@ -585,7 +596,10 @@ validation-image = Choose a picture for { $field }.
 A file input left empty arrives as a file part with no file name and no
 bytes, and Inertia sends a `null` file as an empty text part. Both count as
 a missing file: an optional field is `None`, and a required one reports
-`validation-required`.
+`validation-required`. A field that holds one file takes the first part of
+its name that isn't one of these, and ignores every later part of that name
+without checking it. Text where a file belongs is never checked as a file:
+it reports `validation-file`, however long it is.
 
 A file that fails while the body streams, as one over `MaxSize<N>` does,
 stops the read after the chunk that crossed the limit. The hooks and the
@@ -640,11 +654,15 @@ pub struct Gallery {
 ```
 
 The (`max_count` + 1)-th part with that name returns HTTP `413` before
-allocating, so the extra part never reaches `Vec` growth. The three limits
-on the whole request - the body's byte cap, the part ceiling and a field's
-`max_count` - all answer `413` without reading the body further. When one
-chunk crosses the byte cap and a file's `MaxSize` together, the `413`
-wins.
+allocating, so the extra part never reaches `Vec` growth. The four limits
+on the whole request - the body's byte cap, the part ceiling, a field's
+`max_count`, and the in-memory limit on a text part - all answer `413`
+without reading the body further. Form text must fit in memory, so a text
+part longer than the spill threshold (2 MiB by default, set with
+`suprnova::http::upload::set_global_upload_spill_threshold`) bounds the
+request the way the byte cap does, as PHP's `post_max_size` does for
+Laravel. When one chunk crosses the byte cap and a file's `MaxSize`
+together, the `413` wins.
 
 ### Why Suprnova diverges
 

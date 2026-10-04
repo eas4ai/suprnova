@@ -319,8 +319,13 @@ fn part_head(name: &str, file: Option<(&str, &str)>) -> Vec<u8> {
 }
 
 fn text_part(name: &str, value: &str) -> Vec<u8> {
+    text_part_bytes(name, value.as_bytes())
+}
+
+/// A text part carrying `value` as sent, which need not be UTF-8.
+fn text_part_bytes(name: &str, value: &[u8]) -> Vec<u8> {
     let mut part = part_head(name, None);
-    part.extend_from_slice(value.as_bytes());
+    part.extend_from_slice(value);
     part.extend_from_slice(b"\r\n");
     part
 }
@@ -1741,4 +1746,372 @@ async fn an_empty_part_for_a_required_typed_field_is_missing() {
         first_message(&reply, "ratio"),
         "The ratio field is required."
     );
+}
+
+// ── PAR-043: a text part whose bytes are not UTF-8 ──
+
+/// One field for each key a part that is not UTF-8 can report.
+#[derive(MultipartRequest)]
+struct Encoded {
+    #[field("title")]
+    title: String,
+    #[field("count")]
+    count: u32,
+    #[field("tags[]")]
+    tags: Vec<String>,
+    #[field("ratio")]
+    ratio: Option<f64>,
+    #[field("active")]
+    active: Option<bool>,
+    #[field("address")]
+    address: Option<std::net::IpAddr>,
+    #[field("attachment")]
+    attachment: Option<UploadedFile>,
+}
+
+async fn encoded(req: Request) -> Response {
+    let form = Encoded::from_request(req).await?;
+    Ok(HttpResponse::json(json!({
+        "title": form.title,
+        "count": form.count,
+        "tags": form.tags,
+        "ratio": form.ratio,
+        "active": form.active,
+        "address": form.address.map(|a| a.to_string()),
+        "attachment": form.attachment.map(|a| a.size),
+    })))
+}
+
+/// `café` in Latin-1, as a page served in a legacy encoding sends it.
+const LATIN1_CAFE: &[u8] = b"caf\xe9";
+
+fn encoded_body() -> Vec<u8> {
+    form(&[
+        text_part_bytes("title", LATIN1_CAFE),
+        text_part_bytes("count", b"\xff7"),
+        text_part("tags[]", "fine"),
+        text_part_bytes("tags[]", LATIN1_CAFE),
+    ])
+}
+
+#[tokio::test]
+async fn a_text_part_that_is_not_utf8_answers_422_under_its_name() {
+    let app = App::new(Router::new().post("/encoded", encoded));
+
+    let reply = TestContainer::scope(async {
+        let _catalog = bind_catalog("");
+        send(&app, Outgoing::post("/encoded", encoded_body())).await
+    })
+    .await;
+
+    assert_eq!(
+        reply.status,
+        422,
+        "a part that is not UTF-8 is invalid input: {}",
+        reply.text()
+    );
+    assert_eq!(
+        first_message(&reply, "title"),
+        "The title field must be a string."
+    );
+    assert_eq!(
+        first_message(&reply, "count"),
+        "The count field must be an integer."
+    );
+    assert_eq!(
+        first_message(&reply, "tags.1"),
+        "The tags.1 field must be a string."
+    );
+    assert_eq!(
+        errors(&reply).len(),
+        3,
+        "only the three parts that are not UTF-8 failed: {}",
+        reply.text()
+    );
+}
+
+#[tokio::test]
+async fn a_part_that_is_not_utf8_reports_the_key_of_its_fields_type() {
+    let body = form(&[
+        text_part_bytes("title", LATIN1_CAFE),
+        text_part_bytes("count", b"\xff7"),
+        text_part("tags[]", "fine"),
+        text_part_bytes("tags[]", LATIN1_CAFE),
+        text_part_bytes("ratio", b"0.5\xff"),
+        text_part_bytes("active", b"\xc0"),
+        text_part_bytes("address", b"127.0.0.\xb1"),
+        text_part_bytes("attachment", LATIN1_CAFE),
+    ]);
+    let req = crate::common::request_from_multipart(BOUNDARY, body.into()).await;
+    let errors = match Encoded::from_request(req).await {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {:?}", other.err()),
+    };
+
+    assert_eq!(key(&errors, "title"), "validation-string");
+    assert_eq!(key(&errors, "count"), "validation-integer");
+    assert_eq!(key(&errors, "tags.1"), "validation-string");
+    assert_eq!(key(&errors, "ratio"), "validation-numeric");
+    assert_eq!(key(&errors, "active"), "validation-boolean");
+    assert_eq!(key(&errors, "address"), "validation-format");
+    assert_eq!(
+        key(&errors, "attachment"),
+        "validation-file",
+        "text where a file belongs"
+    );
+    assert_eq!(errors.errors.len(), 7, "{errors}");
+}
+
+#[tokio::test]
+async fn an_inertia_form_gets_a_part_that_is_not_utf8_back_in_props_errors() {
+    let slot = suprnova::session::new_session_slot_for_test();
+    let app = App::with(
+        Router::new()
+            .post("/encoded", encoded)
+            .get("/encoded", |req: Request| async move {
+                InertiaResponse::new("Profile/Edit")
+                    .resolve(&req)
+                    .await
+                    .map_err(HttpResponse::from)
+            }),
+        MiddlewareRegistry::new()
+            .append(SeededSessionScope(slot.clone()))
+            .append(InertiaValidationRedirectMiddleware::new()),
+    );
+
+    let errors = inertia_round_trip(&app, &slot, "/encoded", encoded_body()).await;
+
+    for field in ["title", "count", "tags.1"] {
+        assert!(
+            errors[field].is_string(),
+            "props.errors carries `{field}`: {errors}"
+        );
+    }
+}
+
+// ── PAR-043: the streaming check reads only the parts a field takes ──
+
+/// Sized well under every spill threshold a concurrent test may set, so a
+/// text part longer than the limit stays a text part.
+const SCAN_MAX: usize = 64;
+
+#[derive(MultipartRequest)]
+struct Scans {
+    #[field("scan")]
+    scan: UploadedFile<MaxSize<SCAN_MAX>>,
+    #[field("extra")]
+    extra: Option<UploadedFile<MaxSize<SCAN_MAX>>>,
+    #[field("pages[]")]
+    pages: Vec<UploadedFile<MaxSize<SCAN_MAX>>>,
+}
+
+async fn scans(req: Request) -> Response {
+    let form = Scans::from_request(req).await?;
+    Ok(HttpResponse::json(json!({
+        "scan": form.scan.size,
+        "extra": form.extra.map(|file| file.size),
+        "pages": form.pages.iter().map(|file| file.size).collect::<Vec<_>>(),
+    })))
+}
+
+async fn scans_errors(body: Vec<u8>) -> ValidationErrors {
+    let req = crate::common::request_from_multipart(BOUNDARY, body.into()).await;
+    match Scans::from_request(req).await {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {:?}", other.err()),
+    }
+}
+
+/// A file part of `len` bytes.
+fn sized_file(name: &str, len: usize) -> Vec<u8> {
+    file_part(
+        name,
+        "scan.bin",
+        "application/octet-stream",
+        &vec![7u8; len],
+    )
+}
+
+#[tokio::test]
+async fn a_text_part_longer_than_a_sized_file_is_not_a_file() {
+    let long = "x".repeat(SCAN_MAX * 2);
+    let errors = scans_errors(form(&[
+        text_part("scan", &long),
+        text_part("extra", &long),
+        text_part("pages[]", &long),
+    ]))
+    .await;
+
+    assert_eq!(key(&errors, "scan"), "validation-file");
+    assert_eq!(key(&errors, "extra"), "validation-file");
+    assert_eq!(key(&errors, "pages.0"), "validation-file");
+    assert_eq!(errors.errors.len(), 3, "{errors}");
+}
+
+#[tokio::test]
+async fn a_later_part_for_a_field_that_holds_one_file_is_ignored_unvalidated() {
+    let app = App::new(Router::new().post("/scans", scans));
+
+    // The field takes the first file; the oversized second one is ignored.
+    let reply = send(
+        &app,
+        Outgoing::post(
+            "/scans",
+            form(&[
+                sized_file("scan", SCAN_MAX / 2),
+                sized_file("scan", SCAN_MAX * 2),
+                sized_file("extra", SCAN_MAX / 2),
+                sized_file("extra", SCAN_MAX * 2),
+            ]),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json()["scan"], SCAN_MAX / 2);
+    assert_eq!(reply.json()["extra"], SCAN_MAX / 2);
+
+    // An empty file that has a name is still the file the field takes.
+    let reply = send(
+        &app,
+        Outgoing::post(
+            "/scans",
+            form(&[
+                file_part("scan", "empty.bin", "application/octet-stream", b""),
+                sized_file("scan", SCAN_MAX * 2),
+            ]),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json()["scan"], 0);
+
+    // Text where the file belongs is the part the field takes: the error is
+    // that it is not a file, never the size of the ignored file after it.
+    let errors = scans_errors(form(&[
+        text_part("scan", "not a file"),
+        sized_file("scan", SCAN_MAX * 2),
+    ]))
+    .await;
+    assert_eq!(key(&errors, "scan"), "validation-file");
+    assert_eq!(errors.errors.len(), 1, "{errors}");
+    assert_eq!(errors.errors["scan"].len(), 1, "{errors}");
+}
+
+/// The control for the test above: a part the field does take is checked
+/// while it streams, whatever came before it.
+#[tokio::test]
+async fn a_part_the_field_takes_after_a_left_out_one_is_still_checked() {
+    for left_out in [
+        // Inertia's `null` file.
+        text_part("scan", ""),
+        // A file input left empty.
+        file_part("scan", "", "application/octet-stream", b""),
+    ] {
+        let errors = scans_errors(form(&[left_out, sized_file("scan", SCAN_MAX * 2)])).await;
+        assert_eq!(key(&errors, "scan"), "validation-max-file");
+    }
+
+    // Every part of a list is taken, so every part is checked.
+    let errors = scans_errors(form(&[
+        sized_file("scan", SCAN_MAX / 2),
+        sized_file("pages[]", SCAN_MAX / 2),
+        sized_file("pages[]", SCAN_MAX * 2),
+    ]))
+    .await;
+    assert_eq!(key(&errors, "pages.1"), "validation-max-file");
+}
+
+// ── PAR-043: a text part over the in-memory limit is a request-wide 413 ──
+
+static NOTES_HANDLER_RAN: AtomicBool = AtomicBool::new(false);
+
+#[derive(MultipartRequest)]
+// Its own cap, far above the text limit, so only the text limit can answer.
+#[multipart(max_body_bytes = 64 * 1024 * 1024)]
+struct Notes {
+    #[field("count")]
+    count: u32,
+    #[field("bio")]
+    bio: String,
+}
+
+async fn notes(req: Request) -> Response {
+    let form = Notes::from_request(req).await?;
+    NOTES_HANDLER_RAN.store(true, Ordering::SeqCst);
+    Ok(HttpResponse::json(
+        json!({ "count": form.count, "bio": form.bio.len() }),
+    ))
+}
+
+#[tokio::test]
+async fn a_text_part_over_the_in_memory_limit_answers_413_and_stops_the_read() {
+    let app = App::new(Router::new().post("/notes", notes));
+
+    // A field failure first, then a text part that never ends.
+    let mut prefix = text_part("count", "three");
+    prefix.extend_from_slice(&part_head("bio", None));
+    let mut chunks = vec![prefix];
+    let prefix_chunks = chunks.len();
+    chunks.extend((0..64).map(|_| vec![b'x'; STREAM_CHUNK]));
+    // The default in-memory limit is crossed inside the 9th text chunk.
+    let crossing =
+        prefix_chunks + suprnova::http::upload::DEFAULT_UPLOAD_SPILL_THRESHOLD / STREAM_CHUNK + 1;
+
+    let reply = send(&app, Outgoing::post_chunks("/notes", chunks).unfinished()).await;
+
+    assert_eq!(
+        reply.status,
+        413,
+        "the text limit bounds the whole request: {}",
+        reply.text()
+    );
+    assert!(reply.text().contains("in-memory limit"), "{}", reply.text());
+    assert!(
+        reply.json().get("errors").is_none(),
+        "a request-wide limit wins over the field failure before it: {}",
+        reply.text()
+    );
+    assert!(
+        reply.chunks_sent <= crossing + 6,
+        "the read stops after the crossing chunk ({crossing}); the client had sent {}",
+        reply.chunks_sent
+    );
+    assert!(!NOTES_HANDLER_RAN.load(Ordering::SeqCst), "the handler ran");
+}
+
+// ── PAR-043: the first part decides a field that holds one value ──
+
+#[tokio::test]
+async fn the_first_part_decides_a_text_field_that_holds_one_value() {
+    // A required field: the second failing part adds nothing.
+    let errors = typed_errors(form(&[
+        text_part("count", "abc"),
+        text_part("count", "xyz"),
+    ]))
+    .await;
+    assert_eq!(key(&errors, "count"), "validation-integer");
+    assert_eq!(errors.errors["count"].len(), 1, "{errors}");
+
+    // A later part that parses does not undo the first part's failure.
+    let errors = typed_errors(form(&[text_part("count", "abc"), text_part("count", "5")])).await;
+    assert_eq!(errors.errors["count"].len(), 1, "{errors}");
+
+    // An optional field, the same.
+    let req = crate::common::request_from_multipart(
+        BOUNDARY,
+        form(&[
+            text_part("count", "abc"),
+            text_part("count", "xyz"),
+            text_part("title", "t"),
+        ])
+        .into(),
+    )
+    .await;
+    let errors = match Nullable::from_request(req).await {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {:?}", other.err()),
+    };
+    assert_eq!(key(&errors, "count"), "validation-integer");
+    assert_eq!(errors.errors["count"].len(), 1, "{errors}");
+    assert_eq!(errors.errors.len(), 1, "{errors}");
 }
