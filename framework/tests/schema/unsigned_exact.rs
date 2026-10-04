@@ -12,7 +12,9 @@
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, Value};
 use serial_test::serial;
 use suprnova::testing::TestContainer;
-use suprnova::{DB, DatabaseUserProvider, DbConnection, Model, UserProvider, attrs};
+use suprnova::{
+    DB, DatabaseUserProvider, DbConnection, FrameworkError, Model, UserProvider, attrs, model,
+};
 
 use super::cases::{drop_tables, run};
 use super::mysql::connect_mysql;
@@ -44,6 +46,15 @@ async fn create_amounts(conn: &DatabaseConnection) {
     )
     .await
     .expect("create ux_amounts");
+}
+
+/// `ux_amounts` as a model whose `big` field, a decimal, has no binder arm:
+/// a value written to it binds as for a column of unknown type.
+#[model(table = "ux_amounts", timestamps = false)]
+pub struct UxAmount {
+    pub id: i64,
+    pub big: Option<rust_decimal::Decimal>,
+    pub label: Option<String>,
 }
 
 /// The engine's own count for `condition` over `ux_amounts`.
@@ -348,6 +359,82 @@ pub async fn a_text_identifier_finds_a_twenty_digit_id(conn: &DatabaseConnection
     }
 
     drop_tables(conn, &["ux_amounts"]).await;
+}
+
+/// A model's mass writes of `u64::MAX` to a field its binder does not
+/// type follow the column, as `DB::table`'s writes do: Postgres and MySQL
+/// store it exactly in a numeric column, also after the same statement was
+/// sent with an integer, and SQLite, whose NUMERIC column would hold a
+/// rounded REAL, refuses it with nothing stored. It fails while SQLite
+/// stores the rounded REAL and Postgres reuses the integer statement for
+/// the `numeric` parameter.
+pub async fn model_mass_writes_follow_the_column(conn: &DatabaseConnection) {
+    create_amounts(conn).await;
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(conn.clone()));
+    let backend = conn.get_database_backend();
+    run(
+        conn,
+        "INSERT INTO ux_amounts (big, label) VALUES (1, 'row')",
+    )
+    .await
+    .expect("insert the row");
+    let row = || UxAmount::query().filter("label", "row");
+    assert_eq!(
+        row()
+            .update_all(attrs! { big: 5 })
+            .await
+            .expect("a small write"),
+        1
+    );
+    let update = row().update_all(attrs! { big: u64::MAX }).await;
+    let upsert = UxAmount::query()
+        .upsert(
+            vec![attrs! { id: 1, big: u64::MAX - 1, label: "row" }],
+            vec!["id"],
+            Some(vec!["big"]),
+        )
+        .await;
+    if backend == DbBackend::Sqlite {
+        for (operation, result) in [
+            ("update_all", update.map(|_| ())),
+            ("upsert", upsert.map(|_| ())),
+        ] {
+            let error = result.expect_err(operation);
+            assert!(
+                matches!(error, FrameworkError::Database(ref message) if message.contains("ux_amounts.big")),
+                "{operation}: a database error naming the column: {error:?}"
+            );
+        }
+        assert_eq!(stored(conn, "big", "row").await.as_deref(), Some("5"));
+    } else {
+        update.expect("update_all of u64::MAX");
+        upsert.expect("upsert of u64::MAX - 1");
+        assert_eq!(
+            stored(conn, "big", "row").await,
+            Some((u64::MAX - 1).to_string())
+        );
+    }
+    drop_tables(conn, &["ux_amounts"]).await;
+}
+
+#[tokio::test]
+async fn sqlite_model_mass_writes_follow_the_column() {
+    model_mass_writes_follow_the_column(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_model_mass_writes_follow_the_column() {
+    model_mass_writes_follow_the_column(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_model_mass_writes_follow_the_column() {
+    model_mass_writes_follow_the_column(&connect_mysql().await).await;
 }
 
 #[tokio::test]

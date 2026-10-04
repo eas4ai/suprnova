@@ -992,7 +992,12 @@ The same holds for a column of a narrower integer field such as `i64` or
 `i32`, which can't hold such a value on any database, and a mass update
 that writes one to it is refused on Postgres and SQLite before anything is
 sent. A column the model doesn't know, such as a joined table's column,
-compares as the number on every database, as with `DB::table`.
+compares as the number on every database, as with `DB::table`. A mass
+write (`update_all`, `upsert`) to a field that is neither an integer nor
+text, such as a decimal, also takes the value as `DB::table` does: a
+numeric column on Postgres or MySQL stores it exactly, and SQLite refuses
+it for a column of INTEGER or NUMERIC affinity, which would store a
+rounded REAL.
 
 `to_sql` returns the parameterised SQL the next terminal would emit -
 useful for debugging or building views. The bindings are

@@ -2698,8 +2698,39 @@ fn write_value_expression(
     }
 
     *position += 1;
-    values.push(bind_value(backend, binder, column, value)?);
-    placeholder(backend, *position)
+    let bound = bind_value(backend, binder, column, value)?;
+    let ph = crate::database::placeholder::typed_placeholder(backend, *position, &bound)?;
+    values.push(bound);
+    Ok(ph)
+}
+
+/// Refuse, before anything is sent, a mass write of a `u64` above
+/// `i64::MAX` to a column of `table` that `binder` does not type, where
+/// the database would store a rounded value: on SQLite, a column of
+/// INTEGER or NUMERIC affinity (see `bind_large_unsigned`). The value
+/// itself binds by [`untyped_value`], as the exact number.
+async fn refuse_rounded_writes<'a>(
+    exec: &crate::database::transaction::ExecutorChoice,
+    table: &str,
+    binder: ColumnBinder,
+    attrs: impl IntoIterator<Item = (&'a str, &'a Value)>,
+) -> Result<(), FrameworkError> {
+    use crate::database::transaction::ExecutorChoice;
+    use crate::eloquent::casts::unsigned::{bind_large_unsigned, large_unsigned_attrs};
+
+    let large = large_unsigned_attrs(
+        attrs
+            .into_iter()
+            .filter(|(column, value)| binder(column, value).is_none()),
+    );
+    if large.is_empty() {
+        return Ok(());
+    }
+    match exec {
+        ExecutorChoice::Tx(t, _) => bind_large_unsigned(t.as_ref(), table, &large).await,
+        ExecutorChoice::Pool(c, _) => bind_large_unsigned(c.inner(), table, &large).await,
+    }
+    .map(|_| ())
 }
 
 /// A value compared with a column, as the statement takes it.
@@ -6058,6 +6089,7 @@ where
         )
         .await?;
         let backend = exec.backend();
+        refuse_rounded_writes(&exec, M::TABLE, M::bind_column, attrs.iter()).await?;
 
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n: usize = 0;
@@ -6353,6 +6385,13 @@ where
         )
         .await?;
         let backend = exec.backend();
+        refuse_rounded_writes(
+            &exec,
+            M::TABLE,
+            M::bind_column,
+            rows.iter().flat_map(|attrs| attrs.iter()),
+        )
+        .await?;
 
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n: usize = 0;
