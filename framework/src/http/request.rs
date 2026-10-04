@@ -1122,9 +1122,16 @@ impl Request {
     /// Mirrors Laravel's typed query access (commonly used through
     /// validated form requests in PHP, but Suprnova users reach for
     /// this directly when they only care about query params).
+    ///
+    /// The query reads as Laravel's request holds it and as a form body
+    /// reads: an empty value is `null`, so `?q=` leaves an `Option` `None`
+    /// and a required field missing; a name sent more than once keeps its
+    /// last value; and a name that ends in `[]` is a list under the name
+    /// without the brackets, so `?tags[]=a&tags[]=b` fills a `tags:
+    /// Vec<String>` field.
     pub fn query_into<T: DeserializeOwned>(&self) -> Result<T, FrameworkError> {
         let q = self.query().unwrap_or("");
-        serde_urlencoded::from_str(q)
+        crate::http::input::parse_form_input(q.as_bytes())
             .map_err(|e| FrameworkError::domain(format!("query parse: {e}"), 422))
     }
 

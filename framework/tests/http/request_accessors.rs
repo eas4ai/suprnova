@@ -1013,3 +1013,62 @@ fn hyper_types_reachable_via_crate_root() {
         a
     }
 }
+
+// ── `query_into` reads the query as Laravel does ──
+
+#[derive(Debug, serde::Deserialize)]
+struct Search {
+    sort: String,
+    q: Option<String>,
+    page: Option<u32>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+async fn search(query: &str) -> Result<Search, suprnova::FrameworkError> {
+    build_request(
+        hyper::Request::builder()
+            .method("GET")
+            .uri(format!("/search?{query}")),
+        "",
+    )
+    .await
+    .query_into::<Search>()
+}
+
+#[tokio::test]
+async fn query_into_reads_an_empty_value_as_null() {
+    let found = search("sort=name&q=&page=")
+        .await
+        .expect("an empty value is null");
+    assert_eq!(found.sort, "name");
+    assert_eq!(found.q, None);
+    assert_eq!(found.page, None);
+
+    // A required field left empty is missing.
+    assert!(search("sort=&q=rust").await.is_err());
+}
+
+#[tokio::test]
+async fn query_into_keeps_the_last_value_of_a_repeated_name() {
+    let found = search("sort=name&sort=date&page=1&page=2")
+        .await
+        .expect("a repeated name keeps its last value");
+    assert_eq!(found.sort, "date");
+    assert_eq!(found.page, Some(2));
+
+    // The last value decides even when it is empty.
+    assert!(search("sort=name&sort=").await.is_err());
+}
+
+#[tokio::test]
+async fn query_into_collects_a_list_name() {
+    let found = search("sort=name&tags[]=rust&tags[]=&tags%5B%5D=web")
+        .await
+        .expect("a name ending in [] is a list");
+    // An empty element is null and left out.
+    assert_eq!(found.tags, vec!["rust".to_string(), "web".to_string()]);
+
+    let found = search("sort=name").await.expect("no list at all");
+    assert!(found.tags.is_empty());
+}

@@ -77,6 +77,8 @@ struct Outgoing {
     finish: bool,
     /// When set, the body waits for this notification after the head.
     gate: Option<Arc<Notify>>,
+    /// The body's media type, multipart unless a test says otherwise.
+    content_type: Option<&'static str>,
 }
 
 impl Outgoing {
@@ -92,6 +94,7 @@ impl Outgoing {
             chunks,
             finish: true,
             gate: None,
+            content_type: None,
         }
     }
 
@@ -103,7 +106,14 @@ impl Outgoing {
             chunks: Vec::new(),
             finish: true,
             gate: None,
+            content_type: None,
         }
+    }
+
+    /// Send the body as `media_type` rather than multipart.
+    fn content_type(mut self, media_type: &'static str) -> Self {
+        self.content_type = Some(media_type);
+        self
     }
 
     fn header(mut self, name: &'static str, value: impl Into<String>) -> Self {
@@ -170,9 +180,12 @@ async fn send(app: &App, out: Outgoing) -> Reply {
                 out.method, out.path
             );
             if out.method == "POST" {
+                let content_type = out.content_type.map_or_else(
+                    || format!("multipart/form-data; boundary={BOUNDARY}"),
+                    str::to_string,
+                );
                 head.push_str(&format!(
-                    "Content-Type: multipart/form-data; boundary={BOUNDARY}\r\n\
-                     Transfer-Encoding: chunked\r\n"
+                    "Content-Type: {content_type}\r\nTransfer-Encoding: chunked\r\n"
                 ));
             }
             for (name, value) in &out.headers {
@@ -2209,17 +2222,19 @@ async fn urlencoded(body: &str) -> Result<UrlencodedText, FrameworkError> {
 
 #[tokio::test]
 async fn an_empty_urlencoded_value_for_a_required_string_field_is_missing() {
-    // An empty first value, and an empty last value after a value.
-    for body in ["title=&note=kept", "title=Holiday&title="] {
-        let error = match urlencoded(body).await {
-            Err(error) => error,
-            Ok(form) => panic!("`{body}` extracted {form:?}"),
+    // An empty first value, an empty last value after a value, and no
+    // value at all: each is a validation failure under the field's name.
+    for body in ["title=&note=kept", "title=Holiday&title=", "note=kept"] {
+        let errors = match urlencoded(body).await {
+            Err(FrameworkError::Validation(errors)) => errors,
+            other => panic!("`{body}`: expected validation errors, got {other:?}"),
         };
-        assert_eq!(error.status_code(), 422, "`{body}`: {error}");
-        assert!(
-            error.to_string().contains("missing field `title`"),
-            "`{body}`: {error}"
+        assert_eq!(key(&errors, "title"), "validation-required", "`{body}`");
+        assert_eq!(
+            errors.errors["title"][0].fallback, "The title field is required.",
+            "`{body}`"
         );
+        assert_eq!(errors.errors.len(), 1, "`{body}`: {errors}");
     }
 }
 
@@ -2243,4 +2258,237 @@ async fn a_repeated_urlencoded_name_keeps_its_last_value() {
     assert_eq!(form.title, "Holiday");
     assert_eq!(form.note.as_deref(), Some("kept"));
     assert_eq!(form.count, Some(2));
+}
+
+/// Every kind of field a url-encoded form request can fail on.
+#[derive(Debug, serde::Deserialize, validator::Validate, suprnova::FormRequestDerive)]
+struct UrlencodedTyped {
+    title: String,
+    count: u32,
+    ratio: f64,
+    active: bool,
+    note: Option<String>,
+    #[serde(default)]
+    remember: bool,
+}
+
+async fn urlencoded_typed(body: &str) -> Result<UrlencodedTyped, FrameworkError> {
+    let req =
+        crate::common::request_with_body("/", "application/x-www-form-urlencoded", body.as_bytes())
+            .await;
+    UrlencodedTyped::from_request(req).await
+}
+
+#[tokio::test]
+async fn a_urlencoded_form_reports_every_field_that_does_not_parse_under_its_name() {
+    let errors = match urlencoded_typed("count=abc&ratio=half&active=maybe&note=x").await {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {other:?}"),
+    };
+    assert_eq!(key(&errors, "title"), "validation-required");
+    assert_eq!(key(&errors, "count"), "validation-integer");
+    assert_eq!(key(&errors, "ratio"), "validation-numeric");
+    assert_eq!(key(&errors, "active"), "validation-boolean");
+    // An optional field and a `#[serde(default)]` one are not required.
+    assert_eq!(errors.errors.len(), 4, "{errors}");
+
+    // Every required field missing at once is reported at once.
+    let errors = match urlencoded_typed("note=x").await {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {other:?}"),
+    };
+    for field in ["title", "count", "ratio", "active"] {
+        assert_eq!(key(&errors, field), "validation-required", "{field}");
+    }
+    assert_eq!(errors.errors.len(), 4, "{errors}");
+
+    // A form that parses still extracts.
+    let form = match urlencoded_typed("title=t&count=3&ratio=0.5&active=true").await {
+        Ok(form) => form,
+        Err(error) => panic!("{error}"),
+    };
+    assert_eq!((form.count, form.active, form.remember), (3, true, false));
+    assert_eq!((form.ratio, form.note), (0.5, None));
+}
+
+#[derive(Debug, serde::Deserialize, validator::Validate)]
+struct JsonAddress {
+    street: String,
+}
+
+/// Every kind of field a JSON form request can fail on, nested ones too.
+#[derive(Debug, serde::Deserialize, validator::Validate, suprnova::FormRequestDerive)]
+struct JsonTyped {
+    title: String,
+    count: u32,
+    ratio: f64,
+    active: bool,
+    tags: Vec<u32>,
+    note: Option<String>,
+    address: JsonAddress,
+}
+
+async fn json_typed(body: &str) -> Result<JsonTyped, FrameworkError> {
+    let req = crate::common::request_with_body("/", "application/json", body.as_bytes()).await;
+    JsonTyped::from_request(req).await
+}
+
+#[tokio::test]
+async fn a_json_form_reports_every_field_that_does_not_parse_under_its_name() {
+    let errors = match json_typed(
+        r#"{"title": null, "count": "abc", "ratio": "x", "active": 1,
+            "tags": [1, "two"], "note": 5, "address": {}}"#,
+    )
+    .await
+    {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {other:?}"),
+    };
+    // `null` is a missing value, as Laravel's `required` reads it.
+    assert_eq!(key(&errors, "title"), "validation-required");
+    assert_eq!(key(&errors, "count"), "validation-integer");
+    assert_eq!(key(&errors, "ratio"), "validation-numeric");
+    assert_eq!(key(&errors, "active"), "validation-boolean");
+    assert_eq!(key(&errors, "tags.1"), "validation-integer");
+    assert_eq!(key(&errors, "note"), "validation-string");
+    assert_eq!(key(&errors, "address.street"), "validation-required");
+    assert_eq!(errors.errors.len(), 7, "{errors}");
+
+    // Fields left out entirely, every one of them at once.
+    let errors = match json_typed(r#"{"tags": []}"#).await {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {other:?}"),
+    };
+    for field in ["title", "count", "ratio", "active", "address"] {
+        assert_eq!(key(&errors, field), "validation-required", "{field}");
+    }
+    assert_eq!(errors.errors.len(), 5, "{errors}");
+
+    // A body that is not JSON at all is no field's failure.
+    match json_typed(r#"{"title": "#).await {
+        Err(FrameworkError::Domain { status_code, .. }) => assert_eq!(status_code, 422),
+        other => panic!("expected a parse error, got {other:?}"),
+    }
+
+    // A body that parses still extracts.
+    let form = match json_typed(
+        r#"{"title": "t", "count": 3, "ratio": 1, "active": true, "tags": [4],
+            "address": {"street": "Main"}}"#,
+    )
+    .await
+    {
+        Ok(form) => form,
+        Err(error) => panic!("{error}"),
+    };
+    assert_eq!((form.count, form.tags, form.note), (3, vec![4], None));
+    assert_eq!((form.ratio, form.active), (1.0, true));
+    assert_eq!(form.address.street, "Main");
+}
+
+async fn typed_form_handler(req: Request) -> Response {
+    let form = UrlencodedTyped::from_request(req).await?;
+    Ok(HttpResponse::json(json!({ "title": form.title })))
+}
+
+async fn typed_json_handler(req: Request) -> Response {
+    let form = JsonTyped::from_request(req).await?;
+    Ok(HttpResponse::json(json!({ "title": form.title })))
+}
+
+#[tokio::test]
+async fn an_inertia_form_request_gets_its_field_errors_back_in_props_errors() {
+    let slot = Arc::new(Mutex::new(Some(SessionData::new(
+        "sess-form-request".into(),
+        "csrf".into(),
+    ))));
+    let page = |req: Request| async move {
+        InertiaResponse::new("Profile/Edit")
+            .resolve(&req)
+            .await
+            .map_err(HttpResponse::from)
+    };
+    let app = App::with(
+        Router::new()
+            .post("/profile", typed_form_handler)
+            .get("/profile", page)
+            .post("/settings", typed_json_handler)
+            .get("/settings", page),
+        MiddlewareRegistry::new()
+            .append(SeededSessionScope(slot.clone()))
+            .append(InertiaValidationRedirectMiddleware::new()),
+    );
+
+    for (path, content_type, body) in [
+        (
+            "/profile",
+            "application/x-www-form-urlencoded",
+            "title=&count=abc&ratio=1&active=true",
+        ),
+        (
+            "/settings",
+            "application/json",
+            r#"{"count": "abc", "ratio": 1, "active": true, "tags": [], "address": {"street": "x"}}"#,
+        ),
+    ] {
+        let posted = send(
+            &app,
+            Outgoing::post(path, body.as_bytes().to_vec())
+                .content_type(content_type)
+                .header("X-Inertia", "true")
+                .header("Referer", format!("http://localhost{path}")),
+        )
+        .await;
+        assert_eq!(posted.status, 303, "{content_type}: {}", posted.text());
+        assert_eq!(
+            posted.headers.get("location").map(String::as_str),
+            Some(path)
+        );
+
+        slot.lock()
+            .expect("session slot")
+            .as_mut()
+            .expect("session")
+            .age_flash_data();
+        let shown = send(&app, Outgoing::get(path).header("X-Inertia", "true")).await;
+        assert_eq!(shown.status, 200, "{}", shown.text());
+        let errors = shown.json()["props"]["errors"].clone();
+        assert_eq!(
+            errors["title"], "The title field is required.",
+            "{content_type}: {errors}"
+        );
+        assert_eq!(
+            errors["count"], "The count field must be an integer.",
+            "{content_type}: {errors}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_precognitive_form_request_reports_the_fields_it_was_asked_about() {
+    let app = App::new(Router::new().post("/profile", typed_form_handler));
+    let ask = |only: &'static str| {
+        Outgoing::post("/profile", b"count=abc&ratio=1&active=true".to_vec())
+            .content_type("application/x-www-form-urlencoded")
+            .header("Precognition", "true")
+            .header("Precognition-Validate-Only", only)
+    };
+
+    // Asked about `count`, which does not parse: only its error comes back.
+    let reply = send(&app, ask("count")).await;
+    assert_eq!(reply.status, 422, "{}", reply.text());
+    assert_eq!(
+        first_message(&reply, "count"),
+        "The count field must be an integer."
+    );
+    assert!(!errors(&reply).contains_key("title"), "{}", reply.text());
+
+    // Asked about `ratio`, which parses: the form still cannot be checked
+    // while other fields do not parse, so it is not reported valid, and
+    // the fields in the way are named.
+    let reply = send(&app, ask("ratio")).await;
+    assert_eq!(reply.status, 422, "{}", reply.text());
+    assert_eq!(
+        first_message(&reply, "title"),
+        "The title field is required."
+    );
 }

@@ -415,7 +415,8 @@ streaming byte counter during read.
 
 `FormRequest::extract` looks only at the `Content-Type` header:
 
-- `application/x-www-form-urlencoded` → parsed via `serde_urlencoded`
+- `application/x-www-form-urlencoded` → parsed as a form, as described in
+  [empty values, repeated names, and fields that don't parse](#empty-values-repeated-names-and-fields-that-dont-parse)
 - `application/json` or any `application/*+json` suffix → parsed via `serde_json`
 - Anything else (including a missing header) → rejected with HTTP 415
   Unsupported Media Type, before the body is read
@@ -423,7 +424,7 @@ streaming byte counter during read.
 For multipart bodies (`multipart/form-data`), see
 [file uploads](#file-uploads-multipartrequest) below.
 
-## Empty values and repeated names
+## Empty values, repeated names, and fields that don't parse
 
 A form can't send `null`. An HTML form sends an empty input as `name=`, and
 Inertia sends a `null` value as an empty field when it posts `FormData`.
@@ -434,13 +435,44 @@ read it the same way:
 - An `Option` field is `None`, an `Option<String>` included.
 - A required field is missing, a `String` included, so the request fails
   with a `422`.
-- A `Vec` field of a `MultipartRequest` leaves the element out.
+- A `Vec` field leaves the element out.
 
 A name sent more than once keeps its last value, as PHP does. The body
 `title=&title=Holiday` gives `Holiday`, and `title=Holiday&title=` gives
-`null`. A form-urlencoded name that ends in `[]` is a list, so it keeps every
-value. `req.form()` and the form-urlencoded branch of `req.input()` read the
-body by the same rules.
+`null`. A name that ends in `[]` is a list: `tags[]=rust&tags[]=web` fills a
+`tags: Vec<String>` field. `req.form()`, the form-urlencoded branch of
+`req.input()`, and `req.query_into()` read by the same rules.
+
+A field that is missing, or whose value doesn't parse as its type, answers
+the way a failing rule does: a `422` whose `errors` names every such field
+under its input name, with the catalog message for its type. An Inertia
+form gets the usual redirect back with those errors in `props.errors`. A
+JSON body reads the same way, nested fields included, and a JSON `null`
+where a value is required counts as missing.
+
+| Failure | Catalog key |
+|---|---|
+| A required field missing, empty, or JSON `null` | `validation-required` |
+| A value that isn't an integer, a number, or a `bool` for such a field | `validation-integer`, `validation-numeric`, `validation-boolean` |
+| A JSON value that isn't a string for a `String` field, or a list where one value belongs | `validation-string` |
+| Any other value that doesn't fit, such as an unknown enum variant | `validation-format` |
+
+`title=&count=abc` posted to a struct with `title: String` and `count: u32`
+answers with both:
+
+```json
+{
+    "message": "The given data was invalid.",
+    "errors": {
+        "title": ["The title field is required."],
+        "count": ["The count field must be an integer."]
+    }
+}
+```
+
+A body that isn't JSON at all, or a field a struct denies with
+`#[serde(deny_unknown_fields)]`, is no field's failure: it answers `422`
+with a message that words it.
 
 ```rust
 use suprnova::{handler, json_response, request, Response};
@@ -475,6 +507,16 @@ pub async fn update(form: UpdateProfile) -> Response {
   of its name, where PHP keeps the last. The extractor checks a file while
   the body streams, before it knows whether a later part of the same name
   follows, so it decides on the first one.
+- The `#[validate(...)]` rules run only once every field parses, so a
+  request with a field that doesn't parse hears about the parse failures
+  alone. Laravel checks every rule at once. A struct can't be built while a
+  field has no value of its type, and the rules run on the struct.
+- A JSON object nested in the body reports its first missing field, and a
+  field after that object in the body is checked once the object reads.
+  Missing fields at the top of the body are all reported at once.
+- A Precognition request that asks about a field which parses, while
+  another field doesn't, gets those other fields' errors rather than a
+  `204`: the rules for the field it asked about haven't run.
 
 ## Reading the body directly
 
@@ -584,7 +626,7 @@ case. An unchecked checkbox sends nothing, so declare it `Option<bool>` and
 read a missing value as `false` with `unwrap_or(false)`.
 
 An empty text part is `null`, as
-[empty values and repeated names](#empty-values-and-repeated-names)
+[empty values, repeated names, and fields that don't parse](#empty-values-repeated-names-and-fields-that-dont-parse)
 describes: an `Option` field is `None`, a required field reports
 `validation-required`, and a `Vec` field leaves the element out. A `String`
 field is no exception.
@@ -1073,9 +1115,18 @@ let map = req.query_params(); // HashMap<String, String>
 
 // Typed query parse via serde
 #[derive(serde::Deserialize)]
-struct SearchQuery { page: u32, q: String }
+struct SearchQuery {
+    q: String,
+    page: Option<u32>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
 let q: SearchQuery = req.query_into()?;
 ```
+
+`query_into` reads the query as a form body reads: `?page=` leaves `page`
+`None`, `?q=a&q=b` gives `b`, and `?tags[]=a&tags[]=b` fills `tags`. A
+query that doesn't read answers `422` with a message.
 
 ### Route metadata
 
