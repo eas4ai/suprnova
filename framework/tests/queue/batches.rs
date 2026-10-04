@@ -692,3 +692,145 @@ mod m38_partial_push {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The last settlement fires the callbacks, wherever it happens
+// ---------------------------------------------------------------------------
+
+mod terminal_settlement {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use suprnova::queue::driver::{Reservation, ReservationToken};
+    use suprnova::queue::{Envelope, QueueDriver};
+    use tokio::sync::Notify;
+
+    static CATCH_FIRED: AtomicUsize = AtomicUsize::new(0);
+    static FINALLY_FIRED: AtomicUsize = AtomicUsize::new(0);
+    static THEN_FIRED: AtomicUsize = AtomicUsize::new(0);
+
+    struct Recorded(&'static str);
+
+    #[async_trait]
+    impl BatchCallback for Recorded {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        async fn handle(
+            &self,
+            _batch: Batch,
+            _error: Option<String>,
+        ) -> Result<(), FrameworkError> {
+            let counter = match self.0 {
+                "terminal-catch" => &CATCH_FIRED,
+                "terminal-finally" => &FINALLY_FIRED,
+                _ => &THEN_FIRED,
+            };
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn reset() {
+        cache_init();
+        CATCH_FIRED.store(0, Ordering::SeqCst);
+        FINALLY_FIRED.store(0, Ordering::SeqCst);
+        THEN_FIRED.store(0, Ordering::SeqCst);
+        register_callback(Arc::new(Recorded("terminal-catch")));
+        register_callback(Arc::new(Recorded("terminal-finally")));
+        register_callback(Arc::new(Recorded("terminal-then")));
+        Queue::set_batch_repository(Arc::new(MemoryBatchRepository::new()));
+    }
+
+    /// Accepts the first push into the memory queue; parks the second until
+    /// released, then fails it.
+    struct SecondPushFails {
+        inner: Arc<MemoryQueueDriver>,
+        pushes: AtomicUsize,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl QueueDriver for SecondPushFails {
+        async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
+            if self.pushes.fetch_add(1, Ordering::SeqCst) == 0 {
+                return self.inner.push(env).await;
+            }
+            self.entered.notify_one();
+            self.release.notified().await;
+            Err(FrameworkError::internal("simulated push failure"))
+        }
+        async fn pop(&self, t: Duration) -> Result<Option<Reservation>, FrameworkError> {
+            self.inner.pop(t).await
+        }
+        async fn ack(&self, t: &ReservationToken) -> Result<(), FrameworkError> {
+            self.inner.ack(t).await
+        }
+        async fn nack(&self, t: &ReservationToken, d: Duration) -> Result<(), FrameworkError> {
+            self.inner.nack(t, d).await
+        }
+        fn name(&self) -> &'static str {
+            "second-push-fails"
+        }
+    }
+
+    /// DRIVERS-057: the first job is queued and a worker settles it while the
+    /// second push is still in flight; then the second push fails. Recording
+    /// that job as failed is the batch's last settlement, but dispatch only
+    /// fired the callbacks when nothing at all had been pushed, so they never
+    /// fired.
+    #[tokio::test]
+    #[serial]
+    async fn a_partial_dispatch_whose_queued_jobs_already_settled_fires_its_callbacks() {
+        reset();
+        register_job::<BatchedJob>();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let driver = Arc::new(SecondPushFails {
+            inner: Arc::new(MemoryQueueDriver::new()),
+            pushes: AtomicUsize::new(0),
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        Queue::set_driver(driver.clone());
+
+        let dispatch = tokio::spawn(
+            Queue::batch()
+                .name("partial-settled")
+                .add(BatchedJob { n: 1 })
+                .add(BatchedJob { n: 1 })
+                .catch("terminal-catch")
+                .finally("terminal-finally")
+                .dispatch(),
+        );
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the second push is in flight");
+
+        let cfg = WorkerConfig {
+            visibility_timeout: Duration::from_secs(30),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: Some(1),
+            queues: Vec::new(),
+        };
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            run_worker(driver.clone(), cfg, CancellationToken::new()),
+        )
+        .await
+        .expect("the worker settled the queued job");
+        release.notify_one();
+        dispatch
+            .await
+            .expect("join")
+            .expect_err("the second push failed");
+
+        assert_eq!(
+            CATCH_FIRED.load(Ordering::SeqCst),
+            1,
+            "the batch reached zero pending at dispatch, and nothing fired its catch"
+        );
+        assert_eq!(FINALLY_FIRED.load(Ordering::SeqCst), 1);
+        assert_eq!(THEN_FIRED.load(Ordering::SeqCst), 0);
+    }
+}

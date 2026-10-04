@@ -1618,6 +1618,11 @@ hits zero the worker fires the registered `then`/`catch`/`finally`
 callbacks. By default the first failure cancels the batch;
 `.allow_failures()` keeps remaining jobs going.
 
+When a push fails part way through `dispatch()`, the jobs that never reached
+the queue are recorded as failed and the batch is cancelled. If that leaves
+nothing pending, because the jobs that were queued have already settled,
+`dispatch()` fires the callbacks itself before it returns the push error.
+
 ### Durable batches
 
 `MemoryBatchRepository` is lost on restart, which strands every in-flight

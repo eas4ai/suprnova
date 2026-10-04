@@ -1396,8 +1396,9 @@ impl PendingBatch {
     /// there. Cancellation makes [`SkipIfBatchCancelled`] drop the rest, so
     /// pending still reaches zero and the terminal callbacks still fire.
     ///
-    /// If nothing was pushed at all there is no worker left to drive that last
-    /// settlement, so the callbacks fire here.
+    /// When that bookkeeping is the batch's last settlement - nothing was
+    /// pushed, or every job that was pushed has already settled - no worker
+    /// is left to drive it, so the callbacks fire here.
     ///
     /// The caller gets the original push error either way.
     ///
@@ -1481,7 +1482,6 @@ impl PendingBatch {
         }
 
         let mut remaining = envelopes.into_iter().zip(drivers);
-        let mut pushed = 0usize;
         while let Some((env, driver)) = remaining.next() {
             // A job the fake records is recorded in place of its push, as it
             // is in the `Queue::push` funnel: a faked test has no driver to
@@ -1497,10 +1497,9 @@ impl PendingBatch {
                 let orphans: Vec<Uuid> = std::iter::once(undispatched)
                     .chain(remaining.map(|(e, _)| e.id))
                     .collect();
-                settle_undispatched(repo.as_ref(), &id, &orphans, pushed == 0).await;
+                settle_undispatched(repo.as_ref(), &id, &orphans).await;
                 return Err(e);
             }
-            pushed += 1;
         }
         Ok(id)
     }
@@ -1511,12 +1510,7 @@ impl PendingBatch {
 /// Repository errors here are logged, never returned: the caller needs the
 /// original push error, and a bookkeeping failure on top of it is a second
 /// fact, not a replacement for the first.
-async fn settle_undispatched(
-    repo: &dyn BatchRepository,
-    id: &str,
-    orphans: &[Uuid],
-    nothing_was_pushed: bool,
-) {
+async fn settle_undispatched(repo: &dyn BatchRepository, id: &str, orphans: &[Uuid]) {
     for job_id in orphans {
         if let Err(e) = repo.record_failed_job(id, *job_id).await {
             tracing::warn!(
@@ -1535,32 +1529,34 @@ async fn settle_undispatched(
         );
     }
 
-    // With at least one job in the queue, a worker settles the last one and
-    // fires the callbacks on the normal path. With none, this is the last
-    // chance anything runs them.
-    if nothing_was_pushed {
-        match repo.find(id).await {
-            Ok(Some(batch)) => {
-                if let Err(e) =
-                    crate::queue::worker::claim_and_fire_terminal_callbacks(repo, batch).await
-                {
-                    tracing::warn!(
-                        batch_id = %id,
-                        error = %e,
-                        "queue batch dispatch: could not claim terminal callbacks"
-                    );
-                }
+    // Whoever settles the batch's last job fires its callbacks. While a job
+    // is still pending, that is a worker. When this bookkeeping settled the
+    // last one - nothing was pushed, or every job that was pushed has
+    // already been settled by a worker - nothing else will, so it fires them
+    // here. The claim is atomic, so a worker settling at the same moment
+    // cannot fire them a second time.
+    match repo.find(id).await {
+        Ok(Some(batch)) if batch.pending_jobs > 0 => {}
+        Ok(Some(batch)) => {
+            if let Err(e) =
+                crate::queue::worker::claim_and_fire_terminal_callbacks(repo, batch).await
+            {
+                tracing::warn!(
+                    batch_id = %id,
+                    error = %e,
+                    "queue batch dispatch: could not claim terminal callbacks"
+                );
             }
-            Ok(None) => tracing::warn!(
-                batch_id = %id,
-                "queue batch dispatch: batch vanished before its callbacks could fire"
-            ),
-            Err(e) => tracing::warn!(
-                batch_id = %id,
-                error = %e,
-                "queue batch dispatch: could not load the batch to fire its callbacks"
-            ),
         }
+        Ok(None) => tracing::warn!(
+            batch_id = %id,
+            "queue batch dispatch: batch vanished before its callbacks could fire"
+        ),
+        Err(e) => tracing::warn!(
+            batch_id = %id,
+            error = %e,
+            "queue batch dispatch: could not load the batch to fire its callbacks"
+        ),
     }
 }
 
