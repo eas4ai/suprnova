@@ -80,6 +80,7 @@ pub mod testing;
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use scope::ScopedError;
@@ -95,7 +96,51 @@ static APP_CONTAINER: OnceLock<RwLock<Container>> = OnceLock::new();
 // or `tokio::spawn` boundaries - see [`TASK_CONTAINER`] for the
 // async-safe alternative.
 thread_local! {
-    pub(crate) static TEST_CONTAINER: RefCell<Option<Container>> = const { RefCell::new(None) };
+    static TEST_CONTAINER_SLOT: RefCell<Option<Container>> = const { RefCell::new(None) };
+    /// The live flag of the `TestContainerGuard` that installed the
+    /// container above. A guard dropped on another thread cannot reach this
+    /// thread's slot, so it clears the flag instead, and the slot is
+    /// emptied here at its next use.
+    static TEST_CONTAINER_OWNER: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// This thread's test container, read the way a `thread_local!` key is
+/// read (`TEST_CONTAINER.with(|c| ...)`), with one difference: a container
+/// whose guard has been dropped - on any thread - is gone.
+pub(crate) struct TestContainerSlot;
+
+/// See [`TestContainerSlot`].
+pub(crate) static TEST_CONTAINER: TestContainerSlot = TestContainerSlot;
+
+impl TestContainerSlot {
+    /// Run `f` against this thread's container slot, after emptying it if
+    /// the guard that filled it has been dropped.
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&RefCell<Option<Container>>) -> R) -> R {
+        TEST_CONTAINER_SLOT.with(|slot| {
+            let abandoned = TEST_CONTAINER_OWNER.with(|owner| {
+                owner
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|live| !live.load(Ordering::Acquire))
+            });
+            if abandoned {
+                *slot.borrow_mut() = None;
+                TEST_CONTAINER_OWNER.with(|owner| *owner.borrow_mut() = None);
+            }
+            f(slot)
+        })
+    }
+
+    /// Record `live` as the flag of the guard that just filled the slot.
+    pub(crate) fn own(&self, live: Arc<AtomicBool>) {
+        TEST_CONTAINER_OWNER.with(|owner| *owner.borrow_mut() = Some(live));
+    }
+
+    /// Empty the slot and forget its owner, on the thread that filled it.
+    pub(crate) fn clear(&self) {
+        TEST_CONTAINER_SLOT.with(|slot| *slot.borrow_mut() = None);
+        TEST_CONTAINER_OWNER.with(|owner| *owner.borrow_mut() = None);
+    }
 }
 
 // Task-local test overrides for async-safe isolated testing.

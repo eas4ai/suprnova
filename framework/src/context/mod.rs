@@ -219,6 +219,26 @@ tokio::task_local! {
 thread_local! {
     static QUERY_OVERRIDE: RefCell<Option<HashMap<String, String>>> =
         const { RefCell::new(None) };
+    /// The live flag of the `TestQueryGuard` that installed the override
+    /// above. A guard dropped on another thread clears the flag, and the
+    /// override is wiped here at its next read.
+    static QUERY_OVERRIDE_OWNER: RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
+        const { RefCell::new(None) };
+}
+
+/// Wipe this thread's query override when the guard that installed it has
+/// been dropped, on any thread.
+fn evict_abandoned_query_override() {
+    let abandoned = QUERY_OVERRIDE_OWNER.with(|owner| {
+        owner
+            .borrow()
+            .as_ref()
+            .is_some_and(|live| !live.load(std::sync::atomic::Ordering::Acquire))
+    });
+    if abandoned {
+        QUERY_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+        QUERY_OVERRIDE_OWNER.with(|owner| *owner.borrow_mut() = None);
+    }
 }
 
 /// Facade for the per-request key/value bag.
@@ -608,6 +628,7 @@ impl Context {
     pub fn query_param(name: &str) -> Option<String> {
         // The per-thread testing override wins over the scoped query bag.
         // Without an installed override this branch misses and falls through.
+        evict_abandoned_query_override();
         let from_override = QUERY_OVERRIDE.with(|cell| {
             cell.borrow()
                 .as_ref()
@@ -638,6 +659,7 @@ impl Context {
     /// this hook with `default-features = false` and without `testing`.
     #[cfg(any(test, feature = "testing"))]
     pub fn test_set_query(name: impl Into<String>, value: impl Into<String>) {
+        evict_abandoned_query_override();
         QUERY_OVERRIDE.with(|cell| {
             let mut slot = cell.borrow_mut();
             let map = slot.get_or_insert_with(HashMap::new);
@@ -657,6 +679,7 @@ impl Context {
         QUERY_OVERRIDE.with(|cell| {
             *cell.borrow_mut() = None;
         });
+        QUERY_OVERRIDE_OWNER.with(|owner| *owner.borrow_mut() = None);
     }
 
     /// **Testing hook.** Install a query-parameter override and return a
@@ -690,7 +713,12 @@ impl Context {
     #[must_use = "the guard wipes the test query override on drop; binding it to `_` clears immediately"]
     pub fn test_query_guard(name: impl Into<String>, value: impl Into<String>) -> TestQueryGuard {
         Self::test_set_query(name, value);
-        TestQueryGuard { _private: () }
+        let live = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        QUERY_OVERRIDE_OWNER.with(|owner| *owner.borrow_mut() = Some(std::sync::Arc::clone(&live)));
+        TestQueryGuard {
+            origin: std::thread::current().id(),
+            live,
+        }
     }
 }
 
@@ -699,22 +727,33 @@ impl Context {
 /// override on drop so a panicking or early-returning test body can't
 /// leak overrides into the next test scheduled on the same OS thread.
 ///
+/// It wipes the override it installed, wherever it drops. Dropped on
+/// another thread, it used to wipe that thread's override, which belongs
+/// to another test, and leave its own in place. Now it leaves that thread
+/// alone, and its own override is gone at its thread's next read.
+///
 /// Compiled under `cfg(test)` or the `testing` Cargo feature. `testing` is
 /// enabled by default, including in release builds; consumers can remove this
 /// type with `default-features = false` and without `testing`.
 #[cfg(any(test, feature = "testing"))]
 #[must_use = "the guard wipes the test query override on drop; binding it to `_` clears immediately"]
 pub struct TestQueryGuard {
-    // Private field so external crates can't construct one without
-    // going through `Context::test_query_guard`, which is what installs
-    // the override the guard is responsible for.
-    _private: (),
+    // Private fields so external crates can't construct one without going
+    // through `Context::test_query_guard`, which is what installs the
+    // override the guard is responsible for.
+    /// The thread whose override this guard installed.
+    origin: std::thread::ThreadId,
+    /// Cleared on drop; the override is dead from then on.
+    live: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(any(test, feature = "testing"))]
 impl Drop for TestQueryGuard {
     fn drop(&mut self) {
-        Context::test_clear_query();
+        self.live.store(false, std::sync::atomic::Ordering::Release);
+        if std::thread::current().id() == self.origin {
+            Context::test_clear_query();
+        }
     }
 }
 
@@ -1304,6 +1343,34 @@ mod tests {
                 );
             })
             .await;
+    }
+
+    /// A query guard dropped on another thread wipes the override it
+    /// installed and nothing else. It used to wipe the override of the
+    /// thread it dropped on - another test's - and leave its own in place.
+    #[test]
+    fn a_query_guard_dropped_on_another_thread_wipes_only_its_own_override() {
+        Context::test_clear_query();
+        let guard = Context::test_query_guard("page", "3");
+
+        let theirs = std::thread::spawn(move || {
+            let _theirs = Context::test_query_guard("page", "9");
+            drop(guard);
+            Context::query_param("page")
+        })
+        .join()
+        .expect("the other thread does not panic");
+
+        assert_eq!(
+            theirs.as_deref(),
+            Some("9"),
+            "the other thread keeps its override"
+        );
+        assert_eq!(
+            Context::query_param("page"),
+            None,
+            "this thread's override went with its guard"
+        );
     }
 
     /// A value whose deserialization writes back into the context, as a
