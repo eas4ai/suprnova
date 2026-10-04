@@ -7627,6 +7627,7 @@ dependencies = [
  "reqsign-file-read-tokio",
  "reqwest 0.13.4",
  "rust_decimal",
+ "rustix",
  "rustls",
  "sea-orm",
  "sea-orm-migration",
@@ -7667,6 +7668,7 @@ dependencies = [
  "webauthn-rs",
  "wiremock",
  "writeable 0.6.3",
+ "xattr",
  "zeroize",
 ]
 

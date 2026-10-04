@@ -1664,11 +1664,8 @@ mod tests {
     /// as `Storage::register_fs` configures one - atomic staging included, so
     /// these tests see the same write path an application does.
     fn fs_operator(root: &std::path::Path) -> Operator {
-        let service = crate::filesystem::atomic_fs_service(
-            root.to_str().expect("a tempdir path is valid UTF-8"),
-        )
-        .expect("a tempdir path stays valid UTF-8 once the staging name is joined");
-        Operator::new(service).expect("the fs service builds over an existing directory")
+        crate::filesystem::local_fs_operator(root.to_str().expect("a tempdir path is valid UTF-8"))
+            .expect("the fs service builds over an existing directory")
     }
 
     /// Compose a read-through disk over a *real* primary and a stub fallback.

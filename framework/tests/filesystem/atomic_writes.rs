@@ -1277,3 +1277,78 @@ async fn conditional_writes_claim_the_key_exactly_once_under_a_hostile_neighbour
         );
     }
 }
+
+/// Replace `root/dir` with a symlink to `outside`, keeping the original
+/// directory at `root/dir.old`. This is the swap a local actor with write
+/// access to the disk root can make while an operation is in flight.
+#[cfg(unix)]
+fn swap_directory_for_symlink(root: &std::path::Path, outside: &std::path::Path) {
+    std::fs::rename(root.join("dir"), root.join("dir.old")).expect("move the real directory aside");
+    std::os::unix::fs::symlink(outside, root.join("dir")).expect("plant the symlink");
+}
+
+/// DRIVERS-017: a directory swapped for a symlink after a write validated its
+/// path cannot redirect the publication out of the root. The guard used to
+/// check the path once, at the first write, and publish by pathname at close,
+/// so the whole upload was a window for the swap.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_directory_swapped_for_a_symlink_mid_write_cannot_publish_outside_the_root() {
+    let _guard = Storage::fake();
+    let (tmp, disk) = register_local_disk();
+    let outside = tempfile::tempdir().expect("a directory outside the disk root");
+    std::fs::create_dir_all(tmp.path().join("dir")).expect("create the target directory");
+
+    let mut writer = disk.writer("dir/file.txt").await.expect("open a writer");
+    writer
+        .write("the first chunk validates the path")
+        .await
+        .expect("the first chunk is accepted");
+    swap_directory_for_symlink(tmp.path(), outside.path());
+    let closed = writer.close().await;
+
+    assert!(
+        !outside.path().join("file.txt").exists(),
+        "the write was published outside the disk root through the swapped-in symlink"
+    );
+    assert!(
+        closed.is_err(),
+        "publishing through a symlink that leaves the root must fail"
+    );
+}
+
+/// DRIVERS-017, the read side: a directory swapped for a symlink after a read
+/// opened cannot make that read return a file outside the root. The guard
+/// used to validate the path and let the backend open it by pathname later.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_directory_swapped_for_a_symlink_after_a_read_opens_cannot_redirect_it() {
+    use suprnova::opendal::BytesRange;
+    use suprnova::opendal::raw::oio::{Read as _, ReadStream as _};
+    use suprnova::opendal::raw::{OpRead, Service as _};
+
+    let _guard = Storage::fake();
+    let (tmp, disk) = register_local_disk();
+    let outside = tempfile::tempdir().expect("a directory outside the disk root");
+    std::fs::create_dir_all(tmp.path().join("dir")).expect("create the directory");
+    std::fs::write(tmp.path().join("dir/data.txt"), "inside").expect("seed the object");
+    std::fs::write(outside.path().join("data.txt"), "SECRET").expect("plant the outside file");
+
+    let reader = disk
+        .service()
+        .read(disk.context(), "dir/data.txt", OpRead::new())
+        .expect("build a reader");
+    let (_, mut stream) = reader
+        .open(BytesRange::default())
+        .await
+        .expect("the read validates the path and opens");
+    swap_directory_for_symlink(tmp.path(), outside.path());
+
+    if let Ok(bytes) = stream.read_all().await {
+        assert_eq!(
+            bytes.to_vec(),
+            b"inside",
+            "the read returned a file outside the disk root through the swapped-in symlink"
+        );
+    }
+}

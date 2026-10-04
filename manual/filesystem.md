@@ -168,18 +168,26 @@ rejected if that resolved path lies outside the canonical root, so an in-root
 symlink observed during validation cannot redirect a read, write, list, copy,
 or rename outside the disk.
 
-This is a canonicalize-then-operate guard, not descriptor-relative filesystem
-confinement. It assumes the disk root and its contents are trusted against
-concurrent mutation: an attacker who can replace directories or symlinks after
-validation but before the backend opens the path may win a time-of-check to
-time-of-use race. Use OS-level isolation or a dedicated filesystem when other
-principals can mutate the storage tree concurrently.
+A check followed by a syscall by pathname is a race. Someone who can rename
+entries inside the root could swap a checked directory for a symlink after the
+check and redirect the syscall. On Unix the local disk does not act by
+pathname. Every operation resolves its path one directory at a time, holds each
+directory open, and names the next component relative to it, opening each
+directory and the final entry with `O_NOFOLLOW`. Symlinks inside the root are
+still followed, but by that walk: a link whose target leaves the root is
+refused, and a symlink swapped in after the walk looked at a component fails
+the operation. A write is published with `renameat` or `linkat` relative to its
+held parent directory, so a directory swapped mid-upload cannot carry the
+upload out of the root. On other platforms the guard is a check followed by the
+operation; use OS-level isolation or a dedicated filesystem there when other
+principals can change the storage tree concurrently.
 
-Streaming writers, listers, and copiers perform this resolved-path check once,
-immediately before their first backend I/O. Validation is then fixed for that
-stream session so each chunk or item does not block on filesystem
-canonicalization. Copier and writer aborts always forward cleanup to their
-backends, even before activation or when validation can no longer complete.
+Streaming writers, listers, and copiers perform the resolved-path check once,
+immediately before their first backend I/O, so each chunk or item does not
+block on filesystem canonicalization. On Unix the directory-relative walk
+still runs at publish time, which is what keeps a long upload confined.
+Copier and writer aborts always forward cleanup to their backends, even before
+activation or when validation can no longer complete.
 
 ## The Laravel-shape disk surface
 
