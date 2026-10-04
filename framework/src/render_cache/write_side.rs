@@ -51,6 +51,11 @@ pub enum WriteSideDecision {
 /// answer, and the two fixed answers can never disagree, since they are
 /// computed from process-lifetime facts), so a racing pair of writes can
 /// only ever store the same value twice.
+///
+/// Whether a runtime is installed is not one of those facts: a process can
+/// write once before it installs RenderCache. So `installed` is read before
+/// the fixed answer, never cached in it, and a `CLOSED` fixed earlier cannot
+/// outlive an install (DATA-028).
 const UNKNOWN: u8 = 0;
 const OPEN: u8 = 1;
 const CLOSED: u8 = 2;
@@ -113,8 +118,10 @@ fn enabled() -> bool {
 ///
 /// A runtime installed here answers `true` *without* fixing the state, so a
 /// test that uninstalls the runtime gets the probe it would get in a worker
-/// rather than the serving process's answer frozen in. `Undecided` fixes
-/// nothing either: the next write asks again.
+/// rather than the serving process's answer frozen in. It is also read
+/// before the fixed state, so a `Closed` fixed by a write made before the
+/// install does not keep an installed, serving process from advancing.
+/// `Undecided` fixes nothing either: the next write asks again.
 ///
 /// `caller_holds_pool_connection` is true when the call is made from inside
 /// a transaction - ambient (`CURRENT_TX`) or an explicit `_with_tx` /
@@ -140,15 +147,21 @@ fn enabled() -> bool {
 pub(crate) async fn write_side_open(
     caller_holds_pool_connection: bool,
 ) -> Result<bool, FrameworkError> {
+    // `decide` answers Open for an installed process whatever the other
+    // facts are, so that row is taken here, before the fixed state an
+    // earlier, pre-install write may have left behind.
+    if super::is_installed() {
+        return Ok(true);
+    }
     match STATE.load(Ordering::Relaxed) {
         OPEN => return Ok(true),
         CLOSED => return Ok(false),
         _ => {}
     }
-    let installed = super::is_installed();
+    let installed = false;
     let enabled = enabled();
     let connected = DB::is_connected();
-    let needs_schema_probe = !installed && enabled && connected;
+    let needs_schema_probe = enabled && connected;
     if needs_schema_probe && caller_holds_pool_connection {
         return Ok(false);
     }
@@ -159,9 +172,7 @@ pub(crate) async fn write_side_open(
     };
     match decide(installed, enabled, connected, migration) {
         WriteSideDecision::Open => {
-            if !installed {
-                STATE.store(OPEN, Ordering::Relaxed);
-            }
+            STATE.store(OPEN, Ordering::Relaxed);
             Ok(true)
         }
         WriteSideDecision::Closed => {
