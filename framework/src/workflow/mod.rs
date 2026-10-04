@@ -550,12 +550,25 @@ async fn process_claimed_workflow(
         }
         Err(err) => {
             if claimed.attempts < claimed.max_attempts {
-                let backoff = config.retry_backoff_secs * claimed.attempts as i64;
                 // A worker claims the run when `next_run_at <= NOW()` of the
                 // database, so the retry is stamped from the wall clock: a
                 // test clock would move one side of that comparison only.
+                // `WorkflowConfig::validate` bounds the backoff at boot, but
+                // `with_config` skips that check, so the arithmetic is checked
+                // here too.
                 let wall_now = chrono::Utc::now().naive_utc();
-                let next_run_at = wall_now + ChronoDuration::seconds(backoff);
+                let next_run_at = config
+                    .retry_backoff_secs
+                    .checked_mul(i64::from(claimed.attempts))
+                    .and_then(ChronoDuration::try_seconds)
+                    .and_then(|backoff| wall_now.checked_add_signed(backoff))
+                    .ok_or_else(|| {
+                        FrameworkError::internal(format!(
+                            "WorkflowConfig.retry_backoff_secs of {} seconds after attempt {} \
+                             runs past the dates the clock can hold",
+                            config.retry_backoff_secs, claimed.attempts
+                        ))
+                    })?;
                 store::requeue(
                     claimed.id,
                     &err.to_string(),
@@ -1382,6 +1395,78 @@ mod tests {
         assert!(
             err.contains("panicked"),
             "error must record that it came from a panic, got: {err}"
+        );
+    }
+
+    /// A lease too long for any date is an error naming the lease, not a
+    /// panic in the date arithmetic, in both places that stamp one with the
+    /// worker's clock.
+    #[tokio::test]
+    async fn a_lease_too_long_for_a_date_is_an_error() {
+        let _db = setup_db().await;
+        let workflow_name = format!("{}::{}", module_path!(), "test_workflow");
+        let input = serde_json::to_string(&()).unwrap();
+        let handle = store::insert_workflow(&workflow_name, &input, 3)
+            .await
+            .expect("insert workflow");
+        let id = handle.id();
+
+        let marked =
+            tokio::spawn(
+                async move { store::mark_running(id, "test-worker", Duration::MAX).await },
+            )
+            .await;
+        assert!(
+            matches!(&marked, Ok(Err(error)) if error.to_string().contains("lock_timeout")),
+            "mark_running with Duration::MAX must return an error, got {marked:?}"
+        );
+
+        let claimed = store::mark_running(id, "test-worker", Duration::from_secs(30))
+            .await
+            .expect("mark running");
+        let attempts = claimed.attempts;
+        let refreshed = tokio::spawn(async move {
+            store::refresh_lock_if_owned_at(
+                id,
+                Duration::MAX,
+                "test-worker",
+                attempts,
+                chrono::Utc::now().naive_utc(),
+            )
+            .await
+        })
+        .await;
+        assert!(
+            matches!(&refreshed, Ok(Err(error)) if error.to_string().contains("lock_timeout")),
+            "a refresh with Duration::MAX must return an error, got {refreshed:?}"
+        );
+    }
+
+    /// A retry backoff too long for any date is an error naming the setting,
+    /// not a panic outside the handler's panic boundary. `with_config` skips
+    /// the boot check, so the worker must not trust the value.
+    #[tokio::test]
+    async fn a_retry_backoff_too_long_for_a_date_is_an_error() {
+        let _db = setup_db().await;
+        let workflow_name = format!("{}::{}", module_path!(), "panicking_workflow");
+        let input = serde_json::to_string(&()).unwrap();
+        let handle = store::insert_workflow(&workflow_name, &input, 3)
+            .await
+            .expect("insert workflow");
+        let claimed = store::mark_running(handle.id(), "test-worker", Duration::from_secs(30))
+            .await
+            .expect("mark running");
+        let config = WorkflowConfig {
+            retry_backoff_secs: i64::MAX,
+            ..WorkflowConfig::from_env()
+        };
+
+        let outcome =
+            tokio::spawn(async move { process_claimed_workflow(claimed, Arc::new(config)).await })
+                .await;
+        assert!(
+            matches!(&outcome, Ok(Err(error)) if error.to_string().contains("retry_backoff_secs")),
+            "a retry with a backoff of i64::MAX seconds must return an error, got {outcome:?}"
         );
     }
 

@@ -256,9 +256,9 @@ clamps instead of accepting an obviously-broken config.
 |---|---|---|---|
 | `WORKFLOW_CONCURRENCY` | `4` | `usize` | Maximum concurrent workflow executions per worker process. Clamped to `>= 1`. |
 | `WORKFLOW_POLL_INTERVAL_MS` | `1000` (ms) | `u64` | How often the worker polls for newly-due workflows. |
-| `WORKFLOW_LOCK_TIMEOUT_SECS` | `30` (seconds) | `u64` | Reclaim timeout for a claimed workflow row whose worker has died. |
+| `WORKFLOW_LOCK_TIMEOUT_SECS` | `30` (seconds) | `u64` | Reclaim timeout for a claimed workflow row whose worker has died. Clamped to `>= 2`; above 253402300799 (about 8,000 years) the worker refuses to start, because the lease would end past the dates the clock can hold. |
 | `WORKFLOW_MAX_ATTEMPTS` | `3` | `i32` | Max attempts per workflow run before it is marked failed. Clamped to `>= 1`. |
-| `WORKFLOW_RETRY_BACKOFF_SECS` | `5` | `i64` | Linear backoff per attempt. Clamped to `>= 0` - negative backoff would schedule retries in the past and produce a tight-loop reclaim. |
+| `WORKFLOW_RETRY_BACKOFF_SECS` | `5` | `i64` | Linear backoff per attempt. Clamped to `>= 0` - negative backoff would schedule retries in the past and produce a tight-loop reclaim. When it times `WORKFLOW_MAX_ATTEMPTS` exceeds 253402300799 seconds, the worker refuses to start. |
 
 ## Mail
 
