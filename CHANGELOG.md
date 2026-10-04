@@ -373,10 +373,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `Option<u64>`, its key and foreign keys included, reads and writes on
   SQLite, Postgres and MySQL through the new `AsU64` and `AsOptionalU64`
   casts: the whole range on MySQL's unsigned columns, and `0` to
-  `i64::MAX` on SQLite and Postgres, which store it signed. There a larger
-  value fails with an error naming the column before anything is sent,
-  and a negative stored value fails to read the same way. This landed
-  after the `v3.1.0` tag (#137).
+  `i64::MAX` on SQLite and Postgres, which store it signed. There a write
+  of a larger value is refused before anything is sent, as a database
+  error that names the column in the log, and a negative stored value
+  fails to read the same way. A read by such a value answers what is true
+  of every row: `find` returns none, so a model bound from a route answers
+  404, `find_many` skips the id, and a filter on the key or any narrower
+  integer field matches as it would on MySQL. `DB::table` compares and
+  writes such a value the same way. A `u64`-keyed model binds from a
+  route, `chunk_by_id` and `lazy_by_id` walk the whole `u64` range on
+  MySQL, and the built-in user providers sign in a user whose id is a
+  `u64`. This landed after the `v3.1.0` tag (#137).
 - **Settings that match Laravel's schema.** In a package's `Cargo.toml`,
   `[package.metadata.suprnova.model] datetime_cast = "native"` makes every
   `DateTime<Utc>` field of that package's models without a cast of its
@@ -431,11 +438,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   tag (#137).
 - **`pluck`, `value` and the aggregates read every key type, and say why a
   value does not read.** `pluck`, `pluck_keyed`, `value`, `value_or_fail`,
-  `sole_value`, `sum`, `avg`, `min`, `max` and `DB::scalar` take any type
-  that implements the new `ColumnValue` trait, which every type SeaORM
-  reads already does, and `u64`, which they now read on SQLite and
-  Postgres too. A generic caller bound by `TryGetable` needs `ColumnValue`
-  instead. `pluck`, `pluck_keyed` and `value` used to drop a row whose
+  `sole_value`, `sum`, `min`, `max` and `DB::scalar` take any type that
+  implements the new `ColumnValue` trait, which every type SeaORM reads
+  already does, and `u64`, which they now read on SQLite and Postgres
+  too. A generic caller bound by `TryGetable` needs `ColumnValue`
+  instead. `avg` reads an `f64` or a `rust_decimal::Decimal` (the new
+  `AvgValue` trait), a decimal column's average exactly; another type no
+  longer compiles. `pluck`, `pluck_keyed` and `value` used to drop a row whose
   value did not decode, so `pluck::<u64>` returned an empty list; they
   still skip a NULL, and any other value that does not decode is an error
   naming the column. This landed after the `v3.1.0` tag (#137).
@@ -504,6 +513,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **`sum` and `avg` of an integer column read on Postgres and MySQL.**
+  Postgres answers `numeric` and MySQL `DECIMAL` for them, which `sum` and
+  `avg` could not read, so they failed there while passing on SQLite. They
+  now read either: an integer sum exactly, refusing a fractional or
+  out-of-range sum with an error that quotes it, and `sum::<f64>` of an
+  integer column now reads on SQLite too. `with_sum` and `with_avg` stored
+  `0.0` on Postgres and MySQL; they now hold the value, and a value that is
+  not numeric is an error instead of a silent zero. This landed after the
+  `v3.1.0` tag.
 - **Facebook sign-in receives the email.** The Facebook provider requested
   a bare `/me`, for which the Graph API returns only `id` and `name`; it
   now names `id`, `name`, `email` and `picture`. X requests
