@@ -958,10 +958,14 @@ impl Queue {
         }
         crate::database::after_commit::register_callback(Box::new(move || {
             Box::pin(async move {
-                let mut env = envelope_for::<J>(&job, when.resolve::<J>()?, context)?;
-                env.idempotency_key = Some(unique_id);
-                env.unique_lock_owner = owner.clone();
+                // Building the envelope is inside the guarded block too: a
+                // payload that cannot be encoded at the commit, or an
+                // availability that cannot be resolved, is a push that did not
+                // happen, and its lease goes back like a refused write's.
                 let result = async {
+                    let mut env = envelope_for::<J>(&job, when.resolve::<J>()?, context)?;
+                    env.idempotency_key = Some(unique_id);
+                    env.unique_lock_owner = owner.clone();
                     let drv = driver_for_job::<J>()?;
                     drv.push(env).await
                 }
