@@ -412,19 +412,23 @@ pub const DEFAULT_BATCH_SETTLEMENTS_TABLE: &str = "job_batch_settlements";
 ///     name          TEXT NOT NULL,
 ///     total_jobs    INTEGER NOT NULL,
 ///     options_json  TEXT NOT NULL,
-///     created_at    INTEGER NOT NULL,
-///     cancelled_at  INTEGER NULL,
-///     finished_at   INTEGER NULL
+///     created_at    BIGINT NOT NULL,
+///     cancelled_at  BIGINT NULL,
+///     finished_at   BIGINT NULL
 /// );
 ///
 /// CREATE TABLE job_batch_settlements (
 ///     batch_id   TEXT NOT NULL,
 ///     job_id     TEXT NOT NULL,
 ///     failed     INTEGER NOT NULL,
-///     settled_at INTEGER NOT NULL,
+///     settled_at BIGINT NOT NULL,
 ///     PRIMARY KEY (batch_id, job_id)
 /// );
 /// ```
+///
+/// The epoch columns are `BIGINT` so they outlive 2038. A table created
+/// with `INTEGER` there, as an earlier version of this schema said, still
+/// works: the repository reads every integer column 32 or 64 bits wide.
 ///
 /// Same convention as
 /// [`DatabaseFailedJobStore`](crate::queue::DatabaseFailedJobStore): the
@@ -565,7 +569,7 @@ impl DatabaseBatchRepository {
             .await
             .map_err(|e| FrameworkError::internal(format!("job_batches lock: {e}")))?;
         row.map(|row| {
-            row.try_get_by_index(0)
+            wide_int(&row, 0)
                 .map_err(|e| FrameworkError::internal(format!("job_batches total col: {e}")))
         })
         .transpose()
@@ -637,8 +641,7 @@ impl DatabaseBatchRepository {
         let Some(row) = row else {
             return Ok(None);
         };
-        let total: i64 = row
-            .try_get_by_index(0)
+        let total = wide_int(&row, 0)
             .map_err(|e| FrameworkError::internal(format!("job_batches total col: {e}")))?;
         let settled: i64 = row
             .try_get_by_index(1)
@@ -674,8 +677,7 @@ impl DatabaseBatchRepository {
             .ok_or_else(|| {
                 FrameworkError::internal(format!("batch disappeared while locked: {id}"))
             })?;
-        let cancelled_at: Option<i64> = row
-            .try_get_by_index(0)
+        let cancelled_at = optional_wide_int(&row, 0)
             .map_err(|e| FrameworkError::internal(format!("job_batches cancelled col: {e}")))?;
         cancelled_at
             .map(|value| timestamp(value, "cancelled_at"))
@@ -828,11 +830,11 @@ impl BatchRepository for DatabaseBatchRepository {
             }
         };
         let name: String = row.try_get_by_index(0).map_err(col(0, "name"))?;
-        let total_jobs: i64 = row.try_get_by_index(1).map_err(col(1, "total_jobs"))?;
+        let total_jobs = wide_int(&row, 1).map_err(col(1, "total_jobs"))?;
         let options_json: String = row.try_get_by_index(2).map_err(col(2, "options"))?;
-        let created_at: i64 = row.try_get_by_index(3).map_err(col(3, "created_at"))?;
-        let cancelled_at: Option<i64> = row.try_get_by_index(4).map_err(col(4, "cancelled_at"))?;
-        let finished_at: Option<i64> = row.try_get_by_index(5).map_err(col(5, "finished_at"))?;
+        let created_at = wide_int(&row, 3).map_err(col(3, "created_at"))?;
+        let cancelled_at = optional_wide_int(&row, 4).map_err(col(4, "cancelled_at"))?;
+        let finished_at = optional_wide_int(&row, 5).map_err(col(5, "finished_at"))?;
 
         let counts = self
             .counts(&self.db, id)
@@ -952,8 +954,7 @@ impl BatchRepository for DatabaseBatchRepository {
             .await
             .map_err(|e| FrameworkError::internal(format!("job_batches cancelled: {e}")))?;
         let Some(row) = row else { return Ok(false) };
-        let at: Option<i64> = row
-            .try_get_by_index(0)
+        let at = optional_wide_int(&row, 0)
             .map_err(|e| FrameworkError::internal(format!("job_batches cancelled col: {e}")))?;
         Ok(at.is_some())
     }
@@ -1098,6 +1099,34 @@ impl DatabaseBatchRepository {
         }
         Ok(out)
     }
+}
+
+/// Read an integer column 32 or 64 bits wide.
+///
+/// Postgres pins `INTEGER` to the 32-bit `int4`, and sqlx refuses to read an
+/// `int4` column into an `i64`, while SQLite and MySQL hand back any width.
+/// `total_jobs` is documented as `INTEGER`, and tables created from the
+/// earlier schema have `INTEGER` epoch columns too, so every settlement on
+/// Postgres failed to read its batch. Widening on read, as
+/// `failed_jobs` does, keeps those tables working.
+fn wide_int(row: &sea_orm::QueryResult, index: usize) -> Result<i64, sea_orm::DbErr> {
+    row.try_get_by_index::<i64>(index).or_else(|wide| {
+        row.try_get_by_index::<i32>(index)
+            .map(i64::from)
+            .map_err(|_| wide)
+    })
+}
+
+/// The nullable form of [`wide_int`].
+fn optional_wide_int(
+    row: &sea_orm::QueryResult,
+    index: usize,
+) -> Result<Option<i64>, sea_orm::DbErr> {
+    row.try_get_by_index::<Option<i64>>(index).or_else(|wide| {
+        row.try_get_by_index::<Option<i32>>(index)
+            .map(|value| value.map(i64::from))
+            .map_err(|_| wide)
+    })
 }
 
 /// Turn a stored unix timestamp back into a `DateTime`, naming the column so a
