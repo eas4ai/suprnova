@@ -86,6 +86,25 @@ pub(crate) async fn boot_after_hook(boot: ProcessBoot) -> Result<(), BootError> 
     Ok(())
 }
 
+/// How long the end of a booted process waits for the supervisors its
+/// bootstrap started: the grace `Server::run` gives them.
+const SUPERVISOR_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// End a booted process the way `Server::run` ends its graceful
+/// shutdown: stop the supervisors and drain them, then wait for the
+/// queued event listeners still running, which the supervisors may have
+/// started on their way down.
+///
+/// The application's bootstrap starts supervisors in every process, not
+/// only the server's, and returning from `main` drops the runtime and
+/// every task on it. The workers, the commands, and the console used to
+/// return with their supervisors still running, so the teardown cut them
+/// off mid-work instead of letting them see their cancel token.
+pub(crate) async fn finish_process() {
+    crate::supervisor::SupervisorRegistry::shutdown(SUPERVISOR_DRAIN).await;
+    crate::events::drain_queued_at_shutdown().await;
+}
+
 /// Every runtime driver, in the order `Server::run` boots them.
 ///
 /// `report_failures` turns a driver that does not come up into a warning
