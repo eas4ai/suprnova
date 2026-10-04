@@ -515,7 +515,9 @@ wins**:
    choice made before signing in isn't lost.
 3. **`Accept-Language`** - negotiated against `available_locales()` with
    `fluent-langneg`, honouring q-values. `fr-CH, es;q=0.8, en;q=0.5`
-   against catalogs `en` + `es` resolves to `es`.
+   against catalogs `en` + `es` resolves to `es`. The weights rank the
+   languages, not their order in the header, so `en;q=0.1, es` also
+   resolves to `es`, and a language sent with `q=0` is never chosen.
 4. **`APP_LOCALE`** - the configured default, when nothing above hit.
 
 A candidate that doesn't parse, or names a locale with no catalog, is

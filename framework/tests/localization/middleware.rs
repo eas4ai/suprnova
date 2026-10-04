@@ -203,6 +203,36 @@ async fn accept_language_negotiates() {
     assert_eq!(body, "Hola");
 }
 
+/// DRIVERS-023: the header's q-values rank the languages, not the order
+/// they are written in, and `q=0` refuses a language outright.
+#[tokio::test]
+#[serial_test::serial]
+async fn accept_language_ranks_by_q_value_not_by_position() {
+    let _tmp = bind_translator();
+    let (status, body) = drive(&[("Accept-Language", "en;q=0.1, es;q=1")]).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body, "Hola",
+        "es outranks en by weight, though en is listed first"
+    );
+
+    let (_, body) = drive(&[("Accept-Language", "en;q=0, es;q=0.5")]).await;
+    assert_eq!(body, "Hola", "en is refused with q=0");
+
+    let en = Locale::parse("en").unwrap();
+    assert_eq!(
+        suprnova::localization::negotiate("en;q=0, fr", std::slice::from_ref(&en)),
+        None,
+        "a refused language is never chosen, even as the only one available"
+    );
+    let es = Locale::parse("es").unwrap();
+    assert_eq!(
+        suprnova::localization::negotiate("es;q=0.5, en;q=0.500", &[en.clone(), es.clone()]),
+        Some(es),
+        "equal weights keep the header's order, and three decimals parse"
+    );
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn cookie_beats_header() {
