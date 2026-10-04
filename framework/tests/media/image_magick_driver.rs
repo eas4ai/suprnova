@@ -368,3 +368,85 @@ fn an_animation_reports_the_dimensions_of_its_first_frame() {
         (100, 80)
     );
 }
+
+/// Run `magick identify -format <format> gif:-` over `gif` and return what it
+/// printed, one entry per frame.
+fn identify_frames(gif: &[u8], format: &str) -> Vec<String> {
+    use std::io::Write;
+    let mut child = Command::new(driver().binary())
+        .args(["identify", "-format", format, "gif:-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("magick must run");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(gif)
+        .expect("write the GIF");
+    let out = child.wait_with_output().expect("identify output");
+    assert!(out.status.success(), "identify must read the GIF");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn an_animation_is_processed_as_its_first_frame() {
+    // The built-in driver decodes the first frame composed onto the logical
+    // screen and nothing after it; the manual says the pipeline only uses
+    // the first frame. So this driver must too, or a resize scales each
+    // frame on its own and the output keeps every frame.
+    let made = Command::new(driver().binary())
+        .args([
+            "-size",
+            "40x30",
+            "xc:red",
+            "-set",
+            "page",
+            "100x80+10+10",
+            "-size",
+            "100x80",
+            "xc:blue",
+            "-set",
+            "page",
+            "100x80+0+0",
+            "-loop",
+            "0",
+            "gif:-",
+        ])
+        .output()
+        .expect("magick must run");
+    assert!(made.status.success(), "magick must write the animation");
+
+    let processed = driver()
+        .process(
+            &made.stdout,
+            &pipeline(
+                vec![Transformation::Resize {
+                    width: 50,
+                    height: 40,
+                }],
+                OutputFormat::Gif,
+            ),
+        )
+        .expect("magick must process the animation");
+    let frames = identify_frames(&processed, "%w %h %W %H %[pixel:p{15,12}]\n");
+    assert_eq!(
+        frames.len(),
+        1,
+        "only the first frame is processed: {frames:?}"
+    );
+    let first = &frames[0];
+    assert!(
+        first.starts_with("50 40 50 40 "),
+        "the first frame, composed onto the 100x80 screen, then resized: {first}"
+    );
+    assert!(
+        first.contains("red") || first.contains("255,0,0"),
+        "the red first frame sits where it was placed: {first}"
+    );
+}

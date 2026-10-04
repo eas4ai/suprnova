@@ -541,6 +541,24 @@ fn input_spec(detected: Option<sniff::InputFormat>) -> String {
     }
 }
 
+/// The input argument and the settings that make ImageMagick work on the
+/// image the built-in driver decodes: the first frame (`[0]`), and for a GIF
+/// that frame composed onto its logical screen (`-coalesce`).
+///
+/// The pipeline uses only the first frame. Without `[0]` ImageMagick keeps
+/// every frame of an animation and transforms each on its own, so a resize
+/// of a GIF whose frames have different sizes scales each one differently.
+/// A GIF frame can sit at an offset on a larger screen; the built-in driver
+/// composes it onto that screen, and `-coalesce` does the same. Other formats
+/// keep their own pixels, as the built-in driver reads them.
+fn first_frame_input(detected: Option<sniff::InputFormat>) -> Vec<String> {
+    let mut args = vec![format!("{}[0]", input_spec(detected))];
+    if detected == Some(sniff::InputFormat::Gif) {
+        args.push("-coalesce".into());
+    }
+    args
+}
+
 /// Full argv (after the binary) for a process run.
 fn process_args(
     pipeline: &ImagePipeline,
@@ -549,7 +567,7 @@ fn process_args(
     target: OutputFormat,
 ) -> Vec<String> {
     let mut args = limit_args(config);
-    args.push(input_spec(detected));
+    args.extend(first_frame_input(detected));
     for step in &pipeline.transformations {
         args.extend(transformation_args(*step));
     }
@@ -607,7 +625,7 @@ fn dimensions_args(config: &ImageConfig, detected: Option<sniff::InputFormat>) -
 /// driver and Laravel, both of which drop alpha rather than weighting by it.
 fn dominant_color_args(config: &ImageConfig, detected: Option<sniff::InputFormat>) -> Vec<String> {
     let mut args = limit_args(config);
-    args.push(input_spec(detected));
+    args.extend(first_frame_input(detected));
     args.push("-alpha".into());
     args.push("off".into());
     args.push("-resize".into());
@@ -744,8 +762,9 @@ mod tests {
         let mut expected = limits();
         expected.extend(
             [
-                // The input coder is pinned, not sniffed by ImageMagick.
-                "png:-",
+                // The input coder is pinned, not sniffed by ImageMagick, and
+                // only the first frame is read.
+                "png:-[0]",
                 "-resize",
                 "800x600!",
                 "-colorspace",
@@ -1070,7 +1089,41 @@ mod tests {
         let dims = dimensions_args(&config(), Some(sniff::InputFormat::Png));
         assert_eq!(dims[dims.len() - 1], "png:-[0]");
         let colour = dominant_color_args(&config(), Some(sniff::InputFormat::Jpeg));
-        assert!(colour.contains(&"jpeg:-".to_string()));
+        assert!(colour.contains(&"jpeg:-[0]".to_string()));
+    }
+
+    #[test]
+    fn a_gif_is_read_as_its_first_frame_on_its_screen() {
+        // The built-in driver decodes the first frame composed onto the
+        // logical screen; `-coalesce` composes, `[0]` drops the rest.
+        let pipeline = ImagePipeline::default();
+        let gif = process_args(
+            &pipeline,
+            &config(),
+            Some(sniff::InputFormat::Gif),
+            OutputFormat::Gif,
+        );
+        let input = gif
+            .iter()
+            .position(|arg| arg == "gif:-[0]")
+            .expect("the input");
+        assert_eq!(gif[input + 1], "-coalesce");
+        let colour = dominant_color_args(&config(), Some(sniff::InputFormat::Gif));
+        assert!(
+            colour
+                .windows(2)
+                .any(|pair| pair == ["gif:-[0]", "-coalesce"])
+        );
+        // Other formats keep their own pixels: no composing onto a page.
+        let png = process_args(
+            &pipeline,
+            &config(),
+            Some(sniff::InputFormat::Png),
+            OutputFormat::Png,
+        );
+        assert!(!png.contains(&"-coalesce".to_string()));
+        let unknown = process_args(&pipeline, &config(), None, OutputFormat::Png);
+        assert!(unknown.contains(&"-[0]".to_string()));
     }
 
     #[test]

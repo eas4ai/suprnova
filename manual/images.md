@@ -345,6 +345,11 @@ operator installs ImageMagick and its delegates, and owns their
 licensing. The framework links nothing and compiles nothing native
 either way.
 
+Like the default driver, it works on the first frame of an animation
+and drops the rest. A GIF's first frame is composed onto the GIF's
+logical screen first, so both drivers produce the same image and report
+the same size for it.
+
 Arguments are always a fixed array handed straight to the process, never
 a shell string, and every numeric argument is formatted from an
 already-validated field. There is no argument position user input can
