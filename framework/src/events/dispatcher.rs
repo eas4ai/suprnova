@@ -13,14 +13,15 @@ use tokio::sync::{Mutex as TokioMutex, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{debug, error, warn};
 
-// Per-task deferred-dispatch buffer. When set (via [`EventDispatcher::defer`]
+// Per-task deferred-dispatch buffers. While set (via [`EventDispatcher::defer`]
 // or the [`Event::defer`] facade), every `dispatch`/`dispatch_best_effort`
-// call that targets an eligible event type appends a boxed re-dispatch
-// closure to this buffer instead of running the listeners. The deferring
-// caller flushes after the callback completes. This is task-local so two
-// concurrent `defer` calls cannot stomp on each other's buffers.
+// call on the deferring dispatcher that targets an eligible event type
+// appends a boxed re-dispatch closure to that dispatcher's buffer instead of
+// running the listeners. The deferring caller flushes after the callback
+// completes. This is task-local so two concurrent `defer` calls cannot stomp
+// on each other's buffers.
 tokio::task_local! {
-    static DEFER_BUFFER: DeferBuffer;
+    static DEFER_BUFFER: DeferScopes;
 }
 
 // Set on every queued-listener task. A dispatch made from inside one does not
@@ -69,6 +70,30 @@ impl DeferBuffer {
                 pending: Vec::new(),
             })),
         }
+    }
+}
+
+/// Every deferral scope open on this task, innermost last, each tagged with
+/// the dispatcher that opened it.
+///
+/// The tag is what keeps a deferral to its own dispatcher. Separate
+/// dispatchers keep separate listener tables, so a dispatch on dispatcher B
+/// inside A's deferral must run on B now, not be replayed on A's listeners
+/// at A's flush. A deferral nested on another dispatcher keeps the outer
+/// frames for the same reason: A is still deferring inside B's callback.
+#[derive(Clone, Default)]
+struct DeferScopes {
+    frames: Vec<(usize, DeferBuffer)>,
+}
+
+impl DeferScopes {
+    /// The innermost buffer `dispatcher` opened, if it is deferring.
+    fn innermost_for(&self, dispatcher: usize) -> Option<DeferBuffer> {
+        self.frames
+            .iter()
+            .rev()
+            .find(|(owner, _)| *owner == dispatcher)
+            .map(|(_, buffer)| buffer.clone())
     }
 }
 
@@ -134,6 +159,13 @@ impl EventDispatcher {
             queued_tasks: TokioMutex::new(JoinSet::new()),
             queued_permits: Arc::new(Semaphore::new(queued_concurrency.max(1))),
         }
+    }
+
+    /// The identity a deferral scope is tagged with. Stable for as long as
+    /// a scope can exist: [`Self::defer`] borrows the dispatcher for the
+    /// whole scope, so it can neither move nor drop while its frame is open.
+    fn identity(&self) -> usize {
+        self as *const Self as usize
     }
 
     /// Register a listener for events of type `E`.
@@ -301,7 +333,7 @@ impl EventDispatcher {
         E: super::Event,
         F: FnOnce(E) -> DeferredCall,
     {
-        let Ok(buffer) = DEFER_BUFFER.try_with(|b| b.clone()) else {
+        let Ok(Some(buffer)) = DEFER_BUFFER.try_with(|s| s.innermost_for(self.identity())) else {
             return false;
         };
         let mut guard = buffer.inner.lock().await;
@@ -705,8 +737,9 @@ impl EventDispatcher {
                 .collect::<std::collections::HashSet<_>>()
         });
         let buffer = DeferBuffer::new(only_set);
-        let buffer_clone = buffer.clone();
-        let value = DEFER_BUFFER.scope(buffer_clone, callback).await?;
+        let mut scopes = DEFER_BUFFER.try_with(|s| s.clone()).unwrap_or_default();
+        scopes.frames.push((self.identity(), buffer.clone()));
+        let value = DEFER_BUFFER.scope(scopes, callback).await?;
         // The callback completed Ok; drain the buffer and dispatch.
         let pending = std::mem::take(&mut buffer.inner.lock().await.pending);
         let mut first_err: Option<FrameworkError> = None;
@@ -818,7 +851,9 @@ impl Event {
     /// event is costly to build skips building one nothing would see.
     pub(crate) fn is_observed<E: super::Event>() -> bool {
         super::testing::is_active::<E>()
-            || DEFER_BUFFER.try_with(|_| ()).is_ok()
+            || DEFER_BUFFER
+                .try_with(|s| s.innermost_for(global().identity()).is_some())
+                .unwrap_or(false)
             || global().has_listeners::<E>()
     }
 
@@ -1743,5 +1778,56 @@ mod tests {
             d.queued_tasks.lock().await.is_empty(),
             "a listener admitted during the drain was left running past the deadline"
         );
+    }
+
+    /// DRIVERS-012: a dispatch on dispatcher B inside dispatcher A's
+    /// deferral was captured by A and replayed on A's listeners.
+    #[tokio::test]
+    async fn defer_buffers_only_its_own_dispatcher() {
+        let a = EventDispatcher::new();
+        let b = EventDispatcher::new();
+        let on_a = Arc::new(AtomicI64::new(0));
+        let on_b = Arc::new(AtomicI64::new(0));
+        a.listen::<Pinged, _>(Arc::new(Counter(on_a.clone()))).await;
+        b.listen::<Pinged, _>(Arc::new(Counter(on_b.clone()))).await;
+
+        let (a_ref, b_ref) = (&a, &b);
+        let on_b_inside = on_b.clone();
+        let ((), err) = a
+            .defer::<_, ()>(None, async move {
+                b_ref.dispatch(Pinged { n: 1 }).await?;
+                assert_eq!(
+                    on_b_inside.load(Ordering::SeqCst),
+                    1,
+                    "B is not deferring, so its dispatch runs at once"
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(err.is_none());
+        assert_eq!(on_a.load(Ordering::SeqCst), 0, "B's event ran on A");
+        assert_eq!(on_b.load(Ordering::SeqCst), 1);
+
+        // A nested deferral on B does not capture A's dispatch either: A is
+        // still deferring, so the event waits for A's flush.
+        let on_a_inside = on_a.clone();
+        let ((), err) = a
+            .defer::<_, ()>(None, async move {
+                let ((), inner) = b_ref
+                    .defer::<_, ()>(None, async move {
+                        a_ref.dispatch(Pinged { n: 10 }).await?;
+                        Ok(())
+                    })
+                    .await?;
+                assert!(inner.is_none());
+                assert_eq!(on_a_inside.load(Ordering::SeqCst), 0, "A's deferral was skipped");
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(err.is_none());
+        assert_eq!(on_a.load(Ordering::SeqCst), 10);
+        assert_eq!(on_b.load(Ordering::SeqCst), 1, "A's event was replayed on B");
     }
 }

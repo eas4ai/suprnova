@@ -168,6 +168,10 @@ buffer in scope. Every `dispatch` / `dispatch_best_effort` call made
 inside the callback is captured and replayed after the callback
 returns. Mirrors Laravel's `Event::defer($callback, ?$events)`.
 
+The buffer belongs to the dispatcher that opened it. A dispatch on
+another `EventDispatcher` inside the callback runs at once on that
+dispatcher's listeners, as it would outside the callback.
+
 ```rust
 let ((), flush_err) = EventFacade::defer::<_, ()>(None, async {
     do_work_part_one().await?;
