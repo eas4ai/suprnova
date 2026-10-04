@@ -157,7 +157,18 @@ impl std::fmt::Display for Environment {
 /// Missing `.env` files are NOT an error - they are an expected case
 /// for environments where configuration is fully supplied by the
 /// process environment.
+///
+/// A failed load still restores the real system values and records the
+/// keys the files did write, so the process environment is left as a
+/// later call expects it.
+///
+/// Also returns [`FrameworkError::Internal`], before writing anything,
+/// from inside a Tokio runtime and after `#[suprnova::main]` loaded the
+/// environment: writing it is only sound while no other thread can read
+/// it.
 pub fn load_dotenv(project_root: &Path) -> Result<Environment, FrameworkError> {
+    ensure_environment_writable()?;
+
     // Phase 1a: strip keys previously introduced by load_dotenv so the
     // upcoming snapshot reflects only the real system env. Without
     // this, a second call would treat the prior call's file values as
@@ -166,10 +177,12 @@ pub fn load_dotenv(project_root: &Path) -> Result<Environment, FrameworkError> {
     // SAFETY: `std::env::remove_var` is process-global; documented
     // unsafe because it races with concurrent getenv on some
     // platforms. The invariant is that no other thread exists yet -
-    // and it is now *enforced* rather than assumed: `boot::load_env`
-    // refuses when a Tokio runtime is already running, and
-    // `Application::run` refuses to boot unless `#[suprnova::main]`
-    // loaded the environment beforehand.
+    // and it is *enforced* here rather than assumed, in the cases the
+    // framework can see: `ensure_environment_writable` above refuses a
+    // call from inside a Tokio runtime and any call after
+    // `#[suprnova::main]` built its runtime, and `Application::run`
+    // refuses to boot unless `#[suprnova::main]` loaded the environment
+    // beforehand.
     //
     // Worth stating plainly: until SEC-06 this note asserted an
     // invariant the boot path did not establish. `Application::run`
@@ -201,29 +214,13 @@ pub fn load_dotenv(project_root: &Path) -> Result<Environment, FrameworkError> {
     let system_keys: std::collections::HashSet<String> =
         system_env.iter().map(|(k, _)| k.clone()).collect();
 
-    // Phase 2: load base `.env` non-overriding. Anything already in
-    // system env (i.e. the snapshot) stays untouched. Distinguish
-    // "file missing" (OK) from "IO/parse error" (boot failure).
-    load_env_file(&project_root.join(".env"), false)?;
-
-    // Phase 3: re-detect APP_ENV now that base `.env` has merged in.
-    // Detecting before the base load would skip `.env.production`
-    // when `APP_ENV=production` was set only in `.env`.
-    let env = Environment::detect();
-
-    // Phase 4: load environment-specific files in least-to-most-
-    // specific order, using `from_path_override` so each later file
-    // beats the earlier file. We do NOT want these to override real
-    // system env - we restore that in phase 5.
-    load_env_file(&project_root.join(".env.local"), true)?;
-
-    if let Some(suffix) = env.env_file_suffix() {
-        let path = project_root.join(format!(".env.{}", suffix));
-        load_env_file(&path, true)?;
-
-        let path = project_root.join(format!(".env.{}.local", suffix));
-        load_env_file(&path, true)?;
-    }
+    // Phases 2 to 4 read the files. A file that fails to load still
+    // reaches phase 5: an earlier file may already have overridden a real
+    // system variable and introduced keys of its own. Returning before
+    // the restore left the override in place for a caller that handled
+    // the error, and a retry then snapshotted the half-loaded values as
+    // the system tier and froze them.
+    let loaded = load_env_files(project_root);
 
     // Phase 5a: restore real system env. Any key that existed in the
     // process environment BEFORE this function ran is rewritten back to
@@ -249,7 +246,76 @@ pub fn load_dotenv(project_root: &Path) -> Result<Environment, FrameworkError> {
     let mut guard = LOADED_KEYS.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(introduced);
 
+    loaded
+}
+
+/// Phases 2 to 4 of [`load_dotenv`]: read the files, and detect the
+/// environment once the base `.env` has merged in.
+fn load_env_files(project_root: &Path) -> Result<Environment, FrameworkError> {
+    // Phase 2: load base `.env` non-overriding. Anything already in
+    // system env (i.e. the snapshot) stays untouched. Distinguish
+    // "file missing" (OK) from "IO/parse error" (boot failure).
+    load_env_file(&project_root.join(".env"), false)?;
+
+    // Phase 3: re-detect APP_ENV now that base `.env` has merged in.
+    // Detecting before the base load would skip `.env.production`
+    // when `APP_ENV=production` was set only in `.env`.
+    let env = Environment::detect();
+
+    // Phase 4: load environment-specific files in least-to-most-
+    // specific order, using `from_path_override` so each later file
+    // beats the earlier file. We do NOT want these to override real
+    // system env - we restore that in phase 5.
+    load_env_file(&project_root.join(".env.local"), true)?;
+
+    if let Some(suffix) = env.env_file_suffix() {
+        let path = project_root.join(format!(".env.{}", suffix));
+        load_env_file(&path, true)?;
+
+        let path = project_root.join(format!(".env.{}.local", suffix));
+        load_env_file(&path, true)?;
+    }
+
     Ok(env)
+}
+
+/// Refuse to write the process environment where it may not be sound.
+///
+/// `set_var` and `remove_var` race any thread that reads the environment
+/// at the same moment - through `getenv` in DNS resolution, time
+/// formatting, or a C library - and the race is undefined behaviour that
+/// surfaces far from its cause. [`load_dotenv`] and `Config::init` are
+/// safe functions that used to write it from any thread. A safe function
+/// cannot see every thread in the process, so this refuses the two cases
+/// the framework can see:
+///
+/// - a call from inside a Tokio runtime, whose worker threads already
+///   exist;
+/// - any call after `#[suprnova::main]` loaded the environment: the macro
+///   builds its runtime right after, so its threads run from then on, and
+///   a later call from a plain thread is not inside the runtime.
+///
+/// The supported way to load `.env` is `#[suprnova::main]`, before the
+/// runtime exists. A program that starts threads of its own loads it
+/// before it starts them.
+fn ensure_environment_writable() -> Result<(), FrameworkError> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return Err(FrameworkError::internal(
+            "the environment cannot be loaded from inside a Tokio runtime: loading .env \
+             writes the process environment, which is only sound while the process is \
+             single-threaded. Use #[suprnova::main] instead of #[tokio::main] so the \
+             environment loads before the runtime is built.",
+        ));
+    }
+    if crate::boot::env_loaded_pre_runtime() {
+        return Err(FrameworkError::internal(
+            "the environment was already loaded by #[suprnova::main], and the threads of \
+             its runtime are running: loading .env again would write the process \
+             environment while they may read it. Restart the process to load a changed \
+             .env.",
+        ));
+    }
+    Ok(())
 }
 
 /// Load a single `.env`-style file. `override_existing=false` matches
