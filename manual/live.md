@@ -105,6 +105,75 @@ at most 128 bytes, each unique in the island. `live:check` refuses a literal
 key or id outside it, and a literal id inside a loop, which every item after
 the first would repeat.
 
+### Action arguments
+
+An action directive can pass literal arguments to an action with
+parameters. Write them after the action name, in the order the action
+declares its parameters:
+
+```rust
+use suprnova::live::{LiveComponent, live};
+
+/// A task list rendered by `live/tasks.html`.
+#[derive(LiveComponent)]
+#[live(name = "app.tasks", view = "live/tasks.html")]
+pub struct Tasks {
+    /// Titles of the tasks still open.
+    #[public]
+    open: Vec<String>,
+    /// Whether finished tasks stay visible.
+    #[public]
+    show_done: bool,
+}
+
+#[live]
+impl Tasks {
+    /// Removes the task at `index`, from `live:click="remove(0)"`.
+    #[action]
+    pub fn remove(&mut self, index: u64) {
+        if let Ok(index) = usize::try_from(index)
+            && index < self.open.len()
+        {
+            self.open.remove(index);
+        }
+    }
+
+    /// Adds a task, from `live:click="add('Write the report', true)"`.
+    #[action]
+    pub fn add(&mut self, title: String, show_done: bool) {
+        self.open.push(title);
+        self.show_done = show_done;
+    }
+}
+```
+
+```html
+<div>
+<button type="button" live:click="remove(0)">Remove the first task</button>
+<button type="button" live:click="add('Write the report', true)">Add a task</button>
+</div>
+```
+
+The arguments are literals, never expressions: JSON numbers, strings in
+single or double quotes with JSON escapes, `true`, `false`, and `null`, up
+to 128 of them. Each literal binds the parameter at its position, and you
+can leave out a trailing parameter whose type is an `Option`. The same
+syntax works on every directive that invokes an action: `live:click`,
+`live:submit`, `live:change`, `live:input`, `live:keydown`, and `live:init`.
+
+`live:check` checks each call against the action's signature. A call with
+too many arguments, without a required one, or with a literal of the wrong
+type, such as `remove('first')` above, fails with the file, line, and
+column of the directive. At runtime, the island root lists each action's
+parameter names in its `data-suprnova-live-actions` attribute, and the
+runtime sends `remove(0)` as the arguments `{ "index": 0 }`.
+
+An argument written with `{{ }}`, such as `remove({{ loop.index0 }})`, is
+dynamic: the checker can't prove it, so `live:check` reports it as
+unproved. The runtime parses the rendered text with the same grammar, so a
+quote inside an interpolated string changes the arguments. Interpolate
+only values that render as a literal, such as numbers.
+
 Documents that place islands are ordinary views declared with
 `#[suprnova::view]`; the only unescaped value they accept is `TrustedHtml`
 through the `trusted_html` filter.
@@ -478,6 +547,138 @@ suprnova live:assets --out public/__live
 The publication is atomic and refuses to replace a directory whose bytes
 differ unless you pass `--replace`.
 
+## Limits
+
+Every limit Live applies is a setting with a default sized for large pages: a
+data table of tens of thousands of rows renders, travels and morphs without
+touching one. The server's configuration is the only source. The bootstrap
+writes every value into the page's configuration element, and the browser
+runtime applies what it reads there, so it never refuses what the server
+allows.
+
+Set a limit in the application's `.env` file:
+
+```bash
+LIVE_MAX_HTML_BYTES=67108864
+LIVE_MAX_RESPONSE_BYTES=67108864
+LIVE_MAX_REQUEST_BYTES=67108864
+LIVE_MORPH_MAX_NODES=5000000
+```
+
+Or build the configuration in code and bind it before the runtime assembles.
+The builder starts from the defaults, and `LiveConfigBuilder::from_env()`
+starts from the `.env` values instead:
+
+```rust
+use suprnova::App;
+use suprnova::live::LiveConfig;
+
+let config = LiveConfig::builder()
+    .max_html_bytes(64 * 1024 * 1024)
+    .max_response_bytes(64 * 1024 * 1024)
+    .max_request_bytes(64 * 1024 * 1024)
+    .morph_max_nodes(5_000_000)
+    .build()
+    .expect("the Live limits nest");
+App::singleton(config);
+```
+
+| Key | Default | Bounds |
+|---|---|---|
+| `LIVE_MAX_REQUEST_BYTES` | 16 MiB | One request body, the snapshot included |
+| `LIVE_MAX_RESPONSE_BYTES` | 16 MiB | One response body |
+| `LIVE_MAX_HTML_BYTES` | 16 MiB | One island render's HTML |
+| `LIVE_MAX_JSON_DEPTH` | 32 | JSON nesting |
+| `LIVE_MAX_JSON_ENTRIES` | 1,000,000 | Entries in one request |
+| `LIVE_MAX_REQUEST_ITEMS` | 65,536 | Proposals, operations or arguments in one request |
+| `LIVE_MAX_RESPONSE_ITEMS` | 65,536 | Validation entries, events, effects, or children of one render |
+| `LIVE_MAX_CONTEXT_LIFETIME_MS` | 30,000 | The trusted request context's validity |
+| `LIVE_REQUEST_TIMEOUT_MS` | 60,000 | The browser's wait for one response |
+| `LIVE_MAX_QUEUED_PER_ISLAND` | 8 | Requests one island queues |
+| `LIVE_MAX_PARALLEL_PER_ISLAND` | 1 | Requests one island runs at once |
+| `LIVE_MORPH_MAX_NODES` | 1,000,000 | Nodes in one morphed island |
+| `LIVE_MORPH_MAX_DEPTH` | 512 | Element nesting in one morphed island |
+| `LIVE_MORPH_MAX_KEYS` | 1,000,000 | Keyed elements in one morphed island |
+| `LIVE_MORPH_MAX_ATTRIBUTES` | 10,000,000 | Attributes in one morphed island |
+| `LIVE_MORPH_MAX_ATTRIBUTES_PER_ELEMENT` | 4,096 | Attributes on one element |
+| `LIVE_MORPH_DEADLINE_MS` | 0, no deadline | How long one morph may run |
+| `LIVE_ASYNC_MAX_PAYLOAD_BYTES` | 1 MiB | One asynchronous event payload |
+| `LIVE_ASYNC_MAX_BUFFER_BYTES` | 16 MiB | One open document's delivery queue |
+| `LIVE_ASYNC_MAX_QUEUED_EVENTS` | 4,096 | Events one open document holds before its islands apply them |
+| `LIVE_ASYNC_MAX_REPLAY_EVENTS` | 4,096 | Events in one reconnect replay |
+| `LIVE_ASYNC_MAX_REPLAY_BYTES` | 4 MiB | One subscription's replay log |
+| `LIVE_ASYNC_REPLAY_BUDGET_BYTES` | 256 MiB | Every replay log in the process together |
+| `LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION` | 64 | Open tabs one session streams to |
+| `LIVE_ASYNC_MAX_TRANSPORTS` | 16,384 | Streaming connections in the process |
+| `LIVE_MAX_REDIRECT_BYTES` | 64 KiB | One redirect or reflected URL |
+| `LIVE_UPLOAD_CHUNK_BYTES` | 8 MiB | One upload chunk request |
+| `LIVE_UPLOAD_MAX_ACTIVE` | 8 | Upload transfers running at once |
+| `LIVE_UPLOAD_MAX_FILE_BYTES` | 1 GiB | One uploaded file |
+| `LIVE_UPLOAD_MAX_PENDING_FILES` | 1,024 | Files selected and not yet finished |
+| `LIVE_UPLOAD_MAX_PENDING_BYTES` | 4 GiB | Bytes across the files selected and not yet finished |
+| `LIVE_UPLOAD_MAX_STORAGE_BYTES` | 16 GiB | The temporary upload store, across every visitor |
+| `LIVE_LEDGER_MAX_INSTANCES` | 100,000 | Mounted component instances |
+| `LIVE_LEDGER_INSTANCE_LIFETIME_MS` | 7 days | How long one instance lives |
+| `LIVE_LEDGER_CLAIM_LEASE_MS` | 30,000 | How long one action holds its instance |
+| `LIVE_LEDGER_MAX_ACCEPTED_OUTCOMES` | 64 | Outcomes kept per instance for retries |
+
+The byte limits nest: the island HTML travels inside the response, and the
+response's snapshot comes back in the next request, so `LIVE_MAX_HTML_BYTES`
+must be at most `LIVE_MAX_RESPONSE_BYTES`, which must be at most
+`LIVE_MAX_REQUEST_BYTES`. A setting you leave unset follows the one it must fit
+inside, so lowering only `LIVE_MAX_REQUEST_BYTES` lowers all three. The upload
+limits nest the other way: a chunk is part of one file, one file is part of the
+pending bytes, and the pending bytes are part of the store, so an unset pending
+or store limit grows to hold a larger file. Every key's
+type and range is in [Environment Variables](env-vars.md#live).
+
+When a limit trips, the message names the limit, both values and the key to
+change. The browser prints it to the console unless the runtime boots with
+`diagnostics: "off"`, and the server writes it to the log:
+
+```text
+Suprnova Live island HTML size limit exceeded: measured 20971520 bytes,
+configured 16777216 bytes. Raise LIVE_MAX_HTML_BYTES in the application's .env
+file to allow it.
+```
+
+A request the browser would have to send over `LIVE_MAX_REQUEST_BYTES` fails in
+the browser before it is sent. A render over `LIVE_MAX_HTML_BYTES` fails on the
+server, which logs the `limit` field beside the failed operation's cause. A
+published payload over `LIVE_ASYNC_MAX_PAYLOAD_BYTES` fails with a
+`LiveStreamError` whose `limit()` names the setting. A file over
+`LIVE_UPLOAD_MAX_FILE_BYTES`, or a selection past the pending limits, is
+refused in the browser before any transfer starts; the server refuses the same
+file with a 413 and logs the key. `suprnova live:inspect` prints every limit the
+application runs under, by its key.
+
+An instance lives its whole lifetime: nothing retires it when the visitor
+closes the page. The ledger therefore holds `LIVE_LEDGER_MAX_INSTANCES` page
+views per `LIVE_LEDGER_INSTANCE_LIFETIME_MS`, about 14,000 private-island page
+views a day at the defaults. A busier site raises the instance limit or
+shortens the lifetime; past the limit, new mounts fail until the oldest
+instances expire.
+
+### Sizing a small host
+
+The defaults admit large pages, and every byte of a request is held while it
+is read. Live reads a whole request before it checks the request's context,
+because the context depends on the island the request names. At the defaults
+(`LIVE_MAX_REQUEST_BYTES` 16 MiB, `LIVE_MAX_JSON_ENTRIES` 1,000,000), one
+request costs its 16 MiB body plus what parsing it builds: about 60 MiB for an
+array of a million short strings and about 165 MiB for an object of a million
+members, measured on an optimized build. Concurrent requests add up. On a host
+with little memory, lower both limits to what the pages need:
+
+```bash
+LIVE_MAX_REQUEST_BYTES=2097152
+LIVE_MAX_JSON_ENTRIES=100000
+```
+
+At 2 MiB and 100,000 entries, the same measurements give about 6 MiB and 16
+MiB, so the worst request costs about 18 MiB with its body. The
+response and island HTML limits follow the request limit down unless set.
+
 ## Component library
 
 Suprnova ships the foundations of a component library for Live: a token
@@ -805,8 +1006,9 @@ body; a missing principal answers `401`.
 - `suprnova live:inspect` reports the bound registry, configuration limits,
   installed upload capabilities, assembled runtime services, and the asset
   identity without exposing state or secrets.
-- `LiveConfig` bounds request and response bytes and the trusted context
-  lifetime; bind a custom one before the runtime assembles.
+- `LiveConfig` holds every limit Live applies; set them with the `LIVE_*`
+  keys in `.env` or bind a custom one before the runtime assembles. See
+  [Limits](#limits).
 - Errors carry closed kinds such as `live_document_context_rejected` and
   `invalid_live_bootstrap`; telemetry labels are closed enumerations.
 

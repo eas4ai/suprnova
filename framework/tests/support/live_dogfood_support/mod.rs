@@ -77,6 +77,13 @@ impl DogfoodForm {
     pub fn save(&mut self) {
         self.saves += 1;
     }
+
+    /// Adds `extra` seats: the argument a `live:click="reserve(2)"`
+    /// directive sends.
+    #[action]
+    pub fn reserve(&mut self, extra: u64) {
+        self.seats += extra;
+    }
 }
 
 #[suprnova::view(path = "live/dogfood-document.html")]
@@ -415,6 +422,24 @@ pub fn form_action_request(
     proposals: Value,
     save: bool,
 ) -> hyper::Request<Full<Bytes>> {
+    form_request(spec, proposals, save.then(|| ("save", json!({}))))
+}
+
+/// A request on the form island that invokes `action` with `arguments`, the
+/// object the runtime builds from a directive's literal arguments.
+pub fn form_invoke_request(
+    spec: ActionRequest<'_>,
+    action: &str,
+    arguments: Value,
+) -> hyper::Request<Full<Bytes>> {
+    form_request(spec, json!({}), Some((action, arguments)))
+}
+
+fn form_request(
+    spec: ActionRequest<'_>,
+    proposals: Value,
+    action: Option<(&str, Value)>,
+) -> hyper::Request<Full<Bytes>> {
     let (base_revision, snapshot) = match &spec.snapshot["body"]["revision"] {
         Value::String(revision) => (
             revision.clone(),
@@ -439,8 +464,8 @@ pub fn form_action_request(
         .keys()
         .map(|field| json!({"field": field, "kind": "sync_model"}))
         .collect();
-    if save {
-        operations.push(json!({"arguments": {}, "kind": "invoke_action", "name": "save"}));
+    if let Some((name, arguments)) = action {
+        operations.push(json!({"arguments": arguments, "kind": "invoke_action", "name": name}));
     }
     let body = serde_json::to_vec(&json!({
         "base_revision": base_revision,

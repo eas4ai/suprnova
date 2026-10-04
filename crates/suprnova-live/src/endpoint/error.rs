@@ -3,6 +3,8 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::limits::SizeBreach;
+
 /// Stable failure categories at the normalized Live HTTP boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EndpointErrorKind {
@@ -42,21 +44,45 @@ pub enum EndpointErrorKind {
     InvalidConfiguration,
 }
 
-/// Redacted endpoint failure that never retains request or response payloads.
+/// Redacted endpoint failure that never retains request or response payloads;
+/// a message over its byte limit keeps only the measured and configured sizes.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct EndpointError {
     kind: EndpointErrorKind,
+    size: Option<SizeBreach>,
 }
 
 impl EndpointError {
     pub(crate) const fn new(kind: EndpointErrorKind) -> Self {
-        Self { kind }
+        Self { kind, size: None }
+    }
+
+    /// A request or response over its configured byte limit.
+    pub(crate) const fn too_large(
+        kind: EndpointErrorKind,
+        measured: usize,
+        configured: usize,
+    ) -> Self {
+        Self {
+            kind,
+            size: Some(SizeBreach {
+                measured,
+                configured,
+                at_least: false,
+            }),
+        }
     }
 
     /// Returns the stable closed failure category.
     #[must_use]
     pub const fn kind(self) -> EndpointErrorKind {
         self.kind
+    }
+
+    /// Returns the measured and configured sizes of a message over its limit.
+    #[must_use]
+    pub const fn size(self) -> Option<SizeBreach> {
+        self.size
     }
 }
 
@@ -80,7 +106,15 @@ impl fmt::Display for EndpointError {
             EndpointErrorKind::KernelUnavailable => "live_endpoint_kernel_unavailable",
             EndpointErrorKind::ClockUnavailable => "live_endpoint_clock_unavailable",
             EndpointErrorKind::InvalidConfiguration => "live_endpoint_invalid_configuration",
-        })
+        })?;
+        if let Some(size) = self.size {
+            write!(
+                formatter,
+                " (measured {} bytes, configured {} bytes)",
+                size.measured, size.configured
+            )?;
+        }
+        Ok(())
     }
 }
 

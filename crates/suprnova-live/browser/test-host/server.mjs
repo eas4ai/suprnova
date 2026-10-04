@@ -38,6 +38,18 @@ async function requestBody(request, maximum = 1_048_576) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+// A data table of 10,000 keyed rows: about 2.3 MB of HTML and 50,000 nodes,
+// well past the 32 KiB render cap, the 1 MiB morph cap and the 10,000-node cap
+// the browser used to apply, and well inside the server's defaults.
+function largeTableBody() {
+  const rows = Array.from(
+    { length: 10_000 },
+    (_, index) =>
+      `<tr data-suprnova-live-key="row-${String(index)}"><td>Row ${String(index)}</td><td>${"x".repeat(180)}</td></tr>`,
+  ).join("");
+  return `<button id="hostile-action" live:click.prevent="save">Load the table</button><table id="large-table"><tbody>${rows}</tbody></table>`;
+}
+
 function liveResponse(parsed, mode) {
   if (parsed.protocol_version === 2) {
     if (mode === "redirect") {
@@ -99,6 +111,7 @@ function liveResponse(parsed, mode) {
       mode === "uploads-morph" ||
       mode === "transitions" ||
       mode === "hostile-extreme-morph" ||
+      mode === "large-table-morph" ||
       mode === "hostile-duplicate-identity" ||
       mode === "lifecycle" ||
       mode === "recovery-fails" ||
@@ -138,15 +151,17 @@ function liveResponse(parsed, mode) {
                       ? transitionBody(revision)
                       : mode === "hostile-extreme-morph"
                         ? `<button id="hostile-action" live:click.prevent="save">Exercise hostile response</button>${"<div>".repeat(129)}<p>Too deep</p>${"</div>".repeat(129)}`
-                        : mode === "hostile-duplicate-identity"
-                          ? '<button id="hostile-action" live:click.prevent="save">Exercise hostile response</button><div data-suprnova-live-key="duplicate">First</div><div data-suprnova-live-key="duplicate">Second</div>'
-                          : mode === "recovery-fails"
-                            ? '<p id="recovery-corrupt">Unsafe recovery</p><script>document.documentElement.dataset.recoveryScriptExecuted = "true";</script>'
-                            : mode === "teleport-late-target"
-                              ? '<button id="late-teleport-action" live:click.prevent="save">Attempt teleport</button><div id="late-teleported" data-suprnova-live-key="late-teleported" live:teleport="#late-modal-root">Late teleport</div>'
-                              : mode === "morph-unsafe"
-                                ? '<p id="morph-unsafe-content" onclick="document.documentElement.dataset.morphHandlerExecuted = \'true\'">Unsafe replacement</p><script>document.documentElement.dataset.morphScriptExecuted = "true";</script>'
-                                : '<p id="response-content">Updated</p>';
+                        : mode === "large-table-morph"
+                          ? largeTableBody()
+                          : mode === "hostile-duplicate-identity"
+                            ? '<button id="hostile-action" live:click.prevent="save">Exercise hostile response</button><div data-suprnova-live-key="duplicate">First</div><div data-suprnova-live-key="duplicate">Second</div>'
+                            : mode === "recovery-fails"
+                              ? '<p id="recovery-corrupt">Unsafe recovery</p><script>document.documentElement.dataset.recoveryScriptExecuted = "true";</script>'
+                              : mode === "teleport-late-target"
+                                ? '<button id="late-teleport-action" live:click.prevent="save">Attempt teleport</button><div id="late-teleported" data-suprnova-live-key="late-teleported" live:teleport="#late-modal-root">Late teleport</div>'
+                                : mode === "morph-unsafe"
+                                  ? '<p id="morph-unsafe-content" onclick="document.documentElement.dataset.morphHandlerExecuted = \'true\'">Unsafe replacement</p><script>document.documentElement.dataset.morphScriptExecuted = "true";</script>'
+                                  : '<p id="response-content">Updated</p>';
       const rootId = mode === "stimulus-morph" ? ' id="stimulus-island"' : "";
       const html = `<section data-suprnova-live-root="search-results" data-suprnova-live-island data-suprnova-live-component="catalog.search" data-suprnova-live-slot="search-results" data-suprnova-live-document-key="${documentKey}" data-suprnova-live-protocol-min="2" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="instance" data-suprnova-live-snapshot="${encoded}" data-suprnova-live-revision="${revision}" data-suprnova-live-lazy-complete="false" data-suprnova-live-instance="${instance}"${rootId}>${body}</section>`;
       return JSON.stringify({

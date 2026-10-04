@@ -1,6 +1,7 @@
 //! Browser-parity security contract for engine-owned navigation targets.
 
 use suprnova_live::endpoint::EndpointNavigationTarget;
+use suprnova_live::protocol::MAX_REDIRECT_BYTES;
 
 #[test]
 fn safe_navigation_targets_are_root_relative_and_bounded() {
@@ -20,8 +21,22 @@ fn safe_navigation_targets_are_root_relative_and_bounded() {
 }
 
 #[test]
+fn a_long_query_string_is_a_safe_target() {
+    // 2,048 bytes was a fixed cap; the host's configured redirect size
+    // (`LIVE_MAX_REDIRECT_BYTES`) decides, under the browser's URL ceiling.
+    let target = format!("/reports?{}", "q=x&".repeat(2_500));
+    assert_eq!(
+        EndpointNavigationTarget::parse(&target)
+            .expect("a 10,000-byte target")
+            .as_str(),
+        target
+    );
+}
+
+#[test]
 fn unsafe_navigation_targets_match_browser_rejection_contract() {
-    let oversized = format!("/{}", "a".repeat(2_048));
+    // Past the longest URL a browser follows.
+    let oversized = format!("/{}", "a".repeat(MAX_REDIRECT_BYTES));
     for target in [
         "catalog/books",
         "//evil.test/catalog",

@@ -8,6 +8,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Action directives pass arguments.** `live:click="remove(42)"` and
+  `live:click="rename('draft', true)"` send literal arguments to the
+  action's parameters in declared order; before, every action directive
+  sent none, so an action with parameters could not be called from a
+  template. Only literals are accepted (numbers, quoted strings, `true`,
+  `false`, `null`), and `live:check` reports a wrong count or a literal of
+  the wrong type at its line and column. The island root lists each
+  action's parameter names in `data-suprnova-live-actions`.
 - **Heap profiling.** With the framework's `heap-profiling` feature an
   application profiles its heap with dhat: the framework installs dhat's
   allocator, `#[suprnova::main]` starts the profiler, and a command that
@@ -353,6 +361,27 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   macro takes the island's value as `value`, and the script marks that
   option selected. Bind the query field where you bound `name` before, and
   read the choice from `name`.
+- **Live's limits are settings sized for large pages.** Every limit Live
+  applies is a `LIVE_*` key in the application's `.env` file or a
+  `LiveConfig::builder()` method, and a value outside a key's range fails
+  boot with an error that names the key. The browser runtime had smaller
+  limits of its own: it refused an island render over 32 KiB and a morph
+  past 10,000 nodes or one second while the server allowed 1 MiB, and an
+  action whose island root passed 1 MiB failed. The bootstrap now writes
+  every limit into the page's configuration element and the browser
+  applies those values, so it never refuses what the server allows.
+  Requests, responses and island HTML default to 16 MiB; a morph takes up
+  to 1,000,000 nodes and keys with no deadline; an upload sends 8 MiB
+  chunks of a file up to 1 GiB; an open document holds and replays up to
+  4,096 asynchronous events; and a session streams to 64 open tabs, where
+  it was 8. A replay log holds up to 4 MiB per subscription and 256 MiB
+  across the process, dropping its oldest entries first, and a reconnect
+  that needed a dropped entry renders fresh. A tripped limit's message
+  names the limit, the measured and configured values and the key, in the
+  browser console and in the server log. `suprnova live:inspect` prints
+  every limit by its key, and the Live chapter lists them with their
+  ranges. `live:check` and `live:inspect` speak tooling protocol 2 and
+  fall back to protocol 1 with an application built before it.
 - **Less memory for the same work.** Model events are built only when a
   listener, a fake or a deferral will see them, so a query no longer
   copies every row it reads for a `Retrieved` event nobody hears. Eager
@@ -388,6 +417,31 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **`live:check` finds unescaped output wherever a template writes it.**
+  It read `|safe` from an expression's text and skipped `{% let %}`, so
+  `{% let y = x|safe %}{{ y }}`, `x|safe|lower` and `escape("none")`
+  passed. It now reads the parsed template and follows a raw value through
+  `let` and `set`, macro arguments, macros called as expressions, caller
+  content, inherited blocks and `super()`, loops, `if let`, let chains and
+  `match`, to the place it is written. A filter outside Askama's builtins
+  and the framework's, a Rust macro in an expression, and a dynamic value
+  in an unquoted attribute, an `on*` attribute or `script` or `style` text
+  are reported as unproved, so a view that passed before can now need a
+  change.
+- **`live:check` handles views with many conditionals.** It counted every
+  combination of `if` blocks, so eight independent ones exceeded its limit;
+  each conditional's branches are now checked once. Its limits are sized
+  for real templates (4 MiB of source, 262,144 nodes) and configurable.
+- **`live:check` reports the real column.** Directive and markup
+  diagnostics reported column 1; they now point at the attribute or tag,
+  in the template that wrote it.
+- **An action can dispatch more than 128 events.** An action's outcome
+  refused more than 128 flash messages, events or effects; it now takes as
+  many as `LIVE_MAX_RESPONSE_ITEMS` allows, 65,536 by default.
+- **Reordering a long keyed list morphs in linear time.** The morph looked
+  up each keyed element in the list of moved elements, so reordering every
+  row took time quadratic in the row count; 10,000 rows took about 67 ms
+  and now take under 20 ms.
 - **A workflow step can take an integer argument.** `#[workflow_step]`
   handed the step's body to the workflow context in a closure that borrowed
   its arguments, and the context needs one it can keep, so a step taking a

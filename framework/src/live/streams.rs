@@ -41,17 +41,25 @@ pub enum LiveStreamErrorKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LiveStreamError {
     kind: LiveStreamErrorKind,
+    limit: Option<super::LiveLimitExceeded>,
 }
 
 impl LiveStreamError {
     const fn new(kind: LiveStreamErrorKind) -> Self {
-        Self { kind }
+        Self { kind, limit: None }
     }
 
     /// Returns the closed failure class.
     #[must_use]
     pub const fn kind(&self) -> LiveStreamErrorKind {
         self.kind
+    }
+
+    /// Returns the configured limit an [`LiveStreamErrorKind::InvalidPayload`]
+    /// went over, when that is why it was refused.
+    #[must_use]
+    pub const fn limit(&self) -> Option<super::LiveLimitExceeded> {
+        self.limit
     }
 }
 
@@ -62,9 +70,10 @@ impl fmt::Display for LiveStreamError {
                 formatter.write_str("Live runtime is not bound")
             }
             LiveStreamErrorKind::InvalidTopic => formatter.write_str("invalid Live stream topic"),
-            LiveStreamErrorKind::InvalidPayload => {
-                formatter.write_str("invalid Live stream payload")
-            }
+            LiveStreamErrorKind::InvalidPayload => match self.limit {
+                Some(limit) => write!(formatter, "invalid Live stream payload: {limit}"),
+                None => formatter.write_str("invalid Live stream payload"),
+            },
         }
     }
 }
@@ -136,5 +145,9 @@ const fn publish_error(error: PublishError) -> LiveStreamError {
     match error {
         PublishError::InvalidTopic => LiveStreamError::new(LiveStreamErrorKind::InvalidTopic),
         PublishError::InvalidPayload => LiveStreamError::new(LiveStreamErrorKind::InvalidPayload),
+        PublishError::PayloadTooLarge(limit) => LiveStreamError {
+            kind: LiveStreamErrorKind::InvalidPayload,
+            limit: Some(limit),
+        },
     }
 }

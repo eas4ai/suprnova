@@ -1,11 +1,18 @@
 //! Independent bounds for Live control envelopes and their nested payload classes.
 
-use crate::limits::InputLimits;
+use crate::limits::{HARD_MAX_COLLECTION_ITEMS, HARD_MAX_INPUT_BYTES, InputLimits};
 
 use super::{ProtocolError, ProtocolErrorKind};
 
-const MAX_NESTED_BYTES: usize = 16 * 1024 * 1024;
-const MAX_COLLECTION_ITEMS: usize = 4_096;
+const MAX_NESTED_BYTES: usize = HARD_MAX_INPUT_BYTES;
+const MAX_COLLECTION_ITEMS: usize = HARD_MAX_COLLECTION_ITEMS;
+
+/// Ceiling on one redirect or history URL: browsers refuse a URL past 2 MiB,
+/// so a longer one could never be followed.
+pub const MAX_REDIRECT_BYTES: usize = 2 * 1024 * 1024;
+/// The redirect URL bound until [`ProtocolLimits::with_max_redirect_bytes`]
+/// sets the configured one (`LIVE_MAX_REDIRECT_BYTES` in the framework).
+pub const DEFAULT_REDIRECT_BYTES: usize = 64 * 1024;
 
 /// Raw protocol policy values validated by [`ProtocolLimits`].
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,7 +41,7 @@ pub struct ProtocolLimitConfig {
 
 /// Validated protocol parsing and nested-payload limits.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProtocolLimits(ProtocolLimitConfig);
+pub struct ProtocolLimits(ProtocolLimitConfig, usize);
 
 impl ProtocolLimits {
     /// Validates non-zero nested bounds against hard and whole-input ceilings.
@@ -62,7 +69,17 @@ impl ProtocolLimits {
         {
             return Err(ProtocolError::new(ProtocolErrorKind::InvalidEnvelope));
         }
-        Ok(Self(config))
+        Ok(Self(config, DEFAULT_REDIRECT_BYTES))
+    }
+
+    /// Returns a copy that accepts redirect and history URLs up to `limit`
+    /// bytes, from 1 to [`MAX_REDIRECT_BYTES`] and within one whole input.
+    pub fn with_max_redirect_bytes(mut self, limit: usize) -> Result<Self, ProtocolError> {
+        if limit == 0 || limit > MAX_REDIRECT_BYTES || limit > self.0.input.max_bytes() {
+            return Err(ProtocolError::new(ProtocolErrorKind::InvalidEnvelope));
+        }
+        self.1 = limit;
+        Ok(self)
     }
 
     /// Returns a copy with a smaller or equal positive operation limit.
@@ -121,5 +138,9 @@ impl ProtocolLimits {
 
     pub(crate) const fn max_extensions(&self) -> usize {
         self.0.max_extensions
+    }
+
+    pub(crate) const fn max_redirect_bytes(&self) -> usize {
+        self.1
     }
 }

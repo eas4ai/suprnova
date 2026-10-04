@@ -326,28 +326,36 @@ where
     }))
 }
 
-/// Renders one generated Askama component view through bounded engine validation.
+/// Renders one generated Askama component view through bounded engine
+/// validation, under the host's configured render limits when the context
+/// carries them and the engine's defaults otherwise.
 #[doc(hidden)]
 pub fn render_component_view<T: ViewTemplate + ?Sized>(
+    context: &RenderContext<'_>,
     metadata: &ComponentMetadata,
     template: &T,
 ) -> Result<IslandRender, ComponentError> {
-    ViewRenderer::new(crate::view::RenderLimits::standard())
-        .and_then(|renderer| {
-            renderer.render_component_fragment(
-                metadata.view().clone(),
-                template,
-                AssetSet::empty(),
-                Vec::new(),
-            )
-        })
-        .map_err(|_| ComponentError::contract_failure())
+    ViewRenderer::new(
+        context
+            .render_limits()
+            .unwrap_or_else(crate::view::RenderLimits::standard),
+    )
+    .and_then(|renderer| {
+        renderer.render_component_fragment(
+            metadata.view().clone(),
+            template,
+            AssetSet::empty(),
+            Vec::new(),
+        )
+    })
+    .map_err(|_| ComponentError::contract_failure())
 }
 
-/// Encodes one generated JSON-codec field under the engine's fixed input bound.
+/// Encodes one generated JSON-codec field under the engine's ceilings; the
+/// configured limits apply when the whole snapshot is encoded.
 #[doc(hidden)]
 pub fn encode_json_field<T: Serialize>(value: &T) -> Result<CanonicalValue, ComponentError> {
-    crate::snapshot::state::encode_json(value, &InputLimits::default())
+    crate::snapshot::state::encode_json(value, &InputLimits::ceiling())
         .map_err(|_| ComponentError::contract_failure())
 }
 
@@ -364,7 +372,7 @@ pub fn decode_model_field<T: DeserializeOwned + 'static>(
     codec: &ModelCodec,
 ) -> Result<T, ComponentError> {
     codec
-        .decode(value, &InputLimits::default())
+        .decode(value, &InputLimits::ceiling())
         .map_err(|_| ComponentError::contract_failure())
 }
 
@@ -386,7 +394,7 @@ pub fn encode_field<T: Serialize>(
         }
         StateCodec::BytesBase64Url => {
             let value: Vec<u8> = decode_json_field(&encode_json_field(value)?)?;
-            crate::snapshot::state::encode_bytes(&value, InputLimits::default().max_bytes())
+            crate::snapshot::state::encode_bytes(&value, InputLimits::ceiling().max_bytes())
                 .map_err(|_| ComponentError::contract_failure())
         }
     }
@@ -412,7 +420,7 @@ pub fn decode_field<T: DeserializeOwned>(
         }
         StateCodec::BytesBase64Url => {
             let value =
-                crate::snapshot::state::decode_bytes(value, InputLimits::default().max_bytes())
+                crate::snapshot::state::decode_bytes(value, InputLimits::ceiling().max_bytes())
                     .map_err(|_| ComponentError::contract_failure())?;
             decode_json_field(&encode_json_field(&value)?)
         }

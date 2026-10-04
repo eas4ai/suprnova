@@ -1,7 +1,7 @@
 # Suprnova Live -- 12 DOM Morphing and Identity
 
 Status: Normative design specification
-Last revised: 2026-09-15
+Last revised: 2026-10-04
 
 ## Scope
 
@@ -226,6 +226,20 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-04 -- The morph's limits are the server's configuration, delivered in
+  the boot element: `LIVE_MAX_HTML_BYTES` (16 MiB) replaces the 1 MiB render
+  cap, and `LIVE_MORPH_MAX_NODES` (1,000,000), `LIVE_MORPH_MAX_KEYS`
+  (1,000,000), `LIVE_MORPH_MAX_ATTRIBUTES` (10,000,000),
+  `LIVE_MORPH_MAX_ATTRIBUTES_PER_ELEMENT` (4,096) and `LIVE_MORPH_MAX_DEPTH`
+  (512, a stack guard for the recursive walk) replace 10,000 nodes, 10,000
+  keys, 65,536 attributes, 256 per element and depth 128, which failed a table
+  of about 1,400 rows. The one-second deadline and the hook-call budget are
+  gone: the morph runs synchronously, so a deadline could only abandon work
+  that already held the page and changed part of the island, and the hook
+  count is bounded by the node and attribute limits. `LIVE_MORPH_DEADLINE_MS`
+  sets a deadline for applications that want one; `0`, the default, means
+  none. Continuity carries every edited control, a long textarea included,
+  with no count or byte cap.
 - 2026-09-15 -- `live:key` is the stable key the runtime reads (LIVE-024).
   The checker validated `live:key` and the manual named it while the
   runtime's identity, controls, and preservation read only

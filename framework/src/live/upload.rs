@@ -477,11 +477,14 @@ async fn create_upload(
     let policy = runtime
         .upload_policy(&component, &field)
         .map_err(|_| upload_kind(UploadErrorKind::UnknownField))?;
-    if create.file.size == 0
-        || create.file.size > policy.maximum_file_bytes()
-        || create.file.size > runtime.upload_limits().max_file_bytes()
-    {
+    if create.file.size == 0 || create.file.size > policy.maximum_file_bytes() {
         return Err(upload_kind(UploadErrorKind::InputTooLarge));
+    }
+    let max_file_bytes = runtime.upload_limits().max_file_bytes();
+    if create.file.size > max_file_bytes {
+        return Ok(upload_limit_refusal(
+            super::LiveLimitExceeded::upload_file_bytes(create.file.size, max_file_bytes),
+        ));
     }
     let client =
         ClientUploadMetadata::new(&create.file.name, create.file.claimed_media_type.as_deref())?;
@@ -1088,8 +1091,17 @@ async fn dispatch_chunk(
         .status(&context, grant.clone(), field.clone(), handle.clone(), now)
         .await?;
     let limits = runtime.upload_limits();
-    if declared_bytes == 0 || declared_bytes > limits.max_chunk_bytes() {
+    if declared_bytes == 0 {
         return Err(upload_kind(UploadErrorKind::InputTooLarge));
+    }
+    if declared_bytes > limits.max_chunk_bytes() {
+        return Ok(upload_limit_refusal(
+            super::LiveLimitExceeded::upload_chunk_bytes(
+                declared_bytes as u64,
+                limits.max_chunk_bytes() as u64,
+                false,
+            ),
+        ));
     }
     let budgeted_bytes = declared_bytes
         .checked_add(declared_bytes.min(MAX_BODY_SEGMENT_COPY_BYTES))
@@ -1337,6 +1349,12 @@ fn json_response(status: u16, body: serde_json::Value) -> HttpResponse {
         .status(status)
 }
 
+/// An upload refused because it went over a configured limit: the closed 413
+/// the browser reads, with a report naming the setting to raise.
+fn upload_limit_refusal(limit: super::LiveLimitExceeded) -> HttpResponse {
+    semantic_error(UploadErrorKind::InputTooLarge).with_error_report_from(&limit)
+}
+
 fn semantic_error(kind: UploadErrorKind) -> HttpResponse {
     let status = match kind {
         UploadErrorKind::AuthorizationDenied | UploadErrorKind::ScopeMismatch => 403,
@@ -1372,7 +1390,41 @@ fn closed_response(status: u16) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{UploadBodyBudget, UploadErrorKind};
+    use super::{UploadBodyBudget, UploadErrorKind, upload_limit_refusal};
+
+    #[test]
+    fn an_upload_over_a_configured_limit_names_the_setting() {
+        let response = upload_limit_refusal(crate::live::LiveLimitExceeded::upload_file_bytes(
+            2_147_483_648,
+            1_073_741_824,
+        ));
+        assert_eq!(response.status_code(), 413);
+        let report = response
+            .error_report()
+            .expect("the refusal carries a report");
+        assert_eq!(
+            report.chain().first().map(String::as_str),
+            Some(
+                "Suprnova Live upload file size limit exceeded: measured 2147483648 bytes, \
+                 configured 1073741824 bytes. Raise LIVE_UPLOAD_MAX_FILE_BYTES in the \
+                 application's .env file to allow it."
+            )
+        );
+        let chunk = upload_limit_refusal(crate::live::LiveLimitExceeded::upload_chunk_bytes(
+            9 * 1024 * 1024,
+            8 * 1024 * 1024,
+            false,
+        ));
+        let report = chunk.error_report().expect("the refusal carries a report");
+        assert!(
+            report
+                .chain()
+                .first()
+                .is_some_and(|message| message.contains("LIVE_UPLOAD_CHUNK_BYTES")),
+            "{:?}",
+            report.chain()
+        );
+    }
 
     #[tokio::test]
     async fn body_budget_rejects_an_impossible_permit_request_instead_of_waiting_forever() {

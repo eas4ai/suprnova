@@ -6,19 +6,40 @@ import {
   RuntimeConfigError,
   parseRuntimeConfig,
 } from "../src/runtime/config.js";
+import { SERVER_DEFAULT_LIMITS } from "../src/limits.js";
 import { resolveRuntimePorts, type RuntimePorts } from "../src/runtime/ports.js";
 import type { BootstrapOptions } from "../src/runtime/types.js";
 
 const VALID_CONFIG = {
   asset_identity: "runtime-test-v1",
+  async_max_queued_events: 4_096,
+  async_max_replay_events: 4_096,
   credentials: "same-origin",
   endpoint: "/_suprnova/live",
+  max_html_bytes: 1_048_576,
+  max_json_depth: 32,
+  max_json_entries: 1_000_000,
   max_parallel_per_island: 1,
   max_queued_per_island: 16,
+  max_redirect_bytes: 65_536,
+  max_request_bytes: 16_777_216,
+  max_request_items: 65_536,
   max_response_bytes: 1_048_576,
+  max_response_items: 65_536,
+  morph_deadline_ms: 0,
+  morph_max_attributes: 10_000_000,
+  morph_max_attributes_per_element: 4_096,
+  morph_max_depth: 512,
+  morph_max_keys: 1_000_000,
+  morph_max_nodes: 1_000_000,
   protocol: { maximum: 2, minimum: 1 },
   request_timeout_ms: 15_000,
   runtime_contract_version: 1,
+  upload_chunk_bytes: 8_388_608,
+  upload_max_active: 8,
+  upload_max_file_bytes: 1_073_741_824,
+  upload_max_pending_bytes: 4_294_967_296,
+  upload_max_pending_files: 1_024,
 };
 
 interface FakeConfigElement {
@@ -79,7 +100,11 @@ describe("bounded runtime configuration", () => {
       protocol: { minimum: 1, maximum: 2 },
       credentials: "same-origin",
       requestTimeoutMs: 15_000,
-      maxResponseBytes: 1_048_576,
+      limits: {
+        ...SERVER_DEFAULT_LIMITS,
+        maxHtmlBytes: 1_048_576,
+        maxResponseBytes: 1_048_576,
+      },
       maxQueuedPerIsland: 16,
       maxParallelPerIsland: 1,
       assetIdentity: "runtime-test-v1",
@@ -99,22 +124,45 @@ describe("bounded runtime configuration", () => {
     );
   });
 
-  it("enforces bytes, depth, entries, versions, and every numeric bound", () => {
-    expectConfigFailure([`${" ".repeat(16_385)}{}`], "config_limit");
-    expectConfigFailure([JSON.stringify({ nested: [[[[[[[[[true]]]]]]]]] })], "config_limit");
+  it("enforces depth, versions, and every numeric bound, but no size of its own", () => {
+    // The element is the server's own output; it has no byte or entry cap,
+    // only the parser's depth guard.
+    expect(() =>
+      parseRuntimeConfig(configDocument([`${" ".repeat(64 * 1024)}${encoded()}`])),
+    ).not.toThrow();
     expectConfigFailure(
-      [
-        JSON.stringify(
-          Object.fromEntries(Array.from({ length: 65 }, (_, index) => [`k${String(index)}`, 1])),
-        ),
-      ],
+      [JSON.stringify({ nested: JSON.parse(`${"[".repeat(33)}${"]".repeat(33)}`) as unknown })],
       "config_limit",
     );
+    expectConfigFailure([encoded({ max_html_bytes: 0 })], "config_limit");
+    expectConfigFailure([encoded({ morph_max_nodes: -1 })], "config_limit");
+    expectConfigFailure([encoded({ morph_deadline_ms: -1 })], "config_limit");
+    expectConfigFailure([encoded({ max_json_depth: 65 })], "config_limit");
+    expectConfigFailure([encoded({ max_html_bytes: 2_097_152 })], "config_limit");
+    expectConfigFailure(
+      [encoded({ morph_max_attributes: 10, morph_max_attributes_per_element: 11 })],
+      "config_limit",
+    );
+    // The pairs the server nests stay nested: a replay is queued whole, a
+    // chunk is part of one file, a file is part of the pending bytes, and a
+    // redirect URL travels inside the response.
+    expectConfigFailure(
+      [encoded({ async_max_queued_events: 10, async_max_replay_events: 11 })],
+      "config_limit",
+    );
+    expectConfigFailure(
+      [encoded({ upload_chunk_bytes: 2_048, upload_max_file_bytes: 1_024 })],
+      "config_limit",
+    );
+    expectConfigFailure([encoded({ upload_max_pending_bytes: 1_024 })], "config_limit");
+    expectConfigFailure([encoded({ upload_max_active: 2_000 })], "config_limit");
+    expectConfigFailure([encoded({ max_redirect_bytes: 2_097_152 })], "config_limit");
+    expectConfigFailure([encoded({ upload_chunk_bytes: 0 })], "config_limit");
     expectConfigFailure([encoded({ runtime_contract_version: 2 })], "config_version");
     expectConfigFailure([encoded({ protocol: { minimum: 2, maximum: 1 } })], "config_protocol");
     expectConfigFailure([encoded({ credentials: "omit" })], "config_credentials");
-    expectConfigFailure([encoded({ request_timeout_ms: 99 })], "config_timeout");
-    expectConfigFailure([encoded({ max_response_bytes: 512 })], "config_response_limit");
+    expectConfigFailure([encoded({ request_timeout_ms: 0 })], "config_timeout");
+    expectConfigFailure([encoded({ max_response_bytes: 0 })], "config_response_limit");
     expectConfigFailure([encoded({ max_queued_per_island: 0 })], "config_queue_limit");
     expectConfigFailure([encoded({ max_parallel_per_island: 9 })], "config_parallel_limit");
   });
@@ -143,10 +191,28 @@ describe("bounded runtime configuration", () => {
     expect(config.endpoint.origin).toBe("https://api.example.test");
   });
 
-  it("rejects arbitrary out-of-range concurrency and timeout integers", () => {
+  it("accepts the server's 16 MiB and 1 GiB response limits", () => {
+    for (const bytes of [16_777_216, 1_073_741_824]) {
+      const config = parseRuntimeConfig(
+        configDocument([
+          encoded({ max_html_bytes: bytes, max_request_bytes: bytes, max_response_bytes: bytes }),
+        ]),
+      );
+      expect(config.limits.maxResponseBytes).toBe(bytes);
+    }
+  });
+
+  it("rejects timeouts setTimeout cannot hold, and accepts long ones", () => {
+    expect(
+      parseRuntimeConfig(configDocument([encoded({ request_timeout_ms: 600_000 })]))
+        .requestTimeoutMs,
+    ).toBe(600_000);
     fc.assert(
       fc.property(
-        fc.oneof(fc.integer({ max: 99 }), fc.integer({ min: 120_001 })),
+        fc.oneof(
+          fc.integer({ max: 0 }),
+          fc.integer({ min: 2_147_483_648, max: Number.MAX_SAFE_INTEGER }),
+        ),
         (requestTimeoutMs) => {
           expectConfigFailure(
             [encoded({ request_timeout_ms: requestTimeoutMs })],

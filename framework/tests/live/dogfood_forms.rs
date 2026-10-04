@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use live_dogfood_support::{
     ActionRequest, FORM_DOCUMENT_PATH, build_form_router, decoded_snapshot, dispatch,
-    form_action_request, form_fixture, get, production_middleware, session_cookie,
+    form_action_request, form_fixture, form_invoke_request, get, html_attribute,
+    production_middleware, session_cookie,
 };
 use serde_json::{Value, json};
 use suprnova::StatusCode;
@@ -423,6 +424,220 @@ async fn a_cross_site_first_model_sync_is_refused() {
             status.is_client_error(),
             "{fetch_site:?}: a model sync without same-origin evidence is refused: {status} {}",
             String::from_utf8_lossy(&body)
+        );
+    }
+}
+
+/// An action directive's literal argument reaches the action as its typed
+/// parameter. The island root lists the action's parameter names in
+/// declared order, which is how the runtime sends `live:click="reserve(2)"`
+/// as the arguments `{"extra": 2}`; the server decodes that object into the
+/// action's `u64` and the action runs with it.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_directive_argument_reaches_the_action_as_its_typed_parameter() {
+    let _container = TestContainer::fake();
+    form_fixture();
+    let router = Arc::new(build_form_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+    let middleware = production_middleware();
+
+    let (status, headers, body) =
+        dispatch(router.clone(), middleware.clone(), get(FORM_DOCUMENT_PATH)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let html = String::from_utf8_lossy(&body).into_owned();
+    assert!(html.contains("live:click=\"reserve(2)\""), "{html}");
+    assert_eq!(
+        html_attribute(&html, "data-suprnova-live-actions"),
+        "reserve(extra)"
+    );
+    let cookie = session_cookie(&headers);
+    let seed = decoded_snapshot(&body);
+
+    let (status, _, body) = dispatch(
+        router.clone(),
+        middleware.clone(),
+        form_invoke_request(
+            ActionRequest {
+                snapshot: seed,
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "UlJSUlJSUlJSUlJSUlJSUg",
+            },
+            "reserve",
+            json!({"extra": 2}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let answer: Value = serde_json::from_slice(&body).expect("reserve JSON");
+    assert_eq!(answer["outcome"], "accepted", "{answer}");
+    let html = answer["render"]["html"].as_str().expect("render html");
+    assert!(
+        html.contains("value=\"2\""),
+        "the action received its argument: {answer}"
+    );
+}
+
+/// The 2026-10-04 limits ruling, through the production stack: a model
+/// proposal of 10,000 entries, one of them a 100 KiB string, saves under the
+/// default limits, and the snapshot that carries it comes back in the next
+/// request and is accepted. The old defaults refused it twice over: a
+/// 1 MiB request, 8,192 JSON entries and a 64 KiB field encoding bound.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_large_model_state_round_trips_under_the_default_limits() {
+    let _container = TestContainer::fake();
+    form_fixture();
+    let router = Arc::new(build_form_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+    let middleware = production_middleware();
+
+    let (status, headers, body) =
+        dispatch(router.clone(), middleware.clone(), get(FORM_DOCUMENT_PATH)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let cookie = session_cookie(&headers);
+    let seed = decoded_snapshot(&body);
+
+    let mut topics: Vec<String> = (0..10_000).map(|index| format!("topic-{index}")).collect();
+    topics[0] = "t".repeat(100 * 1024);
+    let (status, _, body) = dispatch(
+        router.clone(),
+        middleware.clone(),
+        form_action_request(
+            ActionRequest {
+                snapshot: seed,
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "SEhISEhISEhISEhISEhISA",
+            },
+            json!({"seats": 4, "topics": topics}),
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body[..body.len().min(512)])
+    );
+    let answer: Value = serde_json::from_slice(&body).expect("action JSON");
+    assert_eq!(answer["outcome"], "accepted");
+    let snapshot = answer["snapshot"].clone();
+    let state = &snapshot["body"]["state"]["topics"];
+    assert_eq!(state.as_array().map(Vec::len), Some(10_000));
+    assert_eq!(state[0].as_str().map(str::len), Some(100 * 1024));
+
+    let (status, _, body) = dispatch(
+        router,
+        middleware,
+        form_action_request(
+            ActionRequest {
+                snapshot,
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "SUlJSUlJSUlJSUlJSUlJSQ",
+            },
+            json!({"seats": 5}),
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body[..body.len().min(512)])
+    );
+    let answer: Value = serde_json::from_slice(&body).expect("second action JSON");
+    assert_eq!(
+        answer["outcome"], "accepted",
+        "the large snapshot came back and was accepted"
+    );
+    let html = answer["render"]["html"].as_str().expect("render html");
+    assert!(html.contains("<p id=\"saves\">2</p>"), "both saves ran");
+    assert_eq!(
+        answer["snapshot"]["body"]["state"]["topics"]
+            .as_array()
+            .map(Vec::len),
+        Some(10_000)
+    );
+}
+
+/// An island whose root metadata passes 1 MiB renders through an action, and
+/// again from the snapshot that carries it. The successor render once stopped
+/// at a fixed 1 MiB of root attributes while a mount allowed the configured
+/// island HTML size, so a state of about 750 KiB failed on every action with
+/// a bare `invalid_mount_metadata`.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_island_past_one_mib_of_root_metadata_renders_through_actions() {
+    let _container = TestContainer::fake();
+    form_fixture();
+    let router = Arc::new(build_form_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+    let middleware = production_middleware();
+
+    let (status, headers, body) =
+        dispatch(router.clone(), middleware.clone(), get(FORM_DOCUMENT_PATH)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let cookie = session_cookie(&headers);
+    let seed = decoded_snapshot(&body);
+
+    // A 1.25 MiB topic: its snapshot alone encodes to about 1.7 MiB of the
+    // root's `data-suprnova-live-snapshot` attribute.
+    let topics = vec!["t".repeat(1_310_720), "second".to_owned()];
+    let mut snapshot = seed;
+    for (round, (seats, key)) in [(4, "SkpKSkpKSkpKSkpKSkpKSg"), (5, "S0tLS0tLS0tLS0tLS0tLSw")]
+        .into_iter()
+        .enumerate()
+    {
+        let model = if round == 0 {
+            json!({"seats": seats, "topics": topics})
+        } else {
+            json!({"seats": seats})
+        };
+        let (status, _, body) = dispatch(
+            router.clone(),
+            middleware.clone(),
+            form_action_request(
+                ActionRequest {
+                    snapshot,
+                    cookie: &cookie,
+                    fetch_site: Some("same-origin"),
+                    login: Some("user-7"),
+                    idempotency_key: key,
+                },
+                model,
+                true,
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "round {round}: {}",
+            String::from_utf8_lossy(&body[..body.len().min(512)])
+        );
+        let answer: Value = serde_json::from_slice(&body).expect("action JSON");
+        assert_eq!(answer["outcome"], "accepted", "round {round}");
+        let html = answer["render"]["html"].as_str().expect("render html");
+        let root_end = html.find('>').expect("the island root tag closes");
+        assert!(
+            root_end > 1024 * 1024,
+            "round {round}: the root's attributes span {root_end} bytes, past 1 MiB"
+        );
+        assert!(html.contains(&format!("<p id=\"saves\">{}</p>", round + 1)));
+        snapshot = answer["snapshot"].clone();
+        assert_eq!(
+            snapshot["body"]["state"]["topics"][0]
+                .as_str()
+                .map(str::len),
+            Some(1_310_720)
         );
     }
 }

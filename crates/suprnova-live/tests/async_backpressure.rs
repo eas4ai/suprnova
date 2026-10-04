@@ -185,6 +185,9 @@ impl AsyncEnvelopeDispatchPort for ExpireAfterFirstDispatcher {
     }
 }
 
+/// A configured document queue depth for the outage case.
+const OUTAGE_DEPTH: usize = 64;
+
 fn policy() -> AsyncPolicy {
     AsyncPolicy {
         max_payload_bytes: NonZeroUsize::new(32 * 1024).expect("payload bound"),
@@ -1498,8 +1501,10 @@ async fn global_outage_stays_aggregate_bounded_and_keeps_a_healthy_sibling_reach
                 AsyncPayload::Heartbeat(Heartbeat),
             )],
         ],
-        ResourceBounds::new(MAX_ASYNC_BUFFER_EVENTS, MAX_ASYNC_BUFFER_BYTES)
-            .expect("hard document bounds"),
+        // A configured depth of 64 (`LIVE_ASYNC_MAX_QUEUED_EVENTS`), well
+        // under the engine's ceiling.
+        ResourceBounds::new(OUTAGE_DEPTH, MAX_ASYNC_BUFFER_BYTES)
+            .expect("configured document bounds"),
     )
     .await;
 
@@ -1509,7 +1514,7 @@ async fn global_outage_stays_aggregate_bounded_and_keeps_a_healthy_sibling_reach
             .await
             .expect("bounded outage ingress");
     }
-    assert_eq!(bounded.retained_events(), MAX_ASYNC_BUFFER_EVENTS);
+    assert_eq!(bounded.retained_events(), OUTAGE_DEPTH);
     assert!(bounded.retained_bytes() <= MAX_ASYNC_BUFFER_BYTES);
     assert!(bounded.is_degraded());
 
@@ -4078,34 +4083,34 @@ async fn invalid_policy_and_document_bounds_fail_before_delivery() {
     .expect_err("replay policy above protocol cap");
     assert_eq!(invalid_replay.close_code(), AsyncCloseCode::InvalidPolicy);
 
-    let invalid_items = BoundedDocumentTransportSession::new(
+    // The async item ceiling is the shared resource ceiling too, so a deeper
+    // queue cannot even be described; the configured depth
+    // (`LIVE_ASYNC_MAX_QUEUED_EVENTS`) applies below it.
+    assert!(
+        ResourceBounds::new(MAX_ASYNC_BUFFER_EVENTS + 1, MAX_ASYNC_BUFFER_BYTES).is_err(),
+        "the async item ceiling is the shared resource ceiling"
+    );
+    BoundedDocumentTransportSession::new(
         fixture.document(
             origin.clone(),
             DocumentTransportKind::ServerSentEvents,
             0x8a,
             1,
         ),
-        ResourceBounds::new(MAX_ASYNC_BUFFER_EVENTS + 1, MAX_ASYNC_BUFFER_BYTES)
+        ResourceBounds::new(MAX_ASYNC_BUFFER_EVENTS, MAX_ASYNC_BUFFER_BYTES)
             .expect("shared generic item bounds"),
         PermitPool::new(1).expect("permit"),
         policy(),
     )
-    .expect_err("async document item cap");
-    assert_eq!(invalid_items.close_code(), AsyncCloseCode::InvalidPolicy);
+    .expect("a queue at the async item ceiling");
 
-    let invalid_bytes = BoundedDocumentTransportSession::new(
-        fixture.document(
-            origin.clone(),
-            DocumentTransportKind::ServerSentEvents,
-            0x8b,
-            1,
-        ),
-        ResourceBounds::new(1, MAX_ASYNC_BUFFER_BYTES + 1).expect("shared generic byte bounds"),
-        PermitPool::new(1).expect("permit"),
-        policy(),
-    )
-    .expect_err("async document byte cap");
-    assert_eq!(invalid_bytes.close_code(), AsyncCloseCode::InvalidPolicy);
+    // The async byte ceiling is the shared resource ceiling (1 GiB), so a
+    // queue above it cannot even be described; the configured per-document
+    // limit applies below it.
+    assert!(
+        ResourceBounds::new(1, MAX_ASYNC_BUFFER_BYTES + 1).is_err(),
+        "the shared resource ceiling refuses a queue above the async ceiling"
+    );
 
     let invalid_fanout = BoundedDocumentTransportSession::new(
         fixture.document(origin, DocumentTransportKind::ServerSentEvents, 0x8c, 1),

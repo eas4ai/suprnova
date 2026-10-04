@@ -12,7 +12,19 @@ use live_support::{
     ASSET_FILES, IDENTITY, asset, asset_body, asset_stream, begin, combined, end_ok, envelope,
     fake_project, run_cli, sha256_hex,
 };
-use suprnova_cli::commands::live_tool::{MAX_ASSETS, Operation, consume};
+use suprnova_cli::commands::live_tool::{
+    MAX_ASSETS, Operation, PROTOCOL_VERSION, consume_protocol,
+};
+
+fn consume<R: std::io::BufRead>(
+    reader: R,
+    operation: Operation,
+) -> Result<
+    suprnova_cli::commands::live_tool::Session,
+    suprnova_cli::commands::live_tool::ToolFailure,
+> {
+    consume_protocol(reader, operation, PROTOCOL_VERSION)
+}
 
 fn published(out: &Path) -> Vec<(String, Vec<u8>)> {
     let dir = out.join(IDENTITY);

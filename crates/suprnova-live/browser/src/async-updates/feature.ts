@@ -10,6 +10,7 @@ import {
 } from "../features/contract.js";
 import { parseFeatureDirective } from "../features/directive-parser.js";
 import type { CoreResourceKind, Disposable } from "../lifecycle/resources.js";
+import { SERVER_DEFAULT_LIMITS } from "../limits.js";
 import { isSignalName } from "../signals/name.js";
 import {
   DocumentConnectionPool,
@@ -1537,12 +1538,20 @@ export class AsyncDocumentOwner {
   readonly #authorizations = new Map<AsyncIslandController, AuthorizedLogicalSubscription>();
   readonly #options: AsyncFeatureOptions;
   readonly #pool: DocumentConnectionPool | null;
-  readonly #queue = new AsyncDocumentQueueBudget();
+  readonly #queue: AsyncDocumentQueueBudget;
   #state: "active" | "disposed" | "resuming" | "suspended" = "active";
 
   constructor(context: RuntimeFeatureDocumentContext, options: AsyncFeatureOptions) {
     if (!validOptions(options)) throw new Error("async_feature_configuration_invalid");
     this.#context = context;
+    const limits = context.limits ?? SERVER_DEFAULT_LIMITS;
+    this.#queue = new AsyncDocumentQueueBudget(
+      limits.asyncMaxQueuedEvents,
+      limits.asyncMaxReplayEvents,
+      (breach) => {
+        context.limit?.(breach);
+      },
+    );
     const timers = trackedTimers(context, options.timers);
     const pollEnvironment = trackedPollEnvironment(
       context,

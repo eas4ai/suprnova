@@ -247,16 +247,27 @@ describe("private Idiomorph adapter", () => {
     expect(prepared.currentRoot.childNodes[1]).toBe(anchor);
   });
 
-  it("enforces non-disableable hook and deadline budgets", () => {
-    const hookLimited = plan({ limits: withLimits({ maxHookCalls: 1 }) });
+  it("has no deadline by default and enforces a configured one, naming its setting", () => {
+    const unlimited = plan();
     morph.mockImplementation((_old, _new, options) => {
-      options.callbacks.beforeNodeMorphed(hookLimited.currentRoot, hookLimited.replacementRoot);
+      for (let index = 0; index < 1_000; index += 1) {
+        options.callbacks.beforeNodeMorphed(unlimited.currentRoot, unlimited.replacementRoot);
+      }
     });
-    expect(() => new IdiomorphAdapter(() => 0).apply(hookLimited, {})).toThrow("morph_hook_limit");
+    const slow = vi.fn(() => 0);
+    expect(() => new IdiomorphAdapter(slow).apply(unlimited, {})).not.toThrow();
+    // With no deadline the adapter never reads the clock at all.
+    expect(slow).not.toHaveBeenCalled();
 
+    morph.mockReset();
     const deadline = plan({ limits: withLimits({ deadlineMs: 1 }) });
-    const now = vi.fn().mockReturnValueOnce(0).mockReturnValue(2);
-    expect(() => new IdiomorphAdapter(now).apply(deadline, {})).toThrow("morph_deadline_exceeded");
+    morph.mockImplementation((_old, _new, options) => {
+      options.callbacks.beforeNodeMorphed(deadline.currentRoot, deadline.replacementRoot);
+    });
+    const now = vi.fn().mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValue(2);
+    expect(() => new IdiomorphAdapter(now).apply(deadline, {})).toThrow(
+      /morph deadline limit exceeded: measured 2 ms, configured 1 ms\. Raise LIVE_MORPH_DEADLINE_MS .*\(morph_deadline_exceeded\)/u,
+    );
     expect(morph).toHaveBeenCalledOnce();
   });
 

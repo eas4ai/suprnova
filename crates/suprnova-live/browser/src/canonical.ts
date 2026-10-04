@@ -8,19 +8,22 @@ export interface JsonObject {
   readonly [key: string]: JsonValue;
 }
 
+/// Bounds one parse applies. Only `maxDepth` is required: the parser is
+/// recursive, so nesting is its stack guard. The other bounds are optional
+/// and absent means none; content the trusted server rendered is bounded by
+/// the server's own configuration and the transport's response limit, while
+/// fixed-shape messages and the request pre-check pass the server's values.
 export interface CanonicalLimits {
-  readonly maxBytes: number;
   readonly maxDepth: number;
-  readonly maxEntries: number;
-  readonly maxStringBytes: number;
+  readonly maxBytes?: number;
+  readonly maxEntries?: number;
+  readonly maxStringBytes?: number;
 }
 
-export const DEFAULT_CANONICAL_LIMITS: CanonicalLimits = {
-  maxBytes: 64 * 1024,
-  maxDepth: 32,
-  maxEntries: 2048,
-  maxStringBytes: 16 * 1024,
-};
+/// The server's default JSON nesting (`LIVE_MAX_JSON_DEPTH`), which the shared
+/// canonical corpus also pins. Callers parsing content under a configured depth
+/// pass that depth instead.
+export const DEFAULT_CANONICAL_LIMITS: CanonicalLimits = Object.freeze({ maxDepth: 32 });
 
 export class CanonicalError extends Error {
   public constructor(public readonly code: string) {
@@ -32,14 +35,17 @@ export class CanonicalError extends Error {
 class Parser {
   private index = 0;
   private entries = 0;
-  private readonly bytes: number;
 
   public constructor(
     private readonly text: string,
     private readonly limits: CanonicalLimits,
   ) {
-    this.bytes = new TextEncoder().encode(text).byteLength;
-    if (this.bytes > limits.maxBytes) throw new CanonicalError("input_too_large");
+    if (
+      limits.maxBytes !== undefined &&
+      new TextEncoder().encode(text).byteLength > limits.maxBytes
+    ) {
+      throw new CanonicalError("input_too_large");
+    }
   }
 
   public parse(): JsonValue {
@@ -87,7 +93,10 @@ class Parser {
         }
         if (typeof decoded !== "string") throw new CanonicalError("invalid_json");
         if (hasLoneSurrogate(decoded)) throw new CanonicalError("invalid_json");
-        if (new TextEncoder().encode(decoded).byteLength > this.limits.maxStringBytes) {
+        if (
+          this.limits.maxStringBytes !== undefined &&
+          new TextEncoder().encode(decoded).byteLength > this.limits.maxStringBytes
+        ) {
           throw new CanonicalError("string_too_long");
         }
         return decoded;
@@ -167,7 +176,9 @@ class Parser {
 
   private bumpEntry(): void {
     this.entries += 1;
-    if (this.entries > this.limits.maxEntries) throw new CanonicalError("too_many_entries");
+    if (this.limits.maxEntries !== undefined && this.entries > this.limits.maxEntries) {
+      throw new CanonicalError("too_many_entries");
+    }
   }
 
   private space(): void {

@@ -1,11 +1,5 @@
 import type { MorphIdentityEntry, MorphPlan } from "../morph/types.js";
-import {
-  consumeContinuityBytes,
-  ContinuityError,
-  type ContinuityBudget,
-  type ContinuityLimits,
-  type ControlContinuity,
-} from "./types.js";
+import { ContinuityError, type ControlContinuity } from "./types.js";
 
 const AUTHORITATIVE_ATTRIBUTE = "data-suprnova-live-authoritative";
 const SAFE_SEQUENCE = /^(?:0|[1-9][0-9]{0,19})$/u;
@@ -41,11 +35,7 @@ function valuesEqual(left: readonly string[], right: readonly string[]): boolean
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function captureEntry(
-  plan: MorphPlan,
-  entry: MorphIdentityEntry,
-  budget: ContinuityBudget,
-): ControlContinuity | null {
+function captureEntry(plan: MorphPlan, entry: MorphIdentityEntry): ControlContinuity | null {
   const element = entry.current;
   if (element === null) return null;
   const authoritative = correction(entry);
@@ -75,7 +65,6 @@ function captureEntry(
       });
     }
     if (element.value === element.defaultValue) return null;
-    consumeContinuityBytes(budget, element.value);
     return Object.freeze({
       authoritative,
       element,
@@ -86,7 +75,6 @@ function captureEntry(
   }
   if (textarea(element)) {
     if (element.value === element.defaultValue) return null;
-    consumeContinuityBytes(budget, element.value);
     return Object.freeze({
       authoritative,
       element,
@@ -98,7 +86,6 @@ function captureEntry(
   if (select(element)) {
     const values = selectedValues(element, false);
     if (valuesEqual(values, selectedValues(element, true))) return null;
-    for (const value of values) consumeContinuityBytes(budget, value);
     return Object.freeze({
       authoritative,
       element,
@@ -110,17 +97,11 @@ function captureEntry(
   return null;
 }
 
-export function captureControls(
-  plan: MorphPlan,
-  limits: ContinuityLimits,
-  budget: ContinuityBudget,
-): readonly ControlContinuity[] {
+export function captureControls(plan: MorphPlan): readonly ControlContinuity[] {
   const records: ControlContinuity[] = [];
   for (const entry of plan.identity.entries) {
-    const record = captureEntry(plan, entry, budget);
-    if (record === null) continue;
-    records.push(record);
-    if (records.length > limits.maxControls) throw new ContinuityError("resource_exhausted");
+    const record = captureEntry(plan, entry);
+    if (record !== null) records.push(record);
   }
   return Object.freeze(records);
 }

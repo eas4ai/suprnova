@@ -16,10 +16,20 @@ import type {
   ValidatedAsyncEnvelope,
 } from "./types.js";
 import type { FreshRenderCompletion } from "../features/contract.js";
+import {
+  LiveLimitError,
+  limitBreach,
+  SERVER_DEFAULT_LIMITS,
+  type LiveLimitBreach,
+} from "../limits.js";
 
-const MAX_REPLAY_BYTES = 256 * 1024;
-const MAX_DOCUMENT_QUEUED_BYTES = 256 * 1024;
-const MAX_DOCUMENT_QUEUED_EVENTS = 64;
+// The document queue holds envelopes until their island can apply them. Its
+// depth is the server's configured queue depth (`LIVE_ASYNC_MAX_QUEUED_EVENTS`)
+// and a replay's length its configured replay count
+// (`LIVE_ASYNC_MAX_REPLAY_EVENTS`), both read from the configuration element.
+// Bytes are not counted here because the server encoded each envelope under
+// its configured payload limit (`LIVE_ASYNC_MAX_PAYLOAD_BYTES`) and bounds
+// what it holds in flight (`LIVE_ASYNC_MAX_BUFFER_BYTES`).
 
 export interface ReplayOutcome {
   readonly applied: number;
@@ -42,8 +52,6 @@ type PendingPresentation =
   | Readonly<{ encodedBytes: number; envelope: ValidatedAsyncEnvelope; kind: "envelope" }>
   | (RefreshSegment & Readonly<{ kind: "refresh" }>);
 
-const MAX_PENDING_PRESENTATIONS = 1_024;
-
 export interface AsyncQueuePressureObservation {
   readonly inFlightRefreshes: number;
   readonly queuedBytes: number;
@@ -55,13 +63,47 @@ export type AsyncQueuePressureObserver = (observation: AsyncQueuePressureObserva
 
 export interface AsyncQueueAdmissionPort {
   current(): Readonly<{ queuedBytes: number; queuedEvents: number }>;
+  /// Reports a configured limit an admission was refused for.
+  limit?(breach: LiveLimitBreach): void;
+  /// Events one replay may carry (`LIVE_ASYNC_MAX_REPLAY_EVENTS`).
+  readonly maxReplayEvents?: number;
   release(events: number, bytes: number): void;
   reserve(events: number, bytes: number): boolean;
 }
 
 export class AsyncDocumentQueueBudget implements AsyncQueueAdmissionPort {
+  readonly #maxEvents: number;
+  readonly #report: ((breach: LiveLimitBreach) => void) | undefined;
+  readonly maxReplayEvents: number;
   #queuedBytes = 0;
   #queuedEvents = 0;
+
+  constructor(
+    maxEvents = SERVER_DEFAULT_LIMITS.asyncMaxQueuedEvents,
+    maxReplayEvents = SERVER_DEFAULT_LIMITS.asyncMaxReplayEvents,
+    report?: (breach: LiveLimitBreach) => void,
+  ) {
+    if (
+      !Number.isSafeInteger(maxEvents) ||
+      maxEvents < 1 ||
+      !Number.isSafeInteger(maxReplayEvents) ||
+      maxReplayEvents < 1 ||
+      maxReplayEvents > maxEvents
+    ) {
+      throw new RangeError("async_document_queue_limits_invalid");
+    }
+    this.#maxEvents = maxEvents;
+    this.maxReplayEvents = maxReplayEvents;
+    this.#report = report;
+  }
+
+  limit(breach: LiveLimitBreach): void {
+    try {
+      this.#report?.(breach);
+    } catch {
+      // Reporting a refusal cannot change what was refused.
+    }
+  }
 
   current(): Readonly<{ queuedBytes: number; queuedEvents: number }> {
     return Object.freeze({ queuedBytes: this.#queuedBytes, queuedEvents: this.#queuedEvents });
@@ -76,10 +118,8 @@ export class AsyncDocumentQueueBudget implements AsyncQueueAdmissionPort {
     ) {
       throw new Error("async_document_queue_admission_invalid");
     }
-    if (
-      this.#queuedEvents + events > MAX_DOCUMENT_QUEUED_EVENTS ||
-      this.#queuedBytes + bytes > MAX_DOCUMENT_QUEUED_BYTES
-    ) {
+    if (this.#queuedEvents + events > this.#maxEvents) {
+      this.limit(limitBreach("asyncMaxQueuedEvents", this.#queuedEvents + events, this.#maxEvents));
       return false;
     }
     this.#queuedEvents += events;
@@ -388,10 +428,7 @@ export class AsyncSubscription {
       return "gap";
     }
     this.#observedPosition = envelope.position;
-    if (this.#pendingAdmissions >= MAX_PENDING_PRESENTATIONS) {
-      this.#failPresentation("presentation_rejected", envelope.position);
-      return "dispatch_failed";
-    }
+    // The document queue's configured depth bounds what waits here.
     if (!this.#queueAdmission.reserve(1, encodedBytes)) {
       this.#failPresentation("resource_exhausted", envelope.position);
       return "dispatch_failed";
@@ -507,12 +544,10 @@ export class AsyncSubscription {
 
   receiveReplay(encoded: readonly string[]): ReplayDisposition {
     this.#assertCurrentAuthority();
-    if (encoded.length === 0 || encoded.length > 1_024) throw new Error("async_replay_invalid");
+    if (encoded.length === 0) throw new Error("async_replay_invalid");
+    this.#checkReplayCount(encoded.length);
     let replayBytes = 0;
-    for (const value of encoded) {
-      replayBytes += new TextEncoder().encode(value).byteLength;
-      if (replayBytes > MAX_REPLAY_BYTES) throw new Error("async_replay_too_large");
-    }
+    for (const value of encoded) replayBytes += new TextEncoder().encode(value).byteLength;
     const transcript = encoded.map((value) => decodeAsyncEnvelope(value, this.#authorization));
     if (transcript.some(({ payload }) => payload.kind === "complete")) {
       throw new Error("async_replay_invalid");
@@ -586,18 +621,24 @@ export class AsyncSubscription {
       continuity.validateAuthoritativeBaseline(authorization.baseline);
       return "authoritative_no_tail";
     }
-    if (encoded.length > 1_024) throw new Error("async_replay_invalid");
-    let replayBytes = 0;
-    for (const value of encoded) {
-      replayBytes += new TextEncoder().encode(value).byteLength;
-      if (replayBytes > MAX_REPLAY_BYTES) throw new Error("async_replay_too_large");
-    }
+    this.#checkReplayCount(encoded.length);
     const transcript = encoded.map((value) => decodeAsyncEnvelope(value, authorization));
     if (transcript.some(({ payload }) => payload.kind === "complete")) {
       throw new Error("async_replay_invalid");
     }
     continuity.validateReplay(transcript.map(({ position }) => position));
     return "complete_replay";
+  }
+
+  /// A replay is queued whole, so its length is checked against the
+  /// configured replay count before any envelope is decoded.
+  #checkReplayCount(count: number): void {
+    const configured =
+      this.#queueAdmission.maxReplayEvents ?? SERVER_DEFAULT_LIMITS.asyncMaxReplayEvents;
+    if (count <= configured) return;
+    const breach = limitBreach("asyncMaxReplayEvents", count, configured);
+    this.#queueAdmission.limit?.(breach);
+    throw new LiveLimitError("async_replay_invalid", breach);
   }
 
   #assertSameLogicalMembership(authorization: AuthorizedLogicalSubscription): void {

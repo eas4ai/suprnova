@@ -64,23 +64,28 @@ validation, 120-second scanning, 1 GiB quarantine storage, 256-item cleanup
 batches, and 64 retained idempotency outcomes. Hosts may configure lower values;
 engine ceilings remain enforced.
 
-The browser upload manager defaults to 256 KiB chunks and four active transfers.
-Its public ceilings are 64 files and handles per document, 16 active transfers,
-4 MiB per chunk, 4 MiB queued bytes, and 4,096 code units for a secret grant.
-The default `FetchUploadTransport` accepts at most 16 KiB of response JSON and
-sends grants only in its upload authorization header.
+The browser upload manager takes its chunk size, active transfers, file size,
+pending files and pending bytes from the server's `LIVE_UPLOAD_*` settings in
+the configuration element (8 MiB, 8, 1 GiB, 1,024 and 4 GiB by default); an
+application option may lower them but not raise them. A secret grant is at
+most 4,096 code units. The framework builds its server upload profile from the
+same settings rather than from the reference profile above. The default
+`FetchUploadTransport` sends grants only in its upload authorization header.
 
 Async subscription metadata permits 16 target scopes. The internal Rust
 metadata type can represent fanout up to 1,024, but browser authorization and
 registered-event admission reject values above 256. The effective end-to-end
 event fanout ceiling is 256, further bounded by signed registration and
-deployment policy. The independent replay transcript limit is 1,024 envelopes;
-it is not event fanout. A component permits 32 subscriptions, with 32 topics and
+deployment policy. The independent replay transcript limit is the configured
+`LIVE_ASYNC_MAX_REPLAY_EVENTS` (4,096 by default); it is not event fanout. A component permits 32 subscriptions, with 32 topics and
 64 event names per subscription, across the two closed transport modes.
 Descriptors live at most 300 seconds, fallback polling is 1-300 seconds with at
 most 100 percent configured jitter, and reconnect attempts are capped at 16.
-Canonical envelopes are 64 KiB with 32 KiB payloads. The server document queue
-is 64 events/256 KiB and owns at most 128 logical memberships. The browser
+A canonical envelope's payload is at most the configured
+`LIVE_ASYNC_MAX_PAYLOAD_BYTES` (1 MiB by default). The server document queue
+holds `LIVE_ASYNC_MAX_QUEUED_EVENTS` events (4,096 by default) and
+`LIVE_ASYNC_MAX_BUFFER_BYTES` (16 MiB by default), and owns at most 128 logical
+memberships. The browser
 connection pool applies its own 256-membership ceiling, one physical transport
 per compatible document key, eight concurrent WebSocket handshakes per origin,
 and one queued plus one in-flight refresh per island.

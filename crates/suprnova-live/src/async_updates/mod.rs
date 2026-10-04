@@ -38,10 +38,10 @@ pub use envelope::{
     AsyncEnvelopeErrorKind, AsyncMembershipRegistryPort, AsyncMembershipRequest,
     AsyncMembershipValidation, AsyncPayload, AsyncReplayMembershipRequest,
     AsyncReplayMembershipValidation, BoundedPresentationSignalContracts, CompletionReason,
-    Heartbeat, MAX_ASYNC_ENVELOPE_ENTRIES, PresentationSignalContract, PresentationSignalSchema,
-    RegisteredBrowserEvent, RegisteredPresentationSignal, RegisteredRefresh, ResolvedEventFanout,
-    SUPPORTED_ASYNC_PROTOCOL_VERSIONS, StreamErrorCode, SubscriptionId, decode_async_envelope,
-    encode_async_envelope,
+    Heartbeat, MAX_ASYNC_ENVELOPE_BYTES, MAX_ASYNC_ENVELOPE_ENTRIES, PresentationSignalContract,
+    PresentationSignalSchema, RegisteredBrowserEvent, RegisteredPresentationSignal,
+    RegisteredRefresh, ResolvedEventFanout, SUPPORTED_ASYNC_PROTOCOL_VERSIONS, StreamErrorCode,
+    SubscriptionId, decode_async_envelope, encode_async_envelope,
 };
 pub(crate) use sequence::SequenceMachine;
 

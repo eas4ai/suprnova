@@ -1,7 +1,7 @@
 # Suprnova Live -- 04 Actions and Validation
 
 Status: Normative design specification
-Last revised: 2026-09-13
+Last revised: 2026-10-04
 
 ## Scope
 
@@ -223,6 +223,12 @@ facility rather than relying on a fallible reporting hook.
 
 ## Decisions and revisions
 
+- 2026-10-04 -- An action's argument schema keeps the order the action
+  declares its parameters in, beside the name order it decodes by. A
+  directive's positional literal arguments bind in that order (spec 09), and
+  the island root names each action's parameters in it, so a template can
+  invoke an action with parameters. Decoding is unchanged: the server still
+  receives a named argument object and validates it against the schema.
 - 2026-09-13 -- Refused the Required transaction policy at registration
   until the host honors it. The framework's transaction port opens a
   transaction only to roll it back and answers commit and rollback with

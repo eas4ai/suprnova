@@ -1,3 +1,5 @@
+import type { LiveLimitBreach } from "../limits.js";
+
 export type TransportFailureKind =
   | "http"
   | "media"
@@ -11,12 +13,18 @@ export type TransportFailureKind =
   | "unsafe_endpoint";
 
 export class LiveTransportError extends Error {
+  readonly liveLimit: LiveLimitBreach | null;
+
   constructor(
     readonly kind: TransportFailureKind,
     readonly status: number | null = null,
+    breach: LiveLimitBreach | null = null,
   ) {
-    super(`live_transport_${kind}`);
+    super(
+      breach === null ? `live_transport_${kind}` : `${breach.message} (live_transport_${kind})`,
+    );
     this.name = "LiveTransportError";
+    this.liveLimit = breach;
   }
 }
 

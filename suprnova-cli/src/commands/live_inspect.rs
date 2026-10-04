@@ -78,18 +78,36 @@ fn run_inner(json: bool, timeout_secs: u64) -> Result<(), String> {
     ui::label_value("Registry bound", yes_no(runtime.registry_bound));
     ui::label_value("Runtime bound", yes_no(runtime.runtime_bound));
     ui::label_value("Components", &runtime.components.to_string());
-    ui::label_value(
-        "Max request bytes",
-        &runtime.config.max_request_bytes.to_string(),
-    );
-    ui::label_value(
-        "Max response bytes",
-        &runtime.config.max_response_bytes.to_string(),
-    );
-    ui::label_value(
-        "Max context lifetime (ms)",
-        &runtime.config.max_context_lifetime_ms.to_string(),
-    );
+    match &runtime.config {
+        // Every configured limit, by the `.env` key that sets it, so a
+        // developer reads both what the application runs under and what to
+        // change.
+        super::live_tool::ConfigReport::Limits { limits } => {
+            for limit in limits {
+                ui::label_value(
+                    &super::live_tool::display_text(&limit.setting),
+                    &format!(
+                        "{} {}",
+                        limit.value,
+                        super::live_tool::display_text(&limit.unit)
+                    ),
+                );
+            }
+        }
+        // A framework from before tooling protocol 2 reports these three.
+        super::live_tool::ConfigReport::Legacy {
+            max_request_bytes,
+            max_response_bytes,
+            max_context_lifetime_ms,
+        } => {
+            ui::label_value("Max request bytes", &max_request_bytes.to_string());
+            ui::label_value("Max response bytes", &max_response_bytes.to_string());
+            ui::label_value(
+                "Max context lifetime (ms)",
+                &max_context_lifetime_ms.to_string(),
+            );
+        }
+    }
     let host = &runtime.upload_host;
     ui::label_value(
         "Upload host",

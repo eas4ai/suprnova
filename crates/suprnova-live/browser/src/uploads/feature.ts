@@ -15,9 +15,8 @@ import {
   UploadProgressPresenter,
   type UploadProgressView,
 } from "./progress.js";
+import { SERVER_DEFAULT_LIMITS, type LiveLimits } from "../limits.js";
 import {
-  DEFAULT_UPLOAD_CHUNK_BYTES,
-  MAX_UPLOAD_FILES_PER_DOCUMENT,
   type UploadConnectivity,
   type UploadApplicationPort,
   type UploadManagerOptions,
@@ -30,9 +29,6 @@ import {
 } from "./types.js";
 
 const DEFAULT_UPLOAD_ENDPOINT = "/__live/upload";
-const DEFAULT_ACTIVE_UPLOADS = 4;
-const DEFAULT_MANAGER_BYTES = 256 * 1024;
-const MAX_UPLOAD_RESPONSE_BYTES = 16 * 1024;
 
 export interface UploadFeatureOptions {
   readonly application?: UploadApplicationPort;
@@ -116,30 +112,24 @@ function controlBody(request: UploadTransportRequest): Readonly<Record<string, u
   }
 }
 
-async function boundedResponse(response: Response): Promise<UploadTransportResponse> {
+// An upload control response is the framework server's own small typed reply
+// on its reserved route; the browser reads it whole and checks its shape. A
+// byte cap of the browser's own protected nothing the server's reply needs.
+async function controlResponse(response: Response): Promise<UploadTransportResponse> {
   const declaredLength = response.headers.get("Content-Length");
-  if (
-    declaredLength !== null &&
-    (!/^(?:0|[1-9][0-9]*)$/u.test(declaredLength) ||
-      Number(declaredLength) > MAX_UPLOAD_RESPONSE_BYTES)
-  ) {
+  if (declaredLength !== null && !/^(?:0|[1-9][0-9]*)$/u.test(declaredLength)) {
     throw new UploadHttpError("upload_transport_failed");
   }
   const reader = response.body?.getReader();
   if (reader === undefined) throw new UploadHttpError("upload_transport_failed");
   // The chunks are kept as they arrive and joined only when there are several,
-  // into an array of exactly their length. A control response is a few
-  // hundred bytes, almost always one chunk, and allocating the 16 KiB limit for
-  // every one of them was the limit's worth of memory per request.
+  // into an array of exactly their length: a control response is a few hundred
+  // bytes, almost always one chunk.
   const chunks: Uint8Array[] = [];
   let length = 0;
   for (;;) {
     const item = await reader.read();
     if (item.done) break;
-    if (item.value.byteLength > MAX_UPLOAD_RESPONSE_BYTES - length) {
-      await reader.cancel();
-      throw new UploadHttpError("upload_transport_failed");
-    }
     chunks.push(item.value);
     length += item.value.byteLength;
   }
@@ -215,7 +205,7 @@ export class FetchUploadTransport implements UploadTransport {
           : "upload_transport_failed",
       );
     }
-    return boundedResponse(response);
+    return controlResponse(response);
   }
 }
 
@@ -250,15 +240,28 @@ function snapshotOptions(options: UploadFeatureOptions): UploadFeatureOptions {
   });
 }
 
-function resolveOptions(options: UploadFeatureOptions): UploadManagerOptions {
+/// The manager's settings: the server's configured upload limits, which an
+/// application option may lower but never raise, because the server refuses
+/// anything past them.
+export function resolveUploadManagerOptions(
+  options: UploadFeatureOptions,
+  context: RuntimeFeatureDocumentContext,
+): UploadManagerOptions {
   const fetchPort = globalThis.fetch;
+  const limits: LiveLimits = context.limits ?? SERVER_DEFAULT_LIMITS;
+  const lower = (option: number | undefined, configured: number): number =>
+    option === undefined ? configured : Math.min(option, configured);
+  const maxItems = lower(options.maxItems, limits.uploadMaxPendingFiles);
+  const report = context.limit?.bind(context);
   return Object.freeze({
     ...(options.application === undefined ? {} : { application: options.application }),
-    chunkBytes: options.chunkBytes ?? DEFAULT_UPLOAD_CHUNK_BYTES,
+    chunkBytes: lower(options.chunkBytes, limits.uploadChunkBytes),
     connectivity: options.connectivity ?? new BrowserConnectivity(),
-    maxActive: options.maxActive ?? DEFAULT_ACTIVE_UPLOADS,
-    maxItems: options.maxItems ?? MAX_UPLOAD_FILES_PER_DOCUMENT,
-    maxQueueBytes: options.maxQueueBytes ?? DEFAULT_MANAGER_BYTES,
+    ...(report === undefined ? {} : { limit: report }),
+    maxActive: Math.min(lower(options.maxActive, limits.uploadMaxActive), maxItems),
+    maxFileBytes: limits.uploadMaxFileBytes,
+    maxItems,
+    maxQueueBytes: lower(options.maxQueueBytes, limits.uploadMaxPendingBytes),
     randomness: options.randomness ?? new BrowserRandomness(),
     ...(options.resourceObserver === undefined
       ? {}
@@ -484,7 +487,7 @@ function defineConfiguredFeature(
 ): RuntimeFeature {
   const definition: UploadsRuntimeFeatureDefinition = Object.freeze({
     connectDocument(context: RuntimeFeatureDocumentContext) {
-      const manager = new UploadManager(resolveOptions(configuration()));
+      const manager = new UploadManager(resolveUploadManagerOptions(configuration(), context));
       if (owner !== undefined) {
         defaultConfigurationLocked = true;
         owner.manager = manager;

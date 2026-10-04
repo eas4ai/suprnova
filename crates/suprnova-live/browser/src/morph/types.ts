@@ -1,5 +1,7 @@
 import type { MorphControlPlan } from "./controls.js";
 
+/// The limits one morph runs under, built from the server's configuration by
+/// `morphLimitsFrom`. `deadlineMs` of `0` means the morph has no deadline.
 export interface MorphLimits {
   readonly maxHtmlBytes: number;
   readonly maxNodes: number;
@@ -7,8 +9,6 @@ export interface MorphLimits {
   readonly maxAttributes: number;
   readonly maxAttributesPerElement: number;
   readonly maxKeys: number;
-  readonly maxKeyBytes: number;
-  readonly maxHookCalls: number;
   readonly deadlineMs: number;
 }
 

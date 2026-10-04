@@ -11,11 +11,8 @@ import {
   type UploadCancellationCleanup,
 } from "./transfer.js";
 import { reacquireUpload } from "./resume.js";
+import { limitBreach, type LiveLimitBreach } from "../limits.js";
 import {
-  MAX_UPLOAD_ACTIVE_TRANSFERS,
-  MAX_UPLOAD_CHUNK_BYTES,
-  MAX_UPLOAD_FILES_PER_DOCUMENT,
-  MAX_UPLOAD_QUEUE_BYTES,
   validateUploadField,
   type ReacquiredTransfer,
   type UploadHandle,
@@ -37,6 +34,7 @@ interface Binding {
 
 interface Entry {
   readonly binding: Binding;
+  readonly bytes: number;
   readonly resource: BoundedDisposable;
   readonly resourceSlot: number;
   readonly transfer: UploadTransfer;
@@ -96,34 +94,34 @@ export class UploadManager {
   readonly #cleanupOwner: UploadCleanupOwner;
   readonly #generations = new Map<UploadIslandPort, Map<string, object>>();
   readonly #observers = new Map<UploadIslandPort, Set<UploadManagerObserver>>();
-  readonly #queueItemBytes: number;
   readonly #resourceSlots = new Set<number>();
   #disposed = false;
   #generationFields = 0;
 
   constructor(options: UploadManagerOptions) {
+    // The values are the server's configured upload limits; the manager adds
+    // no ceiling of its own, only that each is a positive whole number and
+    // that the transfers running at once fit inside the files pending.
     if (
       !validLimit(options.chunkBytes) ||
       !validLimit(options.maxActive) ||
       !validLimit(options.maxItems) ||
       !validLimit(options.maxQueueBytes) ||
-      options.chunkBytes > MAX_UPLOAD_CHUNK_BYTES ||
-      options.maxActive > MAX_UPLOAD_ACTIVE_TRANSFERS ||
-      options.maxItems > MAX_UPLOAD_FILES_PER_DOCUMENT ||
-      options.maxActive > options.maxItems ||
-      options.maxQueueBytes > MAX_UPLOAD_QUEUE_BYTES ||
-      options.maxQueueBytes < options.maxItems
+      (options.maxFileBytes !== undefined && !validLimit(options.maxFileBytes)) ||
+      (options.limit !== undefined && typeof options.limit !== "function") ||
+      options.maxActive > options.maxItems
     ) {
       throw new RangeError("upload_manager_limits_invalid");
     }
     this.#options = Object.freeze({ ...options });
     this.#cleanupOwner = new UploadCleanupOwner(options.maxItems);
+    // The owner counts pending transfers; their bytes are checked against
+    // `maxQueueBytes` when files are selected, from the files' real sizes.
     this.#owner = new BoundedOwner<UploadTransfer>({
       maxActive: options.maxActive,
-      maxBytes: options.maxQueueBytes,
+      maxBytes: options.maxItems,
       maxItems: options.maxItems,
     });
-    this.#queueItemBytes = Math.floor(options.maxQueueBytes / options.maxItems);
     if (
       options.resourceObserver !== undefined &&
       (typeof options.resourceObserver.resources !== "function" ||
@@ -142,14 +140,10 @@ export class UploadManager {
     if (selected.length === 0) return;
     const generation = this.#replaceGeneration(selection.island, selection.field);
     const existing = this.#binding(selection.island, selection.field);
-    const invalidCount =
-      selected.length > this.#options.maxItems ||
-      (!selection.input.multiple && selected.length !== 1);
-    const replaceable = existing?.transfers.length ?? 0;
-    if (
-      invalidCount ||
-      selected.length > this.#options.maxItems - this.#entries.size + replaceable
-    ) {
+    const invalidCount = !selection.input.multiple && selected.length !== 1;
+    const breach = invalidCount ? null : this.#selectionBreach(selected, existing);
+    if (invalidCount || breach !== null) {
+      if (breach !== null) this.#reportLimit(breach);
       if (existing !== null) await this.#retireBinding(existing, true);
       if (!this.#isCurrentGeneration(selection.island, selection.field, generation)) return;
       this.#clearNativeSelection(selection.input);
@@ -438,6 +432,42 @@ export class UploadManager {
     return Object.freeze({ chunks, files, grants });
   }
 
+  /// The configured limit a selection would go over, counting the files
+  /// already pending apart from the ones this selection replaces.
+  #selectionBreach(selected: readonly File[], existing: Binding | null): LiveLimitBreach | null {
+    const replaced = new Set(existing?.transfers ?? []);
+    let pendingFiles = 0;
+    let pendingBytes = 0;
+    for (const entry of this.#entries.values()) {
+      if (replaced.has(entry)) continue;
+      pendingFiles += 1;
+      pendingBytes += entry.bytes;
+    }
+    const files = pendingFiles + selected.length;
+    if (files > this.#options.maxItems) {
+      return limitBreach("uploadMaxPendingFiles", files, this.#options.maxItems);
+    }
+    const maxFileBytes = this.#options.maxFileBytes;
+    for (const file of selected) {
+      if (maxFileBytes !== undefined && file.size > maxFileBytes) {
+        return limitBreach("uploadMaxFileBytes", file.size, maxFileBytes);
+      }
+      pendingBytes += file.size;
+    }
+    if (pendingBytes > this.#options.maxQueueBytes) {
+      return limitBreach("uploadMaxPendingBytes", pendingBytes, this.#options.maxQueueBytes);
+    }
+    return null;
+  }
+
+  #reportLimit(breach: LiveLimitBreach): void {
+    try {
+      this.#options.limit?.(breach);
+    } catch {
+      // Reporting a refusal cannot change what was refused.
+    }
+  }
+
   #add(binding: Binding, file: File, reacquired?: ReacquiredTransfer): void {
     const transfer = new UploadTransfer({
       chunkBytes: this.#options.chunkBytes,
@@ -472,6 +502,7 @@ export class UploadManager {
     }
     const entry: Entry = {
       binding,
+      bytes: file.size,
       handle: null,
       lease: null,
       permit: null,
@@ -492,7 +523,7 @@ export class UploadManager {
     entry.settled = new Promise<void>((resolve) => {
       entry.settle = resolve;
     });
-    const admission = this.#owner.enqueue(entry.transfer, this.#queueItemBytes);
+    const admission = this.#owner.enqueue(entry.transfer, 1);
     if (admission !== "accepted") {
       entry.transfer.dispose();
       entry.resource.dispose();

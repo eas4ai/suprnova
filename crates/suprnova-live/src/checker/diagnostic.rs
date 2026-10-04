@@ -20,7 +20,10 @@ pub enum DiagnosticCode {
     BranchStackMismatch,
     /// Dynamic tag or attribute structure could not be proved.
     DynamicStructureUnproved,
-    /// Askama's untyped safe filter crossed the Live view boundary.
+    /// Askama writes a value without HTML escaping into the Live view: the
+    /// untyped `safe` filter, or `escape` with a text escaper such as
+    /// `none`, reached a `{{ }}` directly or through a binding, a loop
+    /// variable, or a macro argument.
     RawSafe,
     /// A directive name is not in the shipped grammar.
     UnknownDirective,
@@ -28,6 +31,10 @@ pub enum DiagnosticCode {
     ForbiddenLifecycle,
     /// An action identity was not registered by the owning component.
     UnknownAction,
+    /// An action directive's literal arguments do not fit the action's
+    /// declared parameters: too many, a required one left out, or a literal
+    /// the parameter's codec refuses.
+    InvalidActionArguments,
     /// A model identity was not registered.
     UnknownModel,
     /// A field exists but is not browser-bindable.
@@ -50,13 +57,16 @@ pub enum DiagnosticCode {
     UnknownEffect,
     /// A selected accessibility or component-anatomy invariant failed.
     AccessibilityViolation,
-    /// Template source or one expanded branch exceeded the byte ceiling.
+    /// A template's source, or the whole expanded view with every macro
+    /// expansion and conditional arm, exceeded the byte ceiling.
     SourceLimit,
     /// Parsed Askama nodes exceeded the configured ceiling.
     NodeLimit,
     /// Include/inheritance traversal exceeded its depth ceiling or cycled.
     IncludeDepthLimit,
-    /// Control-flow expansion exceeded the branch-state ceiling.
+    /// More distinct paths through the view were alive at once than the
+    /// branch-state ceiling allows, as when one tag's attributes depend on
+    /// many conditionals.
     BranchLimit,
     /// HTML tokenization exceeded the token ceiling.
     HtmlTokenLimit,
@@ -92,6 +102,7 @@ impl DiagnosticCode {
             Self::UnknownDirective => "unknown_directive",
             Self::ForbiddenLifecycle => "forbidden_lifecycle",
             Self::UnknownAction => "unknown_action",
+            Self::InvalidActionArguments => "invalid_action_arguments",
             Self::UnknownModel => "unknown_model",
             Self::ForbiddenModel => "forbidden_model",
             Self::InvalidModifier => "invalid_modifier",
@@ -259,13 +270,26 @@ impl DiagnosticCollector {
         column: u32,
         component: Option<&ComponentName>,
     ) {
+        // Several paths through one view can reach the same markup; a
+        // finding about one place is reported once.
+        let (line, column) = (line.max(1), column.max(1));
+        if self.diagnostics.iter().any(|existing| {
+            existing.code == code
+                && existing.severity == severity
+                && existing.path.as_ref() == path
+                && existing.line == line
+                && existing.column == column
+                && existing.component.as_ref() == component
+        }) {
+            return;
+        }
         if self.diagnostics.len() < self.max {
             self.diagnostics.push(TemplateDiagnostic::new(
                 code,
                 severity,
                 path.cloned(),
-                line.max(1),
-                column.max(1),
+                line,
+                column,
                 component.cloned(),
             ));
             return;
@@ -278,8 +302,8 @@ impl DiagnosticCollector {
             DiagnosticCode::DiagnosticLimit,
             DiagnosticSeverity::Error,
             path.cloned(),
-            line.max(1),
-            column.max(1),
+            line,
+            column,
             component.cloned(),
         );
         if let Some(last) = self.diagnostics.last_mut() {

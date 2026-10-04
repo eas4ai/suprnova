@@ -5,7 +5,7 @@ use std::fmt;
 
 use crate::state::ModelPath;
 
-pub(crate) const HARD_MAX_VALIDATION_ISSUES: usize = 1_024;
+pub(crate) const HARD_MAX_VALIDATION_ISSUES: usize = crate::limits::HARD_MAX_COLLECTION_ITEMS;
 
 /// A bounded localization key; free-form application-user messages never cross this boundary.
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]

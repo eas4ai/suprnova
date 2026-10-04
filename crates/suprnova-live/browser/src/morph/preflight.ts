@@ -1,5 +1,6 @@
+import { breachOf, LiveLimitError, type LiveLimitBreach } from "../limits.js";
 import { planMorphControls, reconcileMorphControlIdentity } from "./controls.js";
-import { parseMorphHtml, type MorphHtmlParser } from "./html.js";
+import { MorphHtmlError, parseMorphHtml, type MorphHtmlParser } from "./html.js";
 import { planMorphIdentity } from "./keys.js";
 import { validateMorphLimits } from "./limits.js";
 import type { MorphAuthority, MorphLimits, MorphPlan } from "./types.js";
@@ -9,9 +10,17 @@ const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
 const validatedPlans = new WeakSet();
 
 export class MorphPreflightError extends Error {
-  constructor(readonly detail: string) {
-    super("morph_preflight_invalid");
+  readonly liveLimit: LiveLimitBreach | null;
+
+  constructor(
+    readonly detail: string,
+    breach: LiveLimitBreach | null = null,
+  ) {
+    super(
+      breach === null ? "morph_preflight_invalid" : `${breach.message} (morph_preflight_invalid)`,
+    );
     this.name = "MorphPreflightError";
+    this.liveLimit = breach;
   }
 }
 
@@ -98,7 +107,6 @@ export function preflightIslandMorph(input: MorphPreflightInput): MorphPlan {
       input.currentRoot,
       replacement,
       initialIdentity,
-      input.limits,
       input.teleports,
     );
     const identity = reconcileMorphControlIdentity(
@@ -118,8 +126,18 @@ export function preflightIslandMorph(input: MorphPreflightInput): MorphPlan {
     return plan;
   } catch (error: unknown) {
     if (error instanceof MorphPreflightError) throw error;
-    return fail(error instanceof Error ? error.message : "unknown");
+    // A tripped limit keeps its breach, so the developer sees which setting to
+    // raise rather than a bare preflight code.
+    throw new MorphPreflightError(stableCode(error), breachOf(error));
   }
+}
+
+/// The machine code an inner failure has always reported as the preflight
+/// detail; a limit error's readable message is not a code.
+function stableCode(error: unknown): string {
+  if (error instanceof LiveLimitError) return error.code;
+  if (error instanceof MorphHtmlError) return "morph_html_invalid";
+  return error instanceof Error ? error.message : "unknown";
 }
 
 export function isValidatedMorphPlan(plan: MorphPlan): boolean {

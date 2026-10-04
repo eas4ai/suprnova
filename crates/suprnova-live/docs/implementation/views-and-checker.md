@@ -31,9 +31,12 @@ conformance adapter, not a registered Suprnova route.
 
 `TemplateChecker` consumes the immutable component registry and a bounded
 template catalog. `askama_parser` supplies the normative AST and spans for
-expressions, `if`, `match`, loops, includes, blocks, macros, and inheritance;
-`html5ever` tokenizes every reachable HTML branch. The checker joins branch
-stack state, enforces nesting/attribute/token/source/diagnostic limits, and
+expressions, `if`, `match`, loops, includes, blocks, macros, and inheritance.
+The view renders into a tree in which each conditional, match, and loop is one
+choice whose arms are rendered once. `html5ever` tokenizes each path through
+that tree, and the checker merges paths that leave the same element structure,
+so independent conditionals add to the work instead of multiplying it. It
+enforces nesting/attribute/token/source/branch-state/diagnostic limits and
 reports stable source-oriented diagnostic codes.
 
 The closed directive grammar checks registered action, model, validation,
@@ -50,7 +53,15 @@ Stimulus controllers, or effect execution.
 ## Trusted markup and escaping
 
 Ordinary Askama interpolation uses HTML escaping. The checker rejects raw
-Askama `safe`, including qualified or whitespace-varied forms. Deliberately
+output, classified from the parsed expression: Askama `safe`, including
+qualified and chained forms, `escape` or `e` with a text escaper such as
+`none`, and a raw wrapper or filter function called directly. A raw value is
+followed through bindings, nested-block assignments, macro arguments, caller
+content, inherited blocks, and loop and pattern variables, and reported where
+it is written. Markup reached through a macro called as an expression, caller
+content, or `super()` is checked where Askama writes it. An application filter,
+a Rust macro, and a dynamic value where HTML escaping does not hold (an unquoted
+or `on*` attribute value, `script` or `style` text) are unproved. Deliberately
 unescaped HTML must be a bounded `TrustedHtml` created from compile-time
 framework markup or output from a `RegisteredSanitizer`. Both paths require an
 explicit bounded `TrustedMarkupReason`; sanitizer output also carries a stable

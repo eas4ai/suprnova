@@ -1,6 +1,5 @@
 import type { RuntimeClock, RuntimeScheduler } from "../runtime/ports.js";
 
-const MAX_TIMING_KEYS = 1_024;
 const MAX_TIMING_KEY_UNITS = 512;
 const SCHEDULING_MODIFIERS = new Set(["latest", "parallel", "serial"]);
 const TIMING_MODIFIERS = new Map<string, ModelTimingPolicy>([
@@ -49,8 +48,15 @@ export class ModelTimingCoordinator {
   #generation = 0;
   #disposed = false;
 
-  constructor(clock: RuntimeClock, scheduler: RuntimeScheduler, maximum = MAX_TIMING_KEYS) {
-    if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > MAX_TIMING_KEYS) {
+  /// `maximum` bounds the timers one coordinator holds when a caller wants a
+  /// bound; a form's coordinator holds one per debounced or throttled binding
+  /// the server rendered, so it passes none.
+  constructor(
+    clock: RuntimeClock,
+    scheduler: RuntimeScheduler,
+    maximum: number = Number.MAX_SAFE_INTEGER,
+  ) {
+    if (!Number.isSafeInteger(maximum) || maximum < 1) {
       throw new Error("model_timing_limit_invalid");
     }
     this.#clock = clock;

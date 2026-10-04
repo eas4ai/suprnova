@@ -25,7 +25,7 @@ use crate::view::{
 };
 
 const HARD_MAX_ATTEMPTS: usize = 16;
-const HARD_MAX_METADATA_BYTES: usize = 1_048_576;
+const HARD_MAX_METADATA_BYTES: usize = crate::limits::HARD_MAX_INPUT_BYTES;
 
 /// Bounded private mount validity, retry, and metadata policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -202,7 +202,8 @@ impl PrivateMountService {
                 MountError::caused_by(MountErrorKind::RandomUnavailable, &error)
             })?;
             let revision = Revision::new(0);
-            let render_context = RenderContext::new(context, &instance_id, revision, expires_at);
+            let render_context = RenderContext::new(context, &instance_id, revision, expires_at)
+                .with_render_limits(self.views.limits());
             let mount_context = MountContext::new(render_context, &request.parameters);
             let lifecycle = self
                 .executor
@@ -282,6 +283,9 @@ impl PrivateMountService {
                         .island_stream_directive
                         .then(|| crate::view::declared_stream(descriptor.metadata()))
                         .flatten(),
+                    action_parameters: crate::view::declared_action_parameters(
+                        descriptor.metadata(),
+                    ),
                 },
                 self.limits.max_metadata_bytes,
             )

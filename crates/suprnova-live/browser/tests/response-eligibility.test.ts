@@ -146,7 +146,6 @@ describe("typed response parsing", () => {
     "/catalog/%2",
     "/catalog/%zz",
     "/catalog/\u0000admin",
-    `/${"a".repeat(2_048)}`,
   ])("rejects browser-unsafe navigation target %j", (target) => {
     expect(() => parseUpdateResponse(navigation(target))).toThrow(ProtocolValidationError);
   });
@@ -158,6 +157,15 @@ describe("typed response parsing", () => {
     "/catalog/books#details",
   ])("accepts browser-safe navigation target %j", (target) => {
     expect(parseUpdateResponse(navigation(target))).toMatchObject({ kind: "navigation", target });
+  });
+
+  it("bounds a navigation target by the configured redirect size, not a browser constant", () => {
+    // 2,049 bytes was refused before; the configured default is 65,536.
+    const long = `/${"a".repeat(2_048)}`;
+    expect(parseUpdateResponse(navigation(long))).toMatchObject({ kind: "navigation" });
+    expect(() => parseUpdateResponse(navigation(`/${"a".repeat(65_536)}`))).toThrow(
+      "Raise LIVE_MAX_REDIRECT_BYTES",
+    );
   });
 });
 

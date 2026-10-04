@@ -65,8 +65,9 @@ independently owned island lineage. Its canonical object has exactly `owner`
 (`null` or one binding) and `children` (an array). Every binding has exactly
 `parent_instance`, decimal-string `parent_revision`, `child_key`,
 `child_component_contract`, `child_instance`, and decimal-string `depth`.
-Parents may record at most 256 immediate children; depth is 1 through 64; the
-extension alone may occupy at most 64 KiB canonical bytes. Empty lineage,
+The children one parent records and the extension's canonical bytes are bounded
+by the snapshot's configured limits (`LIVE_MAX_REQUEST_BYTES`,
+`LIVE_MAX_JSON_ENTRIES`); depth is 1 through 64. Empty lineage,
 duplicate child keys or instances, mixed parent authority, invalid identity,
 depth ambiguity, and a descendant beyond depth 64 fail before signing or trusted
 use. A child owner must name the enclosing child instance and component

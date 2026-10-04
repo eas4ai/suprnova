@@ -10,8 +10,8 @@ import {
 
 const MODEL_FIELD = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/u;
 const VALIDATION_MESSAGE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
-const MAX_MODEL_FIELDS = 512;
-const MAX_VALIDATION_ISSUES = 64;
+// Fields and validation issues are what the server rendered and returned, so
+// they have no cap here; observers are runtime-internal subscribers.
 const MAX_MODEL_OBSERVERS = 8;
 
 export interface ValidationIssue {
@@ -68,7 +68,6 @@ export class ModelState {
       }
       return snapshot(existing);
     }
-    if (this.#fields.size >= MAX_MODEL_FIELDS) throw new Error("model_field_limit");
     const initial = isMissing(accepted) ? MISSING : immutableModelValue(accepted);
     const state: MutableFieldState = {
       acceptedServerValue: initial,
@@ -220,7 +219,6 @@ function validateField(field: string): void {
 }
 
 function normalizeValidation(issues: readonly ValidationIssue[]): readonly ValidationIssue[] {
-  if (issues.length > MAX_VALIDATION_ISSUES) throw new Error("model_validation_limit");
   return Object.freeze(
     issues.map((issue) => {
       if (!VALIDATION_MESSAGE.test(issue.message)) throw new Error("model_validation_invalid");

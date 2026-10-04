@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { SERVER_DEFAULT_LIMITS } from "../src/limits.js";
 import type { JsonValue } from "../src/canonical.js";
 import type { IslandMetadata } from "../src/islands/metadata.js";
 import type { IslandRecord } from "../src/islands/record.js";
@@ -204,17 +205,15 @@ describe("Live request builder", () => {
       ),
     ).rejects.toThrow("request_document_key_conflict");
 
-    // An intent already stops at the protocol's 128 operations and proposals,
-    // so no builder input exceeds them; tests/protocol-bounds.test.ts holds
-    // the validators to the same counts (LIVE-028).
-    const operations = Array.from({ length: 129 }, () =>
-      Object.freeze({
-        arguments: Object.freeze({}),
-        kind: "invoke_action" as const,
-        name: "search",
-      }),
-    );
-    expect(() => intent("instance", operations)).toThrow("intent_operation_limit");
+    // An intent has no counts of its own; the builder checks the request
+    // against the server's configured limits, and an over-limit request
+    // names the setting to raise (LIVE-028).
+    expect(() => intent("instance", [])).toThrow("intent_operation_limit");
+    await expect(
+      new LiveRequestBuilder({ ...SERVER_DEFAULT_LIMITS, maxRequestBytes: 64 }).build(
+        input(2, intent("instance", [action])),
+      ),
+    ).rejects.toThrow(/request size limit exceeded: .*LIVE_MAX_REQUEST_BYTES/u);
 
     await expect(
       new LiveRequestBuilder().build(

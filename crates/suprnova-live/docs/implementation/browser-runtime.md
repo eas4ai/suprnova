@@ -24,7 +24,7 @@ configuration object:
 
 ```html
 <script id="suprnova-live-config" type="application/json">
-{"asset_identity":"live-0.1.0","credentials":"same-origin","endpoint":"/_suprnova/live","max_parallel_per_island":2,"max_queued_per_island":16,"max_response_bytes":1048576,"protocol":{"maximum":2,"minimum":1},"request_timeout_ms":10000,"runtime_contract_version":1}
+{"asset_identity":"live-0.1.0","credentials":"same-origin","endpoint":"/_suprnova/live","max_html_bytes":16777216,"max_json_depth":32,"max_json_entries":1000000,"max_parallel_per_island":2,"max_queued_per_island":16,"max_request_bytes":16777216,"max_request_items":65536,"max_response_bytes":16777216,"max_response_items":65536,"morph_deadline_ms":0,"morph_max_attributes":10000000,"morph_max_attributes_per_element":4096,"morph_max_depth":512,"morph_max_keys":1000000,"morph_max_nodes":1000000,"protocol":{"maximum":2,"minimum":1},"request_timeout_ms":60000,"runtime_contract_version":1}
 </script>
 <script type="module" src="/assets/application.js"></script>
 ```
@@ -43,10 +43,18 @@ bootstrap calls `window.SuprnovaLive.boot()`.
 
 Configuration parsing is bounded, duplicate-aware, and exact-keyed. Endpoints
 default to the document origin; a cross-origin endpoint must be an explicit
-HTTP(S) origin in `allowedEndpointOrigins`. Credentials, timeouts, response
-bytes, queue depth, parallelism, protocol window, and asset identity are all
+HTTP(S) origin in `allowedEndpointOrigins`. Credentials, timeouts, queue
+depth, parallelism, protocol window, asset identity and the page limits are all
 validated before listeners or observers are installed. Invalid configuration
 therefore leaves the initial SSR content visible and inert.
+
+The page limits (`max_*` and `morph_*`) are the server's `LiveConfig`, read from
+its `LIVE_*` keys. They are the only limits the runtime applies to requests,
+responses, renders and morphs: the element has no size cap of its own beyond
+the parser's depth guard, and the runtime keeps no constant tighter than the
+server's defaults. A limit that trips prints one sentence naming the limit, the
+measured and configured values and the key, through the diagnostics console
+unless diagnostics are off.
 
 Production ports use browser clocks, cryptographic randomness, `fetch`, native
 navigation, observers, and schedulers. Tests may inject those ports through

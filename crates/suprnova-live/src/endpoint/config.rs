@@ -65,7 +65,11 @@ impl LiveEndpointConfig {
         media: super::ParsedLiveMediaType,
     ) -> Result<MountSelection, EndpointError> {
         if body.len() > self.max_request_bytes {
-            return Err(EndpointError::new(EndpointErrorKind::RequestTooLarge));
+            return Err(EndpointError::too_large(
+                EndpointErrorKind::RequestTooLarge,
+                body.len(),
+                self.max_request_bytes,
+            ));
         }
         super::request::inspect_mount(body, media, &self.protocol)
     }

@@ -1,5 +1,6 @@
 import { Idiomorph } from "idiomorph";
 
+import { limitBreach, LiveLimitError } from "../limits.js";
 import { morphLifecycleResult } from "./lifecycle.js";
 import { isValidatedMorphPlan } from "./preflight.js";
 import {
@@ -58,7 +59,10 @@ function elementsWithin(node: Node): Element[] {
     const candidate = stack.pop();
     if (candidate === undefined) break;
     if (candidate.nodeType === 1) elements.push(candidate as Element);
-    stack.push(...candidate.childNodes);
+    // A loop, not `push(...childNodes)`: a spread passes one argument per
+    // child, and engines refuse a call with more than about 100,000 arguments,
+    // which a long flat list reaches well inside the node limit.
+    for (const item of candidate.childNodes) stack.push(item);
   }
   return elements;
 }
@@ -172,7 +176,7 @@ function reconcileRekeys(
   appliedRekeys: ReadonlyMap<RekeyPair, Element>,
   markers: ReadonlySet<string>,
   hooks: MorphHooks,
-  checkBudget: VoidFunction,
+  checkDeadline: VoidFunction,
 ): void {
   for (const pair of pairs) {
     const observedReplacement = appliedRekeys.get(pair);
@@ -190,7 +194,7 @@ function reconcileRekeys(
         throw new Error("morph_rekey_missing");
       }
       if (!approvedNode(pair.replacement, markers)) throw new Error("morph_unapproved_node");
-      checkBudget();
+      checkDeadline();
       hooks.beforeNodeRemoved?.(pair.current);
       hooks.beforeNodeAdded?.(pair.replacement);
       const reference = pair.nextSibling?.parentElement === pair.parent ? pair.nextSibling : null;
@@ -202,14 +206,14 @@ function reconcileRekeys(
       continue;
     }
     if (replacementApplied !== null) {
-      checkBudget();
+      checkDeadline();
       hooks.beforeNodeRemoved?.(pair.current);
       pair.current.remove();
       hooks.afterNodeRemoved?.(pair.current);
       continue;
     }
     if (!approvedNode(pair.replacement, markers)) throw new Error("morph_unapproved_node");
-    checkBudget();
+    checkDeadline();
     hooks.beforeNodeRemoved?.(pair.current);
     hooks.beforeNodeAdded?.(pair.replacement);
     pair.current.replaceWith(pair.replacement);
@@ -235,13 +239,21 @@ export class IdiomorphAdapter implements MorphAdapter {
     ) {
       throw new Error("morph_plan_stale");
     }
-    const startedAt = this.#clock();
-    let calls = 0;
-    const checkBudget = (): void => {
-      calls += 1;
-      if (calls > plan.limits.maxHookCalls) throw new Error("morph_hook_limit");
-      if (this.#clock() - startedAt > plan.limits.deadlineMs) {
-        throw new Error("morph_deadline_exceeded");
+    // The morph runs synchronously, so a deadline can only abandon work that
+    // has already held the main thread and changed part of the island. It is
+    // off by default (`0`) and exists for applications that prefer a failed
+    // update to a long one; the cost of the walk is bounded by the node,
+    // key and attribute limits the preflight already applied.
+    const deadlineMs = plan.limits.deadlineMs;
+    const startedAt = deadlineMs === 0 ? 0 : this.#clock();
+    const checkDeadline = (): void => {
+      if (deadlineMs === 0) return;
+      const elapsed = this.#clock() - startedAt;
+      if (elapsed > deadlineMs) {
+        throw new LiveLimitError(
+          "morph_deadline_exceeded",
+          limitBreach("morphDeadlineMs", Math.ceil(elapsed), deadlineMs),
+        );
       }
     };
     const pairs = pairMap(plan.identity.entries);
@@ -277,19 +289,19 @@ export class IdiomorphAdapter implements MorphAdapter {
     const rekeyByToken = new Map(rekeys.map((pair) => [pair.token, pair]));
     const appliedRekeys = new Map<RekeyPair, Element>();
     try {
-      checkBudget();
+      checkDeadline();
       hooks.beforeMorph?.(plan);
       Idiomorph.morph(plan.currentRoot, plan.replacementRoot, {
         callbacks: {
           beforeAttributeUpdated: (name, node) => {
-            checkBudget();
+            checkDeadline();
             if (node === plan.currentRoot && name === "data-suprnova-live-status") return false;
             if (preservesAttribute(plan, node)) return false;
             if (preservesStreamStatus(plan, name, node)) return false;
             return undefined;
           },
           afterNodeAdded: (node) => {
-            checkBudget();
+            checkDeadline();
             if (!approvedNode(node, provenanceMarkers)) {
               throw new Error("morph_unapproved_node");
             }
@@ -303,15 +315,15 @@ export class IdiomorphAdapter implements MorphAdapter {
             if (node.nodeType === 1) restoreInternalTree(node as Element);
           },
           afterNodeMorphed: (current, replacement) => {
-            checkBudget();
+            checkDeadline();
             hooks.afterNodeMorphed?.(current, replacement);
           },
           afterNodeRemoved: (node) => {
-            checkBudget();
+            checkDeadline();
             hooks.afterNodeRemoved?.(node);
           },
           beforeNodeAdded: (node) => {
-            checkBudget();
+            checkDeadline();
             if (!approvedNode(node, provenanceMarkers)) {
               throw new Error("morph_unapproved_node");
             }
@@ -335,7 +347,7 @@ export class IdiomorphAdapter implements MorphAdapter {
             return undefined;
           },
           beforeNodeMorphed: (current, replacement) => {
-            checkBudget();
+            checkDeadline();
             const oldEntry =
               pairs.current.get(current) ?? replacementIdentity(current, pairs.replacement);
             const newEntry = replacementIdentity(replacement, pairs.replacement);
@@ -359,7 +371,7 @@ export class IdiomorphAdapter implements MorphAdapter {
             return undefined;
           },
           beforeNodeRemoved: (node) => {
-            checkBudget();
+            checkDeadline();
             if (skipsNodeRemoval(plan, node)) return false;
             if (rekeyByCurrent.has(node)) return false;
             const entry = pairs.current.get(node);
@@ -374,11 +386,11 @@ export class IdiomorphAdapter implements MorphAdapter {
         morphStyle: "outerHTML",
         restoreFocus: false,
       });
-      reconcileRekeys(rekeys, appliedRekeys, provenanceMarkers, hooks, checkBudget);
+      reconcileRekeys(rekeys, appliedRekeys, provenanceMarkers, hooks, checkDeadline);
       if (!connected(plan.currentRoot)) throw new Error("morph_root_replaced");
       recordMovedProvenance(plan);
       const applied = morphLifecycleResult(plan);
-      checkBudget();
+      checkDeadline();
       hooks.afterMorph?.(applied);
       return applied;
     } finally {

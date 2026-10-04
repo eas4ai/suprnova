@@ -58,12 +58,12 @@ pub(crate) struct UploadHostPorts {
 }
 
 impl HostPorts {
-    pub(crate) fn new(registry: &super::LiveRegistry) -> Result<Self, crate::FrameworkError> {
+    pub(crate) fn new(
+        registry: &super::LiveRegistry,
+        config: super::LiveConfig,
+    ) -> Result<Self, crate::FrameworkError> {
         let configured = crate::App::resolve::<super::LiveUploadHost>().ok();
-        let limits = suprnova_live::limits::UploadLimits::new(
-            suprnova_live::limits::UploadLimitConfig::reference(),
-        )
-        .map_err(|_| crate::FrameworkError::internal("Live upload limits were rejected"))?;
+        let limits = config.engine_upload_limits()?;
         let operation_locks = Arc::new(super::upload::UploadOperationLocks::default());
         let ledger = Arc::new(
             upload_ledger::SuprnovaUploadLedger::new(limits, Arc::clone(&operation_locks))
@@ -130,7 +130,9 @@ impl HostPorts {
             reporter: Arc::new(events::SuprnovaOutcomeReporter),
             trace: Arc::new(telemetry::SuprnovaExecutionTrace),
             cancellation: Arc::new(cancellation::SuprnovaCancellationPort),
-            response: Arc::new(response::SuprnovaResponseIntentPort),
+            response: Arc::new(response::SuprnovaResponseIntentPort::new(
+                config.max_redirect_bytes(),
+            )),
             uploads,
             subscription_authorization: Arc::new(subscription::SuprnovaSubscriptionAuthorization),
             subscription_credentials: Arc::new(
@@ -200,8 +202,9 @@ pub(super) struct HostPortCandidates {
 impl HostPortCandidates {
     pub(super) fn production(
         registry: &super::LiveRegistry,
+        config: super::LiveConfig,
     ) -> Result<Self, crate::FrameworkError> {
-        Ok(HostPorts::new(registry)?.candidates())
+        Ok(HostPorts::new(registry, config)?.candidates())
     }
 
     pub(super) fn finalize(

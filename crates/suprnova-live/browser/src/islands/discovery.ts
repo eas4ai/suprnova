@@ -29,11 +29,12 @@ import { parseUpdateResponse } from "../protocol.js";
 import { captureContinuity, CompositionTracker } from "../continuity/capture.js";
 import { restoreContinuity, restoreContinuityFocus } from "../continuity/restore.js";
 import type { ContinuityRecord } from "../continuity/types.js";
-import { DEFAULT_MORPH_LIMITS } from "../morph/limits.js";
+import { breachOf, type LiveLimitBreach } from "../limits.js";
+import { morphLimitsFrom } from "../morph/limits.js";
 import { preflightIslandMorph } from "../morph/preflight.js";
 import { consumeMorphProvenance } from "../morph/idiomorph.js";
 import { TeleportRegistry } from "../morph/teleport.js";
-import type { MorphAdapter, MorphPlan } from "../morph/types.js";
+import type { MorphAdapter, MorphLimits, MorphPlan } from "../morph/types.js";
 import {
   BrowserTransitionCompletion,
   prepareMorphTransitions,
@@ -51,7 +52,6 @@ import {
   ISLAND_ROOT_SELECTOR,
   ISLAND_STATUS_ATTRIBUTE,
   IslandMetadataError,
-  MAX_ISLANDS_PER_DOCUMENT,
   parseIslandMetadata,
   type IslandMetadata,
 } from "./metadata.js";
@@ -88,7 +88,7 @@ interface PreparedSuccessor {
 function rootsWithin(node: Node): Element[] {
   if (!(node instanceof Element)) return [];
   const roots = node.matches(ISLAND_ROOT_SELECTOR) ? [node] : [];
-  roots.push(...node.querySelectorAll(ISLAND_ROOT_SELECTOR));
+  for (const item of node.querySelectorAll(ISLAND_ROOT_SELECTOR)) roots.push(item);
   return roots;
 }
 
@@ -104,6 +104,7 @@ const NO_RENDER: ValidatedRender = Object.freeze({ kind: "no_render" });
 export class DocumentRuntime {
   readonly #document: Document;
   readonly #config: RuntimeConfig;
+  readonly #morphLimits: MorphLimits;
   readonly #diagnostics: RuntimeDiagnosticSink;
   readonly #observer: MutationObserver;
   readonly #listeners: DelegatedListenerRegistry;
@@ -148,6 +149,7 @@ export class DocumentRuntime {
   ) {
     this.#document = document;
     this.#config = config;
+    this.#morphLimits = morphLimitsFrom(config.limits);
     this.#diagnostics = diagnostics;
     this.#ports = ports;
     this.#effects = effects;
@@ -356,7 +358,9 @@ export class DocumentRuntime {
       return;
     }
     try {
-      const parsed = parseUpdateResponse(completed.response.text);
+      const parsed = this.#reportingLimits(() =>
+        parseUpdateResponse(completed.response.text, this.#config.limits),
+      );
       const disposition = record.scheduler.beginApplication(ticket);
       // The scheduler superseded this request while it was in flight, but the
       // server may have accepted it: its snapshot and revision are the
@@ -516,6 +520,7 @@ export class DocumentRuntime {
           this.#assertSameMetadata(prepared.metadata, metadata);
           successorMetadata = metadata;
         } catch (error: unknown) {
+          this.#reportLimit(error);
           if (teleport?.active === true) this.#teleports.rollback(teleport);
           if (featureMorphActive) {
             featureMorphActive = false;
@@ -541,7 +546,8 @@ export class DocumentRuntime {
           severity: "error",
         });
       },
-      preflight: (response) => this.#preflightSuccessor(record, response),
+      preflight: (response) =>
+        this.#reportingLimits(() => this.#preflightSuccessor(record, response)),
       queueChildren: (response) => {
         queueChildDeliveries(response.childDeliveries, response.snapshot, {
           find: (instanceId) => {
@@ -679,6 +685,22 @@ export class DocumentRuntime {
     return this.#state === "running";
   }
 
+  /// Prints a tripped limit with the setting to raise; other failures keep
+  /// their closed diagnostic only.
+  #reportLimit(error: unknown): void {
+    const breach = breachOf(error);
+    if (breach !== null) this.#diagnostics.limit?.(breach);
+  }
+
+  #reportingLimits<T>(work: () => T): T {
+    try {
+      return work();
+    } catch (error: unknown) {
+      this.#reportLimit(error);
+      throw error;
+    }
+  }
+
   #preflightSuccessor(
     record: IslandRecord,
     response: ValidatedCommittedResponse,
@@ -700,7 +722,7 @@ export class DocumentRuntime {
       },
       currentRoot,
       html: response.render.html,
-      limits: DEFAULT_MORPH_LIMITS,
+      limits: this.#morphLimits,
       teleports: this.#teleports,
     });
     const metadata = parseIslandMetadata(plan.replacementRoot, this.#config);
@@ -829,17 +851,9 @@ export class DocumentRuntime {
   }
 
   #connect(element: Element): void {
+    // Every island the server rendered connects: a record costs memory in
+    // proportion to the island's own markup, which the server already bounded.
     if (this.#records.has(element)) return;
-    if (this.#records.size >= MAX_ISLANDS_PER_DOCUMENT) {
-      element.setAttribute(ISLAND_STATUS_ATTRIBUTE, "invalid");
-      this.#diagnostics.record({
-        code: "resource_limit",
-        severity: "error",
-        phase: "discovery",
-        detailCode: "resource_exhausted",
-      });
-      return;
-    }
     try {
       const metadata = parseIslandMetadata(element, this.#config);
       if (this.#identities.has(metadata.documentKey)) {
@@ -902,6 +916,10 @@ export class DocumentRuntime {
             : "operation_rejected",
         );
       },
+      limit: (breach: LiveLimitBreach) => {
+        this.#diagnostics.limit?.(breach);
+      },
+      limits: this.#config.limits,
       stimulus: this.#stimulus,
       trackResource: (kind: CoreResourceKind, dispose: VoidFunction) => {
         const tracked = this.#resourceLedger?.add(kind, dispose);

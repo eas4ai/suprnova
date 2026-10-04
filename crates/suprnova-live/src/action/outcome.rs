@@ -10,7 +10,10 @@ use crate::registry::ComponentDescriptor;
 
 use super::{EmissionKind, RegisteredEmission};
 
-const MAX_OUTCOME_ITEMS: usize = 128;
+/// The engine's ceiling on flash messages, events and effects in one outcome.
+/// The host's configured response item limit (`LIVE_MAX_RESPONSE_ITEMS` in
+/// the framework) applies first, when the response is sealed.
+const MAX_OUTCOME_ITEMS: usize = crate::limits::HARD_MAX_COLLECTION_ITEMS;
 
 /// Closed action outcome understood by the Live protocol.
 #[derive(Clone, Debug, PartialEq)]

@@ -95,8 +95,9 @@ describe("browser async bounded pressure", () => {
     expect(current.state()).toBe("current");
   });
 
-  it("atomically enforces the 64-event document cap across subscriptions", () => {
-    const documentQueue = new AsyncDocumentQueueBudget();
+  it("atomically enforces the configured document queue depth across subscriptions", () => {
+    // A depth of 64, set the way LIVE_ASYNC_MAX_QUEUED_EVENTS sets it.
+    const documentQueue = new AsyncDocumentQueueBudget(64, 64);
     const firstAuthorization = authorization("subscription-pressure-first", "orders-first");
     const secondAuthorization = authorization("subscription-pressure-second", "orders-second");
     const firstLifecycle = vi.fn();
@@ -142,19 +143,23 @@ describe("browser async bounded pressure", () => {
     expect(documentQueue.current()).toEqual({ queuedBytes: 0, queuedEvents: 0 });
   });
 
-  it("accepts the exact document byte cap and rejects one byte over without leaking", () => {
-    const documentQueue = new AsyncDocumentQueueBudget();
-    expect(documentQueue.reserve(8, 256 * 1024)).toBe(true);
+  it("counts bytes with no byte cap and refuses one event past the depth without leaking", () => {
+    // The depth is the server's configured queue depth
+    // (LIVE_ASYNC_MAX_QUEUED_EVENTS, 64 here); bytes are bounded by the
+    // server's configured payload and buffer limits, not here.
+    const documentQueue = new AsyncDocumentQueueBudget(64, 64);
+    expect(documentQueue.reserve(8, 64 * 1024 * 1024)).toBe(true);
     expect(documentQueue.current()).toEqual({
-      queuedBytes: 256 * 1024,
+      queuedBytes: 64 * 1024 * 1024,
       queuedEvents: 8,
     });
+    expect(documentQueue.reserve(56, 1)).toBe(true);
     expect(documentQueue.reserve(1, 1)).toBe(false);
     expect(documentQueue.current()).toEqual({
-      queuedBytes: 256 * 1024,
-      queuedEvents: 8,
+      queuedBytes: 64 * 1024 * 1024 + 1,
+      queuedEvents: 64,
     });
-    documentQueue.release(8, 256 * 1024);
+    documentQueue.release(64, 64 * 1024 * 1024 + 1);
     expect(documentQueue.current()).toEqual({ queuedBytes: 0, queuedEvents: 0 });
   });
 

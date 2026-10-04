@@ -4,8 +4,9 @@ import { ISLAND_ROOT_SELECTOR } from "../islands/metadata.js";
 import type { IslandRecord } from "../islands/record.js";
 import type { DelegatedEventPhase } from "./modifiers.js";
 
-const MAX_SCANNED_ELEMENTS_PER_ISLAND = 4_096;
-const MAX_DIRECTIVES_PER_ISLAND = 2_048;
+// The scan has no element or directive cap: it walks markup the server
+// rendered and the morph already counted (`LIVE_MORPH_MAX_NODES`), and the caps
+// it had stopped binding directives past the 4,096th element without a word.
 
 export interface OwnedDirective {
   readonly attributeName: string;
@@ -173,7 +174,6 @@ export class DirectiveOwnership {
     const added: OwnedDirective[] = [];
     for (const element of walkElements(node, record.element, this.#ignoredRoots)) {
       if (this.#validated.has(element)) continue;
-      if (recordElements.length >= MAX_SCANNED_ELEMENTS_PER_ISLAND) break;
       this.#validated.add(element);
       this.#ownerByElement.set(element, record);
       recordElements.push(element);
@@ -181,7 +181,6 @@ export class DirectiveOwnership {
       const names = attributes.map((attribute) => attribute.name);
       const owned: OwnedDirective[] = [];
       for (const attribute of attributes) {
-        if (recordDirectives.length >= MAX_DIRECTIVES_PER_ISLAND) break;
         const parsed = parseDirective(attribute.name, attribute.value, names);
         if (!parsed.ok) continue;
         const candidate = Object.freeze({

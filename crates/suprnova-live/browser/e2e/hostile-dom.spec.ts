@@ -23,6 +23,9 @@ for (const scenario of [
   });
 }
 
+// hostileExtremeMorph sends a render one level past the morph depth limit the
+// page's configuration sets (LIVE_MORPH_MAX_DEPTH), so it is over a configured
+// limit, not a browser constant.
 for (const scenario of ["hostileExtremeMorph", "hostileDuplicateIdentity"] as const) {
   test(`${scenario} fails preflight without partial mutation or replay`, async ({ page }) => {
     await page.goto(`/scenario/${scenario}`);
@@ -35,20 +38,32 @@ for (const scenario of ["hostileExtremeMorph", "hostileDuplicateIdentity"] as co
   });
 }
 
-test("extreme initial depth, count, attributes, and text stop at one visible closed outcome", async ({
+test("a large initial island binds every directive, the 4,100th button included", async ({
   page,
 }) => {
-  let requests = 0;
-  page.on("request", (request) => {
-    if (new URL(request.url()).pathname === "/live") requests += 1;
-  });
+  // The browser used to stop scanning at 4,096 elements, so this button was
+  // silently dead. The server rendered it; it works.
   await page.goto("/scenario/hostileInitialLimits");
   const island = page.locator('[data-suprnova-live-document-key="primary"]');
   await expect(page.locator("#hostile-limit-marker")).toBeVisible();
-  await page.locator("#hostile-over-limit").click();
-  await browserTaskBarrier(page);
   await expect(island).toHaveAttribute("data-suprnova-live-status", "connected");
-  expect(requests).toBe(0);
+  const request = page.waitForRequest((candidate) => new URL(candidate.url()).pathname === "/live");
+  await page.locator("#hostile-over-limit").click();
+  await request;
+});
+
+test("a 10,000-row table of about 2.3 MB and 50,000 nodes morphs in", async ({ page }) => {
+  await page.goto("/scenario/largeTableMorph");
+  const island = page.locator('[data-suprnova-live-document-key="primary"]');
+  const response = page.waitForResponse(
+    (candidate) => new URL(candidate.url()).pathname === "/live",
+  );
+  await page.locator("#hostile-action").click();
+  await response;
+  await expect(island).toHaveAttribute("data-suprnova-live-revision", "8", { timeout: 30_000 });
+  await expect(page.locator("#large-table tr")).toHaveCount(10_000);
+  await expect(page.locator('[data-suprnova-live-key="row-9999"]')).toBeVisible();
+  await expect(island).toHaveAttribute("data-suprnova-live-status", "connected");
 });
 
 test("returned scripts and event handlers never execute or partially mutate accepted DOM", async ({

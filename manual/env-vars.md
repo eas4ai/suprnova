@@ -441,6 +441,56 @@ var. The issuer falls back to `"Suprnova"` when `APP_NAME` is unset.
 |---|---|---|---|
 | `SUPRNOVA_FRONTEND` | `svelte` | `String` (`svelte`, `react`, `vue`) | Active frontend. Case-insensitive. Drives `Frontend::detect_from_env()`, the default Vite entry point, and the page-component extension search order at compile time. Unknown or unset values fall back to `svelte`. |
 
+## Live
+
+Every limit Live runs under is one of these keys. The server's configuration is
+the only source: the bootstrap writes each value into the page, and the browser
+runtime applies the value it reads there, never a smaller one of its own.
+Values are plain whole numbers, with bytes written out (`16777216`, not
+`16MiB`). `Config::init` reads every key at boot, so a value that is not a
+whole number, or that breaks its rule, fails boot with the key, the value and
+the rule in the message. `LiveConfig::builder()` sets the same limits in code;
+see [Live](live.md#limits).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `LIVE_MAX_REQUEST_BYTES` | `16777216` (16 MiB) | `usize` (bytes, 1 to 1073741824) | One Live request body, the signed snapshot included. It must be at least `LIVE_MAX_RESPONSE_BYTES`, because a response's snapshot comes back in the next request. The browser checks each request against it before sending. |
+| `LIVE_MAX_RESPONSE_BYTES` | `16777216` (16 MiB), or `LIVE_MAX_REQUEST_BYTES` when that is smaller | `usize` (bytes) | One Live response body: the island HTML as an escaped JSON string, the snapshot, events and effects. The browser reads the response under it. Set it above `LIVE_MAX_HTML_BYTES` when an island renders close to the HTML limit. |
+| `LIVE_MAX_HTML_BYTES` | `16777216` (16 MiB), or `LIVE_MAX_RESPONSE_BYTES` when that is smaller | `usize` (bytes) | One island render's HTML, apart from the response around it. The server refuses a render over it, and the morph refuses an island over it. |
+| `LIVE_MAX_JSON_DEPTH` | `32` | `usize` (levels, 1 to 64) | Container nesting in Live JSON. The parsers are recursive, so 64 is the stack ceiling. |
+| `LIVE_MAX_JSON_ENTRIES` | `1000000` | `usize` (entries, 1 to 100000000) | Array elements plus object members in one request. A parsed entry costs memory beyond its bytes, so this bounds what a request of many tiny entries can grow into. |
+| `LIVE_MAX_REQUEST_ITEMS` | `65536` | `usize` (items, 1 to 16777216) | Items in one request collection: model proposals, operations, action arguments. |
+| `LIVE_MAX_RESPONSE_ITEMS` | `65536` | `usize` (items, 1 to 16777216) | Items in one response collection: validation entries, events, effects, extensions, child deliveries, and the assets, mounts and child components of one render. |
+| `LIVE_MAX_CONTEXT_LIFETIME_MS` | `30000` | `u64` (ms, 1 to 300000) | How long one trusted request context stays valid. |
+| `LIVE_REQUEST_TIMEOUT_MS` | `60000` | `u32` (ms, 1 to 2147483647) | How long the browser waits for one Live response, body included. A 16 MiB response over a 5 Mbit/s link takes about 27 seconds. |
+| `LIVE_MAX_QUEUED_PER_ISLAND` | `8` | `u8` (1 to 64) | Requests one island queues. |
+| `LIVE_MAX_PARALLEL_PER_ISLAND` | `1` | `u8` (1 to 8, at most the queue) | Requests one island runs at once. |
+| `LIVE_MORPH_MAX_NODES` | `1000000` | `u32` (nodes, 1 to 1073741824) | Nodes in one rendered island the browser morphs. |
+| `LIVE_MORPH_MAX_DEPTH` | `512` | `u32` (levels, 1 to 4096) | Element nesting in one rendered island. The morph walks the tree recursively, and browsers' HTML parsers stop nesting at 512. |
+| `LIVE_MORPH_MAX_KEYS` | `1000000` | `u32` (keyed elements, 1 to 1073741824) | Keyed elements (`live:key`, `id`, nested islands) in one rendered island. |
+| `LIVE_MORPH_MAX_ATTRIBUTES` | `10000000` | `u32` (attributes, 1 to 1073741824) | Attributes across one rendered island. |
+| `LIVE_MORPH_MAX_ATTRIBUTES_PER_ELEMENT` | `4096`, or `LIVE_MORPH_MAX_ATTRIBUTES` when that is smaller | `u32` (attributes) | Attributes on one rendered element. The morph's cost for one element grows with the square of its attribute count. |
+| `LIVE_MORPH_DEADLINE_MS` | `0` (no deadline) | `u32` (ms, 0 to 2147483647) | How long one morph may run before the browser abandons it. The morph runs synchronously, so a deadline can only stop work that already held the page and changed part of the island; set one only when a failed update is better than a long one. |
+| `LIVE_ASYNC_MAX_PAYLOAD_BYTES` | `1048576` (1 MiB), or `LIVE_ASYNC_MAX_BUFFER_BYTES` when that is smaller | `usize` (bytes, 1 to 16777216) | One asynchronous event payload. Publishing a larger one fails with the limit named. |
+| `LIVE_ASYNC_MAX_BUFFER_BYTES` | `16777216` (16 MiB) | `usize` (bytes, 1 to 1073741824) | What one open document's delivery queue, and one subscription's replay log, may hold in server memory while the browser catches up. It must be at least `LIVE_ASYNC_MAX_PAYLOAD_BYTES`. |
+| `LIVE_ASYNC_MAX_QUEUED_EVENTS` | `4096` | `usize` (events, 1 to 65536) | Asynchronous events one open document holds before its islands apply them, on the server and in the browser. An event past it is refused with the limit named and the island re-renders fresh. |
+| `LIVE_ASYNC_MAX_REPLAY_EVENTS` | `4096`, or `LIVE_ASYNC_MAX_QUEUED_EVENTS` when that is smaller | `usize` (events, 1 to the queued-event limit) | Events one reconnect replay carries, and events one subscription's replay log keeps. A replay is queued whole, so it fits inside `LIVE_ASYNC_MAX_QUEUED_EVENTS`. A longer gap re-renders the island fresh. |
+| `LIVE_ASYNC_MAX_REPLAY_BYTES` | `4194304` (4 MiB), or `LIVE_ASYNC_MAX_PAYLOAD_BYTES` when that is larger | `usize` (bytes, the payload limit to 68719476736) | Memory one subscription's replay log may hold. The log keeps recent events so a reconnecting browser catches up without a fresh render; each entry is charged its payload tree and bookkeeping, not its encoded size. |
+| `LIVE_ASYNC_REPLAY_BUDGET_BYTES` | `268435456` (256 MiB), or `LIVE_ASYNC_MAX_REPLAY_BYTES` when that is larger | `usize` (bytes, the replay limit to 68719476736) | Memory every replay log in the process may hold together. Past it, the oldest entries in any log are evicted first, and a browser that needed one re-renders fresh. Without it, replay memory grew with the number of sessions. |
+| `LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION` | `64` | `usize` (transports, 1 to 4096) | Asynchronous transports (one per open tab) one session may hold. One past it is refused with a 409 and the key in the log. |
+| `LIVE_ASYNC_MAX_TRANSPORTS` | `16384` | `usize` (transports, the per-session limit to 1048576) | Asynchronous transports the process may hold. Each is a long-lived connection, so keep it under the process's file-descriptor limit. |
+| `LIVE_MAX_REDIRECT_BYTES` | `65536` (64 KiB), or `LIVE_MAX_RESPONSE_BYTES` when that is smaller | `usize` (bytes, 1 to 2097152, at most the response) | One redirect or reflected URL a Live response carries. 2 MiB is the longest URL a browser follows. |
+| `LIVE_UPLOAD_CHUNK_BYTES` | `8388608` (8 MiB), or `LIVE_UPLOAD_MAX_FILE_BYTES` when that is smaller | `usize` (bytes, 1 to 67108864) | One upload chunk request. The server holds a chunk in memory while it checks and stores it. It must be at most the file size and large enough that a file of `LIVE_UPLOAD_MAX_FILE_BYTES` takes at most 99994 chunks. The browser sends chunks of this size unless `configureUploads` asks for smaller ones. |
+| `LIVE_UPLOAD_MAX_ACTIVE` | `8` | `usize` (transfers, 1 to 1024) | Upload transfers running at once. Each holds one chunk in memory, so it times `LIVE_UPLOAD_CHUNK_BYTES` must be at most 1073741824 (1 GiB). |
+| `LIVE_UPLOAD_MAX_FILE_BYTES` | `1073741824` (1 GiB) | `u64` (bytes, 1 to 1099511627776) | One uploaded file. The browser refuses a larger file before it sends anything; a component's own upload policy can only lower it. |
+| `LIVE_UPLOAD_MAX_PENDING_FILES` | `1024`, or `LIVE_UPLOAD_MAX_ACTIVE` when that is larger | `usize` (files, the active limit to 100000) | Files one page, and one visitor on the server, has selected and not yet finished. |
+| `LIVE_UPLOAD_MAX_PENDING_BYTES` | `4294967296` (4 GiB), or `LIVE_UPLOAD_MAX_FILE_BYTES` when that is larger | `u64` (bytes, the file limit to 17592186044416) | Bytes across the files one page, and one visitor on the server, has selected and not yet finished. |
+| `LIVE_UPLOAD_MAX_STORAGE_BYTES` | `17179869184` (16 GiB), or `LIVE_UPLOAD_MAX_PENDING_BYTES` when that is larger | `u64` (bytes, the pending limit to 70368744177664) | What the temporary upload store holds across every visitor. The server alone applies it; it never reaches the page. |
+| `LIVE_LEDGER_MAX_INSTANCES` | `100000` | `usize` (instances, 1 to 1000000) | Component instances the instance ledger holds. Every mounted private island and every promoted public seed is one. Nothing retires an instance when its page closes; it lives its whole lifetime, so this divided by `LIVE_LEDGER_INSTANCE_LIFETIME_MS` is the page views the ledger holds (100,000 over seven days is about 14,000 a day). Past it, new mounts fail until the oldest instances expire. |
+| `LIVE_LEDGER_INSTANCE_LIFETIME_MS` | `604800000` (seven days) | `u64` (ms, 60000 to 604800000) | How long one mounted instance lives, for its snapshot, its mount and the ledger. A shorter lifetime frees ledger room sooner; an island older than it re-renders fresh on its next action. |
+| `LIVE_LEDGER_CLAIM_LEASE_MS` | `30000` | `u64` (ms, 1 to 300000) | How long one action holds its claim on an instance before another action may take it over. |
+| `LIVE_LEDGER_MAX_ACCEPTED_OUTCOMES` | `64` | `usize` (outcomes, 1 to 64) | Accepted outcomes each instance keeps so a retried action gets its original answer. |
+
 ## Maintenance Mode
 
 | Var | Default | Type | Purpose |

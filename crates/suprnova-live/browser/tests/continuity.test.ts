@@ -4,11 +4,9 @@ import { captureControls, restoreControls } from "../src/continuity/forms.js";
 import { restoreFocus } from "../src/continuity/focus.js";
 import { restoreContinuity } from "../src/continuity/restore.js";
 import {
-  consumeContinuityBytes,
   ContinuityError,
   type ContinuityRecord,
   type ControlContinuity,
-  DEFAULT_CONTINUITY_LIMITS,
 } from "../src/continuity/types.js";
 import type { MorphPlan } from "../src/morph/types.js";
 
@@ -19,13 +17,32 @@ function rootContaining(...elements: Element[]): HTMLElement {
 }
 
 describe("interaction continuity", () => {
-  it("bounds retained values by encoded bytes", () => {
-    const budget = { bytes: 0, limit: 3 };
-    consumeContinuityBytes(budget, "é");
-    expect(budget.bytes).toBe(2);
-    expect(() => {
-      consumeContinuityBytes(budget, "é");
-    }).toThrow(new ContinuityError("resource_exhausted"));
+  it("keeps a long textarea and a large form's edits across a morph, with no cap", () => {
+    // The old 16 KiB and 64-control caps failed the update for a long essay or
+    // a large edited grid; the values already live in the DOM.
+    const essay = "é".repeat(100 * 1024);
+    const entries = Array.from({ length: 500 }, (_, index) => ({
+      current: {
+        defaultValue: "",
+        getAttribute: () => null,
+        tagName: index === 0 ? "TEXTAREA" : "INPUT",
+        type: "text",
+        value: index === 0 ? essay : `edit ${String(index)}`,
+      } as unknown as Element,
+      currentPosition: `root/${String(index)}`,
+      kind: "live_key",
+      replacement: { getAttribute: () => null } as unknown as Element,
+      replacementPosition: `root/${String(index)}`,
+      token: `live_key:cell-${String(index)}`,
+      value: `cell-${String(index)}`,
+    }));
+    const plan = {
+      controls: { byCurrent: new Map<Element, never>() },
+      identity: { entries },
+    } as unknown as MorphPlan;
+    const controls = captureControls(plan);
+    expect(controls).toHaveLength(500);
+    expect(controls[0]).toMatchObject({ kind: "text", value: essay });
   });
 
   it("restores dirty text, check, and select presentation without emitting events", () => {
@@ -108,7 +125,7 @@ describe("interaction continuity", () => {
       },
     } as unknown as MorphPlan;
 
-    expect(captureControls(plan, DEFAULT_CONTINUITY_LIMITS, { bytes: 0, limit: 1024 })).toEqual([]);
+    expect(captureControls(plan)).toEqual([]);
 
     const forcedReplacement = {
       ...plan,
@@ -122,12 +139,7 @@ describe("interaction continuity", () => {
         ],
       },
     } as unknown as MorphPlan;
-    expect(
-      captureControls(forcedReplacement, DEFAULT_CONTINUITY_LIMITS, {
-        bytes: 0,
-        limit: 1024,
-      }),
-    ).toEqual([]);
+    expect(captureControls(forcedReplacement)).toEqual([]);
   });
 
   it("runs signal continuity inside the post-commit reconciliation phase", () => {

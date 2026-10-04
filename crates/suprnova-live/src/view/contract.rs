@@ -11,11 +11,11 @@ use crate::identity::{ComponentName, IslandSlot, ViewName};
 
 use super::{ViewError, ViewErrorKind};
 
-const HARD_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
-const HARD_MAX_ASSETS: usize = 1_024;
-const HARD_MAX_MOUNTS: usize = 1_024;
-const HARD_MAX_CHILDREN: usize = 1_024;
-const HARD_MAX_SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
+const HARD_MAX_BODY_BYTES: usize = crate::limits::HARD_MAX_INPUT_BYTES;
+const HARD_MAX_ASSETS: usize = crate::limits::HARD_MAX_COLLECTION_ITEMS;
+const HARD_MAX_MOUNTS: usize = crate::limits::HARD_MAX_COLLECTION_ITEMS;
+const HARD_MAX_CHILDREN: usize = crate::limits::HARD_MAX_COLLECTION_ITEMS;
+const HARD_MAX_SNAPSHOT_BYTES: usize = crate::limits::HARD_MAX_INPUT_BYTES;
 
 /// Validated bounds applied before a render result becomes authoritative.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,15 +53,17 @@ impl RenderLimits {
         })
     }
 
-    /// Returns conservative standalone defaults for ordinary views.
+    /// Returns the framework's defaults (`LIVE_MAX_HTML_BYTES`,
+    /// `LIVE_MAX_RESPONSE_ITEMS`, `LIVE_MAX_REQUEST_BYTES`), sized for large
+    /// modern pages.
     #[must_use]
     pub const fn standard() -> Self {
         Self {
-            max_body_bytes: 2 * 1024 * 1024,
-            max_assets: 128,
-            max_mounts: 128,
-            max_children: 128,
-            max_snapshot_bytes: 512 * 1024,
+            max_body_bytes: 16 * 1024 * 1024,
+            max_assets: 65_536,
+            max_mounts: 65_536,
+            max_children: 65_536,
+            max_snapshot_bytes: 16 * 1024 * 1024,
         }
     }
 

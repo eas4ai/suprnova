@@ -28,12 +28,17 @@ pub(crate) fn take_composition_canonicalization_paths() -> Vec<&'static str> {
 
 /// Snapshot-schema-v1 extension name for independently owned island lineage.
 pub const COMPOSITION_LINEAGE_EXTENSION_V1: &str = "x_suprnova_live_composition_v1";
-/// Maximum immediate children recorded by one instanced snapshot.
-pub const MAX_COMPOSITION_LINEAGE_CHILDREN_V1: usize = 256;
-/// Maximum independently owned island nesting depth recorded by lineage v1.
+/// Ceiling on the immediate children one instanced snapshot records. A list
+/// of row components is bounded by the snapshot's configured byte and entry
+/// limits first (`LIVE_MAX_REQUEST_BYTES`, `LIVE_MAX_JSON_ENTRIES`); this is
+/// the engine's collection ceiling.
+pub const MAX_COMPOSITION_LINEAGE_CHILDREN_V1: usize = crate::limits::HARD_MAX_COLLECTION_ITEMS;
+/// Maximum independently owned island nesting depth recorded by lineage v1,
+/// the composition planner's own depth ceiling.
 pub const MAX_COMPOSITION_LINEAGE_DEPTH_V1: u16 = 64;
-/// Maximum canonical bytes occupied by the composition extension alone.
-pub const MAX_COMPOSITION_LINEAGE_BYTES_V1: usize = 64 * 1024;
+/// Ceiling on the canonical bytes of the composition extension. The
+/// snapshot's configured byte limit applies first.
+pub const MAX_COMPOSITION_LINEAGE_BYTES_V1: usize = crate::limits::HARD_MAX_INPUT_BYTES;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CompositionBindingV1 {

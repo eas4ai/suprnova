@@ -5,8 +5,9 @@ use crate::clock::ClockErrorKind;
 use crate::component::{ActionExecutionErrorKind, LifecycleErrorKind};
 use crate::identity::IdentityErrorKind;
 use crate::ledger::LedgerErrorKind;
+use crate::limits::SizeBreach;
 use crate::snapshot::SnapshotErrorKind;
-use crate::view::ViewErrorKind;
+use crate::view::{ViewError, ViewErrorKind};
 
 use super::HostErrorKind;
 
@@ -53,6 +54,9 @@ pub enum ExecutionFailure {
     Snapshot(SnapshotErrorKind),
     /// The view subsystem refused the rendered fragment or the assembled island root.
     View(ViewErrorKind),
+    /// The rendered island HTML was over the configured byte limit; the sizes
+    /// let the host name the limit and the setting to raise.
+    ViewTooLarge(SizeBreach),
     /// Outcome validation found an incomplete outcome: an empty signed snapshot, a render
     /// outcome without HTML, or HTML for an outcome that renders nothing.
     OutcomeShape,
@@ -66,4 +70,14 @@ pub enum ExecutionFailure {
     /// Accepted-response sealing: the host supplied no request-bound sealer and binding, or a
     /// sealer for another protocol version, or the sealer refused the complete response.
     ResponseSealing,
+}
+
+impl ExecutionFailure {
+    /// The cause a view error becomes: a body over its limit keeps its sizes.
+    pub(crate) fn from_view(error: &ViewError) -> Self {
+        match error.size() {
+            Some(size) => Self::ViewTooLarge(size),
+            None => Self::View(error.kind()),
+        }
+    }
 }

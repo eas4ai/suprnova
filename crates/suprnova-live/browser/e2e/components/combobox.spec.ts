@@ -126,17 +126,20 @@ test("a selection writes the option's value to the bound field and its label to 
     html: combobox({ remote: false, options: COUNTRIES }),
     components: ["combobox"],
   });
-  await within(page.addScriptTag({ content: RECORD_VALUE_EVENTS }), 3_000, "recording value events");
+  await within(
+    page.addScriptTag({ content: RECORD_VALUE_EVENTS }),
+    3_000,
+    "recording value events",
+  );
   await typeQuery(page, "ger");
   await within(page.keyboard.press("ArrowDown"), 3_000, "moving to the option");
   await within(page.keyboard.press("Enter"), 3_000, "selecting the option");
   await expect(page.locator("#country-value")).toHaveValue("germany");
   await expect(page.locator("#country")).toHaveValue("Germany");
   await expect(page.locator("#country-option-4")).toHaveAttribute("aria-selected", "true");
-  expect(await page.evaluate(() => (window as unknown as { valueEvents: string[] }).valueEvents)).toEqual([
-    "input:germany",
-    "change:germany",
-  ]);
+  expect(
+    await page.evaluate(() => (window as unknown as { valueEvents: string[] }).valueEvents),
+  ).toEqual(["input:germany", "change:germany"]);
 });
 
 test("editing the text after a selection clears the selected value", async ({ page }) => {
@@ -144,18 +147,23 @@ test("editing the text after a selection clears the selected value", async ({ pa
     html: combobox({ remote: false, value: "chile", query: "Chile", options: COUNTRIES }),
     components: ["combobox"],
   });
-  await within(page.addScriptTag({ content: RECORD_VALUE_EVENTS }), 3_000, "recording value events");
+  await within(
+    page.addScriptTag({ content: RECORD_VALUE_EVENTS }),
+    3_000,
+    "recording value events",
+  );
   await within(page.locator("#country").focus(), 3_000, "focusing the input");
   await within(page.keyboard.press("End"), 3_000, "moving to the end");
   await within(page.keyboard.press("Backspace"), 3_000, "editing the text");
   await expect(page.locator("#country-value")).toHaveValue("");
-  expect(await page.evaluate(() => (window as unknown as { valueEvents: string[] }).valueEvents)).toEqual([
-    "input:",
-    "change:",
-  ]);
+  expect(
+    await page.evaluate(() => (window as unknown as { valueEvents: string[] }).valueEvents),
+  ).toEqual(["input:", "change:"]);
   // A second edit with nothing selected sends nothing more.
   await within(page.keyboard.press("Backspace"), 3_000, "editing again");
-  expect(await page.evaluate(() => (window as unknown as { valueEvents: string[] }).valueEvents)).toHaveLength(2);
+  expect(
+    await page.evaluate(() => (window as unknown as { valueEvents: string[] }).valueEvents),
+  ).toHaveLength(2);
 });
 
 test("the option holding the bound value renders selected", async ({ page }) => {

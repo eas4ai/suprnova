@@ -11,7 +11,7 @@ use std::num::{NonZeroU16, NonZeroUsize};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -31,16 +31,14 @@ use suprnova_live::async_updates::{
     CapabilityVersion, CloseDisposition, CurrentSubscriptionRegistration,
     DocumentAuthorizationScope, DocumentTransportHandle, DocumentTransportKind,
     DocumentTransportLimits, DocumentTransportSession, EventTarget, Heartbeat,
-    MAX_ASYNC_BUFFER_BYTES, MAX_ASYNC_BUFFER_EVENTS, MAX_ASYNC_PAYLOAD_BYTES,
-    MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, MAX_EVENT_FANOUT, MAX_REPLAY_TRANSCRIPT_ENVELOPES,
-    PollFallbackPolicy, PollInitialBehavior, PollVisibilityPolicy, RegisteredBrowserEvent,
-    RegisteredRefresh, ResolvedAsyncDelivery, ResolvedEventFanout, SequenceDisposition, SseEncoder,
-    SseMembershipControl, StreamEpoch, StreamName, StreamPosition, StreamSequence,
-    SubscriptionBinding, SubscriptionDescriptor, SubscriptionError, SubscriptionErrorKind,
-    SubscriptionId, SubscriptionIssueRequest, SubscriptionModes, SubscriptionService, TopicName,
-    TrustedMountParameters, VerifiedOrigin, WebSocketCodec, WebSocketControlRecord,
-    WebSocketMembershipAcknowledgment, WebSocketMembershipControl, WebSocketMembershipRequest,
-    encode_async_envelope,
+    MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, MAX_EVENT_FANOUT, PollFallbackPolicy, PollInitialBehavior,
+    PollVisibilityPolicy, RegisteredBrowserEvent, RegisteredRefresh, ResolvedAsyncDelivery,
+    ResolvedEventFanout, SequenceDisposition, SseEncoder, SseMembershipControl, StreamEpoch,
+    StreamName, StreamPosition, StreamSequence, SubscriptionBinding, SubscriptionDescriptor,
+    SubscriptionError, SubscriptionErrorKind, SubscriptionId, SubscriptionIssueRequest,
+    SubscriptionModes, SubscriptionService, TopicName, TrustedMountParameters, VerifiedOrigin,
+    WebSocketCodec, WebSocketControlRecord, WebSocketMembershipAcknowledgment,
+    WebSocketMembershipControl, WebSocketMembershipRequest, encode_async_envelope,
 };
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::clock::Clock;
@@ -87,13 +85,7 @@ pub(crate) const DEFAULT_RECONNECT_ATTEMPTS: u8 = 4;
 pub(crate) const MIN_DOCUMENT_INSTANCE_BYTES: usize = 16;
 pub(crate) const MAX_DOCUMENT_INSTANCE_BYTES: usize = 64;
 pub(crate) const MAX_CONTROL_NONCE_BYTES: usize = 128;
-const MAX_TRANSPORTS_PER_SCOPE: usize = 8;
-/// Process-wide bound on live document transports across every scope, so
-/// rotating sessions cannot grow the transport table without limit.
-const MAX_TRANSPORTS_TOTAL: usize = 4_096;
 const MAX_ISSUED_PER_SCOPE: usize = 512;
-const MAX_LOG_ENTRIES: usize = 256;
-const MAX_LOG_BYTES: usize = 64 * 1024;
 const MAX_REMEMBERED_NONCES: usize = 256;
 pub(crate) const MAX_SOCKET_CONTROLS: u32 = 64;
 const OUTBOUND_CAPACITY: usize = 16;
@@ -230,6 +222,8 @@ pub(crate) enum StreamPayloadSpec {
 pub(crate) enum PublishError {
     InvalidTopic,
     InvalidPayload,
+    /// The payload is over `LIVE_ASYNC_MAX_PAYLOAD_BYTES`.
+    PayloadTooLarge(super::LiveLimitExceeded),
 }
 
 /// Exact browser-facing transport kind.
@@ -284,103 +278,56 @@ pub(crate) struct TransportKey {
     instance: String,
 }
 
-struct LogEntry {
-    sequence: u64,
-    envelope: AsyncEnvelope,
-    encoded: Bytes,
+/// One subscription's replay log: its recent typed envelopes, which its
+/// transport reads in order and a reconnecting browser replays.
+pub(crate) type SubscriptionLog = super::replay::ReplayLog<AsyncEnvelope>;
+
+/// The memory every subscription's replay log shares.
+type SubscriptionReplayBudget = super::replay::ReplayBudget<AsyncEnvelope>;
+
+impl super::replay::RetainedBytes for AsyncEnvelope {
+    /// The envelope's strings and payload tree; its encoded form is not kept.
+    fn retained_bytes(&self) -> usize {
+        let payload = match self.payload() {
+            AsyncPayload::BrowserEvent(event) => event
+                .name()
+                .as_str()
+                .len()
+                .saturating_add(super::replay::canonical_heap_bytes(event.payload())),
+            AsyncPayload::PresentationSignal(signal) => signal
+                .name()
+                .as_str()
+                .len()
+                .saturating_add(signal.scope().as_str().len())
+                .saturating_add(super::replay::canonical_heap_bytes(signal.value())),
+            AsyncPayload::Refresh(_)
+            | AsyncPayload::Heartbeat(_)
+            | AsyncPayload::Complete(_)
+            | AsyncPayload::Error(_) => 0,
+        };
+        self.stream().as_str().len().saturating_add(payload)
+    }
 }
 
-/// Bounded ordered log of typed envelopes for one logical subscription.
-pub(crate) struct SubscriptionLog {
-    epoch: u64,
-    next_sequence: u64,
-    entries: VecDeque<LogEntry>,
-    bytes: usize,
-    waker: Option<Waker>,
-    last_append_ms: u64,
+/// The position the next envelope appended to `log` takes.
+fn next_position(log: &SubscriptionLog) -> StreamPosition {
+    StreamPosition::new(
+        StreamEpoch::new(log.epoch()),
+        StreamSequence::new(log.next_sequence()),
+    )
 }
 
-impl SubscriptionLog {
-    fn new(epoch: u64, now_ms: u64) -> Self {
-        Self {
-            epoch,
-            next_sequence: 1,
-            entries: VecDeque::new(),
-            bytes: 0,
-            waker: None,
-            last_append_ms: now_ms,
-        }
-    }
-
-    const fn head(&self) -> u64 {
-        self.next_sequence - 1
-    }
-
-    fn oldest(&self) -> Option<u64> {
-        self.entries.front().map(|entry| entry.sequence)
-    }
-
-    fn next_position(&self) -> StreamPosition {
-        StreamPosition::new(
-            StreamEpoch::new(self.epoch),
-            StreamSequence::new(self.next_sequence),
-        )
-    }
-
-    fn append(&mut self, envelope: AsyncEnvelope, encoded: Bytes, now_ms: u64) {
-        let sequence = self.next_sequence;
-        self.next_sequence = self.next_sequence.saturating_add(1);
-        self.bytes = self.bytes.saturating_add(encoded.len());
-        self.entries.push_back(LogEntry {
-            sequence,
-            envelope,
-            encoded,
-        });
-        while self.entries.len() > MAX_LOG_ENTRIES || self.bytes > MAX_LOG_BYTES {
-            if let Some(evicted) = self.entries.pop_front() {
-                self.bytes = self.bytes.saturating_sub(evicted.encoded.len());
-            } else {
-                break;
-            }
-        }
-        self.last_append_ms = now_ms;
-        if let Some(waker) = self.waker.take() {
-            waker.wake();
-        }
-    }
-
-    fn entry_at(&self, sequence: u64) -> Option<&LogEntry> {
-        let first = self.oldest()?;
-        if sequence < first {
-            return None;
-        }
-        let index = usize::try_from(sequence - first).ok()?;
-        self.entries
-            .get(index)
-            .filter(|entry| entry.sequence == sequence)
-    }
-
-    /// Returns every retained envelope after `position`, or `None` when the tail was evicted.
-    fn tail_after(&self, epoch: u64, sequence: u64) -> Option<Vec<Bytes>> {
-        if epoch != self.epoch || sequence > self.head() {
-            return None;
-        }
-        if sequence == self.head() {
-            return Some(Vec::new());
-        }
-        let first_needed = sequence.saturating_add(1);
-        let oldest = self.oldest()?;
-        if oldest > first_needed {
-            return None;
-        }
-        Some(
-            self.entries
-                .iter()
-                .filter(|entry| entry.sequence >= first_needed)
-                .map(|entry| entry.encoded.clone())
-                .collect(),
-        )
-    }
+/// Every envelope retained after `position`, encoded for the browser, or
+/// `None` when part of the tail was evicted.
+fn encoded_tail(log: &SubscriptionLog, epoch: u64, sequence: u64) -> Option<Vec<Bytes>> {
+    log.tail_after(epoch, sequence)?
+        .into_iter()
+        .map(|envelope| {
+            encode_async_envelope(envelope, &AsyncCodecLimits::v1())
+                .ok()
+                .map(Bytes::from)
+        })
+        .collect()
 }
 
 struct LogSession {
@@ -412,8 +359,7 @@ impl AsyncEventSession for LogSession {
             // replay from its committed position; the lane observes the jump.
             this.cursor = oldest;
         }
-        if let Some(entry) = log.entry_at(this.cursor) {
-            let envelope = entry.envelope.clone();
+        if let Some(envelope) = log.entry_at(this.cursor).cloned() {
             this.cursor = this.cursor.saturating_add(1);
             this.delivery_cursor.store(this.cursor, Ordering::Release);
             return Poll::Ready(Ok(Some(envelope)));
@@ -620,6 +566,35 @@ struct ConstructingClaims {
     events: suprnova_live::async_updates::BoundedEventContracts,
 }
 
+/// The configured asynchronous limits (`LIVE_ASYNC_MAX_PAYLOAD_BYTES`,
+/// `LIVE_ASYNC_MAX_BUFFER_BYTES`), copied out of [`super::LiveConfig`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AsyncLimits {
+    pub(crate) max_payload_bytes: usize,
+    pub(crate) max_buffer_bytes: usize,
+    pub(crate) max_queued_events: usize,
+    pub(crate) max_replay_events: usize,
+    pub(crate) max_replay_bytes: usize,
+    pub(crate) replay_budget_bytes: usize,
+    pub(crate) max_transports_per_scope: usize,
+    pub(crate) max_transports: usize,
+}
+
+impl AsyncLimits {
+    pub(crate) const fn from_config(config: super::LiveConfig) -> Self {
+        Self {
+            max_payload_bytes: config.async_max_payload_bytes(),
+            max_buffer_bytes: config.async_max_buffer_bytes(),
+            max_queued_events: config.async_max_queued_events(),
+            max_replay_events: config.async_max_replay_events(),
+            max_replay_bytes: config.server().async_max_replay_bytes(),
+            replay_budget_bytes: config.server().async_replay_budget_bytes(),
+            max_transports_per_scope: config.server().async_max_transports_per_session(),
+            max_transports: config.server().async_max_transports(),
+        }
+    }
+}
+
 /// Shared asynchronous-update state behind the immutable runtime graph.
 pub(crate) struct AsyncState {
     tables: Mutex<AsyncTables>,
@@ -632,6 +607,8 @@ pub(crate) struct AsyncState {
     source: LogEventSource,
     retirement: Notify,
     signals: BoundedPresentationSignalContracts,
+    limits: AsyncLimits,
+    replay_budget: Arc<SubscriptionReplayBudget>,
 }
 
 impl AsyncState {
@@ -639,6 +616,7 @@ impl AsyncState {
         keys: SnapshotKeyRing,
         clock: Arc<dyn Clock>,
         engine_registry: Arc<ComponentRegistry>,
+        limits: AsyncLimits,
     ) -> Result<Arc<Self>, FrameworkError> {
         let signals = BoundedPresentationSignalContracts::new(Vec::new())
             .map_err(|_| FrameworkError::internal("Live async signal contracts were rejected"))?;
@@ -653,7 +631,29 @@ impl AsyncState {
             source: LogEventSource(weak.clone()),
             retirement: Notify::new(),
             signals,
+            limits,
+            replay_budget: Arc::new(SubscriptionReplayBudget::new(limits.replay_budget_bytes)),
         }))
+    }
+
+    /// The configured transport limit a new transport would go over: the
+    /// session's (`LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION`) or the process's
+    /// (`LIVE_ASYNC_MAX_TRANSPORTS`), which bounds the transport table
+    /// however many sessions rotate through.
+    fn transport_limit(&self, in_scope: usize, total: usize) -> Option<super::LiveLimitExceeded> {
+        if in_scope >= self.limits.max_transports_per_scope {
+            Some(super::LiveLimitExceeded::async_transports_per_session(
+                in_scope as u64 + 1,
+                self.limits.max_transports_per_scope as u64,
+            ))
+        } else if total >= self.limits.max_transports {
+            Some(super::LiveLimitExceeded::async_transports(
+                total as u64 + 1,
+                self.limits.max_transports as u64,
+            ))
+        } else {
+            None
+        }
     }
 
     pub(crate) fn now(&self) -> Result<UnixMillis, AsyncErrorKind> {
@@ -811,6 +811,9 @@ impl AsyncState {
         let log = Arc::new(Mutex::new(SubscriptionLog::new(
             baseline.epoch().get(),
             now.get(),
+            self.limits.max_replay_bytes,
+            self.limits.max_replay_events,
+            Arc::clone(&self.replay_budget),
         )));
         let mut guard = self.tables();
         let tables = &mut *guard;
@@ -835,9 +838,9 @@ impl AsyncState {
             transport.credential_expires_at = transport.credential_expires_at.max(expires_at);
             transport.credential.clone()
         } else {
-            if transports_in_scope >= MAX_TRANSPORTS_PER_SCOPE
-                || tables.transports.len() >= MAX_TRANSPORTS_TOTAL
+            if let Some(limit) = self.transport_limit(transports_in_scope, tables.transports.len())
             {
+                tracing::warn!(limit = %limit, "Live async transport was refused");
                 return Err(AsyncErrorKind::TransportLimit);
             }
             let credential = (kind == TransportKind::Sse).then(mint_credential);
@@ -969,7 +972,7 @@ impl AsyncState {
             }
             {
                 let log = lock_log(&record.log);
-                if position.0 != log.epoch || position.1 > log.head() {
+                if position.0 != log.epoch() || position.1 > log.head() {
                     return Err(AsyncErrorKind::PositionInvalid);
                 }
             }
@@ -1019,7 +1022,7 @@ impl AsyncState {
         let envelope_context = self.construct_context(&authorized, subscription, prior_id)?;
         let (replay, proof) = {
             let log = lock_log(&log);
-            match log.tail_after(position.0, position.1) {
+            match encoded_tail(&log, position.0, position.1) {
                 Some(tail) if tail.is_empty() => (Vec::new(), "authoritative_no_tail"),
                 Some(tail) => (tail, "complete_replay"),
                 None => (Vec::new(), "authoritative_no_tail"),
@@ -1166,6 +1169,7 @@ impl AsyncState {
             DocumentTransportKind::ServerSentEvents,
             transport.handle.clone(),
             transport.scope.clone(),
+            self.limits,
         )?;
         transport.document = Arc::new(tokio::sync::Mutex::new(Some(document)));
         transport.retained_events = 0;
@@ -1216,9 +1220,8 @@ impl AsyncState {
             .values()
             .filter(|transport| transport.scope == scope)
             .count();
-        if transports_in_scope >= MAX_TRANSPORTS_PER_SCOPE
-            || tables.transports.len() >= MAX_TRANSPORTS_TOTAL
-        {
+        if let Some(limit) = self.transport_limit(transports_in_scope, tables.transports.len()) {
+            tracing::warn!(limit = %limit, "Live async transport was refused");
             return Err(AsyncErrorKind::TransportLimit);
         }
         let handle = DocumentTransportHandle::from_bytes(&random_bytes(16))
@@ -1228,6 +1231,7 @@ impl AsyncState {
             DocumentTransportKind::WebSocket,
             handle.clone(),
             scope.clone(),
+            self.limits,
         )?;
         let (sender, receiver) = mpsc::channel(OUTBOUND_CAPACITY);
         let wake = Arc::new(Notify::new());
@@ -1495,7 +1499,7 @@ impl AsyncState {
             record.transport_wake = Some(Arc::clone(&wake));
             let baseline = authorization.baseline().sequence().get();
             let resume = record.resume_position;
-            let epoch = lock_log(&record.log).epoch;
+            let epoch = lock_log(&record.log).epoch();
             record.membership = Some(authorization.clone());
             (wake, resume, baseline, epoch)
         };
@@ -1674,6 +1678,7 @@ impl AsyncState {
         let tables = self.tables();
         let mut accepted = 0_usize;
         let mut rejected = 0_usize;
+        let mut measured = false;
         for id in allowed {
             let Some(record) = tables.issued.get(&id) else {
                 continue;
@@ -1712,10 +1717,20 @@ impl AsyncState {
                     }
                 }
             };
-            if append_payload(record, payload, now).is_ok() {
-                accepted += 1;
-            } else {
-                rejected += 1;
+            // Every subscriber receives the same payload, so it is measured
+            // once, against the first subscriber's envelope, and a payload over
+            // the limit stops the publish before any other subscriber's copy.
+            let limit = (!measured).then_some(self.limits.max_payload_bytes);
+            match append_payload(record, payload, now, limit, &self.replay_budget) {
+                Ok(()) => {
+                    measured = true;
+                    accepted += 1;
+                }
+                Err(AppendError::TooLarge(breach)) => {
+                    tracing::warn!(topic, limit = %breach, "Live stream payload was refused");
+                    return Err(PublishError::PayloadTooLarge(breach));
+                }
+                Err(AppendError::Invalid) => rejected += 1,
             }
         }
         if accepted == 0 && rejected > 0 {
@@ -1842,7 +1857,13 @@ impl AsyncState {
                     >= u64::try_from(HEARTBEAT_INTERVAL.as_millis()).unwrap_or(u64::MAX)
             };
             if idle {
-                let _ = append_payload(record, AsyncPayload::Heartbeat(Heartbeat), now);
+                let _ = append_payload(
+                    record,
+                    AsyncPayload::Heartbeat(Heartbeat),
+                    now,
+                    Some(self.limits.max_payload_bytes),
+                    &self.replay_budget,
+                );
             }
         }
     }
@@ -1963,14 +1984,45 @@ impl Drop for MembershipLease {
     }
 }
 
-fn append_payload(record: &IssuedRecord, payload: AsyncPayload, now: UnixMillis) -> Result<(), ()> {
-    let context = record.context().ok_or(())?;
+enum AppendError {
+    Invalid,
+    TooLarge(super::LiveLimitExceeded),
+}
+
+/// Appends one payload to a subscription's log, then evicts the oldest
+/// entries in any log past the shared replay budget.
+///
+/// `limit` is the configured payload limit to measure against, or `None`
+/// when the same payload was already measured for an earlier subscriber of
+/// one publish: the measurement serializes the whole payload, and every
+/// subscriber receives the same one.
+fn append_payload(
+    record: &IssuedRecord,
+    payload: AsyncPayload,
+    now: UnixMillis,
+    limit: Option<usize>,
+    budget: &SubscriptionReplayBudget,
+) -> Result<(), AppendError> {
+    let context = record.context().ok_or(AppendError::Invalid)?;
     let mut log = lock_log(&record.log);
-    let position = log.next_position();
-    let envelope = AsyncEnvelope::new(context, position, payload).map_err(|_| ())?;
-    let encoded = encode_async_envelope(&envelope, &AsyncCodecLimits::v1()).map_err(|_| ())?;
-    log.append(envelope, Bytes::from(encoded), now.get());
+    let envelope = AsyncEnvelope::new(context, next_position(&log), payload)
+        .map_err(|_| AppendError::Invalid)?;
+    if let Some(max_payload_bytes) = limit {
+        let payload_bytes = envelope
+            .canonical_payload_len()
+            .map_err(|_| AppendError::Invalid)?;
+        if payload_bytes > max_payload_bytes {
+            return Err(AppendError::TooLarge(
+                super::LiveLimitExceeded::async_payload_bytes(
+                    payload_bytes as u64,
+                    max_payload_bytes as u64,
+                ),
+            ));
+        }
+    }
+    log.append(&record.log, envelope, now.get());
     drop(log);
+    budget.enforce();
     if let Some(wake) = &record.transport_wake {
         wake.notify_one();
     }
@@ -2000,19 +2052,23 @@ fn new_document(
     kind: DocumentTransportKind,
     handle: DocumentTransportHandle,
     scope: DocumentAuthorizationScope,
+    async_limits: AsyncLimits,
 ) -> Result<BoundedDocumentTransportSession, AsyncErrorKind> {
     let limits = DocumentTransportLimits::new(MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS)
         .map_err(|_| AsyncErrorKind::Unavailable)?;
     let transport = DocumentTransportSession::new(origin, kind, handle, limits, scope);
     BoundedDocumentTransportSession::new(
         transport,
-        ResourceBounds::new(MAX_ASYNC_BUFFER_EVENTS, MAX_ASYNC_BUFFER_BYTES)
-            .map_err(|_| AsyncErrorKind::Unavailable)?,
+        ResourceBounds::new(
+            async_limits.max_queued_events,
+            async_limits.max_buffer_bytes,
+        )
+        .map_err(|_| AsyncErrorKind::Unavailable)?,
         PermitPool::new(1).map_err(|_| AsyncErrorKind::Unavailable)?,
         AsyncPolicy {
-            max_payload_bytes: NonZeroUsize::new(MAX_ASYNC_PAYLOAD_BYTES)
+            max_payload_bytes: NonZeroUsize::new(async_limits.max_payload_bytes)
                 .ok_or(AsyncErrorKind::Unavailable)?,
-            max_replay_events: NonZeroUsize::new(MAX_REPLAY_TRANSCRIPT_ENVELOPES)
+            max_replay_events: NonZeroUsize::new(async_limits.max_replay_events)
                 .ok_or(AsyncErrorKind::Unavailable)?,
             max_fanout: NonZeroUsize::new(usize::from(MAX_EVENT_FANOUT))
                 .ok_or(AsyncErrorKind::Unavailable)?,
@@ -2660,7 +2716,7 @@ fn reconcile_memberships(
             == Some(suprnova_live::async_updates::SequenceState::Degraded)
         {
             let position = cursor.load(Ordering::Acquire).saturating_sub(1);
-            let epoch = lock_log(&log).epoch;
+            let epoch = lock_log(&log).epoch();
             let _ = document.recover_from_authoritative_refresh(
                 &authorization,
                 state.membership_registry.as_ref(),

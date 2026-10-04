@@ -730,3 +730,79 @@ async fn sse_disconnect_retires_the_transport_and_a_reconnect_reauthenticates_me
     let (_, envelope) = next_envelope(&mut stream).await;
     assert_eq!(envelope["payload"]["kind"], "refresh");
 }
+
+/// A visitor with more than eight tabs open: every document gets its own
+/// transport. The session once held a fixed eight, so a ninth tab was
+/// refused with a 409.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_session_opens_more_than_eight_transports_under_the_default_limit() {
+    let (router, _runtime) = router_and_runtime();
+    let server = spawn_server(router).await;
+    let alice = Identity::alice();
+    for tab in 1..=12 {
+        issue(
+            server.port,
+            &alice,
+            orders_issue_body("sse", &format!("doc-instance-{tab:04}")),
+        )
+        .await;
+    }
+}
+
+/// Restores the default Live configuration when a test that bound its own
+/// ends, even by panicking, because these tests share the global container.
+struct DefaultConfigOnDrop;
+
+impl Drop for DefaultConfigOnDrop {
+    fn drop(&mut self) {
+        suprnova::App::singleton(suprnova::live::LiveConfig::default());
+    }
+}
+
+/// The per-session transport limit is `LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION`:
+/// one transport past it is refused, and a second session is not affected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn the_configured_per_session_transport_limit_refuses_one_more() {
+    let _restore = DefaultConfigOnDrop;
+    suprnova::App::init();
+    suprnova::App::singleton(
+        suprnova::live::LiveConfig::builder()
+            .async_max_transports_per_session(2)
+            .build()
+            .expect("two transports per session"),
+    );
+    let (router, _runtime) = router_and_runtime();
+    let server = spawn_server(router).await;
+    let alice = Identity::alice();
+    for tab in 1..=2 {
+        issue(
+            server.port,
+            &alice,
+            orders_issue_body("sse", &format!("doc-instance-{tab:04}")),
+        )
+        .await;
+    }
+    let refused = post_control(
+        server.port,
+        &alice,
+        SUBSCRIPTION_PATH,
+        None,
+        orders_issue_body("sse", "doc-instance-0003"),
+    )
+    .await;
+    assert_eq!(
+        refused.status,
+        StatusCode::CONFLICT,
+        "{}",
+        String::from_utf8_lossy(&refused.body)
+    );
+    assert_eq!(refused.error_code(), "async_transport_limit");
+    issue(
+        server.port,
+        &alice.clone().with_session("session-bob"),
+        orders_issue_body("sse", "doc-instance-0003"),
+    )
+    .await;
+}

@@ -393,7 +393,7 @@ export async function measureU4_16(artifactValue: unknown): Promise<UploadWorklo
     connectivity: Object.freeze({ online: () => true }),
     maxActive: U4_16.activeTransfers,
     maxItems: U4_16.files,
-    maxQueueBytes: 256 * 1024,
+    maxQueueBytes: U4_16.files * U4_16.fileBytes,
     randomness: Object.freeze({
       idempotencyKey: (() => {
         let next = 0;

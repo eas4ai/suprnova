@@ -1,4 +1,5 @@
 import { canonicalize, type JsonValue } from "../canonical.js";
+import { SERVER_DEFAULT_LIMITS, type LiveLimits } from "../limits.js";
 import { validateUpdateRequest } from "../protocol.js";
 import type { RuntimeRandomness } from "../runtime/ports.js";
 import type { ServerIntent, ServerOperation } from "../scheduler/intent.js";
@@ -141,6 +142,13 @@ function mediaType(version: 1 | 2): string {
 
 export class LiveRequestBuilder {
   readonly #prior = new WeakMap<ServerIntent, PriorBuild>();
+  readonly #limits: LiveLimits;
+
+  /// `limits` are the server's configured limits; each request is checked
+  /// against them before it is sent.
+  constructor(limits: LiveLimits = SERVER_DEFAULT_LIMITS) {
+    this.#limits = limits;
+  }
 
   async build(input: LiveRequestBuildInput): Promise<BuiltLiveRequest> {
     const extensions = requestExtensions(input);
@@ -170,7 +178,7 @@ export class LiveRequestBuilder {
       idempotency_key: idempotencyKey,
     } as JsonValue;
     const text = canonicalize(value);
-    validateUpdateRequest(text);
+    validateUpdateRequest(text, this.#limits);
     const identity = Object.freeze({
       baseRevision: input.intent.source.island.metadata.revision,
       correlationId,

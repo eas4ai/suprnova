@@ -16,6 +16,7 @@ use crate::protocol::BrowserRenderContext;
 use crate::snapshot::state::StateExposure;
 use crate::state::{BindingIssue, ProposalBatch};
 use crate::view::IslandRender;
+use crate::view::RenderLimits;
 
 /// Bounded boxed future used by generated object-safe component hooks.
 pub type LiveFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -84,6 +85,7 @@ pub struct RenderContext<'a> {
     instance_id: Option<&'a InstanceId>,
     revision: Revision,
     expires_at: UnixMillis,
+    render_limits: Option<RenderLimits>,
 }
 
 impl<'a> RenderContext<'a> {
@@ -101,6 +103,7 @@ impl<'a> RenderContext<'a> {
             instance_id: Some(instance_id),
             revision,
             expires_at,
+            render_limits: None,
         }
     }
 
@@ -118,6 +121,7 @@ impl<'a> RenderContext<'a> {
             instance_id: None,
             revision,
             expires_at,
+            render_limits: None,
         }
     }
 
@@ -126,6 +130,22 @@ impl<'a> RenderContext<'a> {
     pub const fn with_browser_context(mut self, browser: &'a BrowserRenderContext) -> Self {
         self.browser = Some(browser);
         self
+    }
+
+    /// Renders the component under the host's configured bounds, so a
+    /// component's own render stops at the configured island HTML limit
+    /// rather than at a fixed engine default.
+    #[must_use]
+    pub const fn with_render_limits(mut self, limits: RenderLimits) -> Self {
+        self.render_limits = Some(limits);
+        self
+    }
+
+    /// Returns the configured bounds the component renders under, when the
+    /// host supplied them.
+    #[must_use]
+    pub const fn render_limits(&self) -> Option<RenderLimits> {
+        self.render_limits
     }
 
     /// Returns the validated host request capability.

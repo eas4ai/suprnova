@@ -1,4 +1,5 @@
-import { canonicalize, type JsonValue } from "../canonical.js";
+import type { JsonValue } from "../canonical.js";
+import { JSON_DEPTH_CEILING } from "../limits.js";
 import type { AsyncPayloadSchema, AsyncRegisteredEventContract } from "../async-updates/types.js";
 import {
   DESCRIPTOR_CYCLE_FIELDS,
@@ -15,9 +16,10 @@ import type {
 const MAX_BINDING_BYTES = 1_024;
 const MAX_EVENTS = 64;
 const MAX_EVENT_TARGETS = 16;
-const MAX_PAYLOAD_BYTES = 32 * 1_024;
-const MAX_PAYLOAD_DEPTH = 32;
-const MAX_PAYLOAD_ENTRIES = 2_048;
+// A registered event's payload arrived in an envelope the server encoded under
+// its configured payload limit, so only the recursive copy's depth is bounded,
+// at the ceiling no server configuration exceeds.
+const MAX_PAYLOAD_DEPTH = JSON_DEPTH_CEILING;
 const OPERATION_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
 const PAYLOAD_CONTRACT = /^[a-z][a-z0-9._/-]{0,127}$/u;
 
@@ -132,15 +134,7 @@ function immutableRecord(
   return Object.freeze(record);
 }
 
-interface PayloadSnapshotBudget {
-  entries: number;
-}
-
-function snapshotPayload(
-  input: unknown,
-  budget: PayloadSnapshotBudget,
-  depth = 0,
-): JsonValue | null {
+function snapshotPayload(input: unknown, depth = 0): JsonValue | null {
   if (input === null || typeof input === "boolean" || typeof input === "string") return input;
   if (typeof input === "number") return Number.isFinite(input) ? input : null;
   if (typeof input !== "object" || depth >= MAX_PAYLOAD_DEPTH) return null;
@@ -163,17 +157,15 @@ function snapshotPayload(
       typeof length !== "number" ||
       !Number.isSafeInteger(length) ||
       length < 0 ||
-      budget.entries + length > MAX_PAYLOAD_ENTRIES ||
       Reflect.ownKeys(descriptors).length !== length + 1
     ) {
       return null;
     }
-    budget.entries += length;
     const values: JsonValue[] = [];
     for (let index = 0; index < length; index += 1) {
       const descriptor = descriptors[index];
       if (descriptor === undefined || !("value" in descriptor)) return null;
-      const value = snapshotPayload(descriptor.value, budget, depth + 1);
+      const value = snapshotPayload(descriptor.value, depth + 1);
       if (value === null && descriptor.value !== null) return null;
       values.push(value);
     }
@@ -181,19 +173,13 @@ function snapshotPayload(
   }
   if (prototype !== Object.prototype && prototype !== null) return null;
   const keys = Reflect.ownKeys(descriptors);
-  if (
-    keys.some((key) => typeof key !== "string") ||
-    budget.entries + keys.length > MAX_PAYLOAD_ENTRIES
-  ) {
-    return null;
-  }
-  budget.entries += keys.length;
+  if (keys.some((key) => typeof key !== "string")) return null;
   const values: [string, JsonValue][] = [];
   for (const key of keys) {
     if (typeof key !== "string") return null;
     const descriptor = descriptors[key];
     if (descriptor === undefined || !("value" in descriptor)) return null;
-    const value = snapshotPayload(descriptor.value, budget, depth + 1);
+    const value = snapshotPayload(descriptor.value, depth + 1);
     if (value === null && descriptor.value !== null) return null;
     values.push([key, value]);
   }
@@ -215,7 +201,7 @@ function snapshotDispatch(input: unknown): RegisteredBrowserEventDispatch | null
   ) {
     return null;
   }
-  const payload = snapshotPayload(payloadInput, { entries: 0 });
+  const payload = snapshotPayload(payloadInput);
   if (payload === null && payloadInput !== null) return null;
   return immutableRecord([
     ["event", event],
@@ -407,15 +393,6 @@ export class RegisteredEventAuthority {
       !contract.targets.includes(candidate.target) ||
       !schemaMatches(contract.schema, candidate.payload)
     ) {
-      return "rejected";
-    }
-    try {
-      if (
-        new TextEncoder().encode(canonicalize(candidate.payload)).byteLength > MAX_PAYLOAD_BYTES
-      ) {
-        return "rejected";
-      }
-    } catch {
       return "rejected";
     }
     const depth = authority.activeDepth.get(contract.name) ?? 0;

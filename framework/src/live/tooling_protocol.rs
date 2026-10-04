@@ -2,7 +2,7 @@
 //! application's Live tooling helper.
 //!
 //! The CLI keeps no framework dependency. It starts the application's console
-//! binary as `__suprnova:live-tool --protocol 1 --operation <check|inspect|assets>`
+//! binary as `__suprnova:live-tool --protocol <1|2> --operation <check|inspect|assets>`
 //! and reads one [`Envelope`](crate::live::tooling_protocol::Envelope) per
 //! stdout line; human and build output stays on
 //! stderr. Every envelope carries the protocol version, a contiguous sequence
@@ -20,8 +20,13 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Protocol version spoken by this framework build.
-pub const PROTOCOL_VERSION: u16 = 1;
+/// Newest protocol version this framework build speaks. Version 2 reports
+/// every configured Live limit by its `.env` key rather than three named
+/// fields; nothing else changed.
+pub const PROTOCOL_VERSION: u16 = 2;
+/// Oldest protocol version this framework build still answers, so a CLI
+/// from before version 2 keeps working: it is answered in its own version.
+pub const MIN_PROTOCOL_VERSION: u16 = 1;
 /// Console command name of the hidden application helper.
 pub const COMMAND_NAME: &str = "__suprnova:live-tool";
 /// Longest encoded envelope line, including its newline.
@@ -50,6 +55,8 @@ pub const MAX_TEMPLATE_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TEMPLATE_DEPTH: usize = 16;
 /// Longest text any field other than asset content carries.
 pub const MAX_TEXT_BYTES: usize = 256;
+/// Most configured limits one runtime report carries.
+pub const MAX_LIMITS: usize = 64;
 
 /// One of the closed set of helper operations.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -215,16 +222,50 @@ pub struct ComponentReport {
     pub contract_digest: String,
 }
 
-/// Configured Live byte and lifetime limits.
+/// The configured Live limits, in the shape the requested protocol knows.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ConfigReport {
+    /// Protocol 2: every configured limit by its `.env` key.
+    Limits {
+        /// One entry per `LIVE_*` limit key, in the order the manual lists
+        /// them.
+        limits: Vec<LimitReport>,
+    },
+    /// Protocol 1: the three limits that version reported.
+    Legacy {
+        /// Largest accepted Live request body.
+        max_request_bytes: u64,
+        /// Largest produced Live response body.
+        max_response_bytes: u64,
+        /// Longest trusted request context lifetime.
+        max_context_lifetime_ms: u64,
+    },
+}
+
+impl ConfigReport {
+    /// The limits a protocol 2 report carries; a protocol 1 report has none
+    /// in this form.
+    #[must_use]
+    pub fn limits(&self) -> &[LimitReport] {
+        match self {
+            Self::Limits { limits } => limits,
+            Self::Legacy { .. } => &[],
+        }
+    }
+}
+
+/// One configured Live limit, by the `.env` key that sets it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ConfigReport {
-    /// Largest accepted Live request body.
-    pub max_request_bytes: u64,
-    /// Largest produced Live response body.
-    pub max_response_bytes: u64,
-    /// Longest trusted request context lifetime.
-    pub max_context_lifetime_ms: u64,
+pub struct LimitReport {
+    /// The `.env` setting, such as `LIVE_MAX_HTML_BYTES`. Named `setting`,
+    /// not `key`, so nothing in an inspection reads as key material.
+    pub setting: String,
+    /// The configured value.
+    pub value: u64,
+    /// The unit the value is counted in, such as `bytes`.
+    pub unit: String,
 }
 
 /// Which application upload capabilities are installed, by presence only.
