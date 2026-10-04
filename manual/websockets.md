@@ -54,7 +54,7 @@ A WebSocket handshake is an HTTP GET with `Upgrade: websocket`. The framework ru
 
 1. **Route match.** The router looks up the path in the WS route table; on miss the request falls through to the HTTP fallback.
 2. **Origin policy.** The configured [`OriginPolicy`](#origin-policy) is enforced. A violation returns HTTP 403 with no upgrade.
-3. **Subprotocol negotiation.** If the route has `accepted_protocols`, the first client-offered token that overlaps is echoed on the 101 response.
+3. **Subprotocol negotiation.** If the route has `accepted_protocols`, the first client-offered token that overlaps is echoed on the 101 response, in the client's own spelling.
 4. **Middleware chain.** `RequestIdMiddleware` runs outermost, followed by every globally-registered middleware, followed by the route's per-route middleware. A non-2xx response from any middleware short-circuits the upgrade - the peer receives the HTTP error, and the WebSocket future drops cleanly.
 5. **Handshake.** `hyper_tungstenite::upgrade` produces the future that resolves into a `WebSocketStream`.
 6. **Handler dispatch.** The (possibly middleware-rewritten) `Request` and a freshly-built `WsSocket` are handed to `WebSocketHandler::handle`.
@@ -462,7 +462,7 @@ let cfg = WsConfig {
 };
 ```
 
-When the client offers `Sec-WebSocket-Protocol`, the framework picks the first client-offered token (in client preference order per RFC 6455 §4.2.2) that overlaps with `accepted_protocols`, matched case-insensitively, and echoes it on the 101 response. If the client offered protocols but none matched, the upgrade still succeeds with no `Sec-WebSocket-Protocol` header - RFC 6455 then requires the browser to fail the connection client-side, which is the right behavior (a server that proceeded would silently be speaking the wrong protocol).
+When the client offers `Sec-WebSocket-Protocol`, the framework picks the first client-offered token (in client preference order per RFC 6455 §4.2.2) that overlaps with `accepted_protocols`, matched case-insensitively, and echoes it on the 101 response exactly as the client spelled it. A client offering `CHAT` to a route that accepts `chat` gets `CHAT` back: RFC 6455 makes the client fail a handshake that names a protocol it did not offer, and browsers compare the strings exactly. If the client offered protocols but none matched, the upgrade still succeeds with no `Sec-WebSocket-Protocol` header - RFC 6455 then requires the browser to fail the connection client-side, which is the right behavior (a server that proceeded would silently be speaking the wrong protocol).
 
 When `accepted_protocols` is empty, negotiation is skipped entirely - the upgrade response omits `Sec-WebSocket-Protocol` and the client falls back to default protocol handling.
 

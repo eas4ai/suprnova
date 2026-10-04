@@ -234,9 +234,12 @@ impl WsConfig {
 /// of acceptable protocols (the route's `WsConfig::accepted_protocols`).
 ///
 /// Returns the first client-offered protocol that appears in `accepted`,
-/// matched case-insensitively per RFC 6455 (protocol tokens are ASCII).
-/// The returned value preserves the casing from `accepted` so the
-/// server's canonical spelling is what the client sees on the 101.
+/// matched case-insensitively (protocol tokens are ASCII). The returned
+/// value is the client's own token, byte for byte, because it is echoed
+/// on the 101: RFC 6455 section 4.1 makes the client fail a handshake
+/// whose `Sec-WebSocket-Protocol` it did not offer, and browsers compare
+/// the strings exactly. The server's spelling of a differently cased
+/// offer would fail every such connection.
 ///
 /// Returns `None` when:
 /// - `accepted` is empty (negotiation disabled - server is protocol-agnostic),
@@ -255,10 +258,11 @@ pub(crate) fn negotiate_subprotocol(
         if token.is_empty() {
             continue;
         }
-        for accept in accepted {
-            if accept.eq_ignore_ascii_case(token) {
-                return Some(accept.clone());
-            }
+        if accepted
+            .iter()
+            .any(|accept| accept.eq_ignore_ascii_case(token))
+        {
+            return Some(token.to_string());
         }
     }
     None
@@ -405,13 +409,20 @@ mod tests {
         assert_eq!(pick.as_deref(), Some("jsonrpc-2.0"));
     }
 
-    /// Case-insensitive match per RFC 6455; preserve server casing in
-    /// the response so the client sees the canonical spelling.
+    /// IDENTITY-033: the match is case-insensitive, but the 101 must name a
+    /// token the client offered, byte for byte. RFC 6455 section 4.1 makes
+    /// the client fail a handshake whose subprotocol it did not offer, and
+    /// browsers compare exactly, so echoing the server's spelling of a
+    /// differently cased offer breaks the connection.
     #[test]
-    fn negotiate_case_insensitive_and_preserves_server_case() {
+    fn negotiate_case_insensitive_and_echoes_the_client_spelling() {
         let accepted = vec!["GraphQL-WS".to_string()];
         let pick = negotiate_subprotocol(&accepted, Some("graphql-ws"));
-        assert_eq!(pick.as_deref(), Some("GraphQL-WS"));
+        assert_eq!(pick.as_deref(), Some("graphql-ws"));
+
+        let accepted = vec!["chat".to_string()];
+        let pick = negotiate_subprotocol(&accepted, Some("CHAT"));
+        assert_eq!(pick.as_deref(), Some("CHAT"));
     }
 
     #[test]
