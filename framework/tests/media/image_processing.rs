@@ -190,7 +190,7 @@ async fn encode(source: &[u8], format: OutputFormat, quality: u8) -> Vec<u8> {
 }
 
 /// Decode any supported image to `(width, height, packed RGBA)`.
-async fn decoded_rgba(image: &[u8]) -> (u32, u32, Vec<u8>) {
+pub(crate) async fn decoded_rgba(image: &[u8]) -> (u32, u32, Vec<u8>) {
     let bmp = Image::from_bytes(image.to_vec())
         .to_format(OutputFormat::Bmp)
         .to_bytes()

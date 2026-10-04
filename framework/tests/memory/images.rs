@@ -447,3 +447,22 @@ async fn mem_audit_a_file_read_never_reserves_past_the_cap() {
         "reading a source capped at {CAP} bytes held {peak}"
     );
 }
+
+/// An odd-sized 4:2:0 or 4:2:2 JPEG converts at its padded size, which the
+/// estimate charges.
+#[tokio::test]
+async fn mem_audit_odd_sized_jpegs_decode_within_the_budget() {
+    let _lock = exclusive().await;
+    for (name, jpeg) in [
+        (
+            "4:2:0 JPEG",
+            &include_bytes!("../media/fixtures/jpeg-420-333x217.jpg")[..],
+        ),
+        (
+            "4:2:2 JPEG",
+            &include_bytes!("../media/fixtures/jpeg-422-333x217.jpg")[..],
+        ),
+    ] {
+        assert_the_budget_holds(name, jpeg, 333, 217);
+    }
+}

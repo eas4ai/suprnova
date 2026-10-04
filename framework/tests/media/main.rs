@@ -4,3 +4,4 @@
 pub mod decode_budget;
 pub mod image_magick_driver;
 pub mod image_processing;
+pub mod interop;

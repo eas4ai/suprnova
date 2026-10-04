@@ -675,25 +675,99 @@ fn yuv_layout(frame: &VideoFrame, width: u32, height: u32) -> Option<PixelFormat
 /// Takes the frame by value so its planes can move into the canvas: the
 /// source planes are dropped as soon as the conversion is done, and a plane
 /// that is already tight RGBA is never copied.
+///
+/// The YUV converter only takes sides its chroma subsampling divides, and a
+/// 4:2:0 or 4:2:2 image of odd width or height is ordinary (a crop, a resized
+/// export). Its chroma planes already cover the rounded-up size, so the luma
+/// plane is padded to that size by repeating its last column and row, the
+/// frame converts at the padded size, and the result is cropped back.
 fn to_rgba(
     frame: VideoFrame,
     source: PixelFormat,
     width: u32,
     height: u32,
 ) -> Result<Canvas, FrameworkError> {
-    let tight = width as usize * 4;
+    let (column_step, row_step) = chroma_subsampling(source);
+    let padded_width = width.next_multiple_of(column_step);
+    let padded_height = height.next_multiple_of(row_step);
+    let frame = if (padded_width, padded_height) == (width, height) {
+        frame
+    } else {
+        pad_luma(frame, width, height, padded_width, padded_height)?
+    };
     let converted = if source == PixelFormat::Rgba {
         frame
     } else {
-        let info = FrameInfo::new(source, width, height);
+        let info = FrameInfo::new(source, padded_width, padded_height);
         pix_convert(&frame, info, PixelFormat::Rgba, &ConvertOptions::default())
             .map_err(|e| FrameworkError::param(format!("image pixel conversion failed: {e}")))?
     };
     // `Canvas::packed` is what rejects a plane shorter than the declared
     // height rather than handing it to a filter that would index past the
     // end of it.
-    let pixels = pack_tight(converted, tight, height as usize)?;
+    let mut pixels = pack_tight(converted, padded_width as usize * 4, padded_height as usize)?;
+    if padded_width != width {
+        crop_rows(
+            &mut pixels,
+            padded_width as usize * 4,
+            width as usize * 4,
+            height as usize,
+        );
+    }
     Canvas::packed(width, height, pixels)
+}
+
+/// Columns and rows each chroma sample covers in a planar YUV layout.
+fn chroma_subsampling(format: PixelFormat) -> (u32, u32) {
+    match format {
+        PixelFormat::Yuv420P => (2, 2),
+        PixelFormat::Yuv422P => (2, 1),
+        _ => (1, 1),
+    }
+}
+
+/// Replace the luma plane with one `padded_width x padded_height`, repeating
+/// the last column and row into the padding.
+fn pad_luma(
+    frame: VideoFrame,
+    width: u32,
+    height: u32,
+    padded_width: u32,
+    padded_height: u32,
+) -> Result<VideoFrame, FrameworkError> {
+    let short = || FrameworkError::param("image decode produced a short luma plane");
+    let mut planes = frame.planes.into_iter();
+    let luma = planes.next().ok_or_else(short)?;
+    let (width, height) = (width as usize, height as usize);
+    let (padded_width, padded_height) = (padded_width as usize, padded_height as usize);
+    if width == 0 || height == 0 || luma.stride < width {
+        return Err(short());
+    }
+    let mut padded = Vec::with_capacity(padded_width * padded_height);
+    for row in 0..padded_height {
+        let source = row.min(height - 1) * luma.stride;
+        let line = luma.data.get(source..source + width).ok_or_else(short)?;
+        padded.extend_from_slice(line);
+        padded.resize(padded.len() + padded_width - width, line[width - 1]);
+    }
+    let mut out = vec![VideoPlane {
+        stride: padded_width,
+        data: padded,
+    }];
+    out.extend(planes);
+    Ok(VideoFrame {
+        pts: frame.pts,
+        planes: out,
+    })
+}
+
+/// Keep the first `kept` bytes of each of `rows` rows of `stride` bytes,
+/// packing them together in place.
+fn crop_rows(pixels: &mut Vec<u8>, stride: usize, kept: usize, rows: usize) {
+    for row in 1..rows {
+        pixels.copy_within(row * stride..row * stride + kept, row * kept);
+    }
+    pixels.truncate(rows * kept);
 }
 
 /// Strip any per-row padding a conversion left behind. A plane that is

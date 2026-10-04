@@ -341,7 +341,8 @@ fn gif_peak(screen_width: u64, screen_height: u64, first: &GifFrame) -> u64 {
 /// coefficient buffer of four bytes a padded sample and renders from it at
 /// the end. Lossless frames keep a `u32` a sample. Converting YCbCr planes
 /// to RGBA copies them (`gather_tight`), builds packed RGB, then RGBA; grey
-/// and packed RGB convert directly.
+/// and packed RGB convert directly. An odd-sized subsampled image converts
+/// at its padded size; see `to_rgba`.
 fn jpeg_peak(frame: &JpegFrame, input_len: u64) -> Result<u64, FrameworkError> {
     let unsupported = |what: &str| {
         Err(FrameworkError::param(format!(
@@ -389,7 +390,21 @@ fn jpeg_peak(frame: &JpegFrame, input_len: u64) -> Result<u64, FrameworkError> {
     let converting = if components == 1 || packed_rgb {
         add(planes, mul(pixels, 4))
     } else {
-        add(mul(planes, 2), mul(pixels, 7))
+        // An odd side under 4:2:0 or 4:2:2 converts at the size the chroma
+        // covers: the driver first copies the luma plane at that size beside
+        // the planes, then converts the padded frame.
+        let min_h = u64::from(used.iter().map(|f| f.0).min().unwrap_or(1).max(1));
+        let min_v = u64::from(used.iter().map(|f| f.1).min().unwrap_or(1).max(1));
+        let padded_pixels = mul(
+            width.next_multiple_of(max_h / min_h),
+            height.next_multiple_of(max_v / min_v),
+        );
+        if padded_pixels == pixels {
+            add(mul(planes, 2), mul(pixels, 7))
+        } else {
+            let padded_planes = add(planes, padded_pixels - pixels);
+            add(planes, padded_pixels).max(add(mul(padded_planes, 2), mul(padded_pixels, 7)))
+        }
     };
     let sending = mul(input_len, 2);
     Ok(sending.max(add(input_len, decoding)).max(converting))
