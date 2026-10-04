@@ -389,6 +389,52 @@ async fn a_slot_scope_that_begins_the_handler_inside_it_restores_to_content() {
     assert!(report.gate.observed.is_empty());
 }
 
+/// DATA-027: the slot is a property of the mount future, not of the task. A
+/// handler that joins an identity-bound mount with independent work runs
+/// both on one task; while the mount is pending, the sibling's reads build
+/// the shell and must be recorded there. Attributing them to the slot would
+/// drop a principal read (so a personalized shell classifies as public) and
+/// a table read (so a write never invalidates the shell). The two channels
+/// pin the overlap: the sibling reads only after the slot has been entered
+/// and before it can finish, whatever order `join!` polls in.
+#[tokio::test]
+async fn a_sibling_future_joined_beside_a_pending_slot_reads_into_the_content_bucket() {
+    let report = Collector::scope(async {
+        collector::begin_handler();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::join!(
+            collector::slot_scope(async move {
+                let _ = entered_tx.send(());
+                let _ = done_rx.await;
+                collector::observe_table_read("island_t");
+            }),
+            async move {
+                let _ = entered_rx.await;
+                collector::observe_table_read("shell_t");
+                collector::observe_principal_value("alice");
+                collector::observe_session_read();
+                let _ = done_tx.send(());
+            }
+        );
+        current_report().expect("report")
+    })
+    .await;
+    assert_eq!(
+        report.observed,
+        vec![DependencyIdentity::table("shell_t")],
+        "the sibling's table read is a shell dependency and the island's is not"
+    );
+    assert!(
+        report.context.principal_read,
+        "the sibling's principal read must reach the shell's context"
+    );
+    assert!(report.context.principal_material.contains("alice"));
+    assert!(report.context.session_read);
+    assert_eq!(report.slot_reads, 1, "only the island's own read is a slot read");
+    assert!(report.gate.observed.is_empty());
+}
+
 #[tokio::test]
 async fn folding_the_gate_into_content_reproduces_the_undivided_report() {
     let mut report = Collector::scope(async {
