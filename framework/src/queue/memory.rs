@@ -581,24 +581,44 @@ mod tests {
         );
     }
 
-    /// The pop half of DRIVERS-059: a pop cancelled while it waits must leave
-    /// the job where another pop finds it, never reserved without a timer.
-    #[tokio::test]
+    /// The pop half of DRIVERS-059: a pop recorded its reservation, then
+    /// waited for the visibility queue a second time to arm the reservation's
+    /// timer. Cancelled at that second wait, it left a reservation no timer
+    /// would ever reclaim.
+    ///
+    /// Reaching that wait takes a second waiter. Tokio's mutex is fair, so a
+    /// waiter queued behind the pop takes the lock as soon as the pop's first
+    /// hold of it ends: a pop that waits for the lock again parks right there,
+    /// with the job already out of `visible`.
+    #[tokio::test(start_paused = true)]
     async fn a_pop_cancelled_while_it_waits_leaves_the_job_poppable() {
         let driver = MemoryQueueDriver::new();
+        // The reaper runs once and sleeps, so it is not queued on the lock.
+        tokio::task::yield_now().await;
         driver.push(ready_envelope()).await.unwrap();
 
         let held = driver.visibility.lock().await;
-        {
-            let pop = driver.pop(Duration::from_secs(30));
-            tokio::pin!(pop);
-            assert!(futures::poll!(pop.as_mut()).is_pending());
-        }
+        let mut pop = Box::pin(driver.pop(Duration::from_secs(30)));
+        assert!(futures::poll!(pop.as_mut()).is_pending());
+        let mut behind = Box::pin(driver.visibility.lock());
+        assert!(futures::poll!(behind.as_mut()).is_pending());
         drop(held);
 
+        // The pop takes the lock and, once its hold ends, the waiter behind it
+        // has the lock. A pop with a second wait for it parks there now.
+        let first = futures::poll!(pop.as_mut());
+        drop(pop);
+        drop(behind);
+
+        // Whatever the first pop did, once its visibility timeout passes the
+        // job is visible again: either it was never taken, or its reservation
+        // has a timer that reclaims it.
+        tokio::time::advance(Duration::from_secs(31)).await;
         assert!(
             driver.pop(Duration::from_secs(30)).await.unwrap().is_some(),
-            "the cancelled pop stranded the job"
+            "the cancelled pop left a reservation that no timer reclaims (first \
+             poll: {})",
+            if first.is_ready() { "ready" } else { "pending" }
         );
     }
 }
