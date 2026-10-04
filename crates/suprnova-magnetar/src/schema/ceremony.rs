@@ -10,6 +10,15 @@ pub trait CeremonyFields: EntityBinding {
     fn read_ceremony_id(model: &Self::Model) -> String;
     /// Return the generated ceremony identifier column.
     fn ceremony_id_column() -> Self::Column;
+    /// Convert an opaque ceremony identifier into the binding's database
+    /// value, for the statements that name one row by its id.
+    ///
+    /// The default binds text. A binding with an integer key must override
+    /// it: PostgreSQL has no implicit text-to-integer cast, so a text value
+    /// compared with an integer column fails the whole statement.
+    fn ceremony_id_value(value: &str) -> sea_orm::Value {
+        value.to_owned().into()
+    }
     /// Read the namespaced ceremony kind.
     fn read_kind(model: &Self::Model) -> String;
     /// Return the generated kind column.

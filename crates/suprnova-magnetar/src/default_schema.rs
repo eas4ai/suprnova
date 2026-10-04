@@ -518,6 +518,13 @@ impl CeremonyFields for ceremonies::Entity {
     fn ceremony_id_column() -> Self::Column {
         ceremonies::Column::Id
     }
+    fn ceremony_id_value(value: &str) -> sea_orm::Value {
+        // Ids come from `read_ceremony_id`, so they parse. Text that does
+        // not names no row; it is bound as text and the database refuses it.
+        value
+            .parse::<i64>()
+            .map_or_else(|_| value.to_owned().into(), Into::into)
+    }
     fn read_kind(m: &Self::Model) -> String {
         m.kind.clone()
     }
