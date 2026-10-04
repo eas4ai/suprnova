@@ -72,6 +72,14 @@ right-hand side, which covers `i64`, `String`, `&str`, `bool`, `f64`,
 `Option<T>`, `chrono::*`, `uuid::Uuid`, and `serde_json::Value` - every
 column type the backend understands.
 
+A `u64` compares as an integer. Postgres and SQLite have no unsigned
+integers, so no integer column there holds a `u64` above `i64::MAX`, and a
+comparison with one gets its answer without sending the value: `=`, `>`,
+`>=` and `where_in` match no row, and `<>`, `<`, `<=` and `where_not_in`
+match every row whose column is not NULL. That is the answer MySQL gives
+for rows that all hold smaller values. To compare a decimal or
+floating-point column with a large number, pass the value as that type.
+
 The rest of the `WHERE` vocabulary uses the Laravel names:
 
 ```rust
@@ -391,6 +399,12 @@ parameters. An explicit null is emitted as SQL `NULL` because the JSON
 attribute map no longer carries its original Rust type; all non-null values
 remain parameter-bound. The same rule applies to typed Eloquent mass writes
 and many-to-many pivot extras.
+
+A `u64` above `i64::MAX` binds as an unsigned integer, which a MySQL
+unsigned column stores exactly. Postgres and SQLite have no integer column
+that holds it, so there `insert` and `update` refuse it before anything
+is sent. The refusal is a database error that names the column: a client
+gets the generic 500 response and the log gets the detail.
 
 #### `update_all` and `delete_all` aliases
 

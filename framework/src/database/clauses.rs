@@ -21,6 +21,7 @@ use crate::database::db_facade::DbTableBuilder;
 use crate::database::placeholder::placeholder;
 use crate::database::{validate_identifier, validate_sql_operator};
 use crate::eloquent::builder::{IntoVal, rewrite_raw_placeholders, validate_raw_placeholders};
+use crate::eloquent::casts::unsigned::{Settled, beyond_signed};
 
 // ---- Identifiers -------------------------------------------------------------
 
@@ -331,6 +332,21 @@ fn render_condition(
             value,
             binary,
         } => {
+            let column_sql = quote_identifier(backend, column);
+            // A u64 no signed column holds - above i64::MAX on Postgres
+            // and SQLite - settles the comparison, as on the model
+            // builder; under LIKE or IS it is compared as its digits.
+            let digits;
+            let value = match value {
+                SeaValue::BigUnsigned(Some(beyond)) if beyond_signed(backend, value) => {
+                    if let Some(settled) = Settled::of_operator(op) {
+                        return Ok(settled.sql(&column_sql));
+                    }
+                    digits = SeaValue::String(Some(beyond.to_string()));
+                    &digits
+                }
+                value => value,
+            };
             let ph = bind(backend, value, values, n)?;
             let op = if *binary {
                 match backend {
@@ -340,7 +356,7 @@ fn render_condition(
             } else {
                 op.clone()
             };
-            format!("{} {op} {ph}", quote_identifier(backend, column))
+            format!("{column_sql} {op} {ph}")
         }
         Condition::Columns { first, op, second } => format!(
             "{} {op} {}",
@@ -355,16 +371,24 @@ fn render_condition(
             if list.is_empty() {
                 return Ok(if *negated { "1 = 1" } else { "1 = 0" }.to_owned());
             }
+            let column_sql = quote_identifier(backend, column);
+            // A value no signed column holds matches no row, so it leaves
+            // the list; a list left with nothing settles the whole test.
             let placeholders = list
                 .iter()
+                .filter(|value| !beyond_signed(backend, value))
                 .map(|value| bind(backend, value, values, n))
                 .collect::<Result<Vec<_>, _>>()?;
+            if placeholders.is_empty() {
+                let settled = if *negated {
+                    Settled::Always
+                } else {
+                    Settled::Never
+                };
+                return Ok(settled.sql(&column_sql));
+            }
             let not = if *negated { "NOT " } else { "" };
-            format!(
-                "{} {not}IN ({})",
-                quote_identifier(backend, column),
-                placeholders.join(", ")
-            )
+            format!("{column_sql} {not}IN ({})", placeholders.join(", "))
         }
         Condition::InQuery {
             column,

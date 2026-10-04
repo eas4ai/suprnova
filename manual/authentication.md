@@ -591,6 +591,11 @@ predicates. Customise the allowlist with `.credential_columns([...])`,
 the lookup column with `.identifier_column("uuid")`, or the id-binding
 strategy with `.with_id_parser(...)`.
 
+By default a numeric id binds as an integer and any other id as text. An
+id above `i64::MAX` binds as a `u64`, so a user whose key is Laravel's
+`BIGINT UNSIGNED` `users.id` signs in at any value on MySQL. Postgres and
+SQLite hold no key that large, so there such an id finds no user.
+
 To plug in a custom source (LDAP, an external API), implement
 `UserProvider` directly. `retrieve_by_id` takes the identifier as
 a `&str`:

@@ -35,8 +35,16 @@ use crate::hashing;
 /// primary keys), everything else binds as a string. See
 /// [`DatabaseUserProvider::with_id_parser`](super::database_provider::DatabaseUserProvider::with_id_parser)
 /// for the zero-padded-string-PK caveat.
+///
+/// An id above `i64::MAX` binds as the `u64` it is: Laravel's
+/// `BIGINT UNSIGNED` `users.id` reaches it on MySQL, and as text MySQL did
+/// not match it while Postgres refused the comparison. On Postgres and
+/// SQLite no row holds such an id, so the lookup finds no user.
 fn default_id_parser(id: &str) -> Value {
-    match id.parse::<i64>() {
+    if let Ok(n) = id.parse::<i64>() {
+        return Value::from(n);
+    }
+    match id.parse::<u64>() {
         Ok(n) => Value::from(n),
         Err(_) => Value::from(id),
     }

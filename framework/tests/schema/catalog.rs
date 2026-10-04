@@ -27,8 +27,30 @@ pub struct CatalogColumn {
     /// number of the SQLite declared type.
     pub scale: Option<i64>,
     /// The full declared type: `column_type` on MySQL (which shows
-    /// `unsigned`), `data_type` on Postgres, the declared text on SQLite.
+    /// `unsigned`) without an integer's display width, `data_type` on
+    /// Postgres, the declared text on SQLite.
     pub declared: String,
+}
+
+/// MariaDB, and MySQL before 8.0.19, write an integer column's display
+/// width into `column_type` (`bigint(20) unsigned`); MySQL 8.4 leaves it
+/// out (`bigint unsigned`). The width changes nothing the column stores, so
+/// it is dropped and both engines report the same type.
+fn without_display_width(declared: &str) -> String {
+    let lower = declared.to_lowercase();
+    for integer in ["tinyint", "smallint", "mediumint", "bigint", "int"] {
+        let Some(rest) = lower.strip_prefix(integer) else {
+            continue;
+        };
+        if let Some((width, tail)) = rest.strip_prefix('(').and_then(|r| r.split_once(')'))
+            && !width.is_empty()
+            && width.bytes().all(|b| b.is_ascii_digit())
+        {
+            return format!("{integer}{tail}");
+        }
+        break;
+    }
+    declared.to_owned()
 }
 
 /// SQLite's rules for the affinity of a declared type (section 3.1 of the
@@ -151,8 +173,28 @@ pub async fn columns(conn: &DatabaseConnection, table: &str) -> Vec<CatalogColum
                  WHERE table_schema = DATABASE() AND table_name = '{table}' \
                  ORDER BY ordinal_position"
             );
-            information_schema_columns(conn, DbBackend::MySql, sql).await
+            let mut columns = information_schema_columns(conn, DbBackend::MySql, sql).await;
+            for column in &mut columns {
+                column.declared = without_display_width(&column.declared);
+            }
+            columns
         }
         other => panic!("the schema tests have no catalog query for {other:?}"),
+    }
+}
+
+#[test]
+fn the_display_width_of_an_integer_is_dropped() {
+    for (declared, expected) in [
+        ("bigint(20) unsigned", "bigint unsigned"),
+        ("bigint(20)", "bigint"),
+        ("int(11)", "int"),
+        ("tinyint(1)", "tinyint"),
+        ("bigint unsigned", "bigint unsigned"),
+        ("varchar(255)", "varchar(255)"),
+        ("decimal(10,2)", "decimal(10,2)"),
+        ("enum('a','b')", "enum('a','b')"),
+    ] {
+        assert_eq!(without_display_width(declared), expected, "{declared}");
     }
 }

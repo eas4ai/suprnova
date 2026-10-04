@@ -83,7 +83,28 @@ async fn reset(conn: &DatabaseConnection) {
     }
 }
 
-/// The declared type of each of [`KEYS`], as the catalog reports it.
+/// MariaDB, and MySQL before 8.0.19, write an integer column's display
+/// width into `column_type` (`bigint(20) unsigned`); MySQL 8.4 leaves it
+/// out (`bigint unsigned`). The width changes nothing the column stores, so
+/// it is dropped and both engines report the same type.
+fn without_display_width(declared: &str) -> String {
+    for integer in ["tinyint", "smallint", "mediumint", "bigint", "int"] {
+        let Some(rest) = declared.strip_prefix(integer) else {
+            continue;
+        };
+        if let Some((width, tail)) = rest.strip_prefix('(').and_then(|r| r.split_once(')'))
+            && !width.is_empty()
+            && width.bytes().all(|b| b.is_ascii_digit())
+        {
+            return format!("{integer}{tail}");
+        }
+        break;
+    }
+    declared.to_owned()
+}
+
+/// The declared type of each of [`KEYS`], as the catalog reports it,
+/// lower-cased and without an integer's display width.
 async fn key_types(conn: &DatabaseConnection) -> Vec<String> {
     let backend = conn.get_database_backend();
     let mut types = Vec::new();
@@ -127,7 +148,7 @@ async fn key_types(conn: &DatabaseConnection) -> Vec<String> {
             }
             other => panic!("no catalog query for {other:?}"),
         };
-        types.push(declared.to_lowercase());
+        types.push(without_display_width(&declared.to_lowercase()));
     }
     types
 }

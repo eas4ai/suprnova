@@ -14,6 +14,10 @@
 //! the column. Writes bind it as a SeaORM `BigUnsigned`, and the framework
 //! refuses one above `i64::MAX` on Postgres and SQLite before the statement
 //! is built, naming the column.
+//!
+//! A read by such a value is not refused: no row of a signed column holds
+//! it, so the answer is known without asking. A lookup by key finds
+//! nothing, and a comparison is [`Settled`], true or false for every row.
 
 use sea_orm::sea_query::{ArrayType, ColumnType, Nullable, ValueType, ValueTypeErr};
 use sea_orm::{ColIdx, DbBackend, DbErr, QueryResult, TryFromU64, TryGetError, TryGetable, Value};
@@ -69,6 +73,25 @@ impl From<u8> for StoredU64 {
 impl From<StoredU64> for u64 {
     fn from(value: StoredU64) -> Self {
         value.0
+    }
+}
+
+/// Parses the decimal digits of a `u64`, so a route parameter binds a
+/// `u64`-keyed model: route-model binding parses the segment as the
+/// entity's key type, which is this one.
+impl std::str::FromStr for StoredU64 {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        text.parse().map(Self)
+    }
+}
+
+/// The bare number, as the `u64` it holds displays, so the key of a bare
+/// SeaORM model formats the way it did when the entity stored a `u64`.
+impl std::fmt::Display for StoredU64 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -160,6 +183,52 @@ fn column_name<I: ColIdx>(index: &I) -> String {
     }
 }
 
+/// Whether `value` is a `u64` that `backend` stores in a signed column
+/// and no such column can hold: one above `i64::MAX` on Postgres or
+/// SQLite. MySQL's unsigned columns hold every `u64`.
+pub(crate) fn beyond_signed(backend: DbBackend, value: &Value) -> bool {
+    matches!(value, Value::BigUnsigned(Some(n)) if *n > i64::MAX as u64)
+        && backend != DbBackend::MySql
+}
+
+/// How a comparison of a signed column with a value above every value it
+/// holds turns out on each row whose column is not NULL. Postgres and
+/// SQLite store a `u64` in a signed `BIGINT`, so a query that compares one
+/// with a larger `u64` already has its answer: it is rendered as that
+/// answer rather than sent with a parameter the drivers there cannot bind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Settled {
+    /// False on every row: `=`, `>`, `>=`, `IN`.
+    Never,
+    /// True on every row: `!=`, `<>`, `<`, `<=`, `NOT IN`.
+    Always,
+}
+
+impl Settled {
+    /// The outcome of `column <op> value` for a value above every value of
+    /// the column, or `None` for an operator that does not order numbers,
+    /// such as `LIKE` or `IS`.
+    pub(crate) fn of_operator(op: &str) -> Option<Self> {
+        match op.trim() {
+            "=" | ">" | ">=" => Some(Self::Never),
+            "!=" | "<>" | "<" | "<=" => Some(Self::Always),
+            _ => None,
+        }
+    }
+
+    /// The comparison as SQL over `column`: false, or true, on a row whose
+    /// column holds a value, and NULL on a row whose column is NULL, as the
+    /// comparison itself would be. Keeping the NULL is what lets a `NOT`
+    /// or an `OR` around it mean what it meant: `NOT (quantity = x)` still
+    /// leaves out a row without a quantity.
+    pub(crate) fn sql(self, column: &str) -> String {
+        match self {
+            Self::Never => format!("({column} IS NULL AND NULL)"),
+            Self::Always => format!("({column} IS NOT NULL OR NULL)"),
+        }
+    }
+}
+
 /// Refuses a `u64` that `column` cannot store on `backend`: above
 /// `i64::MAX` on Postgres and SQLite, which store a `u64` in a signed
 /// `BIGINT`. MySQL's unsigned columns take every `u64`. `table` qualifies
@@ -167,7 +236,11 @@ fn column_name<I: ColIdx>(index: &I) -> String {
 ///
 /// The error names the column and the value. It is raised before the
 /// statement is built, because sea-query-sqlx's Postgres and SQLite
-/// binders panic on the conversion rather than return an error.
+/// binders panic on the conversion rather than return an error. It is for
+/// writes and raw parameters, whose meaning a read cannot settle, and its
+/// callers raise it as a database error: the text, which names the engine,
+/// the table and the column, goes to the log, and a client gets the
+/// generic 500 body unless debug is on.
 pub(crate) fn refuse_unsigned_overflow(
     backend: DbBackend,
     table: &str,
@@ -175,14 +248,14 @@ pub(crate) fn refuse_unsigned_overflow(
     value: &Value,
 ) -> Result<(), String> {
     match value {
-        Value::BigUnsigned(Some(n)) if *n > i64::MAX as u64 && backend != DbBackend::MySql => {
+        Value::BigUnsigned(Some(n)) if beyond_signed(backend, value) => {
             let column = if table.is_empty() {
                 format!("`{column}`")
             } else {
                 format!("`{table}.{column}`")
             };
             Err(format!(
-                "{column}: {n} is above {}, the largest value a {backend:?} BIGINT \
+                "{column}: {n} is above {}, the largest integer a {backend:?} column \
                  holds; {backend:?} has no unsigned integers, so a u64 column stores \
                  0 to {} there",
                 i64::MAX,
@@ -227,6 +300,20 @@ fn unsigned_bind(value: &serde_json::Value) -> Option<Value> {
         .as_u64()
         .filter(|n| *n > i64::MAX as u64)
         .map(|n| Value::BigUnsigned(Some(n)))
+}
+
+/// How a value compared with, or written to, an integer field without a
+/// cast binds: a `u64` above `i64::MAX` as an unsigned number, anything
+/// else as it is (`None`). No integer column narrower than
+/// `BIGINT UNSIGNED` holds such a value, so seeing it as the number it is
+/// lets the query builder settle a comparison and refuse a write, where as
+/// text Postgres refused the comparison and SQLite stored a rounded real.
+///
+/// **Not part of the public API.** It is `pub` because the code
+/// `#[suprnova::model]` generates for a model's column binder calls it.
+#[doc(hidden)]
+pub fn __bind_integer(value: &serde_json::Value) -> Option<Value> {
+    unsigned_bind(value)
 }
 
 impl IntoDynCast for AsU64 {
@@ -306,6 +393,30 @@ mod tests {
     }
 
     #[test]
+    fn a_comparison_beyond_every_signed_value_is_settled_by_its_operator() {
+        let beyond = Value::BigUnsigned(Some(i64::MAX as u64 + 1));
+        assert!(beyond_signed(DbBackend::Postgres, &beyond));
+        assert!(beyond_signed(DbBackend::Sqlite, &beyond));
+        assert!(!beyond_signed(DbBackend::MySql, &beyond));
+        let held = Value::BigUnsigned(Some(i64::MAX as u64));
+        assert!(!beyond_signed(DbBackend::Postgres, &held));
+
+        for op in ["=", ">", ">="] {
+            assert_eq!(Settled::of_operator(op), Some(Settled::Never), "{op}");
+        }
+        for op in ["!=", "<>", "<", "<="] {
+            assert_eq!(Settled::of_operator(op), Some(Settled::Always), "{op}");
+        }
+        for op in ["LIKE", "NOT LIKE", "ILIKE", "IS", "IS NOT"] {
+            assert_eq!(Settled::of_operator(op), None, "{op}");
+        }
+        // NULL where the column is NULL, so a NOT around it keeps SQL's
+        // meaning for that row.
+        assert_eq!(Settled::Never.sql("q"), "(q IS NULL AND NULL)");
+        assert_eq!(Settled::Always.sql("q"), "(q IS NOT NULL OR NULL)");
+    }
+
+    #[test]
     fn only_values_above_i64_max_bind_unsigned() {
         assert_eq!(unsigned_bind(&serde_json::json!(5)), None);
         assert_eq!(
@@ -325,6 +436,18 @@ mod tests {
             serde_json::from_value::<StoredU64>(serde_json::json!(7)).expect("deserialize"),
             StoredU64(7)
         );
+    }
+
+    #[test]
+    fn the_storage_type_parses_and_displays_as_the_number() {
+        assert_eq!(
+            "18446744073709551615".parse::<StoredU64>().ok(),
+            Some(StoredU64(u64::MAX))
+        );
+        for not_a_u64 in ["", "abc", "-1", "18446744073709551616"] {
+            assert!(not_a_u64.parse::<StoredU64>().is_err(), "{not_a_u64:?}");
+        }
+        assert_eq!(StoredU64(42).to_string(), "42");
     }
 
     #[test]

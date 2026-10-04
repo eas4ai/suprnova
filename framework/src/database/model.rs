@@ -18,6 +18,7 @@
 //! rollbacks.
 
 use async_trait::async_trait;
+use sea_orm::sea_query::{FromValueTuple, IntoValueTuple, ValueTuple};
 use sea_orm::{
     ActiveModelBehavior, ActiveModelTrait, EntityTrait, IntoActiveModel, ModelTrait,
     PaginatorTrait, PrimaryKeyTrait, TryIntoModel,
@@ -40,6 +41,13 @@ where
     f(exec)
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))
+}
+
+/// The key `E` takes back from the value tuple it was checked as.
+fn key_from_tuple<E: EntityTrait>(
+    key: ValueTuple,
+) -> <E::PrimaryKey as PrimaryKeyTrait>::ValueType {
+    FromValueTuple::from_value_tuple(key)
 }
 
 /// Mirror of [`with_read_executor`] for write terminals. Skips the
@@ -176,14 +184,20 @@ where
     where
         K: Into<<Self::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,
     {
-        let query = Self::find_by_id(id);
-        with_read_executor(|exec| async move {
-            match exec {
-                ExecutorChoice::Tx(t, _) => query.one(t.as_ref()).await,
-                ExecutorChoice::Pool(c, _) => query.one(c.inner()).await,
-            }
-        })
-        .await
+        let key = IntoValueTuple::into_value_tuple(id.into());
+        let exec = ExecutorChoice::resolve_read(None, None, None).await?;
+        // A key no row can hold, a u64 above i64::MAX on Postgres or
+        // SQLite, finds nothing. It is never sent: the drivers' binders
+        // there panic on it.
+        if crate::eloquent::model::key_beyond_signed(exec.backend(), &key) {
+            return Ok(None);
+        }
+        let query = Self::find_by_id(key_from_tuple::<Self>(key));
+        match exec {
+            ExecutorChoice::Tx(t, _) => query.one(t.as_ref()).await,
+            ExecutorChoice::Pool(c, _) => query.one(c.inner()).await,
+        }
+        .map_err(|e| FrameworkError::database(e.to_string()))
     }
 
     /// Find a record by primary key or return an error
@@ -498,9 +512,14 @@ where
     where
         K: Into<<Self::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,
     {
-        let stmt = Self::delete_by_id(id);
+        let key = IntoValueTuple::into_value_tuple(id.into());
         crate::render_cache::orm::atomic(None, || async move {
             let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+            // A key no row can hold deletes nothing, and is never sent.
+            if crate::eloquent::model::key_beyond_signed(exec.backend(), &key) {
+                return Ok(0);
+            }
+            let stmt = Self::delete_by_id(key_from_tuple::<Self>(key));
             let result = match exec {
                 ExecutorChoice::Tx(t, _) => stmt.exec(t.as_ref()).await,
                 ExecutorChoice::Pool(c, _) => stmt.exec(c.inner()).await,

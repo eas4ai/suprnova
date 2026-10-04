@@ -59,7 +59,7 @@ use chrono::{NaiveDate, NaiveTime};
 use sea_orm::{DbBackend, FromQueryResult, Statement, Value as SeaValue};
 
 use crate::database::ColumnValue;
-use crate::database::column_value::unless_null;
+use crate::database::column_value::{read_aggregate, unless_null};
 use serde_json::Value;
 
 use crate::database::clauses::{
@@ -2698,8 +2698,18 @@ fn write_value_expression(
     placeholder(backend, *position)
 }
 
-/// Render a date-extraction function for the backend.
-/// Bind `value`, compared with `column`, through the model's binder, or
+/// A value compared with a column, as the statement takes it.
+enum Operand {
+    /// Bind this value.
+    Bound(SeaValue),
+    /// A `u64` above `i64::MAX` compared with a column that Postgres or
+    /// SQLite stores as a signed `BIGINT`. No row holds it, so the
+    /// comparison is rendered as its outcome rather than sent with a value
+    /// sea-query-sqlx's binder there would panic on.
+    Beyond(u64),
+}
+
+/// `value`, compared with `column`, bound through the model's binder, or
 /// as it is when the column's cast has no native form.
 ///
 /// On MySQL and MariaDB a zone-aware moment binds as its UTC wall clock.
@@ -2709,30 +2719,174 @@ fn write_value_expression(
 /// matches the same moments sent without a zone. The connection's session
 /// zone is UTC (sqlx sets `+00:00`), so the wall clock names the same
 /// moment.
+fn operand(backend: DbBackend, binder: ColumnBinder, column: &str, value: &Value) -> Operand {
+    let bound = match binder(column, value) {
+        Some(SeaValue::ChronoDateTimeUtc(Some(moment))) if backend == DbBackend::MySql => {
+            SeaValue::from(moment.naive_utc())
+        }
+        Some(bound) => bound,
+        None => json_value_to_sea_value(value),
+    };
+    match bound {
+        SeaValue::BigUnsigned(Some(n))
+            if crate::eloquent::casts::unsigned::beyond_signed(backend, &bound) =>
+        {
+            Operand::Beyond(n)
+        }
+        bound => Operand::Bound(bound),
+    }
+}
+
+/// Bind `value`, written to `column`.
 ///
-/// A `u64` column on Postgres or SQLite is a signed `BIGINT`, so a value
-/// above `i64::MAX` for it, in a filter or a write, is refused with an
-/// error naming the column before anything is sent: sea-query-sqlx's
-/// binder would panic on it, and as text Postgres would refuse it and
-/// SQLite store it as a rounded real.
+/// A `u64` column on Postgres or SQLite is a signed `BIGINT`, so a write
+/// of a value above `i64::MAX` to it is refused before anything is sent:
+/// sea-query-sqlx's binder would panic on it. The refusal names the
+/// column, and is a database error, so a client sees the generic 500 body
+/// and the log the detail.
 fn bind_value(
     backend: DbBackend,
     binder: ColumnBinder,
     column: &str,
     value: &Value,
 ) -> Result<SeaValue, FrameworkError> {
-    Ok(match binder(column, value) {
-        Some(SeaValue::ChronoDateTimeUtc(Some(moment))) if backend == DbBackend::MySql => {
-            SeaValue::from(moment.naive_utc())
+    match operand(backend, binder, column, value) {
+        Operand::Bound(bound) => Ok(bound),
+        Operand::Beyond(n) => {
+            crate::eloquent::casts::unsigned::refuse_unsigned_overflow(
+                backend,
+                "",
+                column,
+                &SeaValue::BigUnsigned(Some(n)),
+            )
+            .map_err(FrameworkError::database)?;
+            Ok(SeaValue::BigUnsigned(Some(n)))
         }
-        Some(bound @ SeaValue::BigUnsigned(_)) => {
-            crate::eloquent::casts::unsigned::refuse_unsigned_overflow(backend, "", column, &bound)
-                .map_err(|problem| FrameworkError::validation(column, problem))?;
-            bound
+    }
+}
+
+/// The column a comparison tests: its name as the model's binder knows
+/// it, and the SQL that names it in the statement, qualified inside a
+/// subquery.
+#[derive(Clone, Copy)]
+struct Compared<'a> {
+    name: &'a str,
+    sql: &'a str,
+}
+
+impl<'a> Compared<'a> {
+    /// A column the statement names as the binder does.
+    fn bare(name: &'a str) -> Self {
+        Self { name, sql: name }
+    }
+}
+
+/// Render `column op value`. A value no row of the column can hold
+/// settles the comparison; under an operator that does not order numbers
+/// (`LIKE`, `IS`) it binds as its digits, the text those operators
+/// compare.
+fn render_comparison(
+    backend: DbBackend,
+    binder: ColumnBinder,
+    column: Compared<'_>,
+    op: &str,
+    value: &Value,
+    values: &mut Vec<SeaValue>,
+    n: &mut usize,
+) -> Result<String, FrameworkError> {
+    use crate::eloquent::casts::unsigned::Settled;
+
+    let bound = match operand(backend, binder, column.name, value) {
+        Operand::Bound(bound) => bound,
+        Operand::Beyond(beyond) => match Settled::of_operator(op) {
+            Some(settled) => return Ok(settled.sql(column.sql)),
+            None => SeaValue::String(Some(beyond.to_string())),
+        },
+    };
+    *n += 1;
+    let ph = placeholder(backend, *n)?;
+    values.push(bound);
+    Ok(format!("{} {op} {ph}", column.sql))
+}
+
+/// Render `column [NOT] IN (...)`. A value no row of the column can hold
+/// matches no row, so it leaves the list; a list left with nothing is the
+/// settled outcome of the whole test.
+fn render_in_list(
+    backend: DbBackend,
+    binder: ColumnBinder,
+    column: Compared<'_>,
+    list: &[Value],
+    negated: bool,
+    values: &mut Vec<SeaValue>,
+    n: &mut usize,
+) -> Result<String, FrameworkError> {
+    use crate::eloquent::casts::unsigned::Settled;
+
+    if list.is_empty() {
+        return Ok(if negated { "1 = 1" } else { "1 = 0" }.to_string());
+    }
+    let mut phs = Vec::with_capacity(list.len());
+    for value in list {
+        if let Operand::Bound(bound) = operand(backend, binder, column.name, value) {
+            *n += 1;
+            phs.push(placeholder(backend, *n)?);
+            values.push(bound);
         }
-        Some(bound) => bound,
-        None => json_value_to_sea_value(value),
-    })
+    }
+    if phs.is_empty() {
+        let settled = if negated {
+            Settled::Always
+        } else {
+            Settled::Never
+        };
+        return Ok(settled.sql(column.sql));
+    }
+    let not = if negated { "NOT " } else { "" };
+    Ok(format!("{} {not}IN ({})", column.sql, phs.join(", ")))
+}
+
+/// Render `column [NOT] BETWEEN low AND high`. A low end no row of the
+/// column can hold matches no row; a high end none can hold leaves only
+/// `column >= low` (`< low` when negated).
+fn render_between(
+    backend: DbBackend,
+    binder: ColumnBinder,
+    column: Compared<'_>,
+    (low, high): (&Value, &Value),
+    negated: bool,
+    values: &mut Vec<SeaValue>,
+    n: &mut usize,
+) -> Result<String, FrameworkError> {
+    use crate::eloquent::casts::unsigned::Settled;
+
+    let low = match operand(backend, binder, column.name, low) {
+        Operand::Bound(bound) => bound,
+        Operand::Beyond(_) => {
+            let settled = if negated {
+                Settled::Always
+            } else {
+                Settled::Never
+            };
+            return Ok(settled.sql(column.sql));
+        }
+    };
+    *n += 1;
+    let pa = placeholder(backend, *n)?;
+    values.push(low);
+    match operand(backend, binder, column.name, high) {
+        Operand::Bound(high) => {
+            *n += 1;
+            let pb = placeholder(backend, *n)?;
+            values.push(high);
+            let not = if negated { "NOT " } else { "" };
+            Ok(format!("{} {not}BETWEEN {pa} AND {pb}", column.sql))
+        }
+        Operand::Beyond(_) => {
+            let op = if negated { "<" } else { ">=" };
+            Ok(format!("{} {op} {pa}", column.sql))
+        }
+    }
 }
 
 /// Bind the value of a date-part comparison (`where_date` and its
@@ -2972,17 +3126,27 @@ fn render_exists(
             .as_deref()
             .map(|s| s.to_string())
             .unwrap_or_else(|| "=".to_string());
-        *n += 1;
-        let ph = placeholder(backend, *n)?;
-        values.push(bind_value(backend, spec.binder, col, val)?);
         // Qualify with the target table when present so the col reads
         // unambiguously in the subquery's WHERE - Laravel's
         // whereRelation always renders the qualified form.
-        if !spec.target_table.is_empty() {
-            where_parts.push(format!("{}.{} {} {}", spec.target_table, col, op, ph));
+        let sql = if spec.target_table.is_empty() {
+            col.clone()
         } else {
-            where_parts.push(format!("{col} {op} {ph}"));
-        }
+            format!("{}.{}", spec.target_table, col)
+        };
+        let column = Compared {
+            name: col,
+            sql: &sql,
+        };
+        where_parts.push(render_comparison(
+            backend,
+            spec.binder,
+            column,
+            &op,
+            val,
+            values,
+            n,
+        )?);
     }
 
     let where_sql = if where_parts.is_empty() {
@@ -3060,66 +3224,52 @@ pub(crate) fn render_subquery_term(
     };
     Ok(match term {
         WhereTerm::Eq(col, v) => {
-            *n += 1;
-            let ph = placeholder(backend, *n)?;
-            values.push(bind_value(backend, binder, col, v)?);
-            format!("{} = {ph}", q(col))
+            let sql = q(col);
+            let column = Compared {
+                name: col,
+                sql: &sql,
+            };
+            render_comparison(backend, binder, column, "=", v, values, n)?
         }
         WhereTerm::Op(col, op, v) => {
-            *n += 1;
-            let ph = placeholder(backend, *n)?;
-            values.push(bind_value(backend, binder, col, v)?);
-            format!("{} {op} {ph}", q(col))
+            let sql = q(col);
+            let column = Compared {
+                name: col,
+                sql: &sql,
+            };
+            render_comparison(backend, binder, column, op, v, values, n)?
         }
         WhereTerm::In(col, vs) => {
-            let phs: Vec<String> = vs
-                .iter()
-                .map(|v| {
-                    *n += 1;
-                    let ph = placeholder(backend, *n)?;
-                    values.push(bind_value(backend, binder, col, v)?);
-                    Ok(ph)
-                })
-                .collect::<Result<Vec<_>, FrameworkError>>()?;
-            if phs.is_empty() {
-                "1 = 0".to_string()
-            } else {
-                format!("{} IN ({})", q(col), phs.join(", "))
-            }
+            let sql = q(col);
+            let column = Compared {
+                name: col,
+                sql: &sql,
+            };
+            render_in_list(backend, binder, column, vs, false, values, n)?
         }
         WhereTerm::NotIn(col, vs) => {
-            let phs: Vec<String> = vs
-                .iter()
-                .map(|v| {
-                    *n += 1;
-                    let ph = placeholder(backend, *n)?;
-                    values.push(bind_value(backend, binder, col, v)?);
-                    Ok(ph)
-                })
-                .collect::<Result<Vec<_>, FrameworkError>>()?;
-            if phs.is_empty() {
-                "1 = 1".to_string()
-            } else {
-                format!("{} NOT IN ({})", q(col), phs.join(", "))
-            }
+            let sql = q(col);
+            let column = Compared {
+                name: col,
+                sql: &sql,
+            };
+            render_in_list(backend, binder, column, vs, true, values, n)?
         }
         WhereTerm::Between(col, a, b) => {
-            *n += 1;
-            let pa = placeholder(backend, *n)?;
-            values.push(bind_value(backend, binder, col, a)?);
-            *n += 1;
-            let pb = placeholder(backend, *n)?;
-            values.push(bind_value(backend, binder, col, b)?);
-            format!("{} BETWEEN {pa} AND {pb}", q(col))
+            let sql = q(col);
+            let column = Compared {
+                name: col,
+                sql: &sql,
+            };
+            render_between(backend, binder, column, (a, b), false, values, n)?
         }
         WhereTerm::NotBetween(col, a, b) => {
-            *n += 1;
-            let pa = placeholder(backend, *n)?;
-            values.push(bind_value(backend, binder, col, a)?);
-            *n += 1;
-            let pb = placeholder(backend, *n)?;
-            values.push(bind_value(backend, binder, col, b)?);
-            format!("{} NOT BETWEEN {pa} AND {pb}", q(col))
+            let sql = q(col);
+            let column = Compared {
+                name: col,
+                sql: &sql,
+            };
+            render_between(backend, binder, column, (a, b), true, values, n)?
         }
         WhereTerm::Null(col) => format!("{} IS NULL", q(col)),
         WhereTerm::NotNull(col) => format!("{} IS NOT NULL", q(col)),
@@ -3355,67 +3505,35 @@ impl<M> Builder<M> {
     ) -> Result<String, FrameworkError> {
         Ok(match term {
             WhereTerm::Eq(col, v) => {
-                *n += 1;
-                let ph = placeholder(backend, *n)?;
-                values.push(bind_value(backend, binder, col, v)?);
-                format!("{col} = {ph}")
+                render_comparison(backend, binder, Compared::bare(col), "=", v, values, n)?
             }
             WhereTerm::Op(col, op, v) => {
-                *n += 1;
-                let ph = placeholder(backend, *n)?;
-                values.push(bind_value(backend, binder, col, v)?);
-                format!("{col} {op} {ph}")
+                render_comparison(backend, binder, Compared::bare(col), op, v, values, n)?
             }
             WhereTerm::In(col, vs) => {
-                let phs: Vec<String> = vs
-                    .iter()
-                    .map(|v| {
-                        *n += 1;
-                        let ph = placeholder(backend, *n)?;
-                        values.push(bind_value(backend, binder, col, v)?);
-                        Ok(ph)
-                    })
-                    .collect::<Result<Vec<_>, FrameworkError>>()?;
-                if phs.is_empty() {
-                    "1 = 0".to_string()
-                } else {
-                    format!("{col} IN ({})", phs.join(", "))
-                }
+                render_in_list(backend, binder, Compared::bare(col), vs, false, values, n)?
             }
             WhereTerm::NotIn(col, vs) => {
-                let phs: Vec<String> = vs
-                    .iter()
-                    .map(|v| {
-                        *n += 1;
-                        let ph = placeholder(backend, *n)?;
-                        values.push(bind_value(backend, binder, col, v)?);
-                        Ok(ph)
-                    })
-                    .collect::<Result<Vec<_>, FrameworkError>>()?;
-                if phs.is_empty() {
-                    "1 = 1".to_string()
-                } else {
-                    format!("{col} NOT IN ({})", phs.join(", "))
-                }
+                render_in_list(backend, binder, Compared::bare(col), vs, true, values, n)?
             }
-            WhereTerm::Between(col, a, b) => {
-                *n += 1;
-                let pa = placeholder(backend, *n)?;
-                values.push(bind_value(backend, binder, col, a)?);
-                *n += 1;
-                let pb = placeholder(backend, *n)?;
-                values.push(bind_value(backend, binder, col, b)?);
-                format!("{col} BETWEEN {pa} AND {pb}")
-            }
-            WhereTerm::NotBetween(col, a, b) => {
-                *n += 1;
-                let pa = placeholder(backend, *n)?;
-                values.push(bind_value(backend, binder, col, a)?);
-                *n += 1;
-                let pb = placeholder(backend, *n)?;
-                values.push(bind_value(backend, binder, col, b)?);
-                format!("{col} NOT BETWEEN {pa} AND {pb}")
-            }
+            WhereTerm::Between(col, a, b) => render_between(
+                backend,
+                binder,
+                Compared::bare(col),
+                (a, b),
+                false,
+                values,
+                n,
+            )?,
+            WhereTerm::NotBetween(col, a, b) => render_between(
+                backend,
+                binder,
+                Compared::bare(col),
+                (a, b),
+                true,
+                values,
+                n,
+            )?,
             WhereTerm::Null(col) => format!("{} IS NULL", joined_column(joined, col)),
             WhereTerm::NotNull(col) => format!("{} IS NOT NULL", joined_column(joined, col)),
             WhereTerm::Like(col, pat) => {
@@ -3535,15 +3653,28 @@ impl<M> Builder<M> {
                 OrderTerm::InOrderOf(col, vs) => {
                     let mut cases = String::new();
                     for (idx, v) in vs.iter().enumerate() {
+                        // A value no row holds matches no row, so its arm
+                        // is left out; the others keep their places.
+                        let Operand::Bound(bound) = operand(backend, self.binder, col, v) else {
+                            continue;
+                        };
                         *n += 1;
                         let ph = placeholder(backend, *n)?;
-                        values.push(bind_value(backend, self.binder, col, v)?);
+                        values.push(bound);
                         cases.push_str(&format!(" WHEN {col} = {ph} THEN {idx}"));
+                    }
+                    if cases.is_empty() {
+                        // No arm is left: every row ties, so the term
+                        // orders nothing, and a CASE needs a WHEN.
+                        continue;
                     }
                     format!("CASE{cases} ELSE {} END", vs.len())
                 }
             };
             parts.push(rendered);
+        }
+        if parts.is_empty() {
+            return Ok(String::new());
         }
         Ok(format!(" ORDER BY {}", parts.join(", ")))
     }
@@ -5516,8 +5647,8 @@ where
             | ColumnType::BigInteger
             | ColumnType::TinyUnsigned
             | ColumnType::SmallUnsigned
-            | ColumnType::Unsigned
-            | ColumnType::BigUnsigned => Ok(KeysetKind::Integer),
+            | ColumnType::Unsigned => Ok(KeysetKind::Integer),
+            ColumnType::BigUnsigned => Ok(KeysetKind::Unsigned),
             ColumnType::Char(_) | ColumnType::String(_) | ColumnType::Text => Ok(KeysetKind::Text),
             _ => Err(Self::keyset_refusal(
                 method,
@@ -5548,7 +5679,8 @@ where
     }
 
     /// One row's primary key as a keyset cursor. A null, an array, an
-    /// object or a number outside the `i64` range has no place in the
+    /// object, or a number outside its column's range (`i64` for a
+    /// signed column, `u64` for an unsigned one) has no place in the
     /// key's order that `pk > cursor` would respect, so it is refused.
     /// So is a value of another kind than its column: a key type that
     /// writes an integer column as a string would bind as text, and the
@@ -5565,7 +5697,8 @@ where
                 method,
                 pk,
                 "a row's key is not of the kind of its column: an integer in the i64 range \
-                 for an integer column, a string for a text column",
+                 for an integer column, in the u64 range for an unsigned one, a string for \
+                 a text column",
             )),
         }
     }
@@ -5591,8 +5724,13 @@ where
     // type with only one of the two would hit a compile error against
     // a bound that doesn't match what the body actually uses.
 
-    /// `SELECT COALESCE(SUM(col), 0)`. Returns `T::default()` on empty
-    /// result sets.
+    /// `SELECT COALESCE(SUM(col), 0)`. Returns zero on empty result sets.
+    ///
+    /// Postgres answers `numeric` for the sum of a `bigint` and MySQL
+    /// `DECIMAL` for any sum of integers, so the sum is read as whichever
+    /// type arrived. An integer `T` or a `rust_decimal::Decimal` takes it
+    /// exactly: a sum with a fraction (for an integer), or one `T` cannot
+    /// hold, is an error, never truncated. `f64` takes the nearest value.
     pub async fn sum<T: ColumnValue + Default>(
         self,
         col: impl IntoColumn,
@@ -5603,12 +5741,13 @@ where
             .await
     }
 
-    /// `SELECT COALESCE(AVG(col), 0)`. Returns `T::default()` on empty
-    /// result sets.
-    pub async fn avg<T: ColumnValue + Default>(
-        self,
-        col: impl IntoColumn,
-    ) -> Result<T, FrameworkError> {
+    /// `SELECT COALESCE(AVG(col), 0)`. Returns zero on empty result sets.
+    ///
+    /// `T` is `f64` or `rust_decimal::Decimal` (see
+    /// [`AvgValue`](crate::AvgValue)): the database answers `numeric`,
+    /// `DECIMAL` or a real, and an `f64` reads the nearest value while a
+    /// `Decimal` reads an exact one or fails.
+    pub async fn avg<T: crate::AvgValue>(self, col: impl IntoColumn) -> Result<T, FrameworkError> {
         let col_name = col.col_name();
         crate::database::validate_identifier(&col_name)?;
         self.aggregate_value::<T>(&format!("COALESCE(AVG({col_name}), 0)"))
@@ -5802,11 +5941,8 @@ where
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?
             .ok_or_else(|| FrameworkError::database("aggregate query returned no row"))?;
-        T::from_column(&row, AGGREGATE_RESULT_ALIAS).map_err(|e| {
-            FrameworkError::database(format!(
-                "aggregate result decode failed for {expr}: {}",
-                sea_orm::DbErr::from(e)
-            ))
+        read_aggregate::<T>(&row, AGGREGATE_RESULT_ALIAS).map_err(|e| {
+            FrameworkError::database(format!("aggregate result decode failed for {expr}: {e}"))
         })
     }
 
@@ -6264,6 +6400,11 @@ fn current_cursor_from_request() -> Option<String> {
 enum KeysetKind {
     /// An integer column. The key is a number in the `i64` range.
     Integer,
+    /// A `BIGINT UNSIGNED` column, a `u64` field's. The key is a number in
+    /// the `u64` range, which MySQL's unsigned keys fill and the field's
+    /// cast binds as an unsigned number. On Postgres and SQLite the column
+    /// is signed and no key passes `i64::MAX`.
+    Unsigned,
     /// A text column. The key is a string.
     Text,
 }
@@ -6273,6 +6414,7 @@ impl KeysetKind {
     fn fits(self, key: &Value) -> bool {
         match self {
             Self::Integer => key.is_i64(),
+            Self::Unsigned => key.is_u64(),
             Self::Text => key.is_string(),
         }
     }
@@ -6287,19 +6429,27 @@ mod tests {
         let number = serde_json::json!(42);
         let text = serde_json::json!("42");
         assert!(KeysetKind::Integer.fits(&number));
+        assert!(KeysetKind::Unsigned.fits(&number));
         assert!(KeysetKind::Text.fits(&text));
         // A key type that writes an integer column as a string binds as
         // text, which the database does not compare with the column.
         assert!(!KeysetKind::Integer.fits(&text));
+        assert!(!KeysetKind::Unsigned.fits(&text));
         assert!(!KeysetKind::Text.fits(&number));
+        // An unsigned column's keys fill the u64 range; a signed column's
+        // stop at i64::MAX.
+        let top = serde_json::json!(u64::MAX);
+        assert!(KeysetKind::Unsigned.fits(&top));
+        assert!(!KeysetKind::Integer.fits(&top));
+        assert!(!KeysetKind::Unsigned.fits(&serde_json::json!(-1)));
         for other in [
             serde_json::json!(null),
             serde_json::json!(1.5),
-            serde_json::json!(u64::MAX),
             serde_json::json!([1]),
             serde_json::json!({"id": 1}),
         ] {
             assert!(!KeysetKind::Integer.fits(&other), "{other}");
+            assert!(!KeysetKind::Unsigned.fits(&other), "{other}");
             assert!(!KeysetKind::Text.fits(&other), "{other}");
         }
     }

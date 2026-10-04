@@ -33,14 +33,23 @@ use crate::hashing;
 /// Trade-off: a zero-padded string id like `"007"` parses to the integer
 /// `7` and would mis-bind against a *text* primary key. Apps with such
 /// keys override the binder with [`DatabaseUserProvider::with_id_parser`].
+///
+/// An id above `i64::MAX` binds as the `u64` it is: Laravel's
+/// `BIGINT UNSIGNED` `users.id` reaches it on MySQL, and as text MySQL did
+/// not match it while Postgres refused the comparison. On Postgres and
+/// SQLite no row holds such an id, so the lookup finds no user.
 fn default_id_parser(id: &str) -> SeaValue {
-    match id.parse::<i64>() {
+    if let Ok(n) = id.parse::<i64>() {
+        return SeaValue::from(n);
+    }
+    match id.parse::<u64>() {
         Ok(n) => SeaValue::from(n),
         Err(_) => SeaValue::from(id.to_string()),
     }
 }
 
-/// Convert a JSON credential value into a SQL bind.
+/// Convert a JSON credential value into a SQL bind. A whole number above
+/// `i64::MAX` binds as the `u64` it is rather than as a rounded `f64`.
 fn json_to_sea_value(v: &Value) -> SeaValue {
     match v {
         Value::String(s) => SeaValue::from(s.clone()),
@@ -48,6 +57,8 @@ fn json_to_sea_value(v: &Value) -> SeaValue {
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 SeaValue::from(i)
+            } else if let Some(u) = n.as_u64() {
+                SeaValue::from(u)
             } else if let Some(f) = n.as_f64() {
                 SeaValue::from(f)
             } else {
