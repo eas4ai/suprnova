@@ -671,6 +671,13 @@ user to save them, and don't store the plaintext anywhere else.
 possession. Re-enrolling on an unconfirmed (pending) row is allowed:
 the prior enrollment never became authoritative.
 
+Both writes are conditional on what was read, so concurrent requests on
+one account cannot cross. `confirm` stamps only the enrollment whose
+secret the code was checked against: if a second `enroll` replaced the
+secret in between, `confirm` returns `409` and the new secret stays
+unconfirmed. `enroll` re-checks that the row is still unconfirmed as it
+writes, so a confirmation that lands while it runs also gets the `409`.
+
 ### Replay protection
 
 `verify` writes the current TOTP timestep to `last_used_timestep` on
