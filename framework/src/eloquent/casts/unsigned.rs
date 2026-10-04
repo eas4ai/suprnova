@@ -13,7 +13,7 @@
 //! on each database, refusing a negative value with an error that names
 //! the column. Writes bind it as a SeaORM `BigUnsigned`, and the framework
 //! refuses one above `i64::MAX` on Postgres and SQLite before the statement
-//! is built ([`refuse_unsigned_overflow`]), naming the column.
+//! is built, naming the column.
 
 use sea_orm::sea_query::{ArrayType, ColumnType, Nullable, ValueType, ValueTypeErr};
 use sea_orm::{ColIdx, DbBackend, DbErr, QueryResult, TryFromU64, TryGetError, TryGetable, Value};
