@@ -1438,6 +1438,18 @@ async fn morph_relations_report_the_models_keys_at_run_time() {
     assert_eq!(unknown.parent_key(), "", "an unknown type has no key");
 }
 
+/// A `MorphMany` reports its parent's primary key as its parent key.
+#[tokio::test]
+async fn morph_many_reports_its_parents_primary_key() {
+    use suprnova::Relation;
+    let doc = RdKeyedDoc {
+        uid: 5,
+        title: "doc".into(),
+        ..Default::default()
+    };
+    assert_eq!(doc.remarks().parent_key(), "uid");
+}
+
 /// A row touches its `MorphTo` owner, found by the owner's primary key.
 /// Guards the run-time path the registry key comes from.
 #[tokio::test]

@@ -1644,7 +1644,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
     match rel.kind {
         RelationKindAttr::HasOne => {
             // FK on the child = <snake(parent_struct)>_id by default.
-            // LK on the parent = the parent's PK by default ("id").
+            // LK on the parent = the parent's primary key by default.
             let fk = fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_has_fk(&parent_name));
@@ -1729,7 +1729,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
         RelationKindAttr::HasMany => {
             // FK on the child table = <snake(parent_struct)>_id by
             // default - same default as HasOne. LK = parent's PK by
-            // default ("id"), configurable via `lk = "..."`.
+            // default, configurable via `lk = "..."`.
             let fk = fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_has_fk(&parent_name));
@@ -1953,6 +1953,14 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             //    to equal for the row to belong to this parent.
             let morph_name = morph_name_or_default(rel);
             let morph_type_value = morph_type_of(input);
+            // A declared `lk` is the parent column the relation reads
+            // (`local_key_ident`); the runtime metadata names it too.
+            // Without one, the runtime default is the parent's primary
+            // key.
+            let local_key_chain = match lk_override(rel) {
+                Some(lk) => quote! { .local_key(#lk) },
+                None => quote! {},
+            };
             let wrapper = match rel.kind {
                 RelationKindAttr::MorphMany => quote! { MorphMany },
                 RelationKindAttr::MorphOne => quote! { MorphOne },
@@ -1981,6 +1989,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                             ::std::string::String::from(#morph_name),
                             ::std::string::String::from(#morph_type_value),
                         )
+                        #local_key_chain
                         .__lazy_load(#lazy_load)
                     }
                 }
