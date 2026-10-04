@@ -58,17 +58,147 @@ use uuid::Uuid;
 // Presence state carried alongside each forwarder.
 // ---------------------------------------------------------------------------
 
-/// Presence metadata for a single channel subscription. `None` for
-/// non-presence channels.
-struct PresenceState {
-    member_id: String,
-    info: Value,
+/// A forwarder task that is aborted when its handle is dropped.
+///
+/// A plain `JoinHandle` detaches on drop. A forwarder waits on
+/// `rx.recv()` while the hub keeps the channel's sender alive, so a
+/// detached one lives until the next event on its channel, or forever.
+/// Every path that loses the handle without the explicit teardown must
+/// still stop the task: the connection future cancelled when the server
+/// aborts WebSocket tasks at the end of its shutdown drain, or a
+/// re-subscribe cancelled during its cleanup.
+struct ForwarderTask(JoinHandle<()>);
+
+impl Drop for ForwarderTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
-/// Combined forwarder entry stored in the per-connection map.
+/// A presence member this connection tracked on the hub. When the
+/// subscription ends, the member is untracked and announced as
+/// `presence.left`.
+///
+/// [`Self::leave`] does that on the normal paths, and the caller awaits
+/// it. When the membership is dropped first instead - the connection
+/// future is cancelled, or a `leave` in progress is cancelled - `Drop`
+/// hands the same two steps to a spawned task. The in-memory hub has no
+/// presence TTL, so a member nobody untracks stays visible for the life
+/// of the process.
+///
+/// The cleanup runs at least once. A `leave` cancelled after its untrack
+/// repeats it from `Drop`; untracking an absent member is a no-op, and
+/// rosters are keyed by member id, so a repeated `presence.left` is too.
+struct PresenceMembership {
+    hub: Arc<dyn BroadcastHub>,
+    channel: String,
+    member_id: String,
+    info: Value,
+    /// Set once `leave` has finished; `Drop` then has nothing to do.
+    left: bool,
+}
+
+impl PresenceMembership {
+    /// Untrack the member and announce `presence.left`. `during` names the
+    /// path that ended the subscription, for the logs.
+    async fn leave(mut self, during: &'static str) {
+        untrack_and_announce(
+            &self.hub,
+            &self.channel,
+            &self.member_id,
+            self.info.clone(),
+            during,
+        )
+        .await;
+        self.left = true;
+    }
+}
+
+impl Drop for PresenceMembership {
+    fn drop(&mut self) {
+        if self.left {
+            return;
+        }
+        let hub = Arc::clone(&self.hub);
+        let channel = std::mem::take(&mut self.channel);
+        let member_id = std::mem::take(&mut self.member_id);
+        let info = self.info.take();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    untrack_and_announce(&hub, &channel, &member_id, info, "cancelled connection")
+                        .await;
+                });
+            }
+            Err(_) => tracing::warn!(
+                channel = %channel,
+                member_id = %member_id,
+                "presence member left tracked: no Tokio runtime to run its cleanup on"
+            ),
+        }
+    }
+}
+
+/// Untrack `member_id` on `channel` and publish its `presence.left`.
+///
+/// Every caller is a cleanup path whose subscription is already gone, so
+/// a hub failure is logged, not returned: there is no client request left
+/// to fail, and the publish still runs when the untrack fails.
+async fn untrack_and_announce(
+    hub: &Arc<dyn BroadcastHub>,
+    channel: &str,
+    member_id: &str,
+    info: Value,
+    during: &'static str,
+) {
+    if let Err(e) = hub.untrack_member(channel, member_id).await {
+        tracing::warn!(
+            error = %e,
+            channel = %channel,
+            member_id = %member_id,
+            during,
+            "presence untrack failed"
+        );
+    }
+    if let Err(e) = hub
+        .publish(BroadcastEnvelope::new(
+            channel.to_string(),
+            "presence.left",
+            info,
+        ))
+        .await
+    {
+        tracing::warn!(
+            channel = %channel,
+            error = %e,
+            during,
+            "broadcasting handler: presence.left publish failed"
+        );
+    }
+}
+
+/// One subscription in the per-connection map. Dropping it stops the
+/// forwarder and, if the subscription joined a presence channel, cleans
+/// up the member; see [`ForwarderTask`] and [`PresenceMembership`].
 struct ForwarderEntry {
-    handle: JoinHandle<()>,
-    presence: Option<PresenceState>,
+    forwarder: ForwarderTask,
+    presence: Option<PresenceMembership>,
+}
+
+impl ForwarderEntry {
+    /// End the subscription: stop the forwarder, then untrack and announce
+    /// the presence member, if any. The forwarder goes first because the
+    /// subscription is over; anything it forwarded now would be stale.
+    async fn end(self, during: &'static str) {
+        let Self {
+            forwarder,
+            presence,
+        } = self;
+        drop(forwarder);
+        if let Some(membership) = presence {
+            membership.leave(during).await;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -148,8 +278,8 @@ impl BroadcastingWsHandler {
 #[async_trait]
 impl WebSocketHandler for BroadcastingWsHandler {
     async fn handle(&self, mut socket: WsSocket, req: Request) -> Result<(), FrameworkError> {
-        // Per-channel forwarder entries.  Aborted on unsubscribe or
-        // when the connection ends.
+        // Per-channel forwarder entries. Ended on unsubscribe or when
+        // the connection ends; dropping one ends it too.
         let forwarders: Arc<Mutex<HashMap<String, ForwarderEntry>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
@@ -215,7 +345,6 @@ impl WebSocketHandler for BroadcastingWsHandler {
                             Ok(ClientFrame::Unsubscribe { channel }) => {
                                 handle_unsubscribe(
                                     &channel,
-                                    &self.hub,
                                     &forwarders,
                                     &mut socket,
                                 )
@@ -297,47 +426,23 @@ impl WebSocketHandler for BroadcastingWsHandler {
         }
         .await;
 
-        // Teardown runs on every exit path, not just the clean `Ok(None)`
-        // break above. Publish `presence.left` for any remaining presence
-        // subscriptions, then abort each forwarder task deterministically -
-        // relying on `JoinHandle`'s detach-on-drop semantics would let
-        // the task block on `rx.recv().await` indefinitely if the broadcast
-        // sender is kept alive elsewhere. A hub publish failure on shutdown
-        // is logged but doesn't replace the original exit reason in
-        // `result`.
-        let mut map = forwarders.lock().await;
-        for (channel, entry) in map.drain() {
-            if let Some(ps) = entry.presence {
-                // Shutdown path: a presence-untrack failure here is
-                // informational - the WS session is already closing,
-                // so the only place to surface it is the log.
-                if let Err(e) = self.hub.untrack_member(&channel, &ps.member_id).await {
-                    tracing::warn!(
-                        error = %e,
-                        channel = %channel,
-                        member_id = %ps.member_id,
-                        "presence untrack failed during shutdown"
-                    );
-                }
-                if let Err(e) = self
-                    .hub
-                    .publish(BroadcastEnvelope::new(
-                        channel.clone(),
-                        "presence.left",
-                        ps.info,
-                    ))
-                    .await
-                {
-                    tracing::warn!(
-                        channel = %channel,
-                        error = %e,
-                        "broadcasting handler: presence.left publish failed during teardown"
-                    );
-                }
-            }
-            entry.handle.abort();
+        // Teardown runs on every exit path out of the loop, not just the
+        // clean `Ok(None)` break above: stop each forwarder, then untrack
+        // and announce each presence member. It is awaited here so a
+        // returning handler has finished its cleanup. A hub failure is
+        // logged and does not replace the exit reason in `result`.
+        //
+        // The one exit this code cannot see is the future itself being
+        // dropped - the server aborts WebSocket tasks when its shutdown
+        // drain times out. That path drops `forwarders` and every entry
+        // in it, and the entries' own `Drop` does the same cleanup.
+        let entries: Vec<ForwarderEntry> = {
+            let mut map = forwarders.lock().await;
+            map.drain().map(|(_, entry)| entry).collect()
+        };
+        for entry in entries {
+            entry.end("connection close").await;
         }
-        drop(map);
 
         // Re-raise the inner loop's exit reason after teardown ran.
         result
@@ -404,7 +509,7 @@ async fn handle_subscribe(
 ) -> Result<(), FrameworkError> {
     // Per-connection subscription cap. Re-subscribes to an existing
     // channel are exempt (they REPLACE the forwarder in place - see
-    // the `map.remove(channel)` below - so the map size doesn't grow);
+    // the `map.insert` below - so the map size doesn't grow);
     // first-time subscribes to a brand-new channel name count against
     // the cap. Without this gate a malicious client could subscribe
     // to `orders.{id}` with thousands of distinct ids on one socket
@@ -476,7 +581,7 @@ async fn handle_subscribe(
     // Capture the channel name so the forwarder can name the channel
     // when it emits a Lagged frame after a `broadcast::RecvError::Lagged(_)`.
     let forwarder_channel = channel.to_string();
-    let forwarder = tokio::spawn(async move {
+    let forwarder = ForwarderTask(tokio::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(envelope) => {
@@ -521,7 +626,7 @@ async fn handle_subscribe(
                 }
             }
         }
-    });
+    }));
 
     // Destructure bootstrap data - used after the forwarder is inserted.
     let (presence_here_members, presence_member_id, presence_info) =
@@ -531,57 +636,39 @@ async fn handle_subscribe(
             (None, None, None)
         };
 
-    // Replace any existing forwarder for this channel (idempotent re-subscribe).
-    {
+    // Register the new subscription in place of any existing one for this
+    // channel (idempotent re-subscribe), in one step under the lock. From
+    // here on the map owns the new forwarder and presence member, so a
+    // connection cancelled at any later await still cleans them up. The
+    // membership is built under the lock, with no await before the insert,
+    // so a cancellation cannot drop one that was never registered.
+    let replaced = {
         let mut map = forwarders.lock().await;
-        if let Some(old) = map.remove(channel) {
-            // Existing subscription being replaced - clean up presence if needed.
-            if let Some(ps) = old.presence {
-                if let Err(e) = hub.untrack_member(channel, &ps.member_id).await {
-                    tracing::warn!(
-                        error = %e,
-                        channel = %channel,
-                        member_id = %ps.member_id,
-                        "presence untrack failed during re-subscribe cleanup"
-                    );
-                }
-                // Cleanup-path publish: log a hub failure but continue -
-                // the user just re-subscribed, we shouldn't fail the new
-                // sub because the prior presence.left couldn't be
-                // forwarded cross-process.
-                if let Err(e) = hub
-                    .publish(BroadcastEnvelope::new(
-                        channel.to_string(),
-                        "presence.left",
-                        ps.info,
-                    ))
-                    .await
-                {
-                    tracing::warn!(
-                        channel = %channel,
-                        error = %e,
-                        "broadcasting handler: presence.left publish failed during resubscribe cleanup"
-                    );
-                }
-            }
-            old.handle.abort();
-        }
-
-        let final_presence = match (presence_member_id.as_deref(), presence_info.as_ref()) {
-            (Some(mid), Some(info)) => Some(PresenceState {
+        let presence = match (presence_member_id.as_deref(), presence_info.as_ref()) {
+            (Some(mid), Some(info)) => Some(PresenceMembership {
+                hub: Arc::clone(hub),
+                channel: channel.to_string(),
                 member_id: mid.to_string(),
                 info: info.clone(),
+                left: false,
             }),
             _ => None,
         };
-
         map.insert(
             channel.to_string(),
             ForwarderEntry {
-                handle: forwarder,
-                presence: final_presence,
+                forwarder,
+                presence,
             },
-        );
+        )
+    };
+
+    // End the subscription this one replaced, outside the lock. A hub
+    // failure is logged, not returned: the client just re-subscribed, and
+    // the new subscription should not fail because the old member's
+    // `presence.left` could not be forwarded cross-process.
+    if let Some(old) = replaced {
+        old.end("re-subscribe").await;
     }
 
     // Send Subscribed ack first.
@@ -644,7 +731,6 @@ async fn handle_subscribe(
 
 async fn handle_unsubscribe(
     channel: &str,
-    hub: &Arc<dyn BroadcastHub>,
     forwarders: &Arc<Mutex<HashMap<String, ForwarderEntry>>>,
     socket: &mut WsSocket,
 ) -> Result<(), FrameworkError> {
@@ -653,38 +739,10 @@ async fn handle_unsubscribe(
         map.remove(channel)
     };
 
-    if let Some(e) = entry {
-        if let Some(ps) = e.presence {
-            // Unsubscribe path: a presence-untrack failure here is
-            // informational - we'd rather still send the
-            // Unsubscribed ack to the client than abort on a
-            // producer hiccup.
-            if let Err(err) = hub.untrack_member(channel, &ps.member_id).await {
-                tracing::warn!(
-                    error = %err,
-                    channel = %channel,
-                    member_id = %ps.member_id,
-                    "presence untrack failed during unsubscribe"
-                );
-            }
-            // Cleanup-path publish: a hub failure here doesn't stop the
-            // client from getting their Unsubscribed ack below.
-            if let Err(err) = hub
-                .publish(BroadcastEnvelope::new(
-                    channel.to_string(),
-                    "presence.left",
-                    ps.info,
-                ))
-                .await
-            {
-                tracing::warn!(
-                    channel = %channel,
-                    error = %err,
-                    "broadcasting handler: presence.left publish failed during unsubscribe"
-                );
-            }
-        }
-        e.handle.abort();
+    // A hub failure while ending the subscription is logged, not returned:
+    // the client still gets its Unsubscribed ack below.
+    if let Some(entry) = entry {
+        entry.end("unsubscribe").await;
     }
 
     let ack = ServerFrame::Unsubscribed {
