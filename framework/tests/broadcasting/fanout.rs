@@ -685,3 +685,51 @@ async fn redis_backend_authenticates_with_the_url_credentials() {
         assert_eq!(received.data["from"], "a");
     }
 }
+
+/// Two hubs exchange an event over `url`, the round trip every connection of
+/// the hub takes part in: the publish goes out on the writer, the delivery
+/// comes in on the reader.
+async fn cross_hub_round_trip(url: &str) {
+    let stream_key = format!("suprnova-test-{}", uuid::Uuid::new_v4());
+    let hub_a = SeaStreamerBroadcastHub::new(url, &stream_key)
+        .await
+        .expect("hub_a Redis connect");
+    let hub_b = SeaStreamerBroadcastHub::new(url, &stream_key)
+        .await
+        .expect("hub_b Redis connect");
+    let mut rx = hub_b.subscribe("chat.round");
+    hub_a
+        .publish(envelope(
+            "chat.round",
+            "MessagePosted",
+            json!({ "from": "a" }),
+        ))
+        .await
+        .expect("the publish lands");
+    let received = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("the event crosses hubs within 5 s")
+        .expect("recv");
+    assert_eq!(received.data["from"], "a");
+}
+
+/// A `rediss://` URL works for every connection of the hub. The test CA is
+/// trusted through `SSL_CERT_FILE`, which the native certificate store reads,
+/// so the child runs in a process of its own.
+#[test]
+#[ignore = "runs redis-server and openssl"]
+fn redis_backend_reaches_a_tls_server() {
+    crate::own_process::run_alone("fanout::redis_backend_reaches_a_tls_server_child");
+}
+
+#[tokio::test]
+async fn redis_backend_reaches_a_tls_server_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _env = crate::env_lock::lock_env_async().await;
+    let _restore = crate::env_snapshot::EnvSnapshot::capture(&["SSL_CERT_FILE"]);
+    let server = crate::redis_server::TlsRedis::start();
+    crate::env_snapshot::set_env("SSL_CERT_FILE", Some(&server.ca.display().to_string()));
+    cross_hub_round_trip(&format!("rediss://127.0.0.1:{}/0", server.port)).await;
+}

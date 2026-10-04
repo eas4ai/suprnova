@@ -357,7 +357,7 @@ pub trait QueueDriver: Send + Sync {
 
     /// Push every envelope in one shot. Mirrors `Queue::bulk($jobs, ...)`.
     /// Default implementation pushes serially; backends with native bulk
-    /// push (sea-streamer pipeline, DB multi-row insert) may override.
+    /// push (SQS `SendMessageBatch`, DB multi-row insert) may override.
     async fn bulk_push(&self, envs: Vec<Envelope>) -> Result<(), FrameworkError> {
         for env in envs {
             self.push(env).await?;

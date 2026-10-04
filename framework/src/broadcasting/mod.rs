@@ -4,8 +4,7 @@
 //! by channel name and subscribing handlers to receive them. The
 //! default `InMemoryBroadcastHub` runs entirely in-process via
 //! `tokio::sync::broadcast`; the `broadcasting-fanout` feature (T11)
-//! adds a sea-streamer-backed implementation for multi-process
-//! fanout.
+//! adds a Redis Streams implementation for multi-process fanout.
 //!
 //! WebSocket subscribers are served by `BroadcastingWsHandler` (T5),
 //! which wires the JSON-envelope subscribe protocol against the hub.
