@@ -688,6 +688,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Relations and soft deletes.** `destroy`, `delete_quietly`,
+  `delete_or_fail` and trait-dispatched `delete` permanently deleted
+  soft-delete rows; they now tombstone them, and `delete_or_fail` on an
+  already trashed row is a 404. `with_count` and the `with_sum` family
+  counted trashed rows and rows hidden by global scopes; they now cover
+  exactly the rows `with` loads. `with([..])` and `with_count([..])` on one
+  relation no longer panic, a count no longer makes `load_missing` skip the
+  rows, and a failed or cancelled nested `load_missing` no longer erases
+  relations already loaded. Relations declared with `lk = "..."` read and
+  write by that column, and an `lk` naming no field is a compile error.
+  Eager many-to-many honours `related_key`, a relation's `pivot_table`
+  override is used when loading pivot context, and eager `HasManyThrough`
+  skips rows reached through a trashed intermediate. Eager loads of a
+  `with_tx(&tx)` or `on(name)` query run on that transaction or connection,
+  `MassPrunable` deletes on the connection its dry run counted, and factory
+  inserts of plain SeaORM rows join the surrounding `DB::transaction`.
+  `with_min` and `with_max` of an integer column read on Postgres. This
+  landed after the `v3.1.0` tag.
 - **Magnetar hashing and sign-up races.** Magnetar password hashing runs on
   Tokio's blocking pool instead of stalling async workers. A magic-link or
   passkey sign-up that loses a race for a new email address answers as the
@@ -1228,6 +1246,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **Route bindings and pivot extras respect what models declare.**
+  `RouteParam<Model>` ignored global scopes on models without
+  `soft_deletes`, so a guessed id of another tenant's row bound to the
+  handler; the binding now applies every global scope, and a hidden row is
+  a 404. `attach_with` wrote pivot extras past the pivot model's casts, so
+  an `AsEncrypted` column was stored as plaintext and an `AsHashed` one
+  unhashed; extras now go through the pivot's casts and mutators, and an
+  extra that does not decode into its field is a validation error. This
+  landed after the `v3.1.0` tag.
 - **RenderCache never stores or reuses a personalized page as shared.**
   Work a handler joined beside an identity-bound island mount
   (`tokio::join!`) had its principal, session and table reads dropped from
