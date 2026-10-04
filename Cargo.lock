@@ -7685,6 +7685,7 @@ dependencies = [
  "getrandom 0.4.3",
  "nix 0.31.3",
  "notify 8.2.0",
+ "proc-macro2",
  "rand 0.10.1",
  "regex",
  "sea-orm",
