@@ -379,7 +379,7 @@ fn jpeg_peak(frame: &JpegFrame, input_len: u64) -> Result<u64, FrameworkError> {
             mul(mul(pixels, 4), u64::from(components)),
             mul(pixels, u64::from(components)),
         ),
-        0xC0 | 0xC1 if frame.first_scan == Some(components) => add(padded, planes),
+        0xC0 | 0xC1 if frame.first_scan == components => add(padded, planes),
         _ => add(add(mul(padded, 4), padded), planes),
     };
     // Samples stored as RGB (components named R, G, B at full resolution)

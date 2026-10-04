@@ -246,58 +246,42 @@ fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((be_u32(bytes, 16)?, be_u32(bytes, 20)?))
 }
 
-/// Walk JPEG marker segments from `pos`, returning the offset and marker of
-/// the first segment `wanted` accepts. The walk ends with `None` at the end
-/// of the image, at a byte that starts no marker, and at a scan nobody asked
-/// for, because entropy-coded data follows a scan header. The loop is
-/// bounded so a file made entirely of well-formed empty segments cannot spin.
-fn jpeg_find_marker(
-    bytes: &[u8],
-    mut pos: usize,
-    wanted: impl Fn(u8) -> bool,
-) -> Option<(usize, u8)> {
-    for _ in 0..1024 {
-        // Segments are 0xFF-prefixed; fill bytes are legal padding.
-        while bytes.get(pos) == Some(&0xFF) && bytes.get(pos + 1) == Some(&0xFF) {
+/// The next JPEG marker at or after `pos`, read the way oxideav-mjpeg's
+/// `MarkerWalker::next_marker` reads it: bytes that are not 0xFF are skipped,
+/// a run of 0xFF fill bytes collapses, and a stuffed 0xFF00 is no marker.
+/// Returns the marker and the position just past it.
+fn jpeg_next_marker(bytes: &[u8], mut pos: usize) -> Option<(u8, usize)> {
+    while pos < bytes.len() {
+        if bytes[pos] != 0xFF {
+            pos += 1;
+            continue;
+        }
+        while bytes.get(pos) == Some(&0xFF) {
             pos += 1;
         }
-        if *bytes.get(pos)? != 0xFF {
-            return None;
-        }
-        let marker = *bytes.get(pos + 1)?;
-        if wanted(marker) {
-            return Some((pos, marker));
-        }
-        match marker {
-            // Standalone markers: no payload length follows.
-            0x01 | 0xD0..=0xD7 => pos += 2,
-            // End of image, or the start of entropy-coded scan data.
-            0xD9 | 0xDA => return None,
-            _ => {
-                let length = usize::from(be_u16(bytes, pos + 2)?);
-                if length < 2 {
-                    return None;
-                }
-                pos = pos.checked_add(2)?.checked_add(length)?;
-            }
+        let marker = *bytes.get(pos)?;
+        pos += 1;
+        if marker != 0x00 {
+            return Some((marker, pos));
         }
     }
     None
 }
 
-/// SOF0..SOF15, minus the three markers that share the range but are not
-/// frame headers: DHT (C4), JPG (C8), DAC (CC).
-fn is_jpeg_frame_header(marker: u8) -> bool {
-    (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
+/// The length-prefixed payload at `pos` and the position after it, read the
+/// way `MarkerWalker::read_segment_payload` reads it.
+fn jpeg_segment(bytes: &[u8], pos: usize) -> Option<(&[u8], usize)> {
+    let length = usize::from(be_u16(bytes, pos)?);
+    if length < 2 {
+        return None;
+    }
+    let end = pos.checked_add(length)?;
+    Some((bytes.get(pos + 2..end)?, end))
 }
 
-/// Walk the marker segments to the first Start-Of-Frame, which is where JPEG
-/// declares its size.
+/// Read a JPEG's dimensions from the frame header its decoder uses.
 fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    let (pos, _) = jpeg_find_marker(bytes, 2, is_jpeg_frame_header)?;
-    let height = be_u16(bytes, pos + 5)?;
-    let width = be_u16(bytes, pos + 7)?;
-    Some((u32::from(width), u32::from(height)))
+    jpeg_frame(bytes).map(|frame| (frame.width, frame.height))
 }
 
 /// What a JPEG's frame header and first scan header declare: everything that
@@ -317,40 +301,97 @@ pub(crate) struct JpegFrame {
     /// Identifiers of the first four components. `R`, `G`, `B` mark samples
     /// stored as RGB rather than YCbCr.
     pub(crate) ids: [u8; 4],
-    /// Components in the first scan, when the walk reached one. A first scan
-    /// with every component is what lets a sequential decode skip the
-    /// coefficient buffers.
-    pub(crate) first_scan: Option<u8>,
+    /// Components in the first scan. A first scan with every component is
+    /// what lets a sequential decode skip the coefficient buffers.
+    pub(crate) first_scan: u8,
 }
 
-/// Read a JPEG's first frame header and the component count of its first
-/// scan header. No decode: the frame header sits before any entropy-coded
-/// data, and so does the first scan header.
+/// Read the frame header and first scan header oxideav-mjpeg will decode.
+///
+/// The walk is the decoder's own, marker for marker: the same marker search,
+/// the same markers taken as standalone (SOI, RSTn), the same segments read
+/// by their length, and the same segments skipped when their length does not
+/// read. A walk that differs would measure a frame the decoder never decodes,
+/// so where the decoder errors (a second frame header, a hierarchical one, a
+/// scan before the frame, the image ending first) this refuses too. The
+/// frame header is validated as the decoder validates it.
 pub(crate) fn jpeg_frame(bytes: &[u8]) -> Option<JpegFrame> {
-    let (pos, marker) = jpeg_find_marker(bytes, 2, is_jpeg_frame_header)?;
-    let length = usize::from(be_u16(bytes, pos + 2)?);
-    let components = *bytes.get(pos + 9)?;
+    let mut frame: Option<JpegFrame> = None;
+    let mut pos = 2;
+    loop {
+        let (marker, after) = jpeg_next_marker(bytes, pos)?;
+        pos = after;
+        match marker {
+            // End of image before a scan, or a hierarchical frame header.
+            0xD9 | 0xC5..=0xC7 | 0xCD..=0xCF => return None,
+            // SOI and RSTn carry no payload.
+            0xD8 | 0xD0..=0xD7 => {}
+            // The frame headers the decoder takes: SOF0-3, SOF9-11.
+            0xC0..=0xC3 | 0xC9..=0xCB => {
+                if frame.is_some() {
+                    return None;
+                }
+                let (payload, next) = jpeg_segment(bytes, pos)?;
+                frame = Some(jpeg_frame_header(marker, payload)?);
+                pos = next;
+            }
+            // The first scan header: the decoder decodes from here on.
+            0xDA => {
+                let mut frame = frame?;
+                let (payload, _) = jpeg_segment(bytes, pos)?;
+                let components = *payload.first()?;
+                if payload.len() < 1 + usize::from(components) * 2 + 3 {
+                    return None;
+                }
+                frame.first_scan = components;
+                return Some(frame);
+            }
+            // Segments the decoder reads, and fails on when they do not read:
+            // DHT, DAC, DQT, DNL, DRI, APPn, COM.
+            0xC4 | 0xCC | 0xDB..=0xDD | 0xE0..=0xEF | 0xFE => {
+                let (_, next) = jpeg_segment(bytes, pos)?;
+                pos = next;
+            }
+            // Any other marker: the decoder skips its segment when the
+            // length reads, and otherwise carries on from just past it.
+            _ => {
+                if let Some((_, next)) = jpeg_segment(bytes, pos) {
+                    pos = next;
+                }
+            }
+        }
+    }
+}
+
+/// Parse and validate a frame header payload as oxideav-mjpeg's `parse_sof`
+/// and `validate_sof` do: one to four components, sampling factors 1 to 4,
+/// quantization tables 0 to 3.
+fn jpeg_frame_header(marker: u8, payload: &[u8]) -> Option<JpegFrame> {
+    let components = *payload.get(5)?;
+    if !(1..=4).contains(&components) || payload.len() < 6 + 3 * usize::from(components) {
+        return None;
+    }
     let mut sampling = [(0u8, 0u8); 4];
     let mut ids = [0u8; 4];
-    for index in 0..usize::from(components).min(4) {
+    for index in 0..usize::from(components) {
         // Each component: identifier, sampling factors, quantization table.
-        let at = pos + 10 + 3 * index;
-        ids[index] = *bytes.get(at)?;
-        let packed = *bytes.get(at + 1)?;
-        sampling[index] = (packed >> 4, packed & 0x0F);
+        let at = 6 + 3 * index;
+        let factors = (payload[at + 1] >> 4, payload[at + 1] & 0x0F);
+        if !(1..=4).contains(&factors.0) || !(1..=4).contains(&factors.1) || payload[at + 2] >= 4 {
+            return None;
+        }
+        ids[index] = payload[at];
+        sampling[index] = factors;
     }
-    let after = pos.checked_add(2)?.checked_add(length)?;
-    let first_scan = jpeg_find_marker(bytes, after, |marker| marker == 0xDA)
-        .and_then(|(scan, _)| bytes.get(scan + 4).copied());
     Some(JpegFrame {
         marker,
-        precision: *bytes.get(pos + 4)?,
-        width: u32::from(be_u16(bytes, pos + 7)?),
-        height: u32::from(be_u16(bytes, pos + 5)?),
+        precision: payload[0],
+        width: u32::from(be_u16(payload, 3)?),
+        height: u32::from(be_u16(payload, 1)?),
         components,
         sampling,
         ids,
-        first_scan,
+        first_scan: 0,
     })
 }
 
@@ -1030,16 +1071,31 @@ mod tests {
         }
     }
 
+    /// A one-component frame header for `width x height` behind `marker`.
+    fn grey_frame_header(marker: u8, width: u16, height: u16) -> Vec<u8> {
+        let mut segment = vec![0xFF, marker, 0x00, 0x0B, 8];
+        segment.extend_from_slice(&height.to_be_bytes());
+        segment.extend_from_slice(&width.to_be_bytes());
+        segment.extend_from_slice(&[1, 1, 0x11, 0]);
+        segment
+    }
+
+    /// A scan header naming `components` components.
+    fn scan_header(components: u8) -> Vec<u8> {
+        let mut segment = vec![0xFF, 0xDA, 0x00, 6 + 2 * components, components];
+        for id in 1..=components {
+            segment.extend_from_slice(&[id, 0x00]);
+        }
+        segment.extend_from_slice(&[0x00, 0x3F, 0x00]);
+        segment
+    }
+
     #[test]
     fn jpeg_walks_segments_to_the_first_start_of_frame() {
         // SOI, an APP0 segment of length 4, then SOF0 declaring 2x3.
-        let jpeg = [
-            0xFF, 0xD8, // SOI
-            0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00, // APP0, length 4
-            0xFF, 0xC0, 0x00, 0x11, 0x08, // SOF0, length 17, precision 8
-            0x00, 0x03, // height 3
-            0x00, 0x02, // width 2
-        ];
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00];
+        jpeg.extend_from_slice(&grey_frame_header(0xC0, 2, 3));
+        jpeg.extend_from_slice(&scan_header(1));
         assert_eq!(
             header_dimensions(InputFormat::Jpeg, &jpeg).expect("dims"),
             (2, 3)
@@ -1049,13 +1105,9 @@ mod tests {
     #[test]
     fn jpeg_does_not_mistake_a_huffman_table_for_a_frame_header() {
         // DHT (0xC4) sits inside the 0xC0..=0xCF range but is not an SOF.
-        let jpeg = [
-            0xFF, 0xD8, // SOI
-            0xFF, 0xC4, 0x00, 0x04, 0x00, 0x00, // DHT, length 4
-            0xFF, 0xC2, 0x00, 0x11, 0x08, // SOF2 (progressive), length 17
-            0x00, 0x05, // height 5
-            0x00, 0x09, // width 9
-        ];
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xC4, 0x00, 0x04, 0x00, 0x00];
+        jpeg.extend_from_slice(&grey_frame_header(0xC2, 9, 5));
+        jpeg.extend_from_slice(&scan_header(1));
         assert_eq!(
             header_dimensions(InputFormat::Jpeg, &jpeg).expect("dims"),
             (9, 5)
@@ -1078,7 +1130,7 @@ mod tests {
         jpeg.extend_from_slice(&640u16.to_be_bytes());
         jpeg.extend_from_slice(&[3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
         jpeg.extend_from_slice(&[0xFF, 0xC4, 0x00, 0x04, 0x00, 0x00]);
-        jpeg.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, scan_components]);
+        jpeg.extend_from_slice(&scan_header(scan_components));
         jpeg
     }
 
@@ -1091,25 +1143,63 @@ mod tests {
         assert_eq!(frame.components, 3);
         assert_eq!(frame.ids[..3], [1, 2, 3]);
         assert_eq!(frame.sampling[..3], [(2, 2), (1, 1), (1, 1)]);
-        assert_eq!(frame.first_scan, Some(3));
+        assert_eq!(frame.first_scan, 3);
 
         assert_eq!(
             jpeg_frame(&progressive_jpeg(1)).map(|frame| frame.first_scan),
-            Some(Some(1))
+            Some(1)
         );
 
-        // A frame header with no scan header after it still reads.
+        // No scan header: the decoder has nothing to decode and errors.
         let mut no_scan = progressive_jpeg(3);
-        no_scan.truncate(no_scan.len() - 5);
-        assert_eq!(
-            jpeg_frame(&no_scan).map(|frame| frame.first_scan),
-            Some(None)
-        );
+        no_scan.truncate(no_scan.len() - 14);
+        assert_eq!(jpeg_frame(&no_scan), None);
 
-        // A frame header cut off inside its component list does not.
+        // A frame header cut off inside its component list.
         let mut cut = progressive_jpeg(3);
         cut.truncate(8 + 15);
         assert_eq!(jpeg_frame(&cut), None);
+    }
+
+    #[test]
+    fn a_jpeg_walk_follows_the_decoders_marker_rules() {
+        let with = |prefix: &[u8]| {
+            let mut jpeg = vec![0xFF, 0xD8];
+            jpeg.extend_from_slice(prefix);
+            jpeg.extend_from_slice(&grey_frame_header(0xC0, 7, 5));
+            jpeg.extend_from_slice(&scan_header(1));
+            jpeg
+        };
+        let size = |jpeg: &[u8]| jpeg_frame(jpeg).map(|frame| (frame.width, frame.height));
+
+        // Bytes that are not 0xFF, a fill run, and a stuffed 0xFF00 are all
+        // stepped over on the way to the next marker.
+        assert_eq!(size(&with(&[0x12, 0x34, 0xFF, 0xFF, 0x00])), Some((7, 5)));
+        // RSTn and a second SOI carry no payload.
+        assert_eq!(size(&with(&[0xFF, 0xD3, 0xFF, 0xD8])), Some((7, 5)));
+        // TEM (0xFF01) has no payload in the standard, but the decoder reads
+        // a length after it: a frame header inside that length is skipped.
+        let mut tem = vec![0xFF, 0x01, 0x00, 0x0F];
+        tem.extend_from_slice(&grey_frame_header(0xC0, 900, 900));
+        assert_eq!(size(&with(&tem)), Some((7, 5)));
+        // A marker the decoder skips, whose length does not read, is passed
+        // over in place.
+        assert_eq!(size(&with(&[0xFF, 0x02, 0x00, 0x01])), Some((7, 5)));
+
+        // Where the decoder errors, the walk refuses: a second frame header,
+        // a hierarchical one, a sampling factor of zero, the image ending.
+        let mut two = with(&[]);
+        let scan_at = two.len() - scan_header(1).len();
+        two.splice(scan_at..scan_at, grey_frame_header(0xC2, 9, 9));
+        assert_eq!(jpeg_frame(&two), None);
+        let mut hierarchical = vec![0xFF, 0xD8];
+        hierarchical.extend_from_slice(&grey_frame_header(0xC5, 7, 5));
+        hierarchical.extend_from_slice(&scan_header(1));
+        assert_eq!(jpeg_frame(&hierarchical), None);
+        let mut zero = with(&[]);
+        zero[2 + 11] = 0x01;
+        assert_eq!(jpeg_frame(&zero), None);
+        assert_eq!(jpeg_frame(&with(&[0xFF, 0xD9])), None);
     }
 
     #[test]

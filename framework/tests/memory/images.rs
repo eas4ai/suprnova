@@ -250,7 +250,9 @@ fn assert_the_budget_holds(name: &str, image: &[u8], width: u32, height: u32) {
 
     let (result, peak) = decode_under(&driver, image, estimate);
     assert_eq!(
-        result.unwrap_or_else(|e| panic!("{name}: refused at its own estimate: {e}")),
+        result.unwrap_or_else(|e| panic!(
+            "{name}: refused at its own {estimate}-byte estimate after holding {peak} bytes: {e}"
+        )),
         (width, height)
     );
     assert!(
@@ -465,4 +467,38 @@ async fn mem_audit_odd_sized_jpegs_decode_within_the_budget() {
     ] {
         assert_the_budget_holds(name, jpeg, 333, 217);
     }
+}
+
+/// A JPEG whose first frame header, as a naive marker walk reads it, is an
+/// 8x8 image, while the decoder walks past it to a 256x256 one. A TEM marker
+/// (0xFF01) has no payload in the standard, but the decoder reads a length
+/// after it, here the bytes of the small frame's own marker (0xFFC0, 65472
+/// bytes), and skips over the small frame to the large JPEG behind it.
+fn jpeg_hiding_its_frame(large: &[u8]) -> Vec<u8> {
+    let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0x01];
+    let length_at = jpeg.len();
+    jpeg.extend_from_slice(&[
+        0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x08, 0x00, 0x08, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11,
+        0x00, 0x03, 0x11, 0x00,
+    ]);
+    jpeg.resize(length_at + 0xFFC0, 0);
+    jpeg.extend_from_slice(&large[2..]);
+    jpeg
+}
+
+/// The estimate measures the frame the decoder decodes, not the first one a
+/// different marker walk happens to reach.
+#[tokio::test]
+async fn mem_audit_a_jpeg_is_measured_at_the_frame_the_decoder_reads() {
+    let _lock = exclusive().await;
+    let large = convert(
+        &encode_png(256, 256, PngPixelFormat::Rgba, 4, false),
+        OutputFormat::Jpeg,
+    );
+    assert_the_budget_holds(
+        "JPEG with a frame behind a TEM marker",
+        &jpeg_hiding_its_frame(&large),
+        256,
+        256,
+    );
 }
