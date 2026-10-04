@@ -10,6 +10,10 @@ mod http_wire;
 #[cfg(feature = "testing")]
 #[path = "../support/magnetar_auth.rs"]
 mod magnetar_auth;
+#[path = "../support/own_process.rs"]
+mod own_process;
+#[path = "../support/own_process_async.rs"]
+mod own_process_async;
 
 pub mod brute_force;
 pub mod email_verified_middleware;

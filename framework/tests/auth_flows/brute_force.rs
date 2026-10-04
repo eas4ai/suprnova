@@ -18,9 +18,20 @@ static SETUP: Lazy<()> = Lazy::new(|| {
     RT.block_on(magnetar_auth::install());
 });
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn record_and_lockout_lifecycle() {
+    crate::own_process::run_alone("brute_force::record_and_lockout_lifecycle_child");
+}
+
 #[test]
 #[serial]
-fn record_and_lockout_lifecycle() {
+fn record_and_lockout_lifecycle_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -92,9 +103,20 @@ fn record_and_lockout_lifecycle() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn reset_attempts_clears_counter() {
+    crate::own_process::run_alone("brute_force::reset_attempts_clears_counter_child");
+}
+
 #[test]
 #[serial]
-fn reset_attempts_clears_counter() {
+fn reset_attempts_clears_counter_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -143,9 +165,22 @@ fn reset_attempts_clears_counter() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn get_lockout_status_for_unknown_email_returns_unlocked() {
+    crate::own_process::run_alone(
+        "brute_force::get_lockout_status_for_unknown_email_returns_unlocked_child",
+    );
+}
+
 #[test]
 #[serial]
-fn get_lockout_status_for_unknown_email_returns_unlocked() {
+fn get_lockout_status_for_unknown_email_returns_unlocked_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -171,9 +206,22 @@ fn get_lockout_status_for_unknown_email_returns_unlocked() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn unlock_account_on_unknown_email_returns_false() {
+    crate::own_process::run_alone(
+        "brute_force::unlock_account_on_unknown_email_returns_false_child",
+    );
+}
+
 #[test]
 #[serial]
-fn unlock_account_on_unknown_email_returns_false() {
+fn unlock_account_on_unknown_email_returns_false_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -298,9 +346,22 @@ fn header_throttle() -> LoginThrottleMiddleware {
     })
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn middleware_passes_through_when_email_missing() {
+    crate::own_process::run_alone(
+        "brute_force::middleware_passes_through_when_email_missing_child",
+    );
+}
+
 #[test]
 #[serial]
-fn middleware_passes_through_when_email_missing() {
+fn middleware_passes_through_when_email_missing_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -318,9 +379,22 @@ fn middleware_passes_through_when_email_missing() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn middleware_passes_through_when_account_not_locked() {
+    crate::own_process::run_alone(
+        "brute_force::middleware_passes_through_when_account_not_locked_child",
+    );
+}
+
 #[test]
 #[serial]
-fn middleware_passes_through_when_account_not_locked() {
+fn middleware_passes_through_when_account_not_locked_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -346,9 +420,20 @@ fn middleware_passes_through_when_account_not_locked() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn middleware_429s_when_account_locked() {
+    crate::own_process::run_alone("brute_force::middleware_429s_when_account_locked_child");
+}
+
 #[test]
 #[serial]
-fn middleware_429s_when_account_locked() {
+fn middleware_429s_when_account_locked_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -396,9 +481,20 @@ fn middleware_429s_when_account_locked() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn account_locked_fires_once_on_transition() {
+    crate::own_process::run_alone("brute_force::account_locked_fires_once_on_transition_child");
+}
+
 #[test]
 #[serial]
-fn account_locked_fires_once_on_transition() {
+fn account_locked_fires_once_on_transition_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -437,9 +533,23 @@ fn account_locked_fires_once_on_transition() {
 /// email. A throttle that counted or checked another spelling would never
 /// see the lock the sign-in path set, so every facade call normalizes the
 /// key the same way.
+///
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn every_spelling_of_an_address_shares_one_lockout() {
+    crate::own_process::run_alone(
+        "brute_force::every_spelling_of_an_address_shares_one_lockout_child",
+    );
+}
+
 #[test]
 #[serial]
-fn every_spelling_of_an_address_shares_one_lockout() {
+fn every_spelling_of_an_address_shares_one_lockout_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -477,9 +587,21 @@ fn every_spelling_of_an_address_shares_one_lockout() {
 /// A store failure while clearing an accepted attempt answers the
 /// documented 503, not a 500: the proof was right, but its outcome is not
 /// recorded.
+///
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn a_failed_attempt_reset_answers_503() {
+    crate::own_process::run_alone("brute_force::a_failed_attempt_reset_answers_503_child");
+}
+
 #[test]
 #[serial]
-fn a_failed_attempt_reset_answers_503() {
+fn a_failed_attempt_reset_answers_503_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
