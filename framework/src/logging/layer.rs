@@ -203,14 +203,21 @@ where
         }
         let mut fields = Fields::default();
         event.record(&mut fields);
-        // The spans' fields, outermost first, then the event's own.
+        // The spans' fields, outermost first, then the event's own. A name
+        // appears once: an inner span's value replaces an outer span's, and
+        // the event's own replaces both, so the message's placeholders and
+        // the context written beside it read the same value.
         if let Some(scope) = ctx.event_scope(event) {
-            let mut inherited = Vec::new();
+            let mut inherited: Vec<(String, String)> = Vec::new();
             for span in scope.from_root() {
                 if let Some(kept) = span.extensions().get::<SpanFields>() {
                     for (key, value) in &kept.0 {
-                        if !fields.context.iter().any(|(name, _)| name == key) {
-                            inherited.push((key.clone(), value.clone()));
+                        if fields.context.iter().any(|(name, _)| name == key) {
+                            continue;
+                        }
+                        match inherited.iter_mut().find(|(name, _)| name == key) {
+                            Some(slot) => slot.1.clone_from(value),
+                            None => inherited.push((key.clone(), value.clone())),
                         }
                     }
                 }

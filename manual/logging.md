@@ -72,7 +72,9 @@ once the bootstrap has run, with an error that names it; so does a name in
 whichever channel is the default. Dates are those of the framework clock,
 in UTC. File lines are text, one line a record, or JSON objects when
 `LOG_FORMAT=json`, and carry the fields of the spans the event is in, the
-request's `request_id` among them.
+request's `request_id` among them. A field an inner span shares a name with
+replaces the outer span's, and an event's own field replaces both, in the
+message's placeholders and in the context alike.
 
 Define your own channels in the bootstrap, and reach any channel with
 `Log`:

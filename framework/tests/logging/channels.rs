@@ -1160,3 +1160,39 @@ fn the_default_stack_writes_to_stdout_when_any_stdout_channel_keeps_the_level() 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains(&marker), "{stdout}");
 }
+
+/// DRIVERS-033: an inner span's field overrides an outer span's field of
+/// the same name in the message's placeholders and in the context alike.
+#[test]
+#[serial]
+fn an_inner_span_field_wins_in_the_message_and_in_the_context() {
+    let _env = lock_env();
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    let sink = Arc::new(MemorySink::default());
+    let driver = unique("span-memory");
+    let shared = Arc::clone(&sink);
+    Log::extend(&driver, move |_| Ok(shared.clone() as Arc<dyn LogSink>));
+    let name = unique("span-default");
+    Log::define(&name, LogChannel::driver(&driver));
+    set_env("LOG_CHANNEL", Some(&name));
+
+    let subscriber = build_subscriber(LogConfig::from_env()).unwrap();
+    tracing::subscriber::with_default(subscriber, || {
+        let outer = tracing::info_span!("outer", user_id = 1);
+        let _outer = outer.enter();
+        let inner = tracing::info_span!("inner", user_id = 2);
+        let _inner = inner.enter();
+        tracing::warn!("actor {{user_id}}");
+    });
+
+    let records = sink.records.lock().unwrap();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].message, "actor 2");
+    let user_ids: Vec<&str> = records[0]
+        .context
+        .iter()
+        .filter(|(key, _)| key == "user_id")
+        .map(|(_, value)| value.as_str())
+        .collect();
+    assert_eq!(user_ids, ["2"], "one user_id, the inner span's");
+}
