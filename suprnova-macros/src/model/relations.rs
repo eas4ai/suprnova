@@ -5069,13 +5069,12 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     // a `Some(_)` here; the missing-key path on the
                     // parent loop handles those.
                     //
-                    // The `__sn_agg` column may come back as an integer
-                    // on SQLite when the source column is INTEGER
-                    // (e.g. SUM(views) on INTEGER yields INTEGER, not
-                    // REAL). `try_get::<Option<f64>>` would silently
-                    // fail that coercion and the dispatcher would
-                    // store 0.0 for every parent. Try `f64` first,
-                    // then `i64` widened to f64 as a fallback.
+                    // The database chooses the type of `__sn_agg`: an
+                    // integer on SQLite for SUM of an INTEGER column,
+                    // `numeric` on Postgres and `DECIMAL` on MySQL for
+                    // a sum or average of integers. The framework reads
+                    // whichever arrives; a decoder that read only one of
+                    // them stored 0.0 for every parent.
                     let mut by_fk: HashMap<
                         ::std::string::String,
                         ::core::option::Option<f64>,
@@ -5084,16 +5083,9 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> = r
-                            .try_get::<::core::option::Option<f64>>("", "__sn_agg")
-                            .ok()
-                            .flatten()
-                            .or_else(|| {
-                                r.try_get::<::core::option::Option<i64>>("", "__sn_agg")
-                                    .ok()
-                                    .flatten()
-                                    .map(|n| n as f64)
-                            });
+                        let agg: ::core::option::Option<f64> =
+                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
+                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
                         by_fk.insert(key, agg);
                     }
 
@@ -5285,16 +5277,9 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> = r
-                            .try_get::<::core::option::Option<f64>>("", "__sn_agg")
-                            .ok()
-                            .flatten()
-                            .or_else(|| {
-                                r.try_get::<::core::option::Option<i64>>("", "__sn_agg")
-                                    .ok()
-                                    .flatten()
-                                    .map(|n| n as f64)
-                            });
+                        let agg: ::core::option::Option<f64> =
+                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
+                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
                         by_fk.insert(key, agg);
                     }
 
@@ -5485,16 +5470,9 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> = r
-                            .try_get::<::core::option::Option<f64>>("", "__sn_agg")
-                            .ok()
-                            .flatten()
-                            .or_else(|| {
-                                r.try_get::<::core::option::Option<i64>>("", "__sn_agg")
-                                    .ok()
-                                    .flatten()
-                                    .map(|n| n as f64)
-                            });
+                        let agg: ::core::option::Option<f64> =
+                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
+                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
                         by_fk.insert(key, agg);
                     }
 
@@ -5672,16 +5650,9 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> = r
-                            .try_get::<::core::option::Option<f64>>("", "__sn_agg")
-                            .ok()
-                            .flatten()
-                            .or_else(|| {
-                                r.try_get::<::core::option::Option<i64>>("", "__sn_agg")
-                                    .ok()
-                                    .flatten()
-                                    .map(|n| n as f64)
-                            });
+                        let agg: ::core::option::Option<f64> =
+                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
+                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
                         by_fk.insert(key, agg);
                     }
 
@@ -5880,16 +5851,9 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> = r
-                            .try_get::<::core::option::Option<f64>>("", "__sn_agg")
-                            .ok()
-                            .flatten()
-                            .or_else(|| {
-                                r.try_get::<::core::option::Option<i64>>("", "__sn_agg")
-                                    .ok()
-                                    .flatten()
-                                    .map(|n| n as f64)
-                            });
+                        let agg: ::core::option::Option<f64> =
+                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
+                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
                         by_fk.insert(key, agg);
                     }
 
@@ -6091,16 +6055,9 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> = r
-                            .try_get::<::core::option::Option<f64>>("", "__sn_agg")
-                            .ok()
-                            .flatten()
-                            .or_else(|| {
-                                r.try_get::<::core::option::Option<i64>>("", "__sn_agg")
-                                    .ok()
-                                    .flatten()
-                                    .map(|n| n as f64)
-                            });
+                        let agg: ::core::option::Option<f64> =
+                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
+                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
                         by_fk.insert(key, agg);
                     }
 

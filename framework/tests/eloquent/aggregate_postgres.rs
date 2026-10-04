@@ -58,7 +58,7 @@ async fn postgres_aggregates_decode_by_a_stable_alias() {
         2
     );
     assert_eq!(AggregateProbe::sum::<f64>("amount").await.unwrap(), 60.0);
-    assert_eq!(AggregateProbe::avg::<f64>("amount").await.unwrap(), 20.0);
+    assert_eq!(AggregateProbe::avg("amount").await.unwrap(), 20.0);
     assert_eq!(
         AggregateProbe::min::<f64>("amount").await.unwrap(),
         Some(10.0)
@@ -70,7 +70,7 @@ async fn postgres_aggregates_decode_by_a_stable_alias() {
 
     let empty = AggregateProbe::query().filter("category", "missing");
     assert_eq!(empty.clone().sum::<f64>("amount").await.unwrap(), 0.0);
-    assert_eq!(empty.clone().avg::<f64>("amount").await.unwrap(), 0.0);
+    assert_eq!(empty.clone().avg("amount").await.unwrap(), 0.0);
     assert_eq!(empty.clone().min::<f64>("amount").await.unwrap(), None);
     assert_eq!(empty.max::<f64>("amount").await.unwrap(), None);
 

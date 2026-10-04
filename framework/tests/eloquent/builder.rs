@@ -300,7 +300,7 @@ async fn aggregates_count_sum_avg_min_max() {
     }
     assert_eq!(T5User::count().await.unwrap(), 3);
     assert!((T5User::sum::<f64>("balance").await.unwrap() - 60.0).abs() < 1e-6);
-    assert!((T5User::avg::<f64>("balance").await.unwrap() - 20.0).abs() < 1e-6);
+    assert!((T5User::avg("balance").await.unwrap() - 20.0).abs() < 1e-6);
     assert_eq!(T5User::min::<f64>("balance").await.unwrap(), Some(10.0));
     assert_eq!(T5User::max::<f64>("balance").await.unwrap(), Some(30.0));
 }

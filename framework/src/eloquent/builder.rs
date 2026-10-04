@@ -59,7 +59,7 @@ use chrono::{NaiveDate, NaiveTime};
 use sea_orm::{DbBackend, FromQueryResult, Statement, Value as SeaValue};
 
 use crate::database::ColumnValue;
-use crate::database::column_value::unless_null;
+use crate::database::column_value::{read_aggregate, unless_null};
 use serde_json::Value;
 
 use crate::database::clauses::{
@@ -5724,8 +5724,13 @@ where
     // type with only one of the two would hit a compile error against
     // a bound that doesn't match what the body actually uses.
 
-    /// `SELECT COALESCE(SUM(col), 0)`. Returns `T::default()` on empty
-    /// result sets.
+    /// `SELECT COALESCE(SUM(col), 0)`. Returns zero on empty result sets.
+    ///
+    /// Postgres answers `numeric` for the sum of a `bigint` and MySQL
+    /// `DECIMAL` for any sum of integers, so the sum is read as whichever
+    /// type arrived. An integer `T` takes it exactly: a sum with a
+    /// fraction, or outside `T`'s range, is an error, never truncated.
+    /// `f64` takes the nearest value.
     pub async fn sum<T: ColumnValue + Default>(
         self,
         col: impl IntoColumn,
@@ -5736,15 +5741,17 @@ where
             .await
     }
 
-    /// `SELECT COALESCE(AVG(col), 0)`. Returns `T::default()` on empty
-    /// result sets.
-    pub async fn avg<T: ColumnValue + Default>(
-        self,
-        col: impl IntoColumn,
-    ) -> Result<T, FrameworkError> {
+    /// `SELECT COALESCE(AVG(col), 0)`, as an `f64`: `0.0` on an empty
+    /// result set.
+    ///
+    /// The average is an `f64` on every database, whatever the column:
+    /// Postgres answers `numeric` and MySQL `DECIMAL` for the average of
+    /// an integer column, and SQLite a real, so the result is read as
+    /// whichever arrived and converted to the nearest `f64`.
+    pub async fn avg(self, col: impl IntoColumn) -> Result<f64, FrameworkError> {
         let col_name = col.col_name();
         crate::database::validate_identifier(&col_name)?;
-        self.aggregate_value::<T>(&format!("COALESCE(AVG({col_name}), 0)"))
+        self.aggregate_value::<f64>(&format!("COALESCE(AVG({col_name}), 0)"))
             .await
     }
 
@@ -5935,11 +5942,8 @@ where
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?
             .ok_or_else(|| FrameworkError::database("aggregate query returned no row"))?;
-        T::from_column(&row, AGGREGATE_RESULT_ALIAS).map_err(|e| {
-            FrameworkError::database(format!(
-                "aggregate result decode failed for {expr}: {}",
-                sea_orm::DbErr::from(e)
-            ))
+        read_aggregate::<T>(&row, AGGREGATE_RESULT_ALIAS).map_err(|e| {
+            FrameworkError::database(format!("aggregate result decode failed for {expr}: {e}"))
         })
     }
 
