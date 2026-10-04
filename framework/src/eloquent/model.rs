@@ -71,6 +71,9 @@ pub(crate) fn key_beyond_signed(
         .any(|value| crate::eloquent::casts::unsigned::beyond_signed(backend, value))
 }
 
+/// The savepoint `create_or_first` takes inside a Postgres transaction.
+const CREATE_OR_FIRST_SAVEPOINT: &str = "suprnova_create_or_first";
+
 /// Refuse a write that needs the model's row when the model has none: one
 /// built in the process - a replica, a new model from `first_or_new` or
 /// `find_or_new`, a `Default` - that was never read or saved and whose key
@@ -2417,11 +2420,25 @@ where
     /// "conflict + lookup hits nothing" combination is almost
     /// certainly a serialization / connection failure rather than
     /// a real uniqueness conflict).
+    ///
+    /// Inside a Postgres transaction the insert runs under a savepoint,
+    /// as Laravel's `createOrFirst` runs it: there a failed statement
+    /// aborts the whole transaction, so without one the lookup could not
+    /// run and the transaction could not go on. SQLite and MySQL undo a
+    /// failed statement alone and need none.
     async fn create_or_first(lookup: Attrs, extras: Attrs) -> Result<Self, FrameworkError> {
         let attrs = lookup.clone().merge(extras);
+        let savepoint = crate::database::Transaction::current()
+            .filter(|tx| tx.backend() == sea_orm::DbBackend::Postgres);
+        if let Some(tx) = &savepoint {
+            tx.savepoint(CREATE_OR_FIRST_SAVEPOINT).await?;
+        }
         match Self::create(attrs).await {
             Ok(row) => Ok(row),
             Err(err @ FrameworkError::Database(_)) => {
+                if let Some(tx) = &savepoint {
+                    tx.rollback_to(CREATE_OR_FIRST_SAVEPOINT).await?;
+                }
                 match Self::query().filter_attrs(&lookup).first().await? {
                     Some(found) => Ok(found),
                     None => Err(err),
