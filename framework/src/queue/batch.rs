@@ -1202,11 +1202,30 @@ pub fn current_repository() -> Option<Arc<dyn BatchRepository>> {
     REPO.read().ok().and_then(|g| g.clone())
 }
 
-pub(crate) fn ensure_default_repository() {
-    let installed = REPO.read().ok().and_then(|g| g.clone()).is_some();
-    if !installed {
-        install_repository(Arc::new(MemoryBatchRepository::new()));
+/// The installed repository, installing the in-memory default first when
+/// there is none.
+pub(crate) fn ensure_default_repository() -> Result<Arc<dyn BatchRepository>, FrameworkError> {
+    ensure_default_in(&REPO, || Arc::new(MemoryBatchRepository::new()))
+}
+
+/// Return the repository in `slot`, installing `make()` when it holds none.
+///
+/// The check and the install happen under one write lock. Two first
+/// dispatches that each saw an empty slot and installed would otherwise
+/// both win, and the second install would replace the repository the first
+/// had already stored its batch in, so that batch's jobs could no longer
+/// find it and its callbacks would never fire.
+fn ensure_default_in(
+    slot: &RwLock<Option<Arc<dyn BatchRepository>>>,
+    make: impl FnOnce() -> Arc<dyn BatchRepository>,
+) -> Result<Arc<dyn BatchRepository>, FrameworkError> {
+    if let Some(repo) = slot.read().ok().and_then(|g| g.clone()) {
+        return Ok(repo);
     }
+    let mut g = slot
+        .write()
+        .map_err(|_| FrameworkError::internal("batch repository registry lock poisoned"))?;
+    Ok(Arc::clone(g.get_or_insert_with(make)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1431,9 +1450,7 @@ impl PendingBatch {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
-        ensure_default_repository();
-        let repo = current_repository()
-            .ok_or_else(|| FrameworkError::internal("batch repository not initialized"))?;
+        let repo = ensure_default_repository()?;
 
         let id = Uuid::new_v4().to_string();
         let total = self.envelopes.len() as u64;
@@ -1725,6 +1742,32 @@ mod tests {
             third.pending_jobs, 0,
             "three distinct jobs settle the batch - the idempotency guard \
              must key on the job id, not suppress every repeat call"
+        );
+    }
+
+    /// DRIVERS-056: two first dispatches could both find no repository and
+    /// both install one, the second replacing the first and every batch the
+    /// first had stored in it. The closure stands in for the other dispatch,
+    /// completing its install between this one's check and its own.
+    #[test]
+    fn a_concurrent_first_install_is_never_replaced() {
+        let slot: RwLock<Option<Arc<dyn BatchRepository>>> = RwLock::new(None);
+        let concurrent: Arc<dyn BatchRepository> = Arc::new(MemoryBatchRepository::new());
+        let ours: Arc<dyn BatchRepository> = Arc::new(MemoryBatchRepository::new());
+        let mut raced = false;
+        let _installed = ensure_default_in(&slot, || {
+            if let Ok(mut other) = slot.try_write() {
+                *other = Some(Arc::clone(&concurrent));
+                raced = true;
+            }
+            Arc::clone(&ours)
+        });
+        let installed = slot.read().unwrap().clone().expect("installed");
+        let survivor = if raced { &concurrent } else { &ours };
+        assert!(
+            Arc::ptr_eq(&installed, survivor),
+            "a repository another dispatch had installed, and stored its batch \
+             in, was replaced"
         );
     }
 }
