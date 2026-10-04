@@ -738,6 +738,27 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Unsigned keys, relation min and max, and raw bindings on every
+  engine.** `with_min` and `with_max` read 32- and 16-bit integer columns
+  on Postgres, and dates, text and times on every database, without an
+  error; `_min_of` and `_max_of` return `Some(None)` for a value that is not
+  a number, and the new `<rel>_min_as::<T>()` and `<rel>_max_as::<T>()`
+  read the value itself. `DB::table`, raw fragments and joined-table
+  columns compare a `u64` above `i64::MAX` as the database does for the
+  stored data, including a REAL held in an INTEGER column on SQLite, and
+  `DB::table` writes store such a value exactly in numeric and text
+  columns while integer columns, and NUMERIC columns on SQLite, refuse it.
+  `attach`, `attach_with` (extras included), `detach` and `sync` bind pivot
+  ids by their column's type: on Postgres and SQLite a `u64` above
+  `i64::MAX` is refused, naming the column, before anything is sent; on
+  MySQL `sync` no longer duplicates unsigned pivot ids, and
+  `BelongsToMany` and `MorphToMany` `get()` load rows whose pivot column is
+  unsigned, where they returned none. On Postgres, a raw fragment sent
+  first with an integer and later with a value above `i64::MAX` no longer
+  fails with "incorrect binary data format". Model `update_all` and
+  `upsert` of such a value to a field that is neither an integer nor text
+  follow the column, as `DB::table` writes do. This landed after the
+  `v3.1.0` tag (#137).
 - **Durations too long for a date are errors, not panics.** A workflow
   lease or retry backoff too long for a date is refused at boot:
   `WORKFLOW_LOCK_TIMEOUT_SECS` above 253402300799, or
