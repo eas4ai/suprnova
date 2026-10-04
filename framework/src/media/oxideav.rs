@@ -46,10 +46,9 @@
 //! - **PNG** goes through `oxideav_png::decode_png_to_rgba`, the crate's own
 //!   entry point that resolves every colour type and bit depth (palette via
 //!   `PLTE`/`tRNS`, 16-bit, grey+alpha) to RGBA. No inference at all.
-//! - **GIF** goes through `oxideav_gif::decode_first_frame` and `compose`,
-//!   which produce the first frame as RGBA. The registry's GIF decoder would
-//!   compose and keep every frame of an animation, and the pipeline uses
-//!   only the first.
+//! - **GIF** is decoded by the framework itself (see the `gif` module): the
+//!   first frame only, written straight onto the screen as RGBA, stopping
+//!   the moment the frame is complete.
 //! - **WebP** and **BMP** go through `decode_webp_image` and `decode_bmp`,
 //!   which return one packed RGBA buffer; `Canvas::packed` checks its length.
 //! - **JPEG** has a small, capability-bounded output set, so the remaining
@@ -76,6 +75,7 @@ use super::ImageConfig;
 use super::driver::{ImageDriver, ImagePipeline, OutputFormat, Transformation};
 use super::sniff::{self, InputFormat};
 
+mod gif;
 mod peak;
 
 use peak::{Layout, PngLayout};
@@ -198,7 +198,9 @@ impl Canvas {
 /// The pure-Rust image driver: OxideAV codecs, OxideAV filters, no native
 /// libraries and nothing to install.
 ///
-/// Holds one `RuntimeContext` with the five still-image codecs registered.
+/// Holds one `RuntimeContext` with the PNG, JPEG, WebP and BMP codecs
+/// registered; GIF is read by the framework and written by
+/// `oxideav_gif::encode_rgba8`, outside the registry.
 /// Building it is cheap but not free, and it is immutable once built, so the
 /// driver is constructed once and shared.
 pub struct OxideAvImageDriver {
@@ -206,7 +208,7 @@ pub struct OxideAvImageDriver {
 }
 
 impl OxideAvImageDriver {
-    /// Register the five supported codecs into a fresh runtime context.
+    /// Register the supported registry codecs into a fresh runtime context.
     ///
     /// Note `oxideav_bmp::register` takes the two sub-registries separately
     /// rather than the `RuntimeContext` its siblings take - an upstream
@@ -216,7 +218,6 @@ impl OxideAvImageDriver {
         oxideav_png::register(&mut context);
         oxideav_mjpeg::register(&mut context);
         oxideav_webp::register(&mut context);
-        oxideav_gif::register(&mut context);
         oxideav_bmp::register(&mut context.codecs, &mut context.containers);
         Self { context }
     }
@@ -271,7 +272,7 @@ impl OxideAvImageDriver {
                 let bitmap = oxideav_png::decode_png_to_rgba(contents).map_err(png_error)?;
                 Canvas::packed(bitmap.width, bitmap.height, bitmap.data)
             }
-            Layout::Gif(_) => decode_gif_first_frame(contents),
+            Layout::Gif(first) => gif::decode_first_frame(contents, first, width, height),
             Layout::WebP(_) => {
                 let image = oxideav_webp::decode_webp_image(contents).map_err(|e| {
                     FrameworkError::param(format!("image decode failed: image/webp: {e}"))
@@ -368,7 +369,7 @@ impl OxideAvImageDriver {
             OutputFormat::WebP | OutputFormat::WebPLossless => {
                 ("webp_vp8l", canvas.into_frame(), PixelFormat::Rgba)
             }
-            OutputFormat::Gif => ("gif", quantise_for_gif(canvas)?, PixelFormat::Rgba),
+            OutputFormat::Gif => return encode_gif(canvas),
             OutputFormat::Bmp => ("bmp", canvas.into_frame(), PixelFormat::Rgba),
         };
 
@@ -563,32 +564,6 @@ fn png_inflated_len(ihdr: &oxideav_png::Ihdr) -> Option<u64> {
             }),
         _ => None,
     }
-}
-
-/// Decode a GIF's first frame and nothing else.
-///
-/// The registry's GIF decoder decodes every frame of an animation, composes
-/// each onto the logical screen, and keeps a full-size RGBA copy of every
-/// result, though the pipeline uses only the first. The header gate measures
-/// one screen, so a GIF of a few kilobytes (a large screen and a thousand 1x1
-/// frames) could allocate a thousand screens. `decode_first_frame` stops at
-/// the first image, and composing one image costs one screen. `peak::layout`
-/// has already checked that the first frame fits its screen.
-fn decode_gif_first_frame(contents: &[u8]) -> Result<Canvas, FrameworkError> {
-    let gif_error = |e: oxideav_gif::Error| {
-        FrameworkError::param(format!("image decode failed: image/gif: {e}"))
-    };
-    let image = oxideav_gif::decode_first_frame(contents).map_err(gif_error)?;
-    let frame = oxideav_gif::compose(&image)
-        .map_err(gif_error)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| FrameworkError::param("image decode failed: image/gif: no frame"))?;
-    Canvas::packed(
-        u32::from(frame.canvas.width),
-        u32::from(frame.canvas.height),
-        frame.canvas.pixels,
-    )
 }
 
 fn decoder_limits(config: &ImageConfig) -> DecoderLimits {
@@ -1160,15 +1135,32 @@ fn edge_extended_frame(
     })
 }
 
-/// Reduce a full-colour frame to at most 256 colours so the GIF encoder can
-/// take it.
+/// Write a canvas as a single-frame GIF.
 ///
-/// The GIF encoder builds its own palette but refuses input with more than
-/// 256 distinct colours rather than quantising, and `oxideav-pixfmt` will not
-/// convert to `Pal8` without a caller-supplied palette. So the palette is
-/// generated explicitly, the frame is mapped through it with Floyd-Steinberg
-/// dithering, and mapped straight back to RGBA - which now holds at most 256
-/// distinct colours and encodes cleanly.
+/// The canvas is reduced to at most 256 colours first, with Floyd-Steinberg
+/// dithering, so `oxideav_gif::encode_rgba8` takes its colours as they are;
+/// that encoder would otherwise quantise with a plain median cut. The
+/// reduction maps every pixel to an opaque palette colour, so the GIF has no
+/// transparent index.
+fn encode_gif(canvas: Canvas) -> Result<Vec<u8>, FrameworkError> {
+    let (width, height) = (canvas.width, canvas.height);
+    let frame = quantise_for_gif(canvas)?;
+    let rgba = frame
+        .planes
+        .into_iter()
+        .next()
+        .ok_or_else(|| FrameworkError::internal("gif quantisation produced no plane"))?
+        .data;
+    oxideav_gif::encode_rgba8(width, height, &rgba, &oxideav_gif::EncodeOptions::default())
+        .map_err(|e| FrameworkError::internal(format!("image encode failed: gif: {e}")))
+}
+
+/// Reduce a full-colour frame to at most 256 colours for the GIF encoder.
+///
+/// `oxideav-pixfmt` will not convert to `Pal8` without a caller-supplied
+/// palette, so the palette is generated explicitly, the frame is mapped
+/// through it with Floyd-Steinberg dithering, and mapped straight back to
+/// RGBA - which now holds at most 256 distinct colours.
 fn quantise_for_gif(canvas: Canvas) -> Result<VideoFrame, FrameworkError> {
     let (width, height) = (canvas.width, canvas.height);
     let frame = canvas.into_frame();
@@ -1634,8 +1626,8 @@ mod tests {
 
     #[test]
     fn gif_encodes_an_image_with_more_than_256_colours() {
-        // Straight to the GIF encoder this would fail; the palette two-step
-        // is what makes a photographic source encodable.
+        // The palette two-step dithers a photographic source down to 256
+        // colours before the encoder sees it.
         let mut pixels = Vec::new();
         for i in 0..300u32 {
             pixels.extend_from_slice(&[
@@ -1655,6 +1647,28 @@ mod tests {
             .encode(source, OutputFormat::Gif, 70)
             .expect("quantised gif");
         assert!(out.starts_with(b"GIF"), "expected a GIF file");
+    }
+
+    #[test]
+    fn a_gif_round_trips_its_colours() {
+        // Under 256 colours, GIF keeps every one exactly.
+        let source = Canvas {
+            width: 3,
+            height: 1,
+            pixels: vec![200, 10, 10, 255, 10, 10, 200, 255, 30, 200, 30, 255],
+        };
+        let driver = OxideAvImageDriver::new();
+        let gif = driver
+            .encode(source, OutputFormat::Gif, 70)
+            .expect("an encodable canvas");
+        let decoded = driver
+            .load(&gif, &ImageConfig::default())
+            .expect("our own GIF decodes");
+        assert_eq!((decoded.width, decoded.height), (3, 1));
+        assert_eq!(
+            decoded.pixels,
+            [200, 10, 10, 255, 10, 10, 200, 255, 30, 200, 30, 255]
+        );
     }
 
     #[test]

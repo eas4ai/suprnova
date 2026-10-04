@@ -450,3 +450,41 @@ fn an_animation_is_processed_as_its_first_frame() {
         "the red first frame sits where it was placed: {first}"
     );
 }
+
+#[test]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn the_default_drivers_gif_output_reads_back_through_imagemagick() {
+    use std::io::Write;
+
+    // The built-in driver's GIF output, read by ImageMagick and by the
+    // built-in driver itself, gives the same pixels.
+    let oxideav = suprnova::OxideAvImageDriver::new();
+    let gif = oxideav
+        .process(&photo_bmp(), &pipeline(Vec::new(), OutputFormat::Gif))
+        .expect("the built-in driver writes a GIF");
+    let mut child = Command::new(driver().binary())
+        .args(["gif:-", "-depth", "8", "rgba:-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("magick must run");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(&gif)
+        .expect("write the GIF");
+    let out = child.wait_with_output().expect("magick output");
+    assert!(
+        out.status.success(),
+        "ImageMagick must read the GIF: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bmp = oxideav
+        .process(&gif, &pipeline(Vec::new(), OutputFormat::Bmp))
+        .expect("the built-in driver reads its own GIF");
+    let ours = crate::image_processing::bmp_rgba_pixels(&bmp);
+    assert_eq!(out.stdout.len(), ours.len(), "both read a 97x65 image");
+    assert!(out.stdout == ours, "ImageMagick reads the same pixels");
+}

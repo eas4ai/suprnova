@@ -4905,12 +4905,9 @@ dependencies = [
 
 [[package]]
 name = "oxideav-gif"
-version = "0.0.11"
+version = "0.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73f2d324fc3bbff4cd4456fec2d418812f9fd355e31b813b0395942893422b34"
-dependencies = [
- "oxideav-core",
-]
+checksum = "7b9580234fd328a4e8f4eb285b4322b1bddb1b32123b12bcfa3e1b56a8faf664"
 
 [[package]]
 name = "oxideav-image-filter"

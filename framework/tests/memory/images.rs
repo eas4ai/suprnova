@@ -3,7 +3,7 @@
 
 #![cfg(feature = "media")]
 
-use oxideav_gif::{Block, DisposalMethod, Frame, GifImage, GraphicControl, Rgb, Version};
+use oxideav_gif::{Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, Rgb, Version};
 use oxideav_png::{PngEncoderOptions, PngImage, PngPixelFormat};
 use suprnova::ImageConfig;
 use suprnova::media::{
@@ -116,8 +116,8 @@ fn png_declaring_one_pixel(width: u32, height: u32) -> Vec<u8> {
 }
 
 /// A four-colour GIF89a on a `width x height` logical screen.
-fn gif(width: u16, height: u16, frames: Vec<Frame>) -> Vec<u8> {
-    oxideav_gif::encode(&GifImage {
+fn gif(width: u16, height: u16, frames: Vec<GifFrameData>) -> Vec<u8> {
+    oxideav_gif::encode_file(&GifFile {
         version: Version::Gif89a,
         screen_width: width,
         screen_height: height,
@@ -137,8 +137,8 @@ fn gif(width: u16, height: u16, frames: Vec<Frame>) -> Vec<u8> {
 }
 
 /// A solid frame of palette entry `index`, kept on the canvas after it shows.
-fn frame(left: u16, top: u16, width: u16, height: u16, index: u8) -> Frame {
-    Frame {
+fn frame(left: u16, top: u16, width: u16, height: u16, index: u8) -> GifFrameData {
+    GifFrameData {
         left,
         top,
         width,

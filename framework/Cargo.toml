@@ -219,6 +219,13 @@ ammonia = "4.1.4"
 # is the one non-MIT crate in the set, so it is called out here rather
 # than discovered during a licence audit.
 #
+# `oxideav-gif` is 0.0.12 or later: 0.0.11 changed LZW code width one code
+# early on both sides, so it could not read GIFs other software writes and
+# other software could not read the GIFs it wrote. The driver uses it only
+# to write GIFs (its own `encode_rgba8`, hence no `registry` feature); it
+# decodes a GIF's first frame itself, so that decoding stops when the frame
+# is complete. See `media/oxideav/gif.rs`.
+#
 # `oxideav-io` is deliberately absent. Its open/save facade is the obvious
 # entry point and is unusable here: gif and webp register no demuxer or
 # muxer, so it can read three of the five formats and write exactly one.
@@ -230,7 +237,7 @@ oxideav-pixfmt = { version = "=0.1.7", optional = true }
 oxideav-mjpeg = { version = "=0.1.8", optional = true }
 oxideav-png = { version = "=0.1.8", optional = true }
 oxideav-webp = { version = "=0.2.3", optional = true }
-oxideav-gif = { version = "=0.0.11", optional = true }
+oxideav-gif = { version = "=0.0.12", optional = true, default-features = false }
 oxideav-bmp = { version = "=0.1.6", optional = true }
 # The zlib inflater `oxideav-png` itself uses. The PNG decode inflates the
 # pixel data once first with a cap at the size the header declares, because

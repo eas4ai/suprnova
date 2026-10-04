@@ -400,20 +400,24 @@ fn gif_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((u32::from(le_u16(bytes, 6)?), u32::from(le_u16(bytes, 8)?)))
 }
 
-/// Where a GIF's first image sits on its logical screen, and what decoding
-/// it reads.
+/// A GIF's first image: where it sits on the logical screen, and where its
+/// color table and LZW data are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GifFrame {
     pub(crate) left: u16,
     pub(crate) top: u16,
     pub(crate) width: u16,
     pub(crate) height: u16,
-    /// Rows are stored in interlaced order, which the decoder reorders
-    /// through a second index buffer.
+    /// Rows are stored in the four-pass interlaced order.
     pub(crate) interlaced: bool,
-    /// Total LZW bytes in the frame's data sub-blocks, which the decoder
-    /// gathers into one buffer before decompressing.
-    pub(crate) data_len: usize,
+    /// The color table the frame uses, as (offset, entries): its own local
+    /// table, or else the global one. `None` when there is neither.
+    pub(crate) palette: Option<(usize, usize)>,
+    /// The transparent index of the Graphic Control Extension that applies
+    /// to the frame, if it sets one.
+    pub(crate) transparent: Option<u8>,
+    /// Offset of the LZW minimum code size; the data sub-blocks follow it.
+    pub(crate) data: usize,
 }
 
 impl GifFrame {
@@ -426,44 +430,52 @@ impl GifFrame {
 
 /// Find a GIF's first image by walking its block structure, decoding nothing.
 ///
-/// The gate measures the logical screen, but a decoder sizes a frame's pixels
-/// from the frame's own Image Descriptor, so the first descriptor has to be
-/// read as well. The walk follows the grammar `oxideav_gif::decode_first_frame`
-/// follows, block for block, including the fixed size it requires of each
-/// extension's first block: wherever that decoder finds the first image, this
-/// finds the same one. `None` when the stream ends, reaches its trailer, or
-/// breaks that grammar first, which are the cases that decoder refuses too.
-/// The walk reads on through the frame's color table and data sub-blocks,
-/// which the decoder needs whole as well.
+/// The gate measures the logical screen, but a frame is decoded at the size
+/// its own Image Descriptor declares, so the first descriptor has to be read
+/// as well. Extensions before it are stepped over by the GIF grammar: each
+/// fixed-size first block at its required size (Graphic Control 4, Plain
+/// Text 12, Application 11), then data sub-blocks. A Graphic Control
+/// Extension applies to the next graphic block, so a Plain Text block in
+/// between takes it. `None` when the stream ends, reaches its trailer, or
+/// breaks that grammar before the first image.
 pub(crate) fn gif_first_frame(bytes: &[u8]) -> Option<GifFrame> {
     // The signature and Logical Screen Descriptor take 13 bytes. A Global
     // Color Table of 3 * 2^(n + 1) bytes follows when the top bit of the
     // descriptor's packed field is set.
-    let packed = *bytes.get(10)?;
+    let screen_flags = *bytes.get(10)?;
     let mut pos = 13usize;
-    if packed & 0x80 != 0 {
-        pos += 3 << ((packed & 0x07) + 1);
+    let mut palette = None;
+    if screen_flags & 0x80 != 0 {
+        let entries = 2usize << (screen_flags & 0x07);
+        bytes.get(pos..pos + 3 * entries)?;
+        palette = Some((pos, entries));
+        pos += 3 * entries;
     }
+    let mut transparent = None;
     loop {
         match *bytes.get(pos)? {
             // Image Descriptor: left, top, width, height, packed fields. A
             // Local Color Table follows when the packed field's top bit is
             // set, then the LZW minimum code size and the data sub-blocks.
             0x2C => {
-                let packed = *bytes.get(pos + 9)?;
+                let flags = *bytes.get(pos + 9)?;
                 let mut data = pos + 10;
-                if packed & 0x80 != 0 {
-                    data += 3 << ((packed & 0x07) + 1);
+                if flags & 0x80 != 0 {
+                    let entries = 2usize << (flags & 0x07);
+                    bytes.get(data..data + 3 * entries)?;
+                    palette = Some((data, entries));
+                    data += 3 * entries;
                 }
                 bytes.get(data)?;
-                let data_len = sub_blocks_len(bytes, data + 1)?;
                 return Some(GifFrame {
                     left: le_u16(bytes, pos + 1)?,
                     top: le_u16(bytes, pos + 3)?,
                     width: le_u16(bytes, pos + 5)?,
                     height: le_u16(bytes, pos + 7)?,
-                    interlaced: packed & 0x40 != 0,
-                    data_len,
+                    interlaced: flags & 0x40 != 0,
+                    palette,
+                    transparent,
+                    data,
                 });
             }
             // Extension introducer, then a label byte.
@@ -471,11 +483,13 @@ pub(crate) fn gif_first_frame(bytes: &[u8]) -> Option<GifFrame> {
                 let label = *bytes.get(pos + 1)?;
                 pos += 2;
                 match label {
-                    // Graphic Control: one 4-byte block, then the terminator.
+                    // Graphic Control: one 4-byte block (flags, delay,
+                    // transparent index), then the terminator.
                     0xF9 => {
                         if *bytes.get(pos)? != 4 || *bytes.get(pos + 5)? != 0 {
                             return None;
                         }
+                        transparent = (bytes[pos + 1] & 0x01 != 0).then_some(bytes[pos + 4]);
                         pos += 6;
                     }
                     // Plain Text opens with a 12-byte block and Application
@@ -486,6 +500,9 @@ pub(crate) fn gif_first_frame(bytes: &[u8]) -> Option<GifFrame> {
                             return None;
                         }
                         pos = skip_sub_blocks(bytes, pos)?;
+                        if label == 0x01 {
+                            transparent = None;
+                        }
                     }
                     // Comment: data sub-blocks only.
                     0xFE => pos = skip_sub_blocks(bytes, pos)?,
@@ -509,22 +526,6 @@ fn skip_sub_blocks(bytes: &[u8], mut pos: usize) -> Option<usize> {
         }
         bytes.get(pos..pos + len)?;
         pos += len;
-    }
-}
-
-/// The total payload of a run of GIF data sub-blocks, which must end with
-/// its zero-length terminator inside `bytes`.
-fn sub_blocks_len(bytes: &[u8], mut pos: usize) -> Option<usize> {
-    let mut total = 0usize;
-    loop {
-        let len = usize::from(*bytes.get(pos)?);
-        pos += 1;
-        if len == 0 {
-            return Some(total);
-        }
-        bytes.get(pos..pos + len)?;
-        pos += len;
-        total += len;
     }
 }
 
@@ -910,6 +911,7 @@ mod tests {
         gif.extend_from_slice(&[0x21, 0x01, 12]);
         gif.extend_from_slice(&[0u8; 12]);
         gif.extend_from_slice(&[2, b'h', b'i', 0]);
+        let descriptor_at = gif.len();
         gif.extend_from_slice(&image_descriptor(2, 3, 8, 9));
         // A second, larger frame the walk must never report.
         gif.extend_from_slice(&image_descriptor(0, 0, 900, 900));
@@ -923,7 +925,10 @@ mod tests {
                 width: 8,
                 height: 9,
                 interlaced: false,
-                data_len: 3,
+                // The global table, right after the screen descriptor.
+                palette: Some((13, 4)),
+                transparent: None,
+                data: descriptor_at + 10,
             }
         );
         assert!(frame.fits(16, 16));
@@ -932,8 +937,11 @@ mod tests {
     }
 
     #[test]
-    fn the_first_gif_frame_reports_interlacing_and_its_data_length() {
+    fn the_first_gif_frame_reports_its_palette_transparency_and_interlacing() {
         let mut gif = gif_head();
+        // Graphic Control with the transparency flag set, index 1.
+        gif.extend_from_slice(&[0x21, 0xF9, 4, 0x01, 10, 0, 1, 0]);
+        let descriptor_at = gif.len();
         let mut descriptor = vec![0x2C];
         for value in [0u16, 0, 4, 4] {
             descriptor.extend_from_slice(&value.to_le_bytes());
@@ -941,15 +949,28 @@ mod tests {
         // Local Color Table of 2^(0 + 1) = 2 entries, interlaced.
         descriptor.push(0x80 | 0x40);
         descriptor.extend_from_slice(&[0u8; 6]);
-        // Minimum code size, then sub-blocks of 4 and 2 bytes.
-        descriptor.extend_from_slice(&[2, 4, 1, 2, 3, 4, 2, 5, 6, 0]);
+        descriptor.extend_from_slice(&[2, 2, 0xAA, 0xBB, 0]);
         gif.extend_from_slice(&descriptor);
         let frame = gif_first_frame(&gif).expect("the first frame");
         assert!(frame.interlaced);
-        assert_eq!(frame.data_len, 6);
+        assert_eq!(frame.palette, Some((descriptor_at + 10, 2)));
+        assert_eq!(frame.transparent, Some(1));
+        assert_eq!(frame.data, descriptor_at + 16);
 
-        // Data sub-blocks that run past the end of the stream.
-        gif.truncate(gif.len() - 4);
+        // A Plain Text block between them takes the Graphic Control.
+        let mut plain_text = gif_head();
+        plain_text.extend_from_slice(&[0x21, 0xF9, 4, 0x01, 10, 0, 1, 0]);
+        plain_text.extend_from_slice(&[0x21, 0x01, 12]);
+        plain_text.extend_from_slice(&[0u8; 12]);
+        plain_text.extend_from_slice(&[0]);
+        plain_text.extend_from_slice(&image_descriptor(0, 0, 4, 4));
+        assert_eq!(
+            gif_first_frame(&plain_text).map(|frame| frame.transparent),
+            Some(None)
+        );
+
+        // A local table that runs past the end of the stream.
+        gif.truncate(descriptor_at + 13);
         assert_eq!(gif_first_frame(&gif), None);
     }
 

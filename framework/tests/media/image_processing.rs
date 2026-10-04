@@ -179,6 +179,12 @@ pub(crate) fn webp_chunks(webp: &[u8]) -> Vec<String> {
     chunks
 }
 
+/// The packed RGBA of a 32-bit BMP the driver wrote. The ImageMagick
+/// driver tests use it too.
+pub(crate) fn bmp_rgba_pixels(bmp: &[u8]) -> Vec<u8> {
+    bmp_rgba(bmp).2
+}
+
 /// Run `source` through the pipeline to `format` at `quality`.
 async fn encode(source: &[u8], format: OutputFormat, quality: u8) -> Vec<u8> {
     Image::from_bytes(source.to_vec())

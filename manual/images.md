@@ -245,8 +245,9 @@ more, and the default driver bounds that too:
   refused when the inflate reaches that size. A few kilobytes of
   compressed data can expand to gigabytes.
 - Only the first frame of an animated GIF is decoded, because the
-  pipeline only uses the first frame. A first frame larger than the
-  GIF's logical screen is refused before it is decoded.
+  pipeline only uses the first frame, and decoding stops the moment that
+  frame is complete. A first frame larger than the GIF's logical screen
+  is refused before it is decoded.
 - A file or stored source is read no further than
   `IMAGE_MAX_ALLOC_BYTES`, even when the size its storage reports is
   wrong or missing, as it is for a pipe.

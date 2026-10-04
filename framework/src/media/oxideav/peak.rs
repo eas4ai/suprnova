@@ -4,7 +4,7 @@
 //! The header gate counts the declared pixels at four bytes each, but the
 //! decoders allocate more than the RGBA they return. oxideav-png keeps its
 //! inflated data, the unfiltered rows and a copy of them while it builds its
-//! output; GIF composition holds three screen-sized canvases; the JPEG
+//! output; the JPEG
 //! decoder keeps four bytes of coefficients for every sample of a progressive
 //! image. `IMAGE_MAX_ALLOC_BYTES` is the most one decode may allocate, so the
 //! driver refuses an image whose estimate is larger.
@@ -47,11 +47,6 @@ const INFLATE_WORK: u64 = 128 * 1024;
 
 /// One `ChunkRef` in oxideav-png's chunk list: a 4-byte type and a slice.
 const PNG_CHUNK_REF: u64 = 24;
-
-/// The LZW dictionary of oxideav-gif (4096 `u16` parents and 4096 `u8`
-/// suffixes), its 4096-byte scratch string, and two color tables of at most
-/// 256 RGB entries.
-const GIF_TABLES: u64 = 4096 * 2 + 4096 + 4096 + 2 * 256 * 3;
 
 /// oxideav-vp8, per 16x16 macroblock: 800 bytes of coefficients (25 blocks of
 /// sixteen `i16`), 384 bytes of padded Y, U and V planes, and the 21-byte
@@ -185,7 +180,7 @@ pub(super) fn estimate(
     let (width, height) = (u64::from(width), u64::from(height));
     let peak = match layout {
         Layout::Png(png) => png_peak(png)?,
-        Layout::Gif(first) => gif_peak(width, height, first),
+        Layout::Gif(_) => gif_peak(width, height),
         Layout::Jpeg(frame) => jpeg_peak(frame, input_len)?,
         Layout::WebP(webp) => webp_peak(width, height, *webp),
         Layout::Bmp(bmp) => bmp_peak(width, height, *bmp, input_len),
@@ -302,33 +297,15 @@ fn png_peak(png: &PngLayout) -> Result<u64, FrameworkError> {
     Ok(decoding.max(to_rgba).max(pre_pass))
 }
 
-/// oxideav-gif's `decode_first_frame`, then `compose`.
-///
-/// Decoding gathers the frame's LZW data into one buffer that grows a
-/// sub-block at a time (doubling), and decompresses into an index buffer
-/// reserved at `min(frame pixels, data * 4096)`; an interlaced frame is
-/// reordered into a second index buffer. Composing that one frame holds a
-/// screen-sized canvas, the snapshot taken before the frame renders, and the
-/// clone it returns, beside the frame's indices.
-fn gif_peak(screen_width: u64, screen_height: u64, first: &GifFrame) -> u64 {
-    let screen = mul(mul(screen_width, screen_height), 4);
-    let frame_pixels = mul(u64::from(first.width), u64::from(first.height));
-    let data = first.data_len as u64;
-    let gathered = mul(data, 2).max(8);
-    let indices = if mul(data, 4096) >= frame_pixels {
-        frame_pixels
-    } else {
-        mul(frame_pixels, 2)
-    };
-    let reordered = if first.interlaced { frame_pixels } else { 0 };
-    let decoding = add(add(gathered, indices), reordered);
-    let kept = if first.interlaced {
-        frame_pixels
-    } else {
-        indices
-    };
-    let composing = add(kept, mul(screen, 3));
-    add(decoding.max(composing), GIF_TABLES)
+/// The framework's own first-frame GIF decoder (`super::gif`): one RGBA
+/// canvas the size of the logical screen, which the frame is written onto
+/// directly, and the LZW dictionary. It keeps no copy of the compressed data
+/// and no index buffer.
+fn gif_peak(screen_width: u64, screen_height: u64) -> u64 {
+    add(
+        mul(mul(screen_width, screen_height), 4),
+        super::gif::DICTIONARY_BYTES,
+    )
 }
 
 /// oxideav-mjpeg through the codec registry, then the conversion to RGBA.
