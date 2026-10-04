@@ -22,7 +22,9 @@ pub(crate) struct DirectiveContext<'checker, 'diagnostics> {
     pub(crate) tag: &'checker str,
     pub(crate) attributes: &'checker [(String, String)],
     pub(crate) path: &'checker crate::identity::ViewName,
+    /// Where the directive's attribute is written.
     pub(crate) line: u32,
+    pub(crate) column: u32,
     pub(crate) diagnostics: &'diagnostics mut DiagnosticCollector,
 }
 
@@ -768,7 +770,7 @@ fn push(
         severity,
         Some(context.path),
         context.line,
-        1,
+        context.column,
         Some(context.owner.identity()),
     );
 }

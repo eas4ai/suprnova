@@ -637,3 +637,106 @@ fn escaped_output_is_not_mistaken_for_raw_output() {
         assert!(report.is_proved(), "{source}: {:?}", report.diagnostics());
     }
 }
+
+fn locations_of(
+    report: &suprnova_live::checker::CheckReport,
+    code: DiagnosticCode,
+) -> Vec<(String, u32, u32)> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == code)
+        .map(|diagnostic| {
+            (
+                diagnostic
+                    .path()
+                    .map(|path| path.as_str().to_owned())
+                    .unwrap_or_default(),
+                diagnostic.line(),
+                diagnostic.column(),
+            )
+        })
+        .collect()
+}
+
+/// A diagnostic names the file, line, and column of what it is about: the
+/// attribute for a directive or attribute rule, the tag for an element rule,
+/// and the unclosed element when the input ends inside it.
+#[test]
+fn diagnostics_report_the_real_column_of_the_attribute_or_element() {
+    let directive = check(
+        "<section>\n  <button type=\"button\" live:click=\"missing\">Go</button>\n</section>",
+    );
+    assert_eq!(
+        locations_of(&directive, DiagnosticCode::UnknownAction),
+        vec![(ROOT_VIEW.to_owned(), 2, 25)],
+        "{:?}",
+        directive.diagnostics()
+    );
+
+    let mismatched = check("<section>\n  <div></span></div>\n</section>");
+    assert_eq!(
+        locations_of(&mismatched, DiagnosticCode::HtmlSyntax),
+        vec![(ROOT_VIEW.to_owned(), 2, 8)],
+        "{:?}",
+        mismatched.diagnostics()
+    );
+
+    let unclosed = check("<p>Open</p>\n    <section>");
+    assert_eq!(
+        locations_of(&unclosed, DiagnosticCode::HtmlSyntax),
+        vec![(ROOT_VIEW.to_owned(), 2, 5)],
+        "{:?}",
+        unclosed.diagnostics()
+    );
+
+    let keyed =
+        check("<section>\n<p live:key=\"same\">A</p>  <p   live:key=\"same\">B</p>\n</section>");
+    assert_eq!(
+        locations_of(&keyed, DiagnosticCode::DuplicateKey),
+        vec![(ROOT_VIEW.to_owned(), 2, 32)],
+        "{:?}",
+        keyed.diagnostics()
+    );
+
+    let missing = check("<section>\n  {% include \"tests/nowhere.html\" %}\n</section>");
+    assert_eq!(
+        locations_of(&missing, DiagnosticCode::MissingTemplate),
+        vec![(ROOT_VIEW.to_owned(), 2, 3)],
+        "{:?}",
+        missing.diagnostics()
+    );
+
+    let dynamic = check("<section><input {{ attrs }}></section>");
+    assert_eq!(
+        locations_of(&dynamic, DiagnosticCode::DynamicStructureUnproved),
+        vec![(ROOT_VIEW.to_owned(), 1, 20)],
+        "{:?}",
+        dynamic.diagnostics()
+    );
+
+    let registry = registry();
+    let included = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            "<section>\n{% include \"tests/shared.html\" %}\n</section>".to_owned(),
+        ),
+        (
+            view("tests/shared.html"),
+            "<p>Shared</p>\n<p><button live:click=\"missing\">Go</button></p>".to_owned(),
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html").to_owned(),
+        ),
+    ])
+    .expect("template catalog");
+    let report = TemplateChecker::new(&registry, &included, CheckerLimits::default())
+        .check_component(&root_name());
+    assert_eq!(
+        locations_of(&report, DiagnosticCode::UnknownAction),
+        vec![("tests/shared.html".to_owned(), 2, 12)],
+        "{:?}",
+        report.diagnostics()
+    );
+}

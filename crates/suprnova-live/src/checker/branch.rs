@@ -174,6 +174,16 @@ struct Scope<'s, 'a> {
     macro_depth: usize,
 }
 
+/// The tag that brought a template in, `{% include %}`, `{% import %}`, or
+/// `{% extends %}`, so a template that cannot be loaded is reported where
+/// it was named.
+#[derive(Clone, Copy)]
+struct Site<'s> {
+    view: &'s ViewName,
+    line: u32,
+    column: u32,
+}
+
 /// The template a node list belongs to: its registered name, its index in
 /// the rendered view's file table, and its source text.
 #[derive(Clone, Copy)]
@@ -218,8 +228,13 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
     /// Renders the view into one tree, or `None` when a failure left nothing
     /// checkable; that failure has reported itself.
     pub(crate) fn render(mut self, view: &ViewName) -> Option<RenderedView<'checker>> {
-        let fragment =
-            self.render_view(view, &Overrides::new(), &RawNames::new(), &mut Vec::new())?;
+        let fragment = self.render_view(
+            view,
+            &Overrides::new(),
+            &RawNames::new(),
+            &mut Vec::new(),
+            None,
+        )?;
         Some(RenderedView {
             fragment,
             files: self.files,
@@ -240,21 +255,25 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
 
     /// Renders one template. `raw` holds the raw names of the template that
     /// includes this one: an included template is expanded in its includer's
-    /// scope, so it sees the includer's locals.
+    /// scope, so it sees the includer's locals. `site` is the tag that named
+    /// the template, absent for the component's own view.
     fn render_view(
         &mut self,
         view: &ViewName,
         incoming_overrides: &Overrides<'checker>,
         raw: &RawNames,
         stack: &mut Vec<ViewName>,
+        site: Option<Site<'_>>,
     ) -> Option<Fragment<'checker>> {
+        let (named_in, named_line, named_column) =
+            site.map_or((view, 1, 1), |site| (site.view, site.line, site.column));
         if stack.len() >= self.limits.max_include_depth() || stack.contains(view) {
             self.push(
                 DiagnosticCode::IncludeDepthLimit,
                 DiagnosticSeverity::Error,
-                view,
-                1,
-                1,
+                named_in,
+                named_line,
+                named_column,
             );
             return None;
         }
@@ -262,9 +281,9 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             self.push(
                 DiagnosticCode::MissingTemplate,
                 DiagnosticSeverity::Error,
-                view,
-                1,
-                1,
+                named_in,
+                named_line,
+                named_column,
             );
             return None;
         };
@@ -309,7 +328,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
 
         stack.push(view.clone());
         let file = self.file_index(view, source);
-        let imports = self.load_imports(&ast, view, stack);
+        let imports = self.load_imports(&ast, view, source, stack);
         let env = TemplateEnv {
             view: view.clone(),
             file,
@@ -327,10 +346,11 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         };
         let place = Place { view, file, source };
         let parent = env.ast.nodes().iter().find_map(|node| match node.as_ref() {
-            Node::Extends(parent) => Some(parent.path),
+            Node::Extends(parent) => Some((parent.path, tag_location(source, node.span()))),
             _ => None,
         });
-        let rendered = if let Some(parent) = parent {
+        let rendered = if let Some((parent, (line, column))) = parent {
+            let site = Site { view, line, column };
             let mut overrides = incoming_overrides.clone();
             for node in env.ast.nodes() {
                 if let Node::BlockDef(block) = node.as_ref() {
@@ -352,14 +372,16 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 }
             }
             match ViewName::parse(parent) {
-                Ok(parent) => self.render_view(&parent, &overrides, &RawNames::new(), stack),
+                Ok(parent) => {
+                    self.render_view(&parent, &overrides, &RawNames::new(), stack, Some(site))
+                }
                 Err(_) => {
                     self.push(
                         DiagnosticCode::MissingTemplate,
                         DiagnosticSeverity::Error,
                         view,
-                        1,
-                        1,
+                        line,
+                        column,
                     );
                     None
                 }
@@ -388,6 +410,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         &mut self,
         ast: &Ast<'checker>,
         view: &ViewName,
+        source: &str,
         stack: &mut Vec<ViewName>,
     ) -> Vec<(String, TemplateEnv<'checker>)> {
         let mut imports = Vec::new();
@@ -395,7 +418,9 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             let Node::Import(import) = node.as_ref() else {
                 continue;
             };
-            let Some(env) = self.load_template(import.path, view, stack) else {
+            let (line, column) = tag_location(source, node.span());
+            let site = Site { view, line, column };
+            let Some(env) = self.load_template(import.path, site, stack) else {
                 continue;
             };
             imports.push((import.scope.to_owned(), env));
@@ -406,16 +431,16 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
     fn load_template(
         &mut self,
         path: &str,
-        importer: &ViewName,
+        site: Site<'_>,
         stack: &mut Vec<ViewName>,
     ) -> Option<TemplateEnv<'checker>> {
         let Ok(imported) = ViewName::parse(path) else {
             self.push(
                 DiagnosticCode::MissingTemplate,
                 DiagnosticSeverity::Error,
-                importer,
-                1,
-                1,
+                site.view,
+                site.line,
+                site.column,
             );
             return None;
         };
@@ -423,9 +448,9 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             self.push(
                 DiagnosticCode::IncludeDepthLimit,
                 DiagnosticSeverity::Error,
-                importer,
-                1,
-                1,
+                site.view,
+                site.line,
+                site.column,
             );
             return None;
         }
@@ -433,14 +458,14 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             self.push(
                 DiagnosticCode::MissingTemplate,
                 DiagnosticSeverity::Error,
-                importer,
-                1,
-                1,
+                site.view,
+                site.line,
+                site.column,
             );
             return None;
         };
         if source.len() > self.limits.max_source_bytes() {
-            self.report_source_limit(&imported);
+            self.report_source_limit(&imported, 1, 1);
             return None;
         }
         let path: Arc<std::path::Path> = Arc::from(PathBuf::from(imported.as_str()));
@@ -471,7 +496,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         }
         stack.push(imported.clone());
         let file = self.file_index(&imported, source);
-        let imports = self.load_imports(&ast, &imported, stack);
+        let imports = self.load_imports(&ast, &imported, source, stack);
         stack.pop();
         Some(TemplateEnv {
             view: imported,
@@ -541,7 +566,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             );
                             continue;
                         };
-                        self.inline(out, caller, view)?;
+                        self.inline(out, caller, origin, view)?;
                         continue;
                     }
                     if let Some(Binding::Literal(literal)) =
@@ -667,34 +692,48 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         (&loop_scope, scope),
                     )?;
                 }
-                Node::Include(include) => match ViewName::parse(include.path) {
-                    Ok(include) => {
-                        let fragment =
-                            self.render_view(&include, &Overrides::new(), scope.raw, stack)?;
-                        self.branched = true;
-                        out.pieces.extend(fragment.pieces);
+                Node::Include(include) => {
+                    let (line, column) = tag_location(source, node.span());
+                    match ViewName::parse(include.path) {
+                        Ok(include) => {
+                            let site = Site { view, line, column };
+                            let fragment = self.render_view(
+                                &include,
+                                &Overrides::new(),
+                                scope.raw,
+                                stack,
+                                Some(site),
+                            )?;
+                            self.branched = true;
+                            out.pieces.extend(fragment.pieces);
+                        }
+                        Err(_) => {
+                            self.push(
+                                DiagnosticCode::MissingTemplate,
+                                DiagnosticSeverity::Error,
+                                view,
+                                line,
+                                column,
+                            );
+                            return None;
+                        }
                     }
-                    Err(_) => {
-                        self.push(
-                            DiagnosticCode::MissingTemplate,
-                            DiagnosticSeverity::Error,
-                            view,
-                            1,
-                            1,
-                        );
-                        return None;
-                    }
-                },
+                }
                 Node::BlockDef(block) => {
                     if let Some(fragment) = overrides.get(*block.name) {
                         self.branched = true;
-                        self.inline(out, fragment.as_ref()?, view)?;
+                        self.inline(
+                            out,
+                            fragment.as_ref()?,
+                            tag_origin(place, node.span()),
+                            view,
+                        )?;
                     } else {
                         self.expand_nodes(&block.nodes, out, overrides, place, stack, scope)?;
                     }
                 }
                 Node::FilterBlock(block) => {
-                    let (line, column) = span_location(source, node.span());
+                    let (line, column) = tag_location(source, node.span());
                     self.push(
                         DiagnosticCode::DynamicStructureUnproved,
                         DiagnosticSeverity::Unproved,
@@ -722,7 +761,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     let scope_name = call.scope.as_ref().map(|scope| **scope);
                     let resolved = scope.template.find_macro(scope_name, *call.name);
                     let Some((definition, template)) = resolved else {
-                        let (line, column) = span_location(source, node.span());
+                        let (line, column) = tag_location(source, node.span());
                         self.push(
                             DiagnosticCode::DynamicStructureUnproved,
                             DiagnosticSeverity::Unproved,
@@ -733,7 +772,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         continue;
                     };
                     if !call.caller_args.is_empty() {
-                        let (line, column) = span_location(source, node.span());
+                        let (line, column) = tag_location(source, node.span());
                         self.push(
                             DiagnosticCode::DynamicStructureUnproved,
                             DiagnosticSeverity::Unproved,
@@ -744,7 +783,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         continue;
                     }
                     if scope.macro_depth >= self.limits.max_include_depth() {
-                        let (line, column) = span_location(source, node.span());
+                        let (line, column) = tag_location(source, node.span());
                         self.push(
                             DiagnosticCode::IncludeDepthLimit,
                             DiagnosticSeverity::Error,
@@ -999,37 +1038,50 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         origin: Origin,
         view: &ViewName,
     ) -> Option<()> {
-        self.charge(text.len(), view)?;
+        self.charge(text.len(), origin, view)?;
         out.pieces.push(Piece::Text(text, origin));
         Some(())
     }
 
-    /// Appends a copy of an already rendered fragment: caller content or an
-    /// inherited block override.
+    /// Appends a copy of an already rendered fragment, caller content or an
+    /// inherited block override, at the tag `origin` that splices it in.
     fn inline(
         &mut self,
         out: &mut Fragment<'checker>,
         fragment: &Fragment<'checker>,
+        origin: Origin,
         view: &ViewName,
     ) -> Option<()> {
-        self.charge(fragment.text_bytes(), view)?;
+        self.charge(fragment.text_bytes(), origin, view)?;
         out.pieces.extend(fragment.pieces.iter().cloned());
         Some(())
     }
 
     /// Counts rendered bytes against the source ceiling. The whole expanded
     /// view, every arm included, must fit, which also bounds every single
-    /// path through it.
-    fn charge(&mut self, bytes: usize, view: &ViewName) -> Option<()> {
+    /// path through it; the text that crosses the ceiling is where it is
+    /// reported.
+    fn charge(&mut self, bytes: usize, origin: Origin, view: &ViewName) -> Option<()> {
         self.expanded_bytes = self.expanded_bytes.saturating_add(bytes);
         if self.expanded_bytes > self.limits.max_source_bytes() {
-            self.report_source_limit(view);
+            // `origin` names a file of `view`'s render; `view` itself is the
+            // place should the table ever lack it.
+            let located = self
+                .files
+                .get(usize::try_from(origin.file).unwrap_or(usize::MAX))
+                .map(|file| {
+                    let (line, column) =
+                        location(file.source, usize::try_from(origin.offset).unwrap_or(0));
+                    (file.view.clone(), line, column)
+                });
+            let (view, line, column) = located.unwrap_or_else(|| (view.clone(), 1, 1));
+            self.report_source_limit(&view, line, column);
             return None;
         }
         Some(())
     }
 
-    fn report_source_limit(&mut self, view: &ViewName) {
+    fn report_source_limit(&mut self, view: &ViewName, line: u32, column: u32) {
         if self.source_limit_reported {
             return;
         }
@@ -1038,8 +1090,8 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             DiagnosticCode::SourceLimit,
             DiagnosticSeverity::Error,
             view,
-            1,
-            1,
+            line,
+            column,
         );
     }
 
@@ -1075,22 +1127,29 @@ fn offset_u32(offset: usize) -> u32 {
 }
 
 /// Where a block tag such as `{% if %}` opens. Askama spans a block node
-/// from its keyword, so the origin steps back over the whitespace and
-/// whitespace-control mark to the `{%` that starts the tag.
-fn tag_origin(place: Place<'_, '_>, span: Span) -> Origin {
+/// from its keyword, so the start steps back over the whitespace and
+/// whitespace-control mark to the `{%` that opens the tag.
+fn tag_start(source: &str, span: Span) -> usize {
     let keyword = span.byte_range().map_or(0, |range| range.start);
-    let before = place.source.get(..keyword).unwrap_or_default();
+    let before = source.get(..keyword).unwrap_or_default();
     let trimmed = before.trim_end_matches(|character: char| {
         character.is_whitespace() || matches!(character, '-' | '+' | '~')
     });
-    let offset = trimmed
+    trimmed
         .strip_suffix("{%")
-        .map_or(keyword, |opening| opening.len());
+        .map_or(keyword, |opening| opening.len())
+}
+
+fn tag_origin(place: Place<'_, '_>, span: Span) -> Origin {
     Origin {
         file: place.file,
-        offset: offset_u32(offset),
+        offset: offset_u32(tag_start(place.source, span)),
         literal: false,
     }
+}
+
+fn tag_location(source: &str, span: Span) -> (u32, u32) {
+    location(source, tag_start(source, span))
 }
 
 fn expression_uses_filter(source: &str, span: Span, expected: &str) -> bool {
@@ -1595,11 +1654,6 @@ fn count_nodes(nodes: &[Box<Node<'_>>]) -> usize {
         };
         count.saturating_add(1).saturating_add(nested)
     })
-}
-
-fn span_location(source: &str, span: Span) -> (u32, u32) {
-    span.byte_range()
-        .map_or((1, 1), |range| location(source, range.start))
 }
 
 pub(crate) fn location(source: &str, offset: usize) -> (u32, u32) {

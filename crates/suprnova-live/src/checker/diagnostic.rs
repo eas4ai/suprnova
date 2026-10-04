@@ -265,13 +265,26 @@ impl DiagnosticCollector {
         column: u32,
         component: Option<&ComponentName>,
     ) {
+        // Several paths through one view can reach the same markup; a
+        // finding about one place is reported once.
+        let (line, column) = (line.max(1), column.max(1));
+        if self.diagnostics.iter().any(|existing| {
+            existing.code == code
+                && existing.severity == severity
+                && existing.path.as_ref() == path
+                && existing.line == line
+                && existing.column == column
+                && existing.component.as_ref() == component
+        }) {
+            return;
+        }
         if self.diagnostics.len() < self.max {
             self.diagnostics.push(TemplateDiagnostic::new(
                 code,
                 severity,
                 path.cloned(),
-                line.max(1),
-                column.max(1),
+                line,
+                column,
                 component.cloned(),
             ));
             return;
@@ -284,8 +297,8 @@ impl DiagnosticCollector {
             DiagnosticCode::DiagnosticLimit,
             DiagnosticSeverity::Error,
             path.cloned(),
-            line.max(1),
-            column.max(1),
+            line,
+            column,
             component.cloned(),
         );
         if let Some(last) = self.diagnostics.last_mut() {

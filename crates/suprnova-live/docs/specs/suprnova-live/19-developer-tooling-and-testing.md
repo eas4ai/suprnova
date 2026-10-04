@@ -468,6 +468,13 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-10-04 -- Checker diagnostics report the real column in the
+  template that wrote the markup: a directive or attribute rule at the
+  attribute's name, an element rule or stack error at the tag, an element
+  left open at its start tag, and a template that cannot be included,
+  imported, or extended at the tag that names it. Directive and HTML
+  diagnostics had reported column 1. A finding that several paths through
+  the view reach at one place is reported once.
 - 2026-10-04 -- The checker checks control flow compositionally. The view
   renders into a tree in which each `if`, `match`, and loop is one choice
   whose arms are rendered once; the HTML check continues every path state

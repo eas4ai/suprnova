@@ -53,7 +53,7 @@ fn diagnostics_have_stable_machine_codes_and_source_locations_without_raw_values
         diagnostic.path().expect("diagnostic path").as_str(),
         ROOT_VIEW
     );
-    assert_eq!((diagnostic.line(), diagnostic.column()), (2, 1));
+    assert_eq!((diagnostic.line(), diagnostic.column()), (2, 9));
     assert_eq!(diagnostic.component(), Some(&root_name()));
     assert!(!format!("{diagnostic:?}").contains("delete-everything"));
 }

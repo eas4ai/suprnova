@@ -69,6 +69,23 @@ struct Position {
 /// The start of the root view, for a failure no element owns.
 const VIEW_START: Position = Position { file: 0, offset: 0 };
 
+/// Where a token was written: its start, and for a start tag where each of
+/// its attributes was written, so a diagnostic about one attribute names
+/// that attribute's column.
+struct Located {
+    position: Position,
+    attributes: Vec<(String, Position)>,
+}
+
+impl Located {
+    fn attribute(&self, name: &str) -> Position {
+        self.attributes
+            .iter()
+            .find(|(attribute, _)| attribute == name)
+            .map_or(self.position, |(_, position)| *position)
+    }
+}
+
 pub(crate) fn check_rendered_view(
     rendered: &RenderedView<'_>,
     registry: &ComponentRegistry,
@@ -108,9 +125,12 @@ struct ElementFrame {
     island: usize,
     morph_control: Option<MorphControlKind>,
     submit_form: Option<usize>,
+    position: Position,
 }
 
 impl ElementFrame {
+    /// Equal for every later check; where the element was written is only
+    /// what a diagnostic about it reports.
     fn same_structure(&self, other: &Self) -> bool {
         self.tag == other.tag
             && self.owner == other.owner
@@ -382,7 +402,7 @@ impl ViewCheck<'_, '_, '_> {
                     offset: origin.offset,
                 };
                 let root = self.root.identity().clone();
-                self.push_located(
+                self.push(
                     DiagnosticCode::BranchLimit,
                     DiagnosticSeverity::Error,
                     position,
@@ -419,7 +439,7 @@ impl ViewCheck<'_, '_, '_> {
             return;
         }
         if let Some(tokens) = tokenize(&text, at_end) {
-            self.commit(state, tokens, text.len());
+            self.commit(state, &text, tokens, text.len());
             return;
         }
         // The text ends inside a tag, a comment, or a raw-text element. The
@@ -434,24 +454,44 @@ impl ViewCheck<'_, '_, '_> {
                 tokenize(text.get(..start).unwrap_or_default(), false).map(|tokens| (start, tokens))
             });
         if let Some((start, tokens)) = settled {
-            self.commit(state, tokens, start);
+            self.commit(state, &text, tokens, start);
         }
         state.failed_at = pending_bytes(&state.pending).count();
     }
 
     /// Checks the tokens of the first `length` bytes of pending text and
     /// keeps the rest pending.
-    fn commit(&mut self, state: &mut PathState<'_>, tokens: Vec<(Token, usize)>, length: usize) {
+    fn commit(
+        &mut self,
+        state: &mut PathState<'_>,
+        text: &str,
+        tokens: Vec<(Token, usize)>,
+        length: usize,
+    ) {
         let map = SourceMap::new(&state.pending);
         let facts = Rc::make_mut(&mut state.facts);
         for (token, offset) in tokens {
-            self.process(facts, token, map.position(offset));
+            let attributes = match &token {
+                Token::TagToken(tag) if tag.kind == TagKind::StartTag => {
+                    attribute_offsets(text, offset)
+                        .into_iter()
+                        .map(|(name, offset)| (name, map.position(offset)))
+                        .collect()
+                }
+                _ => Vec::new(),
+            };
+            let located = Located {
+                position: map.position(offset),
+                attributes,
+            };
+            self.process(facts, token, &located);
         }
         state.pending = split_pending(&state.pending, length);
         state.failed_at = 0;
     }
 
-    fn process(&mut self, facts: &mut HtmlFacts, token: Token, position: Position) {
+    fn process(&mut self, facts: &mut HtmlFacts, token: Token, located: &Located) {
+        let position = located.position;
         if facts.stopped {
             return;
         }
@@ -469,7 +509,7 @@ impl ViewCheck<'_, '_, '_> {
         }
         match token {
             Token::TagToken(tag) if tag.kind == TagKind::StartTag => {
-                self.start_tag(facts, &tag, position);
+                self.start_tag(facts, &tag, located);
             }
             Token::TagToken(tag) if tag.kind == TagKind::EndTag => {
                 let name = tag.name.as_ref().to_ascii_lowercase();
@@ -508,7 +548,8 @@ impl ViewCheck<'_, '_, '_> {
         }
     }
 
-    fn start_tag(&mut self, facts: &mut HtmlFacts, tag: &Tag, position: Position) {
+    fn start_tag(&mut self, facts: &mut HtmlFacts, tag: &Tag, located: &Located) {
+        let position = located.position;
         facts.attributes = facts.attributes.saturating_add(tag.attrs.len());
         if facts.attributes > self.limits.max_attributes() {
             let owner = facts.current_owner(self.root.identity());
@@ -532,16 +573,23 @@ impl ViewCheck<'_, '_, '_> {
                 )
             })
             .collect();
-        if tag_name.contains(DYNAMIC_MARKER)
-            || attributes
-                .iter()
-                .any(|(name, _)| name.contains(DYNAMIC_MARKER))
-        {
+        let positions: Vec<Position> = attributes
+            .iter()
+            .map(|(name, _)| located.attribute(name))
+            .collect();
+        let dynamic_attribute = attributes
+            .iter()
+            .position(|(name, _)| name.contains(DYNAMIC_MARKER));
+        if tag_name.contains(DYNAMIC_MARKER) || dynamic_attribute.is_some() {
             let owner = facts.current_owner(self.root.identity());
             self.push(
                 DiagnosticCode::DynamicStructureUnproved,
                 DiagnosticSeverity::Unproved,
-                position,
+                if tag_name.contains(DYNAMIC_MARKER) {
+                    position
+                } else {
+                    dynamic_attribute.map_or(position, |index| positions[index])
+                },
                 &owner,
             );
         }
@@ -550,12 +598,15 @@ impl ViewCheck<'_, '_, '_> {
         let mut owner = prior_owner.clone();
         let mut island = facts.current_island();
         if let Some((_, component)) = attributes.iter().find(|(name, _)| name == "live:component") {
-            owner = self.resolve_component(component, &attributes, position, &prior_owner);
+            let component_position = located.attribute("live:component");
+            owner =
+                self.resolve_component(component, &attributes, component_position, &prior_owner);
             island = self.next_island;
             self.next_island += 1;
-            facts
-                .freshness
-                .insert(island, IslandFreshness::new(owner.clone(), position));
+            facts.freshness.insert(
+                island,
+                IslandFreshness::new(owner.clone(), component_position),
+            );
             facts
                 .field_declarations
                 .insert(island, IslandFieldDeclarations::default());
@@ -566,7 +617,7 @@ impl ViewCheck<'_, '_, '_> {
             count.most = count.most.saturating_add(1);
             count.owners.insert(owner.clone());
         }
-        if let Some((_, target)) = attributes.iter().find(|(name, _)| {
+        if let Some((name, target)) = attributes.iter().find(|(name, _)| {
             name.strip_prefix("live:")
                 .is_some_and(|name| name.split('.').next() == Some("teleport"))
         }) && let Some(target) = target.strip_prefix('#')
@@ -574,14 +625,15 @@ impl ViewCheck<'_, '_, '_> {
             facts.teleports.push(TeleportIntent {
                 target: target.to_owned(),
                 owner: owner.clone(),
-                position,
+                position: located.attribute(name),
             });
         }
-        observe_freshness(facts, island, &attributes, position);
-        self.observe_upload_model_exclusivity(facts, island, &attributes, position, &owner);
-        let submit_form = self.observe_submit_form(facts, &attributes, position, &owner);
-        self.validate_keys(facts, &attributes, position, &owner);
-        self.validate_element_id(facts, &attributes, island, position, &owner);
+        observe_freshness(facts, island, &attributes, &positions);
+        self.observe_upload_model_exclusivity(facts, island, &attributes, &positions, &owner);
+        let submit_form =
+            self.observe_submit_form(facts, &attributes, &positions, position, &owner);
+        self.validate_keys(facts, &attributes, &positions, &owner);
+        self.validate_element_id(facts, &attributes, island, located, &owner);
         let ancestors: Vec<ComponentName> = std::iter::once(self.root.identity().clone())
             .chain(facts.stack.iter().map(|frame| frame.owner.clone()))
             .collect();
@@ -595,10 +647,11 @@ impl ViewCheck<'_, '_, '_> {
             .iter()
             .filter_map(|frame| frame.morph_control)
             .collect();
-        let (view, line, _) = resolve(self.files, self.root.view(), position);
-        for (name, value) in &attributes {
+        for ((name, value), attribute_position) in attributes.iter().zip(&positions) {
             if name.starts_with("live:") && !matches!(name.as_str(), "live:component" | "live:key")
             {
+                let (view, line, column) =
+                    resolve(self.files, self.root.view(), *attribute_position);
                 let mut context = DirectiveContext {
                     registry,
                     owner: owner_metadata,
@@ -608,6 +661,7 @@ impl ViewCheck<'_, '_, '_> {
                     attributes: &attributes,
                     path: view,
                     line,
+                    column,
                     diagnostics: &mut *self.diagnostics,
                 };
                 validate_directive(name, value, &mut context);
@@ -629,6 +683,7 @@ impl ViewCheck<'_, '_, '_> {
                     owner,
                     island,
                     submit_form,
+                    position,
                 });
             }
         }
@@ -644,6 +699,7 @@ impl ViewCheck<'_, '_, '_> {
         &mut self,
         facts: &mut HtmlFacts,
         attributes: &[(String, String)],
+        positions: &[Position],
         position: Position,
         owner: &ComponentName,
     ) -> Option<usize> {
@@ -660,9 +716,11 @@ impl ViewCheck<'_, '_, '_> {
         };
         let index = form?;
         let entry = facts.submit_forms.entry(index).or_default();
-        for (name, value) in attributes {
+        let mut model_position = None;
+        for ((name, value), attribute_position) in attributes.iter().zip(positions) {
             if name == "live:model" || name.starts_with("live:model.") {
                 entry.fields.insert(value.clone());
+                model_position.get_or_insert(*attribute_position);
             }
         }
         if entry.fields.len() > MAX_SUBMIT_FORM_FIELDS && !entry.reported {
@@ -670,7 +728,7 @@ impl ViewCheck<'_, '_, '_> {
             self.push(
                 DiagnosticCode::SubmitProposalLimit,
                 DiagnosticSeverity::Error,
-                position,
+                model_position.unwrap_or(position),
                 owner,
             );
         }
@@ -682,7 +740,7 @@ impl ViewCheck<'_, '_, '_> {
         facts: &mut HtmlFacts,
         island: usize,
         attributes: &[(String, String)],
-        position: Position,
+        positions: &[Position],
         owner: &ComponentName,
     ) {
         let fields = |directive: &str| {
@@ -711,12 +769,25 @@ impl ViewCheck<'_, '_, '_> {
         declarations.uploads.extend(uploads);
         declarations.models.extend(models);
         if conflicts {
-            self.push(
-                DiagnosticCode::InvalidModifier,
-                DiagnosticSeverity::Error,
-                position,
-                owner,
-            );
+            // The first upload or model binding on the element is the one
+            // that met the other kind.
+            let position = attributes
+                .iter()
+                .zip(positions)
+                .find(|((name, _), _)| {
+                    name.strip_prefix("live:")
+                        .and_then(|suffix| suffix.split('.').next())
+                        .is_some_and(|directive| matches!(directive, "upload" | "model"))
+                })
+                .map(|(_, position)| *position);
+            if let Some(position) = position {
+                self.push(
+                    DiagnosticCode::InvalidModifier,
+                    DiagnosticSeverity::Error,
+                    position,
+                    owner,
+                );
+            }
         }
     }
 
@@ -769,10 +840,14 @@ impl ViewCheck<'_, '_, '_> {
         &mut self,
         facts: &mut HtmlFacts,
         attributes: &[(String, String)],
-        position: Position,
+        positions: &[Position],
         owner: &ComponentName,
     ) {
-        for (_, key) in attributes.iter().filter(|(name, _)| name == "live:key") {
+        for ((_, key), position) in attributes
+            .iter()
+            .zip(positions.iter().copied())
+            .filter(|((name, _), _)| name == "live:key")
+        {
             let checked = (key.contains(CHECKED_KEY_MARKER) || key.contains(CHECKED_DIGEST_MARKER))
                 && !key.contains(DYNAMIC_MARKER);
             let valid = key.len() <= MAX_KEY_BYTES
@@ -812,12 +887,13 @@ impl ViewCheck<'_, '_, '_> {
         facts: &mut HtmlFacts,
         attributes: &[(String, String)],
         island: usize,
-        position: Position,
+        located: &Located,
         owner: &ComponentName,
     ) {
         let Some((_, id)) = attributes.iter().find(|(name, _)| name == "id") else {
             return;
         };
+        let position = located.attribute("id");
         if facts.stack.iter().any(|frame| frame.tag == "template") {
             return;
         }
@@ -866,7 +942,11 @@ impl ViewCheck<'_, '_, '_> {
             return;
         }
         if !facts.stack.is_empty() || facts.loop_depth != 0 {
-            self.push_stack_error(facts, VIEW_START);
+            let unclosed = facts
+                .stack
+                .last()
+                .map_or(VIEW_START, |frame| frame.position);
+            self.push_stack_error(facts, unclosed);
             return;
         }
         for freshness in facts.freshness.values() {
@@ -910,18 +990,6 @@ impl ViewCheck<'_, '_, '_> {
         position: Position,
         component: &ComponentName,
     ) {
-        let (view, line, _) = resolve(self.files, self.root.view(), position);
-        self.diagnostics
-            .push(code, severity, Some(view), line, 1, Some(component));
-    }
-
-    fn push_located(
-        &mut self,
-        code: DiagnosticCode,
-        severity: DiagnosticSeverity,
-        position: Position,
-        component: &ComponentName,
-    ) {
         let (view, line, column) = resolve(self.files, self.root.view(), position);
         self.diagnostics
             .push(code, severity, Some(view), line, column, Some(component));
@@ -932,37 +1000,40 @@ fn observe_freshness(
     facts: &mut HtmlFacts,
     island: usize,
     attributes: &[(String, String)],
-    position: Position,
+    positions: &[Position],
 ) {
     let Some(freshness) = facts.freshness.get_mut(&island) else {
         return;
     };
-    let polls = attributes.iter().any(|(name, _)| {
-        name.strip_prefix("live:")
-            .is_some_and(|suffix| suffix.split('.').next() == Some("poll"))
-    });
-    let stream = attributes
-        .iter()
-        .find(|(name, _)| {
-            name.strip_prefix("live:")
-                .is_some_and(|suffix| suffix.split('.').next() == Some("stream"))
-        })
-        .map(|(name, _)| {
-            if name
-                .split('.')
-                .skip(1)
-                .any(|modifier| modifier == "push-only")
-            {
-                "push-only"
-            } else if name.split('.').skip(1).any(|modifier| modifier == "hybrid") {
-                "hybrid"
-            } else {
-                "default"
-            }
-        });
-    if !polls && stream.is_none() {
+    let directive = |wanted: &str| {
+        attributes
+            .iter()
+            .zip(positions)
+            .find(|((name, _), _)| {
+                name.strip_prefix("live:")
+                    .is_some_and(|suffix| suffix.split('.').next() == Some(wanted))
+            })
+            .map(|((name, _), position)| (name.as_str(), *position))
+    };
+    let poll = directive("poll");
+    let stream_directive = directive("stream");
+    let Some(position) = stream_directive.or(poll).map(|(_, position)| position) else {
         return;
-    }
+    };
+    let polls = poll.is_some();
+    let stream = stream_directive.map(|(name, _)| {
+        if name
+            .split('.')
+            .skip(1)
+            .any(|modifier| modifier == "push-only")
+        {
+            "push-only"
+        } else if name.split('.').skip(1).any(|modifier| modifier == "hybrid") {
+            "hybrid"
+        } else {
+            "default"
+        }
+    });
     let states = std::mem::take(&mut freshness.states);
     for (poll, current) in states.into_keys() {
         let next = match stream {
@@ -1195,6 +1266,65 @@ fn opens_tag(text: &str, start: usize, tag: &Tag) -> bool {
             .chars()
             .next()
             .is_none_or(|next| next.is_ascii_whitespace() || matches!(next, '/' | '>'))
+}
+
+/// Where each attribute of the start tag at `start` is written, by its
+/// lowercase name, first occurrence only, as html5ever keeps the first of a
+/// repeated attribute. The scan follows the HTML attribute syntax only far
+/// enough to place names; html5ever alone decides what the tag holds.
+fn attribute_offsets(text: &str, start: usize) -> Vec<(String, usize)> {
+    let bytes = text.as_bytes();
+    let space = |byte: u8| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0c);
+    let mut index = start.saturating_add(1);
+    while index < bytes.len() && !space(bytes[index]) && !matches!(bytes[index], b'/' | b'>') {
+        index += 1;
+    }
+    let mut attributes: Vec<(String, usize)> = Vec::new();
+    loop {
+        while index < bytes.len() && (space(bytes[index]) || bytes[index] == b'/') {
+            index += 1;
+        }
+        if index >= bytes.len() || bytes[index] == b'>' {
+            return attributes;
+        }
+        let name_start = index;
+        index += 1;
+        while index < bytes.len()
+            && !space(bytes[index])
+            && !matches!(bytes[index], b'/' | b'>' | b'=')
+        {
+            index += 1;
+        }
+        let name = text
+            .get(name_start..index)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let mut after = index;
+        while after < bytes.len() && space(bytes[after]) {
+            after += 1;
+        }
+        if after < bytes.len() && bytes[after] == b'=' {
+            index = after + 1;
+            while index < bytes.len() && space(bytes[index]) {
+                index += 1;
+            }
+            if index < bytes.len() && matches!(bytes[index], b'"' | b'\'') {
+                let quote = bytes[index];
+                index += 1;
+                while index < bytes.len() && bytes[index] != quote {
+                    index += 1;
+                }
+                index = index.saturating_add(1);
+            } else {
+                while index < bytes.len() && !space(bytes[index]) && bytes[index] != b'>' {
+                    index += 1;
+                }
+            }
+        }
+        if !attributes.iter().any(|(existing, _)| *existing == name) {
+            attributes.push((name, name_start));
+        }
+    }
 }
 
 fn raw_text_transition(name: &str) -> TokenSinkResult<()> {
