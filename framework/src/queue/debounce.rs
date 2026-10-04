@@ -11,15 +11,18 @@
 //!
 //! # The window is claimed only once the envelope is queued
 //!
-//! Arming reserves a dispatch its place in the burst, one past the dispatch
-//! that last claimed the window; the owner token is written only after the
-//! driver has accepted the envelope. A dispatch that fails, or is cancelled,
-//! between the two never names the owner, so it cannot make an earlier,
-//! successfully queued envelope look superseded and get it dropped. The token
-//! carries the place, and the worker drops an envelope only for a token from a
-//! *later* place: an envelope that runs before its own claim lands still runs.
-//! Every race between dispatches then costs at worst a duplicate run, never a
-//! lost one, and a failed dispatch has nothing to hand back.
+//! Arming reserves a dispatch its place in the burst from an atomic counter,
+//! one past every place handed out before it; the owner token is written only
+//! after the driver has accepted the envelope. A dispatch that fails, or is
+//! cancelled, between the two never names the owner, so it cannot make an
+//! earlier, successfully queued envelope look superseded and get it dropped.
+//! The token carries the place, and the worker drops an envelope only for a
+//! token from a *later* place: an envelope that runs before its own claim
+//! lands still runs. Because places are reserved, not read off the last
+//! claim, two dispatches that overlap never share a place, and the one that
+//! armed later always outranks the other, whichever claims last. Every race
+//! between dispatches then costs at worst a duplicate run, never a lost one,
+//! and a failed dispatch has nothing to hand back.
 //!
 //! # Why this is not a `Cache::lock`
 //!
@@ -114,6 +117,15 @@ pub(crate) fn first_dispatched_key(key: &str) -> String {
     format!("{key}:first_dispatched_at")
 }
 
+/// The companion key counting the places handed out for `key`.
+///
+/// A prefix, where the stamp above takes a suffix: a debounce id is free
+/// text, so `{key}:place` could be another id's owner key, and an owner token
+/// written over the counter would fail every later increment for that id.
+pub(crate) fn place_key(key: &str) -> String {
+    format!("queue-debounce-place:{key}")
+}
+
 /// Arm (or re-arm) the debounce window for `key`, returning the token this
 /// dispatch will claim it with.
 ///
@@ -124,38 +136,76 @@ pub(crate) fn first_dispatched_key(key: &str) -> String {
 /// deferring the run for at least `max_wait`, in which case the caller queues
 /// the job with no delay at all.
 ///
-/// `after` is the place an earlier dispatch in the same call reserved for
-/// this key. [`Queue::bulk`](crate::queue::Queue::bulk) claims its windows
-/// together after one write, so its later jobs have to be placed after its
-/// earlier ones rather than after a claim that has not landed yet.
+/// The place is reserved here, so jobs armed one after another in one
+/// [`Queue::bulk`](crate::queue::Queue::bulk) call are placed in order
+/// although none of them has claimed the window yet.
 pub(crate) async fn acquire(
     key: &str,
     window: Duration,
     max_wait: Option<Duration>,
-    after: Option<u64>,
 ) -> Result<Debounced, FrameworkError> {
     let ttl = lock_ttl(window);
-    let claimed = current_owner(key).await?;
-    let place = claimed
-        .as_deref()
-        .and_then(place)
-        .unwrap_or(0)
-        .max(after.unwrap_or(0));
+    let place = reserve_place(key, ttl).await?;
     let max_wait_exceeded = max_wait_exceeded(key, ttl, max_wait).await?;
     Ok(Debounced {
-        owner: format!("{}:{}", place.saturating_add(1), uuid::Uuid::new_v4()),
+        owner: format!("{place}:{}", uuid::Uuid::new_v4()),
         max_wait_exceeded,
     })
 }
 
-/// Claim the window for `owner`, whose envelope the driver has accepted.
+/// Reserve this dispatch's place in the burst: one past every place handed
+/// out for `key` before it, whether or not those dispatches have claimed the
+/// window yet.
+///
+/// The place comes from an atomic increment, so no two dispatches share one
+/// and the dispatch that arms later holds the later place. Reading it off
+/// the current claim instead let overlapping dispatches read the same claim:
+/// two pushes tied and their random ids picked the survivor, and an older
+/// bulk that claimed last outranked a newer push that had claimed already.
+///
+/// The counter can restart below a claim that is still live, when it expired
+/// first or the claim predates counters. The reservation then moves the
+/// counter past that claim with a second increment, so every place is still
+/// the result of an atomic increment, and still unique.
+async fn reserve_place(key: &str, ttl: Duration) -> Result<u64, FrameworkError> {
+    let counter = place_key(key);
+    let mut reserved = Cache::increment(&counter, 1).await?;
+    let claimed = current_owner(key).await?.as_deref().and_then(place);
+    if let Some(claimed) = claimed.and_then(|claimed| i64::try_from(claimed).ok())
+        && reserved <= claimed
+    {
+        let behind = claimed
+            .checked_sub(reserved)
+            .and_then(|gap| gap.checked_add(1))
+            .ok_or_else(|| FrameworkError::internal("debounce place counter overflow"))?;
+        reserved = Cache::increment(&counter, behind).await?;
+    }
+    Cache::touch(&counter, ttl).await?;
+    u64::try_from(reserved)
+        .map_err(|_| FrameworkError::internal("debounce place counter went below zero"))
+}
+
+/// Claim the window for `owner`, whose envelope the driver has accepted,
+/// unless a dispatch from a later place has claimed it already.
+///
+/// The check and the write are two steps, so a later claim that lands
+/// between them is overwritten. That costs a duplicate run, never a lost
+/// one: the later dispatch's envelope is not superseded by an earlier place,
+/// so it still runs. The check only spares the common case, a dispatch that
+/// stalled before its claim and finds a newer one already there.
 pub(crate) async fn claim(key: &str, owner: &str, window: Duration) -> Result<(), FrameworkError> {
+    if let Some(current) = current_owner(key).await?
+        && supersedes(&current, owner)
+    {
+        return Ok(());
+    }
     Cache::put(key, &owner, Some(lock_ttl(window))).await
 }
 
 /// Whether the window's token `current` supersedes an envelope stamped with
-/// `envelope`: true only for a token from a later place in the burst, the id
-/// breaking a tie between two dispatches that armed from the same claim.
+/// `envelope`: true only for a token from a later place in the burst. The id
+/// breaks a tie, which only tokens from before places were reserved can
+/// produce.
 ///
 /// A token from before places existed carries only an id. An envelope
 /// stamped with one is judged as it always was, superseded by any other

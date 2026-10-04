@@ -634,7 +634,7 @@ impl Queue {
         // push arms it at the commit, in the same step that writes the
         // envelope, and measures its window from there. It is claimed only
         // after the write below succeeds - see `debounce`'s module docs.
-        let armed = arm_debounce::<J>(&job, &mut env, debounce.as_ref(), None).await?;
+        let armed = arm_debounce::<J>(&job, &mut env, debounce.as_ref()).await?;
         if let Some(armed) = &armed
             && (debounce.is_some()
                 || (matches!(when, AvailableAt::FromJobDelay) && J::delay().is_none()))
@@ -1014,19 +1014,18 @@ impl Queue {
     ) -> Result<(), FrameworkError> {
         let available_at = resolve_job_delay::<J>(crate::clock::now())?;
         let mut envs = Vec::with_capacity(jobs.len());
-        // Per debounce key, the place the last job armed for it reserved, and
-        // the window that job claims once the driver accepts the batch.
-        let mut places: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        // Per debounce key, the window the last job armed for it claims once
+        // the driver accepts the batch. Places are reserved as each job arms,
+        // so the last job armed holds the latest place.
         let mut claims: std::collections::HashMap<String, ArmedWindow> =
             std::collections::HashMap::new();
         for j in jobs {
             let mut env = envelope_for::<J>(&j, available_at, context.clone())?;
-            if let Some(armed) = arm_debounce::<J>(&j, &mut env, None, Some(&places)).await? {
+            if let Some(armed) = arm_debounce::<J>(&j, &mut env, None).await? {
                 // A declared `Job::delay` outranks the window, as on a push.
                 if J::delay().is_none() {
                     env.available_at = armed.available_at;
                 }
-                places.insert(armed.key.clone(), armed.place);
                 claims.insert(armed.key.clone(), armed);
             }
             envs.push(env);
@@ -2050,8 +2049,6 @@ struct ArmedWindow {
     available_at: chrono::DateTime<chrono::Utc>,
     key: String,
     owner: String,
-    /// This dispatch's place in its burst, the one `owner` carries.
-    place: u64,
     window: std::time::Duration,
 }
 
@@ -2079,13 +2076,11 @@ impl ArmedWindow {
 /// it will claim the window with.
 ///
 /// `Ok(None)` means the job is not debounced and the caller's `available_at`
-/// stands. `earlier` maps each key a job earlier in the same call armed to
-/// the place it reserved; see `debounce::acquire`.
+/// stands.
 async fn arm_debounce<J: Job>(
     job: &J,
     env: &mut Envelope,
     options: Option<&debounce::DebounceOptions>,
-    earlier: Option<&std::collections::HashMap<String, u64>>,
 ) -> Result<Option<ArmedWindow>, FrameworkError> {
     let (window, max_wait, id) = match options {
         Some(o) => (o.window, o.max_wait, o.id.clone()),
@@ -2105,9 +2100,7 @@ async fn arm_debounce<J: Job>(
     // window that cannot be represented fails before any cache round trip.
     let window_delay = chrono::Duration::from_std(window)
         .map_err(|e| FrameworkError::internal(format!("debounce window overflow: {e}")))?;
-    let after = earlier.and_then(|earlier| earlier.get(&key).copied());
-    let armed = debounce::acquire(&key, window, max_wait, after).await?;
-    let place = debounce::place(&armed.owner).unwrap_or(0);
+    let armed = debounce::acquire(&key, window, max_wait).await?;
     env.debounce_id = id;
     env.debounce_owner = Some(armed.owner.clone());
     let delay = if armed.max_wait_exceeded {
@@ -2129,7 +2122,6 @@ async fn arm_debounce<J: Job>(
         available_at,
         key,
         owner: armed.owner,
-        place,
         window,
     }))
 }

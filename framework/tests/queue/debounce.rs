@@ -1555,3 +1555,179 @@ async fn bulk_refuses_a_job_declaring_debounce_and_uniqueness() {
     );
     assert_eq!(driver.size().await.expect("size"), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Overlapping dispatches that all succeed keep the one that armed last
+// ---------------------------------------------------------------------------
+
+/// Delegates to a memory driver, except that `bulk_push` parks until released:
+/// a bulk can be held after it armed its windows and before it claims them.
+struct GatedBulkDriver {
+    inner: Arc<MemoryQueueDriver>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl QueueDriver for GatedBulkDriver {
+    async fn push(&self, env: suprnova::queue::Envelope) -> Result<(), FrameworkError> {
+        self.inner.push(env).await
+    }
+    async fn bulk_push(&self, envs: Vec<suprnova::queue::Envelope>) -> Result<(), FrameworkError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.inner.bulk_push(envs).await
+    }
+    async fn pop(&self, vt: Duration) -> Result<Option<Reservation>, FrameworkError> {
+        self.inner.pop(vt).await
+    }
+    async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError> {
+        self.inner.ack(token).await
+    }
+    async fn nack(&self, token: &ReservationToken, delay: Duration) -> Result<(), FrameworkError> {
+        self.inner.nack(token, delay).await
+    }
+}
+
+/// Sol review: places were derived from the claim a dispatch read, so they
+/// were not reserved. Bulk A armed places 1 to 3 and stalled before its
+/// claim; push B, newer, read the same claim, took place 1 and claimed it; A
+/// then claimed place 3, and the worker dropped B's payload, the newest, as
+/// superseded by A's older one.
+#[tokio::test]
+#[serial]
+async fn a_push_made_while_a_bulk_is_claiming_still_wins() {
+    cache_init();
+    SYNC_ORDER_RUNS.store(0, Ordering::SeqCst);
+    SYNC_ORDER_LAST_REVISION.store(0, Ordering::SeqCst);
+    register_job::<SyncOrder>();
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    Queue::set_driver(Arc::new(GatedBulkDriver {
+        inner: driver.clone(),
+        entered: entered.clone(),
+        release: release.clone(),
+    }));
+    let bulk = tokio::spawn(Queue::bulk(
+        (1..=3)
+            .map(|revision| SyncOrder {
+                order_id: 650,
+                revision,
+            })
+            .collect(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("A armed its three jobs and is inside its write");
+
+    Queue::set_driver(driver.clone());
+    Queue::push(SyncOrder {
+        order_id: 650,
+        revision: 4,
+    })
+    .await
+    .expect("B is queued and claims the window");
+    release.notify_one();
+    bulk.await.expect("join").expect("A is queued");
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        worker_cfg(),
+        CancellationToken::new(),
+    ));
+    settle(|| SYNC_ORDER_RUNS.load(Ordering::SeqCst) > 0).await;
+    handle.abort();
+    assert_eq!(
+        SYNC_ORDER_LAST_REVISION.load(Ordering::SeqCst),
+        4,
+        "B armed after every job of A, so B's payload is the one that runs"
+    );
+    assert_eq!(
+        SYNC_ORDER_RUNS.load(Ordering::SeqCst),
+        1,
+        "and A, whose claim came last but from an earlier place, runs nothing"
+    );
+}
+
+/// Parks the first `JobQueueing` after `armed` is set: that dispatch has
+/// armed its window and not yet written its envelope.
+struct HoldQueueing {
+    armed: Arc<std::sync::atomic::AtomicBool>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl suprnova::events::Listener<suprnova::queue::events::JobQueueing> for HoldQueueing {
+    async fn handle(
+        &self,
+        _event: &suprnova::queue::events::JobQueueing,
+    ) -> Result<(), FrameworkError> {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+}
+
+/// Sol review: two pushes that overlap read the same claim and took the same
+/// place, so their random ids decided which payload ran. P1 arms and parks
+/// before its write; P2 arms after it, writes and claims; then P1 writes and
+/// claims. P2 armed last, so P2 is the one that runs.
+#[tokio::test]
+#[serial]
+async fn overlapping_pushes_keep_the_one_that_armed_last() {
+    cache_init();
+    SYNC_ORDER_RUNS.store(0, Ordering::SeqCst);
+    SYNC_ORDER_LAST_REVISION.store(0, Ordering::SeqCst);
+    register_job::<SyncOrder>();
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    EventFacade::listen::<suprnova::queue::events::JobQueueing, _>(Arc::new(HoldQueueing {
+        armed: armed.clone(),
+        entered: entered.clone(),
+        release: release.clone(),
+    }))
+    .await;
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let first = tokio::spawn(Queue::push(SyncOrder {
+        order_id: 651,
+        revision: 1,
+    }));
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("P1 armed its window and parked before its write");
+    Queue::push(SyncOrder {
+        order_id: 651,
+        revision: 2,
+    })
+    .await
+    .expect("P2 is queued and claims the window");
+    release.notify_one();
+    first.await.expect("join").expect("P1 is queued");
+    EventFacade::forget::<suprnova::queue::events::JobQueueing>();
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        worker_cfg(),
+        CancellationToken::new(),
+    ));
+    settle(|| SYNC_ORDER_RUNS.load(Ordering::SeqCst) > 0).await;
+    handle.abort();
+    assert_eq!(
+        SYNC_ORDER_RUNS.load(Ordering::SeqCst),
+        1,
+        "the two dispatches collapse into one run"
+    );
+    assert_eq!(
+        SYNC_ORDER_LAST_REVISION.load(Ordering::SeqCst),
+        2,
+        "and the run is P2's, the dispatch that armed last"
+    );
+}
