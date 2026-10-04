@@ -1,7 +1,7 @@
 # Suprnova Live -- 19 Developer Tooling and Testing
 
 Status: Normative design specification
-Last revised: 2026-09-16
+Last revised: 2026-10-04
 
 ## Scope
 
@@ -468,6 +468,17 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-10-04 -- The checker reads unescaped output from the parsed Askama
+  expression instead of its source text. `safe`, and `escape` or `e` with an
+  escaper Askama maps to its text escaper (`none`, `txt`, `md`, `yml`, the
+  empty string), make a value raw; the raw value is followed through `let`
+  and `set` bindings, `decl` and `let mut` assignments made in nested
+  blocks, macro arguments and defaults, caller content, loop variables,
+  `if let`, and `match` arms, and `raw_safe` is reported where the value is
+  written, at its line and column. A text search had passed
+  `{% let y = x|safe %}{{ y }}`, `x|safe|lower`, and `escape("none")`. A
+  `set` block's name holds escaped text, as Askama 0.16 stores the rendered
+  block as a string and escapes it on output.
 - 2026-09-16 -- The checker renders an empty call block to a macro that
   splices `caller()` as empty caller content, and fails a component whose view
   renders no branch (LIVE-025). The empty caller had rendered zero branches,

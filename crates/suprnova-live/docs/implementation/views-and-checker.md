@@ -50,7 +50,11 @@ Stimulus controllers, or effect execution.
 ## Trusted markup and escaping
 
 Ordinary Askama interpolation uses HTML escaping. The checker rejects raw
-Askama `safe`, including qualified or whitespace-varied forms. Deliberately
+output, classified from the parsed expression: Askama `safe`, including
+qualified and chained forms, and `escape` or `e` with a text escaper such as
+`none`. A raw value is followed through bindings, nested-block assignments,
+macro arguments, caller content, and loop and pattern variables, and reported
+where it is written. Deliberately
 unescaped HTML must be a bounded `TrustedHtml` created from compile-time
 framework markup or output from a `RegisteredSanitizer`. Both paths require an
 explicit bounded `TrustedMarkupReason`; sanitizer output also carries a stable
