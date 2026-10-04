@@ -77,7 +77,6 @@ struct GoogleUserInfo {
     #[serde(default)]
     email_verified: bool,
     name: Option<String>,
-    picture: Option<String>,
 }
 
 /// The Google `OAuthProvider` plugin.
@@ -146,8 +145,7 @@ impl OAuthProvider for GoogleOAuthProvider {
         let ProviderResponse::UserInfo { body } = response else {
             return None;
         };
-        let info: GoogleUserInfo = serde_json::from_str(body).ok()?;
-        info.picture.filter(|url| !url.trim().is_empty())
+        super::oauth_profile_picture(body, "/picture")
     }
 
     async fn revoke(&self, token: &str, hint: TokenHint) -> OAuthResult<()> {
