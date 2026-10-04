@@ -99,6 +99,25 @@ struct IssuedTransport {
     memberships: BTreeMap<String, IssuedMembership>,
 }
 
+impl IssuedTransport {
+    /// Whether no document can still be using this transport: no reader ever
+    /// attached to it, and none of its memberships is open or mid-control.
+    ///
+    /// A browser receives a transport's authority before it opens the socket
+    /// or event stream, and it can stop or leave in between, as a document
+    /// retired during a reconnect backoff does. Only a reader's drop retires a
+    /// transport, so the authority it never used would otherwise hold its
+    /// kind for the life of the host, and every later document, which starts
+    /// again at generation 1, would be refused.
+    fn abandoned(&self) -> bool {
+        !self.reader_active
+            && self
+                .memberships
+                .values()
+                .all(|membership| !membership.open && !membership.control_in_flight)
+    }
+}
+
 struct AsyncState {
     engine: Arc<EngineAsyncFixture>,
     transports: BTreeMap<String, IssuedTransport>,
@@ -106,6 +125,34 @@ struct AsyncState {
     continuity_authorities: BTreeMap<(TransportKind, String), AsyncReferenceAuthority>,
     next_transport: u64,
     retired: bool,
+}
+
+impl AsyncState {
+    /// Removes one transport and returns its memberships' continuity for the
+    /// next transport of the same kind. The caller closes the returned
+    /// document once the lock is released.
+    fn take_transport(&mut self, transport_id: &str) -> Option<IssuedTransport> {
+        let mut transport = self.transports.remove(transport_id)?;
+        let kind = transport.kind;
+        if self
+            .by_kind
+            .get(&kind)
+            .is_some_and(|current| current == transport_id)
+        {
+            self.by_kind.remove(&kind);
+        }
+        for (subscription, mut membership) in std::mem::take(&mut transport.memberships) {
+            membership
+                .authority
+                .close_transport(membership.authority_transport);
+            membership.open = false;
+            self.engine.remove(&membership.engine_authorization);
+            drop(membership.lease.take());
+            self.continuity_authorities
+                .insert((kind, subscription), membership.authority);
+        }
+        Some(transport)
+    }
 }
 
 #[derive(Default)]
@@ -230,29 +277,16 @@ impl TransportReaderLease {
 impl Drop for TransportReaderLease {
     fn drop(&mut self) {
         let mut state = self.state.lock().expect("async runtime lock");
-        let Some(current) = state.transports.get(&self.transport) else {
-            return;
-        };
-        if current.generation != self.generation {
+        if state
+            .transports
+            .get(&self.transport)
+            .is_none_or(|current| current.generation != self.generation)
+        {
             return;
         }
-        let kind = current.kind;
-        let Some(mut transport) = state.transports.remove(&self.transport) else {
+        let Some(mut transport) = state.take_transport(&self.transport) else {
             return;
         };
-        state.by_kind.remove(&kind);
-        let engine = Arc::clone(&state.engine);
-        for (subscription, mut membership) in transport.memberships {
-            membership
-                .authority
-                .close_transport(membership.authority_transport);
-            membership.open = false;
-            engine.remove(&membership.engine_authorization);
-            drop(membership.lease.take());
-            state
-                .continuity_authorities
-                .insert((kind, subscription), membership.authority);
-        }
         drop(state);
         self.emission_changed.notify_waiters();
         tokio::spawn(async move {
@@ -330,6 +364,37 @@ impl AsyncRuntime {
             }
             _ => return Err("transport_facts_invalid"),
         };
+        // A transport of this kind that no document can still be using does
+        // not hold the kind against a request at another generation: it is
+        // retired, and its continuity carries to the replacement. One at the
+        // requested generation is still reused below.
+        let abandoned = {
+            let mut state = self.state.lock().expect("async runtime lock");
+            if state.retired {
+                return Err("transport_retired");
+            }
+            let abandoned = state
+                .by_kind
+                .get(&kind)
+                .filter(|transport_id| {
+                    state
+                        .transports
+                        .get(*transport_id)
+                        .is_some_and(|transport| {
+                            transport.generation != request.transport_generation
+                                && transport.abandoned()
+                        })
+                })
+                .cloned();
+            abandoned.and_then(|transport_id| state.take_transport(&transport_id))
+        };
+        if let Some(mut abandoned) = abandoned {
+            abandoned
+                .document
+                .close()
+                .await
+                .map_err(|_| "transport_retirement_failed")?;
+        }
         let mut state = self.state.lock().expect("async runtime lock");
         if state.retired {
             return Err("transport_retired");
@@ -1920,6 +1985,154 @@ mod tests {
         .await
         .expect("emission barrier")
         .expect("emission scheduled");
+        runtime.retire().await.expect("runtime retires");
+        assert_eq!(resources.current(), 0);
+    }
+
+    fn websocket_create(
+        transport_generation: u64,
+        prior: Option<(&str, u64)>,
+    ) -> TransportCreateRequest {
+        TransportCreateRequest {
+            kind: "websocket".to_owned(),
+            position: prior.map(|(_, sequence)| TransportPosition {
+                epoch: "1".to_owned(),
+                sequence: sequence.to_string(),
+            }),
+            prior_subscription: prior.map(|(subscription, _)| subscription.to_owned()),
+            subscription: "orders".to_owned(),
+            transport_generation,
+        }
+    }
+
+    fn baseline_sequence(created: &Value) -> u64 {
+        created["memberships"][0]["browser_authorization"]["baseline"]["sequence"]
+            .as_str()
+            .expect("baseline sequence")
+            .parse()
+            .expect("decimal baseline sequence")
+    }
+
+    /// Subscribes the first membership over the open socket and returns the
+    /// sequence of the initial envelope the acknowledgment carries.
+    async fn subscribe_first_membership(
+        runtime: &AsyncRuntime,
+        created: &Value,
+        transport_generation: u64,
+    ) -> u64 {
+        let transport = created["transport"].as_str().expect("transport");
+        let membership = &created["memberships"][0];
+        let control = serde_json::to_vec(&json!({
+            "control_nonce": "0000000000000001",
+            "descriptor_binding": membership["descriptor_binding"],
+            "kind": "subscribe",
+            "stream": "orders",
+            "subscription": membership["subscription"],
+            "transport_generation": transport_generation,
+        }))
+        .expect("control JSON");
+        let outcome = runtime
+            .websocket_control(transport, &control)
+            .await
+            .expect("subscribe control");
+        let initial: Value =
+            serde_json::from_slice(&outcome.messages[1]).expect("initial engine envelope");
+        initial["position"]["sequence"]
+            .as_str()
+            .expect("sequence")
+            .parse()
+            .expect("decimal sequence")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reauthorized_websocket_that_never_connects_does_not_refuse_the_next_document() {
+        let resources = Arc::new(ResourceCounter::default());
+        let runtime = AsyncRuntime::new(ReferenceFaultSchedule::None, Arc::clone(&resources))
+            .await
+            .expect("async runtime");
+        let origin = "http://127.0.0.1:4197";
+        let first = runtime
+            .create(websocket_create(1, None), origin)
+            .await
+            .expect("first document transport");
+        let reader = runtime
+            .acquire_reader(
+                first["transport"].as_str().expect("transport"),
+                DocumentTransportKind::WebSocket,
+            )
+            .expect("first document socket");
+        let delivered = subscribe_first_membership(&runtime, &first, 1).await;
+        let subscription = first["memberships"][0]["subscription"]
+            .as_str()
+            .expect("subscription");
+
+        // The socket closes and the document reauthorizes at its next
+        // generation, then stops before it opens the replacement socket.
+        drop(reader);
+        let abandoned = runtime
+            .create(websocket_create(2, Some((subscription, delivered))), origin)
+            .await
+            .expect("reauthorized transport");
+        let abandoned = abandoned["transport"].as_str().expect("transport");
+
+        // Every new document starts again at generation 1.
+        let next = runtime
+            .create(websocket_create(1, None), origin)
+            .await
+            .expect("the next document is authorized");
+        let next_transport = next["transport"].as_str().expect("transport");
+        assert_ne!(next_transport, abandoned);
+        assert_eq!(next["transport_generation"], 1);
+        assert_eq!(baseline_sequence(&next), delivered);
+        assert_eq!(
+            runtime
+                .acquire_reader(abandoned, DocumentTransportKind::WebSocket)
+                .err(),
+            Some("transport_authority_invalid")
+        );
+        let reader = runtime
+            .acquire_reader(next_transport, DocumentTransportKind::WebSocket)
+            .expect("next document socket");
+        assert_eq!(
+            subscribe_first_membership(&runtime, &next, 1).await,
+            delivered + 1,
+            "the next document's first envelope directly succeeds its baseline"
+        );
+        drop(reader);
+        runtime.retire().await.expect("runtime retires");
+        assert_eq!(resources.current(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_new_generation_is_still_refused_while_the_current_socket_is_open() {
+        let resources = Arc::new(ResourceCounter::default());
+        let runtime = AsyncRuntime::new(ReferenceFaultSchedule::None, Arc::clone(&resources))
+            .await
+            .expect("async runtime");
+        let origin = "http://127.0.0.1:4197";
+        let created = runtime
+            .create(websocket_create(1, None), origin)
+            .await
+            .expect("transport");
+        let transport = created["transport"].as_str().expect("transport");
+        let reader = runtime
+            .acquire_reader(transport, DocumentTransportKind::WebSocket)
+            .expect("open socket");
+        assert_eq!(
+            runtime
+                .create(websocket_create(2, None), origin)
+                .await
+                .err(),
+            Some("transport_generation_invalid")
+        );
+        assert_eq!(
+            runtime
+                .create(websocket_create(1, None), origin)
+                .await
+                .expect("same generation")["transport"],
+            transport
+        );
+        drop(reader);
         runtime.retire().await.expect("runtime retires");
         assert_eq!(resources.current(), 0);
     }
