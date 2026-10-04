@@ -669,7 +669,7 @@ fn build_form_request(ctx: &DataCodegen<'_>, struct_opts: &StructOptions) -> Tok
                                 // Form-urlencoded: flatten pairs into a JSON object
                                 // (last value wins on duplicate keys, matching Laravel).
                                 let mut obj = ::suprnova::serde_json::Map::new();
-                                for (k, v) in ::url::form_urlencoded::parse(&body_bytes) {
+                                for (k, v) in ::suprnova::__form_urlencoded::parse(&body_bytes) {
                                     obj.insert(
                                         k.into_owned(),
                                         ::suprnova::serde_json::Value::String(v.into_owned()),
@@ -1441,6 +1441,32 @@ fn build_deserialize(
             (ident, slot, o.names.deserialize.clone(), &f.ty)
         })
         .collect();
+    // How the visitor reads each input field's value. A route parameter of
+    // a 128-bit integer type arrives as its decimal text, because a JSON
+    // number carries at most 64 bits; it is read through a seed that takes
+    // the text as well as a number. Every other field reads its own type.
+    let wide_route_params: Vec<&Ident> = parsed
+        .iter()
+        .filter(|(f, o)| {
+            o.from_route_param.is_some()
+                && matches!(
+                    classify_route_param_type(&f.ty),
+                    RouteParamKind::I128 | RouteParamKind::U128
+                )
+        })
+        .map(|(f, _)| f.ident.as_ref().unwrap())
+        .collect();
+    let read_value = |ident: &Ident, ty: &syn::Type| {
+        if wide_route_params.contains(&ident) {
+            quote! {
+                map.next_value_seed(
+                    ::suprnova::data::route_params::WideInteger::<#ty>::new(),
+                )?
+            }
+        } else {
+            quote!(map.next_value()?)
+        }
+    };
 
     // Required fields - missing key is an error (non-Option, non-Field).
     // Note: reference-typed fields never appear here because build_deserialize
@@ -1456,6 +1482,10 @@ fn build_deserialize(
         .map(|(_, _, name, _)| name.as_str())
         .collect();
     let req_types: Vec<&syn::Type> = required.iter().map(|(_, _, _, ty)| *ty).collect();
+    let req_reads: Vec<TokenStream2> = required
+        .iter()
+        .map(|(ident, _, _, ty)| read_value(ident, ty))
+        .collect();
 
     // Defaultable fields - missing key yields Default::default().
     let defaultable: Vec<&(&Ident, Ident, String, &syn::Type)> = input_fields
@@ -1469,6 +1499,10 @@ fn build_deserialize(
         .map(|(_, _, name, _)| name.as_str())
         .collect();
     let def_types: Vec<&syn::Type> = defaultable.iter().map(|(_, _, _, ty)| *ty).collect();
+    let def_reads: Vec<TokenStream2> = defaultable
+        .iter()
+        .map(|(ident, _, _, ty)| read_value(ident, ty))
+        .collect();
 
     let output_only_idents: Vec<&Ident> = parsed
         .iter()
@@ -1563,12 +1597,12 @@ fn build_deserialize(
                                 )*
                                 #(
                                     #req_names => {
-                                        #req_slots = Some(map.next_value()?);
+                                        #req_slots = Some(#req_reads);
                                     }
                                 )*
                                 #(
                                     #def_names => {
-                                        #def_slots = Some(map.next_value()?);
+                                        #def_slots = Some(#def_reads);
                                     }
                                 )*
                                 #unknown_field_arm
@@ -1637,14 +1671,26 @@ fn build_into_json_resource(ctx: &DataCodegen<'_>, opts: &JsonResourceOptions) -
         })
         .collect();
 
-    // Relationship fields: allow_include=true AND not lazy (Prop fields excluded).
+    // Relationship fields: allow_include=true AND not lazy (Prop fields
+    // excluded). An `input_only` field is never sent, as a relationship no
+    // more than as an attribute: neither its linkage nor, through
+    // `?include=`, the related resource.
     let rel_fields: Vec<(&Ident, String)> = parsed
         .iter()
-        .filter(|(_, fo)| fo.allow_include && fo.lazy.is_none() && !fo.names.skip_serializing)
+        .filter(|(_, fo)| {
+            fo.allow_include && fo.lazy.is_none() && !fo.input_only && !fo.names.skip_serializing
+        })
         .map(|(f, fo)| {
             let ident = f.ident.as_ref().unwrap();
             (ident, fo.names.serialize.clone())
         })
+        .collect();
+    let rel_types: Vec<&syn::Type> = parsed
+        .iter()
+        .filter(|(_, fo)| {
+            fo.allow_include && fo.lazy.is_none() && !fo.input_only && !fo.names.skip_serializing
+        })
+        .map(|(f, _)| &f.ty)
         .collect();
 
     // JSON:API reserves `type` and `id` for the resource object itself: an
@@ -1735,10 +1781,51 @@ fn build_into_json_resource(ctx: &DataCodegen<'_>, opts: &JsonResourceOptions) -
         }
     });
 
+    // The include tree is checked against the types, not against the
+    // values: an empty collection, or one whose relations are all unset,
+    // must still refuse a path no resource here could include.
+    let validated_entries = rel_fields.iter().zip(&rel_types).map(|((_, name), ty)| {
+        quote! {
+            if let ::std::option::Option::Some(subtree) = include_tree.subtree(#name) {
+                <#ty as ::suprnova::resources::PushIncluded>::validate_included(subtree).map_err(
+                    |mut __suprnova_include_err| {
+                        __suprnova_include_err.path = ::std::format!(
+                            "{}.{}",
+                            #name,
+                            __suprnova_include_err.path,
+                        );
+                        __suprnova_include_err
+                    },
+                )?;
+            }
+        }
+    });
+
     quote! {
         impl #impl_generics ::suprnova::resources::IntoJsonResource for #struct_name #ty_generics #where_clause {
             fn resource_type() -> &'static str {
                 #resource_type
+            }
+
+            fn validate_include_tree(
+                include_tree: &::suprnova::resources::IncludeTree,
+            ) -> ::std::result::Result<(), ::suprnova::resources::IncludeResolutionError>
+            where
+                Self: Sized,
+            {
+                const ALLOWED: &[&str] = &[#(#allowed_include_names),*];
+                for (key, _) in include_tree.iter() {
+                    if !ALLOWED.contains(&key) {
+                        return ::std::result::Result::Err(
+                            ::suprnova::resources::IncludeResolutionError {
+                                path: key.to_string(),
+                                on_type: #resource_type_lit,
+                            },
+                        );
+                    }
+                }
+                #(#validated_entries)*
+                ::std::result::Result::Ok(())
             }
 
             fn resource_id(&self) -> ::std::string::String {

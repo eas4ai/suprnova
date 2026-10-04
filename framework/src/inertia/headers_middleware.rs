@@ -27,6 +27,7 @@
 //! [`InertiaVersionMiddleware`](crate::InertiaVersionMiddleware) returns
 //! without ever calling the handler.
 
+use super::error_page_middleware::header_survives_rewrite;
 use crate::http::{HttpResponse, Redirect, Request, Response};
 use crate::middleware::{Middleware, Next};
 use async_trait::async_trait;
@@ -93,9 +94,30 @@ impl Middleware for InertiaHeadersMiddleware {
             // PUT/PATCH/DELETE and leaves GET at 302. A substituted
             // redirect is never a continuation of the original method -
             // the client must issue a GET - so we say so directly.
+            //
+            // The redirect replaces the empty body, not what the handler
+            // decided: its cookies, security and CORS headers, and its error
+            // report carry over, by the rule the error page uses for the
+            // same substitution. `Location` is the redirect's own.
+            let carried: Vec<(String, String)> = http
+                .headers()
+                .filter(|(name, _)| {
+                    header_survives_rewrite(name) && !name.eq_ignore_ascii_case("Location")
+                })
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect();
             let redirect: Response = Redirect::back("/").into();
-            let substituted = redirect.unwrap_or_else(|e| e).status(303);
-            return Ok(ensure_vary_x_inertia(substituted));
+            let substituted = redirect
+                .unwrap_or_else(|e| e)
+                .status(303)
+                .with_headers(carried)
+                .with_error_report_of(http);
+            let substituted = ensure_vary_x_inertia(substituted);
+            return if was_ok {
+                Ok(substituted)
+            } else {
+                Err(substituted)
+            };
         }
 
         let http = ensure_vary_x_inertia(http);

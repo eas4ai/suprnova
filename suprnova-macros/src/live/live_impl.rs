@@ -12,7 +12,7 @@ use syn::{
 use super::attrs::{
     ActionAuthorizationArgs, ActionTransactionArgs, ActionValidationArgs, contains_reference,
     is_field_helper, is_method_helper, parse_action_args, parse_validation_hook_args,
-    validate_registered_name,
+    validate_registered_name, wire_name,
 };
 use super::component::model_codec_tokens;
 use super::expand::enforce_runtime_path_contract;
@@ -182,7 +182,7 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                 ActionTransactionArgs::Required => quote!(Required),
             };
             let argument_fields = action.arguments.iter().map(|argument| {
-                let name = argument.name.to_string();
+                let name = &argument.wire;
                 let codec = model_codec_tokens(&argument.ty);
                 let required = argument.required;
                 quote! {
@@ -214,45 +214,44 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
         .enumerate()
         .map(|(index, action)| {
             let method = &action.method;
-            let decodes = action.arguments.iter().map(|argument| {
-                let ident = &argument.name;
+            // The generated locals take mixed-site spans and the decoded
+            // arguments take generated names, so an argument the
+            // application names `target`, `arguments` or `authorization`
+            // neither shadows them nor is shadowed by them.
+            let target = generated_local("__snv_live_target");
+            let authorization = generated_local("__snv_live_authorization");
+            let arguments = generated_local("__snv_live_arguments");
+            let decoded = generated_locals("__snv_live_argument", action.arguments.len());
+            let decodes = action.arguments.iter().zip(&decoded).map(|(argument, local)| {
                 let ty = &argument.ty;
-                let name = ident.to_string();
+                let name = &argument.wire;
                 quote! {
-                    let #ident: #ty = arguments.decode::<#ty>(#name)?;
+                    let #local: #ty = #arguments.decode::<#ty>(#name)?;
                 }
             });
             let mut invocation_arguments = Vec::new();
             if action.authorization_parameter.is_some() {
-                invocation_arguments.push(quote!(authorization));
+                invocation_arguments.push(quote!(#authorization));
             }
-            invocation_arguments.extend(
-                action
-                    .arguments
-                    .iter()
-                    .map(|argument| {
-                        let name = &argument.name;
-                        quote!(#name)
-                    }),
-            );
+            invocation_arguments.extend(decoded.iter().map(|local| quote!(#local)));
             let invocation = if action.asynchronous {
-                quote!(target.#method(#(#invocation_arguments),*).await)
+                quote!(#target.#method(#(#invocation_arguments),*).await)
             } else {
-                quote!(target.#method(#(#invocation_arguments),*))
+                quote!(#target.#method(#(#invocation_arguments),*))
             };
             quote! {
                 ::suprnova::live::__private::action::ActionEntry::new(
                     metadata.actions()[#index].clone(),
-                    |target, authorization, arguments| {
+                    |#target, #authorization, #arguments| {
                         ::std::boxed::Box::pin(async move {
-                            let target = target
+                            let #target = #target
                                 .as_any_mut()
                                 .downcast_mut::<#self_ty>()
                                 .ok_or_else(
                                     ::suprnova::live::__private::action::ActionError::dispatcher_contract
                                 )?;
                             #(#decodes)*
-                            let _ = authorization;
+                            let _ = #authorization;
                             let output = #invocation;
                             ::suprnova::live::__private::action::IntoActionResult::into_action_result(
                                 output,
@@ -312,15 +311,15 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
         let action_validation_arms = action_validation_hooks.iter().map(|(name, hook)| {
             let name = syn::LitStr::new(name, hook.span);
             let method = &hook.method;
-            let decodes = hook.arguments.iter().map(|argument| {
-                let ident = &argument.name;
+            let decoded = generated_locals("__snv_live_argument", hook.arguments.len());
+            let decodes = hook.arguments.iter().zip(&decoded).map(|(argument, local)| {
                 let ty = &argument.ty;
-                let name = ident.unraw().to_string();
+                let name = &argument.wire;
                 quote! {
-                    let #ident: #ty = request.decode_argument::<#ty>(#name)?;
+                    let #local: #ty = request.decode_argument::<#ty>(#name)?;
                 }
             });
-            let arguments = hook.arguments.iter().map(|argument| &argument.name);
+            let arguments = decoded.iter();
             let invocation = if hook.asynchronous {
                 quote!(target.#method(#(#arguments),*).await)
             } else {
@@ -465,9 +464,10 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             }
         }
     };
-    let tokens = quote! {
-        #item
-
+    // The application's own impl is emitted as written and is not checked:
+    // a string in an action body, or a module of its own, is not a path the
+    // macro generated.
+    let generated = quote! {
         #computed_view_impl
 
         impl ::suprnova::live::__private::component::generated::GeneratedComponentRuntime
@@ -558,20 +558,24 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             #validation_port
         }
     };
-    enforce_runtime_path_contract(&tokens)?;
-    Ok(tokens)
+    enforce_runtime_path_contract(&generated)?;
+    Ok(quote! {
+        #item
+
+        #generated
+    })
 }
 
 fn generate_mount_runtime(mount: &Option<RegisteredMount>) -> TokenStream2 {
     let (expected, decodes, invocation) = if let Some(mount) = mount {
         let expected = mount.parameters.len();
-        let decodes = mount.parameters.iter().map(|parameter| {
+        let decoded = generated_locals("__snv_live_mount", mount.parameters.len());
+        let decodes = mount.parameters.iter().zip(&decoded).map(|(parameter, local)| {
             let name = &parameter.name;
-            let ident = &parameter.ident;
             let ty = &parameter.ty;
             let codec = model_codec_tokens(ty);
             quote! {
-                let #ident: #ty =
+                let #local: #ty =
                     ::suprnova::live::__private::component::generated::decode_model_field(
                         parameters.get(#name).ok_or_else(
                             ::suprnova::live::__private::component::ComponentError::contract_failure,
@@ -581,7 +585,7 @@ fn generate_mount_runtime(mount: &Option<RegisteredMount>) -> TokenStream2 {
             }
         });
         let method = &mount.method;
-        let arguments = mount.parameters.iter().map(|parameter| &parameter.ident);
+        let arguments = decoded.iter();
         let invocation = if mount.asynchronous {
             quote!(Self::#method(#(#arguments),*).await)
         } else {
@@ -914,9 +918,24 @@ struct RegisteredAction {
 }
 
 struct ActionParameter {
-    name: syn::Ident,
+    /// The argument's name in metadata and in the request: unraw, in the
+    /// Live identity grammar.
+    wire: String,
     ty: Type,
     required: bool,
+}
+
+/// A local the generated code introduces for itself. The mixed-site span
+/// keeps it apart from every name in the application's own tokens.
+fn generated_local(name: &str) -> syn::Ident {
+    syn::Ident::new(name, Span::mixed_site())
+}
+
+/// `count` generated locals, `<prefix>_0` onward.
+fn generated_locals(prefix: &str, count: usize) -> Vec<syn::Ident> {
+    (0..count)
+        .map(|index| generated_local(&format!("{prefix}_{index}")))
+        .collect()
 }
 
 struct RegisteredMount {
@@ -970,7 +989,7 @@ fn validate_validation_hooks(
                 .all(|(action, hook)| {
                     let action_ty = &action.ty;
                     let hook_ty = &hook.ty;
-                    action.name == hook.name
+                    action.wire == hook.wire
                         && quote!(#action_ty).to_string() == quote!(#hook_ty).to_string()
                 });
         if !same_contract {
@@ -1045,7 +1064,7 @@ fn extract_action_parameters(
             ));
         }
         parameters.push(ActionParameter {
-            name: pattern.ident.clone(),
+            wire: wire_name(&pattern.ident, "Live action argument")?,
             ty: argument.ty.as_ref().clone(),
             required: option_inner(&argument.ty).is_none(),
         });
@@ -1141,7 +1160,7 @@ fn extract_mount_parameters(method: &ImplItemFn) -> syn::Result<Vec<MountParamet
                 ));
             }
             Ok(MountParameter {
-                name: pattern.ident.unraw().to_string(),
+                name: wire_name(&pattern.ident, "Live mount parameter")?,
                 ident: pattern.ident.clone(),
                 ty: argument.ty.as_ref().clone(),
             })

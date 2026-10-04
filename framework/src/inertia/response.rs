@@ -328,13 +328,25 @@ impl InertiaResponse {
         self
     }
 
+    /// Register `prop` under `key`, replacing any earlier prop there.
+    ///
+    /// Every builder method goes through here. A replacement drops the
+    /// earlier prop's `#[derive(Data)]` include gate with it: the gate
+    /// belongs to the prop `prop_lazy_with_owner` registered, not to the
+    /// key, so a plain prop put under the same key is sent like any other.
+    fn put_prop(&mut self, key: impl Into<String>, prop: Prop) {
+        let key = key.into();
+        self.lazy_owned.shift_remove(&key);
+        self.props.insert(key, prop);
+    }
+
     /// Attach an eager prop. Honors partial-reload filtering per the v3
     /// protocol - when the client sends `X-Inertia-Partial-Data` matching
     /// the same component, this key is included only if it's in that list
     /// (and not in `X-Inertia-Partial-Except`).
     pub fn with<V: Serialize>(mut self, key: impl Into<String>, value: V) -> Self {
         let v = to_value_or_die(&value);
-        self.props.insert(key.into(), Prop::eager(v));
+        self.put_prop(key.into(), Prop::eager(v));
         self
     }
 
@@ -343,7 +355,7 @@ impl InertiaResponse {
     /// narrower set. Maps to Laravel's `Inertia::always($value)`.
     pub fn always<V: Serialize>(mut self, key: impl Into<String>, value: V) -> Self {
         let v = to_value_or_die(&value);
-        self.props.insert(key.into(), Prop::eager(v).always());
+        self.put_prop(key.into(), Prop::eager(v).always());
         self
     }
 
@@ -362,8 +374,7 @@ impl InertiaResponse {
         V: Serialize + 'static,
     {
         let resolver = make_resolver(resolver);
-        self.props
-            .insert(key.into(), Prop::from_resolver(resolver).always());
+        self.put_prop(key.into(), Prop::from_resolver(resolver).always());
         self
     }
 
@@ -388,7 +399,7 @@ impl InertiaResponse {
         V: Serialize + 'static,
     {
         let resolver = make_resolver(resolver);
-        self.props.insert(key.into(), Prop::from_resolver(resolver));
+        self.put_prop(key.into(), Prop::from_resolver(resolver));
         self
     }
 
@@ -417,7 +428,7 @@ impl InertiaResponse {
         field: &'static str,
         prop: Prop,
     ) -> Self {
-        self.props.insert(field.to_string(), prop);
+        self.put_prop(field.to_string(), prop);
         self.lazy_owned
             .insert(field.to_string(), (owner_struct_name, field));
         self
@@ -446,7 +457,7 @@ impl InertiaResponse {
     /// The prop replaces any earlier prop registered under the same key,
     /// like every other builder method.
     pub fn prop(mut self, key: impl Into<String>, prop: Prop) -> Self {
-        self.props.insert(key.into(), prop);
+        self.put_prop(key.into(), prop);
         self
     }
 
@@ -462,12 +473,12 @@ impl InertiaResponse {
         for (k, entry) in props {
             match entry {
                 PropEntry::Eager(v) => {
-                    r.props.insert(k, Prop::eager(v));
+                    r.put_prop(k, Prop::eager(v));
                 }
                 PropEntry::LazyOwned { owner, field, prop }
                 | PropEntry::DeferredOwned { owner, field, prop }
                 | PropEntry::ClosureOwned { owner, field, prop } => {
-                    r.props.insert(k, prop);
+                    r.put_prop(k, prop);
                     r.lazy_owned.insert(field.to_string(), (owner, field));
                 }
             }
@@ -485,8 +496,7 @@ impl InertiaResponse {
         V: Serialize + 'static,
     {
         let resolver = make_resolver(resolver);
-        self.props
-            .insert(key.into(), Prop::from_resolver(resolver).optional());
+        self.put_prop(key.into(), Prop::from_resolver(resolver).optional());
         self
     }
 
@@ -524,7 +534,7 @@ impl InertiaResponse {
         if options.rescue {
             prop = prop.rescue();
         }
-        self.props.insert(key.into(), prop);
+        self.put_prop(key.into(), prop);
         self
     }
 
@@ -557,8 +567,7 @@ impl InertiaResponse {
         strategy: MergeStrategy,
     ) -> Self {
         let v = to_value_or_die(&value);
-        self.props
-            .insert(key.into(), Prop::eager(v).merge_strategy(strategy));
+        self.put_prop(key.into(), Prop::eager(v).merge_strategy(strategy));
         self
     }
 
@@ -598,7 +607,7 @@ impl InertiaResponse {
         V: Serialize + 'static,
     {
         let resolver = make_resolver(resolver);
-        self.props.insert(
+        self.put_prop(
             key.into(),
             Prop::from_resolver(resolver).merge_strategy(strategy),
         );
@@ -644,7 +653,7 @@ impl InertiaResponse {
         if options.fresh {
             prop = prop.fresh();
         }
-        self.props.insert(key.into(), prop);
+        self.put_prop(key.into(), prop);
         self
     }
 
@@ -757,7 +766,7 @@ impl InertiaResponse {
         if let Some(wrap) = wrap_key {
             prop = prop.scroll_wrap(wrap);
         }
-        self.props.insert(key, prop);
+        self.put_prop(key, prop);
         self
     }
 
@@ -807,7 +816,7 @@ impl InertiaResponse {
     ) -> Result<Self, FrameworkError> {
         let key = key.into();
         let v = to_value_or_err(&key, &value)?;
-        self.props.insert(key, Prop::eager(v));
+        self.put_prop(key, Prop::eager(v));
         Ok(self)
     }
 
@@ -819,7 +828,7 @@ impl InertiaResponse {
     ) -> Result<Self, FrameworkError> {
         let key = key.into();
         let v = to_value_or_err(&key, &value)?;
-        self.props.insert(key, Prop::eager(v).always());
+        self.put_prop(key, Prop::eager(v).always());
         Ok(self)
     }
 
@@ -835,8 +844,7 @@ impl InertiaResponse {
     ) -> Result<Self, FrameworkError> {
         let key = key.into();
         let v = to_value_or_err(&key, &value)?;
-        self.props
-            .insert(key, Prop::eager(v).merge_strategy(strategy));
+        self.put_prop(key, Prop::eager(v).merge_strategy(strategy));
         Ok(self)
     }
 
@@ -994,7 +1002,7 @@ impl InertiaResponse {
     /// Not part of the stable public API.
     #[doc(hidden)]
     pub fn __add_eager(&mut self, key: String, value: Value) {
-        self.props.insert(key, Prop::eager(value));
+        self.put_prop(key, Prop::eager(value));
     }
 
     /// Resolve the builder into an [`HttpResponse`] using request state.
@@ -1515,6 +1523,11 @@ async fn resolve_props(
 
     let mut tasks: Vec<TaskFuture> = Vec::new();
     let now_ms = crate::clock::now().timestamp_millis();
+    // The keys that reach the page, in registration order. Eager values
+    // land in `materialized` at once and resolver values only after every
+    // task finishes, so the map alone records which source was faster,
+    // not which prop came first. Dotted keys compose in this order below.
+    let mut registered: Vec<String> = Vec::new();
 
     for (key, prop) in props {
         // The absent sentinel (`when_loaded!` on an unloaded relation)
@@ -1840,6 +1853,7 @@ async fn resolve_props(
         // client whole even when the request's `X-Inertia-Partial-Data`
         // names a nested path inside it.
         let narrow_value = prop.visibility() != Visibility::Always && !is_errors_bag;
+        registered.push(key.clone());
         match prop.into_source() {
             // Unreachable: handled at the top of the loop. Listed so the
             // match stays exhaustive without a panic.
@@ -1945,17 +1959,35 @@ async fn resolve_props(
         }
     }
 
+    // Put the values back in registration order: `errors` first, where
+    // the session seed put it, then every prop in the order it was
+    // registered, so `dotted::unpack_map` composes a later dotted key over
+    // an earlier parent whether either one was eager or resolver-backed.
+    let mut ordered = serde_json::Map::with_capacity(materialized.len());
+    if let Some(errors) = materialized.remove(ERRORS_KEY) {
+        ordered.insert(ERRORS_KEY.to_string(), errors);
+    }
+    for key in registered {
+        if let Some(value) = materialized.remove(&key) {
+            ordered.insert(key, value);
+        }
+    }
+    ordered.extend(materialized);
+    let mut materialized = ordered;
+
     // `X-Inertia-Error-Bag` scoping. Apply AFTER all props have
     // resolved so a handler-provided `errors` prop (via
     // `.with("errors", {...})`) gets correctly wrapped. Without this
     // post-pass, the seeded empty object would be wrapped here but
-    // overwritten by the user prop, silently losing the bag.
+    // overwritten by the user prop, silently losing the bag. The value is
+    // wrapped in place: moving the key would move another prop out of
+    // registration order.
     if let Some(bag) = error_bag
-        && let Some(errors_val) = materialized.remove(ERRORS_KEY)
+        && let Some(errors_val) = materialized.get_mut(ERRORS_KEY)
     {
         let mut wrapper = serde_json::Map::new();
-        wrapper.insert(bag.to_string(), errors_val);
-        materialized.insert(ERRORS_KEY.to_string(), Value::Object(wrapper));
+        wrapper.insert(bag.to_string(), errors_val.take());
+        *errors_val = Value::Object(wrapper);
     }
 
     // Dot-key nesting - Laravel's `Arr::set`-based `resolveArrayableProperties`
