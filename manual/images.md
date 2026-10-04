@@ -257,6 +257,13 @@ more, and the default driver bounds that too:
 - A file or stored source is read no further than
   `IMAGE_MAX_ALLOC_BYTES`, even when the size its storage reports is
   wrong or missing, as it is for a pipe.
+- A JPEG's Extended XMP segments are counted before it decodes. The JPEG
+  decoder keeps every segment of an unfinished series and re-reads all of
+  them after each marker, so the work grows with the square of the
+  segment count: 100,000 one-byte segments, about 8 MB, ask for billions
+  of comparisons. The default driver counts the bytes those passes would
+  read and refuses the JPEG when that is over `IMAGE_MAX_ALLOC_BYTES`. A
+  complete series, as cameras and editors write one, is far below it.
 
 ### What a decode costs
 

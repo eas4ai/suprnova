@@ -158,6 +158,10 @@ pub struct ImageConfig {
     /// decoders hold more than the RGBA they return, and refuses an image
     /// whose estimate is over it. The `magick` driver hands it to
     /// ImageMagick's own memory limits. Source files are capped at it too.
+    ///
+    /// The built-in driver also caps at it the bytes its JPEG decoder reads
+    /// while reassembling Extended XMP metadata, which grow with the square
+    /// of the segment count rather than with their size.
     pub max_alloc_bytes: u64,
     /// Wall-clock seconds an ImageMagick invocation may run for.
     ///
