@@ -151,3 +151,49 @@ async fn postmark_encodes_attachments_as_base64_with_filename_and_content_type()
         .unwrap();
     assert_eq!(decoded, b"%PDF-1.4\n%test-content");
 }
+
+/// A provider endpoint that redirects to another origin must not receive
+/// the server token there. reqwest strips only `Authorization` and cookies
+/// on a cross-origin redirect, so `x-postmark-server-token` would follow,
+/// with the whole message on a 307. The vendor client follows no redirect:
+/// the 3xx is the provider's error.
+#[tokio::test]
+#[serial]
+async fn postmark_does_not_follow_a_redirect_to_another_origin() {
+    let elsewhere = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MessageID": "stolen",
+            "ErrorCode": 0,
+            "Message": "OK"
+        })))
+        .mount(&elsewhere)
+        .await;
+    let endpoint = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(307)
+                .insert_header("location", format!("{}/email", elsewhere.uri()).as_str()),
+        )
+        .mount(&endpoint)
+        .await;
+
+    let transport = PostmarkMailTransport::with_endpoint("secret-server-token", endpoint.uri());
+    let _ = Mail::set_transport(Arc::new(transport));
+    let result = Mail::to("alice@example.org").send(Bing::default()).await;
+
+    let leaked = elsewhere.received_requests().await.unwrap();
+    assert!(
+        leaked.is_empty(),
+        "the other origin received {} request(s), the first with token {:?}",
+        leaked.len(),
+        leaked
+            .first()
+            .and_then(|r| r.headers.get("x-postmark-server-token").cloned())
+    );
+    let err = result.expect_err("a redirect is not a delivery");
+    assert!(
+        err.to_string().contains("307"),
+        "the status is reported: {err}"
+    );
+}

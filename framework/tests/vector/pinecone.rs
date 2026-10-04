@@ -902,3 +902,39 @@ async fn integration_control_plane_resolves_a_real_index_host() {
         "the data plane must be reached over TLS, got {host}"
     );
 }
+
+/// An index host that redirects to another origin must not receive the
+/// `Api-Key` there. reqwest strips only `Authorization` and cookies on a
+/// cross-origin redirect, so the key would follow, with the query body on a
+/// 307. The vendor client follows no redirect.
+#[tokio::test]
+async fn a_redirect_to_another_origin_does_not_carry_the_api_key() {
+    let elsewhere = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "matches": [] })))
+        .mount(&elsewhere)
+        .await;
+    let index = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(307)
+                .insert_header("location", format!("{}/query", elsewhere.uri()).as_str()),
+        )
+        .mount(&index)
+        .await;
+
+    let result = driver_against(&index)
+        .similar(TEST_INDEX, vec![0.1, 0.2, 0.3], 3)
+        .await;
+
+    let leaked = elsewhere.received_requests().await.unwrap();
+    assert!(
+        leaked.is_empty(),
+        "the other origin received {} request(s), the first with Api-Key {:?}",
+        leaked.len(),
+        leaked
+            .first()
+            .and_then(|r| r.headers.get("api-key").cloned())
+    );
+    assert!(result.is_err(), "a redirect is not an answer: {result:?}");
+}
