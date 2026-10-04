@@ -116,8 +116,22 @@ fn token_only_registry() -> MiddlewareRegistry {
 /// published the id through `set_auth_user`, which is a silent no-op
 /// without a `SessionMiddleware`-installed session scope, so
 /// `AuthMiddleware::new()` always saw a guest and returned 401.
+///
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, and the session-guard and remember-me tests of
+/// this binary run without one.
 #[test]
 fn valid_bearer_token_reaches_handler_without_session_middleware() {
+    crate::own_process::run_alone(
+        "bearer_token_without_session::valid_bearer_token_reaches_handler_without_session_middleware_child",
+    );
+}
+
+#[test]
+fn valid_bearer_token_reaches_handler_without_session_middleware_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     LazyLock::force(&SETUP);
 
     RT.block_on(async {
@@ -165,8 +179,21 @@ fn valid_bearer_token_reaches_handler_without_session_middleware() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, and the session-guard and remember-me tests of
+/// this binary run without one.
 #[test]
 fn valid_bearer_does_not_satisfy_stateful_basic() {
+    crate::own_process::run_alone(
+        "bearer_token_without_session::valid_bearer_does_not_satisfy_stateful_basic_child",
+    );
+}
+
+#[test]
+fn valid_bearer_does_not_satisfy_stateful_basic_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     LazyLock::force(&SETUP);
 
     RT.block_on(async {
@@ -226,8 +253,22 @@ fn valid_bearer_does_not_satisfy_stateful_basic() {
 /// Assertion 2: the same stack with NO `Authorization` header returns 401.
 /// Passes before and after the fix - proves the fix did not simply disable
 /// the gate.
+///
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, and the session-guard and remember-me tests of
+/// this binary run without one.
 #[test]
 fn missing_authorization_header_returns_401_without_session_middleware() {
+    crate::own_process::run_alone(
+        "bearer_token_without_session::missing_authorization_header_returns_401_without_session_middleware_child",
+    );
+}
+
+#[test]
+fn missing_authorization_header_returns_401_without_session_middleware_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     LazyLock::force(&SETUP);
 
     RT.block_on(async {
@@ -330,8 +371,22 @@ async fn serve_scoped(registry: MiddlewareRegistry, headers: &[(&str, &str)]) ->
 /// nobody. A request-wide bearer cache shared by every token guard answered
 /// `admin_api` with the `api` guard's user, so the route let the token in as
 /// an admin.
+///
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, and the session-guard and remember-me tests of
+/// this binary run without one.
 #[test]
 fn a_second_token_guard_never_answers_with_the_first_guards_user() {
+    crate::own_process::run_alone(
+        "bearer_token_without_session::a_second_token_guard_never_answers_with_the_first_guards_user_child",
+    );
+}
+
+#[test]
+fn a_second_token_guard_never_answers_with_the_first_guards_user_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     LazyLock::force(&SETUP);
 
     RT.block_on(TestContainer::scope(async {
@@ -384,8 +439,22 @@ fn a_second_token_guard_never_answers_with_the_first_guards_user() {
 /// Assertion 3: the same stack with a syntactically valid but unknown
 /// bearer token returns 401. Passes before and after the fix - proves the
 /// fix did not simply disable the gate.
+///
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, and the session-guard and remember-me tests of
+/// this binary run without one.
 #[test]
 fn unknown_bearer_token_returns_401_without_session_middleware() {
+    crate::own_process::run_alone(
+        "bearer_token_without_session::unknown_bearer_token_returns_401_without_session_middleware_child",
+    );
+}
+
+#[test]
+fn unknown_bearer_token_returns_401_without_session_middleware_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     LazyLock::force(&SETUP);
 
     RT.block_on(async {

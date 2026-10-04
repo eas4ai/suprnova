@@ -545,8 +545,21 @@ fn response_set_cookies(response: &suprnova::HttpResponse) -> Vec<String> {
         .collect()
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn remembered_recovery_promotion_rollback_retires_carrier_and_preserves_pending_session() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::remembered_recovery_promotion_rollback_retires_carrier_and_preserves_pending_session_child",
+    );
+}
+
+#[test]
+fn remembered_recovery_promotion_rollback_retires_carrier_and_preserves_pending_session_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -655,8 +668,21 @@ fn remembered_recovery_promotion_rollback_retires_carrier_and_preserves_pending_
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn remembered_promotion_retirement_failure_still_suppresses_the_carrier() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::remembered_promotion_retirement_failure_still_suppresses_the_carrier_child",
+    );
+}
+
+#[test]
+fn remembered_promotion_retirement_failure_still_suppresses_the_carrier_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -721,8 +747,21 @@ fn remembered_promotion_retirement_failure_still_suppresses_the_carrier() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn remembered_promotion_cookie_construction_failure_retires_carrier_before_migration() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::remembered_promotion_cookie_construction_failure_retires_carrier_before_migration_child",
+    );
+}
+
+#[test]
+fn remembered_promotion_cookie_construction_failure_retires_carrier_before_migration_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -826,8 +865,21 @@ fn remembered_promotion_cookie_construction_failure_retires_carrier_before_migra
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn promotion_commit_ack_unknown_expires_client_state_and_reconciles_replacement() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::promotion_commit_ack_unknown_expires_client_state_and_reconciles_replacement_child",
+    );
+}
+
+#[test]
+fn promotion_commit_ack_unknown_expires_client_state_and_reconciles_replacement_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -903,8 +955,21 @@ fn promotion_commit_ack_unknown_expires_client_state_and_reconciles_replacement(
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn recovery_promotion_write_failure_preserves_pending_session_for_retry() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::recovery_promotion_write_failure_preserves_pending_session_for_retry_child",
+    );
+}
+
+#[test]
+fn recovery_promotion_write_failure_preserves_pending_session_for_retry_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1032,8 +1097,21 @@ fn recovery_promotion_write_failure_preserves_pending_session_for_retry() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn totp_promotion_write_failure_preserves_pending_session_and_replay_claim() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::totp_promotion_write_failure_preserves_pending_session_and_replay_claim_child",
+    );
+}
+
+#[test]
+fn totp_promotion_write_failure_preserves_pending_session_and_replay_claim_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1104,8 +1182,21 @@ fn totp_promotion_write_failure_preserves_pending_session_and_replay_claim() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn complete_challenge_rotates_session_id_and_csrf() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::complete_challenge_rotates_session_id_and_csrf_child",
+    );
+}
+
+#[test]
+fn complete_challenge_rotates_session_id_and_csrf_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1144,8 +1235,21 @@ fn complete_challenge_rotates_session_id_and_csrf() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn complete_challenge_dispatches_login_and_authenticated_and_challenged() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::complete_challenge_dispatches_login_and_authenticated_and_challenged_child",
+    );
+}
+
+#[test]
+fn complete_challenge_dispatches_login_and_authenticated_and_challenged_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1171,8 +1275,21 @@ fn complete_challenge_dispatches_login_and_authenticated_and_challenged() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn complete_challenge_with_remember_true_reissues_remember_me_cookie() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::complete_challenge_with_remember_true_reissues_remember_me_cookie_child",
+    );
+}
+
+#[test]
+fn complete_challenge_with_remember_true_reissues_remember_me_cookie_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1232,8 +1349,21 @@ fn complete_challenge_with_remember_true_reissues_remember_me_cookie() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn complete_challenge_survives_remember_issue_failure_without_claiming_remembered_login() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::complete_challenge_survives_remember_issue_failure_without_claiming_remembered_login_child",
+    );
+}
+
+#[test]
+fn complete_challenge_survives_remember_issue_failure_without_claiming_remembered_login_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1304,8 +1434,21 @@ fn complete_challenge_survives_remember_issue_failure_without_claiming_remembere
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn complete_challenge_with_remember_false_does_not_issue_remember_me_cookie() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::complete_challenge_with_remember_false_does_not_issue_remember_me_cookie_child",
+    );
+}
+
+#[test]
+fn complete_challenge_with_remember_false_does_not_issue_remember_me_cookie_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1350,8 +1493,21 @@ fn complete_challenge_with_remember_false_does_not_issue_remember_me_cookie() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn complete_challenge_with_bad_code_records_single_brute_force_attempt() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::complete_challenge_with_bad_code_records_single_brute_force_attempt_child",
+    );
+}
+
+#[test]
+fn complete_challenge_with_bad_code_records_single_brute_force_attempt_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1370,8 +1526,21 @@ fn complete_challenge_with_bad_code_records_single_brute_force_attempt() {
         assert_eq!(attempt_rows(&user_id, true).await, 5);
     });
 }
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn complete_challenge_fails_closed_when_attempt_admission_cannot_persist() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::complete_challenge_fails_closed_when_attempt_admission_cannot_persist_child",
+    );
+}
+
+#[test]
+fn complete_challenge_fails_closed_when_attempt_admission_cannot_persist_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1399,8 +1568,21 @@ fn complete_challenge_fails_closed_when_attempt_admission_cannot_persist() {
             .expect("the unread code is still valid");
     });
 }
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn complete_challenge_cancels_attempt_after_totp_read_error() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::complete_challenge_cancels_attempt_after_totp_read_error_child",
+    );
+}
+
+#[test]
+fn complete_challenge_cancels_attempt_after_totp_read_error_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1430,8 +1612,21 @@ fn complete_challenge_cancels_attempt_after_totp_read_error() {
         assert_not_dispatched::<AccountLocked>(|event| event.email == email);
     });
 }
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn complete_challenge_cancels_attempt_after_recovery_read_error() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::complete_challenge_cancels_attempt_after_recovery_read_error_child",
+    );
+}
+
+#[test]
+fn complete_challenge_cancels_attempt_after_recovery_read_error_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1461,8 +1656,21 @@ fn complete_challenge_cancels_attempt_after_recovery_read_error() {
         assert_not_dispatched::<AccountLocked>(|event| event.email == email);
     });
 }
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn cancellation_failure_returns_state_uncertain_and_keeps_capacity_reserved() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::cancellation_failure_returns_state_uncertain_and_keeps_capacity_reserved_child",
+    );
+}
+
+#[test]
+fn cancellation_failure_returns_state_uncertain_and_keeps_capacity_reserved_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1510,8 +1718,21 @@ fn cancellation_failure_returns_state_uncertain_and_keeps_capacity_reserved() {
         );
     });
 }
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn complete_challenge_caps_concurrent_proof_evaluation_at_attempt_limit() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::complete_challenge_caps_concurrent_proof_evaluation_at_attempt_limit_child",
+    );
+}
+
+#[test]
+fn complete_challenge_caps_concurrent_proof_evaluation_at_attempt_limit_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1545,8 +1766,21 @@ fn complete_challenge_caps_concurrent_proof_evaluation_at_attempt_limit() {
         );
     });
 }
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn threshold_crossing_invalid_challenge_dispatches_account_locked() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::threshold_crossing_invalid_challenge_dispatches_account_locked_child",
+    );
+}
+
+#[test]
+fn threshold_crossing_invalid_challenge_dispatches_account_locked_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1582,8 +1816,21 @@ fn threshold_crossing_invalid_challenge_dispatches_account_locked() {
         );
     });
 }
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn threshold_reservation_with_valid_challenge_resets_without_lock_event() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::threshold_reservation_with_valid_challenge_resets_without_lock_event_child",
+    );
+}
+
+#[test]
+fn threshold_reservation_with_valid_challenge_resets_without_lock_event_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1606,8 +1853,21 @@ fn threshold_reservation_with_valid_challenge_resets_without_lock_event() {
         assert_eq!(attempt_rows(&user_id, false).await, 0);
     });
 }
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn complete_challenge_with_bad_code_dispatches_failed_event_and_no_login() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::complete_challenge_with_bad_code_dispatches_failed_event_and_no_login_child",
+    );
+}
+
+#[test]
+fn complete_challenge_with_bad_code_dispatches_failed_event_and_no_login_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -1637,8 +1897,21 @@ fn complete_challenge_with_bad_code_dispatches_failed_event_and_no_login() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
 #[test]
 fn complete_challenge_rejects_locked_account_without_checking_code() {
+    crate::own_process::run_alone(
+        "two_factor_challenge_flow::complete_challenge_rejects_locked_account_without_checking_code_child",
+    );
+}
+
+#[test]
+fn complete_challenge_rejects_locked_account_without_checking_code_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;

@@ -1,4 +1,9 @@
 //! Auth errors must not become the legacy providerless ID-only mode.
+//!
+//! The legacy-provider and providerless tests run in their own processes
+//! under plain `cargo test` (`own_process_async::delegate`): they need a
+//! process with no `AuthManager` in the global container, and other tests of
+//! this binary register one there.
 
 use std::any::Any;
 use std::convert::Infallible;
@@ -179,6 +184,14 @@ async fn named_provider_error_text_does_not_enable_providerless_mode() {
 
 #[tokio::test]
 async fn legacy_provider_error_text_does_not_enable_providerless_mode() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "legacy_provider_error_text_does_not_enable_providerless_mode",
+    )
+    .await
+    {
+        return;
+    }
     TestContainer::scope(async {
         TestContainer::bind::<dyn UserProvider>(Arc::new(Provider { fail: true }));
         assert_eq!(protected_status().await, 500);
@@ -188,6 +201,14 @@ async fn legacy_provider_error_text_does_not_enable_providerless_mode() {
 
 #[tokio::test]
 async fn truly_providerless_persisted_id_still_reaches_handler() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "truly_providerless_persisted_id_still_reaches_handler",
+    )
+    .await
+    {
+        return;
+    }
     TestContainer::scope(async {
         assert_eq!(protected_status().await, 200);
     })
@@ -196,6 +217,14 @@ async fn truly_providerless_persisted_id_still_reaches_handler() {
 
 #[tokio::test]
 async fn legacy_provider_valid_identity_still_reaches_handler() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "legacy_provider_valid_identity_still_reaches_handler",
+    )
+    .await
+    {
+        return;
+    }
     TestContainer::scope(async {
         TestContainer::bind::<dyn UserProvider>(Arc::new(Provider { fail: false }));
         assert_eq!(protected_status().await, 200);
@@ -205,6 +234,11 @@ async fn legacy_provider_valid_identity_still_reaches_handler() {
 
 #[tokio::test]
 async fn providerless_login_id_remains_supported() {
+    if crate::own_process_async::delegate(module_path!(), "providerless_login_id_remains_supported")
+        .await
+    {
+        return;
+    }
     TestContainer::scope(async {
         session_scope_for_test(new_session_slot_for_test(), async {
             Auth::login_id("7").expect("providerless login_id");
