@@ -117,7 +117,7 @@ The framework registers a small set of commands itself. Linking the framework in
 | `--help` / `-h` | List available commands; per-subcommand `--help` is built by clap from the typed args. |
 | `--version`   | Print the version registered by `set_version` (typically your app's `CARGO_PKG_VERSION`). Omitted entirely if `set_version` was never called. |
 
-`db:seed` runs whatever you've registered in `bootstrap::register()` with `suprnova::seed::register::<MySeeder>()`. On an empty registry it prints a warning and returns `Ok(())` - invoking `db:seed` before registering seeders is a benign user mistake, not a programmer error.
+`db:seed` runs whatever you've registered in `bootstrap::register()` with `suprnova::seed::register::<MySeeder>()`. On an empty registry a bare `db:seed` prints a warning and returns `Ok(())` - invoking `db:seed` before registering seeders is a benign user mistake, not a programmer error. A targeted run, `db:seed --class=<Name>`, fails with the not-found error when no seeder of that name is registered, whether or not other seeders are.
 
 `db:seed` reports progress on a targeted run using
 `suprnova::two_column_detail`, which renders a name, a dot leader, and a
