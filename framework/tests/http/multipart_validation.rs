@@ -2020,3 +2020,61 @@ async fn a_part_the_field_takes_after_a_left_out_one_is_still_checked() {
     .await;
     assert_eq!(key(&errors, "pages.1"), "validation-max-file");
 }
+
+// ── PAR-043: a text part over the in-memory limit is a request-wide 413 ──
+
+static NOTES_HANDLER_RAN: AtomicBool = AtomicBool::new(false);
+
+#[derive(MultipartRequest)]
+// Its own cap, far above the text limit, so only the text limit can answer.
+#[multipart(max_body_bytes = 64 * 1024 * 1024)]
+struct Notes {
+    #[field("count")]
+    count: u32,
+    #[field("bio")]
+    bio: String,
+}
+
+async fn notes(req: Request) -> Response {
+    let form = Notes::from_request(req).await?;
+    NOTES_HANDLER_RAN.store(true, Ordering::SeqCst);
+    Ok(HttpResponse::json(
+        json!({ "count": form.count, "bio": form.bio.len() }),
+    ))
+}
+
+#[tokio::test]
+async fn a_text_part_over_the_in_memory_limit_answers_413_and_stops_the_read() {
+    let app = App::new(Router::new().post("/notes", notes));
+
+    // A field failure first, then a text part that never ends.
+    let mut prefix = text_part("count", "three");
+    prefix.extend_from_slice(&part_head("bio", None));
+    let mut chunks = vec![prefix];
+    let prefix_chunks = chunks.len();
+    chunks.extend((0..64).map(|_| vec![b'x'; STREAM_CHUNK]));
+    // The default in-memory limit is crossed inside the 9th text chunk.
+    let crossing =
+        prefix_chunks + suprnova::http::upload::DEFAULT_UPLOAD_SPILL_THRESHOLD / STREAM_CHUNK + 1;
+
+    let reply = send(&app, Outgoing::post_chunks("/notes", chunks).unfinished()).await;
+
+    assert_eq!(
+        reply.status,
+        413,
+        "the text limit bounds the whole request: {}",
+        reply.text()
+    );
+    assert!(reply.text().contains("in-memory limit"), "{}", reply.text());
+    assert!(
+        reply.json().get("errors").is_none(),
+        "a request-wide limit wins over the field failure before it: {}",
+        reply.text()
+    );
+    assert!(
+        reply.chunks_sent <= crossing + 6,
+        "the read stops after the crossing chunk ({crossing}); the client had sent {}",
+        reply.chunks_sent
+    );
+    assert!(!NOTES_HANDLER_RAN.load(Ordering::SeqCst), "the handler ran");
+}

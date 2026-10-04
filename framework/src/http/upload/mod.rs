@@ -31,7 +31,8 @@
 //! value that does not parse, a file a validator refuses - answers 422
 //! with [`ValidationErrors`] under the field's input name, so a form can
 //! show it under the field. A limit on the whole request - the body's
-//! byte cap, the part ceiling, a field's `max_count` - answers 413.
+//! byte cap, the part ceiling, a field's `max_count`, a text part's
+//! in-memory limit - answers 413.
 
 use crate::error::{FrameworkError, ValidationErrors};
 use crate::validation::message::ValidationMessage;
@@ -114,6 +115,11 @@ pub fn global_max_multipart_body_bytes() -> usize {
 /// `tempfile::NamedTempFile` so the framework never materialises an
 /// arbitrarily large body in RAM.
 ///
+/// A text part cannot spill: form text must fit in memory, so a text part
+/// over this value answers 413, as a body over its cap does. Lowering the
+/// threshold to keep less of each file in memory lowers the largest text
+/// field accepted with it.
+///
 /// Setting `0` is special: it means "use [`DEFAULT_UPLOAD_SPILL_THRESHOLD`]".
 /// Setting `usize::MAX` effectively disables spilling (every part is
 /// buffered fully - only do this if you're certain about your body cap).
@@ -183,9 +189,9 @@ pub fn global_max_multipart_parts() -> usize {
 /// since process start.
 ///
 /// A monotonically increasing process-global counter, useful as an
-/// upload-pressure signal. Oversized *text* parts are rejected at the
-/// in-memory spill threshold and never spill, so this counter reflects
-/// only file parts that legitimately exceeded the threshold.
+/// upload-pressure signal. Oversized *text* parts are rejected with HTTP
+/// 413 at the in-memory spill threshold and never spill, so this counter
+/// reflects only file parts that legitimately exceeded the threshold.
 pub fn upload_tempfiles_spilled_total() -> usize {
     UPLOAD_TEMPFILES_SPILLED.load(Ordering::SeqCst)
 }
@@ -208,8 +214,10 @@ pub struct MultipartLimits<'a> {
     /// against many-tiny-parts flooding.
     pub max_parts: usize,
     /// Per-part in-memory byte threshold before a file part spills to a
-    /// temp file. A text part that crosses this threshold is rejected
-    /// (HTTP 400) rather than spilled.
+    /// temp file. A text part that crosses this threshold is rejected with
+    /// HTTP 413 rather than spilled, at the chunk that crossed it: like the
+    /// byte cap, it bounds the request's memory, so it is not a field
+    /// error.
     pub spill_threshold: usize,
     /// Per-field count ceilings keyed by wire field name. When a field
     /// reaches its ceiling, the next part carrying that name is rejected
@@ -472,9 +480,18 @@ pub enum MultipartValue {
     NonUtf8Text(Vec<u8>),
 }
 
-/// Internal: the parser's per-part output before classification into
-/// `MultipartValue::File` vs `MultipartValue::Text`. Keeps the
-/// inner-loop signature small.
+/// Internal: what `collect_part` read from one part. A text part never
+/// leaves memory, so only a file part carries a backing that may be a temp
+/// file.
+enum Collected {
+    /// A text part's bytes, before they are checked as UTF-8.
+    Text(Vec<u8>),
+    /// A file part.
+    File(CollectedPart),
+}
+
+/// Internal: a file part as the parser read it, before it becomes a
+/// `MultipartValue::File`. Keeps the inner-loop signature small.
 struct CollectedPart {
     backing: PartBacking,
     size: u64,
@@ -484,20 +501,12 @@ struct CollectedPart {
 
 /// Internal: the byte buffer underlying a `CollectedPart`. Either an
 /// in-memory `Vec<u8>` (for small parts) or a `NamedTempFile` (for
-/// spilled parts). Converted to [`UploadedFileBacking`] (file) or a
-/// `String` (text) at the end of `collect_part`.
+/// spilled parts). Converted to [`UploadedFileBacking`] by the parse loop.
 enum PartBacking {
     Memory(Vec<u8>),
     Disk(NamedTempFile),
 }
 
-/// Stream a single part out of `field`, spilling to a temp file once
-/// the accumulated buffer crosses `spill_threshold` bytes.
-///
-/// Updates `*budget.used` after each chunk and short-circuits with a
-/// 413 if the running total exceeds `budget.cap`. Validators see the
-/// bounded sniff buffer + current accumulated size and may also
-/// short-circuit.
 /// Translate a multer error into a `FrameworkError`, distinguishing "the
 /// client sent something malformed" (400) from "we cut the stream off
 /// ourselves for exceeding the raw byte cap" (413).
@@ -538,6 +547,13 @@ struct BodyBudget<'a> {
     raw_cap_tripped: &'a AtomicBool,
 }
 
+/// Stream a single part out of `field`, spilling a file part to a temp file
+/// once the accumulated buffer crosses `spill_threshold` bytes.
+///
+/// Updates `*budget.used` after each chunk and short-circuits with a 413 if
+/// the running total exceeds `budget.cap`, or if a text part crosses
+/// `spill_threshold`. Validators see the bounded sniff buffer + current
+/// accumulated size and may also short-circuit.
 async fn collect_part<F>(
     field: &mut multer::Field<'_>,
     name: &str,
@@ -546,7 +562,7 @@ async fn collect_part<F>(
     budget: &mut BodyBudget<'_>,
     is_text: bool,
     check_chunks: bool,
-) -> Result<CollectedPart, FrameworkError>
+) -> Result<Collected, FrameworkError>
 where
     F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
 {
@@ -590,16 +606,20 @@ where
                 if mem.len() > spill_threshold {
                     // A text part must fit in memory: the spill threshold
                     // is a sizing hint for opaque file payloads, not for
-                    // arbitrary form fields. Reject an oversized text part
+                    // arbitrary form fields. Refuse an oversized text part
                     // here, the moment it crosses the threshold, instead
-                    // of streaming the rest to a temp file only to reject
-                    // it after the part is fully consumed.
+                    // of streaming the rest to a temp file only to refuse
+                    // it after the part is fully consumed. It bounds the
+                    // request's memory, as the body cap does, so it is a
+                    // request-wide 413 rather than a field error; the body
+                    // cap, checked above, answers when one chunk crosses
+                    // both.
                     if is_text {
                         return Err(FrameworkError::Domain {
                             message: format!(
-                                "text field '{name}' exceeded the {spill_threshold}-byte in-memory limit; reject as oversized"
+                                "text field '{name}' exceeds the {spill_threshold}-byte in-memory limit (cap)"
                             ),
-                            status_code: 400,
+                            status_code: 413,
                         });
                     }
                     UPLOAD_TEMPFILES_SPILLED.fetch_add(1, Ordering::SeqCst);
@@ -640,6 +660,12 @@ where
         }
     }
 
+    if is_text {
+        // The loop refuses a text part at the threshold, before it could
+        // spill, so all of its bytes are in `mem`.
+        return Ok(Collected::Text(mem));
+    }
+
     let inferred_extension = if sniff.is_empty() {
         None
     } else {
@@ -661,12 +687,12 @@ where
         PartBacking::Memory(mem)
     };
 
-    Ok(CollectedPart {
+    Ok(Collected::File(CollectedPart {
         backing,
         size,
         sniff,
         inferred_extension,
-    })
+    }))
 }
 
 /// Stream the body of `req` into a `MultipartPayload`, capped at
@@ -693,7 +719,8 @@ where
 /// - 400 if the request is malformed (missing content-type, bad boundary)
 /// - 413 if a declared `Content-Length`, the accumulated body size, the
 ///   number of parts, or the parts of one field (`per_field_max_counts`)
-///   exceed the configured ceiling, before the body is read further
+///   exceed the configured ceiling, or a text part exceeds
+///   `spill_threshold`, before the body is read further
 /// - 422 [`FrameworkError::Validation`] when `per_field_validator` refuses
 ///   a file with [`FrameworkError::invalid_upload`]: the message goes under
 ///   the part's input name, a trailing `[]` replaced by the part's
@@ -952,6 +979,10 @@ where
             }
         };
 
+        // Classification: presence of `filename=` in Content-Disposition
+        // is the canonical marker of a file part. Text parts may carry
+        // a `Content-Type`, so we don't use `mime.is_some()` as the
+        // discriminator.
         let collected = collect_part(
             &mut field,
             &name,
@@ -975,43 +1006,25 @@ where
             other => other,
         })?;
 
-        // Classification: presence of `filename=` in Content-Disposition
-        // is the canonical marker of a file part. Text parts may carry
-        // a `Content-Type`, so we don't use `mime.is_some()` as the
-        // discriminator.
-        let value = if file_name.is_some() {
-            let backing = match collected.backing {
-                PartBacking::Memory(v) => UploadedFileBacking::Memory(Bytes::from(v)),
-                PartBacking::Disk(t) => UploadedFileBacking::Disk(t),
-            };
-            MultipartValue::File {
-                backing,
-                size: collected.size,
-                file_name,
-                content_type: mime,
-                inferred_extension: collected.inferred_extension,
-                sniff: collected.sniff,
-            }
-        } else {
-            // Text parts must fit in memory - the spill threshold is a
-            // sizing hint for opaque file payloads, not arbitrary form
-            // fields. A multi-MiB text field is an attack signal: reject
-            // with 400.
-            let buf: Vec<u8> = match collected.backing {
-                PartBacking::Memory(v) => v,
-                PartBacking::Disk(_) => {
-                    return Err(FrameworkError::Domain {
-                        message: format!(
-                            "text field '{name}' exceeded spill threshold ({spill_threshold} bytes); reject as oversized"
-                        ),
-                        status_code: 400,
-                    });
+        let value = match collected {
+            Collected::File(part) => {
+                let backing = match part.backing {
+                    PartBacking::Memory(v) => UploadedFileBacking::Memory(Bytes::from(v)),
+                    PartBacking::Disk(t) => UploadedFileBacking::Disk(t),
+                };
+                MultipartValue::File {
+                    backing,
+                    size: part.size,
+                    file_name,
+                    content_type: mime,
+                    inferred_extension: part.inferred_extension,
+                    sniff: part.sniff,
                 }
-            };
-            match String::from_utf8(buf) {
+            }
+            Collected::Text(bytes) => match String::from_utf8(bytes) {
                 Ok(text) => MultipartValue::Text(text),
                 Err(not_utf8) => MultipartValue::NonUtf8Text(not_utf8.into_bytes()),
-            }
+            },
         };
 
         // The field takes the first part that does not leave its file out,

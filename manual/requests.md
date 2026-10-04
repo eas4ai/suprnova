@@ -649,11 +649,15 @@ pub struct Gallery {
 ```
 
 The (`max_count` + 1)-th part with that name returns HTTP `413` before
-allocating, so the extra part never reaches `Vec` growth. The three limits
-on the whole request - the body's byte cap, the part ceiling and a field's
-`max_count` - all answer `413` without reading the body further. When one
-chunk crosses the byte cap and a file's `MaxSize` together, the `413`
-wins.
+allocating, so the extra part never reaches `Vec` growth. The four limits
+on the whole request - the body's byte cap, the part ceiling, a field's
+`max_count`, and the in-memory limit on a text part - all answer `413`
+without reading the body further. Form text must fit in memory, so a text
+part longer than the spill threshold (2 MiB by default, set with
+`suprnova::http::upload::set_global_upload_spill_threshold`) bounds the
+request the way the byte cap does, as PHP's `post_max_size` does for
+Laravel. When one chunk crosses the byte cap and a file's `MaxSize`
+together, the `413` wins.
 
 ### Why Suprnova diverges
 
