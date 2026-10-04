@@ -10,6 +10,14 @@
 //! ([`super::TwoFactorLockout`]) no longer count, which also retires the
 //! reservation of a request that died before it settled.
 //!
+//! Inside a user's lock every statement either reads, inserts, or names
+//! rows by primary key. On MySQL and MariaDB, under REPEATABLE READ, a
+//! delete or update that selects rows by a range of the `user_id` index
+//! takes gap locks that reach into neighbouring users' keys, and
+//! concurrent admissions for different users then deadlock each other's
+//! inserts. Expired rows are therefore deleted by id after the admission
+//! commits, outside the lock.
+//!
 //! The counter belongs to the second factor alone. A successful password
 //! check does not touch it, so wrong codes cannot be washed out by signing
 //! in with the password again, and it works with no Magnetar engine
@@ -17,8 +25,8 @@
 
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, DatabaseTransaction, DbErr, EntityTrait, PaginatorTrait,
-    QueryFilter, TransactionTrait,
+    ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseTransaction, DbErr, EntityTrait,
+    PaginatorTrait, QueryFilter, QuerySelect, TransactionTrait,
 };
 
 use super::TwoFactorLockout;
@@ -152,23 +160,31 @@ where
 }
 
 /// Reserve one attempt for `user_id`, or report it locked.
+///
+/// Only attempts inside the window count. The expired ones are deleted
+/// after the reservation commits, by id and outside the lock; a failure to
+/// delete them leaves rows that no longer count.
 pub(crate) async fn admit(user_id: &str) -> Result<Admission, FrameworkError> {
     let lockout = TwoFactorLockout::resolve()?;
     let owner = user_id.to_owned();
-    locked(user_id, move |transaction| {
+    let (admission, expired) = locked(user_id, move |transaction| {
         Box::pin(async move {
             let now = crate::clock::now();
-            attempt::Entity::delete_many()
-                .filter(attempt::Column::UserId.eq(owner.as_str()))
-                .filter(attempt::Column::AttemptedAt.lte(window_floor(now, lockout)))
-                .exec(transaction)
-                .await?;
+            let floor = window_floor(now, lockout);
             let counted = attempt::Entity::find()
                 .filter(attempt::Column::UserId.eq(owner.as_str()))
+                .filter(attempt::Column::AttemptedAt.gt(floor))
                 .count(transaction)
                 .await?;
+            let expired = attempt_ids(
+                transaction,
+                attempt::Entity::find()
+                    .filter(attempt::Column::UserId.eq(owner.as_str()))
+                    .filter(attempt::Column::AttemptedAt.lte(floor)),
+            )
+            .await?;
             if counted >= u64::from(lockout.max_attempts()) {
-                return Ok(Admission::Locked);
+                return Ok((Admission::Locked, expired));
             }
             let id = uuid::Uuid::new_v4().to_string();
             attempt::Entity::insert(attempt::ActiveModel {
@@ -179,10 +195,61 @@ pub(crate) async fn admit(user_id: &str) -> Result<Admission, FrameworkError> {
             })
             .exec_without_returning(transaction)
             .await?;
-            Ok(Admission::Admitted(Reservation { id, user_id: owner }))
+            Ok((
+                Admission::Admitted(Reservation { id, user_id: owner }),
+                expired,
+            ))
         })
     })
-    .await
+    .await?;
+    purge_expired(expired).await;
+    Ok(admission)
+}
+
+/// The ids of the attempts `query` selects, read without locking anything.
+async fn attempt_ids(
+    connection: &impl ConnectionTrait,
+    query: sea_orm::Select<attempt::Entity>,
+) -> Result<Vec<String>, DbErr> {
+    query
+        .select_only()
+        .column(attempt::Column::Id)
+        .into_tuple::<String>()
+        .all(connection)
+        .await
+}
+
+/// Delete attempt rows by primary key. A key lookup locks only the rows it
+/// names, never a gap another user's insert needs.
+async fn delete_attempts(connection: &impl ConnectionTrait, ids: Vec<String>) -> Result<(), DbErr> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    attempt::Entity::delete_many()
+        .filter(attempt::Column::Id.is_in(ids))
+        .exec(connection)
+        .await?;
+    Ok(())
+}
+
+/// Best-effort removal of attempts that fell out of the window.
+async fn purge_expired(ids: Vec<String>) {
+    if ids.is_empty() {
+        return;
+    }
+    let outcome = match DB::connection() {
+        Ok(db) => delete_attempts(db.inner(), ids)
+            .await
+            .map_err(|e| e.to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    if let Err(error) = outcome {
+        tracing::warn!(
+            error = %error,
+            "could not delete expired two-factor attempts; they no longer count and \
+             the next admission retries"
+        );
+    }
 }
 
 /// The reserved attempt's code was wrong: count it as a failure.
@@ -223,16 +290,15 @@ pub(crate) async fn record_success(reservation: &Reservation) -> Result<(), Fram
     let owner = reservation.user_id.clone();
     locked(&reservation.user_id, move |transaction| {
         Box::pin(async move {
-            attempt::Entity::delete_many()
-                .filter(attempt::Column::Id.eq(id.as_str()))
-                .exec(transaction)
-                .await?;
-            attempt::Entity::delete_many()
-                .filter(attempt::Column::UserId.eq(owner.as_str()))
-                .filter(attempt::Column::Failed.eq(true))
-                .exec(transaction)
-                .await?;
-            Ok(())
+            let mut ids = attempt_ids(
+                transaction,
+                attempt::Entity::find()
+                    .filter(attempt::Column::UserId.eq(owner.as_str()))
+                    .filter(attempt::Column::Failed.eq(true)),
+            )
+            .await?;
+            ids.push(id);
+            delete_attempts(transaction, ids).await
         })
     })
     .await
@@ -262,10 +328,12 @@ pub(crate) async fn clear(user_id: &str) -> Result<bool, FrameworkError> {
                 .filter(attempt::Column::AttemptedAt.gt(window_floor(crate::clock::now(), lockout)))
                 .count(transaction)
                 .await?;
-            attempt::Entity::delete_many()
-                .filter(attempt::Column::UserId.eq(owner.as_str()))
-                .exec(transaction)
-                .await?;
+            let ids = attempt_ids(
+                transaction,
+                attempt::Entity::find().filter(attempt::Column::UserId.eq(owner.as_str())),
+            )
+            .await?;
+            delete_attempts(transaction, ids).await?;
             Ok(failed_attempts >= u64::from(lockout.max_attempts()))
         })
     })

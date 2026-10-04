@@ -66,7 +66,7 @@ async fn connect(engine: Engine) -> DatabaseConnection {
     // Enough connections for every parallel request to hold its own, so the
     // requests contend for the row lock rather than for the pool.
     options
-        .max_connections(10)
+        .max_connections(24)
         .min_connections(0)
         .connect_timeout(Duration::from_secs(5))
         .acquire_timeout(Duration::from_secs(10))
@@ -136,6 +136,12 @@ async fn enrolled(
 }
 
 fn totp_code_for(otpauth_url: &str) -> String {
+    totp_code_steps_ahead(otpauth_url, 0)
+}
+
+/// The code `steps` timesteps after the current one; within the skew a
+/// verification accepts, and unused by a confirmation of the current code.
+fn totp_code_steps_ahead(otpauth_url: &str, steps: u64) -> String {
     use totp_rs::{Algorithm, Secret, TOTP};
     let url = url::Url::parse(otpauth_url).expect("otpauth url");
     let secret = url
@@ -144,10 +150,12 @@ fn totp_code_for(otpauth_url: &str) -> String {
         .map(|(_, value)| value.into_owned())
         .expect("secret query parameter");
     let bytes = Secret::Encoded(secret).to_bytes().expect("decode secret");
-    TOTP::new(Algorithm::SHA1, 6, 1, 30, bytes, None, "user".into())
-        .expect("totp")
-        .generate_current()
-        .expect("generate code")
+    let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, bytes, None, "user".into()).expect("totp");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock is after the epoch")
+        .as_secs();
+    totp.generate(now + steps * 30)
 }
 
 /// Status of one verify outcome: 200 accepted, 401 rejected, or the error.
@@ -268,6 +276,56 @@ async fn a_correct_code_under_contention_is_accepted_once(engine: Engine) {
     );
 }
 
+/// Sixteen users admit attempts at the same moment, round after round,
+/// then all succeed at once. Their counters have nothing to do with each
+/// other, so no request may fail for a lock another user's request holds:
+/// on MySQL a range delete inside the admission took gap locks that
+/// spanned other users' keys and deadlocked their inserts.
+async fn many_users_admitting_at_once_never_deadlock(engine: Engine) {
+    const USERS: usize = 16;
+    const ROUNDS: usize = 4;
+    let (_guard, _conn, first, first_enrollment) = enrolled(engine, "many-users").await;
+    let mut users = vec![(first, first_enrollment)];
+    for _ in 1..USERS {
+        let user = EngineUser {
+            id: format!("many-users-{}", uuid::Uuid::new_v4().simple()),
+            email: "many-users@example.test".to_owned(),
+        };
+        let enrollment = TwoFactor::enroll(&user).await.expect("enroll");
+        TwoFactor::confirm(&user, &totp_code_for(&enrollment.otpauth_url))
+            .await
+            .expect("confirm");
+        users.push((user, enrollment));
+    }
+
+    let mut failures = Vec::new();
+    for round in 0..ROUNDS {
+        let guesses = users
+            .iter()
+            .map(|(user, _)| TwoFactor::verify(user, "000000"));
+        for outcome in futures::future::join_all(guesses).await {
+            if status(&outcome) != 401 {
+                failures.push(format!("wrong-code round {round}: {outcome:?}"));
+            }
+        }
+    }
+    let successes = users.iter().map(|(user, enrollment)| async move {
+        TwoFactor::verify(user, &totp_code_steps_ahead(&enrollment.otpauth_url, 1)).await
+    });
+    for outcome in futures::future::join_all(successes).await {
+        if status(&outcome) != 200 {
+            failures.push(format!("success round: {outcome:?}"));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} of {} requests failed: {failures:#?}",
+        failures.len(),
+        USERS * (ROUNDS + 1)
+    );
+}
+
 /// The attempt migration runs over an existing attempt table, as every
 /// framework migration must when an app registers it over a schema that
 /// already has it.
@@ -326,6 +384,13 @@ async fn postgres_a_correct_code_under_contention_is_accepted_once() {
 #[tokio::test]
 #[serial]
 #[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_many_users_admitting_at_once_never_deadlock() {
+    many_users_admitting_at_once_never_deadlock(Engine::Postgres).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
 async fn postgres_the_attempt_migration_runs_over_an_existing_table() {
     the_attempt_migration_runs_over_an_existing_table(Engine::Postgres).await;
 }
@@ -358,6 +423,13 @@ async fn mysql_parallel_wrong_codes_evaluate_at_most_the_threshold() {
 #[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
 async fn mysql_a_correct_code_under_contention_is_accepted_once() {
     a_correct_code_under_contention_is_accepted_once(Engine::Mysql).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_many_users_admitting_at_once_never_deadlock() {
+    many_users_admitting_at_once_never_deadlock(Engine::Mysql).await;
 }
 
 #[tokio::test]
