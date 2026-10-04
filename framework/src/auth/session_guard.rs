@@ -97,6 +97,17 @@ impl SessionGuard {
     /// committed after the password was read, so the login is refused with
     /// `401`. The recorded epoch, never one read later, is what the session
     /// is issued at.
+    /// The Magnetar engine's admission of a sign-in through this guard:
+    /// the default guard's sign-ins are refused for an account whose
+    /// second factor they did not prove. Other guards are not the engine's
+    /// to admit.
+    async fn admit_host_sign_in(&self, user_id: &str) -> Result<(), FrameworkError> {
+        if self.name == Auth::default_guard_name() {
+            crate::magnetar_integration::admit_host_sign_in(user_id).await?;
+        }
+        Ok(())
+    }
+
     async fn login_at_epoch(
         &self,
         user: Arc<dyn Authenticatable>,
@@ -324,7 +335,13 @@ impl StatefulGuard for SessionGuard {
 
         let creds = credentials.as_value();
         if let Some(user) = self.provider.retrieve_by_credentials(&creds).await? {
+            // A once-only sign-in proves a password, not a Magnetar second
+            // factor, so the engine's refusal applies as it does to a login.
+            // Held until the password is checked, so it never answers a
+            // wrong password.
+            let admission = self.admit_host_sign_in(&user.get_auth_identifier()).await;
             if self.provider.validate_credentials(&*user, &creds).await? {
+                admission?;
                 let user_id = user.get_auth_identifier();
                 request_state::set_guard_user(&self.name, user);
                 request_state::set_guard_via_remember(&self.name, false);
@@ -384,6 +401,7 @@ impl StatefulGuard for SessionGuard {
         match self.provider.retrieve_by_id(id).await? {
             Some(user) => {
                 let user_id = user.get_auth_identifier();
+                self.admit_host_sign_in(&user_id).await?;
                 request_state::set_guard_user(&self.name, user.clone());
                 request_state::set_guard_via_remember(&self.name, false);
                 EventFacade::dispatch(events::Authenticated {

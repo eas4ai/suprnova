@@ -198,8 +198,10 @@ framework's word for who signed in, and no Magnetar plugin can reach it.
   a `500` that names the cause.
 - **Second factors.** An account with a confirmed Magnetar second factor is
   refused with `409`, because the framework login did not prove it. The
-  session guards, `Auth::login_remember` and `TwoFactor` ask before they log
-  in or read a code, so a refusal fires no `Login` event, consumes no code,
+  session guards, including the once-only paths (`Auth::once`,
+  `Auth::once_using_id` and `BasicAuthMiddleware::once()`),
+  `Auth::login_remember` and `TwoFactor` ask before they log in or read a
+  code, so a refusal fires no `Login` event, consumes no code,
   and issues no remember-me credential. `Auth::login_id` cannot await the engine, so its refusal arrives
   at the end of the request, which then stores nothing and retires a
   remember-me credential issued during it.

@@ -336,6 +336,24 @@ fn router() -> Router {
                 Err(error) => failure(error),
             }
         })
+        .get("/once", |request: Request| async move {
+            let credentials =
+                Credentials::password(header(&request, "x-email"), header(&request, "x-password"));
+            match Auth::once(&credentials).await {
+                Ok(true) => Ok(HttpResponse::text(
+                    Auth::id().unwrap_or_else(|| "guest".to_owned()),
+                )),
+                Ok(false) => Ok(HttpResponse::text("invalid credentials").status(401)),
+                Err(error) => failure(error),
+            }
+        })
+        .get("/once-using-id", |request: Request| async move {
+            match Auth::once_using_id(&header(&request, "x-user-id")).await {
+                Ok(Some(user)) => Ok(HttpResponse::text(user.get_auth_identifier())),
+                Ok(None) => Ok(HttpResponse::text("unknown").status(404)),
+                Err(error) => failure(error),
+            }
+        })
         .get("/whoami", |_request: Request| async {
             Ok(HttpResponse::text(
                 Auth::id().unwrap_or_else(|| "guest".to_owned()),
@@ -352,12 +370,25 @@ struct Browser {
 
 impl Browser {
     async fn open() -> Self {
+        Self::serve(false).await
+    }
+
+    /// A server that also runs `BasicAuthMiddleware::once()` on every route.
+    async fn open_with_basic_once() -> Self {
+        Self::serve(true).await
+    }
+
+    async fn serve(basic_once: bool) -> Self {
         let mut config = SessionConfig::default();
         config.cookie_secure = false;
         // The framework's database driver: it migrates a promoted 2FA
         // session atomically, as production does.
         let middleware = SessionMiddleware::new(config);
-        let registry = Arc::new(MiddlewareRegistry::new().append(middleware));
+        let mut registry = MiddlewareRegistry::new().append(middleware);
+        if basic_once {
+            registry = registry.append(suprnova::BasicAuthMiddleware::once());
+        }
+        let registry = Arc::new(registry);
         let router = Arc::new(router());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -997,4 +1028,68 @@ async fn a_password_reset_during_the_password_check_cancels_the_challenge() {
     assert_ne!(status, 200, "no challenge for the reset sign-in completes");
     assert_eq!(browser.whoami().await, "guest");
     assert_eq!(session_count(&account).await, 0);
+}
+
+fn basic_authorization(email: &str, password: &str) -> String {
+    use base64::Engine as _;
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!("{email}:{password}"))
+    )
+}
+
+/// HTTP Basic "once" authenticates a request without a session. It proves
+/// a password, not a Magnetar second factor, so an account with one is
+/// refused; one without still gets through.
+#[tokio::test]
+async fn basic_once_refuses_an_account_with_a_magnetar_second_factor() {
+    let guarded = setup().await;
+    enroll_magnetar_factor(&guarded).await;
+    let plain = setup().await;
+    let mut browser = Browser::open_with_basic_once().await;
+
+    let (status, body) = browser
+        .get(
+            "/whoami",
+            &[(
+                "authorization",
+                &basic_authorization(&guarded.email, PASSWORD),
+            )],
+        )
+        .await;
+    assert_eq!(status, 409, "{body}");
+
+    let (status, body) = browser
+        .get(
+            "/whoami",
+            &[(
+                "authorization",
+                &basic_authorization(&plain.email, PASSWORD),
+            )],
+        )
+        .await;
+    assert_eq!((status, body.as_str()), (200, plain.id.as_str()));
+}
+
+/// `Auth::once` and `Auth::once_using_id` authenticate one request without a
+/// session; neither proves a Magnetar second factor, so both refuse an
+/// account that has one.
+#[tokio::test]
+async fn auth_once_refuses_an_account_with_a_magnetar_second_factor() {
+    let account = setup().await;
+    enroll_magnetar_factor(&account).await;
+    let mut browser = Browser::open().await;
+
+    let (status, body) = browser
+        .get(
+            "/once",
+            &[("x-email", &account.email), ("x-password", PASSWORD)],
+        )
+        .await;
+    assert_eq!(status, 409, "Auth::once: {body}");
+
+    let (status, body) = browser
+        .get("/once-using-id", &[("x-user-id", &account.id)])
+        .await;
+    assert_eq!(status, 409, "Auth::once_using_id: {body}");
 }
