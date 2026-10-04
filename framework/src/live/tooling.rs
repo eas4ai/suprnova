@@ -36,8 +36,8 @@ use super::tooling_protocol::{
     DiagnosticReport, EndReport, Envelope, LimitReport, MAX_ASSET_BYTES, MAX_ASSETS,
     MAX_COMPONENTS, MAX_DIAGNOSTICS, MAX_ENVELOPES, MAX_LINE_BYTES, MAX_TEMPLATE_DEPTH,
     MAX_TEMPLATE_FILE_BYTES, MAX_TEMPLATE_FILES, MAX_TEMPLATE_ROOTS, MAX_TEMPLATE_TOTAL_BYTES,
-    MAX_TOTAL_BYTES, Operation, Outcome, PROTOCOL_VERSION, ReadinessReport, RuntimeReport,
-    Severity, UploadHostReport,
+    MAX_TOTAL_BYTES, MIN_PROTOCOL_VERSION, Operation, Outcome, PROTOCOL_VERSION, ReadinessReport,
+    RuntimeReport, Severity, UploadHostReport,
 };
 use super::upload_host::LiveUploadHost;
 use crate::App;
@@ -191,6 +191,9 @@ impl ToolRequest {
 
 struct Emitter<'sink> {
     sink: &'sink mut dyn Write,
+    /// The protocol every envelope is written in: the requested one when this
+    /// build speaks it, otherwise the newest, so the caller learns which.
+    protocol: u16,
     operation: Operation,
     assets: Option<String>,
     sequence: u32,
@@ -201,7 +204,7 @@ impl Emitter<'_> {
     fn emit(&mut self, body: Body) -> Result<(), ToolingError> {
         let is_end = matches!(body, Body::End(_));
         let envelope = Envelope {
-            protocol: PROTOCOL_VERSION,
+            protocol: self.protocol,
             sequence: self.sequence,
             operation: self.operation,
             framework: env!("CARGO_PKG_VERSION").to_owned(),
@@ -236,18 +239,24 @@ pub fn execute(request: &ToolRequest, sink: &mut dyn Write) -> Result<(), Toolin
     let assets = live_asset_catalog()
         .ok()
         .map(|catalog| catalog.identity().to_owned());
+    let supported = (MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&request.protocol);
     let mut emitter = Emitter {
         sink,
+        protocol: if supported {
+            request.protocol
+        } else {
+            PROTOCOL_VERSION
+        },
         operation: request.operation,
         assets,
         sequence: 0,
         written: 0,
     };
     emitter.emit(Body::Begin)?;
-    let outcome = if request.protocol == PROTOCOL_VERSION {
+    let outcome = if supported {
         match request.operation {
             Operation::Check => run_check(&mut emitter, &request.template_roots),
-            Operation::Inspect => run_inspect(&mut emitter),
+            Operation::Inspect => run_inspect(&mut emitter, request.protocol),
             Operation::Assets => run_assets(&mut emitter),
         }
     } else {
@@ -433,7 +442,7 @@ fn walk_templates(
     Ok(())
 }
 
-fn run_inspect(emitter: &mut Emitter<'_>) -> Result<(), ToolingError> {
+fn run_inspect(emitter: &mut Emitter<'_>, protocol: u16) -> Result<(), ToolingError> {
     let registry = App::resolve::<LiveRegistry>().ok();
     let config = LiveConfig::resolve().unwrap_or_default();
     let upload_host = App::resolve::<LiveUploadHost>().ok();
@@ -465,16 +474,24 @@ fn run_inspect(emitter: &mut Emitter<'_>) -> Result<(), ToolingError> {
         registry_bound: registry.is_some(),
         components: u32::try_from(names.len())
             .map_err(|_| ToolingError::new(ToolingErrorKind::ComponentLimitExceeded))?,
-        config: ConfigReport {
-            limits: config
-                .limit_values()
-                .into_iter()
-                .map(|(setting, unit, value)| LimitReport {
-                    setting: setting.to_owned(),
-                    value,
-                    unit: unit.to_owned(),
-                })
-                .collect(),
+        config: if protocol == 1 {
+            ConfigReport::Legacy {
+                max_request_bytes: config.max_request_bytes() as u64,
+                max_response_bytes: config.max_response_bytes() as u64,
+                max_context_lifetime_ms: config.max_context_lifetime_ms(),
+            }
+        } else {
+            ConfigReport::Limits {
+                limits: config
+                    .limit_values()
+                    .into_iter()
+                    .map(|(setting, unit, value)| LimitReport {
+                        setting: setting.to_owned(),
+                        value,
+                        unit: unit.to_owned(),
+                    })
+                    .collect(),
+            }
         },
         upload_host: UploadHostReport {
             installed: upload_host.is_some(),

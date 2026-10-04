@@ -626,8 +626,10 @@ async fn repeated_islands_and_core_only_documents_do_not_duplicate_roles() {
     assert_eq!(html.matches("data-suprnova-live-island").count(), 2);
     assert_eq!(html.matches("suprnova-live.esm.js").count(), 1);
     assert_eq!(html.matches(boot.file()).count(), 1);
-    assert!(!html.contains("uploads"), "no island needs the upload role");
-    assert!(!html.contains("async"), "no island needs the async role");
+    // The role artifacts by name: the configuration element itself now
+    // carries `async_*` and `upload_*` limits.
+    assert!(!html.contains(".uploads."), "no island needs the upload role");
+    assert!(!html.contains(".async."), "no island needs the async role");
 }
 
 #[tokio::test]

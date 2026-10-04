@@ -16,6 +16,7 @@ mod document;
 mod events;
 pub(crate) mod ports;
 mod registry;
+mod replay;
 mod response;
 pub(crate) mod revocation;
 mod routes;
@@ -49,7 +50,7 @@ pub mod __private;
 pub use assets::{LiveBootstrap, LiveBootstrapOptions, LiveBootstrapStrategy};
 pub use config::{
     LedgerDriver, LiveConfig, LiveConfigBuilder, LiveConfigError, LiveConfigErrorKind,
-    LiveLimitExceeded, LiveMorphLimits, LiveUploadLimits,
+    LiveLimitExceeded, LiveMorphLimits, LiveServerLimits, LiveUploadLimits,
 };
 pub(crate) use document::NestedSegmentIdentity;
 pub use document::{

@@ -537,6 +537,10 @@ App::singleton(config);
 | `LIVE_ASYNC_MAX_BUFFER_BYTES` | 16 MiB | One open document's delivery queue |
 | `LIVE_ASYNC_MAX_QUEUED_EVENTS` | 4,096 | Events one open document holds before its islands apply them |
 | `LIVE_ASYNC_MAX_REPLAY_EVENTS` | 4,096 | Events in one reconnect replay |
+| `LIVE_ASYNC_MAX_REPLAY_BYTES` | 4 MiB | One subscription's replay log |
+| `LIVE_ASYNC_REPLAY_BUDGET_BYTES` | 256 MiB | Every replay log in the process together |
+| `LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION` | 64 | Open tabs one session streams to |
+| `LIVE_ASYNC_MAX_TRANSPORTS` | 16,384 | Streaming connections in the process |
 | `LIVE_MAX_REDIRECT_BYTES` | 64 KiB | One redirect or reflected URL |
 | `LIVE_UPLOAD_CHUNK_BYTES` | 8 MiB | One upload chunk request |
 | `LIVE_UPLOAD_MAX_ACTIVE` | 8 | Upload transfers running at once |
@@ -544,6 +548,10 @@ App::singleton(config);
 | `LIVE_UPLOAD_MAX_PENDING_FILES` | 1,024 | Files selected and not yet finished |
 | `LIVE_UPLOAD_MAX_PENDING_BYTES` | 4 GiB | Bytes across the files selected and not yet finished |
 | `LIVE_UPLOAD_MAX_STORAGE_BYTES` | 16 GiB | The temporary upload store, across every visitor |
+| `LIVE_LEDGER_MAX_INSTANCES` | 100,000 | Mounted component instances |
+| `LIVE_LEDGER_INSTANCE_LIFETIME_MS` | 7 days | How long one instance lives |
+| `LIVE_LEDGER_CLAIM_LEASE_MS` | 30,000 | How long one action holds its instance |
+| `LIVE_LEDGER_MAX_ACCEPTED_OUTCOMES` | 64 | Outcomes kept per instance for retries |
 
 The byte limits nest: the island HTML travels inside the response, and the
 response's snapshot comes back in the next request, so `LIVE_MAX_HTML_BYTES`
@@ -574,6 +582,33 @@ published payload over `LIVE_ASYNC_MAX_PAYLOAD_BYTES` fails with a
 refused in the browser before any transfer starts; the server refuses the same
 file with a 413 and logs the key. `suprnova live:inspect` prints every limit the
 application runs under, by its key.
+
+An instance lives its whole lifetime: nothing retires it when the visitor
+closes the page. The ledger therefore holds `LIVE_LEDGER_MAX_INSTANCES` page
+views per `LIVE_LEDGER_INSTANCE_LIFETIME_MS`, about 14,000 private-island page
+views a day at the defaults. A busier site raises the instance limit or
+shortens the lifetime; past the limit, new mounts fail until the oldest
+instances expire.
+
+### Sizing a small host
+
+The defaults admit large pages, and every byte of a request is held while it
+is read. Live reads a whole request before it checks the request's context,
+because the context depends on the island the request names. At the defaults
+(`LIVE_MAX_REQUEST_BYTES` 16 MiB, `LIVE_MAX_JSON_ENTRIES` 1,000,000), one
+request costs its 16 MiB body plus what parsing it builds: about 60 MiB for an
+array of a million short strings and about 165 MiB for an object of a million
+members, measured on an optimized build. Concurrent requests add up. On a host
+with little memory, lower both limits to what the pages need:
+
+```bash
+LIVE_MAX_REQUEST_BYTES=2097152
+LIVE_MAX_JSON_ENTRIES=100000
+```
+
+At 2 MiB and 100,000 entries, the same measurements give about 6 MiB and 16
+MiB, so the worst request costs about 18 MiB with its body. The
+response and island HTML limits follow the request limit down unless set.
 
 ## Component library
 

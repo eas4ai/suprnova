@@ -9,7 +9,6 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use suprnova_live::action::RawActionArguments;
 use suprnova_live::canonical::CanonicalValue;
@@ -216,13 +215,14 @@ pub(crate) async fn handle(request: Request) -> Response {
         }
         Err(error) => return failure_response(EndpointErrorKind::KernelUnavailable, &error),
     };
-    // An owned copy: the request is mutated below to close the identity
-    // absences its mount permits, after the body has named that mount.
-    let body = Bytes::copy_from_slice(
-        request
-            .cached_body()
-            .expect("the Live handler just buffered the complete request body"),
-    );
+    // A second handle on the buffered body, not a copy: the request is
+    // mutated below to close the identity absences its mount permits, after
+    // the body has named that mount, and that touches only its headers. A
+    // copy held a second 16 MiB per request at the default limit.
+    let body = request
+        .cached_body()
+        .cloned()
+        .expect("the Live handler just buffered the complete request body");
     let selection = match runtime.inspect_mount(&body, media) {
         Ok(selection) => selection,
         Err(error) => return endpoint_failure(&error),

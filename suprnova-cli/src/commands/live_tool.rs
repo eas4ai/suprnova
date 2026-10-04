@@ -2,7 +2,7 @@
 //!
 //! The CLI has no framework dependency, so every registry, checker, runtime,
 //! and artifact fact comes from the generated application's console binary,
-//! started as `__suprnova:live-tool --protocol 2 --operation <op>` through the
+//! started as `__suprnova:live-tool --protocol <n> --operation <op>` through the
 //! explicit-binary Cargo wrapper. The helper writes one JSON envelope per
 //! stdout line; human and build output stays on stderr. This module owns the
 //! transport side only: it validates version, sequence, identity, shape,
@@ -22,9 +22,13 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-/// Protocol version this CLI speaks. Version 2 carries every configured Live
-/// limit by its `.env` key; it changed together with the framework's helper.
+/// Newest protocol version this CLI speaks. Version 2 carries every
+/// configured Live limit by its `.env` key; nothing else changed.
 pub const PROTOCOL_VERSION: u16 = 2;
+/// Oldest protocol version this CLI still speaks, for applications on a
+/// framework from before version 2: the CLI asks for the newest and falls
+/// back when the helper answers in this one.
+pub const MIN_PROTOCOL_VERSION: u16 = 1;
 /// Hidden console command exposed by applications built on the framework.
 pub const HELPER_COMMAND: &str = "__suprnova:live-tool";
 /// Longest encoded envelope line, including its newline.
@@ -196,12 +200,25 @@ pub struct ComponentReport {
     pub contract_digest: String,
 }
 
-/// Every configured Live limit.
+/// The configured Live limits, in the shape the exchange's protocol knows.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigReport {
-    /// One entry per `LIVE_*` limit key, in the order the manual lists them.
-    pub limits: Vec<LimitReport>,
+#[serde(untagged)]
+pub enum ConfigReport {
+    /// Protocol 2: every configured limit by its `.env` key.
+    Limits {
+        /// One entry per `LIVE_*` limit key, in the order the manual lists
+        /// them.
+        limits: Vec<LimitReport>,
+    },
+    /// Protocol 1: the three limits that version reported.
+    Legacy {
+        /// Largest accepted request body.
+        max_request_bytes: u64,
+        /// Largest produced response body.
+        max_response_bytes: u64,
+        /// Longest request context lifetime.
+        max_context_lifetime_ms: u64,
+    },
 }
 
 /// One configured Live limit, by the `.env` key that sets it.
@@ -460,9 +477,14 @@ impl fmt::Display for ToolFailure {
                 f,
                 "Unexpected or malformed output on stdout at line {line} ({bytes} bytes); the application helper prints only protocol envelopes"
             ),
+            Self::UnsupportedProtocol(protocol) if *protocol > PROTOCOL_VERSION => write!(
+                f,
+                "The application helper speaks protocol {protocol}, newer than this CLI's protocols {MIN_PROTOCOL_VERSION} to {PROTOCOL_VERSION}; upgrade the suprnova CLI to the application's suprnova version"
+            ),
             Self::UnsupportedProtocol(protocol) => write!(
                 f,
-                "The application helper speaks protocol {protocol}; this CLI speaks protocol {PROTOCOL_VERSION}"
+                "The application helper speaks protocol {protocol}, older than this CLI's protocols {MIN_PROTOCOL_VERSION} to {PROTOCOL_VERSION}; upgrade the application's suprnova dependency to {} or later",
+                env!("CARGO_PKG_VERSION")
             ),
             Self::WrongOperation => {
                 f.write_str("The application helper answered a different operation than requested")
@@ -596,7 +618,12 @@ pub(crate) fn display_text(raw: &str) -> String {
         .collect()
 }
 
-pub fn consume<R: BufRead>(reader: R, operation: Operation) -> Result<Session, ToolFailure> {
+/// Reads and validates one complete exchange in `protocol`.
+pub fn consume_protocol<R: BufRead>(
+    reader: R,
+    operation: Operation,
+    protocol: u16,
+) -> Result<Session, ToolFailure> {
     let mut reader = reader.take((MAX_TOTAL_BYTES + 1) as u64);
     let mut buffer = Vec::new();
     let mut session = Session::default();
@@ -630,7 +657,7 @@ pub fn consume<R: BufRead>(reader: R, operation: Operation) -> Result<Session, T
         let text = buffer.strip_suffix(b"\n").unwrap_or(&buffer);
         let envelope: Envelope = serde_json::from_slice(text)
             .map_err(|_| ToolFailure::UnexpectedStdout { line, bytes: read })?;
-        if envelope.protocol != PROTOCOL_VERSION {
+        if envelope.protocol != protocol {
             return Err(ToolFailure::UnsupportedProtocol(envelope.protocol));
         }
         if envelope.operation != operation {
@@ -691,9 +718,15 @@ pub fn consume<R: BufRead>(reader: R, operation: Operation) -> Result<Session, T
                 {
                     return Err(ToolFailure::TextTooLong(line));
                 }
-                if report.config.limits.len() > MAX_LIMITS
-                    || !report.config.limits.iter().all(limit_ok)
-                {
+                // Each protocol has its one shape: protocol 1 the three named
+                // limits, protocol 2 every limit by its key.
+                let shape_ok = match &report.config {
+                    ConfigReport::Limits { limits } => {
+                        protocol >= 2 && limits.len() <= MAX_LIMITS && limits.iter().all(limit_ok)
+                    }
+                    ConfigReport::Legacy { .. } => protocol == 1,
+                };
+                if !shape_ok {
                     return Err(ToolFailure::InvalidLimit(line));
                 }
                 if session.runtime.replace(report).is_some() {
@@ -776,11 +809,28 @@ pub fn run(
     extra_args: &[String],
     timeout: Duration,
 ) -> Result<Session, ToolFailure> {
-    let protocol = PROTOCOL_VERSION.to_string();
+    match run_in(PROTOCOL_VERSION, operation, extra_args, timeout) {
+        // A helper from before protocol 2 answers in protocol 1 and refuses
+        // the request; it still speaks protocol 1, so ask again in that.
+        Err(ToolFailure::UnsupportedProtocol(spoken)) if spoken == MIN_PROTOCOL_VERSION => {
+            run_in(MIN_PROTOCOL_VERSION, operation, extra_args, timeout)
+        }
+        result => result,
+    }
+}
+
+/// Runs the helper once, asking for `protocol`.
+fn run_in(
+    protocol: u16,
+    operation: Operation,
+    extra_args: &[String],
+    timeout: Duration,
+) -> Result<Session, ToolFailure> {
+    let protocol_arg = protocol.to_string();
     let mut args: Vec<&str> = vec![
         HELPER_COMMAND,
         "--protocol",
-        &protocol,
+        &protocol_arg,
         "--operation",
         operation.as_str(),
     ];
@@ -799,7 +849,7 @@ pub fn run(
         .ok_or_else(|| ToolFailure::Spawn("stdout was not captured".to_owned()))?;
     let (sender, receiver) = mpsc::channel();
     let reader = thread::spawn(move || {
-        let result = consume(std::io::BufReader::new(stdout), operation);
+        let result = consume_protocol(std::io::BufReader::new(stdout), operation, protocol);
         let _ = sender.send(result);
     });
     let parsed = match receiver.recv_timeout(timeout) {

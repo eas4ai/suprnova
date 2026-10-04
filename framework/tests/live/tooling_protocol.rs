@@ -11,8 +11,9 @@ use suprnova::container::testing::{TestContainer, TestContainerGuard};
 use suprnova::live::assets::live_asset_catalog;
 use suprnova::live::tooling::{ToolRequest, ToolingErrorKind, execute};
 use suprnova::live::tooling_protocol::{
-    AssetKind, Body, COMMAND_NAME, Envelope, MAX_LIMITS, MAX_LINE_BYTES, MAX_TEMPLATE_FILE_BYTES,
-    MAX_TEMPLATE_ROOTS, MAX_TEXT_BYTES, Operation, Outcome, PROTOCOL_VERSION, Severity,
+    AssetKind, Body, COMMAND_NAME, ConfigReport, Envelope, MAX_LIMITS, MAX_LINE_BYTES,
+    MAX_TEMPLATE_FILE_BYTES, MAX_TEMPLATE_ROOTS, MAX_TEXT_BYTES, Operation, Outcome,
+    PROTOCOL_VERSION, Severity,
 };
 use suprnova::live::{LiveComponent, LiveConfig, LiveRegistry, live};
 use suprnova::{App, Crypt, EncryptionKey, console};
@@ -272,11 +273,11 @@ fn inspect_reports_only_safe_bounded_metadata() {
     let config = LiveConfig::standard();
     let limits: Vec<(&str, u64, &str)> = runtime
         .config
-        .limits
+        .limits()
         .iter()
         .map(|limit| (limit.setting.as_str(), limit.value, limit.unit.as_str()))
         .collect();
-    assert_eq!(limits.len(), 28, "{limits:?}");
+    assert_eq!(limits.len(), 36, "{limits:?}");
     for expected in [
         (
             "LIVE_MAX_REQUEST_BYTES",
@@ -295,6 +296,9 @@ fn inspect_reports_only_safe_bounded_metadata() {
         ("LIVE_UPLOAD_CHUNK_BYTES", 8_388_608, "bytes"),
         ("LIVE_UPLOAD_MAX_FILE_BYTES", 1_073_741_824, "bytes"),
         ("LIVE_UPLOAD_MAX_STORAGE_BYTES", 17_179_869_184, "bytes"),
+        ("LIVE_ASYNC_REPLAY_BUDGET_BYTES", 268_435_456, "bytes"),
+        ("LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION", 64, "transports"),
+        ("LIVE_LEDGER_MAX_INSTANCES", 100_000, "instances"),
     ] {
         assert!(
             limits.contains(&expected),
@@ -409,6 +413,54 @@ fn assets_exports_exactly_the_reviewed_bytes() {
     }
     let files: std::collections::BTreeSet<&str> = assets.iter().map(|a| a.file.as_str()).collect();
     assert_eq!(files.len(), 13, "every file is exported once");
+}
+
+/// A CLI from before protocol 2 still checks, exports assets and inspects
+/// against this helper: protocol 1 is answered in protocol 1, and its
+/// inspect report carries the three limits that version knew.
+#[test]
+fn a_protocol_one_cli_is_answered_in_protocol_one() {
+    for operation in [Operation::Check, Operation::Assets, Operation::Inspect] {
+        let roots = if operation == Operation::Check {
+            vec![template_root()]
+        } else {
+            Vec::new()
+        };
+        let (result, envelopes) = run(1, operation, roots);
+        assert_eq!(result, Ok(()), "{operation:?}");
+        assert_eq!(end(&envelopes), (Outcome::Ok, None), "{operation:?}");
+        assert!(
+            envelopes.iter().all(|envelope| envelope.protocol == 1),
+            "{operation:?} is answered in protocol 1"
+        );
+    }
+    let (_, envelopes) = run(1, Operation::Inspect, Vec::new());
+    let runtime = envelopes
+        .iter()
+        .find_map(|e| match &e.body {
+            Body::Runtime(report) => Some(report),
+            _ => None,
+        })
+        .expect("one runtime report");
+    let config = LiveConfig::standard();
+    assert_eq!(
+        runtime.config,
+        ConfigReport::Legacy {
+            max_request_bytes: config.max_request_bytes() as u64,
+            max_response_bytes: config.max_response_bytes() as u64,
+            max_context_lifetime_ms: config.max_context_lifetime_ms(),
+        }
+    );
+    let encoded = serde_json::to_value(&runtime.config).expect("encode the config report");
+    assert_eq!(
+        encoded,
+        serde_json::json!({
+            "max_request_bytes": config.max_request_bytes(),
+            "max_response_bytes": config.max_response_bytes(),
+            "max_context_lifetime_ms": config.max_context_lifetime_ms(),
+        }),
+        "the protocol 1 shape, field for field"
+    );
 }
 
 #[test]
