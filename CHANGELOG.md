@@ -354,7 +354,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `avatar_url`: the picture URL the provider reports, or none. Google
   fills it from `picture`, TikTok from `avatar_url`, Facebook from
   `picture.data.url` and X from `profile_image_url`; Apple reports none,
-  and an empty value is none. Treat it as untrusted profile data, and check
+  and an empty value, or one of an unexpected shape, is none and never
+  fails sign-in. Treat it as untrusted profile data, and check
   its scheme and length before you render, fetch or store it. A provider
   supplies it through `OAuthProvider::avatar_url`, which returns none
   unless the provider implements it, so a provider written before it
