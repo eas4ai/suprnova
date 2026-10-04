@@ -168,6 +168,34 @@ pub struct AttemptVerdict {
     pub rehash: RehashOutcome,
 }
 
+/// Run one piece of password hash work off the async runtime's workers.
+///
+/// A password hash is slow on purpose: an Argon2id mint or verify holds a
+/// thread for tens of milliseconds. On a runtime worker that blocks every
+/// other task scheduled there, so the work runs on Tokio's blocking pool
+/// when a runtime is present. Outside a runtime it runs inline, as there is
+/// no worker to stall.
+///
+/// # Errors
+///
+/// The work's own error, or [`Error::Internal`] when the blocking task did
+/// not complete (it panicked or the runtime is shutting down).
+pub async fn run_hash_work<T, F>(work: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => runtime
+            .spawn_blocking(work)
+            .await
+            .map_err(|error| Error::Internal {
+                message: format!("password hash work did not complete: {error}"),
+            })?,
+        Err(_) => work(),
+    }
+}
+
 /// The one verification service for both deployed formats.
 pub struct PasswordVerifier {
     driver: Arc<dyn PasswordHashDriver>,
@@ -300,6 +328,35 @@ impl PasswordVerifier {
     /// Mint a fresh credential hash at the pinned Argon2id target.
     pub fn mint_target(&self, password: &SecretString) -> Result<String> {
         self.driver.mint(&self.config.argon2_target(), password)
+    }
+
+    /// [`mint_target`](Self::mint_target), run where it cannot stall the
+    /// async runtime (see [`run_hash_work`]).
+    pub async fn mint_target_blocking(self: &Arc<Self>, password: SecretString) -> Result<String> {
+        let verifier = Arc::clone(self);
+        run_hash_work(move || verifier.mint_target(&password)).await
+    }
+
+    /// [`verify_attempt`](Self::verify_attempt), run where it cannot stall
+    /// the async runtime (see [`run_hash_work`]).
+    pub async fn verify_attempt_blocking(
+        self: &Arc<Self>,
+        stored_hash: Option<String>,
+        password: SecretString,
+    ) -> Result<AttemptVerdict> {
+        let verifier = Arc::clone(self);
+        run_hash_work(move || verifier.verify_attempt(stored_hash.as_deref(), &password)).await
+    }
+
+    /// [`verify_work_only`](Self::verify_work_only), run where it cannot
+    /// stall the async runtime (see [`run_hash_work`]).
+    pub async fn verify_work_only_blocking(
+        self: &Arc<Self>,
+        stored_hash: Option<String>,
+        password: SecretString,
+    ) -> Result<()> {
+        let verifier = Arc::clone(self);
+        run_hash_work(move || verifier.verify_work_only(stored_hash.as_deref(), &password)).await
     }
 
     /// Upgrade-only rehash policy: bcrypt always upgrades; Argon2 upgrades

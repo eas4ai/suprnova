@@ -31,6 +31,9 @@ dialoguer = "0.12"
 console = "0.16"
 ctrlc = "3.5"
 syn = { version = "2", features = ["full", "parsing", "visit"] }
+# `generate-types --routes` walks `routes.rs` as tokens to follow nested
+# `group!` prefixes. Already in the tree through `syn`.
+proc-macro2 = "1"
 walkdir = "2"
 notify = "8.2"
 dotenvy = "0.15"

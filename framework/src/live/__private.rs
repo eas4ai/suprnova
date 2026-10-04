@@ -99,6 +99,11 @@ pub mod component {
 }
 
 #[doc(hidden)]
+pub mod session {
+    pub use crate::live::session_state::{load, stage};
+}
+
+#[doc(hidden)]
 pub mod child {
     pub use suprnova_live::child::EligibleChildParametersV2;
     pub use suprnova_live::child::VerifiedChildParametersV1;

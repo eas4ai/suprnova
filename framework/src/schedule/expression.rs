@@ -74,14 +74,92 @@ pub struct CronExpression {
     day_of_week: CronField,
 }
 
+/// One field of a cron expression.
+///
+/// The grammar is cron's own, the one Laravel's cron library accepts and
+/// the one [`super::tz_display`] reads and writes for `schedule:list`:
+/// comma-separated parts, each `*`, `N` or `N-M`, each with an optional
+/// `/step`, where `N/step` runs from `N` to the field's maximum. A step
+/// counts from the first value of its part, and for `*` that is the
+/// field's minimum: `*/2` in the day-of-month field is the 1st, 3rd, 5th
+/// and so on, as in every cron. It used to count from zero, which made it
+/// the even days - not what cron means, and not what `schedule:list`
+/// printed for the same expression in another timezone.
 #[derive(Debug, Clone)]
 enum CronField {
-    Any,                // *
-    Value(u32),         // 5
-    Range(u32, u32),    // 1-5
-    Step(u32),          // */5
-    List(Vec<u32>),     // 1,3,5
-    StepFrom(u32, u32), // 5/10 (start at 5, every 10)
+    /// `*` alone. Kept apart from a part that spans the whole range because
+    /// the day-of-month/day-of-week OR rule asks for exactly this.
+    Any,
+    /// Every other field: its parts, and the text they were written as,
+    /// which `Display` prints back.
+    Parts { parts: Vec<CronPart>, text: String },
+}
+
+/// One comma-separated part of a field: the values from `first` to `last`
+/// that are `step` apart, counting from `first`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CronPart {
+    first: u32,
+    last: u32,
+    step: u32,
+}
+
+impl CronPart {
+    fn matches(self, value: u32) -> bool {
+        value >= self.first && value <= self.last && (value - self.first).is_multiple_of(self.step)
+    }
+
+    /// Parse one part of `field` against its bounds. `in_list` only words
+    /// the error for a bare value that is out of range.
+    fn parse(part: &str, field: &str, in_list: bool, bounds: FieldBounds) -> Result<Self, String> {
+        let number = |text: &str, what: &str| -> Result<u32, String> {
+            text.parse::<u32>()
+                .map_err(|_| format!("Invalid {what} in '{field}'"))
+        };
+        let (head, step) = match part.split_once('/') {
+            Some((head, step)) => (head, Some(number(step, "step value")?)),
+            None => (part, None),
+        };
+        if step == Some(0) {
+            return Err(format!(
+                "{} step `{part}` is invalid (step must be positive) in '{field}'",
+                bounds.name
+            ));
+        }
+        let (first, last) = if head == "*" {
+            (bounds.min, bounds.max)
+        } else if let Some((from, to)) = head.split_once('-') {
+            let from = number(from, "range start")?;
+            let to = number(to, "range end")?;
+            if from > to {
+                return Err(format!(
+                    "{} range start `{from}` is greater than end `{to}` in '{field}'",
+                    bounds.name
+                ));
+            }
+            bounds.check(from, "range start", field)?;
+            bounds.check(to, "range end", field)?;
+            (from, to)
+        } else if step.is_some() {
+            let start = number(head, "start value")?;
+            bounds.check(start, "start", field)?;
+            (start, bounds.max)
+        } else {
+            let (what, label) = if in_list {
+                ("list value", "list entry")
+            } else {
+                ("value", "value")
+            };
+            let value = number(head, what)?;
+            bounds.check(value, label, field)?;
+            (value, value)
+        };
+        Ok(Self {
+            first,
+            last,
+            step: step.unwrap_or(1),
+        })
+    }
 }
 
 /// Per-field value bounds, plus a human label used in error messages.
@@ -140,16 +218,23 @@ impl FieldBounds {
 }
 
 impl CronField {
+    /// The field that matches `value` alone, for the builders that set a
+    /// field directly rather than parsing it.
+    fn value(value: u32) -> Self {
+        CronField::Parts {
+            parts: vec![CronPart {
+                first: value,
+                last: value,
+                step: 1,
+            }],
+            text: value.to_string(),
+        }
+    }
+
     fn matches(&self, value: u32) -> bool {
         match self {
             CronField::Any => true,
-            CronField::Value(v) => *v == value,
-            CronField::Range(start, end) => value >= *start && value <= *end,
-            CronField::Step(step) => value.is_multiple_of(*step),
-            CronField::StepFrom(start, step) => {
-                value >= *start && (value - start).is_multiple_of(*step)
-            }
-            CronField::List(values) => values.contains(&value),
+            CronField::Parts { parts, .. } => parts.iter().any(|part| part.matches(value)),
         }
     }
 
@@ -164,91 +249,23 @@ impl CronField {
     ///
     /// `bounds` carries the per-field inclusive range (minute 0..=59,
     /// hour 0..=23, etc.) and a human label used to build a clear error
-    /// message. Numeric values, range endpoints, and list entries are
-    /// each checked against the bounds; a `Range(start, end)` further
-    /// requires `start <= end`. `Step(0)` / `StepFrom(_, 0)` are
-    /// rejected: a step of zero degenerates to "every value congruent
-    /// to 0 mod 0" which only matches `value == 0`, silently turning a
-    /// `*/0 * * * *` schedule into "every hour at minute 0".
+    /// message. Every value, range end and step start is checked against
+    /// the bounds, a range must not run backwards, and a step must be
+    /// positive: a step of zero used to match only the value 0, silently
+    /// turning a `*/0 * * * *` schedule into "every hour at minute 0".
     fn parse(s: &str, bounds: FieldBounds) -> Result<Self, String> {
         if s == "*" {
             return Ok(CronField::Any);
         }
-
-        // Handle */N (every N)
-        if let Some(rest) = s.strip_prefix("*/") {
-            let step: u32 = rest
-                .parse()
-                .map_err(|_| format!("Invalid step value in '{}'", s))?;
-            if step == 0 {
-                return Err(format!(
-                    "{} step `*/0` is invalid (step must be positive) in '{}'",
-                    bounds.name, s
-                ));
-            }
-            return Ok(CronField::Step(step));
-        }
-
-        // Handle N/M (starting at N, every M)
-        if s.contains('/') && !s.starts_with('*') {
-            let parts: Vec<&str> = s.split('/').collect();
-            if parts.len() == 2 {
-                let start: u32 = parts[0]
-                    .parse()
-                    .map_err(|_| format!("Invalid start value in '{}'", s))?;
-                let step: u32 = parts[1]
-                    .parse()
-                    .map_err(|_| format!("Invalid step value in '{}'", s))?;
-                if step == 0 {
-                    return Err(format!(
-                        "{} step `{start}/0` is invalid (step must be positive) in '{}'",
-                        bounds.name, s
-                    ));
-                }
-                bounds.check(start, "start", s)?;
-                return Ok(CronField::StepFrom(start, step));
-            }
-        }
-
-        // Handle comma-separated list (1,3,5)
-        if s.contains(',') {
-            let values: Vec<u32> = s
-                .split(',')
-                .map(|v| v.trim().parse::<u32>())
-                .collect::<Result<_, _>>()
-                .map_err(|_| format!("Invalid list value in '{}'", s))?;
-            for v in &values {
-                bounds.check(*v, "list entry", s)?;
-            }
-            return Ok(CronField::List(values));
-        }
-
-        // Handle range (1-5)
-        if s.contains('-') {
-            let parts: Vec<&str> = s.split('-').collect();
-            if parts.len() == 2 {
-                let start: u32 = parts[0]
-                    .parse()
-                    .map_err(|_| format!("Invalid range start in '{}'", s))?;
-                let end: u32 = parts[1]
-                    .parse()
-                    .map_err(|_| format!("Invalid range end in '{}'", s))?;
-                if start > end {
-                    return Err(format!(
-                        "{} range start `{start}` is greater than end `{end}` in '{}'",
-                        bounds.name, s
-                    ));
-                }
-                bounds.check(start, "range start", s)?;
-                bounds.check(end, "range end", s)?;
-                return Ok(CronField::Range(start, end));
-            }
-        }
-
-        // Handle single value
-        let value: u32 = s.parse().map_err(|_| format!("Invalid value in '{}'", s))?;
-        bounds.check(value, "value", s)?;
-        Ok(CronField::Value(value))
+        let in_list = s.contains(',');
+        let parts = s
+            .split(',')
+            .map(|part| CronPart::parse(part, s, in_list, bounds))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(CronField::Parts {
+            parts,
+            text: s.to_string(),
+        })
     }
 }
 
@@ -256,18 +273,7 @@ impl std::fmt::Display for CronField {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CronField::Any => write!(f, "*"),
-            CronField::Value(v) => write!(f, "{}", v),
-            CronField::Range(s, e) => write!(f, "{}-{}", s, e),
-            CronField::Step(s) => write!(f, "*/{}", s),
-            CronField::StepFrom(start, step) => write!(f, "{}/{}", start, step),
-            CronField::List(l) => write!(
-                f,
-                "{}",
-                l.iter()
-                    .map(|v| v.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
+            CronField::Parts { text, .. } => write!(f, "{text}"),
         }
     }
 }
@@ -473,8 +479,8 @@ impl CronExpression {
     pub fn at(mut self, time: &str) -> Self {
         match Self::parse_hh_mm(time) {
             Ok((hour, minute)) => {
-                self.hour = CronField::Value(hour);
-                self.minute = CronField::Value(minute);
+                self.hour = CronField::value(hour);
+                self.minute = CronField::value(minute);
                 self.raw = format!(
                     "{} {} {} {} {}",
                     minute, hour, self.day_of_month, self.month, self.day_of_week,
@@ -503,8 +509,8 @@ impl CronExpression {
     /// use [`try_daily_at`](Self::try_daily_at) for that.
     pub fn try_at(mut self, time: &str) -> Result<Self, String> {
         let (hour, minute) = Self::parse_hh_mm(time)?;
-        self.hour = CronField::Value(hour);
-        self.minute = CronField::Value(minute);
+        self.hour = CronField::value(hour);
+        self.minute = CronField::value(minute);
         self.raw = format!(
             "{} {} {} {} {}",
             minute, hour, self.day_of_month, self.month, self.day_of_week,
@@ -1185,6 +1191,68 @@ mod tests {
             (next.month(), next.day(), next.hour(), next.minute()),
             (3, 30, 2, 30),
             "2026-03-29 02:30 does not exist in Berlin, so the next run is the 30th",
+        );
+    }
+
+    // ---- step phase and the shared grammar ------------------------------
+    //
+    // A step counts from the first value of its part, and for `*` that is
+    // the field's minimum. Day-of-month and month start at 1, so `*/2` is
+    // the odd days and `*/3` is January, April, July and October - what
+    // cron and Laravel mean. It used to count from zero, which gave the
+    // even days, while `schedule:list` converted the same expression for
+    // another zone the cron way: the listing and the scheduler disagreed.
+
+    #[test]
+    fn a_day_of_month_step_counts_from_the_first() {
+        let expr = CronExpression::parse("0 20 */2 8 *").unwrap();
+        assert!(
+            expr.is_due_at(utc_at(2026, 8, 1, 20, 0)),
+            "the 1st is a run day"
+        );
+        assert!(!expr.is_due_at(utc_at(2026, 8, 2, 20, 0)), "the 2nd is not");
+        assert!(expr.is_due_at(utc_at(2026, 8, 31, 20, 0)), "the 31st is");
+    }
+
+    #[test]
+    fn a_month_step_counts_from_january() {
+        let expr = CronExpression::parse("0 0 1 */3 *").unwrap();
+        let due: Vec<u32> = (1..=12)
+            .filter(|month| expr.is_due_at(utc_at(2026, *month, 1, 0, 0)))
+            .collect();
+        assert_eq!(due, [1, 4, 7, 10]);
+    }
+
+    #[test]
+    fn a_minute_step_still_counts_from_zero() {
+        let expr = CronExpression::parse("*/15 * * * *").unwrap();
+        let due: Vec<u32> = (0..60)
+            .filter(|minute| expr.is_due_at(utc_at(2026, 1, 1, 0, *minute)))
+            .collect();
+        assert_eq!(due, [0, 15, 30, 45]);
+    }
+
+    /// `schedule:list` prints ranges with steps and lists that mix values
+    /// and ranges; the scheduler reads the same grammar, so a printed line
+    /// can be scheduled as it reads.
+    #[test]
+    fn ranges_with_steps_and_mixed_lists_parse() {
+        let expr = CronExpression::parse("0 5 2-30/2 6 *").unwrap();
+        assert!(expr.is_due_at(utc_at(2026, 6, 2, 5, 0)));
+        assert!(!expr.is_due_at(utc_at(2026, 6, 3, 5, 0)));
+
+        let expr = CronExpression::parse("1-3,10,20-40/10 * * * *").unwrap();
+        let due: Vec<u32> = (0..60)
+            .filter(|minute| expr.is_due_at(utc_at(2026, 1, 1, 0, *minute)))
+            .collect();
+        assert_eq!(due, [1, 2, 3, 10, 20, 30, 40]);
+        assert_eq!(expr.expression(), "1-3,10,20-40/10 * * * *");
+
+        assert!(CronExpression::parse("1-5/0 * * * *").is_err(), "zero step");
+        assert!(CronExpression::parse("1,,2 * * * *").is_err(), "empty part");
+        assert!(
+            CronExpression::parse("50-70/5 * * * *").is_err(),
+            "range end"
         );
     }
 }

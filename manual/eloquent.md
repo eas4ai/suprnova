@@ -965,7 +965,11 @@ read as a type parameter; for `avg` it is `f64` or `rust_decimal::Decimal`
 (the `AvgValue` trait). Suprnova aliases generated
 aggregate expressions internally so the same typed result is decoded on
 PostgreSQL, MySQL, and SQLite. `sum` and `avg` return zero for an empty
-match set, while `min` and `max` return `None`. An incompatible requested
+match set, while `min` and `max` return `None`. The same holds when no row
+comes back at all - an offset skips the aggregate's one row, as
+`skip(10).count()` does, or a grouped query has no group: `count`, `sum`
+and `avg` return zero and `min` and `max` return `None`, as Laravel's
+`count`, `sum`, `min` and `max` do. An incompatible requested
 Rust type or missing result column is a database error; it is never
 converted into a plausible zero or `None`.
 
@@ -1071,9 +1075,9 @@ let users  = first.union_all(second).get().await?;
 
 As in Laravel, an ordering, a limit, or an offset belongs to the whole
 union when you add it after `union`, and to the first query alone when
-you add it before. `paginate`, `simple_paginate`, `first`, and `count`
-all come after `union`, so they page, take, and count the rows of the
-union:
+you add it before. `paginate`, `simple_paginate`, `cursor_paginate`,
+`first`, and `count` all come after `union`, so they page, take, and
+count the rows of the union; a cursor bounds the rows of every arm:
 
 ```rust
 let page = User::filter("active", true)
@@ -1428,7 +1432,10 @@ tx.
 Three-way precedence for routing an operation through a connection:
 
 1. **Builder-level override** - `Builder::with_tx(&tx)` or any
-   `Model::*_with_tx(&tx, ...)` shim. Explicit beats ambient.
+   `Model::*_with_tx(&tx, ...)` shim. Explicit beats ambient. The
+   eager loads of such a query read through the same transaction, and
+   those of an `on(name)` query read from that connection, unless the
+   related model declares a connection of its own.
 2. **The ambient transaction** - installed by `DB::transaction` /
    `DB::transaction_with_attempts` for the closure's task scope.
    A read that names another connection, through `on(name)` or a
@@ -1586,6 +1593,7 @@ it when the query runs.
 | `Model::without_global_scopes()` | No |
 | `Model::query().without_global_scope::<S>()` | Yes, minus `S`, wherever it is chained |
 | `Model::with_trashed()` / `Model::only_trashed()` | Yes - only the soft-delete filter is lifted |
+| `RouteParam<Model>` route binding | Yes - the bound row is read through `Model::query()` |
 | `Model::find(id)` | No - PK lookup goes through SeaORM directly |
 | `Model::find_many([...])` | No - same reason |
 | `Model::all()` | No - same reason |
@@ -2210,7 +2218,10 @@ let users = User::query()
 
 The per-row `__eager` cache cells are keyed by:
 
-- `<rel>` (relation NAME alone) for `with` and `with_count`.
+- `<rel>` (relation NAME alone) for `with` and `with_count`. The rows
+  and the count are kept in separate cells, so `with(["posts"])` and
+  `with_count(["posts"])` on one query keep both, and a count alone
+  does not count as loaded rows for `load_missing`.
 - `<rel>_<kind>_<col>` (e.g. `posts_sum_views`) for the four
   aggregate kinds - `with_sum` / `with_avg` / `with_min` / `with_max`.
   This wide key lets multiple aggregates on the same relation coexist
@@ -2704,6 +2715,10 @@ User::query().chunk(100, |batch: Collection<User>| async move {
 The closure receives a `Collection<M>` per batch - slice-shape access
 (`.iter()`, indexing) works directly via `Deref`.
 
+`chunk`, `chunk_map`, and `each` keep the query's own `OFFSET` and
+`LIMIT`, as Laravel's `chunk` does: the offset skips rows once, at the
+start of the walk, and the limit caps the rows the whole walk visits.
+
 `chunk` is OFFSET-paginated and **not safe under concurrent inserts**:
 rows inserted before the next batch's offset get skipped; rows deleted
 before the offset get processed twice (whatever shifted into their
@@ -2729,7 +2744,10 @@ an original row to skip or duplicate.
 The walk sets its own order. An `ORDER BY` already on the query is
 dropped, because any other order would make the cursor skip some rows
 and repeat others. An `OFFSET` on the query skips that many rows once,
-before the first batch; every later batch starts at the cursor.
+before the first batch; every later batch starts at the cursor. A
+`LIMIT` on the query caps the rows the whole walk visits, as in
+Laravel's `chunkById`: `.limit(10).chunk_by_id(3, ..)` hands over 3, 3,
+3 and 1 rows.
 
 The cursor is the value of the primary key, in the order of the key.
 These keys work:
@@ -3726,7 +3744,9 @@ impl Prunable for ExpiredSession {
 
 For high-volume tables (audit logs, request logs, expired cache
 entries) `MassPrunable` skips per-row events and runs a single
-`DELETE WHERE …` statement:
+`DELETE WHERE …` statement. It runs where the `prunable()` query routes,
+the same place the `--pretend` count reads: the model's declared
+connection, or the query's own `on(name)` or `with_tx`:
 
 ```rust
 use suprnova::eloquent::MassPrunable;
@@ -4513,6 +4533,11 @@ code paths where a missing row is a bug.
 let user = user.update_or_fail(attrs).await?;   // not_found if row deleted mid-flight
 user.delete_or_fail().await?;
 ```
+
+On a model declared with `soft_deletes`, `delete_or_fail`, `delete_quietly`,
+`destroy`, and a `delete` called through the `Model` trait all tombstone
+the row, as `delete()` does. `delete_or_fail` answers not-found for a row
+that is already trashed.
 
 ### Filtered serialisation - `to_array_except` / `to_array_only`
 

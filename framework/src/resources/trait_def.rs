@@ -46,6 +46,23 @@ pub trait IntoJsonResource: Send + Sync {
         sink: &mut IncludedSink,
     ) -> Result<(), IncludeResolutionError>;
 
+    /// Check `include_tree` against what this type can include, without a
+    /// value of the type.
+    ///
+    /// `resource_included` checks the paths a value reaches, so an empty
+    /// collection, or relations that happen to be unset, check nothing.
+    /// The responses call this first, so an unknown path answers `400`
+    /// whatever the data. The derive checks every level; the default
+    /// accepts every path, which keeps a hand-written impl that predates
+    /// this method on its old behavior.
+    fn validate_include_tree(include_tree: &IncludeTree) -> Result<(), IncludeResolutionError>
+    where
+        Self: Sized,
+    {
+        let _ = include_tree;
+        Ok(())
+    }
+
     /// Optional per-resource `links` member (spec §5.2.7). Empty by
     /// default; override to provide `self`, `related`, etc. links on
     /// this specific resource object.

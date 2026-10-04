@@ -2,8 +2,11 @@
 //!
 //! Per-project entry point for `db:seed`, your own `#[command]`s, and
 //! other one-shot CLI tasks. Calls `{package_name}::bootstrap::register()`
-//! lazily (only when a real subcommand matches), then routes argv to
-//! a registered console command. `register()` is process-wide only - it
+//! lazily (only when a real subcommand matches), boots what a queue worker
+//! boots - the `#[injectable]` services, the `#[policy]` gates, and the
+//! Cache, Queue, Mail and other runtime drivers - and then routes argv to a
+//! registered console command. It waits for the queued event listeners the
+//! command started before it exits. `register()` is process-wide only - it
 //! does not install the HTTP stack (that lives behind `.http_bootstrap`
 //! in `cmd/main.rs`) - so console commands run in images that ship no
 //! built frontend assets.

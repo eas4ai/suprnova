@@ -165,15 +165,19 @@ impl Resource {
         let include_tree = IncludeTree::from_include_set(&include_set);
         let data = render_resource_object(&dto, &fieldset);
         let mut sink = IncludedSink::new();
+        sink.mark_primary(&data);
         let top_level_meta = dto.resource_top_level_meta();
-        let result = dto.resource_included(&include_tree, &mut sink).map(|()| {
-            let mut builder = JsonApiBuilder::single(data);
-            builder.absorb_included_sink(sink);
-            if !top_level_meta.is_empty() {
-                builder = builder.with_meta_map(top_level_meta);
-            }
-            builder
-        });
+        let result = T::validate_include_tree(&include_tree)
+            .and_then(|()| dto.resource_included(&include_tree, &mut sink))
+            .map(|()| {
+                let mut builder = JsonApiBuilder::single(data);
+                builder.include_requested(!include_tree.is_empty());
+                builder.absorb_included_sink(sink);
+                if !top_level_meta.is_empty() {
+                    builder = builder.with_meta_map(top_level_meta);
+                }
+                builder
+            });
         JsonApiResponse::from_result(result)
     }
 
@@ -188,17 +192,23 @@ impl Resource {
             .map(|d| render_resource_object(d, &fieldset))
             .collect();
         let mut sink = IncludedSink::new();
-        let mut first_err: Option<IncludeResolutionError> = None;
-        for d in &dtos {
-            if let Err(e) = d.resource_included(&include_tree, &mut sink) {
-                first_err = Some(e);
-                break;
+        for resource in &data {
+            sink.mark_primary(resource);
+        }
+        let mut first_err = T::validate_include_tree(&include_tree).err();
+        if first_err.is_none() {
+            for d in &dtos {
+                if let Err(e) = d.resource_included(&include_tree, &mut sink) {
+                    first_err = Some(e);
+                    break;
+                }
             }
         }
         let result = match first_err {
             Some(e) => Err(e),
             None => {
                 let mut builder = JsonApiBuilder::collection(data);
+                builder.include_requested(!include_tree.is_empty());
                 builder.absorb_included_sink(sink);
                 // Collections take their top-level meta from the first
                 // item, mirroring Laravel's `with($request)` semantics -
@@ -232,11 +242,16 @@ impl Resource {
             .map(|d| render_resource_object(d, &fieldset))
             .collect();
         let mut sink = IncludedSink::new();
-        let mut first_err: Option<IncludeResolutionError> = None;
-        for d in items {
-            if let Err(e) = d.resource_included(&include_tree, &mut sink) {
-                first_err = Some(e);
-                break;
+        for resource in &data {
+            sink.mark_primary(resource);
+        }
+        let mut first_err = T::validate_include_tree(&include_tree).err();
+        if first_err.is_none() {
+            for d in items {
+                if let Err(e) = d.resource_included(&include_tree, &mut sink) {
+                    first_err = Some(e);
+                    break;
+                }
             }
         }
         let result = match first_err {
@@ -247,6 +262,7 @@ impl Resource {
                 for (rel, href) in paginator.links_iter() {
                     builder = builder.with_link(rel, href);
                 }
+                builder.include_requested(!include_tree.is_empty());
                 builder.absorb_included_sink(sink);
                 if let Some(first) = items.first() {
                     let m = first.resource_top_level_meta();

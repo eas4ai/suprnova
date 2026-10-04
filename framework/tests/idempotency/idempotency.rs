@@ -850,3 +850,52 @@ async fn release_owned_reports_false_for_a_key_that_was_never_locked() {
         "releasing an absent lock is a success case, not an error"
     );
 }
+
+/// The rustdoc of `Idempotency::remember` shows the key shape applications
+/// copy. `remember` replays whatever is stored under the key, so the shape
+/// it recommends must carry the authenticated user, or two users who send
+/// the same client key on one endpoint read each other's results.
+#[test]
+fn the_recommended_remember_key_carries_the_user_identity() {
+    let source = include_str!("../../src/idempotency/mod.rs");
+    let good = source
+        .split("// GOOD")
+        .nth(1)
+        .and_then(|rest| rest.split("// BAD").next())
+        .expect("the remember rustdoc shows a GOOD example");
+    let key_arguments = good
+        .split("format!(")
+        .nth(1)
+        .and_then(|rest| rest.split(");").next())
+        .expect("the GOOD example builds its key with format!");
+    assert!(
+        key_arguments.contains("user_id"),
+        "the recommended key must include the authenticated user: {key_arguments}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn the_recommended_key_shape_keeps_two_users_apart() {
+    install_memory_cache();
+    let key_for = |user_id: &str| format!("POST:/orders:{user_id}:client-key-1");
+
+    let first: Replay<String> =
+        Idempotency::remember(&key_for("user-1"), Duration::from_secs(60), || async {
+            Ok("order for user-1".to_string())
+        })
+        .await
+        .expect("first remember succeeds");
+    let second: Replay<String> =
+        Idempotency::remember(&key_for("user-2"), Duration::from_secs(60), || async {
+            Ok("order for user-2".to_string())
+        })
+        .await
+        .expect("second remember succeeds");
+
+    assert!(matches!(first, Replay::Fresh(ref value) if value == "order for user-1"));
+    assert!(
+        matches!(second, Replay::Fresh(ref value) if value == "order for user-2"),
+        "a second user with the same client key must run their own body"
+    );
+}

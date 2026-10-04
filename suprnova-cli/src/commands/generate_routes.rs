@@ -6,7 +6,7 @@
 //! - `form.submit(controllers.todo.store({ title: 'Task', completed: false }))`
 //! - `<Link href={controllers.user.index()}>Users</Link>`
 
-use regex::Regex;
+use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -14,7 +14,9 @@ use syn::visit::Visit;
 use syn::{Attribute, Fields, FnArg, ItemFn, ItemStruct, Type};
 use walkdir::WalkDir;
 
-use super::generate_types::{derive_list_names, names_framework_item};
+use super::generate_types::{
+    derive_list_names, names_framework_item, serde_input_key, ts_property_key,
+};
 use crate::ui;
 
 /// HTTP methods for routes
@@ -85,6 +87,8 @@ pub struct FormRequestStruct {
 
 #[derive(Debug, Clone)]
 pub struct FormRequestField {
+    /// The key the request is deserialized from: serde's `rename` and
+    /// `rename_all` applied, not the Rust field name.
     pub name: String,
     pub ty: RustType,
 }
@@ -109,60 +113,307 @@ pub struct GeneratedRoute {
     pub request_struct: Option<FormRequestStruct>,
 }
 
-/// Parse routes.rs file content and extract route definitions
+/// The prefixes the `group!`s around a route add to it.
+///
+/// Mirrors `GroupDef::register_with_inherited` in the framework: paths join
+/// outside in, name prefixes concatenate outside in, and a
+/// `controller = ...` path applies only to the bare handler names of its own
+/// group, not to a group nested inside it.
+#[derive(Clone, Default)]
+struct GroupScope {
+    /// The joined path of every enclosing group; `None` outside any group.
+    path_prefix: Option<String>,
+    name_prefix: String,
+    controller: Option<String>,
+}
+
+/// Parse routes.rs file content and extract route definitions.
+///
+/// The file is read as Rust tokens, not with a pattern over its text, so a
+/// route inside `group!` gets the group's path prefix and name prefix the
+/// way the backend registers it. A route the scan cannot read (a closure
+/// handler, a computed path) is skipped.
 pub fn parse_routes_file(content: &str) -> Vec<RouteDefinition> {
+    let Ok(tokens) = content.parse::<TokenStream>() else {
+        return Vec::new();
+    };
     let mut routes = Vec::new();
+    collect_routes(tokens, &GroupScope::default(), &mut routes);
+    routes
+}
 
-    // Pattern to match route definitions like:
-    // get!("/path", controllers::module::function).name("route.name")
-    // post!("/path/{id}", controllers::module::function)
-    let route_pattern = Regex::new(
-        r#"(get|post|put|patch|delete)!\s*\(\s*"([^"]+)"\s*,\s*([a-zA-Z_][a-zA-Z0-9_:]*)\s*\)(?:\s*\.name\s*\(\s*"([^"]+)"\s*\))?"#
-    ).unwrap();
-
-    // Pattern to extract path parameters like {id}
-    let param_pattern = Regex::new(r#"\{(\w+)\}"#).unwrap();
-
-    for cap in route_pattern.captures_iter(content) {
-        let method_str = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-        let path = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-        let handler_path = cap.get(3).map(|m| m.as_str()).unwrap_or("");
-        let name = cap.get(4).map(|m| m.as_str().to_string());
-
-        let method = match HttpMethod::from_str(method_str) {
-            Some(m) => m,
-            None => continue,
-        };
-
-        // Parse handler path: controllers::user::show -> (controllers::user, show)
-        let parts: Vec<&str> = handler_path.rsplitn(2, "::").collect();
-        let (handler_fn, handler_module) = if parts.len() == 2 {
-            (parts[0].to_string(), parts[1].to_string())
-        } else {
+/// Walk `tokens`, collecting every route macro and descending into every
+/// group and every other token group with the scope it adds.
+fn collect_routes(tokens: TokenStream, scope: &GroupScope, routes: &mut Vec<RouteDefinition>) {
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    let mut at = 0;
+    while at < trees.len() {
+        if let Some((name, body)) = macro_call_at(&trees, at) {
+            let (chain, next) = method_chain(&trees, at + 3);
+            match name.as_str() {
+                "get" | "post" | "put" | "patch" | "delete" => {
+                    if let Some(route) = route_definition(&name, body, &chain, scope) {
+                        routes.push(route);
+                    }
+                }
+                "group" => {
+                    if let Some((items, inner)) = group_scope(body, &chain, scope) {
+                        collect_routes(items, &inner, routes);
+                    }
+                }
+                _ => collect_routes(body, scope, routes),
+            }
+            at = next;
             continue;
-        };
+        }
+        if let TokenTree::Group(group) = &trees[at] {
+            collect_routes(group.stream(), scope, routes);
+        }
+        at += 1;
+    }
+}
 
-        // Extract path parameters
-        let path_params: Vec<PathParam> = param_pattern
-            .captures_iter(path)
-            .filter_map(|cap| {
-                cap.get(1).map(|m| PathParam {
-                    name: m.as_str().to_string(),
-                })
-            })
-            .collect();
+/// `name ! ( ... )` at `at`: the macro's name and the tokens inside it.
+fn macro_call_at(trees: &[TokenTree], at: usize) -> Option<(String, TokenStream)> {
+    let TokenTree::Ident(name) = trees.get(at)? else {
+        return None;
+    };
+    let TokenTree::Punct(bang) = trees.get(at + 1)? else {
+        return None;
+    };
+    let TokenTree::Group(body) = trees.get(at + 2)? else {
+        return None;
+    };
+    (bang.as_char() == '!').then(|| (name.to_string(), body.stream()))
+}
 
-        routes.push(RouteDefinition {
-            method,
-            path: path.to_string(),
-            handler_module,
-            handler_fn,
-            name,
-            path_params,
-        });
+/// The `.method(args)` calls chained after the token at `at - 1`, and the
+/// index of the first token after them.
+fn method_chain(trees: &[TokenTree], mut at: usize) -> (Vec<(String, TokenStream)>, usize) {
+    let mut chain = Vec::new();
+    while let (
+        Some(TokenTree::Punct(dot)),
+        Some(TokenTree::Ident(method)),
+        Some(TokenTree::Group(args)),
+    ) = (trees.get(at), trees.get(at + 1), trees.get(at + 2))
+    {
+        if dot.as_char() != '.' || args.delimiter() != Delimiter::Parenthesis {
+            break;
+        }
+        chain.push((method.to_string(), args.stream()));
+        at += 3;
+    }
+    (chain, at)
+}
+
+/// The string literal a token stream holds, when it holds exactly one.
+fn string_literal(tokens: TokenStream) -> Option<String> {
+    syn::parse2::<syn::LitStr>(tokens)
+        .ok()
+        .map(|literal| literal.value())
+}
+
+/// The string the last `.<method>("...")` in `chain` sets.
+fn chained_string(chain: &[(String, TokenStream)], method: &str) -> Option<String> {
+    chain
+        .iter()
+        .rev()
+        .find(|(name, _)| name == method)
+        .and_then(|(_, args)| string_literal(args.clone()))
+}
+
+/// Split a macro body at its top-level commas.
+fn comma_separated(tokens: TokenStream) -> Vec<Vec<TokenTree>> {
+    let mut parts = vec![Vec::new()];
+    for tree in tokens {
+        match &tree {
+            TokenTree::Punct(punct) if punct.as_char() == ',' => parts.push(Vec::new()),
+            _ => {
+                if let Some(part) = parts.last_mut() {
+                    part.push(tree);
+                }
+            }
+        }
+    }
+    if parts.last().is_some_and(Vec::is_empty) {
+        parts.pop();
+    }
+    parts
+}
+
+/// A Rust path written as tokens (`controllers::user::show`), or `None` for
+/// anything else, such as a closure.
+fn path_text(tokens: &[TokenTree]) -> Option<String> {
+    let mut text = String::new();
+    for tree in tokens {
+        match tree {
+            TokenTree::Ident(ident) => text.push_str(&ident.to_string()),
+            TokenTree::Punct(punct) if punct.as_char() == ':' => text.push(':'),
+            _ => return None,
+        }
+    }
+    let text = text.trim_start_matches("::").to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+fn route_definition(
+    method: &str,
+    body: TokenStream,
+    chain: &[(String, TokenStream)],
+    scope: &GroupScope,
+) -> Option<RouteDefinition> {
+    let method = HttpMethod::from_str(method)?;
+    let mut parts = comma_separated(body).into_iter();
+    let path = string_literal(parts.next()?.into_iter().collect())?;
+    let handler = path_text(&parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
     }
 
-    routes
+    let (handler_module, handler_fn) = match handler.rsplit_once("::") {
+        Some((module, function)) => (module.to_string(), function.to_string()),
+        None => (scope.controller.clone()?, handler),
+    };
+
+    let joined = match &scope.path_prefix {
+        Some(prefix) => join_paths(prefix, &path),
+        None => path,
+    };
+    let path = convert_route_params(&joined);
+    let name = chained_string(chain, "name").map(|name| format!("{}{name}", scope.name_prefix));
+    let path_params = path_param_names(&path)
+        .into_iter()
+        .map(|name| PathParam { name })
+        .collect();
+
+    Some(RouteDefinition {
+        method,
+        path,
+        handler_module,
+        handler_fn,
+        name,
+        path_params,
+    })
+}
+
+/// The items of a `group!` and the scope they register in.
+fn group_scope(
+    body: TokenStream,
+    chain: &[(String, TokenStream)],
+    scope: &GroupScope,
+) -> Option<(TokenStream, GroupScope)> {
+    let mut parts = comma_separated(body).into_iter();
+    let prefix = string_literal(parts.next()?.into_iter().collect())?;
+    let mut controller = None;
+    let mut items = None;
+    for part in parts {
+        match part.as_slice() {
+            [TokenTree::Group(group)] if group.delimiter() == Delimiter::Brace => {
+                items = Some(group.stream());
+            }
+            [TokenTree::Ident(key), TokenTree::Punct(eq), rest @ ..]
+                if key == "controller" && eq.as_char() == '=' =>
+            {
+                controller = Some(path_text(rest)?);
+            }
+            _ => return None,
+        }
+    }
+    let path_prefix = join_paths(scope.path_prefix.as_deref().unwrap_or(""), &prefix);
+    let name_prefix = format!(
+        "{}{}",
+        scope.name_prefix,
+        chained_string(chain, "name").unwrap_or_default()
+    );
+    Some((
+        items?,
+        GroupScope {
+            path_prefix: Some(path_prefix),
+            name_prefix,
+            controller,
+        },
+    ))
+}
+
+/// The framework's `join_paths`: one `/` between prefix and child, and `/`
+/// for two empty halves.
+fn join_paths(prefix: &str, child: &str) -> String {
+    let prefix = prefix.trim_end_matches('/');
+    let child = child.trim_start_matches('/');
+    match (prefix.is_empty(), child.is_empty()) {
+        (true, true) => "/".to_string(),
+        (false, true) => prefix.to_string(),
+        (_, false) => format!("{prefix}/{child}"),
+    }
+}
+
+/// The framework's `convert_route_params`: a `:name` segment becomes
+/// `{name}`. A colon inside a segment stays literal.
+fn convert_route_params(path: &str) -> String {
+    path.split('/')
+        .map(|segment| match segment.strip_prefix(':') {
+            Some(name) => format!("{{{name}}}"),
+            None => segment.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// What one `{...}` placeholder of a route path is.
+enum Placeholder<'a> {
+    /// `{name}`: one path segment.
+    Segment(&'a str),
+    /// `{*name}`: the rest of the path, slashes included. The backend
+    /// captures it under `name`, without the `*`.
+    CatchAll(&'a str),
+}
+
+/// Read the text between `{` and `}`. Anything other than a plain name or a
+/// catch-all name (an optional `{id?}`, for one) is not a parameter the
+/// helpers fill in.
+fn placeholder(inner: &str) -> Option<Placeholder<'_>> {
+    let is_name =
+        |name: &str| !name.is_empty() && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_');
+    match inner.strip_prefix('*') {
+        Some(name) if is_name(name) => Some(Placeholder::CatchAll(name)),
+        None if is_name(inner) => Some(Placeholder::Segment(inner)),
+        _ => None,
+    }
+}
+
+/// Split `path` into literal text and placeholders, in order.
+fn path_pieces(path: &str) -> Vec<Result<Placeholder<'_>, &str>> {
+    let mut pieces = Vec::new();
+    let mut rest = path;
+    while let Some(open) = rest.find('{') {
+        let Some(length) = rest[open..].find('}') else {
+            break;
+        };
+        let close = open + length;
+        if open > 0 {
+            pieces.push(Err(&rest[..open]));
+        }
+        match placeholder(&rest[open + 1..close]) {
+            Some(found) => pieces.push(Ok(found)),
+            None => pieces.push(Err(&rest[open..=close])),
+        }
+        rest = &rest[close + 1..];
+    }
+    if !rest.is_empty() {
+        pieces.push(Err(rest));
+    }
+    pieces
+}
+
+/// The parameter names a path's placeholders capture, in order.
+fn path_param_names(path: &str) -> Vec<String> {
+    path_pieces(path)
+        .into_iter()
+        .filter_map(|piece| match piece {
+            Ok(Placeholder::Segment(name) | Placeholder::CatchAll(name)) => Some(name.to_string()),
+            Err(_) => None,
+        })
+        .collect()
 }
 
 /// Visitor that collects handler functions with #[handler] attribute
@@ -313,13 +564,16 @@ impl<'ast> Visit<'ast> for FormRequestVisitor {
         if self.has_form_request_attr(&node.attrs) {
             let name = node.ident.to_string();
 
+            // The interface describes what the request deserializes, so a
+            // field carries the key serde reads it from, and a field serde
+            // skips on input is left out.
             let fields = match &node.fields {
                 Fields::Named(named) => named
                     .named
                     .iter()
                     .filter_map(|f| {
-                        f.ident.as_ref().map(|ident| FormRequestField {
-                            name: ident.to_string(),
+                        serde_input_key(&node.attrs, f).map(|name| FormRequestField {
+                            name,
                             ty: Self::parse_type(&f.ty),
                         })
                     })
@@ -492,22 +746,31 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
             output.push_str(&format!("export interface {} {{\n", form_req.name));
             for field in &form_req.fields {
                 let ts_type = rust_type_to_ts(&field.ty);
-                output.push_str(&format!("  {}: {};\n", field.name, ts_type));
+                output.push_str(&format!(
+                    "  {}: {};\n",
+                    ts_property_key(&field.name),
+                    ts_type
+                ));
             }
             output.push_str("}\n\n");
         }
     }
 
+    // One helper key per route, shared by the controllers object, the
+    // params interface and the named-routes lookup.
+    let helper_keys = helper_keys(routes);
+
     // Collect all path param types
-    let routes_with_params: Vec<&GeneratedRoute> = routes
+    let routes_with_params: Vec<(&GeneratedRoute, &String)> = routes
         .iter()
-        .filter(|r| !r.definition.path_params.is_empty())
+        .zip(&helper_keys)
+        .filter(|(r, _)| !r.definition.path_params.is_empty())
         .collect();
 
     if !routes_with_params.is_empty() {
         output.push_str("// Path parameter types\n");
-        for route in &routes_with_params {
-            let interface_name = generate_params_interface_name(route);
+        for (route, key) in &routes_with_params {
+            let interface_name = generate_params_interface_name(route, key);
             output.push_str(&format!("export interface {} {{\n", interface_name));
             for param in &route.definition.path_params {
                 output.push_str(&format!("  {}: string;\n", param.name));
@@ -517,10 +780,10 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
     }
 
     // Group routes by module (first part of handler_module after "controllers::")
-    let mut modules: HashMap<String, Vec<&GeneratedRoute>> = HashMap::new();
-    for route in routes {
+    let mut modules: HashMap<String, Vec<(&GeneratedRoute, &String)>> = HashMap::new();
+    for (route, key) in routes.iter().zip(&helper_keys) {
         let module_name = extract_controller_name(&route.definition.handler_module);
-        modules.entry(module_name).or_default().push(route);
+        modules.entry(module_name).or_default().push((route, key));
     }
 
     // Generate controllers object
@@ -534,50 +797,21 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
         let module_routes = modules.get(*module_name).unwrap();
         output.push_str(&format!("  {}: {{\n", module_name));
 
-        // Track used function names to handle duplicates
-        let mut used_names: HashMap<String, usize> = HashMap::new();
-
-        for (j, route) in module_routes.iter().enumerate() {
-            // Generate unique function name for duplicate handlers
-            let base_fn_name = &route.definition.handler_fn;
-            let fn_name = if let Some(count) = used_names.get(base_fn_name) {
-                // Duplicate handler in this module - derive a unique key from the
-                // route name or path, then sanitize it to a valid TS identifier.
-                let raw = if let Some(name) = &route.definition.name {
-                    // Use the last part of the route name: "home" from "home", "protected" from name
-                    name.split('.')
-                        .next_back()
-                        .unwrap_or(base_fn_name)
-                        .to_string()
-                } else {
-                    // Use path to create unique name
-                    route.definition.path.trim_start_matches('/').to_string()
-                };
-                let key = sanitize_route_key(&raw);
-                if key.is_empty() {
-                    format!("{}_{}", base_fn_name, count + 1)
-                } else {
-                    key
-                }
-            } else {
-                base_fn_name.clone()
-            };
-            *used_names.entry(base_fn_name.clone()).or_insert(0) += 1;
-
+        for (j, (route, fn_name)) in module_routes.iter().enumerate() {
             let method = route.definition.method.to_ts_method();
             let has_params = !route.definition.path_params.is_empty();
             let has_data = route.request_struct.is_some();
 
             // Determine function signature
             let (params_signature, return_type) = if has_params && has_data {
-                let params_type = generate_params_interface_name(route);
+                let params_type = generate_params_interface_name(route, fn_name);
                 let data_type = route.request_struct.as_ref().unwrap().name.clone();
                 (
                     format!("params: {}, data: {}", params_type, data_type),
                     format!("RouteConfig<{}>", data_type),
                 )
             } else if has_params {
-                let params_type = generate_params_interface_name(route);
+                let params_type = generate_params_interface_name(route, fn_name);
                 (
                     format!("params: {}", params_type),
                     "RouteConfig".to_string(),
@@ -616,19 +850,18 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
     output.push_str("} as const;\n\n");
 
     // Generate named routes lookup
-    let named_routes: Vec<&GeneratedRoute> = routes
+    let named_routes: Vec<(&String, &GeneratedRoute, &String)> = routes
         .iter()
-        .filter(|r| r.definition.name.is_some())
+        .zip(&helper_keys)
+        .filter_map(|(r, key)| r.definition.name.as_ref().map(|name| (name, r, key)))
         .collect();
 
     if !named_routes.is_empty() {
         output.push_str("// Named routes lookup\n");
         output.push_str("export const routes = {\n");
 
-        for (i, route) in named_routes.iter().enumerate() {
-            let name = route.definition.name.as_ref().unwrap();
+        for (i, (name, route, fn_name)) in named_routes.iter().enumerate() {
             let module = extract_controller_name(&route.definition.handler_module);
-            let fn_name = &route.definition.handler_fn;
             let comma = if i < named_routes.len() - 1 { "," } else { "" };
             output.push_str(&format!(
                 "  '{}': controllers.{}.{}{}\n",
@@ -642,15 +875,62 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
     output
 }
 
+/// The key each route's helper gets in its module of the `controllers`
+/// object, in the order of `routes`.
+///
+/// The first route of a handler keeps the handler's name. A later route of
+/// the same handler in the same module gets a key from its route name or its
+/// path, so two routes never share one helper. The named-routes lookup and
+/// the params interface use these keys too, so an alias reaches its own
+/// route rather than the first route of its handler.
+fn helper_keys(routes: &[GeneratedRoute]) -> Vec<String> {
+    let mut used_names: HashMap<(String, String), usize> = HashMap::new();
+    routes
+        .iter()
+        .map(|route| {
+            let module = extract_controller_name(&route.definition.handler_module);
+            let base_fn_name = &route.definition.handler_fn;
+            let seen = used_names
+                .entry((module, base_fn_name.clone()))
+                .or_insert(0);
+            let key = if *seen == 0 {
+                base_fn_name.clone()
+            } else {
+                // Duplicate handler in this module - derive a unique key from the
+                // route name or path, then sanitize it to a valid TS identifier.
+                let raw = if let Some(name) = &route.definition.name {
+                    // Use the last part of the route name: "home" from "home", "protected" from name
+                    name.split('.')
+                        .next_back()
+                        .unwrap_or(base_fn_name)
+                        .to_string()
+                } else {
+                    // Use path to create unique name
+                    route.definition.path.trim_start_matches('/').to_string()
+                };
+                let key = sanitize_route_key(&raw);
+                if key.is_empty() {
+                    format!("{}_{}", base_fn_name, *seen + 1)
+                } else {
+                    key
+                }
+            };
+            *seen += 1;
+            key
+        })
+        .collect()
+}
+
 /// Generate params interface name from route
-fn generate_params_interface_name(route: &GeneratedRoute) -> String {
-    // Convert handler to PascalCase: user::show -> UserShowParams
+fn generate_params_interface_name(route: &GeneratedRoute, helper_key: &str) -> String {
+    // Convert handler to PascalCase: user::show -> UserShowParams. A second
+    // route of the same handler is named after its own helper key, so the
+    // two interfaces do not merge into one that requires both routes' params.
     let module = extract_controller_name(&route.definition.handler_module);
-    let fn_name = &route.definition.handler_fn;
     format!(
         "{}{}Params",
         to_pascal_case(&module),
-        to_pascal_case(fn_name)
+        to_pascal_case(helper_key)
     )
 }
 
@@ -702,19 +982,35 @@ fn extract_controller_name(module_path: &str) -> String {
         .to_string()
 }
 
-/// Generate URL template string with params interpolation
+/// Generate the template literal that builds a route's URL from `params`.
+///
+/// Each value is percent-encoded the way the backend's `route()` helper
+/// encodes it, so a slug of `a/b` reaches the handler as `a/b` instead of
+/// adding a path segment, and `?` or `#` in a value cannot start a query or
+/// a fragment. A catch-all value spans segments: each segment is encoded and
+/// the slashes between them stay.
 fn generate_url_with_params(path: &str) -> String {
-    // Manually replace {param} with ${params.param} for JS template literals
-    let param_pattern = Regex::new(r#"\{(\w+)\}"#).unwrap();
-    let mut result = path.to_string();
-
-    for cap in param_pattern.captures_iter(path) {
-        let full_match = cap.get(0).unwrap().as_str();
-        let param_name = cap.get(1).unwrap().as_str();
-        result = result.replace(full_match, &format!("${{params.{}}}", param_name));
+    let mut template = String::from("`");
+    for piece in path_pieces(path) {
+        match piece {
+            Ok(Placeholder::Segment(name)) => {
+                template.push_str(&format!("${{encodeURIComponent(String(params.{name}))}}"));
+            }
+            Ok(Placeholder::CatchAll(name)) => template.push_str(&format!(
+                "${{String(params.{name}).split('/').map(encodeURIComponent).join('/')}}"
+            )),
+            Err(text) => {
+                for ch in text.chars() {
+                    if matches!(ch, '`' | '\\' | '$') {
+                        template.push('\\');
+                    }
+                    template.push(ch);
+                }
+            }
+        }
     }
-
-    format!("`{}`", result)
+    template.push('`');
+    template
 }
 
 /// Generate routes and write to the output file
@@ -829,5 +1125,194 @@ mod form_request_scan_tests {
     fn scan_skips_a_struct_with_another_crates_derive() {
         let found = scan("#[derive(other::FormRequest)] pub struct Store { pub title: String }");
         assert!(found.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod route_contract_tests {
+    use super::*;
+
+    fn generated(definitions: Vec<RouteDefinition>) -> Vec<GeneratedRoute> {
+        definitions
+            .into_iter()
+            .map(|definition| GeneratedRoute {
+                definition,
+                handler_info: None,
+                request_struct: None,
+            })
+            .collect()
+    }
+
+    /// `(method, path, name, module, handler)` for each parsed route.
+    fn summary(definitions: &[RouteDefinition]) -> Vec<(String, String, Option<String>, String)> {
+        definitions
+            .iter()
+            .map(|route| {
+                (
+                    route.method.to_ts_method().to_string(),
+                    route.path.clone(),
+                    route.name.clone(),
+                    format!("{}::{}", route.handler_module, route.handler_fn),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn group_prefixes_and_name_prefixes_compose_like_the_backend() {
+        let definitions = parse_routes_file(
+            r#"
+routes! {
+    get!("/", controllers::home::index).name("home"),
+    group!("/users", {
+        get!("/{id}", controllers::user::show).name("show"),
+        group!("/{user}/posts", {
+            get!("/:post", controllers::post::show).name("show"),
+        }).name("posts."),
+    }).middleware(AuthMiddleware::new()).name("users."),
+    group!("/teams", controller = controllers::team, {
+        post!("/", store).name("teams.store"),
+    }),
+}
+"#,
+        );
+
+        assert_eq!(
+            summary(&definitions),
+            vec![
+                (
+                    "get".to_string(),
+                    "/".to_string(),
+                    Some("home".to_string()),
+                    "controllers::home::index".to_string(),
+                ),
+                (
+                    "get".to_string(),
+                    "/users/{id}".to_string(),
+                    Some("users.show".to_string()),
+                    "controllers::user::show".to_string(),
+                ),
+                (
+                    "get".to_string(),
+                    "/users/{user}/posts/{post}".to_string(),
+                    Some("users.posts.show".to_string()),
+                    "controllers::post::show".to_string(),
+                ),
+                (
+                    "post".to_string(),
+                    "/teams".to_string(),
+                    Some("teams.store".to_string()),
+                    "controllers::team::store".to_string(),
+                ),
+            ]
+        );
+        let params: Vec<&str> = definitions[2]
+            .path_params
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect();
+        assert_eq!(params, ["user", "post"]);
+
+        let ts = generate_typescript(&generated(definitions));
+        assert!(
+            ts.contains("url: `/users/${encodeURIComponent(String(params.id))}`"),
+            "the helper must target the grouped path; got:\n{ts}"
+        );
+    }
+
+    #[test]
+    fn a_named_alias_of_a_repeated_handler_points_at_its_own_helper() {
+        let definitions = parse_routes_file(
+            r#"
+routes! {
+    get!("/first", controllers::home::index).name("home.first"),
+    post!("/second", controllers::home::index).name("home.second"),
+}
+"#,
+        );
+        let ts = generate_typescript(&generated(definitions));
+
+        assert!(
+            ts.contains("second: (): RouteConfig => ({ url: '/second', method: 'post' })"),
+            "the second route gets its own helper; got:\n{ts}"
+        );
+        assert!(
+            ts.contains("'home.first': controllers.home.index"),
+            "got:\n{ts}"
+        );
+        assert!(
+            ts.contains("'home.second': controllers.home.second"),
+            "the second alias must reference the second helper, not the first; got:\n{ts}"
+        );
+    }
+
+    #[test]
+    fn path_parameters_are_percent_encoded_like_the_backend_route_helper() {
+        // `route()` encodes a value as one path segment, so `a/b` reaches
+        // the handler as `a/b`. Interpolating it raw would change the path,
+        // the query or the fragment instead.
+        assert_eq!(
+            generate_url_with_params("/posts/{slug}/edit"),
+            "`/posts/${encodeURIComponent(String(params.slug))}/edit`"
+        );
+        // A catch-all spans segments: each segment is encoded and the
+        // slashes between them stay.
+        assert_eq!(
+            generate_url_with_params("/files/{*rest}"),
+            "`/files/${String(params.rest).split('/').map(encodeURIComponent).join('/')}`"
+        );
+        let definitions = parse_routes_file(r#"get!("/files/{*rest}", controllers::file::show)"#);
+        let params: Vec<&str> = definitions[0]
+            .path_params
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect();
+        assert_eq!(params, ["rest"]);
+    }
+
+    #[test]
+    fn request_interfaces_use_the_names_serde_deserializes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).expect("mkdir src");
+        fs::write(
+            src.join("requests.rs"),
+            r#"
+#[derive(Deserialize, FormRequest)]
+#[serde(rename_all = "camelCase")]
+pub struct Store {
+    pub display_name: String,
+    #[serde(rename = "e-mail")]
+    pub email: String,
+    #[serde(rename(serialize = "out", deserialize = "given"))]
+    pub both: String,
+    #[serde(skip_deserializing)]
+    pub server_only: String,
+    #[serde(skip)]
+    pub hidden: String,
+    pub r#type: String,
+}
+"#,
+        )
+        .expect("write source");
+        let store = scan_form_requests(dir.path())
+            .remove("Store")
+            .expect("Store is a form request");
+        let mut route = generated(parse_routes_file(
+            r#"post!("/store", controllers::thing::store)"#,
+        ));
+        route[0].request_struct = Some(store);
+        let ts = generate_typescript(&route);
+
+        let interface = ts
+            .split("export interface Store {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("Store interface emitted");
+        let keys: Vec<&str> = interface
+            .lines()
+            .filter_map(|line| line.trim().split_once(':').map(|(key, _)| key))
+            .collect();
+        assert_eq!(keys, ["displayName", "\"e-mail\"", "given", "type"]);
     }
 }

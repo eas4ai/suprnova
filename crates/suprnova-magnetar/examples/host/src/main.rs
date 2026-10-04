@@ -306,9 +306,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let crypto = Arc::new(AeadEncryptor::new([9; 32]));
     // The second factor counts its failures in a table of its own, which
     // no password identity can reach.
-    let second_factor_lockout = Arc::new(LockoutService::new(
+    let second_factor_lockout = Arc::new(LockoutService::without_user_lock(
         Arc::new(SeaOrmStorage::<SecondFactorStorageSchema>::new(db.clone())),
-        storage.clone(),
         LockoutConfig::default(),
     ));
     let two_factor = Arc::new(TwoFactorService::new(

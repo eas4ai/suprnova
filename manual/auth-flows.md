@@ -164,7 +164,10 @@ challenge (`Auth::factor()`), but in a table of their own,
 address, and anyone can register any string as one, so a shared table would
 let an address reach a user's second-factor counter. A correct password
 therefore doesn't clear second-factor failures, a failed sign-in can't lock a
-second factor, and wrong codes don't lock password sign-in. A password reset proves the mailbox, not the second factor, so it
+second factor, and wrong codes don't lock password sign-in. The second factor's
+keys aren't addresses, so its locks and unlocks never touch an `app_users` row:
+an account registered under an address equal to a key is never locked or
+unlocked by it. A password reset proves the mailbox, not the second factor, so it
 leaves a second-factor lock in place until the window passes. Confirming an
 enrollment, rotating the secret, and regenerating recovery codes count their
 wrong codes in the same table. Each of these paths reserves its attempt before
@@ -172,7 +175,12 @@ it reads the code, so parallel guesses never get past the limit, and a failure
 the lockout store can't record is returned as an error instead of a wrong code.
 A confirmation confirms only the secret its code was checked against, once, and
 uses the code up: if another request replaces the enrollment in between,
-nothing is confirmed and the caller gets a conflict.
+nothing is confirmed and the caller gets a conflict. A rotation waits beside
+the confirmed secret in `auth_two_factor`'s pending columns, which
+`default_schema::migrate` adds to an existing table. The confirmed secret and
+its recovery codes keep gating sign-in until a code from the new secret
+confirms the rotation, a plain enrollment can't replace a waiting rotation,
+and disabling the factor discards it.
 
 Password reset normalizes an unknown or provider-backed unverified address to
 `Ok(())` only after the abuse-limiter, mail configuration, provider/engine, and
@@ -343,10 +351,14 @@ async fn verify_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
 }
 ```
 
-`verify` checks `Auth::id()` against the token owner before consumption. A
-token belonging to another account returns the same invalid-token response and
-remains unused. On success, the provider marks the authenticated owner verified
-and the facade fires `EmailVerified`.
+`verify` checks the route's user against the token owner before consumption.
+The route's user is the user of the guard the last `AuthMiddleware` checked,
+or of the default guard, and `verify` reads and stamps it through that guard's
+provider; behind `AuthMiddleware::for_guard("admin")` it is the admin user,
+never the default guard's user in the same session. A token belonging to
+another account returns the same invalid-token response and remains unused.
+On success, the provider marks the authenticated owner verified and the facade
+fires `EmailVerified`.
 
 A link proves the mailbox it was sent to, and no other. The token carries a
 digest of that address, and `verify` compares it with the account's current
@@ -768,6 +780,41 @@ that confirmed the enrollment is refused at the next sign-in; the user
 signs in with a later code.
 `enroll` checks that the row is still unconfirmed in the statement that
 writes it, so a confirmation that lands while it runs also gets the `409`.
+
+### One second factor per account
+
+With Magnetar installed, an account holds the framework's TOTP or a Magnetar
+second factor, never both. Each refuses the sign-ins that don't verify it: the
+framework's logins refuse an account with a Magnetar factor, and Magnetar's own
+sign-ins refuse an account with the framework's TOTP. An account with both
+could sign in by no path, so neither system lets the second one in.
+
+- `TwoFactor::enroll` and `TwoFactor::confirm` return `409` while the account
+  has a Magnetar factor, confirmed or waiting for its confirmation. `confirm`
+  checks before it reads the code, so of two enrollments racing each other the
+  second to confirm loses.
+- Magnetar's `TwoFactorService` returns a conflict on
+  `magnetar::two_factor::OTHER_SECOND_FACTOR` from `enroll` and `confirm` while
+  the account has the framework's TOTP, confirmed or pending. `init_magnetar`
+  gives its service that check; a host that builds its own service passes
+  `suprnova::magnetar_integration::engine::FrameworkTotpEnrollment` to
+  `TwoFactorService::with_other_second_factor`.
+
+An account can still hold both if it enrolled before these checks, or if a
+migration imported a Magnetar factor for an account that has the framework's
+TOTP. Every sign-in path refuses it with `409` until one factor is disabled,
+and disabling either one is the recovery. The user can't sign in to do it, so
+it's an administrator's action:
+
+```rust
+// Disable the framework TOTP. Auth::password() and Magnetar's other
+// sign-ins then ask for the Magnetar factor.
+TwoFactor::disable(&user_2fa).await?;
+```
+
+A host that holds its `TwoFactorService` can disable the Magnetar factor
+instead. The account then signs in through the application's login and
+`TwoFactor::complete_challenge`.
 
 ### Replay protection
 

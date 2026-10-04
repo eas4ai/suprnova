@@ -237,7 +237,13 @@ pub struct PostResource {
 ```
 
 A request that names an include path not on this resource's allowlist
-gets a JSON:API 400 errors envelope.
+gets a JSON:API 400 errors envelope. The path is checked against the
+resource types, not against the values in the response, so an empty
+collection refuses an unknown path too. A request that names a supported
+path always gets an `included` array, empty when nothing relates. A
+resource that is already primary data never repeats in `included`. A
+field marked `#[data(input_only, allow_include)]` is never sent: it has
+no relationship linkage, and including it is a 400.
 
 ### Depth cap
 
@@ -312,7 +318,8 @@ Resource::paginated(page).render().await
 Every `FrameworkError` knows how to render itself as a JSON:API
 `{"errors": [...]}` envelope via `into_json_api_response()`. The
 helper is exposed because `FrameworkError` carries a status code, a
-field-name source pointer (for `ValidationError`), and a request-id
+field-name source pointer (for `ValidationError`, escaped per RFC 6901,
+so an attribute named `a/b` is `/data/attributes/a~1b`), and a request-id
 correlation token under `meta.request_id`. 5xx responses are
 sanitised: the raw message never reaches the client unless
 `APP_DEBUG=true` is set in the active environment, in which case it

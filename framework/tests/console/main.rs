@@ -5,4 +5,5 @@ pub mod command_macro;
 pub mod console;
 pub mod db_seed;
 pub mod harness;
+pub mod process_boot;
 pub mod typed;

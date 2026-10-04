@@ -251,7 +251,10 @@ pub async fn pusher_channel_auth(req: Request) -> Response {
             })))
         }
         WireKind::Presence => {
-            let Some(user_id) = Auth::id() else {
+            // The route's user: behind `AuthMiddleware::for_guard(name)`,
+            // that guard's user as `<guard>:<id>`, never the default
+            // guard's user in the same session.
+            let Some(user_id) = Auth::route_principal().await? else {
                 return Err(forbidden());
             };
             let Some(presence) = channel.presence_info() else {
@@ -285,6 +288,11 @@ pub async fn pusher_channel_auth(req: Request) -> Response {
 /// It reads `socket_id` like [`pusher_channel_auth`] and answers 422
 /// when it is malformed, 403 (`{}`) without a logged-in user, and
 /// otherwise 200 with `auth` and `user_data` (`{"id": <user id>}`).
+///
+/// The user is the route's: the user of the guard the last
+/// `AuthMiddleware` checked, as its bare id for the default guard and as
+/// `<guard>:<id>` for any other. A presence member's `user_id` from
+/// [`pusher_channel_auth`] follows the same rule.
 pub async fn pusher_user_auth(req: Request) -> Response {
     let auth = bound_auth()?;
     let req = req.buffer_body(AUTH_BODY_LIMIT).await?;
@@ -292,7 +300,7 @@ pub async fn pusher_user_auth(req: Request) -> Response {
     let Some(socket_id) = body.socket_id.as_deref().filter(|s| is_valid_socket_id(s)) else {
         return Err(invalid(&[("socket_id", SOCKET_ID_MESSAGE)]));
     };
-    let Some(user_id) = Auth::id() else {
+    let Some(user_id) = Auth::route_principal().await? else {
         return Err(forbidden());
     };
     let user_data = to_json_string(&json!({ "id": user_id }))?;

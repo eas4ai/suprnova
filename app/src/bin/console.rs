@@ -3,8 +3,11 @@
 //! Per-project entry point for runtime CLI commands: `db:seed`,
 //! user-defined commands registered via `#[command]`, etc. Calls
 //! `app::bootstrap::register()` so the seeder / queue / event
-//! registries are wired up before dispatch, then routes argv to a
-//! handler registered in `suprnova::console`'s inventory.
+//! registries are wired up before dispatch, and the framework then boots
+//! what a queue worker boots - the `#[injectable]` services, the
+//! `#[policy]` gates, the runtime drivers - before it routes argv to a
+//! handler registered in `suprnova::console`'s inventory. It waits for
+//! the queued event listeners the command started before it exits.
 //!
 //! Why a separate binary from `app` (the HTTP server in `cmd/main.rs`):
 //! `app` starts the listener and never returns. A console command

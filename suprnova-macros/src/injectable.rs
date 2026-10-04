@@ -240,11 +240,12 @@ fn generate_with_injection(
         ::suprnova::inventory::submit! {
             ::suprnova::container::provider::SingletonEntry {
                 register: || -> ::std::result::Result<(), ::std::string::String> {
-                    // singleton_if_absent - boot is idempotent and does not
-                    // clobber manual overrides. `?` defers to the bootstrap
-                    // loop if a dependency isn't installed yet.
-                    let instance = #name::__resolve_dependencies()?;
-                    ::suprnova::App::singleton_if_absent(instance);
+                    // Boot is idempotent and does not clobber manual
+                    // overrides - and a type already bound is not
+                    // constructed at all, so the dependencies only its
+                    // constructor reads need not exist. `?` defers to the
+                    // bootstrap loop if a dependency isn't installed yet.
+                    ::suprnova::App::singleton_if_absent_with(#name::__resolve_dependencies)?;
                     ::std::result::Result::Ok(())
                 },
                 name: #name_str,

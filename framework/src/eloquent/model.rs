@@ -1188,8 +1188,11 @@ where
     /// 2. *DELETE lands*
     /// 3. `Deleted { model, is_force: false }`
     ///
-    /// Soft-delete models override the inherent `delete` to also
-    /// dispatch `Trashed { model }` after step 2.
+    /// A model declared with `soft_deletes` overrides this method, on the
+    /// trait as well as inherently, with its tombstone `UPDATE`, which
+    /// also dispatches `Trashed { model }` after step 2. A call through
+    /// the trait - generic code, [`Self::destroy`],
+    /// [`Self::delete_quietly`] - tombstones the row too.
     async fn delete(self) -> Result<(), FrameworkError> {
         Self::__dispatch_deleting(&self, false).await?;
         let touch_plan = Self::__plan_touches(Some(&self), &Attrs::new())?;
@@ -2167,6 +2170,9 @@ where
     /// after the DELETE lands and surface `0` as 404 - matching what
     /// the caller would have seen had the pre-flight observed the
     /// missing row.
+    ///
+    /// On a model declared with `soft_deletes` the row is tombstoned, as
+    /// [`Self::delete`] does, and a row that is already trashed is a 404.
     async fn delete_or_fail(self) -> Result<(), FrameworkError> {
         if crate::database::after_commit::in_transaction() {
             return delete_one_or_fail::<Self>(self, None).await;
@@ -2570,11 +2576,19 @@ fn is_record_missing(err: &FrameworkError) -> bool {
     }
 }
 
-/// Execute a hard DELETE for `model` and assert that exactly one row
+/// Execute the DELETE for `model` and assert that exactly one row
 /// was removed. Shared between `delete_or_fail` and its
 /// ambient-transaction branch so both paths fire the same lifecycle
 /// events (`Deleting` → DELETE → `Deleted`) and the same
 /// `rows_affected == 1` check.
+///
+/// A model declared with `soft_deletes` is tombstoned instead, as its
+/// `delete()` does: one `UPDATE ... SET deleted_at = <now>` of the row
+/// while it is not trashed, then `Trashed` before `Deleted`. A row
+/// already trashed is not found, as a scoped read would not find it.
+/// This is generic code, so it reads the model's declaration from
+/// [`EloquentModel::__soft_delete_stamp`]; the concrete `delete()` it
+/// mirrors is an inherent method generic dispatch never reaches.
 ///
 /// When `tx` is `Some` the DELETE is pinned to the supplied
 /// transaction (the `delete_or_fail` no-ambient-tx path uses this
@@ -2600,6 +2614,10 @@ where
         Send + Into<sea_orm::Value>,
 {
     M::__dispatch_deleting(&model, false).await?;
+
+    if let Some(stamp) = M::__soft_delete_stamp()? {
+        return trash_one_or_fail(model, tx, stamp).await;
+    }
 
     let snapshot = model.clone();
     let row = model.try_into_storage()?;
@@ -2641,5 +2659,92 @@ where
     }
 
     M::__dispatch_deleted(&snapshot, false).await?;
+    Ok(())
+}
+
+/// The soft-delete branch of [`delete_one_or_fail`]: tombstone `model`'s
+/// row while it is not trashed, with the stamp the model declares, and
+/// answer not-found when no live row was there to tombstone.
+async fn trash_one_or_fail<M>(
+    model: M,
+    tx: Option<&crate::database::Transaction>,
+    stamp: crate::eloquent::SoftDeleteStamp,
+) -> Result<(), FrameworkError>
+where
+    M: Model,
+    M: From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    crate::database::validate_identifier(M::SOFT_DELETES_COLUMN)?;
+    crate::database::validate_identifier(M::primary_key_name())?;
+    let model_ref = &model;
+    let write = || async move {
+        let exec = match tx {
+            Some(t) => crate::database::transaction::ExecutorChoice::from_tx(t),
+            None => {
+                crate::database::transaction::ExecutorChoice::resolve_write(
+                    None,
+                    None,
+                    M::default_connection_name(),
+                )
+                .await?
+            }
+        };
+        let backend = exec.backend();
+        let placeholder = crate::database::__macro_support::placeholder;
+        let mut values = vec![stamp.deleted_at];
+        let mut sql = format!(
+            "UPDATE {} SET {} = {}",
+            M::TABLE,
+            M::SOFT_DELETES_COLUMN,
+            placeholder(backend, values.len())?
+        );
+        if let Some(updated_at) = stamp.updated_at {
+            crate::database::validate_identifier(M::UPDATED_AT_COLUMN)?;
+            values.push(updated_at);
+            sql.push_str(&format!(
+                ", {} = {}",
+                M::UPDATED_AT_COLUMN,
+                placeholder(backend, values.len())?
+            ));
+        }
+        values.push(model_ref.primary_key_value().into());
+        sql.push_str(&format!(
+            " WHERE {} = {} AND {} IS NULL",
+            M::primary_key_name(),
+            placeholder(backend, values.len())?,
+            M::SOFT_DELETES_COLUMN,
+        ));
+        let result = exec
+            .run(sea_orm::Statement::from_sql_and_values(
+                backend, &sql, values,
+            ))
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        if result.rows_affected() == 0 {
+            return Err(FrameworkError::not_found(
+                "delete_or_fail: row no longer exists",
+            ));
+        }
+        match tx {
+            Some(t) => crate::render_cache::orm::after_model_write_with_tx(t, model_ref).await?,
+            None => crate::render_cache::orm::after_model_write(model_ref).await?,
+        }
+        Ok(())
+    };
+    match tx {
+        Some(_) => write().await?,
+        None => crate::render_cache::orm::atomic(M::default_connection_name(), write).await?,
+    }
+
+    M::__dispatch_trashed(&model).await?;
+    M::__dispatch_deleted(&model, false).await?;
     Ok(())
 }

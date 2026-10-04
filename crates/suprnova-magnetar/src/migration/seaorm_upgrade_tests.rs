@@ -72,11 +72,19 @@ fn assert_expected_upgrade_delta(
         .map(String::as_str)
         .filter(|table| before.get(*table) != after.get(*table))
         .collect();
+    // app_users gains its email uniqueness index and auth_two_factor its
+    // pending-rotation columns, which postdate them too.
     assert_eq!(
-        BTreeSet::from(["auth_lockouts", "auth_second_factor_lockouts"]),
+        BTreeSet::from([
+            "app_users",
+            "auth_lockouts",
+            "auth_second_factor_lockouts",
+            "auth_two_factor"
+        ]),
         changed_tables,
-        "first migration pass must only add the current auth_lockouts schema and the \
-         second-factor lockout table"
+        "first migration pass must only add the current auth_lockouts schema, the \
+         second-factor lockout table, the app_users email index and the \
+         pending-rotation columns"
     );
 }
 

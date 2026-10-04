@@ -103,8 +103,21 @@ fn google_config(
     MagnetarConfig::from_sea_orm(connection).oauth(oauth)
 }
 
+/// Runs in its own process: `init_magnetar` installs the process-wide
+/// Magnetar engines, which every other installing test in this binary also
+/// claims.
+#[test]
+fn default_installer_runs_password_session_and_lockout_flows() {
+    crate::own_process::run_alone(
+        "default_engine::default_installer_runs_password_session_and_lockout_flows_child",
+    );
+}
+
 #[tokio::test]
-async fn default_installer_runs_password_session_and_lockout_flows() {
+async fn default_installer_runs_password_session_and_lockout_flows_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Crypt::init(EncryptionKey::generate());
     suprnova::App::bind::<dyn RateLimiterDriver>(Arc::new(AllowingLimiter));
     let connection = Database::connect("sqlite::memory:")

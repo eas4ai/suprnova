@@ -135,20 +135,21 @@ async fn wait_terminate() {
     std::future::pending::<()>().await;
 }
 
+/// Build a listener that can be fired by hand, so the loops that consume
+/// one are testable without raising real signals at the test process -
+/// which would take the test runner down with them.
+#[cfg(test)]
+pub(crate) fn riggable() -> (
+    tokio::sync::watch::Sender<Option<ShutdownSignal>>,
+    ShutdownListener,
+) {
+    let (tx, rx) = tokio::sync::watch::channel(None);
+    (tx, ShutdownListener { rx })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Build a listener that can be fired by hand, so the loops that
-    /// consume one are testable without raising real signals at the test
-    /// process - which would take the test runner down with them.
-    fn riggable() -> (
-        tokio::sync::watch::Sender<Option<ShutdownSignal>>,
-        ShutdownListener,
-    ) {
-        let (tx, rx) = tokio::sync::watch::channel(None);
-        (tx, ShutdownListener { rx })
-    }
 
     /// The property that makes one listener correct for a whole loop. The
     /// shape this replaced rebuilt its signal future every iteration, and

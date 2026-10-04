@@ -23,18 +23,15 @@
 //! and asserts the response is 500 - **not** 200 - and that the protected
 //! handler was never reached.
 //!
-//! # Why this is a SEPARATE integration binary
+//! # Why the `AuthManager` is scoped, not global
 //!
-//! The middleware executes on a tokio worker thread (`spawn` → `tokio::spawn`
-//! → `handle_request`). Container lookup is task-local → thread-local →
-//! **global**, and the thread-local layer that `TestContainer` installs does
-//! NOT cross into the worker thread. So `active_user_provider()` (which
-//! resolves the `AuthManager`) must be bound **globally** for the worker to see
-//! it - and the provider is registered globally via `Auth::register_provider`.
-//! That global binding would race/bleed into the four parallel tests in
-//! `framework/tests/email_verified_middleware.rs`, which register a *different*
-//! (Eloquent) provider under the same `"users"` name. Keeping this test in its
-//! own integration binary gives it its own process → no global-state bleed.
+//! This test shares the `auth_flows` binary, and so the process, with
+//! `email_verified_middleware.rs`, which binds a *different* (Eloquent)
+//! provider under the same `"users"` name in the global container. A global
+//! binding here would race those tests both ways. So the manager and the
+//! token-only provider live in a task-local `TestContainer::scope`, and the
+//! server task is started with `TestContainer::spawn`, which carries that
+//! scope across to the task that runs the middleware.
 //!
 //! The HTTP plumbing mirrors `email_verified_middleware.rs`: a `LoginAs` global
 //! middleware installs a fixed user id into request state (what `Auth::id()`
@@ -59,8 +56,9 @@ use tokio::runtime::Runtime;
 use suprnova::FrameworkError;
 use suprnova::auth::AuthConfig;
 use suprnova::http::text;
+use suprnova::testing::TestContainer;
 use suprnova::{
-    App, Auth, AuthManager, Authenticatable, EnsureEmailVerifiedMiddleware, Middleware,
+    Auth, AuthManager, Authenticatable, EnsureEmailVerifiedMiddleware, Middleware,
     MiddlewareRegistry, Next, Request, Response, Router, UserProvider, handle_request,
 };
 
@@ -110,14 +108,13 @@ impl UserProvider for TokenOnlyProvider {
     }
 }
 
-/// One-time GLOBAL setup: bind an `AuthManager` and register the token-only
-/// provider as the active `"users"` provider - globally, so the worker thread
-/// resolving `active_user_provider()` can see it. No DB is bound: this path
-/// errors before any storage read.
-static SETUP: Lazy<()> = Lazy::new(|| {
-    App::singleton(AuthManager::new(AuthConfig::default()));
+/// Bind an `AuthManager` and register the token-only provider as the active
+/// `"users"` provider, in the caller's `TestContainer::scope`. No DB is
+/// bound: this path errors before any storage read.
+fn install_token_only_provider() {
+    TestContainer::singleton(AuthManager::new(AuthConfig::default()));
     Auth::register_provider("users", Arc::new(TokenOnlyProvider)).expect("register provider");
-});
+}
 
 /// `Authenticatable` whose `get_auth_identifier()` returns a fixed id string -
 /// installed into request state by `LoginAs` so `Auth::id()` is `Some(id)`.
@@ -165,7 +162,9 @@ async fn spawn(registry: MiddlewareRegistry, accepts: usize) -> SocketAddr {
         .expect("bind ephemeral listener");
     let addr = listener.local_addr().expect("local_addr");
 
-    tokio::spawn(async move {
+    // `TestContainer::spawn` carries the caller's container scope to the
+    // server task, so the middleware resolves the scoped `AuthManager`.
+    TestContainer::spawn(async move {
         for _ in 0..accepts {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
@@ -173,7 +172,7 @@ async fn spawn(registry: MiddlewareRegistry, accepts: usize) -> SocketAddr {
             let io = TokioIo::new(stream);
             let router = router.clone();
             let middleware = middleware.clone();
-            tokio::spawn(async move {
+            TestContainer::spawn(async move {
                 let svc = service_fn(move |req: hyper::Request<Incoming>| {
                     let router = router.clone();
                     let middleware = middleware.clone();
@@ -196,9 +195,8 @@ async fn spawn(registry: MiddlewareRegistry, accepts: usize) -> SocketAddr {
 /// must NOT pass through.
 #[test]
 fn provider_error_fails_closed_with_500() {
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    RT.block_on(TestContainer::scope(async {
+        install_token_only_provider();
         HANDLER_REACHED.store(false, Ordering::SeqCst);
         PROVIDER_CONSULTED.store(false, Ordering::SeqCst);
 
@@ -232,5 +230,5 @@ fn provider_error_fails_closed_with_500() {
             !HANDLER_REACHED.load(Ordering::SeqCst),
             "protected handler must NOT be reached when the provider errors"
         );
-    });
+    }));
 }

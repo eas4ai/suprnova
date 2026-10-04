@@ -935,4 +935,33 @@ mod tests {
             vec![(-1, vec![20])]
         );
     }
+
+    /// The listing and the scheduler read one grammar: every line
+    /// `schedule:list` prints parses, and it is due at exactly the display
+    /// times the task runs. `*/2` on the day of month used to be the even
+    /// days to the scheduler and the odd days to this converter, and the
+    /// converted `2-30/2` did not parse at all.
+    #[test]
+    fn a_converted_expression_runs_when_the_task_runs() {
+        let task = CronExpression::parse("0 20 */2 6 *").expect("the task parses");
+        let tokyo = tz("Asia/Tokyo");
+        let lines: Vec<CronExpression> = rewritten_as("0 20 */2 6 *", "UTC", "Asia/Tokyo")
+            .iter()
+            .map(|line| {
+                CronExpression::parse(line)
+                    .unwrap_or_else(|e| panic!("`{line}` from schedule:list does not parse: {e}"))
+            })
+            .collect();
+        for day in 1..=30 {
+            let at = utc(2026, 6, day, 20, 0);
+            let runs = task.is_due_at(at);
+            let listed = lines
+                .iter()
+                .any(|line| line.is_due_at(at.with_timezone(&tokyo)));
+            assert_eq!(
+                listed, runs,
+                "June {day} 20:00 UTC: the scheduler says {runs}, the listing says {listed}"
+            );
+        }
+    }
 }

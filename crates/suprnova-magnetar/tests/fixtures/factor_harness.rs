@@ -117,9 +117,8 @@ pub async fn factor_world_with(
     let reauth = Arc::new(StubReauth::default());
     let crypto = Arc::new(AeadEncryptor::new([21; 32]));
 
-    let second_factor_lockout = Arc::new(LockoutService::new(
+    let second_factor_lockout = Arc::new(LockoutService::without_user_lock(
         Arc::new(SeaOrmStorage::<SecondFactorStorageSchema>::new(db.clone())),
-        storage.clone(),
         lockout_config,
     ));
     let two_factor = Arc::new(TwoFactorService::new(

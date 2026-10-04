@@ -417,3 +417,96 @@ async fn failed_sign_ins_as_the_second_factor_key_do_not_lock_it() {
 
     assert_eq!(reply.status, 200, "strangers cannot lock the second factor");
 }
+
+/// The second factor counts failures under a key derived from the user id,
+/// not an address. An account registered with that key as its address is
+/// someone else's account: second-factor failures must never lock it, and
+/// clearing them must never unlock it.
+#[tokio::test]
+async fn second_factor_lockouts_never_lock_or_unlock_a_decoy_account() {
+    let (world, key, enrollment) = victim_with_second_factor().await;
+    let victim_id = world
+        .storage
+        .find_by_email(EMAIL)
+        .await
+        .unwrap()
+        .unwrap()
+        .user_id;
+    let decoy = send(&world, register_request(&key, "decoy password 123")).await;
+    assert_eq!(decoy.status, 200);
+    let decoy_locked_at = || async {
+        world
+            .storage
+            .find_by_email(&key)
+            .await
+            .unwrap()
+            .expect("the decoy account exists")
+            .locked_at
+    };
+
+    // Three wrong codes lock the victim's second factor.
+    let login = send(&world, login_request(EMAIL, PASSWORD)).await;
+    let selector = login.body.unwrap()["challenge_selector"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for _ in 0..3 {
+        let reply = send(
+            &world,
+            post_json(
+                "/two-factor-challenge",
+                json!({"challenge_selector": selector, "code": "000000"}),
+            ),
+        )
+        .await;
+        assert_eq!(reply.status, 401);
+    }
+    assert!(
+        world
+            .second_factor_lockout
+            .status(&key)
+            .await
+            .unwrap()
+            .is_locked
+    );
+    assert_eq!(
+        decoy_locked_at().await,
+        None,
+        "the second factor's lock never reaches the decoy's row"
+    );
+
+    // The decoy is locked for reasons of its own. Unlocking the victim's
+    // second factor, and then a successful challenge, leave that lock alone.
+    world
+        .storage
+        .set_locked_at_by_email(&key, Some(Utc::now()))
+        .await
+        .unwrap();
+    assert!(world.two_factor.unlock(&victim_id).await.unwrap());
+    assert!(
+        decoy_locked_at().await.is_some(),
+        "unlocking the second factor never unlocks the decoy"
+    );
+    let login = send(&world, login_request(EMAIL, PASSWORD)).await;
+    let selector = login.body.unwrap()["challenge_selector"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let code = totp_code_at(
+        &enrollment.otpauth_url,
+        Utc::now().timestamp() + STEP_SECONDS,
+    );
+    let completed = send(
+        &world,
+        post_json(
+            "/two-factor-challenge",
+            json!({"challenge_selector": selector, "code": code}),
+        ),
+    )
+    .await;
+    assert_eq!(completed.status, 200);
+    assert!(
+        decoy_locked_at().await.is_some(),
+        "a successful challenge never unlocks the decoy"
+    );
+}

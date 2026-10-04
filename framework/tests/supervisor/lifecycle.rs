@@ -251,10 +251,13 @@ async fn supervisor_exits_when_cancel_token_fires() {
     );
 }
 
-/// Cancelling a supervisor that uses Always policy does NOT cause a restart:
-/// the restart loop checks cancel.is_cancelled() before each new run.
+/// A supervisor whose token is already cancelled never runs: the restart
+/// loop checks the token before every run, the first one included. It used
+/// to check only after a run finished, so a supervisor spawned during
+/// shutdown started a fresh body after the drain that should have covered
+/// it.
 #[tokio::test]
-async fn cancel_prevents_restart_under_always_policy() {
+async fn a_pre_cancelled_supervisor_never_runs() {
     struct AlwaysOkInstant {
         counter: Arc<AtomicUsize>,
     }
@@ -281,8 +284,7 @@ async fn cancel_prevents_restart_under_always_policy() {
     });
     let cancel = CancellationToken::new();
 
-    // Cancel before spawning - the restart loop should exit immediately after
-    // the first run (cancel.is_cancelled() is true at the top of loop #2).
+    // Cancel before spawning: the loop must exit before its first run.
     cancel.cancel();
     let handle = tokio::spawn(run_with_restart_for_testing_with_cancel(sv, cancel));
 
@@ -291,11 +293,10 @@ async fn cancel_prevents_restart_under_always_policy() {
         .expect("supervisor did not exit within 500ms")
         .expect("supervisor task panicked");
 
-    // Should have run exactly once: the pre-cancel check fires before any restart.
     assert_eq!(
         counter.load(Ordering::SeqCst),
-        1,
-        "Always supervisor should run once then stop when pre-cancelled"
+        0,
+        "a pre-cancelled supervisor must not run its body at all"
     );
 }
 

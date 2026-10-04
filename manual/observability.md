@@ -451,6 +451,12 @@ before the process exits or you lose whatever is still buffered.
   endpoint, or `OTEL_SDK_DISABLED`, or a non-`otel` build) hands back a
   provider-less guard whose drop is silent, so collector-less dev and
   test runs don't get spammed.
+- A second `init_telemetry` call while a guard still holds providers
+  changes nothing: it builds and installs no providers, and returns a
+  provider-less guard. The first guard stays in charge of the global
+  tracer and meter providers, so shutting the second one down can't stop
+  the `Metrics` facade. Once the first guard is dropped, with
+  `shutdown()` or without it, the next call installs providers again.
 
 ## Summary
 

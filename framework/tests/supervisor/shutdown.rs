@@ -108,4 +108,48 @@ async fn shutdown_cancels_token_drains_tasks_and_is_idempotent() {
         elapsed2 < Duration::from_millis(150),
         "second shutdown (idempotent) should return near-instantly; took {elapsed2:?}"
     );
+
+    // ── Phase 5: a spawn after the drain starts nothing ──────────────────────
+    // The pool has drained, so a supervisor handed in now would run outside
+    // any drain. It used to start its body anyway.
+    let ran = Arc::new(AtomicBool::new(false));
+    SupervisorRegistry::spawn(Arc::new(LateSupervisor {
+        ran: Arc::clone(&ran),
+    }))
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !ran.load(Ordering::SeqCst),
+        "a supervisor spawned after shutdown must not run"
+    );
+    let sv_tasks = supervisor_tasks().unwrap();
+    assert!(
+        sv_tasks.lock().await.is_empty(),
+        "a spawn after shutdown adds nothing to the drained pool"
+    );
+}
+
+/// Records whether its body ran, and ignores the cancel token, as an
+/// application supervisor may.
+struct LateSupervisor {
+    ran: Arc<AtomicBool>,
+}
+
+#[suprnova::async_trait]
+impl suprnova::supervisor::Supervisor for LateSupervisor {
+    fn name(&self) -> &'static str {
+        "late_supervisor"
+    }
+
+    async fn run(
+        &self,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<(), suprnova::FrameworkError> {
+        self.ran.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn restart_policy(&self) -> suprnova::supervisor::RestartPolicy {
+        suprnova::supervisor::RestartPolicy::Never
+    }
 }

@@ -8,9 +8,10 @@
 //! ## SeaORM blanket impl
 //!
 //! Every SeaORM `Model` that can `IntoActiveModel<ActiveModel>` already
-//! gets `Persistable` via the blanket impl below. `persist(self)` pulls
-//! the framework's bound `DB::connection()`, converts to an
-//! `ActiveModel`, and `.insert(...)`s. The returned `Self` is what
+//! gets `Persistable` via the blanket impl below. `persist(self)`
+//! converts to an `ActiveModel` and `.insert(...)`s it on the ambient
+//! `DB::transaction` when one is open, and on the framework's bound
+//! `DB::connection()` otherwise. The returned `Self` is what
 //! SeaORM hands back from the insert - with the auto-incremented id,
 //! default-filled columns, etc. resolved.
 //!
@@ -47,8 +48,9 @@ use sea_orm::{
 /// defaulted columns resolved, etc.).
 #[async_trait]
 pub trait Persistable: Sized + Send {
-    /// Insert `self` against the default database connection and return
-    /// the canonicalized post-insert version with assigned id, default
+    /// Insert `self` - on the ambient `DB::transaction` when one is open,
+    /// otherwise on the default database connection - and return the
+    /// canonicalized post-insert version with assigned id, default
     /// columns resolved, and timestamps populated.
     async fn persist(self) -> Result<Self, FrameworkError>;
 }
@@ -98,9 +100,16 @@ where
         .map_err(|e| FrameworkError::internal(format!("factory persist: {e}")))
 }
 
-/// Blanket impl: any SeaORM `Model` is `Persistable` via
-/// `DB::connection()`. Consumers don't write per-model
-/// `impl Persistable for User` - the trait is already there.
+/// Blanket impl: any SeaORM `Model` is `Persistable`. Consumers don't
+/// write per-model `impl Persistable for User` - the trait is already
+/// there.
+///
+/// The insert runs where every framework write runs: on the ambient
+/// `DB::transaction` when one is open, and on the default pool
+/// otherwise. `create_many` documents wrapping it in a transaction for
+/// atomicity, so an insert sent to the pool instead escaped the
+/// rollback - and on a one-connection pool it waited for the connection
+/// the transaction held.
 #[async_trait]
 impl<M, E> Persistable for M
 where
@@ -111,8 +120,11 @@ where
         PrimaryKeyToColumn<Column = <E as EntityTrait>::Column> + Iterable,
 {
     async fn persist(self) -> Result<Self, FrameworkError> {
-        let db = crate::database::DB::connection()?;
-        let result = persist_via_seaorm(self, db.inner()).await?;
+        use crate::database::transaction::ExecutorChoice;
+        let result = match ExecutorChoice::resolve_write(None, None, None).await? {
+            ExecutorChoice::Tx(tx, _) => persist_via_seaorm(self, tx.as_ref()).await?,
+            ExecutorChoice::Pool(db, _) => persist_via_seaorm(self, db.inner()).await?,
+        };
         let table = crate::database::model::entity_table_name::<E>();
         crate::render_cache::orm::after_table_write(table).await?;
         Ok(result)

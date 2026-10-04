@@ -164,3 +164,68 @@ async fn mariadb_dumps_loads_and_prunes() {
     )
     .await;
 }
+
+/// The URL in `var` read the way SQLx reads it but spelled differently: the
+/// password moved to a `password=` query parameter that SQLx applies after
+/// a stale one left in the authority, and `query` appended. The framework
+/// connects with it, so the tools must too.
+fn respelled_url(var: &str, query: &str) -> String {
+    let mut url = url::Url::parse(
+        &std::env::var(var).unwrap_or_else(|_| panic!("{var} must name a throwaway database")),
+    )
+    .expect("a URL");
+    let password = url
+        .password()
+        .map(|password| {
+            percent_encoding::percent_decode_str(password)
+                .decode_utf8_lossy()
+                .into_owned()
+        })
+        .expect("the test URL has a password");
+    url.set_password(Some("not-the-password"))
+        .expect("the URL takes a password");
+    url.query_pairs_mut().append_pair("password", &password);
+    let joiner = if url.query().is_some() { '&' } else { '?' };
+    format!("{url}{joiner}{query}")
+}
+
+#[tokio::test]
+#[ignore = "needs PG_TEST_URL"]
+async fn postgres_tools_read_the_url_like_the_connection() {
+    let url = respelled_url("PG_TEST_URL", "ssl-mode=require");
+    let _lock = cases::exclusive().await;
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    suprnova::use_database_path(dir.path());
+    let (_environment, _args, env) = record_tools(dir.path(), &["pg_dump", "psql"]);
+
+    // The connection reads `password=` over the stale authority password and
+    // `ssl-mode` as `sslmode`; pg_dump has to reach the same server the
+    // same way, or the dump fails to authenticate.
+    cases::dump_holds_the_schema_and_the_ledger(&url, dir.path(), "postgres").await;
+    let environment = std::fs::read_to_string(&env).expect("the tool ran");
+    assert!(
+        environment.contains("PGSSLMODE=require"),
+        "the URL's ssl-mode reaches pg_dump: {environment}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs MYSQL_TEST_URL, a MySQL server"]
+async fn mysql_tools_read_the_unhyphenated_tls_spelling() {
+    let url = url("MYSQL_TEST_URL", "sslmode=REQUIRED");
+    let _lock = cases::exclusive().await;
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    suprnova::use_database_path(dir.path());
+    let (_environment, args, _env) = record_tools(dir.path(), &["mysqldump", "mysql"]);
+
+    cases::dump_holds_the_schema_and_the_ledger(&url, dir.path(), "mysql").await;
+    // A MySQL client takes the mode as `--ssl-mode`; a MariaDB client,
+    // which may answer to the same name, as `--ssl`.
+    let arguments = std::fs::read_to_string(&args).expect("the tool ran");
+    assert!(
+        arguments
+            .lines()
+            .any(|a| a == "--ssl-mode=REQUIRED" || a == "--ssl"),
+        "the URL's sslmode reaches the tool: {arguments}"
+    );
+}
