@@ -776,7 +776,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   resolves an action no longer fails with `ServiceNotFound`. The console
   also boots the runtime drivers and `#[policy]` gates, warns on stderr and
   goes on when a driver cannot boot, and waits for queued listeners before
-  it exits; `down`, `up` and `schedule:list` run the application's
+  it exits. Workers, the queue and maintenance commands and console
+  commands cancel and drain the supervisors the bootstrap started before
+  they exit, with the same 5-second grace as `serve`; `down`, `up` and `schedule:list` run the application's
   bootstrap hook. `schedule:work` stops on SIGTERM while an inline task
   runs, stopping a task still running after the 30-second grace. A
   panicking `Terminable` hook no longer skips the hooks after it, and a
