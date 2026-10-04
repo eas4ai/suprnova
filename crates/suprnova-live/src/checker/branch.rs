@@ -1585,8 +1585,8 @@ fn collect_raw_assignments(nodes: &[Box<Node<'_>>], raw: &mut RawNames) {
 /// `if let` binds from the condition, and each `let` after `&&` binds from
 /// its own expression, left to right, so a later binding can read an earlier
 /// one. `None` when the raw names do not change.
-fn bind_let_chain<'c, 'a>(
-    cond: &'c askama_parser::node::CondTest<'a>,
+fn bind_let_chain<'a>(
+    cond: &askama_parser::node::CondTest<'a>,
     raw: &RawNames,
 ) -> (Vec<&'a str>, Option<RawNames>) {
     let mut lets = Vec::new();
