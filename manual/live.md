@@ -652,12 +652,14 @@ refused in the browser before any transfer starts; the server refuses the same
 file with a 413 and logs the key. `suprnova live:inspect` prints every limit the
 application runs under, by its key.
 
-An instance lives its whole lifetime: nothing retires it when the visitor
-closes the page. The ledger therefore holds `LIVE_LEDGER_MAX_INSTANCES` page
-views per `LIVE_LEDGER_INSTANCE_LIFETIME_MS`, about 14,000 private-island page
-views a day at the defaults. A busier site raises the instance limit or
-shortens the lifetime; past the limit, new mounts fail until the oldest
-instances expire.
+Nothing retires an instance when the visitor closes the page, so the ledger
+fills at `LIVE_LEDGER_MAX_INSTANCES` page views per
+`LIVE_LEDGER_INSTANCE_LIFETIME_MS`, about 14,000 private-island page views a
+day at the defaults. A full ledger still mounts every new page: it evicts the
+instance that expires soonest to make room, which is usually a page the
+visitor closed long ago. If that page is still open, its next action is told
+to refresh, and the browser reloads the page with current state. A site whose
+open pages get evicted raises the instance limit.
 
 ### Sizing a small host
 
@@ -1050,7 +1052,7 @@ cause is one of these groups:
 |---|---|
 | `Action` | The registered action: its lookup, arguments, authorization, dispatch or outcome |
 | `Lifecycle` | The component: a recovery render, a model sync, a parameter change, a lazy completion or a promotion mount. `Panicked` means the component panicked |
-| `Ledger`, `LedgerSuccessorMismatch` | The instance ledger: `ProviderUnavailable` points at the store, `CapacityExceeded` at its limits |
+| `Ledger`, `LedgerSuccessorMismatch` | The instance ledger: `ProviderUnavailable` points at the store, `CapacityExceeded` at a stored record over its 32 KiB bound |
 | `Clock` | The host clock: no time, or a deadline that overflowed |
 | `ContextExpired` | The request context ran out before the new snapshot was signed |
 | `Snapshot`, `Identity` | The signed state: the kind says which check refused it, such as `SignatureInvalid` or `Expired` |
