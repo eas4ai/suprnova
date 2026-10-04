@@ -479,7 +479,8 @@ to messages only - a child term always supplies a value, and that
 value always wins. Attribute merge-by-name, whole-pattern replacement
 for the value, and parent-wins comments all apply to terms exactly as
 to messages. Terms are tracked in their own namespace - overriding
-`-brand` can never shadow a message also named `brand`.
+`-brand` can never shadow a message also named `brand`, on the server
+as in the browser.
 
 ### Why Suprnova diverges
 

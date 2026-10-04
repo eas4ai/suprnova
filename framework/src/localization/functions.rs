@@ -14,6 +14,12 @@ use crate::error::FrameworkError;
 use fluent_bundle::{FluentArgs, FluentValue};
 use std::borrow::Cow;
 
+/// The names of the functions every catalog's bundle registers:
+/// Fluent's builtin `NUMBER()` and the framework's `DATETIME()`.
+/// fluent-bundle keeps functions in the same name map as messages and
+/// terms, so `fluent.rs` needs them to keep a term from shadowing one.
+pub(crate) const FUNCTION_NAMES: [&str; 2] = ["NUMBER", "DATETIME"];
+
 /// Register `DATETIME()` on `bundle`, the bundle of `locale`'s catalog.
 ///
 /// The function formats in `locale`, the catalog's own, rather than in

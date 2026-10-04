@@ -224,6 +224,54 @@ fn has_is_false_for_a_message_with_attributes_but_no_value() {
     assert!(t.has(&en, "plain"));
 }
 
+/// DRIVERS-027: Fluent keeps terms (`-brand`) and messages (`brand`) in
+/// separate namespaces, and so does the catalog merge, but the runtime
+/// bundle keys both by the bare name. Both must still resolve, in either
+/// order, and a term must not hide a built-in function of the same name.
+/// The catalog served to the browser keeps the author's names.
+#[test]
+fn a_term_and_a_message_with_one_name_both_resolve() {
+    for ftl in [
+        "-brand = Suprnova\nbrand = Brand settings\nabout = About { -brand }\n",
+        "brand = Brand settings\n-brand = Suprnova\nabout = About { -brand }\n",
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        write_lang(tmp.path(), "en", "app.ftl", ftl);
+        let t = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
+        let en = Locale::parse("en").unwrap();
+        let args = TranslateArgs::new();
+        assert_eq!(
+            t.translate(&en, "brand", &args).unwrap(),
+            "Brand settings",
+            "{ftl}"
+        );
+        assert_eq!(
+            t.translate(&en, "about", &args).unwrap(),
+            "About Suprnova",
+            "{ftl}"
+        );
+        assert!(t.has(&en, "brand"));
+        let served = t.catalog(&en).unwrap().text;
+        assert!(
+            served.contains("-brand = Suprnova") && served.contains("about = About { -brand }"),
+            "the served catalog keeps the term's own name: {served}"
+        );
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(
+        tmp.path(),
+        "en",
+        "app.ftl",
+        "-NUMBER = items\ncount = { NUMBER($n) } { -NUMBER }\n",
+    );
+    let t = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
+    let en = Locale::parse("en").unwrap();
+    let mut args = TranslateArgs::new();
+    args.insert("n".into(), serde_json::json!(3));
+    assert_eq!(t.translate(&en, "count", &args).unwrap(), "3 items");
+}
+
 /// `Lang` facade + `__!` macro tests. These bind a process-global
 /// container binding (`App::bind::<dyn Translator>`), and tests within
 /// one integration-test binary run concurrently by default - a later

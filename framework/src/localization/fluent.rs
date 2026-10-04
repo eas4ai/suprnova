@@ -23,7 +23,10 @@ use crate::error::FrameworkError;
 use crate::validation::message::TranslateArgs;
 use fluent_bundle::concurrent::FluentBundle;
 use fluent_bundle::{FluentArgs, FluentResource, FluentValue};
-use fluent_syntax::ast::Resource as FtlResource;
+use fluent_syntax::ast::{
+    CallArguments, Entry, Expression, InlineExpression, Pattern, PatternElement,
+    Resource as FtlResource,
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -502,13 +505,19 @@ fn build_locale_catalog(
         .take(32)
         .collect();
     let text: Arc<str> = Arc::from(serialized.as_str());
+    // The served text keeps the author's names; only the compiled copy
+    // renames a term that collides (see `runtime_ast`).
+    let compiled = match runtime_ast(ast) {
+        Some(renamed) => super::merge::serialize(&renamed),
+        None => serialized,
+    };
 
     // Every entry in `ast` already passed through `parse_strict` as an
     // individual file (or the embedded catalog), so a failure to
     // re-parse the serialized, merged result is an internal invariant
     // failure of the merge/serialize round trip - not a user-facing
     // malformed-file error - and must never panic.
-    let resource = FluentResource::try_new(serialized).map_err(|(_, errors)| {
+    let resource = FluentResource::try_new(compiled).map_err(|(_, errors)| {
         FrameworkError::param(format!(
             "lang/{locale}: internal error re-parsing the flattened catalog: {errors:?}"
         ))
@@ -519,6 +528,145 @@ fn build_locale_catalog(
         bundle,
         source: CatalogSource { text, hash },
     })
+}
+
+/// The flattened AST the runtime bundle compiles, when it must differ from
+/// the one served to the browser.
+///
+/// fluent-bundle keys messages, terms and functions by their bare name in
+/// one map, so `-brand` and `brand` overwrite each other there, and a term
+/// `-NUMBER` hides the `NUMBER()` function, although Fluent itself, the
+/// merge (`super::merge`) and the browser's `@fluent/bundle` keep terms in
+/// a namespace of their own. Each term whose name is also a message's or a
+/// function's is renamed, with every reference to it, to a name nothing in
+/// the catalog uses, so both resolve on the server as they do in the
+/// browser. `None` when no term collides, the usual case, so the served
+/// text is compiled as it is.
+fn runtime_ast(ast: &FtlResource<String>) -> Option<FtlResource<String>> {
+    let mut messages: HashSet<&str> = HashSet::new();
+    let mut terms: HashSet<&str> = HashSet::new();
+    for entry in &ast.body {
+        match entry {
+            Entry::Message(message) => {
+                messages.insert(message.id.name.as_str());
+            }
+            Entry::Term(term) => {
+                terms.insert(term.id.name.as_str());
+            }
+            _ => {}
+        }
+    }
+    let mut taken: HashSet<String> = messages
+        .iter()
+        .chain(terms.iter())
+        .chain(functions::FUNCTION_NAMES.iter())
+        .map(|name| (*name).to_owned())
+        .collect();
+    let mut colliding: Vec<&str> = terms
+        .iter()
+        .copied()
+        .filter(|name| messages.contains(name) || functions::FUNCTION_NAMES.contains(name))
+        .collect();
+    if colliding.is_empty() {
+        return None;
+    }
+    // Sorted, so a catalog always compiles to the same names.
+    colliding.sort_unstable();
+    let mut renames: HashMap<String, String> = HashMap::new();
+    for name in colliding {
+        let renamed = (1..)
+            .map(|n| format!("{name}-term-{n}"))
+            .find(|candidate| !taken.contains(candidate))
+            .unwrap_or_else(|| format!("{name}-term"));
+        taken.insert(renamed.clone());
+        renames.insert(name.to_owned(), renamed);
+    }
+
+    let mut renamed = ast.clone();
+    for entry in &mut renamed.body {
+        match entry {
+            Entry::Message(message) => {
+                if let Some(value) = &mut message.value {
+                    rename_terms_in_pattern(value, &renames);
+                }
+                for attribute in &mut message.attributes {
+                    rename_terms_in_pattern(&mut attribute.value, &renames);
+                }
+            }
+            Entry::Term(term) => {
+                if let Some(name) = renames.get(&term.id.name) {
+                    term.id.name = name.clone();
+                }
+                rename_terms_in_pattern(&mut term.value, &renames);
+                for attribute in &mut term.attributes {
+                    rename_terms_in_pattern(&mut attribute.value, &renames);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(renamed)
+}
+
+fn rename_terms_in_pattern(pattern: &mut Pattern<String>, renames: &HashMap<String, String>) {
+    for element in &mut pattern.elements {
+        if let PatternElement::Placeable { expression } = element {
+            rename_terms_in_expression(expression, renames);
+        }
+    }
+}
+
+fn rename_terms_in_expression(
+    expression: &mut Expression<String>,
+    renames: &HashMap<String, String>,
+) {
+    match expression {
+        Expression::Select { selector, variants } => {
+            rename_terms_in_inline(selector, renames);
+            for variant in variants {
+                rename_terms_in_pattern(&mut variant.value, renames);
+            }
+        }
+        Expression::Inline(inline) => rename_terms_in_inline(inline, renames),
+    }
+}
+
+fn rename_terms_in_inline(
+    inline: &mut InlineExpression<String>,
+    renames: &HashMap<String, String>,
+) {
+    match inline {
+        InlineExpression::TermReference { id, arguments, .. } => {
+            if let Some(name) = renames.get(&id.name) {
+                id.name = name.clone();
+            }
+            if let Some(arguments) = arguments {
+                rename_terms_in_arguments(arguments, renames);
+            }
+        }
+        InlineExpression::FunctionReference { arguments, .. } => {
+            rename_terms_in_arguments(arguments, renames);
+        }
+        InlineExpression::Placeable { expression } => {
+            rename_terms_in_expression(expression, renames);
+        }
+        InlineExpression::StringLiteral { .. }
+        | InlineExpression::NumberLiteral { .. }
+        | InlineExpression::MessageReference { .. }
+        | InlineExpression::VariableReference { .. } => {}
+    }
+}
+
+fn rename_terms_in_arguments(
+    arguments: &mut CallArguments<String>,
+    renames: &HashMap<String, String>,
+) {
+    for positional in &mut arguments.positional {
+        rename_terms_in_inline(positional, renames);
+    }
+    for named in &mut arguments.named {
+        rename_terms_in_inline(&mut named.value, renames);
+    }
 }
 
 /// A path → mtime inventory of every `.ftl` file directly under a locale
