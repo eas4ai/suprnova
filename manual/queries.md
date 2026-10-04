@@ -400,6 +400,12 @@ attribute map no longer carries its original Rust type; all non-null values
 remain parameter-bound. The same rule applies to typed Eloquent mass writes
 and many-to-many pivot extras.
 
+A `u64` above `i64::MAX` binds as an unsigned integer, which a MySQL
+unsigned column stores exactly. Postgres and SQLite have no integer column
+that holds it, so there `insert` and `update` refuse it before anything
+is sent. The refusal is a database error that names the column: a client
+gets the generic 500 response and the log gets the detail.
+
 #### `update_all` and `delete_all` aliases
 
 `update` and `delete` are the Laravel-faithful names. The
