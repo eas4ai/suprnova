@@ -339,7 +339,9 @@ fn a_second_token_guard_never_answers_with_the_first_guards_user() {
         Auth::password()
             .register("two-token-guards@example.com", "TwoGuards1!")
             .await
-            .unwrap();
+            .unwrap()
+            .created()
+            .expect("registration creates a new account");
         let (_user, magnetar_session) = Auth::password()
             .authenticate("two-token-guards@example.com", "TwoGuards1!", None, None)
             .await
