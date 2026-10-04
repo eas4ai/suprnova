@@ -1193,6 +1193,7 @@ impl LiveRuntime {
     pub(crate) fn validate_async_request_context(
         &self,
         request: &Request,
+        principal: &str,
         component: &str,
         slot: &str,
         document_key: &str,
@@ -1201,7 +1202,7 @@ impl LiveRuntime {
         let selector = self
             .select_mount(component, slot, document_key)
             .map_err(|_| AsyncErrorKind::MountUnknown)?;
-        let parameters = trusted_mount_parameters(request, &selector)
+        let parameters = trusted_mount_parameters(request, principal, &selector)
             .map_err(|_| AsyncErrorKind::ContextRejected)?;
         let subscription = SubscriptionCapabilities {
             registry: Arc::new(SuprnovaSubscriptionRegistry::new(
@@ -1756,9 +1757,14 @@ fn mount_limit(
 /// Trusted topic parameters of one request for one finalized mount.
 ///
 /// Every value is a single topic segment; identities that cannot be spelled
-/// as one segment are omitted so templates needing them fail closed.
+/// as one segment are omitted so templates needing them fail closed. The
+/// `principal` is the route's (see `ports::route_principal`): a bare id
+/// behind the default guard, and `<guard>:<id>` behind another guard, whose
+/// `:` keeps it out of the topic, so a `:principal` topic never resolves to
+/// another guard's user.
 fn trusted_mount_parameters(
     request: &Request,
+    principal: &str,
     selector: &UploadMountSelector,
 ) -> Result<TrustedMountParameters, FrameworkError> {
     let mut values = vec![
@@ -1775,9 +1781,7 @@ fn trusted_mount_parameters(
             selector.document_key.as_str().to_owned(),
         ),
     ];
-    if let Some(principal) = crate::auth::guard::Auth::id() {
-        values.push(("principal".to_owned(), principal));
-    }
+    values.push(("principal".to_owned(), principal.to_owned()));
     if let Some(tenant) = request.live_tenant() {
         values.push(("tenant".to_owned(), tenant.to_owned()));
     }

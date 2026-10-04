@@ -15,6 +15,8 @@
 mod factor;
 #[path = "fixtures/password_harness.rs"]
 mod harness;
+#[path = "fixtures/racing_sign_up.rs"]
+mod racing_sign_up;
 #[path = "fixtures/storage_schema.rs"]
 mod storage_schema;
 
@@ -472,5 +474,42 @@ async fn last_passkey_removal_is_census_guarded() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+/// A passkey sign-up that loses the race for a new address answers as the
+/// existing account: the store refuses a second account, and the request
+/// meets the existing-account rule, which requires the authenticated owner.
+#[tokio::test]
+async fn a_passkey_sign_up_that_loses_the_race_answers_as_the_existing_account() {
+    let world = factor_world().await;
+    world
+        .storage
+        .create_user(magnetar::storage::NewUser {
+            email: "race@example.test".into(),
+            password_hash: None,
+        })
+        .await
+        .unwrap();
+    let service = magnetar::passkey::PasskeyAuthService::new(
+        &magnetar::passkey::PasskeyConfig::default(),
+        std::sync::Arc::new(racing_sign_up::RacingSignUp::new(world.storage.clone())),
+        world.storage.clone(),
+        world.storage.clone(),
+        std::sync::Arc::new(magnetar::crypto::AeadEncryptor::new([7; 32])),
+        world.gate.clone(),
+    )
+    .expect("localhost relying party is valid");
+    let error = service
+        .begin_registration(RegistrationIntent {
+            email: "race@example.test".into(),
+            actor: None,
+            reauthenticated_at: None,
+        })
+        .await
+        .expect_err("an address on file needs its authenticated owner");
+    assert!(
+        matches!(&error, magnetar::Error::InvalidInput { field, .. } if field == "actor"),
+        "the lost race answers as the existing account: {error:?}"
     );
 }

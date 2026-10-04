@@ -151,9 +151,21 @@ impl PasswordManagementService {
         new_password: &str,
     ) -> Result<PasswordResetFlowOutcome> {
         validate_password(new_password)?;
+        // Refuse a token that is not live before hashing the candidate
+        // password: the hash is a slow Argon2id mint, and any caller could
+        // otherwise buy one per request with a made-up token. Consumption
+        // below still decides for a live token.
+        if !self
+            .tokens
+            .check(PresentedToken::new(token), PASSWORD_RESET_PURPOSE)
+            .await?
+        {
+            return Err(invalid_token());
+        }
         let hash = self
             .verifier
-            .mint_target(&secrecy::SecretString::from(new_password.to_owned()))?;
+            .mint_target_blocking(secrecy::SecretString::from(new_password.to_owned()))
+            .await?;
         let commit = self
             .first_proof
             .apply(FirstEmailProofMutation::PasswordReset {

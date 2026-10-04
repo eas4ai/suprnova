@@ -595,6 +595,12 @@ impl Auth {
         }
 
         let saved_id = crate::session::middleware::persisted_guard_auth_user_id(guard_name);
+        // The identity and session this guard's Live memberships were issued
+        // under, captured before either is cleared (LIVE-021).
+        let live_principal = request_state::guard_user_id(guard_name)
+            .or_else(|| saved_id.clone())
+            .map(|id| Self::guard_principal(guard_name, &id));
+        let live_session_id = session().map(|session| session.id);
         let mut selectors = session()
             .and_then(|session| session.auth_guard_remember_selector(guard_name))
             .into_iter()
@@ -609,6 +615,12 @@ impl Auth {
             session.csrf_token = generate_csrf_token();
             session.dirty = true;
         });
+        // The session survives this guard's logout, so the Live memberships
+        // it opened for this guard's user end here (LIVE-021).
+        if let (Some(session_id), Some(principal)) = (live_session_id, live_principal) {
+            crate::live::revocation::session_deauthenticated(session_id.as_bytes(), &principal)
+                .await;
+        }
         let mut first_revoke_error = None;
         for selector in selectors {
             if let Some(ref expected_user_id) = saved_id {
@@ -980,6 +992,27 @@ impl Auth {
             Some(guard) => Self::manager()?.guard_provider(&guard),
             None => super::active_user_provider(),
         }
+    }
+
+    /// The principal of the route's user, by the rule of
+    /// [`guard_principal`](Self::guard_principal): the bare id for the
+    /// default guard, `<guard>:<id>` for any other. Gates that take a
+    /// principal string, such as Live's, are asked about this value.
+    ///
+    /// The route's guard is the one the last `AuthMiddleware` that passed
+    /// the request on checked. When the route names none, it is the default
+    /// guard: [`id`](Self::id), unchanged, or the user of a default guard of
+    /// the application under its name. `None` when that guard has no user.
+    pub(crate) async fn route_principal() -> Result<Option<String>, crate::error::FrameworkError> {
+        let guard = match request_state::route_guard() {
+            Some(guard) => guard,
+            None => match Self::custom_default_guard() {
+                Some(guard) => guard,
+                None => return Ok(Self::id()),
+            },
+        };
+        let id = Self::guard(&guard)?.id().await?;
+        Ok(id.map(|id| Self::guard_principal(&guard, &id)))
     }
 
     /// The route's guard, by name, when it is not the default guard: the
