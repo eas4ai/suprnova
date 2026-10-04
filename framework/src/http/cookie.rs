@@ -3,7 +3,7 @@
 //! Provides Laravel-like cookie API with secure defaults.
 
 use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 /// Bytes that must be percent-encoded when serializing a cookie name or
@@ -557,6 +557,18 @@ impl Cookie {
 
 /// Parse cookies from a Cookie header value
 ///
+/// Names and values are percent-decoded. Two rules keep a decoded name from
+/// standing in for a cookie the browser protects:
+///
+/// - A cookie whose name decodes to a `__Host-` or `__Secure-` name, but
+///   whose name on the wire does not carry that prefix, is dropped. The
+///   browser applies the prefix rules to the name it stores, so
+///   `%5F%5FHost-session` escapes them: a sibling subdomain or a plain-HTTP
+///   response can set it. Decoding it into `__Host-session` would hand the
+///   server a cookie the prefix was meant to keep out.
+/// - A cookie sent under its literal name wins over one whose name only
+///   decodes to it, whatever their order in the header.
+///
 /// # Example
 ///
 /// ```rust,no_run
@@ -565,19 +577,39 @@ impl Cookie {
 /// assert_eq!(cookies.get("session"), Some(&"abc123".to_string()));
 /// ```
 pub fn parse_cookies(header: &str) -> HashMap<String, String> {
-    header
-        .split(';')
-        .filter_map(|part| {
-            let part = part.trim();
-            if part.is_empty() {
-                return None;
-            }
-            let mut parts = part.splitn(2, '=');
-            let name = parts.next()?.trim();
-            let value = parts.next().unwrap_or("").trim();
-            Some((url_decode(name), url_decode(value)))
-        })
-        .collect()
+    let mut cookies = HashMap::new();
+    let mut literal_names = HashSet::new();
+    for part in header.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let mut parts = part.splitn(2, '=');
+        let Some(wire_name) = parts.next().map(str::trim) else {
+            continue;
+        };
+        let value = url_decode(parts.next().unwrap_or("").trim());
+        let name = url_decode(wire_name);
+        if name == wire_name {
+            literal_names.insert(name.clone());
+            cookies.insert(name, value);
+        } else if (has_protected_prefix(wire_name) || !has_protected_prefix(&name))
+            && !literal_names.contains(&name)
+        {
+            cookies.insert(name, value);
+        }
+    }
+    cookies
+}
+
+/// Whether `name` starts with a prefix the browser enforces rules for,
+/// `__Host-` or `__Secure-`, in any case (RFC 6265bis compares them
+/// case-insensitively).
+fn has_protected_prefix(name: &str) -> bool {
+    ["__host-", "__secure-"].iter().any(|prefix| {
+        name.get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+    })
 }
 
 /// Percent-encode cookie names and values per [`COOKIE_ENCODE`].
@@ -761,6 +793,53 @@ mod tests {
         let cookies = parse_cookies("display_name=caf%C3%A9; lang=fr");
         assert_eq!(cookies.get("display_name"), Some(&"café".to_string()));
         assert_eq!(cookies.get("lang"), Some(&"fr".to_string()));
+    }
+
+    /// IDENTITY-013: a browser checks the `__Host-` and `__Secure-` rules
+    /// against the literal name it stores, so an encoded alias of a
+    /// protected name escapes them. The alias never answers for the
+    /// protected name, in any case of the prefix.
+    #[test]
+    fn an_encoded_alias_never_takes_a_protected_prefix_name() {
+        let cookies = parse_cookies("%5F%5FHost-session=planted; %5F%5Fsecure-id=planted");
+        assert_eq!(cookies.get("__Host-session"), None);
+        assert_eq!(cookies.get("__secure-id"), None);
+        assert_eq!(cookies.get("%5F%5FHost-session"), None);
+
+        // The literal protected name is read as before.
+        let cookies = parse_cookies("__Host-session=real; __Secure-id=real");
+        assert_eq!(cookies.get("__Host-session"), Some(&"real".to_string()));
+        assert_eq!(cookies.get("__Secure-id"), Some(&"real".to_string()));
+
+        // A literal protected name next to its alias keeps its own value,
+        // in either order.
+        for header in [
+            "__Host-session=real; %5F%5FHost-session=planted",
+            "%5F%5FHost-session=planted; __Host-session=real",
+        ] {
+            let cookies = parse_cookies(header);
+            assert_eq!(cookies.get("__Host-session"), Some(&"real".to_string()));
+        }
+    }
+
+    /// An encoded alias of an ordinary name never displaces a cookie sent
+    /// under that literal name, whatever the order in the header.
+    #[test]
+    fn a_literal_name_wins_over_its_encoded_alias() {
+        for header in [
+            "session=real; sessi%6Fn=alias",
+            "sessi%6Fn=alias; session=real",
+        ] {
+            let cookies = parse_cookies(header);
+            assert_eq!(
+                cookies.get("session"),
+                Some(&"real".to_string()),
+                "{header}"
+            );
+        }
+        // Alone, an encoded ordinary name still decodes as before.
+        let cookies = parse_cookies("sessi%6Fn=alias");
+        assert_eq!(cookies.get("session"), Some(&"alias".to_string()));
     }
 
     #[test]
