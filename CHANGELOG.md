@@ -549,8 +549,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   already does, and `u64`, which they now read on SQLite and Postgres
   too. A generic caller bound by `TryGetable` needs `ColumnValue`
   instead. `avg` reads an `f64` or a `rust_decimal::Decimal` (the new
-  `AvgValue` trait), a decimal column's average exactly; another type no
-  longer compiles. `pluck`, `pluck_keyed` and `value` used to drop a row whose
+  `AvgValue` trait); another type no longer compiles. Postgres and MySQL
+  average exactly, so a `Decimal` average is exact there. SQLite averages
+  as a REAL, so there the `Decimal` holds the shortest decimal that
+  round-trips SQLite's floating-point answer. `pluck`, `pluck_keyed` and `value` used to drop a row whose
   value did not decode, so `pluck::<u64>` returned an empty list; they
   still skip a NULL, and any other value that does not decode is an error
   naming the column. This landed after the `v3.1.0` tag (#137).
