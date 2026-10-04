@@ -322,13 +322,27 @@ let user = User::update_or_create(
 
 let user = User::first_or_new(
     attrs! { email: "alice@example.com" },
-).await?;   // returns an unsaved User; caller saves explicitly
+).await?;   // returns an unsaved User; caller inserts it explicitly
+let user = user.persist().await?;   // `use suprnova::Persistable;`
 ```
 
 Lookup keys go in the first map; extra fields applied on the
 create-path go in the second map. Returning an unsaved model via
-`first_or_new` lets the caller mutate it further before
-`save().await?`.
+`first_or_new` lets the caller mutate it further before inserting it
+with `persist().await?`, which fires `creating` and `created` and
+returns the saved model with the key the database assigned. When
+`first_or_new` finds a row, the model it returns is loaded, and `save`
+updates it.
+
+### Why Suprnova diverges
+
+Laravel's `save` inserts a model that does not exist yet and writes the
+new key into it. Suprnova's `save` borrows the model, so it cannot hand
+the new key back. A model built in the process whose key still holds its
+reset value - a new model from `first_or_new` or `find_or_new`, or a
+replica - has no row to update, so `save` refuses it with an error that
+names `persist`. `persist` consumes the model and returns the inserted
+one, key included.
 
 ## Creating and updating
 
@@ -459,7 +473,10 @@ The rules follow Laravel's `save`:
   `replicate` builds a new model without one.
 - A model you build in memory and save without reading it first has no
   loaded values to compare with: every column counts as changed, and
-  `get_original` returns `None` until that save returns.
+  `get_original` returns `None` until that save returns. Such a model
+  needs a key a row already holds: while its key holds the reset value,
+  as a replica's and a new `first_or_new` model's do, `save` refuses it
+  and `persist` inserts it.
 
 ### Why Suprnova diverges
 
@@ -527,7 +544,9 @@ row they already hold a reference to. `replicate` builds an
 in-memory clone with the PK and the timestamps reset
 (`Default::default()` for each type). Insert it with
 `replica.persist().await?` (the `Persistable` trait), which stamps
-`created_at` and `updated_at` the way `create` does.
+`created_at` and `updated_at` the way `create` does. `replica.save()`
+refuses it: the replica has no row yet, and its reset key would name
+another row.
 
 `refresh` and `refresh_for_update` both return an error when the row no
 longer exists, rather than leaving the model holding stale values.
@@ -579,8 +598,9 @@ or vice-versa.
 `replicate_into<T>` does NOT fire `Replicating` (the event carries
 `Arc<Mutex<Self>>`, so a listener on the source type couldn't mutate
 the cross-type replica anyway). Callers wanting per-T setup should
-run it on the returned `T` before calling `T::save` - the normal
-`Saving` / `Created` chain still fires inside `save`.
+run it on the returned `T` before calling `persist` - the normal
+`Creating` / `Saving` / `Created` / `Saved` chain still fires inside
+`persist`.
 
 ## Deleting and soft deletes
 
@@ -4533,7 +4553,8 @@ let user = User::find_or(id, || async {
 
 // Look up by PK; build an unsaved instance from defaults if not found.
 let user = User::find_or_new(id, attrs! { name: "draft" }).await?;
-// user.id == 0 here - the instance is in-memory only.
+// user.id == 0 here - the instance is in-memory only; insert it with
+// `user.persist().await?`.
 
 // Race-safe insert: try create, fall back to fetch on conflict.
 let user = User::create_or_first(

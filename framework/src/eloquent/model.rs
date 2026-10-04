@@ -71,6 +71,51 @@ pub(crate) fn key_beyond_signed(
         .any(|value| crate::eloquent::casts::unsigned::beyond_signed(backend, value))
 }
 
+/// Refuse a write that needs the model's row when the model has none: one
+/// built in the process - a replica, a new model from `first_or_new` or
+/// `find_or_new`, a `Default` - that was never read or saved and whose key
+/// still holds its reset value. An `UPDATE` by that key would write over
+/// whatever row holds it instead of creating a row, and the model cannot
+/// receive the key an insert would assign, because these methods borrow it
+/// or return the row they updated. `persist` inserts it and returns the
+/// saved model with its key.
+///
+/// A model built with a real key, or deserialized from one, still updates
+/// that row, and so does a type that keeps no row state: neither can be
+/// told apart from a loaded model here.
+fn refuse_unsaved<M>(model: &M, method: &str) -> Result<(), FrameworkError>
+where
+    M: Model,
+    M: From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    let Some(cache) = model.__eager_cache() else {
+        return Ok(());
+    };
+    if crate::eloquent::changes::original_row(Some(cache.row_state())).is_some() {
+        return Ok(());
+    }
+    let mut reset = model.clone();
+    reset.reset_primary_key();
+    if reset.primary_key_value() != model.primary_key_value() {
+        return Ok(());
+    }
+    Err(FrameworkError::internal(format!(
+        "{method}: this `{}` has not been inserted - it was built in the process \
+         (replicate, first_or_new, find_or_new or Default) and its key still holds \
+         the reset value, which names no row of its own; insert it with persist(), \
+         which returns the saved model with its key",
+        std::any::type_name::<M>(),
+    )))
+}
+
 /// `UPDATE table SET column = column <operator> by WHERE pk = ?`, the
 /// body of [`Model::increment`] and [`Model::decrement`]. The operator is
 /// written rather than the amount negated, because `i64::MIN` has no
@@ -813,7 +858,15 @@ where
     /// the row as the database has it after the UPDATE. A listener
     /// that cancels at (1) or (2) aborts with
     /// `FrameworkError::bad_request(reason)`.
+    ///
+    /// `save` updates a row. A model built in the process that was never
+    /// inserted - a replica, a new model from `first_or_new` or
+    /// `find_or_new` - still holds its reset key, so `save` refuses it
+    /// with `FrameworkError::internal` before any event fires: insert it
+    /// with [`Persistable::persist`](crate::Persistable::persist), which
+    /// returns the saved model with its key.
     async fn save(&self) -> Result<(), FrameworkError> {
+        refuse_unsaved(self, "save")?;
         // Serialize the in-memory model to an Attrs map so listeners
         // see the "what's about to be written" payload through the
         // same Arc<Mutex<Attrs>> shape they see on create.
@@ -874,8 +927,10 @@ where
     ///
     /// Same event sequence as [`Self::save`] - `Updating` /
     /// `Saving { is_creating: false }` before the UPDATE, then
-    /// `Updated` / `Saved` after.
+    /// `Updated` / `Saved` after. Refuses a model that was never
+    /// inserted, as [`Self::save`] does.
     async fn update(self, attrs: Attrs) -> Result<Self, FrameworkError> {
+        refuse_unsaved(&self, "update")?;
         let previous = self.clone();
         let filtered = Self::fillable_filter().apply_checked(attrs)?;
         let shared = std::sync::Arc::new(tokio::sync::Mutex::new(filtered));
@@ -1380,8 +1435,10 @@ where
     /// event sequence as [`Self::save`] (`Updating` → `Saving` →
     /// UPDATE → `Updated` → `Saved`). Used with
     /// [`DB::begin_transaction`](crate::DB::begin_transaction) when the
-    /// closure form doesn't fit the caller's control flow.
+    /// closure form doesn't fit the caller's control flow. Refuses a
+    /// model that was never inserted, as [`Self::save`] does.
     async fn save_with_tx(&self, tx: &crate::database::Transaction) -> Result<(), FrameworkError> {
+        refuse_unsaved(self, "save_with_tx")?;
         let attrs_value = serde_json::to_value(self).map_err(|e| {
             FrameworkError::internal(format!(
                 "save_with_tx: serialize self for Saving event: {e}"
@@ -1423,12 +1480,14 @@ where
 
     /// Apply `attrs` to this row through `tx`. Mirrors
     /// [`Self::update`] event-for-event but pins the SQL to the
-    /// supplied transaction. Returns the updated row.
+    /// supplied transaction. Returns the updated row. Refuses a model
+    /// that was never inserted, as [`Self::save`] does.
     async fn update_with_tx(
         self,
         tx: &crate::database::Transaction,
         attrs: Attrs,
     ) -> Result<Self, FrameworkError> {
+        refuse_unsaved(&self, "update_with_tx")?;
         let previous = self.clone();
         let filtered = Self::fillable_filter().apply_checked(attrs)?;
         let shared = std::sync::Arc::new(tokio::sync::Mutex::new(filtered));

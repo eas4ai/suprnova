@@ -866,7 +866,7 @@ in-memory copy via `replicate()`:
 let original = Post::find_or_fail(1).await?;
 let mut copy = original.replicate().await?;  // unsaved
 copy.title = format!("{} (copy)", original.title);
-copy.save().await?;  // now persisted with a new PK
+let copy = copy.persist().await?;  // inserted with a new PK (`use suprnova::Persistable;`)
 ```
 
 The `Replicating` event fires AFTER the in-memory clone is built but
@@ -895,7 +895,8 @@ The replica's PK is already cleared by the time the listener runs -
 `replicate()` calls `reset_primary_key()` before firing the
 event, so you can't accidentally re-save under the original ID.
 Timestamps are also reset; `created_at` / `updated_at` fire on the
-subsequent `save()` like any new row.
+subsequent `persist()` like any new row. `save()` refuses a replica:
+it has no row yet, and its reset key would name another row.
 
 ### `replicate_into<T>` - cross-type replication
 
