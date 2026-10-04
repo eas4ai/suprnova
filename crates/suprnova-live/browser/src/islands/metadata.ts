@@ -12,6 +12,9 @@ const MAX_UNSIGNED_64 = 18_446_744_073_709_551_615n;
 const SAFE_TEXT_IDENTITY = /^[A-Za-z0-9._:/-]+$/u;
 const SAFE_DOCUMENT_KEY = /^[A-Za-z0-9._:-]+$/u;
 const SAFE_INSTANCE = /^[A-Za-z0-9_-]{22,43}$/u;
+const ACTION_PARAMETERS_ATTRIBUTE = "data-suprnova-live-actions";
+const ACTION_PARAMETER_ENTRY =
+  /^([A-Za-z0-9._:/-]{1,128})\(([A-Za-z0-9._:/-]{1,128}(?:,[A-Za-z0-9._:/-]{1,128}){0,127})\)$/u;
 const REQUIRED_ATTRIBUTES = [
   "data-suprnova-live-component",
   "data-suprnova-live-contract",
@@ -27,6 +30,7 @@ const REQUIRED_ATTRIBUTES = [
 const KNOWN_ATTRIBUTES = new Set([
   "data-suprnova-live-island",
   "data-suprnova-live-instance",
+  ACTION_PARAMETERS_ATTRIBUTE,
   ISLAND_STATUS_ATTRIBUTE,
   ...REQUIRED_ATTRIBUTES,
 ]);
@@ -42,6 +46,12 @@ export interface IslandMetadata {
   readonly instanceId: string | null;
   readonly revision: bigint;
   readonly lazyComplete: boolean;
+  /**
+   * Each action that takes arguments, with its parameter names in declared
+   * order: an action directive's positional literals are sent under these
+   * names. Absent when no action of the component takes arguments.
+   */
+  readonly actionParameters?: ReadonlyMap<string, readonly string[]>;
 }
 
 export class IslandMetadataError extends Error {
@@ -105,6 +115,30 @@ function validateAttributeSet(element: Element): void {
   }
 }
 
+/**
+ * Reads the root's `data-suprnova-live-actions` list: one
+ * `action(parameter,parameter)` entry per action that takes arguments,
+ * separated by single spaces. Anything else marks the island invalid.
+ */
+export function parseActionParameters(value: string): ReadonlyMap<string, readonly string[]> {
+  const parameters = new Map<string, readonly string[]>();
+  for (const entry of value.split(" ")) {
+    const match = ACTION_PARAMETER_ENTRY.exec(entry);
+    const action = match?.[1];
+    const names = match?.[2]?.split(",");
+    if (
+      action === undefined ||
+      names === undefined ||
+      parameters.has(action) ||
+      new Set(names).size !== names.length
+    ) {
+      return fail("action_parameters");
+    }
+    parameters.set(action, Object.freeze(names));
+  }
+  return parameters;
+}
+
 export function parseIslandMetadata(element: Element, config: RuntimeConfig): IslandMetadata {
   validateAttributeSet(element);
   const component = safeIdentity(element.getAttribute("data-suprnova-live-component"));
@@ -149,6 +183,7 @@ export function parseIslandMetadata(element: Element, config: RuntimeConfig): Is
   ) {
     incompatible("snapshot_disagreement");
   }
+  const actionText = element.getAttribute(ACTION_PARAMETERS_ATTRIBUTE);
   return Object.freeze({
     component,
     slot,
@@ -160,5 +195,6 @@ export function parseIslandMetadata(element: Element, config: RuntimeConfig): Is
     instanceId,
     revision: acceptedRevision,
     lazyComplete: lazyText === "true",
+    ...(actionText === null ? {} : { actionParameters: parseActionParameters(actionText) }),
   });
 }

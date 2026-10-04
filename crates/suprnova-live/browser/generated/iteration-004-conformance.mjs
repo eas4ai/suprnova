@@ -999,6 +999,7 @@ var MAX_PRESENT_DIRECTIVES = 64;
 // src/islands/metadata.ts
 var ISLAND_ROOT_SELECTOR = "[data-suprnova-live-island]";
 var ISLAND_STATUS_ATTRIBUTE = "data-suprnova-live-status";
+var ACTION_PARAMETERS_ATTRIBUTE = "data-suprnova-live-actions";
 var REQUIRED_ATTRIBUTES = [
   "data-suprnova-live-component",
   "data-suprnova-live-contract",
@@ -1014,6 +1015,7 @@ var REQUIRED_ATTRIBUTES = [
 var KNOWN_ATTRIBUTES = /* @__PURE__ */ new Set([
   "data-suprnova-live-island",
   "data-suprnova-live-instance",
+  ACTION_PARAMETERS_ATTRIBUTE,
   ISLAND_STATUS_ATTRIBUTE,
   ...REQUIRED_ATTRIBUTES
 ]);

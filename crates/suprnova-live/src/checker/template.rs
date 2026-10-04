@@ -10,7 +10,7 @@ use crate::registry::ComponentRegistry;
 
 use super::branch::BranchRenderer;
 use super::diagnostic::{CheckReport, DiagnosticCode, DiagnosticCollector, DiagnosticSeverity};
-use super::html::check_html_branches;
+use super::html::check_rendered_view;
 use super::limits::CheckerLimits;
 
 /// Duplicate template identity in a checker catalog.
@@ -114,17 +114,17 @@ impl<'checker> TemplateChecker<'checker> {
             return diagnostics.finish();
         }
 
-        let mut renderer = BranchRenderer::new(
+        let rendered = BranchRenderer::new(
             self.catalog,
             self.limits,
             metadata.identity(),
             &mut diagnostics,
-        );
-        let branches = renderer.render(metadata.view());
-        // A view that renders no branch checked nothing, so it cannot prove
-        // the component (LIVE-025). A limit that emptied the branches has
-        // already reported itself; this keeps the result failed either way.
-        if branches.is_empty() {
+        )
+        .render(metadata.view());
+        // A view that renders nothing checkable cannot prove the component
+        // (LIVE-025). A limit that stopped the render has already reported
+        // itself; this keeps the result failed either way.
+        let Some(rendered) = rendered else {
             diagnostics.push(
                 DiagnosticCode::DynamicStructureUnproved,
                 DiagnosticSeverity::Error,
@@ -134,9 +134,9 @@ impl<'checker> TemplateChecker<'checker> {
                 Some(metadata.identity()),
             );
             return diagnostics.finish();
-        }
-        check_html_branches(
-            &branches,
+        };
+        check_rendered_view(
+            &rendered,
             self.registry,
             self.catalog,
             metadata,

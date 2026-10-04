@@ -105,6 +105,75 @@ at most 128 bytes, each unique in the island. `live:check` refuses a literal
 key or id outside it, and a literal id inside a loop, which every item after
 the first would repeat.
 
+### Action arguments
+
+An action directive can pass literal arguments to an action with
+parameters. Write them after the action name, in the order the action
+declares its parameters:
+
+```rust
+use suprnova::live::{LiveComponent, live};
+
+/// A task list rendered by `live/tasks.html`.
+#[derive(LiveComponent)]
+#[live(name = "app.tasks", view = "live/tasks.html")]
+pub struct Tasks {
+    /// Titles of the tasks still open.
+    #[public]
+    open: Vec<String>,
+    /// Whether finished tasks stay visible.
+    #[public]
+    show_done: bool,
+}
+
+#[live]
+impl Tasks {
+    /// Removes the task at `index`, from `live:click="remove(0)"`.
+    #[action]
+    pub fn remove(&mut self, index: u64) {
+        if let Ok(index) = usize::try_from(index)
+            && index < self.open.len()
+        {
+            self.open.remove(index);
+        }
+    }
+
+    /// Adds a task, from `live:click="add('Write the report', true)"`.
+    #[action]
+    pub fn add(&mut self, title: String, show_done: bool) {
+        self.open.push(title);
+        self.show_done = show_done;
+    }
+}
+```
+
+```html
+<div>
+<button type="button" live:click="remove(0)">Remove the first task</button>
+<button type="button" live:click="add('Write the report', true)">Add a task</button>
+</div>
+```
+
+The arguments are literals, never expressions: JSON numbers, strings in
+single or double quotes with JSON escapes, `true`, `false`, and `null`, up
+to 128 of them. Each literal binds the parameter at its position, and you
+can leave out a trailing parameter whose type is an `Option`. The same
+syntax works on every directive that invokes an action: `live:click`,
+`live:submit`, `live:change`, `live:input`, `live:keydown`, and `live:init`.
+
+`live:check` checks each call against the action's signature. A call with
+too many arguments, without a required one, or with a literal of the wrong
+type, such as `remove('first')` above, fails with the file, line, and
+column of the directive. At runtime, the island root lists each action's
+parameter names in its `data-suprnova-live-actions` attribute, and the
+runtime sends `remove(0)` as the arguments `{ "index": 0 }`.
+
+An argument written with `{{ }}`, such as `remove({{ loop.index0 }})`, is
+dynamic: the checker can't prove it, so `live:check` reports it as
+unproved. The runtime parses the rendered text with the same grammar, so a
+quote inside an interpolated string changes the arguments. Interpolate
+only values that render as a literal, such as numbers.
+
 Documents that place islands are ordinary views declared with
 `#[suprnova::view]`; the only unescaped value they accept is `TrustedHtml`
 through the `trusted_html` filter.

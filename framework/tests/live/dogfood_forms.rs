@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use live_dogfood_support::{
     ActionRequest, FORM_DOCUMENT_PATH, build_form_router, decoded_snapshot, dispatch,
-    form_action_request, form_fixture, get, production_middleware, session_cookie,
+    form_action_request, form_fixture, form_invoke_request, get, html_attribute,
+    production_middleware, session_cookie,
 };
 use serde_json::{Value, json};
 use suprnova::StatusCode;
@@ -425,4 +426,56 @@ async fn a_cross_site_first_model_sync_is_refused() {
             String::from_utf8_lossy(&body)
         );
     }
+}
+
+/// An action directive's literal argument reaches the action as its typed
+/// parameter. The island root lists the action's parameter names in
+/// declared order, which is how the runtime sends `live:click="reserve(2)"`
+/// as the arguments `{"extra": 2}`; the server decodes that object into the
+/// action's `u64` and the action runs with it.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_directive_argument_reaches_the_action_as_its_typed_parameter() {
+    let _container = TestContainer::fake();
+    form_fixture();
+    let router = Arc::new(build_form_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+    let middleware = production_middleware();
+
+    let (status, headers, body) =
+        dispatch(router.clone(), middleware.clone(), get(FORM_DOCUMENT_PATH)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let html = String::from_utf8_lossy(&body).into_owned();
+    assert!(html.contains("live:click=\"reserve(2)\""), "{html}");
+    assert_eq!(
+        html_attribute(&html, "data-suprnova-live-actions"),
+        "reserve(extra)"
+    );
+    let cookie = session_cookie(&headers);
+    let seed = decoded_snapshot(&body);
+
+    let (status, _, body) = dispatch(
+        router.clone(),
+        middleware.clone(),
+        form_invoke_request(
+            ActionRequest {
+                snapshot: seed,
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "UlJSUlJSUlJSUlJSUlJSUg",
+            },
+            "reserve",
+            json!({"extra": 2}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let answer: Value = serde_json::from_slice(&body).expect("reserve JSON");
+    assert_eq!(answer["outcome"], "accepted", "{answer}");
+    let html = answer["render"]["html"].as_str().expect("render html");
+    assert!(
+        html.contains("value=\"2\""),
+        "the action received its argument: {answer}"
+    );
 }

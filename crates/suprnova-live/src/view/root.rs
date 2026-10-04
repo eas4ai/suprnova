@@ -65,6 +65,37 @@ pub(crate) struct IslandRootInput<'a> {
     /// island-owned `live:stream` directive so the browser runtime opens the
     /// asynchronous transport for framework-rendered islands.
     pub(crate) stream: Option<String>,
+    /// The parameter names of each action that takes arguments, in declared
+    /// order, so the runtime can send a directive's positional literals as
+    /// the named arguments the server decodes.
+    pub(crate) action_parameters: Option<String>,
+}
+
+/// The `data-suprnova-live-actions` value for a component: one
+/// `action(parameter,parameter)` entry per action that declares parameters,
+/// separated by single spaces. Action and parameter identities never hold a
+/// space, a comma, or a parenthesis, so the list needs no escaping beyond the
+/// attribute's own. `None` when no action takes arguments.
+#[must_use]
+pub(crate) fn declared_action_parameters(
+    metadata: &crate::metadata::ComponentMetadata,
+) -> Option<String> {
+    let mut entries = Vec::new();
+    for action in metadata.actions() {
+        let parameters: Vec<&str> = action
+            .arguments()
+            .declared()
+            .map(|parameter| parameter.name().as_str())
+            .collect();
+        if !parameters.is_empty() {
+            entries.push(format!(
+                "{}({})",
+                action.name().as_str(),
+                parameters.join(",")
+            ));
+        }
+    }
+    (!entries.is_empty()).then(|| entries.join(" "))
 }
 
 /// The stream the island root subscribes on the component's behalf.
@@ -151,6 +182,9 @@ pub(crate) fn assemble_island_root(
         let _ = write!(attributes, " data-suprnova-live-flag-{}=\"", flag.name);
         escape_attribute(&mut attributes, &flag.value);
         attributes.push('"');
+    }
+    if let Some(parameters) = &input.action_parameters {
+        write_attribute(&mut attributes, "data-suprnova-live-actions", parameters);
     }
     if let Some(stream) = &input.stream {
         write_attribute(&mut attributes, "live:stream", stream);

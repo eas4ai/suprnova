@@ -1,16 +1,23 @@
 //! Hard checker resource ceilings.
+//!
+//! Each dimension has a default sized for real templates and a hard maximum
+//! that keeps a hostile or runaway template from exhausting the machine.
+//! Every value is configurable up to its maximum through
+//! [`CheckerLimits::new`].
 
 use std::error::Error;
 use std::fmt;
 
-const MAX_SOURCE_BYTES: usize = 512 * 1024;
-const MAX_TEMPLATE_NODES: usize = 32_768;
+const MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_TEMPLATE_NODES: usize = 4 * 1024 * 1024;
 const MAX_INCLUDE_DEPTH: usize = 64;
-const MAX_BRANCH_STATES: usize = 256;
-const MAX_HTML_TOKENS: usize = 65_536;
-const MAX_ATTRIBUTES: usize = 16_384;
+const MAX_BRANCH_STATES: usize = 65_536;
+const MAX_HTML_TOKENS: usize = 16 * 1024 * 1024;
+const MAX_ATTRIBUTES: usize = 4 * 1024 * 1024;
 const MAX_STACK_DEPTH: usize = 512;
-const MAX_DIAGNOSTICS: usize = 1_024;
+/// The tooling protocol carries at most 2,048 diagnostics in one run, so one
+/// component never needs more.
+const MAX_DIAGNOSTICS: usize = 2_048;
 
 /// Invalid checker ceiling configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,16 +122,25 @@ impl CheckerLimits {
 }
 
 impl Default for CheckerLimits {
+    /// Defaults a large real view stays well inside. Source bytes bound each
+    /// template file and the whole expanded view, every macro expansion and
+    /// conditional arm included. Nodes count every template parsed for one
+    /// component, imported component libraries included. Branch states count
+    /// the distinct paths alive at once, which only grow where one tag's
+    /// attributes or one raw-text element depend on several conditionals.
+    /// Tokens and attributes count one path through the whole view. Include
+    /// depth and element nesting stay at sixteen and 256, deeper than real
+    /// templates nest; a recursive macro cannot be expanded at any depth.
     fn default() -> Self {
         Self {
-            max_source_bytes: 256 * 1024,
-            max_template_nodes: 8_192,
+            max_source_bytes: 4 * 1024 * 1024,
+            max_template_nodes: 256 * 1024,
             max_include_depth: 16,
-            max_branch_states: 128,
-            max_html_tokens: 32_768,
-            max_attributes: 2_048,
+            max_branch_states: 1_024,
+            max_html_tokens: 1024 * 1024,
+            max_attributes: 256 * 1024,
             max_stack_depth: 256,
-            max_diagnostics: 64,
+            max_diagnostics: 256,
         }
     }
 }

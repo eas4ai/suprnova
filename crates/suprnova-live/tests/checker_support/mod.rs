@@ -1,7 +1,9 @@
 use std::num::NonZeroU8;
 use std::sync::OnceLock;
 
-use suprnova_live::action::{ActionArgumentSchema, AuthorizationRequirement, TransactionPolicy};
+use suprnova_live::action::{
+    ActionArgumentField, ActionArgumentSchema, AuthorizationRequirement, TransactionPolicy,
+};
 use suprnova_live::async_updates::{
     BoundedEventNames, BoundedTargets, BoundedTopics, EventCyclePolicy, EventOrder, EventSource,
     EventTarget, ReconnectPolicy, StreamName, SubscriptionMetadata, SubscriptionMode,
@@ -134,7 +136,21 @@ fn root_metadata_with_checker_contract(checker_contract: u16) -> ComponentMetada
         view(ROOT_VIEW),
         ContractVersions::new(1, 1, 1, checker_contract, 1).expect("root versions"),
         vec![query, page, secret, avatar],
-        vec![action("refresh"), action("save")],
+        vec![
+            action("refresh"),
+            action("save"),
+            action_with("remove", vec![("id", ModelCodec::U64, true)]),
+            // Declared title first: positional arguments follow this order,
+            // not the schema's name order.
+            action_with(
+                "rename",
+                vec![
+                    ("title", ModelCodec::String, true),
+                    ("publish", ModelCodec::Boolean, true),
+                ],
+            ),
+            action_with("note", vec![("text", ModelCodec::String, false)]),
+        ],
         vec![
             EventMetadata::from_payload::<ProfileSaved>().expect("event metadata"),
             orders_event_metadata(),
@@ -195,6 +211,31 @@ fn action(name: &str) -> ActionMetadata {
         ActionName::parse(name).expect("action identity"),
         1,
         ActionArgumentSchema::empty(),
+        AuthorizationRequirement::Current,
+        ValidationSelection::ComponentAndArguments,
+        TransactionPolicy::None,
+    )
+    .expect("action metadata")
+}
+
+/// An action with typed parameters in declared order: name, codec, and
+/// whether the parameter is required.
+fn action_with(name: &str, parameters: Vec<(&str, ModelCodec, bool)>) -> ActionMetadata {
+    let fields = parameters
+        .into_iter()
+        .map(|(parameter, codec, required)| {
+            ActionArgumentField::new(
+                ModelField::parse(parameter).expect("parameter identity"),
+                codec,
+                required,
+            )
+            .expect("parameter field")
+        })
+        .collect();
+    ActionMetadata::new_with_contract(
+        ActionName::parse(name).expect("action identity"),
+        1,
+        ActionArgumentSchema::new(fields).expect("argument schema"),
         AuthorizationRequirement::Current,
         ValidationSelection::ComponentAndArguments,
         TransactionPolicy::None,
