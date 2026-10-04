@@ -512,8 +512,97 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `from_storage_json`; a cast whose in-memory value is the stored value
   returns it without copying.
 
+- **Framework payments, features and RBAC models carry `DateTime<Utc>`
+  timestamps.** The SeaORM `Model` of the six payments entities, of
+  `features::entity`, and of the RBAC `Role` and `Permission` carries
+  `DateTime<Utc>` (`Option<DateTime<Utc>>` for `canceled_at`, `paid_at` and
+  `processed_at`) where it carried `String`, because their migrations
+  create native timestamp columns. Code that read those fields as text
+  needs the date-time type. This landed after the `v3.1.0` tag.
+- **A mail message is checked on the dispatch path, and a refusal is a
+  500.** `Mail::send`, `Mail::raw`, `Mail::html`, the queue worker and the
+  notification mail channel check the message before `MessageSending`
+  fires and before any transport sees it, including a transport bound with
+  `Mail::set_transport` and the one behind `Mail::fake`. `Mail::queue` and
+  `Mail::later` check it when they push. A refusal is an internal error, a
+  500 with the detail in the log, where it was a 400 that echoed the
+  address. Headers the message structure owns (`To`, `Cc`, `Bcc`, `From`,
+  `Sender`, `Reply-To`, `Return-Path`, `Subject`, `Date`, `Message-ID`,
+  `MIME-Version` and `Content-*`) are refused as caller headers. Postmark
+  refuses a second tag, and SES refuses a tag or metadata it cannot carry,
+  instead of dropping them. The address and header serializer is public as
+  `suprnova::mail_wire` for transport authors. This landed after the
+  `v3.1.0` tag.
+- **The framework registers its own mail and notification jobs.** A
+  worker dispatches `SendMailJob` and `SendNotificationJob` with no
+  `register_job` line. Registering the same job type again is quiet; only
+  a different type taking over a job name still warns. This landed after
+  the `v3.1.0` tag.
+- **A full Live instance ledger evicts instead of refusing mounts.** At
+  `LIVE_LEDGER_MAX_INSTANCES`, a new mount or promotion removes the
+  instance that expires soonest, preferring one with no claim in flight,
+  and the evicted page's next action gets `refresh_required` and reloads
+  fresh. Before, a full ledger refused every mount on the site until
+  records expired, and anyone who could mount in a loop could keep
+  everyone else out. `CapacityExceeded` now means only a record over a
+  codec bound. A custom `InstanceRecordStore` implements two new methods,
+  `soonest_expiring_instances` and `compare_and_remove`; the memory, SQL
+  and Redis stores ship them. This landed after the `v3.1.0` tag.
+- **Live form controls match the density of the suprnova.app forms.**
+  Controls read at 14px through `--sn-density-control-font-size` (16px on
+  a coarse pointer), fields are 40px tall, labels are 12px and sit 6px
+  above their control, legends are 14px, and hints and errors are 12px. A
+  textarea shows three rows and is at least two control heights tall.
+  `--sn-density-field-gap` puts 12px between fields, checkboxes, switches
+  and groups, and a group's options sit 8px apart. To pick it up in an
+  application, run `live:add` again for `button`, `checkbox`, `combobox`,
+  `datatable`, `date-picker`, `field`, `fieldset`, `input-otp`, `label`,
+  `load-more`, `pagination`, `radio-group`, `switch`, `textarea` and
+  `upload`. This landed after the `v3.1.0` tag.
+
 ### Fixed
 
+- **Payment webhooks, feature flags and RBAC work on Postgres, MySQL and
+  MariaDB.** Their models used a text cast for native timestamp columns,
+  so every payment webhook answered 500, `set_flag` and the feature admin
+  failed, and `Role` and `Permission` could not read a row the RBAC
+  helpers wrote. They now read and write the native columns; text written
+  on SQLite still reads back. This landed after the `v3.1.0` tag.
+- **Job batches settle on Postgres.** The documented `job_batches` schema
+  declares `INTEGER` columns, which Postgres stores as 32-bit, and the
+  repository read them as 64-bit, so every settlement failed: the job ran
+  again after each visibility timeout and the batch callbacks never fired.
+  The repository reads either width, and the documented epoch columns are
+  now `BIGINT`; tables created from the earlier schema keep working. This
+  landed after the `v3.1.0` tag.
+- **The MariaDB vector store works against a real server.** `similar`
+  looked for the vector index in a form MariaDB never prints, so every
+  call failed, and the table `ensure_table_sql` emits could not be created
+  because its key was too long for a vector index. The id column is now
+  `VARBINARY(254)`, which also compares ids byte for byte as the other
+  drivers do. This landed after the `v3.1.0` tag.
+- **Native JSON columns have their own cast.** The structured casts bind
+  and read text, which Postgres refuses for `json` and `jsonb` and MySQL
+  for `JSON`, although their documentation said those columns worked. The
+  new `AsNativeJson<T>` and `AsOptionalNativeJson<T>` store any serde type
+  as JSON. The `AsBool` documentation now names a `BIGINT` column and sends
+  a native boolean column to a plain `bool` field. This landed after the
+  `v3.1.0` tag.
+- **SMTP mail goes out from the return path.** A return path reached SMTP
+  only as a header, so bounces still went to the author; the envelope
+  sender is now the return path. This landed after the `v3.1.0` tag.
+- **Queued mail and queued notifications send.** Nothing registered their
+  jobs with the worker and the manuals never said to, so every one failed
+  as an unknown job and dead-lettered, and with the sync driver the push
+  itself failed. This landed after the `v3.1.0` tag.
+- **Queued and notification mail fire `MessageSending` and `MessageSent`.**
+  Only a direct send fired them, so switching to `queue` or sending through
+  a notification cut off audit and metrics listeners. This landed after
+  the `v3.1.0` tag.
+- **A Live primary button looks like the primary action.** A
+  `type="button"` button with the default primary variant rendered as a
+  secondary control, and so did dialog, sheet and drawer triggers. This
+  landed after the `v3.1.0` tag.
 - **`sum` and `avg` of an integer column read on Postgres and MySQL.**
   Postgres answers `numeric` and MySQL `DECIMAL` for them, which `sum` and
   `avg` could not read, so they failed there while passing on SQLite. They
@@ -771,6 +860,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `#[derive(InertiaProps)]` structs keep their Rust names: their own
   `Serialize` never reads `#[serde(...)]`. This fix landed on main after the
   `v3.0.0` tag.
+
+### Security
+
+- **Mail headers and recipients cannot be injected.** Postmark and Mailgun
+  received recipient lists joined from unquoted display names, so a name
+  such as `attacker@example.com, Victim` added a recipient, and SMTP and
+  the file transport wrote header names carrying CR, LF or NUL verbatim.
+  Every transport now builds addresses and headers through one validating
+  serializer: an address is exactly one RFC 5322 address with its display
+  name quoted when needed, a header name follows the RFC 5322 grammar and
+  is at most 76 bytes, and a header value, the subject included, refuses
+  control characters other than tab. This landed after the `v3.1.0` tag.
 
 ## 3.0.0 - 2026-09-29
 
