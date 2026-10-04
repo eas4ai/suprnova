@@ -25,7 +25,19 @@ use chrono::{DateTime, Utc};
 ///
 /// `(name, scope_key)` is a UNIQUE composite key; `scope_key = ""` means a
 /// global flag, other values carry the scope inline as `kind:identifier`.
-#[suprnova::model(table = "features", timestamps)]
+///
+/// Every time column is `timestamp with time zone` on Postgres and
+/// `TIMESTAMP` on MySQL and MariaDB (see the migration), so each one is
+/// stored through the native casts. The default text cast `AsDateTime`
+/// cannot write to or read from those columns.
+#[suprnova::model(
+    table = "features",
+    timestamps,
+    casts = {
+        created_at = suprnova::AsNativeDateTime,
+        updated_at = suprnova::AsNativeDateTime,
+    },
+)]
 pub struct Feature {
     /// Primary key.
     pub id: i64,

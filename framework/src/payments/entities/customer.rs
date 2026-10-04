@@ -11,7 +11,19 @@
 use chrono::{DateTime, Utc};
 
 /// Mirror row for a provider-side customer record.
-#[suprnova::model(table = "payments_customers", timestamps)]
+///
+/// Every time column is `timestamp with time zone` on Postgres and
+/// `TIMESTAMP` on MySQL and MariaDB (see the migration), so each one is
+/// stored through the native casts. The default text cast `AsDateTime`
+/// cannot write to or read from those columns.
+#[suprnova::model(
+    table = "payments_customers",
+    timestamps,
+    casts = {
+        created_at = suprnova::AsNativeDateTime,
+        updated_at = suprnova::AsNativeDateTime,
+    },
+)]
 pub struct Customer {
     /// Surrogate primary key.
     pub id: i64,

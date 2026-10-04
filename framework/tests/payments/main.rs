@@ -7,6 +7,7 @@ pub mod mock_discriminator;
 pub mod money;
 pub mod public_surface;
 pub mod registry;
+pub mod shipped_tables;
 pub mod webhook_hydration;
 pub mod webhook_idempotency;
 pub mod webhook_remote_addr;

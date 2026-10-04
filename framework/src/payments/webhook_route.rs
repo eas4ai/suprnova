@@ -228,7 +228,7 @@ async fn handle_webhook_inner(
             provider_event_type: Set(event.provider_event_type.clone()),
             neutral_event_kind: Set(neutral_str),
             payload: Set(event.raw_payload.clone()),
-            received_at: Set(crate::clock::now().to_rfc3339()),
+            received_at: Set(crate::clock::now()),
             processed_at: Set(None),
             process_error: Set(None),
             ..Default::default()
@@ -605,7 +605,7 @@ where
     let mark_canceled = matches!(neutral, NeutralEventKind::SubscriptionCanceled)
         || matches!(result.status, SubscriptionStatus::Canceled);
 
-    let now = crate::clock::now().to_rfc3339();
+    let now = crate::clock::now();
 
     match existing {
         Some(model) => {
@@ -613,11 +613,11 @@ where
             let mut am: subscription::ActiveModel = model.into();
             am.provider_customer_id = Set(result.provider_customer_id.clone());
             am.status = Set(status_str.to_string());
-            am.current_period_start = Set(result.current_period_start.to_rfc3339());
-            am.current_period_end = Set(result.current_period_end.to_rfc3339());
+            am.current_period_start = Set(result.current_period_start);
+            am.current_period_end = Set(result.current_period_end);
             am.cancel_at_period_end = Set(result.cancel_at_period_end);
             if mark_canceled && !was_canceled {
-                am.canceled_at = Set(Some(now.clone()));
+                am.canceled_at = Set(Some(now));
             }
             am.provider_metadata = Set(result.provider_metadata.clone());
             am.updated_at = Set(now);
@@ -627,22 +627,18 @@ where
             >());
         }
         None => {
-            let canceled_at = if mark_canceled {
-                Some(now.clone())
-            } else {
-                None
-            };
+            let canceled_at = if mark_canceled { Some(now) } else { None };
             let am = subscription::ActiveModel {
                 provider: Set(provider.to_string()),
                 provider_subscription_id: Set(result.provider_subscription_id.clone()),
                 provider_customer_id: Set(result.provider_customer_id.clone()),
                 status: Set(status_str.to_string()),
-                current_period_start: Set(result.current_period_start.to_rfc3339()),
-                current_period_end: Set(result.current_period_end.to_rfc3339()),
+                current_period_start: Set(result.current_period_start),
+                current_period_end: Set(result.current_period_end),
                 cancel_at_period_end: Set(result.cancel_at_period_end),
                 canceled_at: Set(canceled_at),
                 provider_metadata: Set(result.provider_metadata.clone()),
-                created_at: Set(now.clone()),
+                created_at: Set(now),
                 updated_at: Set(now),
                 ..Default::default()
             };
@@ -682,7 +678,7 @@ where
         .all(db)
         .await?;
 
-    let now = crate::clock::now().to_rfc3339();
+    let now = crate::clock::now();
 
     let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
     for item in &result.items {
@@ -710,7 +706,7 @@ where
                 am.quantity = Set(quantity);
                 am.unit_amount_minor = Set(unit_amount);
                 am.unit_currency = Set(unit_currency);
-                am.updated_at = Set(now.clone());
+                am.updated_at = Set(now);
                 am.update(db).await?;
                 touched.push(crate::database::model::entity_table_name::<
                     subscription_item::Entity,
@@ -725,8 +721,8 @@ where
                     unit_amount_minor: Set(unit_amount),
                     unit_currency: Set(unit_currency),
                     provider_metadata: Set(serde_json::Value::Null),
-                    created_at: Set(now.clone()),
-                    updated_at: Set(now.clone()),
+                    created_at: Set(now),
+                    updated_at: Set(now),
                     ..Default::default()
                 };
                 am.insert(db).await?;
@@ -770,7 +766,7 @@ where
         .one(db)
         .await?;
 
-    let now = crate::clock::now().to_rfc3339();
+    let now = crate::clock::now();
 
     match existing {
         Some(model) => {
@@ -786,7 +782,7 @@ where
             // Preserve original paid_at across refund/dispute events - the
             // original payment time is the canonical reference.
             if snapshot.paid_at.is_some() {
-                am.paid_at = Set(snapshot.paid_at.map(|t| t.to_rfc3339()));
+                am.paid_at = Set(snapshot.paid_at);
             }
             am.provider_metadata = Set(snapshot.provider_metadata.clone());
             am.updated_at = Set(now);
@@ -805,9 +801,9 @@ where
                 amount_tax_minor: Set(snapshot.amount_tax_minor),
                 currency: Set(snapshot.currency.clone()),
                 status: Set(snapshot.status.clone()),
-                paid_at: Set(snapshot.paid_at.map(|t| t.to_rfc3339())),
+                paid_at: Set(snapshot.paid_at),
                 provider_metadata: Set(snapshot.provider_metadata.clone()),
-                created_at: Set(now.clone()),
+                created_at: Set(now),
                 updated_at: Set(now),
                 ..Default::default()
             };
@@ -845,7 +841,7 @@ where
 
     let mut am: transaction::ActiveModel = existing.into();
     am.status = Set(status.to_owned());
-    am.updated_at = Set(crate::clock::now().to_rfc3339());
+    am.updated_at = Set(crate::clock::now());
     am.update(db).await?;
     touched.push(crate::database::model::entity_table_name::<
         transaction::Entity,
@@ -893,7 +889,7 @@ where
         }
         am.provider_metadata = Set(snap.provider_metadata.clone());
     }
-    am.updated_at = Set(crate::clock::now().to_rfc3339());
+    am.updated_at = Set(crate::clock::now());
     am.update(db).await?;
     touched.push(crate::database::model::entity_table_name::<customer::Entity>());
     Ok(())
@@ -914,7 +910,7 @@ where
         .await?
         .ok_or_else(|| PaymentError::Internal("webhook event vanished after insert".into()))?;
     let mut am: webhook_event::ActiveModel = model.into();
-    am.processed_at = Set(Some(crate::clock::now().to_rfc3339()));
+    am.processed_at = Set(Some(crate::clock::now()));
     am.process_error = Set(None);
     am.update(db).await?;
     touched.push(crate::database::model::entity_table_name::<
@@ -1106,7 +1102,7 @@ mod tests {
             provider_event_type: Set("payment.succeeded".into()),
             neutral_event_kind: Set(Some("payment_succeeded".into())),
             payload: Set(serde_json::json!({})),
-            received_at: Set(crate::clock::now().to_rfc3339()),
+            received_at: Set(crate::clock::now()),
             processed_at: Set(None),
             process_error: Set(None),
             ..Default::default()
@@ -1128,7 +1124,7 @@ mod tests {
             .await
             .expect("TestDatabase::fresh");
         let conn = db.conn();
-        let processed_at = crate::clock::now().to_rfc3339();
+        let processed_at = crate::clock::now();
         let event = WebhookEvent {
             provider: "mock".into(),
             provider_event_id: "evt_processed_before_failure_record".into(),
@@ -1142,8 +1138,8 @@ mod tests {
             provider_event_type: Set(event.provider_event_type.clone()),
             neutral_event_kind: Set(Some("payment_succeeded".into())),
             payload: Set(event.raw_payload.clone()),
-            received_at: Set(processed_at.clone()),
-            processed_at: Set(Some(processed_at.clone())),
+            received_at: Set(processed_at),
+            processed_at: Set(Some(processed_at)),
             process_error: Set(None),
             ..Default::default()
         }
@@ -1162,7 +1158,7 @@ mod tests {
             .await
             .expect("db ok")
             .expect("audit row");
-        assert_eq!(audit.processed_at.as_deref(), Some(processed_at.as_str()));
+        assert_eq!(audit.processed_at, Some(processed_at));
         assert!(
             audit.process_error.is_none(),
             "a losing contender must not overwrite the committed audit state"
@@ -1194,7 +1190,7 @@ mod tests {
             provider_event_type: Set("payment.succeeded".into()),
             neutral_event_kind: Set(Some("payment_succeeded".into())),
             payload: Set(serde_json::json!({})),
-            received_at: Set(crate::clock::now().to_rfc3339()),
+            received_at: Set(crate::clock::now()),
             processed_at: Set(None),
             process_error: Set(None),
             ..Default::default()
@@ -1305,7 +1301,7 @@ mod tests {
             provider_event_type: Set("payment.succeeded".into()),
             neutral_event_kind: Set(Some("payment_succeeded".into())),
             payload: Set(serde_json::json!({})),
-            received_at: Set(crate::clock::now().to_rfc3339()),
+            received_at: Set(crate::clock::now()),
             processed_at: Set(None),
             process_error: Set(Some("transient failure on first attempt".into())),
             ..Default::default()

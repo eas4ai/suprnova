@@ -5,3 +5,5 @@ pub mod gate_bridge;
 pub mod migration;
 pub mod postgres;
 pub mod rbac;
+#[cfg(feature = "testing")]
+pub mod shipped_tables;

@@ -12,7 +12,19 @@ use chrono::{DateTime, Utc};
 /// etc.); `method_details` carries the display-safe envelope (brand,
 /// last4, expiry - never PAN or CVV). `is_default` flags the customer's
 /// primary instrument.
-#[suprnova::model(table = "payments_payment_methods", timestamps)]
+///
+/// Every time column is `timestamp with time zone` on Postgres and
+/// `TIMESTAMP` on MySQL and MariaDB (see the migration), so each one is
+/// stored through the native casts. The default text cast `AsDateTime`
+/// cannot write to or read from those columns.
+#[suprnova::model(
+    table = "payments_payment_methods",
+    timestamps,
+    casts = {
+        created_at = suprnova::AsNativeDateTime,
+        updated_at = suprnova::AsNativeDateTime,
+    },
+)]
 pub struct PaymentMethod {
     /// Surrogate primary key.
     pub id: i64,

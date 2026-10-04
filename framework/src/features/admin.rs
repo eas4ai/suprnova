@@ -47,18 +47,9 @@ pub struct FeatureRow {
 
 impl From<entity::Model> for FeatureRow {
     fn from(m: entity::Model) -> Self {
-        // Phase 10A T11 - `entity::Model` now carries the storage
-        // shape (RFC-3339 string timestamps from the `AsDateTime`
-        // cast). Parse back to `DateTime<Utc>` for the admin/JSON
-        // surface; failures fall back to the unix epoch so a corrupt
-        // row never panics the admin listing - the FeatureRow is
-        // serialised by the admin UI which treats parse errors as
-        // "unknown timestamp" rather than fatal.
-        let parse = |s: &str| {
-            chrono::DateTime::parse_from_rfc3339(s)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::DateTime::<chrono::Utc>::UNIX_EPOCH)
-        };
+        // `entity::Model` carries the storage shape. The timestamps are
+        // native (`AsNativeDateTime`), so the driver has already decoded
+        // them to `DateTime<Utc>`.
         Self {
             id: m.id,
             name: m.name,
@@ -66,8 +57,8 @@ impl From<entity::Model> for FeatureRow {
             enabled: m.enabled,
             description: m.description,
             updated_by: m.updated_by,
-            created_at: parse(&m.created_at),
-            updated_at: parse(&m.updated_at),
+            created_at: m.created_at,
+            updated_at: m.updated_at,
         }
     }
 }
@@ -118,12 +109,11 @@ pub async fn upsert(
     actor_id: Option<String>,
 ) -> Result<FeatureRow, FrameworkError> {
     let db = DB::connection()?;
-    // Phase 10A T11 - the inner SeaORM Model now stores timestamps as
-    // RFC-3339 strings (the `AsDateTime` cast's `Storage` type). Format
-    // the chrono value the same way the cast pipeline does so the
-    // round-trip back through the FeatureRow conversion below parses
-    // cleanly.
-    let now = crate::clock::now().to_rfc3339();
+    // The inner SeaORM Model stores the timestamps natively (the
+    // `AsNativeDateTime` cast's `Storage` is `DateTime<Utc>`), matching
+    // the `timestamp with time zone` / `TIMESTAMP` columns the migration
+    // creates.
+    let now = crate::clock::now();
 
     let active = entity::ActiveModel {
         name: Set(name.to_string()),
@@ -131,7 +121,7 @@ pub async fn upsert(
         enabled: Set(enabled),
         description: Set(description.clone()),
         updated_by: Set(actor_id.clone()),
-        created_at: Set(now.clone()),
+        created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()
     };

@@ -13,7 +13,20 @@ use chrono::{DateTime, Utc};
 /// or refund). `amount_total_minor` / `amount_tax_minor` are the smallest
 /// currency unit (cents, satang, etc.). `paid_at` stays `None` for
 /// pending or failed entries.
-#[suprnova::model(table = "payments_transactions", timestamps)]
+///
+/// Every time column is `timestamp with time zone` on Postgres and
+/// `TIMESTAMP` on MySQL and MariaDB (see the migration), so each one is
+/// stored through the native casts. The default text cast `AsDateTime`
+/// cannot write to or read from those columns.
+#[suprnova::model(
+    table = "payments_transactions",
+    timestamps,
+    casts = {
+        paid_at = suprnova::AsOptionalNativeDateTime,
+        created_at = suprnova::AsNativeDateTime,
+        updated_at = suprnova::AsNativeDateTime,
+    },
+)]
 pub struct Transaction {
     /// Surrogate primary key.
     pub id: i64,

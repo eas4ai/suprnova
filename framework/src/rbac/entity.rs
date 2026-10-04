@@ -4,7 +4,19 @@ use chrono::{DateTime, Utc};
 
 /// Role row, usually named for a coarse application capability such as
 /// `"admin"` or `"author"`.
-#[suprnova::model(table = "roles", timestamps)]
+///
+/// Every time column is `timestamp with time zone` on Postgres and
+/// `TIMESTAMP` on MySQL and MariaDB (see the migration), so each one is
+/// stored through the native casts. The default text cast `AsDateTime`
+/// cannot write to or read from those columns.
+#[suprnova::model(
+    table = "roles",
+    timestamps,
+    casts = {
+        created_at = suprnova::AsNativeDateTime,
+        updated_at = suprnova::AsNativeDateTime,
+    },
+)]
 pub struct Role {
     /// Primary key.
     pub id: i64,
@@ -22,7 +34,19 @@ pub struct Role {
 
 /// Permission row, usually named as a dotted ability such as
 /// `"articles.create"`.
-#[suprnova::model(table = "permissions", timestamps)]
+///
+/// Every time column is `timestamp with time zone` on Postgres and
+/// `TIMESTAMP` on MySQL and MariaDB (see the migration), so each one is
+/// stored through the native casts. The default text cast `AsDateTime`
+/// cannot write to or read from those columns.
+#[suprnova::model(
+    table = "permissions",
+    timestamps,
+    casts = {
+        created_at = suprnova::AsNativeDateTime,
+        updated_at = suprnova::AsNativeDateTime,
+    },
+)]
 pub struct Permission {
     /// Primary key.
     pub id: i64,

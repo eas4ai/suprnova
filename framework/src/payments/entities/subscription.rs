@@ -11,9 +11,21 @@ use chrono::{DateTime, Utc};
 /// provider's lifecycle term (`active`, `trialing`, `past_due`, etc.).
 /// `cancel_at_period_end` reflects a scheduled cancellation; `canceled_at`
 /// is set once the cancellation actually takes effect.
+///
+/// Every time column is `timestamp with time zone` on Postgres and
+/// `TIMESTAMP` on MySQL and MariaDB (see the migration), so each one is
+/// stored through the native casts. The default text cast `AsDateTime`
+/// cannot write to or read from those columns.
 #[suprnova::model(
     table = "payments_subscriptions",
     timestamps,
+    casts = {
+        current_period_start = suprnova::AsNativeDateTime,
+        current_period_end = suprnova::AsNativeDateTime,
+        canceled_at = suprnova::AsOptionalNativeDateTime,
+        created_at = suprnova::AsNativeDateTime,
+        updated_at = suprnova::AsNativeDateTime,
+    },
     relations = {
         items: HasMany<crate::payments::entities::subscription_item::SubscriptionItem>,
     },

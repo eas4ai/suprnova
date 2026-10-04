@@ -18,7 +18,18 @@ use chrono::{DateTime, Utc};
 /// Note: no `timestamps` flag - this entity uses `received_at` /
 /// `processed_at` instead of the standard `created_at` / `updated_at`
 /// pair. The macro's auto-touch logic is not applied.
-#[suprnova::model(table = "payments_webhook_events")]
+///
+/// Every time column is `timestamp with time zone` on Postgres and
+/// `TIMESTAMP` on MySQL and MariaDB (see the migration), so each one is
+/// stored through the native casts. The default text cast `AsDateTime`
+/// cannot write to or read from those columns.
+#[suprnova::model(
+    table = "payments_webhook_events",
+    casts = {
+        received_at = suprnova::AsNativeDateTime,
+        processed_at = suprnova::AsOptionalNativeDateTime,
+    },
+)]
 pub struct WebhookEvent {
     /// Surrogate primary key.
     pub id: i64,

@@ -3,3 +3,5 @@
 
 pub mod features;
 pub mod migration;
+#[cfg(feature = "testing")]
+pub mod shipped_table;
