@@ -278,20 +278,25 @@ bytes:
 
 | Format | Times |
 |---|---|
-| PNG, 8-bit grey or palette | 1.3 |
-| PNG, 8-bit RGB or RGBA | 2.5 to 5 |
-| PNG, 16-bit | 8 to 9.5 |
-| GIF | 3.3 to 3.6 |
+| PNG, 8-bit | 1.3 (grey or palette) to 5 (incompressible RGBA) |
+| PNG, 16-bit | 2.5 (grey) to 10 (incompressible RGBA). At the 1 GiB default, 16-bit RGBA tops out at about 27 megapixels and 16-bit RGB at about 36 |
+| GIF | 1.0 to 1.1 |
 | JPEG, grey | 1.3 to 1.7 |
-| JPEG, colour | 2.6 to 4.7 (progressive and 4:4:4 at the top) |
-| WebP | 1.7 to 2.6 |
-| BMP | 1.1 to 2.1 |
+| JPEG, colour | 2.5 to 4.8 (progressive, arithmetic and 4:4:4 at the top) |
+| WebP | 1.4 to 2.4 |
+| BMP | 1.0 to 2.1 |
 
-So the default 1 GiB decodes a 48-megapixel photo (8000x6000) in every
+So the default 1 GiB admits a 48-megapixel photo (8000x6000) in every
 8-bit format, a progressive 4:4:4 JPEG and a PNG of incompressible RGBA
 included. 16-bit PNG holds more and tops out lower, as the table says.
 Raise `IMAGE_MAX_ALLOC_BYTES` if your users upload larger images, or
 lower it on a small host.
+
+The JPEG decoder has a limit of its own that no variable changes: it
+refuses a frame of more than 67,108,864 samples (width x height x
+components), so the default driver reads colour JPEGs up to about 22
+megapixels and grey ones up to about 67. The `magick` driver reads larger
+JPEGs.
 
 A limit hit is a 4xx-shaped `FrameworkError::param`, because oversized
 input is a client problem, not a server fault.

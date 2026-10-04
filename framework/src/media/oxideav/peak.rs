@@ -440,3 +440,99 @@ fn bmp_peak(width: u64, height: u64, bmp: BmpLayout, input_len: u64) -> u64 {
     );
     add(add(add(rgba, run_length), lookup), palette)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media::DEFAULT_IMAGE_MAX_ALLOC_BYTES;
+
+    /// A 48-megapixel photo.
+    const WIDTH: u32 = 8000;
+    const HEIGHT: u32 = 6000;
+
+    /// A progressive 4:4:4 JPEG's headers: SOI, a SOF2 frame header with
+    /// three components sampled 1x1, and the first scan header.
+    fn progressive_444_jpeg(width: u32, height: u32) -> Vec<u8> {
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xC2, 0x00, 0x11, 0x08];
+        jpeg.extend_from_slice(&(height as u16).to_be_bytes());
+        jpeg.extend_from_slice(&(width as u16).to_be_bytes());
+        jpeg.extend_from_slice(&[0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
+        jpeg.extend_from_slice(&[
+            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+        ]);
+        jpeg
+    }
+
+    /// The estimate for a PNG of incompressible pixels: deflate stores them,
+    /// five bytes of block header for every 65,535 bytes, in 8 KiB IDAT
+    /// chunks as libpng writes them.
+    fn incompressible_png(
+        width: u32,
+        height: u32,
+        bit_depth: u8,
+        colour_type: u8,
+        interlace: u8,
+    ) -> u64 {
+        let ihdr = oxideav_png::Ihdr {
+            width,
+            height,
+            bit_depth,
+            colour_type,
+            compression: 0,
+            filter: 0,
+            interlace,
+        };
+        let inflated = png_inflated_len(&ihdr).expect("a PNG pixel format");
+        let idat_len = inflated + inflated.div_ceil(65_535) * 5 + 6;
+        let layout = Layout::Png(PngLayout {
+            ihdr,
+            idat_len,
+            chunks: idat_len.div_ceil(8192) + 2,
+        });
+        let file = idat_len + 8 + 25 + 12 * (idat_len.div_ceil(8192) + 1);
+        estimate(&layout, file, width, height).expect("an estimate")
+    }
+
+    #[test]
+    fn the_default_budget_admits_a_48_megapixel_photo_in_every_8_bit_format() {
+        let jpeg = progressive_444_jpeg(WIDTH, HEIGHT);
+        let layout = layout(InputFormat::Jpeg, &jpeg, WIDTH, HEIGHT).expect("the headers read");
+        // Three bytes a pixel: more than any photo compresses to.
+        let file = u64::from(WIDTH) * u64::from(HEIGHT) * 3;
+        let needed = estimate(&layout, file, WIDTH, HEIGHT).expect("an estimate");
+        assert!(
+            needed <= DEFAULT_IMAGE_MAX_ALLOC_BYTES,
+            "a progressive 4:4:4 JPEG needs {needed} bytes"
+        );
+        for (colour_type, interlace) in [(2, 0), (6, 0), (6, 1)] {
+            let needed = incompressible_png(WIDTH, HEIGHT, 8, colour_type, interlace);
+            assert!(
+                needed <= DEFAULT_IMAGE_MAX_ALLOC_BYTES,
+                "an 8-bit PNG of colour type {colour_type}, interlace {interlace}, needs {needed} bytes"
+            );
+        }
+    }
+
+    /// The images chapter's figures: incompressible 16-bit RGBA tops out at
+    /// about 27 megapixels, 16-bit RGB at about 36.
+    #[test]
+    fn a_sixteen_bit_png_tops_out_where_the_images_chapter_says() {
+        for (colour_type, admitted, refused) in [
+            (6, (5976, 4482), (6000, 4500)),
+            (2, (6900, 5175), (6928, 5196)),
+        ] {
+            let (width, height) = admitted;
+            let needed = incompressible_png(width, height, 16, colour_type, 0);
+            assert!(
+                needed <= DEFAULT_IMAGE_MAX_ALLOC_BYTES,
+                "{width}x{height}, colour type {colour_type}, needs {needed} bytes"
+            );
+            let (width, height) = refused;
+            let needed = incompressible_png(width, height, 16, colour_type, 0);
+            assert!(
+                needed > DEFAULT_IMAGE_MAX_ALLOC_BYTES,
+                "{width}x{height}, colour type {colour_type}, needs only {needed} bytes"
+            );
+        }
+    }
+}

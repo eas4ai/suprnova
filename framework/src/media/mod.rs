@@ -83,7 +83,14 @@ pub use oxideav::OxideAvImageDriver;
 pub const DEFAULT_IMAGE_MAX_DIMENSION: u32 = 16_384;
 
 /// Default cap on the bytes decoding a single image may allocate.
-pub const DEFAULT_IMAGE_MAX_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+///
+/// 1 GiB admits a 48-megapixel photo (8000x6000) in every 8-bit format
+/// the built-in driver reads, a progressive 4:4:4 JPEG and a PNG of
+/// incompressible RGBA included: decoders hold several times the RGBA they
+/// return. 16-bit PNG holds more and tops out lower, and the built-in JPEG
+/// decoder has a smaller frame limit of its own; the images chapter lists
+/// both.
+pub const DEFAULT_IMAGE_MAX_ALLOC_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Default wall-clock ceiling on one ImageMagick invocation, in seconds.
 ///
