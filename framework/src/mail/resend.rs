@@ -79,9 +79,47 @@ struct RsAttachment<'a> {
     content_type: &'a str,
 }
 
+/// Resend requires both `name` and `value` on every tag and rejects the
+/// whole email over a tag that lacks either.
 #[derive(Serialize)]
 struct RsTag<'a> {
-    name: &'a str,
+    name: String,
+    value: &'a str,
+}
+
+/// Resend tag rule: a tag name and value hold only ASCII letters, digits,
+/// `_` and `-`, at most 256 characters, and Resend rejects the whole email
+/// over one that does not.
+fn resend_tag_valid(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 256
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Map the plain-string `tags` onto Resend's `{name, value}` pairs the way
+/// SES maps them: a bare tag becomes `{name: "tag_<i>", value: tag}`, whose
+/// name is valid by construction. A tag Resend cannot carry is refused here,
+/// so the caller gets the error instead of a queued mail Resend rejects on
+/// every retry.
+fn resend_tags(msg: &OutgoingMessage) -> Result<Vec<RsTag<'_>>, FrameworkError> {
+    msg.tags
+        .iter()
+        .enumerate()
+        .map(|(i, tag)| {
+            if resend_tag_valid(tag) {
+                Ok(RsTag {
+                    name: format!("tag_{i}"),
+                    value: tag,
+                })
+            } else {
+                Err(FrameworkError::internal(format!(
+                    "Resend: tag {tag:?} cannot be sent: a Resend tag value holds only \
+                     [A-Za-z0-9_-], at most 256 characters"
+                )))
+            }
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -99,12 +137,12 @@ impl MailTransport for ResendMailTransport {
             })
             .collect();
 
-        // Resend tags are a list of `{name, value}` objects; the
-        // Suprnova model carries plain strings, so we send the
-        // tag-name only. Metadata maps to provider headers (Resend has
-        // no first-class metadata field - `headers` is the standard
-        // pass-through). Caller-set custom headers union over metadata.
-        let tags: Vec<RsTag> = msg.tags.iter().map(|t| RsTag { name: t }).collect();
+        // Resend tags are a list of `{name, value}` objects; the Suprnova
+        // model carries plain strings, mapped by `resend_tags`. Metadata
+        // maps to provider headers (Resend has no first-class metadata
+        // field - `headers` is the standard pass-through). Caller-set
+        // custom headers union over metadata.
+        let tags = resend_tags(msg)?;
         let mut headers: BTreeMap<String, String> = BTreeMap::new();
         for (k, v) in &msg.metadata {
             // The metadata key becomes part of a header name, so it is held

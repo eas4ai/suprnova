@@ -565,7 +565,7 @@ The same precedence applies on the queue path: queued mailables go through `appl
 
 ## Tags, Metadata, Priority, Headers, Return-Path
 
-Every dispatched message can carry Laravel-style provider hints - tags, metadata key/values, RFC-2076 priority, custom MIME headers, and a Sender / bounce-to address. They forward to the HTTP providers' native fields (Postmark `Tag` / `Metadata` / `Headers`, SES `EmailTags` plus `Content.Simple.Headers`, SendGrid `categories` / `custom_args` / `headers`, Mailgun `o:tag` / `v:` / `h:`, Resend `tags` / `headers`) and to SMTP as RFC 5322 headers.
+Every dispatched message can carry Laravel-style provider hints - tags, metadata key/values, RFC-2076 priority, custom MIME headers, and a Sender / bounce-to address. They forward to the HTTP providers' native fields (Postmark `Tag` / `Metadata` / `Headers`, SES `EmailTags` plus `Content.Simple.Headers`, SendGrid `categories` / `custom_args` / `headers`, Mailgun `o:tag` / `v:` / `h:`, Resend `tags` / `headers`) and to SMTP as RFC 5322 headers. SES and Resend take a tag as a name and value pair, so each bare tag goes out as `{name: "tag_<i>", value: <tag>}`.
 
 On SMTP, the return path also becomes the envelope sender (`MAIL FROM`), which is the address bounces are sent to. The `From` header and the recipients do not change.
 
@@ -580,7 +580,7 @@ Every message is checked before anything sees it. `Mail::send`, `Mail::raw`, `Ma
 - A metadata key follows the header-name grammar and is at most 65 characters, on every transport, because SMTP, the `file` driver, and Resend write it into an `X-Metadata-<key>` header name.
 - An attachment's content type must parse as a MIME type.
 
-A message that breaks a rule fails with an internal error and is not sent. An HTTP response shows a 500 and the detail stays in the logs, as with Laravel's `RfcComplianceException`: a bad address is a fault in the application, not in the request. Two provider limits add refusals of their own: Postmark carries one tag per email, and SES carries tags and metadata only when the tag, the key, and the value hold nothing but `A-Z`, `a-z`, `0-9`, `_`, and `-`.
+A message that breaks a rule fails with an internal error and is not sent. An HTTP response shows a 500 and the detail stays in the logs, as with Laravel's `RfcComplianceException`: a bad address is a fault in the application, not in the request. Three provider limits add refusals of their own: Postmark carries one tag per email, SES carries tags and metadata only when the tag, the key, and the value hold nothing but `A-Z`, `a-z`, `0-9`, `_`, and `-`, and Resend carries a tag only when it holds nothing but those characters and is at most 256 characters long.
 
 On SES specifically, headers ride whichever content shape the message uses:
 `Content.Simple.Headers` for a plain message, real MIME header lines for a
