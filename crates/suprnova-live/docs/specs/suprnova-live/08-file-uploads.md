@@ -1,7 +1,7 @@
 # Suprnova Live -- 08 File Uploads
 
 Status: Normative design specification
-Last revised: 2026-09-15
+Last revised: 2026-10-04
 
 ## Scope
 
@@ -105,7 +105,8 @@ registration. The
 reference fetch adapter uses the fixed reserved `/__live/upload` endpoint and
 places a transfer grant only in the `Authorization` header, never in the URL,
 history, diagnostics, or model proposal. It reads upload control responses
-through a 16 KiB bounded stream rather than an unbounded `response.json()`.
+whole as the framework server's own small typed reply; it has no byte cap of
+its own, because the server bounds what it sends.
 Every typed response is checked against its operation and cannot regress the
 expected revision. Server-terminal failure, cancellation, expiry, or
 finalization clears the proposal, file, grant, handle, and uncertain bytes.
@@ -301,6 +302,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-04 -- The reference fetch adapter reads an upload control response
+  without the 16 KiB browser cap. The response is the framework server's own
+  typed reply on its reserved route, and a browser cap protected nothing the
+  server's limits did not already bound. The upload declaration scan covers the
+  whole island; its 4,096-element and 64-attribute caps made an upload field
+  in a large island read as undeclared. Upload control requests keep their
+  fixed-shape protocol grammar.
 - 2026-09-15 -- The official upload widget presents the domain's states
   (queued, transferring, verifying, ready, finalizing, finalized, rejected,
   canceled, expired, failed) as rendered text selected from the runtime's

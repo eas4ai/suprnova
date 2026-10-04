@@ -1,7 +1,7 @@
 # Suprnova Live -- 05 Snapshots and Hydration
 
 Status: Normative design specification
-Last revised: 2026-09-07
+Last revised: 2026-10-04
 
 ## Scope
 
@@ -36,8 +36,10 @@ Acceptance criteria:
   extension name is validated by its exact registered schema. Instanced
   snapshot schema v1 optionally recognizes
   `x_suprnova_live_composition_v1`; public seeds reject it.
-- Composition lineage is canonical, inside the signed body, and independently
-  bounded to 256 immediate children, depth 64, and 64 KiB. It rejects empty or
+- Composition lineage is canonical, inside the signed body, and bounded by the
+  snapshot's configured byte and entry limits (`LIVE_MAX_REQUEST_BYTES`,
+  `LIVE_MAX_JSON_ENTRIES`) and by depth 64, so a parent records every child it
+  renders. It rejects empty or
   ambiguous records, invalid identities, duplicate keys or child instances,
   mixed parent authority, and descendants beyond the depth bound before use.
 - Component, route, slot, instance where present, and identity binding cannot be
@@ -289,6 +291,14 @@ owner lineage records the newly applied parent revision.
 
 ## Decisions and revisions
 
+- 2026-10-04 -- Removed the composition lineage's arbitrary 256-child and
+  64 KiB caps. A list of row components records every child; the lineage is
+  bounded by the snapshot's configured byte and entry limits, which every
+  snapshot already meets because it comes back in each request, and by depth
+  64, the composition planner's own ceiling. The engine's default input limits
+  are the framework's defaults (16 MiB, 1,000,000 entries, 16 MiB strings), and
+  generated component fields encode under the engine ceilings so the
+  configured snapshot limit is the one that applies.
 - 2026-09-07 -- Shipped tier-provider Live instance ledgers as one kernel over
   a record store port. The distributed ledger runs the same state machine the
   Tier 0 memory ledger runs and answers the same conformance suite; records
