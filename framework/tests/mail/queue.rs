@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use suprnova::FrameworkError;
@@ -546,5 +547,83 @@ async fn queued_mail_carries_the_context_of_the_code_that_queued_it() {
     assert_eq!(
         context.data.get("trace_id"),
         Some(&serde_json::json!("abc"))
+    );
+}
+
+/// Set only in the child process that
+/// `a_worker_with_no_manual_job_registration_delivers_queued_mail` spawns.
+const SCAFFOLD_WORKER_CHILD: &str = "SUPRNOVA_SCAFFOLD_MAIL_WORKER_CHILD";
+
+/// The worker of an app built from the manual: a transport, a queue driver
+/// and the mailable factory, and no `register_job` call. It runs in its own
+/// process because the job registry is process-global and other tests in
+/// this binary register `SendMailJob` by hand, which would hide the defect.
+#[tokio::test]
+async fn scaffold_shaped_mail_worker_child() {
+    if std::env::var(SCAFFOLD_WORKER_CHILD).is_err() {
+        return;
+    }
+    let _events = suprnova::events::EventFacade::fake();
+    let capture = Arc::new(InMemoryMailTransport::new());
+    Mail::set_transport(capture.clone()).unwrap();
+    suprnova::mail::register_mailable_factory::<WelcomeMail>().unwrap();
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Mail::to("alice@example.org")
+        .queue(WelcomeMail {
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+    run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: Some(1),
+            queues: Vec::new(),
+        },
+        CancellationToken::new(),
+    )
+    .await;
+
+    let exceptions: Vec<String> =
+        suprnova::events::dispatched::<suprnova::queue::events::JobExceptionOccurred>(|_| true)
+            .into_iter()
+            .map(|e| e.exception)
+            .collect();
+    let msgs = capture.captured();
+    assert_eq!(
+        msgs.len(),
+        1,
+        "the worker must deliver queued mail with no manual register_job; \
+         worker exceptions: {exceptions:?}"
+    );
+    assert_eq!(msgs[0].subject, "Welcome, Alice");
+}
+
+#[test]
+fn a_worker_with_no_manual_job_registration_delivers_queued_mail() {
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--exact",
+            "queue::scaffold_shaped_mail_worker_child",
+            "--nocapture",
+        ])
+        .env(SCAFFOLD_WORKER_CHILD, "1")
+        .output()
+        .expect("spawn the worker child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("running 1 test"),
+        "the child filter matched no test (its module path changed?); stdout:\n{stdout}"
+    );
+    assert!(
+        output.status.success(),
+        "a worker that follows the manual must deliver queued mail; status: {}\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
     );
 }

@@ -38,6 +38,8 @@ suprnova::queue::worker::register_job::<SendWelcomeEmail>();
 Queue::push(SendWelcomeEmail { user_id: 42 }).await?;
 ```
 
+Register the jobs you write. The framework's own jobs - `SendMailJob` behind `Mail::queue` and `SendNotificationJob` behind `Notify::queue` - are registered before your code runs.
+
 A worker process drains the configured driver until cancelled:
 
 ```rust

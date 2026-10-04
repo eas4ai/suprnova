@@ -342,6 +342,8 @@ Mail::to("alice@example.org")
     .await?;
 ```
 
+The worker already knows `SendMailJob`: the framework registers its own job, so the factory is the only registration a queued mailable needs. You never call `register_job` for it.
+
 Route a queued dispatch to a specific queue or connection with `.on_queue(...)` / `.on_connection(...)`, or give the `Mailable` itself a default via `Mailable::queue(&self)`:
 
 ```rust
