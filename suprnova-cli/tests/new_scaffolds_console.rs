@@ -41,17 +41,17 @@ fn read(p: impl AsRef<std::path::Path>) -> String {
 }
 
 /// Pins the production build shape (design doc section 5.1): the
-/// production dependency turns default features off and lists the nine
+/// production dependency turns default features off and lists the ten
 /// non-`testing` defaults, and a dev-dependency turns `testing` back on
 /// for tests only.
 fn assert_production_build_shape(cargo: &str) {
     let production_features = "default-features = false, features = [\"filesystem\", \
          \"database-sqlite\", \"database-postgres\", \"database-mysql\", \"vector-mariadb\", \
-         \"web-push\", \"localization\", \"magnetar-oauth\", \"media\"] }";
+         \"web-push\", \"localization\", \"magnetar-oauth\", \"media\", \"queue-sqs\"] }";
     assert!(
         cargo.contains(production_features),
         "Cargo.toml's production dependency must turn default features off \
-         and list the nine non-testing defaults: {cargo}"
+         and list the ten non-testing defaults: {cargo}"
     );
     assert!(
         cargo.contains("[dev-dependencies]"),

@@ -44,6 +44,7 @@
 use std::borrow::Cow;
 use std::convert::Infallible;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
@@ -158,13 +159,18 @@ impl DebugRequest {
 
     /// Serve the request with `route`, recording frames, then replace the
     /// response with the page when PAR-012 asks for it.
-    pub(crate) async fn serve<F>(self, route: F) -> hyper::Response<Body>
-    where
-        F: Future<Output = hyper::Response<Body>>,
-    {
-        // Boxed: the request future is large, and the two scopes would
-        // otherwise hold it inline on the connection task's stack.
-        let routed = NOTES.scope(Arc::clone(&self.notes), Box::pin(route));
+    ///
+    /// `route` arrives boxed. The request future is large, and an async
+    /// function keeps its arguments in its own state from the start, so a
+    /// future passed by value would sit inline in this one, and again in the
+    /// caller's, however it was boxed in here. That put every request, and
+    /// every render nested inside one, a full request future deeper on the
+    /// stack and overflowed the default 2 MiB test thread.
+    pub(crate) async fn serve(
+        self,
+        route: Pin<Box<dyn Future<Output = hyper::Response<Body>> + Send>>,
+    ) -> hyper::Response<Body> {
+        let routed = NOTES.scope(Arc::clone(&self.notes), route);
         let response = frames::record_frames(true, routed).await;
         self.replace(response)
     }

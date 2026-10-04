@@ -1289,6 +1289,10 @@ async fn the_live_native_gallery_renders_every_component_on_native_controls() {
         "<input class=\"sn-date-radio\" type=\"radio\" name=\"when-day\" value=\"31\">31",
         // FORM-008: the combobox pattern over a native input, with a datalist before upgrade.
         "<sn-combobox class=\"sn-combobox\" live:key=\"country-combobox\" live:preserve.self>",
+        // The field is the chosen option's value; the text is the query.
+        "<input type=\"hidden\" id=\"country-value\" name=\"country\" value=\"\" live:model=\"country\" data-sn-combobox-value>",
+        "id=\"country\" name=\"country_query\" type=\"text\" role=\"combobox\"",
+        "live:model=\"country_query\"",
         "role=\"combobox\" aria-autocomplete=\"list\" aria-expanded=\"false\" aria-controls=\"country-listbox\"",
         "<datalist id=\"country-datalist\"><option value=\"Canada\"></option>",
         "<ul class=\"sn-combobox-listbox\" id=\"country-listbox\" role=\"listbox\" aria-label=\"Country suggestions\" data-sn-remote data-sn-query=\"\"",

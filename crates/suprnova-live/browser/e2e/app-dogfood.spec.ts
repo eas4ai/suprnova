@@ -562,6 +562,8 @@ test("the live-native enhancements upgrade, and every control still submits with
   await expect(country).toHaveAttribute("aria-activedescendant", "country-option-1");
   await country.press("Enter");
   await expect(country).toHaveValue("Canada");
+  // The field holds the option's value, not its label.
+  await expect(page.locator("#country-value")).toHaveValue("ca");
   await expect(country).toHaveAttribute("aria-expanded", "false");
 
   // FDB-005: the stream connects and the status names the state honestly.

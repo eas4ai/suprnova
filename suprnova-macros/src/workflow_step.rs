@@ -68,7 +68,10 @@ pub fn workflow_step_impl(_attr: TokenStream, input: TokenStream) -> TokenStream
                 ctx.run_step_with_input(
                     stringify!(#fn_name),
                     __input_json,
-                    || async move { #inner_name(#(#arg_idents),*).await },
+                    // `move`: the context takes a `'static` closure, and a
+                    // borrowing one would hold a reference to every `Copy`
+                    // argument instead of the value.
+                    move || async move { #inner_name(#(#arg_idents),*).await },
                 )
                 .await
             } else {

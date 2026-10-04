@@ -739,7 +739,12 @@ async fn serve_request(
     let debug_request = crate::error::debug_page::DebugRequest::capture(&req);
     let is_head = req.method() == hyper::Method::HEAD;
     let response = debug_request
-        .serve(route_request(router, middleware_registry, req, peer_ip))
+        .serve(Box::pin(route_request(
+            router,
+            middleware_registry,
+            req,
+            peer_ip,
+        )))
         .await;
     // `route_request` already stripped a HEAD response's body; the page
     // must not add one back.

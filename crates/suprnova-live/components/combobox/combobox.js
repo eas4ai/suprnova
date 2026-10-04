@@ -1,8 +1,13 @@
 // sn-combobox - the accessible combobox pattern over a native input and a
-// server-rendered listbox (FORM-008). Light DOM: the input, the datalist
-// and the listbox are the server's markup. The input carries the value, so
-// nothing here is form-associated and the control works with this file
-// blocked (the datalist gives the same options natively).
+// server-rendered listbox (FORM-008). Light DOM: the inputs, the datalist
+// and the listbox are the server's markup. Two inputs carry the state: the
+// hidden value input (data-sn-combobox-value) holds the selected option's
+// value, which is what the field means, and the text input holds what the
+// user typed, the query a remote listbox answers. A selection writes the
+// option's data-sn-value to the first and its label to the second; editing
+// the text afterwards clears the value, so a stale selection never stays
+// behind text that no longer names it. Nothing here is form-associated, and
+// with this file blocked the datalist still offers the labels as text.
 //
 // A remote listbox (data-sn-remote) holds the options the server rendered
 // for the query in its data-sn-query. The element shows all of them, as the
@@ -58,6 +63,7 @@
         this.#connection = null;
         const input = this.querySelector("input[role=combobox]");
         const listbox = this.querySelector("[role=listbox]");
+        const valueInput = this.querySelector("input[data-sn-combobox-value]");
         if (!input || !listbox) return;
         const connection = new AbortController();
         this.#connection = connection;
@@ -119,8 +125,27 @@
             }
           });
         };
+        // The value input is bound like any field: the model directive hears
+        // its input and change events, so a write announces itself the same
+        // way a typed edit does.
+        const writeValue = (value) => {
+          if (!valueInput || valueInput.value === value) return;
+          valueInput.value = value;
+          valueInput.dispatchEvent(new Event("input", { bubbles: true }));
+          valueInput.dispatchEvent(new Event("change", { bubbles: true }));
+        };
+        // aria-selected follows the bound value, after a selection and after a
+        // morph that re-renders the options.
+        const markSelected = () => {
+          const value = valueInput ? valueInput.value : null;
+          for (const option of options()) {
+            const chosen = value !== null && value !== "" && option.getAttribute("data-sn-value") === value;
+            setAttribute(option, "aria-selected", String(chosen));
+          }
+        };
         const select = (option) => {
-          for (const other of options()) setAttribute(other, "aria-selected", String(other === option));
+          writeValue(option.getAttribute("data-sn-value") ?? option.textContent.trim());
+          markSelected();
           input.value = option.textContent.trim();
           input.dispatchEvent(new Event("input", { bubbles: true }));
           input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -129,7 +154,13 @@
         };
         input.addEventListener(
           "input",
-          () => {
+          (event) => {
+            // The selection's own label write arrives here too; only an edit
+            // by the user unsets the value it chose.
+            if (event.isTrusted) {
+              writeValue("");
+              markSelected();
+            }
             selected = false;
             sequence.ask();
             render();
@@ -180,6 +211,7 @@
         observe(
           listbox,
           () => {
+            markSelected();
             if (selected) {
               setExpanded(false);
               return;
@@ -190,6 +222,9 @@
           },
           { attributes: true, attributeFilter: ["data-sn-query", "hidden"], childList: true },
         );
+        // A re-render that changes the bound value rewrites the attribute.
+        if (valueInput) observe(valueInput, markSelected, { attributes: true, attributeFilter: ["value"] });
+        markSelected();
         setAttribute(this, "data-sn-upgraded", "");
       }
 

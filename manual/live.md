@@ -754,17 +754,23 @@ containers, so tap, click and arrow keys select with no script;
 is the accessible combobox pattern (`role="combobox"`, `aria-expanded`,
 `aria-activedescendant`, a `role="listbox"` of options) over a native input
 with a `datalist` for the script-free case, and `sn-combobox` moves the
-active option and selects. By default the options are your server's answer
-to the query: render them for the model field on every render, and the
-element shows all of them while the query they answer is the input's text,
-whatever your search matched, and keeps an answer to older text hidden, so a
-stale result never replaces results for a newer query. Pass `remote=false`
-for a fixed list, which the element filters by the typed text:
+active option and selects. Each option is a `(value, label)` pair, and the
+combobox binds two fields: `name` holds the chosen option's value, through a
+hidden input that a selection fills and an edit of the text clears, and
+`<name>_query` holds the typed text. Pass the island's current value as
+`value` and its text as `query`, so both render back (the option holding
+the value renders selected). By default the options are your server's
+answer to the query: render them for the query field on every render, and
+the element shows all of them while the query they answer is the input's
+text, whatever your search matched, and keeps an answer to older text
+hidden, so a stale result never replaces results for a newer query. Pass
+`remote=false` for a fixed list, which the element filters by the typed
+text:
 
 ```html
 {% call otp::input_otp("code", "One-time code") %}{% for index in cells %}{% call otp::otp_cell(index) %}{% endcall %}{% endfor %}{% endcall %}
 {% call date::date_picker("when", "Renewal date", years, months, days, min="2026-01-01", max="2028-12-31") %}{% endcall %}
-{% call combo::combobox("country", "Country", countries, query=country, placeholder="Type a country") %}{% endcall %}
+{% call combo::combobox("country", "Country", countries, query=country_query, placeholder="Type a country", value=country) %}{% endcall %}
 ```
 
 ### Why Suprnova diverges

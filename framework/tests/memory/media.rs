@@ -1,61 +1,10 @@
-//! MEM-003 and MEM-005 on images, documentation, files and processes.
+//! MEM-003 and MEM-005 on documentation and processes. Images are in
+//! `images` and files in `files`, behind the features they need.
 
+use suprnova::Process;
 use suprnova::content::{DocsBuildConfig, build_docs};
-use suprnova::media::{
-    ImageDriver, ImagePipeline, OutputFormat, OxideAvImageDriver, Transformation,
-};
-use suprnova::{DiskExt, Process, Storage};
 
 use crate::support::{Heap, exclusive};
-
-const RED_PNG_1X1: &[u8] = &[
-    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
-    0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
-    0x00, 0x03, 0x01, 0x01, 0x00, 0xF7, 0x03, 0x41, 0x43, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
-    0x44, 0xAE, 0x42, 0x60, 0x82,
-];
-
-/// MEM-003: an image pipeline moves its planes from step to step and into
-/// the encoder rather than copying each one.
-#[tokio::test]
-async fn mem_audit_an_image_pipeline_moves_its_planes() {
-    let _lock = exclusive().await;
-    let driver = OxideAvImageDriver::new();
-    let bmp = driver
-        .process(
-            RED_PNG_1X1,
-            &ImagePipeline {
-                transformations: vec![Transformation::Resize {
-                    width: 1024,
-                    height: 1024,
-                }],
-                format: Some(OutputFormat::Bmp),
-                ..Default::default()
-            },
-        )
-        .expect("a 1024 by 1024 bitmap");
-    let steps = ImagePipeline {
-        transformations: vec![
-            Transformation::FlipVertically,
-            Transformation::FlipHorizontally,
-            Transformation::Grayscale,
-        ],
-        format: Some(OutputFormat::Bmp),
-        ..Default::default()
-    };
-    driver.process(&bmp, &steps).expect("a warm-up");
-
-    const PLANE: u64 = 1024 * 1024 * 4;
-    let heap = Heap::start();
-    let before = heap.bytes();
-    driver.process(&bmp, &steps).expect("the pipeline");
-    let used = heap.bytes() - before;
-    assert!(
-        used < 11 * PLANE,
-        "three steps over a 4 MiB plane allocated {used} bytes"
-    );
-}
 
 /// MEM-005: the docs builder keeps no chapter after writing it, so its
 /// peak is one chapter's work, not the whole corpus.
@@ -102,31 +51,6 @@ async fn mem_audit_the_docs_builder_keeps_no_chapter() {
         peak < html / 2,
         "the build peaked at {peak} bytes over {html} bytes of HTML"
     );
-}
-
-/// MEM-003: appending to a file copies the file's bytes once at most.
-#[tokio::test]
-async fn mem_audit_appending_does_not_copy_the_file_twice() {
-    let _lock = exclusive().await;
-    const SIZE: usize = 16 * 1024 * 1024;
-    let _storage = Storage::fake();
-    Storage::register_memory("mem-audit");
-    let disk = Storage::disk("mem-audit").expect("a disk");
-    disk.put("f", vec![b'a'; SIZE]).await.expect("put");
-    disk.append("f", "w").await.expect("a warm-up");
-
-    let heap = Heap::start();
-    let before = heap.bytes();
-    disk.append("f", "x").await.expect("append");
-    let used = heap.bytes() - before;
-    drop(heap);
-    assert!(
-        used < (SIZE as u64) * 3 / 2,
-        "appending one byte to {SIZE} bytes allocated {used} bytes"
-    );
-    let contents = disk.get("f").await.expect("get");
-    assert_eq!(contents.len(), SIZE + 4);
-    assert!(contents.ends_with(b"\nw\nx"));
 }
 
 /// MEM-003: a process's output is held once in its result.

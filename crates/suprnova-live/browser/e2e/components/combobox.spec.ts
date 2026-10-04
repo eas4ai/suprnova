@@ -9,6 +9,7 @@ import { expectResponsive, mountComponents, within } from "./support.js";
 function combobox(listbox: {
   remote: boolean;
   query?: string;
+  value?: string;
   options: readonly string[];
 }): string {
   const remote = listbox.remote ? ` data-sn-remote data-sn-query="${listbox.query ?? ""}"` : "";
@@ -18,8 +19,17 @@ function combobox(listbox: {
         `<li class="sn-combobox-option" id="country-option-${String(index + 1)}" role="option" aria-selected="false" data-sn-value="${text.toLowerCase()}">${text}</li>`,
     )
     .join("");
-  return `<sn-combobox class="sn-combobox"><label class="sn-combobox-label" for="country">Country</label><input class="sn-input sn-combobox-input" id="country" name="country" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="country-listbox" autocomplete="off" value="${listbox.query ?? ""}"><ul class="sn-combobox-listbox" id="country-listbox" role="listbox" aria-label="Country suggestions"${remote} hidden>${options}</ul></sn-combobox><div id="elsewhere"></div>`;
+  return `<sn-combobox class="sn-combobox"><label class="sn-combobox-label" for="country">Country</label><input type="hidden" id="country-value" name="country" value="${listbox.value ?? ""}" data-sn-combobox-value><input class="sn-input sn-combobox-input" id="country" name="country_query" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="country-listbox" autocomplete="off" value="${listbox.query ?? ""}"><ul class="sn-combobox-listbox" id="country-listbox" role="listbox" aria-label="Country suggestions"${remote} hidden>${options}</ul></sn-combobox><div id="elsewhere"></div>`;
 }
+
+// What a selection hands the island: the value input's events, in order.
+const RECORD_VALUE_EVENTS = `
+  window.valueEvents = [];
+  const value = document.getElementById("country-value");
+  for (const type of ["input", "change"]) {
+    value.addEventListener(type, () => window.valueEvents.push(type + ":" + value.value));
+  }
+`;
 
 const COUNTRIES = ["Canada", "Cameroon", "Chile", "Germany"] as const;
 
@@ -107,6 +117,54 @@ test("FORM-012: a remote listbox answering the input's text shows every option t
   await within(page.keyboard.press("Enter"), 3_000, "selecting the option");
   await expect(page.locator("#country")).toHaveValue("São Tomé and Príncipe");
   await expect(page.locator("#country-listbox")).toBeHidden();
+});
+
+test("a selection writes the option's value to the bound field and its label to the text", async ({
+  page,
+}) => {
+  await mountComponents(page, {
+    html: combobox({ remote: false, options: COUNTRIES }),
+    components: ["combobox"],
+  });
+  await within(page.addScriptTag({ content: RECORD_VALUE_EVENTS }), 3_000, "recording value events");
+  await typeQuery(page, "ger");
+  await within(page.keyboard.press("ArrowDown"), 3_000, "moving to the option");
+  await within(page.keyboard.press("Enter"), 3_000, "selecting the option");
+  await expect(page.locator("#country-value")).toHaveValue("germany");
+  await expect(page.locator("#country")).toHaveValue("Germany");
+  await expect(page.locator("#country-option-4")).toHaveAttribute("aria-selected", "true");
+  expect(await page.evaluate(() => (window as unknown as { valueEvents: string[] }).valueEvents)).toEqual([
+    "input:germany",
+    "change:germany",
+  ]);
+});
+
+test("editing the text after a selection clears the selected value", async ({ page }) => {
+  await mountComponents(page, {
+    html: combobox({ remote: false, value: "chile", query: "Chile", options: COUNTRIES }),
+    components: ["combobox"],
+  });
+  await within(page.addScriptTag({ content: RECORD_VALUE_EVENTS }), 3_000, "recording value events");
+  await within(page.locator("#country").focus(), 3_000, "focusing the input");
+  await within(page.keyboard.press("End"), 3_000, "moving to the end");
+  await within(page.keyboard.press("Backspace"), 3_000, "editing the text");
+  await expect(page.locator("#country-value")).toHaveValue("");
+  expect(await page.evaluate(() => (window as unknown as { valueEvents: string[] }).valueEvents)).toEqual([
+    "input:",
+    "change:",
+  ]);
+  // A second edit with nothing selected sends nothing more.
+  await within(page.keyboard.press("Backspace"), 3_000, "editing again");
+  expect(await page.evaluate(() => (window as unknown as { valueEvents: string[] }).valueEvents)).toHaveLength(2);
+});
+
+test("the option holding the bound value renders selected", async ({ page }) => {
+  await mountComponents(page, {
+    html: combobox({ remote: false, value: "chile", query: "Chile", options: COUNTRIES }),
+    components: ["combobox"],
+  });
+  await expect(page.locator("#country-option-3")).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#country-option-1")).toHaveAttribute("aria-selected", "false");
 });
 
 test("FORM-008: a listbox rendered for an older query stays hidden until the newer answer arrives", async ({

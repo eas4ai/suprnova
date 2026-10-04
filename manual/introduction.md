@@ -85,8 +85,9 @@ chapter, look for **"Why Suprnova diverges"** boxes.
 
 **3. No gatekeeping.** Laravel restricts some features to one backend
 (e.g. vector search via Postgres `pgvector`). Suprnova treats backends
-as drivers - `Vector::driver("qdrant")`, `Vector::driver("pinecone")`,
-`Vector::driver("mariadb")`, `Cache::driver("redis")`, `Mail::driver("ses")`.
+as drivers chosen by configuration - `CACHE_DRIVER=redis`,
+`MAIL_DRIVER=ses`, `QUEUE_DRIVER=sqs` - and vector search runs on Qdrant,
+Pinecone, MariaDB or in memory, each registered with `Vector::register`.
 You pick the right tool; we don't pick for you.
 
 **4. Suprnova is the API surface.** Internally we use SeaORM, hyper, Tokio,

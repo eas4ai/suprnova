@@ -25,6 +25,7 @@ path = "src/main.rs"
 suprnova = { path = "../../../../framework", default-features = false, features = [
     "filesystem", "database-sqlite", "database-postgres", "database-mysql",
     "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
+    "queue-sqs",
 ] }
 
 [features]
