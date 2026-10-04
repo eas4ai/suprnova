@@ -89,10 +89,15 @@ Five casts cover the SQL scalar types.
 
 ### `AsBool`
 
-`bool` ↔ `INTEGER` (0 / 1). SQLite has no native boolean column;
-Postgres and MySQL both round-trip `i64` cleanly through SeaORM's
-`Value::Int` boundary. A single storage shape lets you use the same
-cast against every backend.
+`bool` ↔ an integer column holding 0 / 1, read and written as `i64`.
+SQLite has no native boolean column, so this is the shape a boolean
+takes there. On Postgres the column has to be `BIGINT`: Postgres pins
+`INTEGER` to 32 bits, which the driver will not read as an `i64`. On
+MySQL and MariaDB any integer column works.
+
+A native boolean column - what the schema builder's `boolean()` creates
+on Postgres - takes no cast: declare the field `bool`. Postgres refuses
+`AsBool`'s integer for a `BOOLEAN` column.
 
 ```rust
 #[model(table = "settings", casts = { dark_mode = AsBool })]
@@ -289,10 +294,10 @@ and `AsDateTime` when you want RFC-3339 strings in your logs.
 
 Five casts cover collections, structs, and arbitrary JSON. All
 serialise the runtime value to JSON text and store it in a `TEXT`
-column. Postgres native `JSON` / `JSONB` and MySQL `JSON` columns
-accept the same string payload - if you want a native JSON column
-type for indexing, declare it manually in a migration; the cast
-layer doesn't constrain the column type.
+column. They need a text column: Postgres refuses their text for a
+`JSON` or `JSONB` column, and the MySQL driver will not read MySQL's
+`JSON` type as text. For a native JSON column, use
+[`AsNativeJson<T>`](#asnativejsont).
 
 ### `AsArray<T>`
 
@@ -364,6 +369,35 @@ use suprnova::AsOptionalJson;
 pub struct Event {
     pub id: i64,
     pub metadata: Option<serde_json::Value>,
+}
+```
+
+### `AsNativeJson<T>`
+
+Any `Serialize + DeserializeOwned` type ↔ a native JSON column:
+`JSONB` or `JSON` on Postgres, `JSON` on MySQL and MariaDB, `TEXT` on
+SQLite. It stores the value as JSON rather than text, so the column can
+be native and the database's JSON operators and indexes work on it. A
+struct, a `Vec<T>`, an `IndexMap<String, T>` or a `serde_json::Value`
+all fit as `T`, so it covers what `AsObject`, `AsArray`,
+`AsArrayObject` and `AsJson` do over text. `AsOptionalNativeJson<T>`
+is the nullable form: `None` stores SQL `NULL`. An `update_all` or a
+`filter` on the column binds a JSON parameter too.
+
+```rust
+use suprnova::{AsNativeJson, AsOptionalNativeJson};
+
+#[model(
+    table = "documents",
+    casts = {
+        prefs = AsNativeJson<Prefs>,
+        tags = AsOptionalNativeJson<Vec<String>>,
+    },
+)]
+pub struct Document {
+    pub id: i64,
+    pub prefs: Prefs,
+    pub tags: Option<Vec<String>>,
 }
 ```
 

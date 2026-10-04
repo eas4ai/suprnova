@@ -13,6 +13,7 @@ pub mod builder_identifier_validation;
 pub mod cast_panic_diagnostic;
 pub mod casts_encrypted;
 pub mod casts_encrypted_key_rotation;
+pub mod casts_native_columns;
 pub mod casts_primitive;
 pub mod casts_structured;
 pub mod chunking;

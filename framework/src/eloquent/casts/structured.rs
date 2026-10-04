@@ -5,10 +5,15 @@
 //! it in a `TEXT` column. The storage shape is intentionally
 //! backend-agnostic: SQLite has no native JSON type so we pick TEXT
 //! as the lowest-common-denominator that every backend round-trips
-//! cleanly through SeaORM's `Value::String` boundary. Postgres /
-//! MySQL accept JSON-in-TEXT just as cleanly; users who want native
-//! `JSONB` / `JSON` column types in Postgres / MySQL can write a
-//! manual column definition - the cast layer doesn't constrain it.
+//! cleanly through SeaORM's `Value::String` boundary.
+//!
+//! Text is all they read and write, so they need a text column. Postgres
+//! refuses a text parameter for a `jsonb` or `json` column, and MySQL's
+//! driver refuses to read its `JSON` type as text. For a native JSON
+//! column use [`AsNativeJson`] (or [`AsOptionalNativeJson`]), which
+//! stores the value as JSON. Any of the shapes below fits as its type
+//! parameter: a struct, a `Vec<T>`, an `IndexMap<String, T>` or a
+//! `serde_json::Value`.
 //!
 //! ## `AsArrayObject` vs `AsObject`
 //!
@@ -299,6 +304,112 @@ where
     }
 }
 
+// ---- AsNativeJson<T> ------------------------------------------------------
+
+/// Cast any `Serialize + DeserializeOwned` type ↔ a native JSON column:
+/// `jsonb` or `json` on Postgres, `JSON` on MySQL and MariaDB, text on
+/// SQLite.
+///
+/// The other structured casts store text, which Postgres refuses to bind
+/// to a `jsonb` or `json` column and MySQL's driver refuses to read from
+/// a `JSON` column. This one stores the value as JSON, so the column can
+/// be native and the database's JSON operators and indexes work on it.
+/// Queries bind through it too: an `update_all` or a `filter` on the
+/// column sends a JSON parameter.
+pub struct AsNativeJson<T>(PhantomData<T>);
+
+impl<T> Cast for AsNativeJson<T>
+where
+    T: Serialize + DeserializeOwned + Send + Sync,
+{
+    type Runtime = T;
+    type Storage = serde_json::Value;
+
+    fn to_storage(v: &T) -> Result<serde_json::Value, FrameworkError> {
+        serde_json::to_value(v)
+            .map_err(|e| FrameworkError::validation("AsNativeJson", format!("{e}")))
+    }
+
+    fn from_storage(s: &serde_json::Value) -> Result<T, FrameworkError> {
+        T::deserialize(s).map_err(|e| FrameworkError::validation("AsNativeJson", format!("{e}")))
+    }
+
+    fn bind_json(value: &serde_json::Value) -> Option<sea_orm::Value> {
+        native_json_bind(value)
+    }
+}
+
+/// A value compared with or written to a native JSON column, as a JSON
+/// parameter. `null` is left to the caller, which writes SQL `NULL`.
+fn native_json_bind(value: &serde_json::Value) -> Option<sea_orm::Value> {
+    (!value.is_null()).then(|| sea_orm::Value::Json(Some(Box::new(value.clone()))))
+}
+
+/// The erased form of [`AsNativeJson`]. The stored value is the JSON
+/// itself, not text, so it reads it as `T` directly.
+struct AsNativeJsonDyn<T>(PhantomData<T>);
+
+impl<T> DynCast for AsNativeJsonDyn<T>
+where
+    T: Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    fn from_storage_json(
+        &self,
+        v: &serde_json::Value,
+    ) -> Result<serde_json::Value, FrameworkError> {
+        let parsed = AsNativeJson::<T>::from_storage(v)?;
+        serde_json::to_value(parsed).map_err(|e| {
+            FrameworkError::internal(format!("AsNativeJson: re-serialize failed: {e}"))
+        })
+    }
+
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
+        Ok(v.clone())
+    }
+}
+
+impl<T> IntoDynCast for AsNativeJson<T>
+where
+    T: Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    fn into_dyn() -> Box<dyn DynCast> {
+        Box::new(AsNativeJsonDyn::<T>(PhantomData))
+    }
+}
+
+/// The nullable form of [`AsNativeJson`]: `Option<T>` ↔ a nullable native
+/// JSON column. `None` is SQL `NULL`, not the JSON `null`.
+pub struct AsOptionalNativeJson<T>(PhantomData<T>);
+
+impl<T> Cast for AsOptionalNativeJson<T>
+where
+    T: Serialize + DeserializeOwned + Send + Sync,
+{
+    type Runtime = Option<T>;
+    type Storage = Option<serde_json::Value>;
+
+    fn to_storage(v: &Option<T>) -> Result<Option<serde_json::Value>, FrameworkError> {
+        v.as_ref().map(AsNativeJson::<T>::to_storage).transpose()
+    }
+
+    fn from_storage(s: &Option<serde_json::Value>) -> Result<Option<T>, FrameworkError> {
+        s.as_ref().map(AsNativeJson::<T>::from_storage).transpose()
+    }
+
+    fn bind_json(value: &serde_json::Value) -> Option<sea_orm::Value> {
+        native_json_bind(value)
+    }
+}
+
+impl<T> IntoDynCast for AsOptionalNativeJson<T>
+where
+    T: Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    fn into_dyn() -> Box<dyn DynCast> {
+        Box::new(OptionalStructuredDyn(AsNativeJson::<T>::into_dyn()))
+    }
+}
+
 // ---- AsArrayObject<T> -----------------------------------------------------
 
 /// Cast `IndexMap<String, T>` ↔ JSON-encoded `TEXT`. Use when the
@@ -577,9 +688,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        AsArray, AsArrayObject, AsCollection, AsJson, AsObject, AsOptionalArray,
-        AsOptionalArrayObject, AsOptionalCollection, AsOptionalJson, AsOptionalObject, Cast,
-        IntoDynCast,
+        AsArray, AsArrayObject, AsCollection, AsJson, AsNativeJson, AsObject, AsOptionalArray,
+        AsOptionalArrayObject, AsOptionalCollection, AsOptionalJson, AsOptionalNativeJson,
+        AsOptionalObject, Cast, IntoDynCast,
     };
     use serde::{Deserialize, Serialize};
     use serde_json::json;
@@ -719,6 +830,68 @@ mod tests {
         assert_eq!(
             AsOptionalArrayObject::<String>::to_storage(&None).unwrap(),
             None
+        );
+    }
+
+    /// The native JSON cast stores the value as JSON, not as text, and
+    /// binds a JSON parameter, which a Postgres `jsonb` column needs.
+    #[test]
+    fn the_native_json_cast_stores_and_binds_json() {
+        let prefs = Prefs {
+            theme: "dark".into(),
+        };
+        let stored = AsNativeJson::<Prefs>::to_storage(&prefs).unwrap();
+        assert_eq!(stored, json!({ "theme": "dark" }));
+        assert_eq!(AsNativeJson::<Prefs>::from_storage(&stored).unwrap(), prefs);
+        assert!(AsNativeJson::<Prefs>::from_storage(&json!([1, 2])).is_err());
+        assert_eq!(
+            <AsNativeJson<Prefs> as Cast>::bind_json(&json!({ "theme": "dark" })),
+            Some(sea_orm::Value::Json(Some(Box::new(
+                json!({ "theme": "dark" })
+            ))))
+        );
+        assert_eq!(
+            <AsNativeJson<Prefs> as Cast>::bind_json(&serde_json::Value::Null),
+            None,
+            "null is left to the caller, which writes SQL NULL"
+        );
+
+        let erased = AsNativeJson::<Prefs>::into_dyn();
+        assert_eq!(
+            erased
+                .from_storage_json(&json!({ "theme": "dark" }))
+                .unwrap(),
+            json!({ "theme": "dark" })
+        );
+        assert!(erased.from_storage_json(&json!("not prefs")).is_err());
+        assert_eq!(
+            erased.to_storage_json(&json!({ "theme": "dark" })).unwrap(),
+            json!({ "theme": "dark" })
+        );
+    }
+
+    #[test]
+    fn the_optional_native_json_cast_stores_none_as_sql_null() {
+        assert_eq!(
+            AsOptionalNativeJson::<Vec<String>>::to_storage(&None).unwrap(),
+            None
+        );
+        assert_eq!(
+            AsOptionalNativeJson::<Vec<String>>::to_storage(&Some(vec!["a".into()])).unwrap(),
+            Some(json!(["a"]))
+        );
+        assert_eq!(
+            AsOptionalNativeJson::<Vec<String>>::from_storage(&None).unwrap(),
+            None
+        );
+        let erased = AsOptionalNativeJson::<Vec<String>>::into_dyn();
+        assert_eq!(
+            erased.from_storage_json(&serde_json::Value::Null).unwrap(),
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            erased.from_storage_json(&json!(["a"])).unwrap(),
+            json!(["a"])
         );
     }
 }
