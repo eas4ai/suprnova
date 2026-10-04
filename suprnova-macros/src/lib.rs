@@ -808,7 +808,10 @@ pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `Vec<UploadedFile<V>>` - collect every matching file part
 /// - `T: FromStr` (e.g. `String`, `u32`) - required text field
 /// - `Option<T>` - optional text field
-/// - `Vec<T>` - collect every matching text part
+/// - `Vec<T>` - collect every matching text part; an empty part is a
+///   missing element, reported under its index
+/// - `Vec<Option<T>>` - collect every matching text part, an empty part as
+///   `None` in its place
 ///
 /// The validator `V` defaults to `()` (accept anything). Built-in
 /// validators live in `suprnova::http::upload::validators` and can be

@@ -435,7 +435,20 @@ read it the same way:
 - An `Option` field is `None`, an `Option<String>` included.
 - A required field is missing, a `String` included, so the request fails
   with a `422`.
-- A `Vec` field leaves the element out.
+- A list keeps the `null` in its place. An element of a `Vec<Option<T>>` is
+  `None`. An element of a `Vec<T>`, which has no place for `null`, is
+  missing, and is reported under its index, such as `ids.1`.
+
+The name itself stays, holding `null`, so a cleared field is told apart from
+one never sent. Read into a `serde_json::Value` or a map, `name=Ada&bio=`
+gives `{"name": "Ada", "bio": null}`, and a `#[serde(flatten)]` map sees
+`bio` too. A `#[serde(default)]` field that arrives empty is `null`, not its
+default: the default is for a field the form left out.
+
+A `bool` field reads what forms send, in a url-encoded body, a query
+string and a multipart body alike: `1` and `0`, as Inertia sends them,
+`true` and `false`, and `on` and `off`, as an HTML checkbox sends them, the
+words in any case.
 
 A name sent more than once keeps its last value, as PHP does. The body
 `title=&title=Holiday` gives `Holiday`, and `title=Holiday&title=` gives
@@ -500,9 +513,9 @@ pub async fn update(form: UpdateProfile) -> Response {
 - Text isn't trimmed. Laravel's `TrimStrings` middleware runs before
   `ConvertEmptyStringsToNull`, so a value of spaces is `null` in Laravel and
   text in Suprnova.
-- A list leaves a `null` element out, where Laravel keeps `null` at its
-  index: a Rust `Vec<T>` has no place for `null`. An error still names the
-  part by its own index, such as `ids.2`.
+- A JSON body reads a `bool` as JSON `true` or `false` only. Laravel's
+  `boolean` rule also takes `1`, `0`, `"1"` and `"0"` there. A JSON client
+  sends a JSON boolean, which a `bool` field reads as it is.
 - A `MultipartRequest` field that holds one file takes the first file part
   of its name, where PHP keeps the last. The extractor checks a file while
   the body streams, before it knows whether a later part of the same name
@@ -618,6 +631,7 @@ Field shapes:
 | `String` / `u32` / any `FromStr` | text field (required) |
 | `Option<String>` / `Option<T: FromStr>` | optional text field |
 | `Vec<String>` / `Vec<T: FromStr>` | repeated text fields |
+| `Vec<Option<String>>` / `Vec<Option<T: FromStr>>` | repeated text fields, an empty one as `None` |
 
 A text field is read through its type's `FromStr`, except a `bool`, which
 takes what forms send: `1` and `0`, as Inertia sends them, `true` and
@@ -628,8 +642,11 @@ read a missing value as `false` with `unwrap_or(false)`.
 An empty text part is `null`, as
 [empty values, repeated names, and fields that don't parse](#empty-values-repeated-names-and-fields-that-dont-parse)
 describes: an `Option` field is `None`, a required field reports
-`validation-required`, and a `Vec` field leaves the element out. A `String`
-field is no exception.
+`validation-required`, and an empty element is `None` in a
+`Vec<Option<T>>` and reports `validation-required` under its index in a
+`Vec<T>`. A `String` field is no exception. A `Vec<UploadedFile<V>>` field
+still leaves out an empty file input or a `null` file, which is how a
+client leaves a file out.
 
 A text field that holds one value, rather than a `Vec`, takes the last part
 of its name. Only that part is parsed, so an earlier part that doesn't parse

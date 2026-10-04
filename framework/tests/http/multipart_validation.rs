@@ -1659,9 +1659,9 @@ struct Nullable {
     #[field("title")]
     title: String,
     #[field("ids[]")]
-    ids: Vec<u32>,
+    ids: Vec<Option<u32>>,
     #[field("tags[]")]
-    tags: Vec<String>,
+    tags: Vec<Option<String>>,
 }
 
 async fn nullable(req: Request) -> Response {
@@ -1715,9 +1715,10 @@ async fn an_empty_part_is_null_for_an_optional_typed_field() {
     // makes the empty text `null` whatever the field's rules.
     assert_eq!(body["note"], Value::Null);
     assert_eq!(body["title"], "Holiday");
-    // A null element of a list is left out, of numbers and of text alike.
-    assert_eq!(body["ids"], json!([3, 4]));
-    assert_eq!(body["tags"], json!(["beach", "sun"]));
+    // A list whose elements may be null keeps a null element in its place,
+    // of numbers and of text alike.
+    assert_eq!(body["ids"], json!([3, null, 4]));
+    assert_eq!(body["tags"], json!(["beach", null, "sun"]));
 }
 
 #[derive(MultipartRequest)]
@@ -2491,4 +2492,103 @@ async fn a_precognitive_form_request_reports_the_fields_it_was_asked_about() {
         first_message(&reply, "title"),
         "The title field is required."
     );
+}
+
+// ── An empty value is a present key holding null, as Laravel keeps it ──
+
+#[tokio::test]
+async fn an_empty_urlencoded_value_is_a_present_key_with_null() {
+    let req = crate::common::request_with_body(
+        "/",
+        "application/x-www-form-urlencoded",
+        b"name=Ada&bio=&tags[]=a&tags[]=&tags[]=b",
+    )
+    .await;
+    let form: Value = match req.form().await {
+        Ok(form) => form,
+        Err(error) => panic!("{error}"),
+    };
+    // A cleared field is told apart from one never sent.
+    assert_eq!(
+        form,
+        json!({ "name": "Ada", "bio": null, "tags": ["a", null, "b"] })
+    );
+}
+
+/// A list whose elements may be null, and one whose elements may not.
+#[derive(Debug, serde::Deserialize, validator::Validate, suprnova::FormRequestDerive)]
+struct UrlencodedLists {
+    #[serde(default)]
+    maybe: Vec<Option<u32>>,
+    #[serde(default)]
+    ids: Vec<u32>,
+}
+
+#[tokio::test]
+async fn a_null_list_element_is_none_or_a_missing_element() {
+    let read = |body: &'static str| async move {
+        let req = crate::common::request_with_body(
+            "/",
+            "application/x-www-form-urlencoded",
+            body.as_bytes(),
+        )
+        .await;
+        UrlencodedLists::from_request(req).await
+    };
+    let form = match read("maybe[]=3&maybe[]=&maybe[]=4").await {
+        Ok(form) => form,
+        Err(error) => panic!("{error}"),
+    };
+    assert_eq!(form.maybe, vec![Some(3), None, Some(4)]);
+    assert!(form.ids.is_empty());
+
+    // An element that cannot be null is required, under its own index.
+    let errors = match read("ids[]=3&ids[]=&ids[]=4").await {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {other:?}"),
+    };
+    assert_eq!(key(&errors, "ids.1"), "validation-required");
+    assert_eq!(errors.errors.len(), 1, "{errors}");
+}
+
+#[tokio::test]
+async fn a_urlencoded_bool_reads_what_forms_send() {
+    for (sent, read) in [
+        ("1", true),
+        ("0", false),
+        ("true", true),
+        ("FALSE", false),
+        ("on", true),
+        ("Off", false),
+    ] {
+        let body = format!("title=t&count=1&ratio=1&active={sent}");
+        match urlencoded_typed(&body).await {
+            Ok(form) => assert_eq!(form.active, read, "`{sent}`"),
+            Err(error) => panic!("`{sent}`: {error}"),
+        }
+    }
+    for sent in ["yes", "2", " 1"] {
+        let body = format!("title=t&count=1&ratio=1&active={sent}");
+        let errors = match urlencoded_typed(&body).await {
+            Err(FrameworkError::Validation(errors)) => errors,
+            other => panic!("`{sent}`: expected validation errors, got {other:?}"),
+        };
+        assert_eq!(key(&errors, "active"), "validation-boolean", "`{sent}`");
+    }
+}
+
+#[tokio::test]
+async fn an_empty_part_of_a_list_that_cannot_hold_null_is_a_missing_element() {
+    let errors = typed_errors(form(&[
+        text_part("count", "1"),
+        text_part("ratio", "1"),
+        text_part("active", "1"),
+        text_part("address", "127.0.0.1"),
+        text_part("tags[]", "1"),
+        text_part("tags[]", ""),
+        text_part("tags[]", "3"),
+    ]))
+    .await;
+    assert_eq!(key(&errors, "tags.1"), "validation-required");
+    assert_eq!(errors.errors.len(), 1, "{errors}");
 }
