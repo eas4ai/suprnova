@@ -162,6 +162,32 @@ fn totp_code_for(otpauth_url: &str) -> String {
         .unwrap()
 }
 
+/// The code an authenticator app shows at `unix_seconds`.
+fn totp_code_at(otpauth_url: &str, unix_seconds: i64) -> String {
+    use totp_rs::{Algorithm, Secret, TOTP};
+    let url = url::Url::parse(otpauth_url).unwrap();
+    let secret = url
+        .query_pairs()
+        .find(|(k, _)| k == "secret")
+        .map(|(_, v)| v.into_owned())
+        .expect("otpauth url must contain a secret query param");
+    let bytes = Secret::Encoded(secret).to_bytes().unwrap();
+    let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, bytes, None, "user".into()).unwrap();
+    totp.generate(<u64 as TryFrom<i64>>::try_from(unix_seconds).unwrap())
+}
+
+/// Confirm with the code of two minutes ago, on a clock set back to then.
+/// A confirmation uses its code up and claims that code's window, so
+/// confirming in the past leaves the current codes free for the proofs a
+/// test makes next.
+async fn confirm_earlier<U: TwoFactorUser>(user: &U, otpauth_url: &str) {
+    let earlier = chrono::Utc::now() - chrono::Duration::seconds(120);
+    let _clock = suprnova::testing::TestClock::travel_to(earlier);
+    TwoFactor::confirm(user, &totp_code_at(otpauth_url, earlier.timestamp()))
+        .await
+        .expect("confirm");
+}
+
 #[tokio::test]
 async fn start_challenge_sets_pending_and_clears_auth_user() {
     ensure_crypt();
@@ -279,8 +305,7 @@ async fn enrollment_round_trip() {
     );
 
     // Confirm with a real code derived from the otpauth URL.
-    let code = totp_code_for(&response.otpauth_url);
-    TwoFactor::confirm(&user, &code).await.unwrap();
+    confirm_earlier(&user, &response.otpauth_url).await;
 
     assert!(TwoFactor::is_enabled(&user).await.unwrap());
 
@@ -484,8 +509,7 @@ async fn re_enroll_invalidates_old_recovery_codes_and_resets_confirmed() {
     };
 
     let first = TwoFactor::enroll(&user).await.unwrap();
-    let confirm_code = totp_code_for(&first.otpauth_url);
-    TwoFactor::confirm(&user, &confirm_code).await.unwrap();
+    confirm_earlier(&user, &first.otpauth_url).await;
     assert!(TwoFactor::is_enabled(&user).await.unwrap());
 
     // Re-enroll: proof required because the existing enrollment is
@@ -662,8 +686,7 @@ async fn consuming_all_codes_clears_recovery_column() {
     };
 
     let response = TwoFactor::enroll(&user).await.unwrap();
-    let code = totp_code_for(&response.otpauth_url);
-    TwoFactor::confirm(&user, &code).await.unwrap();
+    confirm_earlier(&user, &response.otpauth_url).await;
 
     // Drain every code.
     for c in &response.recovery_codes {
@@ -690,11 +713,10 @@ async fn verify_rejects_replay_within_same_timestep() {
     };
 
     let response = TwoFactor::enroll(&user).await.unwrap();
-    let code = totp_code_for(&response.otpauth_url);
 
-    // Confirm enrollment with the code - this also exercises check_code
-    // but the verify-replay path only kicks in for `verify()`.
-    TwoFactor::confirm(&user, &code).await.unwrap();
+    // Confirm enrollment with an earlier code; the confirmation uses its
+    // own code up, which `the_confirmation_code_cannot_be_used_again` pins.
+    confirm_earlier(&user, &response.otpauth_url).await;
 
     // First verify after confirmation accepts the current code.
     let live = totp_code_for(&response.otpauth_url);
@@ -745,9 +767,7 @@ async fn concurrent_verifies_in_same_timestep_elect_one_winner() {
     };
 
     let response = TwoFactor::enroll(&user).await.unwrap();
-    TwoFactor::confirm(&user, &totp_code_for(&response.otpauth_url))
-        .await
-        .unwrap();
+    confirm_earlier(&user, &response.otpauth_url).await;
 
     let live = totp_code_for(&response.otpauth_url);
     let (r1, r2, r3, r4, r5) = tokio::join!(
@@ -921,9 +941,7 @@ async fn verify_stamps_forward_skew_edge_to_block_next_step_replay() {
     };
 
     let resp = TwoFactor::enroll(&user).await.unwrap();
-    TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
-        .await
-        .unwrap();
+    confirm_earlier(&user, &resp.otpauth_url).await;
 
     let before_step = chrono::Utc::now().timestamp() / 30;
     let live = totp_code_for(&resp.otpauth_url);
@@ -980,9 +998,7 @@ async fn verify_replay_state_resets_on_re_enrollment() {
 
     // Enroll, confirm, verify (sets last_used_timestep).
     let resp1 = TwoFactor::enroll(&user).await.unwrap();
-    TwoFactor::confirm(&user, &totp_code_for(&resp1.otpauth_url))
-        .await
-        .unwrap();
+    confirm_earlier(&user, &resp1.otpauth_url).await;
     let live1 = totp_code_for(&resp1.otpauth_url);
     assert!(TwoFactor::verify(&user, &live1).await.unwrap());
 
@@ -995,9 +1011,7 @@ async fn verify_replay_state_resets_on_re_enrollment() {
     // replay check we just installed).
     let recovery_proof = resp1.recovery_codes[0].clone();
     let resp2 = TwoFactor::re_enroll(&user, &recovery_proof).await.unwrap();
-    TwoFactor::confirm(&user, &totp_code_for(&resp2.otpauth_url))
-        .await
-        .unwrap();
+    confirm_earlier(&user, &resp2.otpauth_url).await;
 
     let live2 = totp_code_for(&resp2.otpauth_url);
     assert!(
@@ -1328,5 +1342,27 @@ async fn a_missing_attempt_table_logs_the_migration_to_add() {
     assert!(
         logs_contain("migration_attempts"),
         "the log names the missing migration"
+    );
+}
+
+// ---- A confirmation uses its code up ----------------------------------------
+
+/// The code that confirmed an enrollment is spent: replaying it, at sign-in
+/// or anywhere else a code is checked, is refused like any other replay.
+#[tokio::test]
+async fn the_confirmation_code_cannot_be_used_again() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let user = FakeUser {
+        id: "confirmation-code-spent".into(),
+        email: "confirmation-code-spent@example.com".into(),
+    };
+    let resp = TwoFactor::enroll(&user).await.expect("enroll");
+    let code = totp_code_for(&resp.otpauth_url);
+    TwoFactor::confirm(&user, &code).await.expect("confirm");
+
+    assert!(
+        !TwoFactor::verify(&user, &code).await.unwrap(),
+        "the confirmation code is not accepted a second time"
     );
 }

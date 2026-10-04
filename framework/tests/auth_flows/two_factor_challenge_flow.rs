@@ -193,6 +193,32 @@ impl TwoFactorUser for ChallengeUser {
 
 /// Compute the live TOTP for an otpauth URL exactly like an
 /// authenticator app would.
+/// The code an authenticator app shows at `unix_seconds`.
+fn totp_code_at(otpauth_url: &str, unix_seconds: i64) -> String {
+    use totp_rs::{Algorithm, Secret, TOTP};
+    let url = url::Url::parse(otpauth_url).expect("otpauth url");
+    let secret = url
+        .query_pairs()
+        .find(|(k, _)| k == "secret")
+        .map(|(_, v)| v.into_owned())
+        .expect("secret query param");
+    let bytes = Secret::Encoded(secret).to_bytes().expect("decode secret");
+    let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, bytes, None, "user".into()).expect("totp");
+    totp.generate(<u64 as TryFrom<i64>>::try_from(unix_seconds).expect("positive time"))
+}
+
+/// Confirm with the code of two minutes ago, on a clock set back to then.
+/// A confirmation uses its code up and claims that code's window, so
+/// confirming in the past leaves the current codes free for the proofs a
+/// test makes next.
+async fn confirm_earlier<U: TwoFactorUser>(user: &U, otpauth_url: &str) {
+    let earlier = chrono::Utc::now() - chrono::Duration::seconds(120);
+    let _clock = suprnova::testing::TestClock::travel_to(earlier);
+    TwoFactor::confirm(user, &totp_code_at(otpauth_url, earlier.timestamp()))
+        .await
+        .expect("confirm");
+}
+
 fn totp_code_for(otpauth_url: &str) -> String {
     use totp_rs::{Algorithm, Secret, TOTP};
     let url = url::Url::parse(otpauth_url).unwrap();
@@ -324,10 +350,7 @@ async fn register_and_enroll_with_recovery(label: &str) -> (String, String, Stri
         email: email.clone(),
     };
     let resp = TwoFactor::enroll(&tf_user).await.expect("enroll");
-    let confirm_code = totp_code_for(&resp.otpauth_url);
-    TwoFactor::confirm(&tf_user, &confirm_code)
-        .await
-        .expect("confirm");
+    confirm_earlier(&tf_user, &resp.otpauth_url).await;
     (user_id, email, resp.otpauth_url, resp.recovery_codes)
 }
 

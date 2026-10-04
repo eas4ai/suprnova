@@ -285,15 +285,17 @@ impl TwoFactor {
         // without it the 6-digit TOTP of a pending enrollment could be
         // ground online.
         let confirmed = settle_attempt(user.user_id(), user.email(), || async {
-            if !check_code(
-                &enrollment.secret_b32,
-                code,
-                crate::clock::now().timestamp(),
-            )? {
+            let now = crate::clock::now();
+            if !check_code(&enrollment.secret_b32, code, now.timestamp())? {
                 return Ok(false);
             }
-            if !stamp_confirmation(user.user_id(), &enrollment.ciphertext, crate::clock::now())
-                .await?
+            if !stamp_confirmation(
+                user.user_id(),
+                &enrollment.ciphertext,
+                totp_timestep_at(now.timestamp()),
+                now,
+            )
+            .await?
             {
                 return Err(FrameworkError::domain(
                     "the 2FA enrollment changed while it was being confirmed; confirm a code from the current enrollment",
@@ -1111,8 +1113,9 @@ async fn write_enrollment_row(
     Ok(())
 }
 
-/// Stamp `confirmed_at` on the enrollment whose code was just checked.
-/// Returns `false` when that enrollment is gone or already confirmed.
+/// Stamp `confirmed_at` on the enrollment whose code was just checked, and
+/// use the code up. Returns `false` when that enrollment is gone or already
+/// confirmed, or its code's window is already claimed.
 ///
 /// `checked_ciphertext` is the stored secret the code was checked against.
 /// Each enrollment encrypts a fresh secret with a fresh nonce, so the
@@ -1120,14 +1123,22 @@ async fn write_enrollment_row(
 /// it means a concurrent enroll that replaced the secret after the check
 /// leaves this stamp with nothing to match: the code proved possession of
 /// the old secret, not of the new one.
+///
+/// The same write claims `current_timestep` the way [`claim_totp_timestep`]
+/// does, so the confirmation code cannot be replayed at sign-in.
 async fn stamp_confirmation(
     user_id: &str,
     checked_ciphertext: &str,
+    current_timestep: i64,
     when: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, FrameworkError> {
     let db = DB::connection()?;
     let stamp = entity::Entity::update_many()
         .col_expr(entity::Column::ConfirmedAt, Expr::value(Some(when)))
+        .col_expr(
+            entity::Column::LastUsedTimestep,
+            Expr::value(current_timestep + TOTP_SKEW_STEPS),
+        )
         .col_expr(entity::Column::UpdatedAt, Expr::value(crate::clock::now()))
         .filter(entity::Column::UserId.eq(user_id))
         .filter(entity::Column::Secret.eq(checked_ciphertext))
@@ -1135,6 +1146,11 @@ async fn stamp_confirmation(
         // enrollment racing this one must neither re-stamp it nor fire
         // `TwoFactorEnrolled` again.
         .filter(entity::Column::ConfirmedAt.is_null())
+        .filter(
+            Condition::any()
+                .add(entity::Column::LastUsedTimestep.is_null())
+                .add(entity::Column::LastUsedTimestep.lt(current_timestep)),
+        )
         .exec(db.inner())
         .await
         .map_err(|e| FrameworkError::internal(format!("two_factor confirm: {e}")))?;
@@ -1430,11 +1446,17 @@ mod tests {
         let step = Utc::now().timestamp() / 30;
         let a_time = step * 30 + 29;
         let b_time = (step + 1) * 30;
-        let clock = TestClock::travel_to(at(a_time));
+        // Enroll and confirm two steps earlier: a confirmation uses its
+        // code up, so it must not claim the window under test.
+        let confirm_time = (step - 2) * 30 + 5;
+        let clock = TestClock::travel_to(at(confirm_time));
 
         TwoFactor::enroll(&User).await.expect("enroll");
+        TwoFactor::confirm(&User, &stored_code_at(confirm_time).await)
+            .await
+            .expect("confirm");
+        clock.set(at(a_time));
         let code = stored_code_at(a_time).await;
-        TwoFactor::confirm(&User, &code).await.expect("confirm");
 
         // B reads the row before A stamps it, so B's snapshot passes.
         clock.set(at(b_time));

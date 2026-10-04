@@ -129,9 +129,7 @@ async fn enrolled(
         email: format!("{label}@example.test"),
     };
     let resp = TwoFactor::enroll(&user).await.expect("enroll");
-    TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
-        .await
-        .expect("confirm");
+    confirm_earlier(&user, &resp.otpauth_url).await;
     (guard, conn, user, resp)
 }
 
@@ -139,8 +137,33 @@ fn totp_code_for(otpauth_url: &str) -> String {
     totp_code_steps_ahead(otpauth_url, 0)
 }
 
+/// Confirm with the code of two minutes ago, on a clock set back to then.
+/// A confirmation uses its code up and claims that code's window, so
+/// confirming in the past leaves the current codes free for the test.
+async fn confirm_earlier(user: &EngineUser, otpauth_url: &str) {
+    let earlier = chrono::Utc::now() - chrono::Duration::seconds(120);
+    let _clock = suprnova::testing::TestClock::travel_to(earlier);
+    TwoFactor::confirm(user, &totp_code_at(otpauth_url, earlier.timestamp()))
+        .await
+        .expect("confirm");
+}
+
+/// The code an authenticator app shows at `unix_seconds`.
+fn totp_code_at(otpauth_url: &str, unix_seconds: i64) -> String {
+    use totp_rs::{Algorithm, Secret, TOTP};
+    let url = url::Url::parse(otpauth_url).expect("otpauth url");
+    let secret = url
+        .query_pairs()
+        .find(|(key, _)| key == "secret")
+        .map(|(_, value)| value.into_owned())
+        .expect("secret query parameter");
+    let bytes = Secret::Encoded(secret).to_bytes().expect("decode secret");
+    let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, bytes, None, "user".into()).expect("totp");
+    totp.generate(<u64 as TryFrom<i64>>::try_from(unix_seconds).expect("positive time"))
+}
+
 /// The code `steps` timesteps after the current one; within the skew a
-/// verification accepts, and unused by a confirmation of the current code.
+/// verification accepts.
 fn totp_code_steps_ahead(otpauth_url: &str, steps: u64) -> String {
     use totp_rs::{Algorithm, Secret, TOTP};
     let url = url::Url::parse(otpauth_url).expect("otpauth url");
@@ -292,9 +315,7 @@ async fn many_users_admitting_at_once_never_deadlock(engine: Engine) {
             email: "many-users@example.test".to_owned(),
         };
         let enrollment = TwoFactor::enroll(&user).await.expect("enroll");
-        TwoFactor::confirm(&user, &totp_code_for(&enrollment.otpauth_url))
-            .await
-            .expect("confirm");
+        confirm_earlier(&user, &enrollment.otpauth_url).await;
         users.push((user, enrollment));
     }
 

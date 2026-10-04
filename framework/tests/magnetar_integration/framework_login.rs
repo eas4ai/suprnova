@@ -434,7 +434,23 @@ impl Browser {
     }
 }
 
+/// Confirm with the code of two minutes ago, on a clock set back to then.
+/// A confirmation uses its code up and claims that code's window, so
+/// confirming in the past leaves the current code free for the challenge.
+async fn confirm_earlier(account: &Account, otpauth_url: &str) {
+    let earlier = chrono::Utc::now() - chrono::Duration::seconds(120);
+    let _clock = suprnova::testing::TestClock::travel_to(earlier);
+    TwoFactor::confirm(account, &code_at(otpauth_url, earlier.timestamp()))
+        .await
+        .expect("confirm");
+}
+
 fn current_code(otpauth_url: &str) -> String {
+    code_at(otpauth_url, chrono::Utc::now().timestamp())
+}
+
+/// The code an authenticator app shows at `unix_seconds`.
+fn code_at(otpauth_url: &str, unix_seconds: i64) -> String {
     let url = url::Url::parse(otpauth_url).expect("otpauth url");
     let secret = url
         .query_pairs()
@@ -454,8 +470,7 @@ fn current_code(otpauth_url: &str) -> String {
         "label".into(),
     )
     .expect("totp")
-    .generate_current()
-    .expect("generate code")
+    .generate(u64::try_from(unix_seconds).expect("positive time"))
 }
 
 /// The manual's challenge flow with remember-me off: password login demotes
@@ -465,8 +480,8 @@ fn current_code(otpauth_url: &str) -> String {
 async fn a_completed_two_factor_challenge_without_remember_me_stays_signed_in() {
     let account = setup().await;
     let enrollment = TwoFactor::enroll(&account).await.expect("enroll");
+    confirm_earlier(&account, &enrollment.otpauth_url).await;
     let code = current_code(&enrollment.otpauth_url);
-    TwoFactor::confirm(&account, &code).await.expect("confirm");
 
     let mut browser = Browser::open().await;
     let (status, body) = browser
@@ -605,8 +620,8 @@ async fn registering_an_existing_address_never_signs_in_as_its_owner() {
 async fn a_password_success_does_not_clear_second_factor_failures() {
     let account = setup().await;
     let enrollment = TwoFactor::enroll(&account).await.expect("enroll");
+    confirm_earlier(&account, &enrollment.otpauth_url).await;
     let code = current_code(&enrollment.otpauth_url);
-    TwoFactor::confirm(&account, &code).await.expect("confirm");
 
     let mut evaluated = 0;
     let mut refused = 0;
@@ -675,8 +690,8 @@ async fn session_count(account: &Account) -> usize {
 async fn an_auth_epoch_change_during_a_challenge_cancels_it() {
     let account = setup().await;
     let enrollment = TwoFactor::enroll(&account).await.expect("enroll");
+    confirm_earlier(&account, &enrollment.otpauth_url).await;
     let code = current_code(&enrollment.otpauth_url);
-    TwoFactor::confirm(&account, &code).await.expect("confirm");
 
     let mut browser = Browser::open().await;
     let (status, body) = browser
@@ -709,8 +724,8 @@ async fn a_magnetar_second_factor_refuses_the_framework_challenge_up_front() {
     let _events = suprnova::EventFacade::fake();
     let account = setup().await;
     let enrollment = TwoFactor::enroll(&account).await.expect("enroll");
+    confirm_earlier(&account, &enrollment.otpauth_url).await;
     let code = current_code(&enrollment.otpauth_url);
-    TwoFactor::confirm(&account, &code).await.expect("confirm");
 
     let mut browser = Browser::open().await;
     let (status, body) = browser

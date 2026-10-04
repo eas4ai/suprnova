@@ -737,6 +737,9 @@ secret the code was checked against: if a second `enroll` replaced the
 secret in between, `confirm` returns `409` and the new secret stays
 unconfirmed. A confirmation stamps an enrollment once: a second
 confirmation racing it gets `409` and fires no second `TwoFactorEnrolled`.
+It also uses its code up the way a successful `verify` does, so the code
+that confirmed the enrollment is refused at the next sign-in; the user
+signs in with a later code.
 `enroll` checks that the row is still unconfirmed in the statement that
 writes it, so a confirmation that lands while it runs also gets the `409`.
 
