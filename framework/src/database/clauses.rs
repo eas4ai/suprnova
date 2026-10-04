@@ -1,5 +1,6 @@
-//! The `WHERE` and `JOIN` pieces that [`DbTableBuilder`] and the model
-//! builder [`Builder<M>`](crate::eloquent::Builder) share.
+//! The `WHERE`, `JOIN` and `LIMIT` / `OFFSET` pieces that
+//! [`DbTableBuilder`] and the model builder
+//! [`Builder<M>`](crate::eloquent::Builder) share.
 //!
 //! [`DbTableBuilder`] keeps its conditions as [`Condition`]s, and both
 //! builders keep their joins as [`JoinClause`]s, so a join renders the same
@@ -22,6 +23,31 @@ use crate::database::placeholder::placeholder;
 use crate::database::{validate_identifier, validate_sql_operator};
 use crate::eloquent::builder::{IntoVal, rewrite_raw_placeholders, validate_raw_placeholders};
 use crate::eloquent::casts::unsigned::{Settled, beyond_signed};
+
+// ---- LIMIT and OFFSET ----------------------------------------------------------
+
+/// ` LIMIT n` and ` OFFSET m` for a SELECT, either of them absent when
+/// unset. SQLite and MySQL accept `OFFSET` only after a `LIMIT`, so an
+/// offset with no limit gets each one's unlimited `LIMIT`: `-1` on SQLite,
+/// the largest unsigned 64-bit value on MySQL, as Laravel writes it.
+/// Postgres takes `OFFSET` on its own.
+pub(crate) fn render_limit_offset(
+    backend: DbBackend,
+    limit: Option<u64>,
+    offset: Option<u64>,
+) -> String {
+    let mut sql = String::new();
+    match (limit, offset, backend) {
+        (Some(limit), _, _) => sql.push_str(&format!(" LIMIT {limit}")),
+        (None, Some(_), DbBackend::Sqlite) => sql.push_str(" LIMIT -1"),
+        (None, Some(_), DbBackend::MySql) => sql.push_str(&format!(" LIMIT {}", u64::MAX)),
+        _ => {}
+    }
+    if let Some(offset) = offset {
+        sql.push_str(&format!(" OFFSET {offset}"));
+    }
+    sql
+}
 
 // ---- Identifiers -------------------------------------------------------------
 

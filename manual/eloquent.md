@@ -1069,6 +1069,30 @@ let users  = first.union(second).get().await?;
 let users  = first.union_all(second).get().await?;
 ```
 
+As in Laravel, an ordering, a limit, or an offset belongs to the whole
+union when you add it after `union`, and to the first query alone when
+you add it before. `paginate`, `simple_paginate`, `first`, and `count`
+all come after `union`, so they page, take, and count the rows of the
+union:
+
+```rust
+let page = User::filter("active", true)
+    .union(User::filter("role", "admin"))
+    .order_by_desc("id")      // orders the union
+    .paginate(20)             // pages the union; `total` counts its rows
+    .await?;
+
+let latest_active = User::filter("active", true)
+    .order_by_desc("created_at")
+    .limit(10)                // the ten newest active users only
+    .union(User::filter("role", "admin"));
+```
+
+The union is wrapped as a subquery for these clauses, so order it by the
+bare names of its columns (`id`, not `users.id`). A `UNION` keeps one
+copy of a row both queries return, and `total` counts it once;
+`union_all` keeps both.
+
 ## Row locking
 
 Two builder methods request a per-row database lock at SELECT time:
