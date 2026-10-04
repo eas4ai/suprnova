@@ -1551,10 +1551,13 @@ async fn iteration_004_reset_upload_window(State(state): State<Arc<HostState>>) 
 /// runs on its own uploads, it first clears what a finished test left behind,
 /// so one stalled request fails only its own test: it releases the pause,
 /// disarms the one-shot faults, and cancels unfinished uploads and records.
+/// It also retires every async transport no reader holds, since no page owns
+/// one between tests.
 async fn iteration_004_reset_uploads_between_tests(
     State(state): State<Arc<HostState>>,
 ) -> StatusCode {
-    if state.uploads.reset_between_tests().await.is_ok() {
+    let transports = state.async_runtime.retire_unconnected_transports().await;
+    if transports.is_ok() && state.uploads.reset_between_tests().await.is_ok() {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::CONFLICT
