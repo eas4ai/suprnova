@@ -138,15 +138,6 @@ impl PivotFilters {
         Ok(out)
     }
 
-    /// Push the terms onto a typed pivot query.
-    ///
-    /// No qualifier is needed: the pivot query's `FROM` is the pivot
-    /// table alone, so a bare column is unambiguous.
-    pub(crate) fn apply<M>(&self, mut builder: Builder<M>) -> Builder<M> {
-        builder.where_terms.extend(self.terms.iter().cloned());
-        builder
-    }
-
     /// Refuse a pivot write while filters are set.
     ///
     /// Laravel folds `pivotWheres` into `detach()`. Suprnova builds its
@@ -641,15 +632,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_pushes_every_term_onto_a_typed_builder() {
+    fn push_or_folds_into_the_previous_term() {
         let mut filters = PivotFilters::default();
         filters.push(eq("active", 1));
         filters.push_or(eq("pinned", 1));
 
-        let builder = filters.apply(Builder::<()>::new());
-        assert_eq!(builder.where_terms.len(), 1, "the or_ fold collapsed both");
+        assert_eq!(filters.terms.len(), 1, "the or_ fold collapsed both");
         assert!(matches!(
-            builder.where_terms.first(),
+            filters.terms.first(),
             Some(WhereTerm::Or(group)) if group.len() == 2
         ));
     }

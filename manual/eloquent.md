@@ -622,7 +622,7 @@ pub struct User {
 ### Lifecycle
 
 ```rust
-user.delete().await?;             // UPDATE: sets deleted_at = NOW()
+user.delete().await?;             // UPDATE: sets deleted_at (and updated_at) = NOW()
 user.trashed();                   // -> true
 let trashed = User::with_trashed().find(user.id).await?.unwrap();
 trashed.restore().await?;         // UPDATE: sets deleted_at = NULL
@@ -633,9 +633,10 @@ let all_including_dead = User::with_trashed().get().await?;
 user.force_delete().await?;       // actual DELETE
 ```
 
-The mass form follows the row form. `delete_all()` on a builder soft-deletes
-every row the query matches with one `UPDATE`, and it sets `updated_at` when
-the model manages timestamps. `force_delete_all()` removes the rows for good.
+`delete()` sets `updated_at` along with `deleted_at` when the model manages
+timestamps, as Laravel's soft delete does. The mass form follows the row
+form. `delete_all()` on a builder soft-deletes every row the query matches
+with one `UPDATE`, and it sets `updated_at` too. `force_delete_all()` removes the rows for good.
 Neither fires per-row events. See
 [Mass mutation](#mass-mutation---update_all--delete_all--upsert--_each).
 
