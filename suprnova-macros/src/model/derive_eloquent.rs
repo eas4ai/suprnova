@@ -1629,7 +1629,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 col: impl ::suprnova::eloquent::builder::IntoColumn,
             ) -> ::core::result::Result<T, ::suprnova::FrameworkError>
             where
-                T: ::suprnova::sea_orm::TryGetable + ::core::default::Default,
+                T: ::suprnova::ColumnValue + ::core::default::Default,
             {
                 <Self as ::suprnova::eloquent::Model>::query().sum(col).await
             }
@@ -1639,7 +1639,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 col: impl ::suprnova::eloquent::builder::IntoColumn,
             ) -> ::core::result::Result<T, ::suprnova::FrameworkError>
             where
-                T: ::suprnova::sea_orm::TryGetable + ::core::default::Default,
+                T: ::suprnova::ColumnValue + ::core::default::Default,
             {
                 <Self as ::suprnova::eloquent::Model>::query().avg(col).await
             }
@@ -1649,7 +1649,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 col: impl ::suprnova::eloquent::builder::IntoColumn,
             ) -> ::core::result::Result<::core::option::Option<T>, ::suprnova::FrameworkError>
             where
-                T: ::suprnova::sea_orm::TryGetable,
+                T: ::suprnova::ColumnValue,
             {
                 <Self as ::suprnova::eloquent::Model>::query().min(col).await
             }
@@ -1659,7 +1659,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 col: impl ::suprnova::eloquent::builder::IntoColumn,
             ) -> ::core::result::Result<::core::option::Option<T>, ::suprnova::FrameworkError>
             where
-                T: ::suprnova::sea_orm::TryGetable,
+                T: ::suprnova::ColumnValue,
             {
                 <Self as ::suprnova::eloquent::Model>::query().max(col).await
             }
@@ -1669,7 +1669,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 col: impl ::suprnova::eloquent::builder::IntoColumn,
             ) -> ::core::result::Result<::std::vec::Vec<T>, ::suprnova::FrameworkError>
             where
-                T: ::suprnova::sea_orm::TryGetable,
+                T: ::suprnova::ColumnValue,
             {
                 <Self as ::suprnova::eloquent::Model>::query().pluck(col).await
             }
@@ -1684,8 +1684,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 ::suprnova::FrameworkError,
             >
             where
-                K: ::suprnova::sea_orm::TryGetable + ::core::cmp::Eq + ::std::hash::Hash,
-                V: ::suprnova::sea_orm::TryGetable,
+                K: ::suprnova::ColumnValue + ::core::cmp::Eq + ::std::hash::Hash,
+                V: ::suprnova::ColumnValue,
             {
                 <Self as ::suprnova::eloquent::Model>::query()
                     .pluck_keyed(key_col, val_col)

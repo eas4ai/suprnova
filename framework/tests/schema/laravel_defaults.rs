@@ -79,6 +79,15 @@ pub struct LdWideOrder {
     pub label: String,
 }
 
+/// A table of plain `u64` columns, for the query terminals whose type the
+/// caller chooses (`pluck::<u64>`, `value::<u64>`, `max::<u64>`, ...).
+#[model(table = "ld_counters", fillable = ["hits", "spare"])]
+pub struct LdCounter {
+    pub id: u64,
+    pub hits: u64,
+    pub spare: Option<u64>,
+}
+
 /// Date-time fields with no cast of their own, in a package without
 /// `[package.metadata.suprnova.model]`.
 #[model(table = "ld_stamps", fillable = ["title"])]
@@ -589,6 +598,261 @@ pub async fn u64_full_range_on_mysql(conn: &DatabaseConnection) {
     drop_tables(conn, WIDE_TABLES).await;
 }
 
+/// The query terminals whose result type the caller names read `u64` and
+/// `Option<u64>` on every database, as model fields do: `pluck`,
+/// `pluck_keyed`, `value`, `value_or_fail`, `sole_value`, `min`, `max` and
+/// the raw `DB::scalar`. On MySQL the values span the whole `u64` range.
+/// On Postgres and SQLite a stored negative value fails the read, naming
+/// the column, where `pluck` and `value` used to drop it; and a filter
+/// above `i64::MAX` is refused, naming the column, with nothing sent,
+/// where it was bound as text, and a raw parameter that large is an error
+/// rather than a panic in sea-query-sqlx's binder. It fails while these
+/// terminals decode through SeaORM's `TryGetable`, which reads a `u64` on
+/// MySQL only.
+pub async fn u64_query_terminals(conn: &DatabaseConnection) {
+    let backend = conn.get_database_backend();
+    let manager = SchemaManager::new(conn);
+    drop_tables(conn, &["ld_counters"]).await;
+    Schema::create(&manager, "ld_counters", |t| {
+        t.unsigned_id();
+        t.unsigned_big_integer("hits");
+        t.unsigned_big_integer("spare").nullable();
+    })
+    .await
+    .expect("create ld_counters");
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(conn.clone()));
+
+    let first = LdCounter::create(attrs! { hits: 5, spare: 9 })
+        .await
+        .expect("create the first counter");
+    let second = LdCounter::create(attrs! { hits: 7, spare: None::<u64> })
+        .await
+        .expect("create the second counter");
+    // MySQL holds the top of the range: one row above i64::MAX.
+    let (top, highest) = if backend == DbBackend::MySql {
+        run(
+            conn,
+            &format!(
+                "INSERT INTO ld_counters (id, hits, spare) VALUES ({}, {}, {})",
+                u64::MAX,
+                u64::MAX,
+                u64::MAX - 1
+            ),
+        )
+        .await
+        .expect("insert a row above i64::MAX");
+        (Some(u64::MAX), u64::MAX)
+    } else {
+        (None, 7)
+    };
+
+    let mut hits = vec![5, 7];
+    let mut spare = vec![Some(9), None];
+    let mut keyed = std::collections::HashMap::from([(first.id, 5), (second.id, 7)]);
+    if let Some(top) = top {
+        hits.push(top);
+        spare.push(Some(top - 1));
+        keyed.insert(top, top);
+    }
+    assert_eq!(
+        LdCounter::query()
+            .order_by_asc("id")
+            .pluck::<u64>("hits")
+            .await
+            .expect("pluck::<u64>"),
+        hits
+    );
+    assert_eq!(
+        LdCounter::query()
+            .order_by_asc("id")
+            .pluck::<Option<u64>>("spare")
+            .await
+            .expect("pluck::<Option<u64>>"),
+        spare
+    );
+    assert_eq!(
+        LdCounter::query()
+            .pluck_keyed::<u64, u64>("id", "hits")
+            .await
+            .expect("pluck_keyed::<u64, u64>"),
+        keyed
+    );
+    assert_eq!(
+        LdCounter::query()
+            .filter("id", first.id)
+            .value::<u64>("hits")
+            .await
+            .expect("value::<u64>"),
+        Some(5)
+    );
+    assert_eq!(
+        LdCounter::query()
+            .filter("id", second.id)
+            .value::<Option<u64>>("spare")
+            .await
+            .expect("value::<Option<u64>>"),
+        Some(None)
+    );
+    assert_eq!(
+        LdCounter::query()
+            .filter("id", second.id)
+            .value_or_fail::<u64>("hits")
+            .await
+            .expect("value_or_fail::<u64>"),
+        7
+    );
+    assert_eq!(
+        LdCounter::query()
+            .filter("id", first.id)
+            .sole_value::<u64>("spare")
+            .await
+            .expect("sole_value::<u64>"),
+        9
+    );
+    assert_eq!(
+        LdCounter::query()
+            .max::<u64>("hits")
+            .await
+            .expect("max::<u64>"),
+        Some(highest)
+    );
+    assert_eq!(
+        LdCounter::query()
+            .min::<u64>("hits")
+            .await
+            .expect("min::<u64>"),
+        Some(5)
+    );
+    assert_eq!(
+        DB::scalar::<u64>("SELECT MAX(hits) FROM ld_counters", vec![])
+            .await
+            .expect("DB::scalar::<u64>"),
+        highest
+    );
+    if let Some(top) = top {
+        assert_eq!(
+            LdCounter::query()
+                .filter("hits", top)
+                .value::<u64>("spare")
+                .await
+                .expect("a filter on the top of the range"),
+            Some(top - 1)
+        );
+        drop_tables(conn, &["ld_counters"]).await;
+        return;
+    }
+
+    let too_big = i64::MAX as u64 + 1;
+    DB::enable_query_log().expect("enable the query log");
+    let refusals = [
+        (
+            "filter",
+            LdCounter::query()
+                .filter("hits", too_big)
+                .count()
+                .await
+                .map(|_| ()),
+        ),
+        (
+            "where_in",
+            LdCounter::query()
+                .where_in("hits", vec![too_big])
+                .get()
+                .await
+                .map(|_| ()),
+        ),
+        (
+            "filter_op",
+            LdCounter::query()
+                .filter_op("hits", ">", too_big)
+                .first()
+                .await
+                .map(|_| ()),
+        ),
+    ];
+    for (operation, result) in refusals {
+        let error = result.expect_err(operation).to_string();
+        assert!(
+            error.contains("hits") && error.contains(&too_big.to_string()),
+            "{operation}: the error names the column and the value: {error}"
+        );
+    }
+    assert!(
+        DB::get_query_log().expect("query log").is_empty(),
+        "no refused filter reached the database"
+    );
+    DB::disable_query_log().expect("disable the query log");
+    let placeholder = if backend == DbBackend::Postgres {
+        "$1"
+    } else {
+        "?"
+    };
+    assert!(
+        DB::scalar::<i64>(
+            &format!("SELECT COUNT(*) FROM ld_counters WHERE hits = {placeholder}"),
+            vec![sea_orm::Value::BigUnsigned(Some(too_big))],
+        )
+        .await
+        .is_err(),
+        "a raw parameter above i64::MAX is an error, not a panic in the binder"
+    );
+
+    run(
+        conn,
+        &format!("UPDATE ld_counters SET hits = -1 WHERE id = {}", first.id),
+    )
+    .await
+    .expect("store a negative value");
+    let negative_reads = [
+        (
+            "pluck",
+            LdCounter::query().pluck::<u64>("hits").await.map(|_| ()),
+        ),
+        (
+            "value",
+            LdCounter::query()
+                .filter("id", first.id)
+                .value::<u64>("hits")
+                .await
+                .map(|_| ()),
+        ),
+        (
+            "pluck_keyed",
+            LdCounter::query()
+                .pluck_keyed::<u64, u64>("id", "hits")
+                .await
+                .map(|_| ()),
+        ),
+        (
+            "min",
+            LdCounter::query().min::<u64>("hits").await.map(|_| ()),
+        ),
+        (
+            "DB::scalar",
+            DB::scalar::<u64>(
+                &format!("SELECT hits FROM ld_counters WHERE id = {}", first.id),
+                vec![],
+            )
+            .await
+            .map(|_| ()),
+        ),
+    ];
+    for (operation, result) in negative_reads {
+        let error = result.expect_err(operation).to_string();
+        assert!(
+            error.contains("hits") || operation == "DB::scalar",
+            "{operation}: the error names the column: {error}"
+        );
+        assert!(
+            error.contains("-1"),
+            "{operation}: the error quotes the value: {error}"
+        );
+    }
+
+    drop_tables(conn, &["ld_counters"]).await;
+}
+
 /// Without the `[package.metadata.suprnova]` tables, which this package does
 /// not carry, `id()` and `foreign_id()` create signed columns and a
 /// `DateTime<Utc>` field without a cast stores text, as before PAR-045.
@@ -664,6 +928,25 @@ async fn postgres_u64_above_i64_max_is_refused() {
 #[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
 async fn mysql_u64_full_range() {
     u64_full_range_on_mysql(&connect_mysql().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_u64_query_terminals() {
+    u64_query_terminals(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_u64_query_terminals() {
+    u64_query_terminals(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_u64_query_terminals() {
+    u64_query_terminals(&connect_mysql().await).await;
 }
 
 #[tokio::test]
