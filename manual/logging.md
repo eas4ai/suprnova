@@ -98,7 +98,8 @@ methods take a JSON context: each `{key}` in the message is replaced with
 its value, and the context is written beside the message. A channel
 `.level(...)` keeps only the records at that level or above. A stack's
 `.level(...)` applies to every channel it lists, on top of each channel's
-own.
+own, and a default stack that names `stdout` more than once writes an event
+there when any of those channels keeps its level.
 
 A stack writes each record to every channel it lists, and a channel that
 cannot write, such as a file it cannot open, stops none of the others;

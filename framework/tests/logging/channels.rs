@@ -1112,3 +1112,51 @@ fn forgetting_a_channel_reopens_its_file_in_the_stacks_that_list_it() {
         "{old}"
     );
 }
+
+/// In a child: the default channel is a stack of two stdout channels, the
+/// first keeping warnings and above, the second every level.
+#[test]
+fn child_writes_info_through_two_stdout_channels() {
+    if !is_child() {
+        return;
+    }
+    let marker = std::env::var("SUPRNOVA_LOG_MARKER").unwrap();
+    Log::define(
+        "strict-stdout",
+        LogChannel::stdout().level(LogLevel::Warning),
+    );
+    Log::define("open-stdout", LogChannel::stdout());
+    Log::define(
+        "both-stdout",
+        LogChannel::stack(["strict-stdout", "open-stdout"]),
+    );
+    let guard = suprnova::telemetry::init_telemetry(
+        LogConfig {
+            level: "info".into(),
+            format: suprnova::LogFormat::Json,
+        },
+        suprnova::telemetry::OtelConfig::disabled(),
+    );
+    tracing::info!("{marker}");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(guard.shutdown());
+}
+
+/// DRIVERS-032: an event goes to stdout when any stdout channel in the
+/// default stack keeps its level, whichever comes first in the stack.
+#[test]
+fn the_default_stack_writes_to_stdout_when_any_stdout_channel_keeps_the_level() {
+    let marker = unique("two-stdout-marker");
+    let output = run_child(
+        "channels::child_writes_info_through_two_stdout_channels",
+        &[
+            ("SUPRNOVA_LOG_MARKER", &marker),
+            ("LOG_CHANNEL", "both-stdout"),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(&marker), "{stdout}");
+}

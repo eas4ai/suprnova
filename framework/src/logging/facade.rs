@@ -237,14 +237,34 @@ fn level_code(level: Option<LogLevel>) -> u8 {
     level.map_or(8, LogLevel::severity)
 }
 
+/// The lowest level any of the standard-stream leaves keeps, as the
+/// `tracing` formatter's threshold for that stream: `None` when no leaf is
+/// that stream, `Some(None)` when one keeps every level.
+///
+/// `tracing` writes an event to a stream once however many channels in the
+/// default stack name it, so the event goes when any of them keeps its
+/// level, whichever comes first in the stack.
+fn stream_minimum(
+    leaves: &[Leaf],
+    of_stream: impl Fn(&Leaf) -> Option<Option<LogLevel>>,
+) -> Option<Option<LogLevel>> {
+    leaves
+        .iter()
+        .filter_map(of_stream)
+        .reduce(|kept, level| match (kept, level) {
+            (Some(kept), Some(level)) => Some(kept.max(level)),
+            _ => None,
+        })
+}
+
 /// Make `name` the default channel: the one `tracing` events go to.
 pub(crate) fn set_default(name: &str) -> Result<(), FrameworkError> {
     let leaves = resolve_named(name, 0)?;
-    let stdout = leaves.iter().find_map(|leaf| match leaf {
+    let stdout = stream_minimum(&leaves, |leaf| match leaf {
         Leaf::Stdout(level) => Some(*level),
         _ => None,
     });
-    let stderr = leaves.iter().find_map(|leaf| match leaf {
+    let stderr = stream_minimum(&leaves, |leaf| match leaf {
         Leaf::Stderr(level) => Some(*level),
         _ => None,
     });
