@@ -1011,6 +1011,19 @@ pub enum FrameworkError {
     #[error("Precognition validation failed")]
     PrecognitionFailure(ValidationErrors),
 
+    /// A file an upload validator refused as invalid input, as opposed to
+    /// a failure to check it (422 Unprocessable Entity).
+    ///
+    /// A validator sees the bytes, not the form, so this carries a
+    /// catalog-keyed message and no field name. The multipart extractor
+    /// files it in [`Self::Validation`] under the field's input name, which
+    /// is what lets a form show the error under the right field. Built
+    /// with [`Self::invalid_upload`]. Any other error a validator returns
+    /// is operational and answers with its own status. Boxed, so the
+    /// message does not grow every `Result<_, FrameworkError>`.
+    #[error("{0}")]
+    InvalidUpload(Box<ValidationMessage>),
+
     /// CLI sentinel: the failure has already been reported to the user
     /// (e.g. clap formatted and printed its own parse error). Callers
     /// translate this to a non-zero exit code without printing
@@ -1301,6 +1314,7 @@ impl FrameworkError {
             Self::UnsupportedMediaType => 415,
             Self::PrecognitionSuccess => 204,
             Self::PrecognitionFailure(_) => 422,
+            Self::InvalidUpload(_) => 422,
             Self::AlreadyReported => 500,
             Self::RateLimited { .. } => 429,
             Self::Timeout { .. } => 504,
@@ -1339,6 +1353,45 @@ impl FrameworkError {
     #[track_caller]
     pub fn validation_errors(errors: ValidationErrors) -> Self {
         Self::Validation(errors).recorded()
+    }
+
+    /// The error an [`UploadValidator`] returns for a file it refuses as
+    /// invalid input: wrong type, too large, unreadable.
+    ///
+    /// The multipart extractor answers it as a 422 whose `errors` holds
+    /// `message` under the field's input name, so give the message a
+    /// catalog key an application can override. Return any other error for
+    /// a failure to check the file, such as a scanner that is down; that
+    /// one keeps its own status.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::http::upload::validators::UploadValidator;
+    /// use suprnova::{FrameworkError, ValidationMessage};
+    ///
+    /// #[derive(Default)]
+    /// struct PdfOnly;
+    ///
+    /// impl UploadValidator for PdfOnly {
+    ///     fn validate_final(
+    ///         &self,
+    ///         sniff: &[u8],
+    ///         _size: u64,
+    ///         _content_type: Option<&str>,
+    ///     ) -> Result<(), FrameworkError> {
+    ///         if !sniff.starts_with(b"%PDF-") {
+    ///             return Err(FrameworkError::invalid_upload(
+    ///                 ValidationMessage::keyed("validation-pdf").fallback("The file must be a PDF."),
+    ///             ));
+    ///         }
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// [`UploadValidator`]: crate::http::upload::validators::UploadValidator
+    #[track_caller]
+    pub fn invalid_upload(message: impl Into<ValidationMessage>) -> Self {
+        Self::InvalidUpload(Box::new(message.into())).recorded()
     }
 
     /// Turn a database write error into a field-scoped 422 validation
@@ -1456,6 +1509,7 @@ impl FrameworkError {
             Self::UnsupportedMediaType => "Unsupported Media Type",
             Self::PrecognitionSuccess => "Precognition validation passed",
             Self::PrecognitionFailure(_) => "Precognition validation failed",
+            Self::InvalidUpload(message) => &message.fallback,
             Self::AlreadyReported => "",
             Self::RateLimited { message, .. } => message,
             Self::Timeout { message, .. } => message,
@@ -1492,7 +1546,7 @@ impl FrameworkError {
     ///
     /// Variant preservation: structured response variants
     /// (`Validation`, `ValidationError`, `PrecognitionFailure`,
-    /// `PrecognitionSuccess`, `Unauthorized`, `ModelNotFound`,
+    /// `InvalidUpload`, `PrecognitionSuccess`, `Unauthorized`, `ModelNotFound`,
     /// `ParamParse`, `UnsupportedMediaType`, `AlreadyReported`,
     /// `RateLimited`) keep their variant so their response renderer
     /// still emits the per-variant body (Laravel `errors` map,
@@ -1530,6 +1584,9 @@ impl FrameworkError {
             Self::PrecognitionFailure(errors) => {
                 Self::PrecognitionFailure(prefix_messages(errors, &prefix))
             }
+            // Still a refused file, so the extractor still files it under
+            // its field, with the prefix on the message.
+            Self::InvalidUpload(message) => Self::InvalidUpload(Box::new(message.prefix(prefix))),
             Self::ValidationError { field, message } => Self::ValidationError {
                 field,
                 message: format!("{}: {}", prefix, message),

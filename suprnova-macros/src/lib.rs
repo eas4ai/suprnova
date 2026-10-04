@@ -808,7 +808,14 @@ pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// `#[multipart(custom_hooks)]` on the struct suppresses the
 /// auto-generated `impl MultipartRequestHooks for Self {}`, letting
-/// users override `authorize` and `after_validation`.
+/// users override `authorize`, `after_validation` and
+/// `after_validation_async`.
+///
+/// A field's failure - missing, unparseable, of the wrong kind, or refused
+/// by its validator - answers 422 with `ValidationErrors` under the
+/// field's input name, a trailing `[]` replaced by the part's index
+/// (`photos[]` gives `photos.1`). A limit on the whole request (body cap,
+/// part ceiling, `max_count`) answers 413.
 ///
 /// # Example
 ///

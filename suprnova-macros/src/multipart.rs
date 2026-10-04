@@ -1,9 +1,11 @@
 //! `#[derive(MultipartRequest)]` - strongly-typed multipart extractor.
 //!
 //! Emits two impls per struct:
-//! 1. `impl FromRequest` - calls hooks, parses the body once via
-//!    `parse_multipart_streaming_with_cap`, dispatches each `(name, value)`
-//!    to the right field, then constructs `Self`.
+//! 1. `impl FromRequest` - runs the stages in order: `authorize`, the
+//!    body parsed once via `parse_multipart_streaming_with_limits` with each
+//!    `(name, value)` dispatched to its field, `after_validation`,
+//!    `after_validation_async`. Each runs only after the one before it
+//!    succeeded.
 //! 2. `impl MultipartRequestHooks` - empty default unless the struct
 //!    carries `#[multipart(custom_hooks)]`, in which case the user
 //!    provides their own impl.
@@ -12,9 +14,15 @@
 //! bytes; the parser captures both during streaming so neither
 //! `validate_chunk` nor `validate_final` requires the full part in
 //! memory.
+//!
+//! A field's failures are collected into one `ValidationErrors` under the
+//! field's input name, so the client learns about every bad field at once.
+//! The per-part logic lives in the framework (`take_file`, `take_text`);
+//! the expansion only routes parts to fields.
 
 use proc_macro::TokenStream;
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::{Data, DeriveInput, Fields, LitStr, Type, parse_macro_input};
 
 pub fn expand(input: TokenStream) -> TokenStream {
@@ -81,7 +89,12 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
     let mut field_arms = Vec::new();
     let mut validator_arms = Vec::new();
     let mut validator_decls = Vec::new();
+    let mut required_checks = Vec::new();
     let mut struct_init = Vec::new();
+    // `(name a hook may use, input name)` pairs for renaming hook errors:
+    // each field's Rust name, and its `#[field]` name when that carries
+    // `[]`. Identity pairs are left out.
+    let mut hook_names: Vec<(String, String)> = Vec::new();
     // `(wire_name, max_count)` pairs for every Vec field carrying a
     // `max_count` ceiling. Handed to the parser via
     // `MultipartLimits::per_field_max_counts` so the ceiling is enforced
@@ -101,7 +114,7 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
         // cap). `max_count` is handed to the parser via
         // `MultipartLimits::per_field_max_counts` and enforced DURING
         // streaming: the (cap + 1)-th part carrying this name is rejected
-        // with 422 before it is read, so the extra part never allocates.
+        // with 413 before it is read, so the extra part never allocates.
         //
         // Honoured for `Vec<UploadedFile<V>>` (FileVec) and
         // `Vec<T: FromStr>` (TextVec). On scalar/option fields the
@@ -152,6 +165,15 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
             .to_compile_error();
         };
         let field_name_str = field_name.value();
+        let input_name = field_name_str
+            .strip_suffix("[]")
+            .unwrap_or(&field_name_str)
+            .to_string();
+        for alias in [ident.unraw().to_string(), field_name_str.clone()] {
+            if alias != input_name && !hook_names.iter().any(|(name, _)| *name == alias) {
+                hook_names.push((alias, input_name.clone()));
+            }
+        }
 
         let shape = classify(ty);
 
@@ -171,61 +193,60 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
             )
             .to_compile_error();
         }
+        // `max_count` (when set) is enforced by the parser during streaming
+        // via `MultipartLimits::per_field_max_counts`: the (cap + 1)-th part
+        // with this name is rejected with 413 before it is read, so the
+        // extra part never allocates.
+        if let Some(cap) = max_count {
+            max_count_entries.push(quote! { (#field_name_str, #cap) });
+        }
+
+        // Each part's zero-based index among the parts of this name, which
+        // names its error when the input name ends in `[]`.
+        let index_ident = quote::format_ident!("__index_{}", ident);
+        // Set when a part of a required field failed, so a field reported
+        // as invalid is not also reported as missing.
+        let invalid_ident = quote::format_ident!("__invalid_{}", ident);
+        field_decls.push(quote! {
+            let mut #index_ident: usize = 0;
+        });
+        let next_index = quote! {
+            let __index = #index_ident;
+            #index_ident += 1;
+        };
+
+        // A scalar field is required; an `Option` or `Vec` one is not.
+        let required = matches!(
+            shape,
+            FieldShape::FileScalar { .. } | FieldShape::TextScalar { .. }
+        );
 
         match shape {
-            FieldShape::FileScalar { validator } => {
+            FieldShape::FileScalar { validator } | FieldShape::FileOption { validator } => {
                 let v_ident = quote::format_ident!("__v_{}", ident);
                 let (validator_decl, validator_arm) =
                     validator_wiring(&validator, &v_ident, &field_name_str);
                 validator_decls.push(validator_decl);
                 validator_arms.push(validator_arm);
-                let uploaded_file = uploaded_file_from_backing(&validator);
+                let on_invalid = if required {
+                    quote! { #invalid_ident = true; }
+                } else {
+                    quote! {}
+                };
                 field_arms.push(quote! {
                     #field_name_str => {
-                        if let ::suprnova::http::upload::MultipartValue::File { backing, size, file_name, content_type, inferred_extension, sniff } = value {
-                            <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_final(
-                                &#v_ident, &sniff, size, content_type.as_deref()
-                            )?;
-                            if #ident.is_none() {
-                                #ident = ::core::option::Option::Some(
-                                    #uploaded_file
-                                );
-                            }
-                        } else {
-                            return ::core::result::Result::Err(::suprnova::FrameworkError::Domain {
-                                message: format!("field '{}' must be a file", #field_name_str),
-                                status_code: 400,
-                            });
-                        }
-                    }
-                });
-                field_decls.push(quote! {
-                    let mut #ident: ::core::option::Option<::suprnova::http::upload::UploadedFile<#validator>> = ::core::option::Option::None;
-                });
-                struct_init.push(quote! {
-                    #ident: #ident.ok_or_else(|| ::suprnova::FrameworkError::Domain {
-                        message: format!("missing required file field '{}'", #field_name_str),
-                        status_code: 422,
-                    })?,
-                });
-            }
-            FieldShape::FileOption { validator } => {
-                let v_ident = quote::format_ident!("__v_{}", ident);
-                let (validator_decl, validator_arm) =
-                    validator_wiring(&validator, &v_ident, &field_name_str);
-                validator_decls.push(validator_decl);
-                validator_arms.push(validator_arm);
-                let uploaded_file = uploaded_file_from_backing(&validator);
-                field_arms.push(quote! {
-                    #field_name_str => {
-                        if let ::suprnova::http::upload::MultipartValue::File { backing, size, file_name, content_type, inferred_extension, sniff } = value {
-                            <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_final(
-                                &#v_ident, &sniff, size, content_type.as_deref()
-                            )?;
-                            if #ident.is_none() {
-                                #ident = ::core::option::Option::Some(
-                                    #uploaded_file
-                                );
+                        #next_index
+                        // First write wins; a later part of the name is
+                        // neither validated nor kept.
+                        if #ident.is_none() {
+                            match ::suprnova::http::upload::take_file(
+                                &#v_ident, __value, #field_name_str, __index, &mut __errors,
+                            )? {
+                                ::suprnova::http::upload::Taken::Value(__file) => {
+                                    #ident = ::core::option::Option::Some(__file);
+                                }
+                                ::suprnova::http::upload::Taken::Absent => {}
+                                ::suprnova::http::upload::Taken::Invalid => { #on_invalid }
                             }
                         }
                     }
@@ -233,7 +254,15 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 field_decls.push(quote! {
                     let mut #ident: ::core::option::Option<::suprnova::http::upload::UploadedFile<#validator>> = ::core::option::Option::None;
                 });
-                struct_init.push(quote! { #ident, });
+                push_required(
+                    required,
+                    &ident,
+                    &invalid_ident,
+                    &field_name_str,
+                    &mut field_decls,
+                    &mut required_checks,
+                    &mut struct_init,
+                );
             }
             FieldShape::FileVec { validator } => {
                 let v_ident = quote::format_ident!("__v_{}", ident);
@@ -241,24 +270,15 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                     validator_wiring(&validator, &v_ident, &field_name_str);
                 validator_decls.push(validator_decl);
                 validator_arms.push(validator_arm);
-                // `max_count` (when set) is enforced by the parser during
-                // streaming via `MultipartLimits::per_field_max_counts`: the
-                // (cap + 1)-th part with this name is rejected with 422
-                // before it is read, so the extra part never allocates.
-                // Collect the `(name, cap)` pair for the limits struct.
-                if let Some(cap) = max_count {
-                    max_count_entries.push(quote! { (#field_name_str, #cap) });
-                }
-                let uploaded_file = uploaded_file_from_backing(&validator);
                 field_arms.push(quote! {
                     #field_name_str => {
-                        if let ::suprnova::http::upload::MultipartValue::File { backing, size, file_name, content_type, inferred_extension, sniff } = value {
-                            <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_final(
-                                &#v_ident, &sniff, size, content_type.as_deref()
-                            )?;
-                            #ident.push(
-                                #uploaded_file
-                            );
+                        #next_index
+                        if let ::suprnova::http::upload::Taken::Value(__file) =
+                            ::suprnova::http::upload::take_file(
+                                &#v_ident, __value, #field_name_str, __index, &mut __errors,
+                            )?
+                        {
+                            #ident.push(__file);
                         }
                     }
                 });
@@ -267,41 +287,27 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 });
                 struct_init.push(quote! { #ident, });
             }
-            FieldShape::TextScalar { inner_ty } => {
-                let parse_text = parse_text_field(&inner_ty, &field_name_str);
+            FieldShape::TextScalar { inner_ty, failure }
+            | FieldShape::TextOption { inner_ty, failure } => {
+                let on_invalid = if required {
+                    quote! { #invalid_ident = true; }
+                } else {
+                    quote! {}
+                };
                 field_arms.push(quote! {
                     #field_name_str => {
-                        if let ::suprnova::http::upload::MultipartValue::Text(s) = value {
-                            if #ident.is_none() {
-                                #parse_text
-                                #ident = ::core::option::Option::Some(parsed);
-                            }
-                        } else {
-                            return ::core::result::Result::Err(::suprnova::FrameworkError::Domain {
-                                message: format!("field '{}' must be text", #field_name_str),
-                                status_code: 400,
-                            });
-                        }
-                    }
-                });
-                field_decls.push(quote! {
-                    let mut #ident: ::core::option::Option<#inner_ty> = ::core::option::Option::None;
-                });
-                struct_init.push(quote! {
-                    #ident: #ident.ok_or_else(|| ::suprnova::FrameworkError::Domain {
-                        message: format!("missing required text field '{}'", #field_name_str),
-                        status_code: 422,
-                    })?,
-                });
-            }
-            FieldShape::TextOption { inner_ty } => {
-                let parse_text = parse_text_field(&inner_ty, &field_name_str);
-                field_arms.push(quote! {
-                    #field_name_str => {
-                        if let ::suprnova::http::upload::MultipartValue::Text(s) = value {
-                            if #ident.is_none() {
-                                #parse_text
-                                #ident = ::core::option::Option::Some(parsed);
+                        #next_index
+                        // First write wins; a later part of the name is
+                        // neither parsed nor kept.
+                        if #ident.is_none() {
+                            match ::suprnova::http::upload::take_text::<#inner_ty>(
+                                __value, #field_name_str, __index, #failure, &mut __errors,
+                            ) {
+                                ::suprnova::http::upload::Taken::Value(__parsed) => {
+                                    #ident = ::core::option::Option::Some(__parsed);
+                                }
+                                ::suprnova::http::upload::Taken::Absent => {}
+                                ::suprnova::http::upload::Taken::Invalid => { #on_invalid }
                             }
                         }
                     }
@@ -309,23 +315,26 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 field_decls.push(quote! {
                     let mut #ident: ::core::option::Option<#inner_ty> = ::core::option::Option::None;
                 });
-                struct_init.push(quote! { #ident, });
+                push_required(
+                    required,
+                    &ident,
+                    &invalid_ident,
+                    &field_name_str,
+                    &mut field_decls,
+                    &mut required_checks,
+                    &mut struct_init,
+                );
             }
-            FieldShape::TextVec { inner_ty } => {
-                // `max_count` on text Vec fields covers the same DoS as
-                // file Vec fields: many text parts each allocate a parsed
-                // scalar. Like FileVec, the ceiling is enforced by the
-                // parser during streaming via
-                // `MultipartLimits::per_field_max_counts`.
-                if let Some(cap) = max_count {
-                    max_count_entries.push(quote! { (#field_name_str, #cap) });
-                }
-                let parse_text = parse_text_field(&inner_ty, &field_name_str);
+            FieldShape::TextVec { inner_ty, failure } => {
                 field_arms.push(quote! {
                     #field_name_str => {
-                        if let ::suprnova::http::upload::MultipartValue::Text(s) = value {
-                            #parse_text
-                            #ident.push(parsed);
+                        #next_index
+                        if let ::suprnova::http::upload::Taken::Value(__parsed) =
+                            ::suprnova::http::upload::take_text::<#inner_ty>(
+                                __value, #field_name_str, __index, #failure, &mut __errors,
+                            )
+                        {
+                            #ident.push(__parsed);
                         }
                     }
                 });
@@ -336,6 +345,10 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
             }
         }
     }
+
+    let hook_name_pairs = hook_names
+        .iter()
+        .map(|(name, input)| quote! { (#name, #input) });
 
     let hooks_impl = if emit_default_hooks {
         quote! {
@@ -352,6 +365,7 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
             async fn from_request(req: ::suprnova::http::Request)
                 -> ::core::result::Result<Self, ::suprnova::FrameworkError>
             {
+                // Stage 1: authorize, before any byte of the body is read.
                 if !<Self as ::suprnova::http::upload::MultipartRequestHooks>::authorize(&req) {
                     return ::core::result::Result::Err(::suprnova::FrameworkError::Unauthorized);
                 }
@@ -366,6 +380,9 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 // state would be discarded.
                 #(#validator_decls)*
 
+                // Stage 2: extraction. A request-wide limit answers 413 and a
+                // file refused while the body streams answers 422, both
+                // without reading further.
                 let __max_body_bytes: usize = #max_body_bytes_expr;
                 let __spill_threshold: usize = ::suprnova::http::upload::global_upload_spill_threshold();
                 let __limits = ::suprnova::http::upload::MultipartLimits {
@@ -374,11 +391,11 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                     spill_threshold: __spill_threshold,
                     per_field_max_counts: &[ #(#max_count_entries),* ],
                 };
-                let payload = ::suprnova::http::upload::parse_multipart_streaming_with_limits(
+                let __payload = ::suprnova::http::upload::parse_multipart_streaming_with_limits(
                     req,
                     __limits,
-                    |name: &str, sniff: &[u8], size: u64| -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                        match name {
+                    |__name: &str, __sniff: &[u8], __size: u64| -> ::core::result::Result<(), ::suprnova::FrameworkError> {
+                        match __name {
                             #(#validator_arms)*
                             _ => {}
                         }
@@ -387,23 +404,55 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 ).await?;
 
                 #(#field_decls)*
+                let mut __errors = ::suprnova::ValidationErrors::new();
 
-                for (name, value) in payload.fields {
-                    match name.as_str() {
+                for (__name, __value) in __payload.fields {
+                    match __name.as_str() {
                         #(#field_arms)*
                         _ => {}
                     }
                 }
 
-                let constructed = Self { #(#struct_init)* };
+                #(#required_checks)*
 
-                if let ::core::result::Result::Err(errs) =
-                    <Self as ::suprnova::http::upload::MultipartRequestHooks>::after_validation(&constructed)
-                {
-                    return ::core::result::Result::Err(::suprnova::FrameworkError::Validation(errs));
+                // A field failed: answer with every field's errors. The
+                // values built so far drop here, removing their temp files.
+                if !__errors.is_empty() {
+                    return ::core::result::Result::Err(
+                        ::suprnova::FrameworkError::validation_errors(__errors),
+                    );
                 }
 
-                ::core::result::Result::Ok(constructed)
+                let __constructed = Self { #(#struct_init)* };
+
+                // Hook errors name fields as extraction errors do.
+                fn __input_name(__key: &str) -> ::std::string::String {
+                    ::suprnova::http::upload::hook_error_key(__key, &[ #(#hook_name_pairs),* ])
+                }
+
+                // Stage 3: the synchronous hook. An empty set is success.
+                // (A `match`, not a let chain: the expansion compiles in the
+                // caller's edition.)
+                match <Self as ::suprnova::http::upload::MultipartRequestHooks>::after_validation(&__constructed) {
+                    ::core::result::Result::Err(errs) if !errs.is_empty() => {
+                        return ::core::result::Result::Err(
+                            ::suprnova::FrameworkError::validation_errors(errs.rename_keys(__input_name)),
+                        );
+                    }
+                    _ => {}
+                }
+
+                // Stage 4: the async hook, only once the sync one passed.
+                match <Self as ::suprnova::http::upload::MultipartRequestHooks>::after_validation_async(&__constructed).await {
+                    ::core::result::Result::Err(errs) if !errs.is_empty() => {
+                        return ::core::result::Result::Err(
+                            ::suprnova::FrameworkError::validation_errors(errs.rename_keys(__input_name)),
+                        );
+                    }
+                    _ => {}
+                }
+
+                ::core::result::Result::Ok(__constructed)
             }
         }
 
@@ -413,28 +462,47 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
     expanded
 }
 
-/// The `match backing { Memory => from_memory, Disk => from_disk }`
-/// expression that turns a parsed file part into an `UploadedFile`. It
-/// reads the `backing`, `size`, `file_name`, `content_type` and
-/// `inferred_extension` bindings that the file arms introduce, so every
-/// file shape builds the value the same way.
-fn uploaded_file_from_backing(validator: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
-    quote! {
-        match backing {
-            ::suprnova::http::upload::UploadedFileBacking::Memory(b) =>
-                ::suprnova::http::upload::UploadedFile::<#validator>::from_memory(
-                    b, file_name, content_type, inferred_extension,
-                ),
-            ::suprnova::http::upload::UploadedFileBacking::Disk(t) =>
-                ::suprnova::http::upload::UploadedFile::<#validator>::from_disk(
-                    t, size, file_name, content_type, inferred_extension,
-                ),
-        }
+/// The declarations, the missing-field check and the struct initialiser
+/// of one scalar or optional field. A required field missing with no
+/// failure of its own is reported as `validation-required` under its
+/// input name; an optional one is simply `None`.
+fn push_required(
+    required: bool,
+    ident: &syn::Ident,
+    invalid_ident: &syn::Ident,
+    field_name_str: &str,
+    field_decls: &mut Vec<proc_macro2::TokenStream>,
+    required_checks: &mut Vec<proc_macro2::TokenStream>,
+    struct_init: &mut Vec<proc_macro2::TokenStream>,
+) {
+    if !required {
+        struct_init.push(quote! { #ident, });
+        return;
     }
+    field_decls.push(quote! {
+        let mut #invalid_ident = false;
+    });
+    required_checks.push(quote! {
+        if #ident.is_none() && !#invalid_ident {
+            ::suprnova::http::upload::add_field_failure(
+                &mut __errors,
+                #field_name_str,
+                ::core::option::Option::None,
+                ::suprnova::http::upload::FieldFailure::Required,
+            );
+        }
+    });
+    // Unreachable: a missing required field was reported above, and the
+    // error set was checked before construction. An error, not a panic.
+    struct_init.push(quote! {
+        #ident: #ident.ok_or_else(|| ::suprnova::FrameworkError::internal(
+            format!("multipart field '{}' was neither extracted nor reported", #field_name_str)
+        ))?,
+    });
 }
 
 /// The validator instance declaration and the `validate_chunk` arm for
-/// one file field. The arm reads the `sniff` and `size` names of the
+/// one file field. The arm reads the `__sniff` and `__size` names of the
 /// chunk callback the caller emits.
 fn validator_wiring(
     validator: &proc_macro2::TokenStream,
@@ -446,39 +514,52 @@ fn validator_wiring(
     };
     let arm = quote! {
         #field_name_str => {
-            <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, sniff, size)?;
+            <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, __sniff, __size)?;
         }
     };
     (decl, arm)
 }
 
-/// The `let parsed = ...?;` statement that parses a text part through
-/// `FromStr` and answers a parse failure with a 400. It reads the `s`
-/// binding of the `MultipartValue::Text(s)` pattern the caller emits.
-fn parse_text_field(
-    inner_ty: &proc_macro2::TokenStream,
-    field_name_str: &str,
-) -> proc_macro2::TokenStream {
-    quote! {
-        let parsed = <#inner_ty as ::core::str::FromStr>::from_str(&s)
-            .map_err(|_| ::suprnova::FrameworkError::Domain {
-                message: format!(
-                    "could not parse text field '{}' as {}",
-                    #field_name_str,
-                    ::core::stringify!(#inner_ty),
-                ),
-                status_code: 400,
-            })?;
-    }
+enum FieldShape {
+    FileScalar {
+        validator: proc_macro2::TokenStream,
+    },
+    FileOption {
+        validator: proc_macro2::TokenStream,
+    },
+    FileVec {
+        validator: proc_macro2::TokenStream,
+    },
+    TextScalar {
+        inner_ty: proc_macro2::TokenStream,
+        failure: proc_macro2::TokenStream,
+    },
+    TextOption {
+        inner_ty: proc_macro2::TokenStream,
+        failure: proc_macro2::TokenStream,
+    },
+    TextVec {
+        inner_ty: proc_macro2::TokenStream,
+        failure: proc_macro2::TokenStream,
+    },
 }
 
-enum FieldShape {
-    FileScalar { validator: proc_macro2::TokenStream },
-    FileOption { validator: proc_macro2::TokenStream },
-    FileVec { validator: proc_macro2::TokenStream },
-    TextScalar { inner_ty: proc_macro2::TokenStream },
-    TextOption { inner_ty: proc_macro2::TokenStream },
-    TextVec { inner_ty: proc_macro2::TokenStream },
+/// The `FieldFailure` a text part that does not parse as `ty` reports,
+/// chosen by the type's name as Laravel's rules split them: integer types,
+/// float types, `bool`, and everything else as a format error.
+fn parse_failure(ty: &Type) -> proc_macro2::TokenStream {
+    let failure = match outer_segment_ident(ty).as_deref() {
+        Some(
+            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
+            | "usize" | "NonZeroI8" | "NonZeroI16" | "NonZeroI32" | "NonZeroI64" | "NonZeroI128"
+            | "NonZeroIsize" | "NonZeroU8" | "NonZeroU16" | "NonZeroU32" | "NonZeroU64"
+            | "NonZeroU128" | "NonZeroUsize",
+        ) => quote! { Integer },
+        Some("f32" | "f64") => quote! { Numeric },
+        Some("bool") => quote! { Boolean },
+        _ => quote! { Format },
+    };
+    quote! { ::suprnova::http::upload::FieldFailure::#failure }
 }
 
 fn classify(ty: &Type) -> FieldShape {
@@ -491,6 +572,7 @@ fn classify(ty: &Type) -> FieldShape {
                 FieldShape::FileVec { validator }
             } else {
                 FieldShape::TextVec {
+                    failure: parse_failure(&inner),
                     inner_ty: quote! { #inner },
                 }
             }
@@ -500,6 +582,7 @@ fn classify(ty: &Type) -> FieldShape {
                 FieldShape::FileOption { validator }
             } else {
                 FieldShape::TextOption {
+                    failure: parse_failure(&inner),
                     inner_ty: quote! { #inner },
                 }
             }
@@ -509,6 +592,7 @@ fn classify(ty: &Type) -> FieldShape {
                 FieldShape::FileScalar { validator }
             } else {
                 FieldShape::TextScalar {
+                    failure: parse_failure(ty),
                     inner_ty: quote! { #ty },
                 }
             }
@@ -637,6 +721,48 @@ mod tests {
         assert!(
             rendered.contains("MultipartRequest field needs"),
             "diagnostic must explain the missing #[field] attribute; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_text_field_reports_the_parse_failure_of_its_type() {
+        let failure = |ty: Type| parse_failure(&ty).to_string();
+        assert!(failure(parse_quote!(u32)).ends_with("Integer"));
+        assert!(failure(parse_quote!(std::num::NonZeroU64)).ends_with("Integer"));
+        assert!(failure(parse_quote!(f64)).ends_with("Numeric"));
+        assert!(failure(parse_quote!(bool)).ends_with("Boolean"));
+        assert!(failure(parse_quote!(std::net::IpAddr)).ends_with("Format"));
+        assert!(failure(parse_quote!(String)).ends_with("Format"));
+    }
+
+    #[test]
+    fn hook_errors_are_renamed_from_rust_names_to_input_names() {
+        let input: DeriveInput = parse_quote! {
+            struct Album {
+                #[field("photos[]")]
+                photo: Vec<UploadedFile>,
+                #[field("title")]
+                r#name: String,
+                #[field("slug")]
+                slug: String,
+            }
+        };
+        let rendered = render(input);
+        assert!(
+            rendered.contains(r#"("photo" , "photos")"#),
+            "the Rust name maps to the input name; got: {rendered}"
+        );
+        assert!(
+            rendered.contains(r#"("photos[]" , "photos")"#),
+            "the bracketed name maps to the input name; got: {rendered}"
+        );
+        assert!(
+            rendered.contains(r#"("name" , "title")"#),
+            "a raw identifier maps by its plain name; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains(r#"("slug" , "slug")"#),
+            "a field whose names agree needs no entry; got: {rendered}"
         );
     }
 }
