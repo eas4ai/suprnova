@@ -248,3 +248,8 @@ async fn sqlite_action_shorthands() {
 async fn sqlite_unsigned_keys_everywhere() {
     laravel_cases::unsigned_keys_everywhere(&connect_sqlite().await).await;
 }
+
+#[tokio::test]
+async fn sqlite_quoted_index_and_key_names() {
+    cases::quoted_index_and_key_names(&connect_sqlite().await).await;
+}
