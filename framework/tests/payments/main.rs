@@ -5,6 +5,10 @@ pub mod dto;
 pub mod migration;
 pub mod mock_discriminator;
 pub mod money;
+// Its tests move the framework clock with `TestClock`, which exists with
+// the `testing` feature only.
+#[cfg(feature = "testing")]
+pub mod native_engines;
 pub mod public_surface;
 pub mod registry;
 pub mod webhook_hydration;

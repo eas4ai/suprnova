@@ -17,8 +17,10 @@
 //! docker rm -f suprnova-rbac-pg
 //! ```
 
-use sea_orm::{ConnectOptions, ConnectionTrait, Database, Statement};
+use sea_orm::{ConnectOptions, ConnectionTrait, Database};
+use sea_orm_migration::{MigrationTrait, SchemaManager};
 use std::time::Duration;
+use suprnova::rbac::migrations::CreateRbacTables;
 use suprnova::rbac::{
     assign_role_to_model, create_role, give_permission_to_model, give_permission_to_role,
     has_permission_for_model, has_role_for_model, remove_permission_from_model,
@@ -26,6 +28,28 @@ use suprnova::rbac::{
 };
 use suprnova::testing::TestContainer;
 use suprnova::{DB, DbConnection};
+
+/// Drop whatever an earlier run left, children first, and run the shipped
+/// migration so the columns are exactly the ones an application gets.
+pub(crate) async fn fresh_rbac_schema(database: &DbConnection) {
+    for table in [
+        "model_permissions",
+        "model_roles",
+        "role_permissions",
+        "permissions",
+        "roles",
+    ] {
+        database
+            .inner()
+            .execute_unprepared(&format!("DROP TABLE IF EXISTS {table}"))
+            .await
+            .expect("drop a leftover rbac table");
+    }
+    CreateRbacTables
+        .up(&SchemaManager::new(database.inner()))
+        .await
+        .expect("run the rbac migration");
+}
 
 async fn connect_and_install() -> suprnova::testing::TestContainerGuard {
     let url = std::env::var("PG_TEST_URL").expect("set PG_TEST_URL to a disposable Postgres");
@@ -38,32 +62,13 @@ async fn connect_and_install() -> suprnova::testing::TestContainerGuard {
     let conn = Database::connect(options)
         .await
         .expect("Postgres test database must be reachable");
-    let backend = conn.get_database_backend();
-
-    // The RBAC schema, matching what the framework's migrations create.
-    for sql in [
-        "DROP TABLE IF EXISTS model_permissions",
-        "DROP TABLE IF EXISTS model_roles",
-        "DROP TABLE IF EXISTS role_permissions",
-        "DROP TABLE IF EXISTS permissions",
-        "DROP TABLE IF EXISTS roles",
-        "CREATE TABLE roles (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, \
-         display_name TEXT NULL, guard_name TEXT NOT NULL)",
-        "CREATE TABLE permissions (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, \
-         display_name TEXT NULL, guard_name TEXT NOT NULL)",
-        "CREATE TABLE role_permissions (role_id BIGINT NOT NULL, permission_id BIGINT NOT NULL)",
-        "CREATE TABLE model_roles (model_type TEXT NOT NULL, model_id TEXT NOT NULL, \
-         role_id BIGINT NOT NULL)",
-        "CREATE TABLE model_permissions (model_type TEXT NOT NULL, model_id TEXT NOT NULL, \
-         permission_id BIGINT NOT NULL)",
-    ] {
-        conn.execute_raw(Statement::from_string(backend, sql.to_owned()))
-            .await
-            .unwrap_or_else(|e| panic!("schema setup failed on {sql:?}: {e}"));
-    }
+    // The shipped migration, so the tables carry every column an
+    // application's do - including the native timestamps the models read.
+    let database = DbConnection::from_raw(conn);
+    fresh_rbac_schema(&database).await;
 
     let guard = TestContainer::fake();
-    TestContainer::singleton(DbConnection::from_raw(conn));
+    TestContainer::singleton(database);
     guard
 }
 

@@ -278,7 +278,7 @@ async fn sanity_seaorm_update_via_model_into_active_model() {
         .await
         .expect("TestDatabase::fresh");
     let conn = db.conn().clone();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = chrono::Utc::now();
 
     let inserted = customer::ActiveModel {
         provider: Set("mock".into()),
@@ -286,8 +286,8 @@ async fn sanity_seaorm_update_via_model_into_active_model() {
         user_id: Set("user_x".into()),
         email: Set("first@example.com".into()),
         provider_metadata: Set(json!({})),
-        created_at: Set(now.clone()),
-        updated_at: Set(now.clone()),
+        created_at: Set(now),
+        updated_at: Set(now),
         ..Default::default()
     }
     .insert(&conn)
@@ -686,14 +686,14 @@ async fn customer_updated_webhook_updates_existing_customer_row_only() {
     let conn = Arc::new(db.conn().clone());
 
     // Pre-seed a customer row (mimics what an app does after CustomerStore::create_customer).
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = chrono::Utc::now();
     let inserted = customer::ActiveModel {
         provider: Set("mock".into()),
         provider_customer_id: Set("cus_app_known_1".into()),
         user_id: Set("user_42".into()),
         email: Set("before@example.com".into()),
         provider_metadata: Set(json!({"seed": true})),
-        created_at: Set(now.clone()),
+        created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()
     }
@@ -1272,7 +1272,7 @@ async fn malformed_payment_snapshot_is_retryable_without_corrupting_existing_mir
     assert_eq!(disputed.status, "disputed");
     let mut normalized_disputed = disputed.clone();
     normalized_disputed.status = updated.status.clone();
-    normalized_disputed.updated_at = updated.updated_at.clone();
+    normalized_disputed.updated_at = updated.updated_at;
     assert_eq!(
         normalized_disputed, updated,
         "a customerless dispute must only change status and updated_at"
@@ -1313,7 +1313,7 @@ async fn malformed_payment_snapshot_is_retryable_without_corrupting_existing_mir
     assert_eq!(refunded.status, "refunded");
     let mut normalized_refunded = refunded;
     normalized_refunded.status = disputed.status.clone();
-    normalized_refunded.updated_at = disputed.updated_at.clone();
+    normalized_refunded.updated_at = disputed.updated_at;
     assert_eq!(
         normalized_refunded, disputed,
         "a customerless refund must only change status and updated_at"
