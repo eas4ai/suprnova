@@ -1491,3 +1491,29 @@ async fn enroll_cannot_overwrite_a_pending_rotation() {
             .unwrap()
     );
 }
+
+/// Every attempt and rotation row keys the user id in a column of 255
+/// characters, so enrollment refuses a longer id on every engine instead
+/// of enrolling it and answering 503 at every proof.
+#[tokio::test]
+async fn enrollment_refuses_a_user_id_longer_than_255_characters() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let too_long = FakeUser {
+        id: "u".repeat(256),
+        email: "long-id@example.com".into(),
+    };
+    let error = TwoFactor::enroll(&too_long)
+        .await
+        .expect_err("a 256-character user id is refused");
+    assert_eq!(error.status_code(), 422);
+    assert!(!TwoFactor::is_enabled(&too_long).await.unwrap());
+
+    let longest = FakeUser {
+        id: "u".repeat(255),
+        email: "longest-id@example.com".into(),
+    };
+    TwoFactor::enroll(&longest)
+        .await
+        .expect("255 characters fit");
+}

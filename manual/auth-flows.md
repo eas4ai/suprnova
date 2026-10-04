@@ -658,7 +658,9 @@ Secrets and recovery codes are encrypted at rest with
 in their `Migrator::migrations()` - see [Bootstrapping](#bootstrapping).
 The table is keyed by `user_id`, a `TEXT` column on PostgreSQL and SQLite.
 MySQL and MariaDB can't index a `TEXT` key, so there the column is
-`VARCHAR(255)`, and a user id longer than 255 characters can't enroll.
+`VARCHAR(255)`. The attempt and rotation tables key the user id in 255
+characters on every engine, so `enroll` refuses a longer id with `422` on
+every engine.
 
 ### Enroll, confirm, verify
 
@@ -712,8 +714,10 @@ Two settings shape the lock:
 | `TWO_FACTOR_MAX_ATTEMPTS` | `5` | Failures inside the window that lock the second factor. |
 | `TWO_FACTOR_LOCKOUT_MINUTES` | `15` | How long each attempt counts. A lock lifts once the failure that completed it is this old. |
 
-Both must be whole numbers of at least 1. `Config::init` checks them at
-boot, so a zero or malformed value stops the app with the variable named.
+Both must be whole numbers of at least 1, and the window at most 43200
+minutes (thirty days): a longer window reaches back past the timestamp
+range MySQL and MariaDB store. `Config::init` checks them at boot, so a
+zero, malformed or too-long value stops the app with the variable named.
 To set them in code instead, bind a `TwoFactorLockout`, which wins over the
 environment:
 

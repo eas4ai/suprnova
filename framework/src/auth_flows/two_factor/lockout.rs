@@ -10,11 +10,18 @@ const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 /// Minutes an attempt counts, when `TWO_FACTOR_LOCKOUT_MINUTES` is unset.
 const DEFAULT_LOCKOUT_MINUTES: u32 = 15;
 
+/// The longest window, thirty days. The window's start is compared with
+/// stored attempt times, and a start reaching back past 1970 falls outside
+/// the TIMESTAMP range MySQL and MariaDB store; thirty days is far inside
+/// it and longer than any lockout an application needs.
+const MAX_LOCKOUT_MINUTES: u32 = 43_200;
+
 /// How many second-factor failures lock the [`super::TwoFactor`] proof
 /// paths, and for how long each failure counts.
 ///
 /// Read from `TWO_FACTOR_MAX_ATTEMPTS` (default 5) and
-/// `TWO_FACTOR_LOCKOUT_MINUTES` (default 15) in the application's `.env`
+/// `TWO_FACTOR_LOCKOUT_MINUTES` (default 15, at most 43200, thirty days)
+/// in the application's `.env`
 /// file, or built in code with [`Self::new`] and bound with
 /// `App::singleton`, which wins over the environment. `Config::init`
 /// checks the environment values at boot, so a bad value stops the app
@@ -40,9 +47,10 @@ impl TwoFactorLockout {
     ///
     /// # Errors
     ///
-    /// Returns [`FrameworkError`] when either value is zero: a zero
+    /// Returns [`FrameworkError`] when either value is zero - a zero
     /// threshold would lock every proof, and a zero window would count
-    /// nothing.
+    /// nothing - or when the window is longer than thirty days (43200
+    /// minutes).
     pub fn new(max_attempts: u32, window_minutes: u32) -> Result<Self, FrameworkError> {
         if max_attempts == 0 {
             return Err(rejected(
@@ -56,6 +64,13 @@ impl TwoFactorLockout {
                 "TWO_FACTOR_LOCKOUT_MINUTES",
                 "0",
                 "must be at least 1",
+            ));
+        }
+        if window_minutes > MAX_LOCKOUT_MINUTES {
+            return Err(rejected(
+                "TWO_FACTOR_LOCKOUT_MINUTES",
+                &window_minutes.to_string(),
+                "must be at most 43200 (thirty days)",
             ));
         }
         Ok(Self {
@@ -181,11 +196,14 @@ mod tests {
             ("TWO_FACTOR_LOCKOUT_MINUTES", "0"),
             ("TWO_FACTOR_LOCKOUT_MINUTES", "1.5"),
             ("TWO_FACTOR_LOCKOUT_MINUTES", "99999999999"),
+            ("TWO_FACTOR_LOCKOUT_MINUTES", "43201"),
         ] {
             let error = TwoFactorLockout::from_source(&read(vec![(key, value)])).unwrap_err();
             assert!(error.to_string().contains(key), "{error}");
         }
         assert!(TwoFactorLockout::new(0, 15).is_err());
         assert!(TwoFactorLockout::new(5, 0).is_err());
+        assert!(TwoFactorLockout::new(5, 43_201).is_err());
+        assert!(TwoFactorLockout::new(5, 43_200).is_ok());
     }
 }

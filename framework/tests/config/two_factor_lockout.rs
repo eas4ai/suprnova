@@ -64,3 +64,21 @@ fn valid_or_unset_values_boot() {
     set_env("TWO_FACTOR_LOCKOUT_MINUTES", Some("60"));
     boot().expect("positive whole numbers boot");
 }
+
+#[test]
+fn a_window_past_the_maximum_fails_boot_and_names_the_variable() {
+    let _env = crate::env_lock::lock_env();
+    __reset_loaded_keys_for_tests();
+    let _snap = EnvSnapshot::capture(&KEYS);
+
+    // Thirty days is the most a window may span; a longer one reaches back
+    // past the timestamp range some engines store.
+    for value in ["43201", "4294967295"] {
+        let error = boot_with("TWO_FACTOR_LOCKOUT_MINUTES", value)
+            .expect_err("a window past the maximum must fail boot");
+        let message = error.to_string();
+        assert!(message.contains("TWO_FACTOR_LOCKOUT_MINUTES"), "{message}");
+    }
+    set_env("TWO_FACTOR_LOCKOUT_MINUTES", Some("43200"));
+    boot().expect("thirty days is accepted");
+}

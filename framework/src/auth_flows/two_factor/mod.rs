@@ -55,6 +55,10 @@ const ISSUER_ENV: &str = "APP_NAME";
 const DEFAULT_ISSUER: &str = "Suprnova";
 const RECOVERY_CODE_COUNT: usize = 10;
 
+/// The longest user id the second-factor tables key: `two_factor_attempts`
+/// and `two_factor_rotations` hold it in 255 characters on every engine.
+const MAX_USER_ID_CHARS: usize = 255;
+
 /// Forward-skew window the TOTP construction in [`check_code`] accepts
 /// (`skew=1`). The replay-claim stamp uses `current + TOTP_SKEW_STEPS`
 /// so the next-timestep replay of the same code is rejected - a bare
@@ -136,6 +140,9 @@ impl TwoFactor {
     ///
     /// # Errors
     ///
+    /// Returns `FrameworkError::domain(.., 422)` when the user id is longer
+    /// than 255 characters, the width the second-factor tables key.
+    ///
     /// Returns `FrameworkError::domain(.., 409)` when the user
     /// **already has a confirmed 2FA enrollment**. Overwriting a
     /// confirmed secret without proof of the existing one would let a
@@ -148,6 +155,15 @@ impl TwoFactor {
     /// the write itself, so a confirmation that lands while `enroll` runs
     /// also gets the `409`.
     pub async fn enroll<U: TwoFactorUser>(user: &U) -> Result<EnrollmentResponse, FrameworkError> {
+        // The attempt and rotation tables key the user id in 255
+        // characters on every engine. Refuse a longer id here rather than
+        // enroll it and answer 503 at every proof.
+        if user.user_id().chars().count() > MAX_USER_ID_CHARS {
+            return Err(FrameworkError::domain(
+                "user id is longer than the 255 characters two-factor storage keys",
+                422,
+            ));
+        }
         // No separate "already enabled?" read: the write refuses a
         // confirmed row in the same statement that replaces a pending one,
         // so a confirmation cannot land between a check and the write.
