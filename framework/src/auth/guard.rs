@@ -99,6 +99,18 @@ impl Auth {
     ///
     /// Regenerates the session ID to prevent session fixation, and rotates the
     /// CSRF token.
+    ///
+    /// # With Magnetar installed
+    ///
+    /// Every web login then needs a Magnetar session, so revocation and auth
+    /// epochs reach it. This method cannot await the engine, so
+    /// [`SessionMiddleware`](crate::SessionMiddleware) issues the session for
+    /// `user_id` at the end of the request and records its binding before it
+    /// stores the session. When the engine refuses - an unknown user, a
+    /// Magnetar second factor this login did not prove - the request fails
+    /// with that error and nothing is stored. The async session-guard
+    /// logins ([`Auth::attempt`](Self::attempt), [`Auth::login`](Self::login))
+    /// ask the engine before they log in, so their refusal fires no event.
     pub fn login_id(user_id: impl Into<String>) -> Result<(), crate::error::FrameworkError> {
         Self::refuse_custom_default_guard("login_id", "login")?;
         Self::login_guard_id(&Self::default_guard_name(), user_id)
@@ -185,8 +197,15 @@ impl Auth {
         ttl_minutes: i64,
     ) -> Result<(), crate::error::FrameworkError> {
         Self::ensure_remember_issue_scopes()?;
-        Self::flush_pending_remember_revocations().await?;
         let user_id = user_id.into();
+        // With the Magnetar engine installed, ask before anything changes:
+        // a refused login must not leave a remember credential behind.
+        let host_auth_epoch = if guard_name == Self::default_guard_name() {
+            crate::magnetar_integration::admit_host_sign_in(&user_id).await?
+        } else {
+            None
+        };
+        Self::flush_pending_remember_revocations().await?;
         let remember_to_revoke = Self::prepare_guard_remember_identity_replacement(guard_name);
         if let Some((previous_user_id, selector)) = remember_to_revoke {
             Self::revoke_remember_selector(guard_name, &previous_user_id, &selector).await?;
@@ -195,6 +214,9 @@ impl Auth {
         // also verifies the session scope is installed - failing loud here
         // before the DB row gets written by `issue_remember_cookie`.
         Self::login_guard_id(guard_name, user_id.clone())?;
+        if let Some(auth_epoch) = host_auth_epoch {
+            crate::session::middleware::record_host_sign_in_epoch(&user_id, auth_epoch);
+        }
         // Issue the row + queue the cookie.
         Self::issue_remember_cookie_for_guard(guard_name, &user_id, ttl_minutes).await
     }
@@ -216,6 +238,11 @@ impl Auth {
     /// call [`login_remember`](Self::login_remember) instead - it
     /// handles session id rotation + CSRF + auth user + remember-me in
     /// one step.
+    ///
+    /// With the Magnetar engine installed, the credential is a Magnetar
+    /// remember credential, and Magnetar treats a remembered sign-in as
+    /// having proved every factor. Issue one only for a user who proved
+    /// every factor the account has: this method does not check.
     pub async fn issue_remember_cookie(
         user_id: &str,
         ttl_minutes: i64,
@@ -685,6 +712,8 @@ impl Auth {
         // session would share an ID - defeating "complete session
         // destruction." Laravel's `session()->invalidate()` is
         // explicitly `flush()` + `regenerate()`; we match that here.
+        // The default identity's Magnetar session ends with it.
+        crate::session::middleware::retire_default_binding_before_flush();
         regenerate_session_id();
         session_mut(|session| {
             session.flush();
@@ -1387,7 +1416,9 @@ impl Auth {
     /// use suprnova::Auth;
     ///
     /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
-    /// let user = Auth::password().register("alice@example.com", "s3cret!").await?;
+    /// // An address that already has an account yields
+    /// // `Registration::Accepted` and never that account.
+    /// let _registration = Auth::password().register("alice@example.com", "s3cret!").await?;
     /// let (user, session) = Auth::password()
     ///     .authenticate("alice@example.com", "s3cret!", None, None)
     ///     .await?;

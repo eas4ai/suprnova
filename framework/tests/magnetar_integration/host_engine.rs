@@ -966,6 +966,10 @@ async fn magnetar_host_engine_child() {
         "oauth" => {
             run_oauth_host_engine_scenario().await;
         }
+        #[cfg(feature = "magnetar-oauth")]
+        "oauth-framework-totp" => {
+            run_oauth_framework_totp_scenario().await;
+        }
         other => panic!("unknown Magnetar host-engine child mode: {other}"),
     }
 }
@@ -1103,7 +1107,9 @@ async fn run_password_host_engine_scenario() {
             .await
     })
     .await
-    .expect("password facade registers through real Magnetar storage");
+    .expect("password facade registers through real Magnetar storage")
+    .created()
+    .expect("registration creates a new account");
     assert_eq!(registered.email, "host-engine@example.test");
     let created = storage
         .find_by_email("host-engine@example.test")
@@ -2151,6 +2157,177 @@ fn offline_config(
 #[test]
 fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_after_success() {
     assert_magnetar_host_engine_child_succeeds("oauth");
+}
+
+/// An OAuth sign-in through Magnetar never reads the framework's own TOTP,
+/// so it must refuse an account that has it, as the framework logins refuse
+/// an account with a Magnetar factor.
+#[cfg(feature = "magnetar-oauth")]
+#[test]
+fn framework_totp_refuses_a_magnetar_oauth_sign_in() {
+    assert_magnetar_host_engine_child_succeeds("oauth-framework-totp");
+}
+
+#[cfg(feature = "magnetar-oauth")]
+async fn run_oauth_framework_totp_scenario() {
+    use sea_orm_migration::MigratorTrait;
+    use suprnova::auth_flows::{TwoFactor, TwoFactorUser};
+
+    struct TotpMigrator;
+    impl MigratorTrait for TotpMigrator {
+        fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
+            vec![
+                Box::new(suprnova::auth_flows::two_factor::migration::Migration),
+                Box::new(suprnova::auth_flows::two_factor::migration_replay::Migration),
+                Box::new(suprnova::auth_flows::two_factor::migration_attempts::Migration),
+                Box::new(suprnova::auth_flows::two_factor::migration_rotation::Migration),
+            ]
+        }
+    }
+    struct TotpUser {
+        id: String,
+        email: String,
+    }
+    impl TwoFactorUser for TotpUser {
+        fn user_id(&self) -> &str {
+            &self.id
+        }
+        fn email(&self) -> &str {
+            &self.email
+        }
+    }
+
+    suprnova::testing::install_test_encryption_key();
+    let connection = Database::connect("sqlite::memory:")
+        .await
+        .expect("connect SQLite");
+    create_application_auth_tables(&connection).await;
+    TotpMigrator::up(&connection, None)
+        .await
+        .expect("framework TOTP tables");
+    // The TwoFactor facade reads the application's default connection.
+    suprnova::App::singleton(suprnova::DbConnection::from_raw(connection.clone()));
+    let binding = MagnetarBinding::<FrameworkAuthSchema>::new(connection);
+    let storage = Arc::new(SeaOrmStorage::<FrameworkAuthSchema>::new(
+        binding.database().clone(),
+    ));
+    let password_verifier = Arc::new(test_password_verifier());
+    let password = Arc::new(PasswordAuthService::new(
+        storage.clone(),
+        storage.clone(),
+        password_verifier.clone(),
+    ));
+    // No Magnetar factor: only the framework's TOTP stands in the way.
+    let factors = Arc::new(FrameworkFactorVerifier::enrolled());
+    factors
+        .enrolled
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let engine = Arc::new(
+        MagnetarHostEngine::new(MagnetarHostEngineParts {
+            binding,
+            session_store: Arc::new(FrameworkSessionStore {
+                database: storage.database().clone(),
+            }),
+            remember_store: Arc::new(magnetar::default_schema::sql_stores::SqlRememberStore(
+                storage.database().clone(),
+            )),
+            ceremonies: storage.clone(),
+            factors,
+            password,
+            password_lockout: Arc::new(RecordingPasswordLockout::default()),
+            first_email_proof: Arc::new(FrameworkFirstProofStore {
+                storage: storage.clone(),
+            }),
+            password_verifier,
+            encryptor: Arc::new(AeadEncryptor::new([33; 32])),
+            session_config: OpaqueConfig::default(),
+            users: Arc::new(FrameworkUsers {
+                database: storage.database().clone(),
+            }),
+            lifecycle_deliveries: Arc::new(SqliteLifecycleDeduplication {
+                database: storage.database().clone(),
+            }),
+            lifecycle_lease_duration: suprnova::chrono::Duration::seconds(30),
+        })
+        .expect("compose host engine"),
+    );
+    let transport = Arc::new(OfflineOAuthTransport::new(vec![
+        offline_token(),
+        offline_response("verified"),
+        offline_token(),
+        offline_response("verified"),
+    ]));
+    suprnova::magnetar_integration::install_magnetar_oauth_engine_with_factor(
+        Arc::new(
+            engine
+                .oauth_service(offline_config(transport))
+                .expect("compose installed OAuth service"),
+        ),
+        engine.clone(),
+    )
+    .expect("install OAuth dispatcher with its factor and session authority");
+
+    // The first sign-in creates the account, which has no second factor.
+    let slot = suprnova::session::new_session_slot_for_test();
+    let kickoff = suprnova::session::session_scope_for_test(slot.clone(), async {
+        suprnova::Auth::oauth("offline").begin().await
+    })
+    .await
+    .expect("begin the first OAuth sign-in");
+    let (user, _) = suprnova::session::session_bind_scopes_for_test(slot, async {
+        suprnova::Auth::oauth("offline")
+            .complete("code", &kickoff.state)
+            .await
+    })
+    .await
+    .expect("an account without a second factor signs in");
+
+    // The account turns on the framework's TOTP.
+    let account = TotpUser {
+        id: user.id.to_string(),
+        email: user.email.clone(),
+    };
+    let enrollment = TwoFactor::enroll(&account).await.expect("enroll");
+    let secret = url::Url::parse(&enrollment.otpauth_url)
+        .expect("otpauth url")
+        .query_pairs()
+        .find(|(key, _)| key == "secret")
+        .map(|(_, value)| value.into_owned())
+        .expect("secret");
+    let code = totp_rs::TOTP::new(
+        totp_rs::Algorithm::SHA1,
+        6,
+        1,
+        30,
+        totp_rs::Secret::Encoded(secret)
+            .to_bytes()
+            .expect("decode secret"),
+        None,
+        "user".into(),
+    )
+    .expect("totp")
+    .generate_current()
+    .expect("code");
+    TwoFactor::confirm(&account, &code).await.expect("confirm");
+
+    // The next OAuth sign-in proves no TOTP code and is refused.
+    let slot = suprnova::session::new_session_slot_for_test();
+    let kickoff = suprnova::session::session_scope_for_test(slot.clone(), async {
+        suprnova::Auth::oauth("offline").begin().await
+    })
+    .await
+    .expect("begin the second OAuth sign-in");
+    let outcome = suprnova::session::session_bind_scopes_for_test(slot, async {
+        suprnova::Auth::oauth("offline")
+            .complete("code", &kickoff.state)
+            .await
+    })
+    .await;
+    assert!(
+        matches!(&outcome, Err(error) if error.status_code() == 409),
+        "an account with framework TOTP is refused: {:?}",
+        outcome.map(|(user, _)| user.id)
+    );
 }
 
 #[cfg(feature = "magnetar-oauth")]

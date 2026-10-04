@@ -196,7 +196,8 @@ pub trait ProviderTokenStore: Send + Sync {
     /// linked-account provider exchange begins. The existing deadline is
     /// preserved so followers can distinguish a live exchange from an
     /// abandoned one. A successful implementation must replace the exact
-    /// ordinary `claim_id` with [`exchange_claim_id(claim_id)`]. The default
+    /// ordinary `claim_id` with
+    /// [`exchange_claim_id(claim_id)`](exchange_claim_id). The default
     /// fails closed for custom stores.
     async fn mark_exchange_started(
         &self,

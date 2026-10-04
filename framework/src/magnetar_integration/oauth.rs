@@ -341,6 +341,11 @@ fn map_error(error: super::engine::HostOAuthError) -> FrameworkError {
         super::engine::HostOAuthError::Protocol(error) => {
             FrameworkError::domain(error.to_string(), error.class().status())
         }
+        super::engine::HostOAuthError::Auth(magnetar::Error::Conflict { resource, message })
+            if resource == super::engine::FRAMEWORK_SECOND_FACTOR =>
+        {
+            FrameworkError::domain(message, 409)
+        }
         super::engine::HostOAuthError::Auth(magnetar::Error::InvalidInput { message, .. })
         | super::engine::HostOAuthError::Auth(magnetar::Error::NotFound {
             identifier: message,

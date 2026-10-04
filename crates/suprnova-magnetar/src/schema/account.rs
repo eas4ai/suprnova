@@ -20,6 +20,15 @@ pub trait LinkedAccountFields: EntityBinding {
     fn read_account_id(model: &Self::Model) -> String;
     /// Return the generated linked-account identifier column.
     fn account_id_column() -> Self::Column;
+    /// Convert an opaque linked-account identifier into the binding's
+    /// database value, for the statements that name one row by its id.
+    ///
+    /// The default binds text. A binding with an integer key must override
+    /// it: PostgreSQL has no implicit text-to-integer cast, so a text value
+    /// compared with an integer column fails the whole statement.
+    fn account_id_value(value: &str) -> sea_orm::Value {
+        value.to_owned().into()
+    }
     /// Set the linked-account identifier when constructing a new model.
     fn write_account_id(model: &mut Self::ActiveModel, value: &str);
     /// Read the owning user identifier.

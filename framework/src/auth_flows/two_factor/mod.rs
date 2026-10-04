@@ -23,10 +23,15 @@
 //! stringy `user_id` (typically `UserId::to_string()`). There
 //! is no FK to a user table.
 
+mod attempts;
 pub mod entity;
+pub mod lockout;
 pub mod migration;
+pub mod migration_attempts;
 pub mod migration_replay;
+pub mod migration_rotation;
 pub mod recovery;
+mod rotation;
 
 #[cfg(any(
     feature = "database-sqlite",
@@ -44,9 +49,15 @@ use sea_orm::{
 };
 use totp_rs::{Algorithm, Secret, TOTP};
 
+pub use lockout::TwoFactorLockout;
+
 const ISSUER_ENV: &str = "APP_NAME";
 const DEFAULT_ISSUER: &str = "Suprnova";
 const RECOVERY_CODE_COUNT: usize = 10;
+
+/// The longest user id the second-factor tables key: `two_factor_attempts`
+/// and `two_factor_rotations` hold it in 255 characters on every engine.
+const MAX_USER_ID_CHARS: usize = 255;
 
 /// Forward-skew window the TOTP construction in [`check_code`] accepts
 /// (`skew=1`). The replay-claim stamp uses `current + TOTP_SKEW_STEPS`
@@ -129,6 +140,9 @@ impl TwoFactor {
     ///
     /// # Errors
     ///
+    /// Returns `FrameworkError::domain(.., 422)` when the user id is longer
+    /// than 255 characters, the width the second-factor tables key.
+    ///
     /// Returns `FrameworkError::domain(.., 409)` when the user
     /// **already has a confirmed 2FA enrollment**. Overwriting a
     /// confirmed secret without proof of the existing one would let a
@@ -137,25 +151,40 @@ impl TwoFactor {
     /// valid TOTP code or recovery code as proof.
     ///
     /// Re-enrolling on an unconfirmed (pending) row is allowed - the
-    /// prior enrollment never became authoritative.
+    /// prior enrollment never became authoritative. The check is part of
+    /// the write itself, so a confirmation that lands while `enroll` runs
+    /// also gets the `409`.
     pub async fn enroll<U: TwoFactorUser>(user: &U) -> Result<EnrollmentResponse, FrameworkError> {
-        if Self::is_enabled(user).await? {
+        // The attempt and rotation tables key the user id in 255
+        // characters on every engine. Refuse a longer id here rather than
+        // enroll it and answer 503 at every proof.
+        if user.user_id().chars().count() > MAX_USER_ID_CHARS {
             return Err(FrameworkError::domain(
-                "2FA is already enabled for this account; call re_enroll with a valid TOTP or recovery code as proof to rotate the secret",
-                409,
+                "user id is longer than the 255 characters two-factor storage keys",
+                422,
             ));
         }
-        Self::write_new_enrollment(user).await
+        // No separate "already enabled?" read: the write refuses a
+        // confirmed row in the same statement that replaces a pending one,
+        // so a confirmation cannot land between a check and the write.
+        let (response, encrypted_secret, encrypted_recovery) = Self::new_secret(user)?;
+        write_enrollment_row(user.user_id(), encrypted_secret, encrypted_recovery).await?;
+        Ok(response)
     }
 
     /// Rotate the secret for an existing confirmed 2FA enrollment.
     /// Requires either a valid current TOTP code or an unused
     /// recovery code as proof of possession.
     ///
-    /// On success, the row is overwritten with a fresh secret + 10
-    /// fresh recovery codes; `confirmed_at` is reset to NULL so the
-    /// user must call [`Self::confirm`] with a code from the new
-    /// secret before 2FA is active again.
+    /// On success, a fresh secret + 10 fresh recovery codes wait as a
+    /// pending rotation until [`Self::confirm`] proves a code from the new
+    /// secret. Until then the confirmed secret and its recovery codes keep
+    /// gating sign-in, so a rotation nobody finishes never leaves the
+    /// account without a second factor, and [`Self::enroll`], which takes
+    /// no proof, cannot replace the pending secret. A second `re_enroll`
+    /// replaces the pending rotation. The rotation waits in
+    /// `two_factor_rotations`, which
+    /// [`migration_rotation::Migration`] creates.
     ///
     /// # Errors
     ///
@@ -164,6 +193,9 @@ impl TwoFactor {
     ///   window) nor a recovery code.
     /// - `FrameworkError::domain(.., 400)` when no confirmed
     ///   enrollment exists - call [`Self::enroll`] instead.
+    /// - `FrameworkError::domain(.., 429)` while wrong codes have locked
+    ///   the second factor (see [`Self::verify`]), and `.., 503` when the
+    ///   attempt store or the rotation store fails.
     pub async fn re_enroll<U: TwoFactorUser>(
         user: &U,
         proof: &str,
@@ -175,54 +207,31 @@ impl TwoFactor {
             ));
         }
 
-        // Reject early if the account is locked by brute-force
-        // throttling - symmetric with [`Self::complete_challenge`]'s
-        // gate. Without it, an attacker who tripped lockout via
-        // wrong proof codes could still rotate the secret by
-        // submitting the right one (since `verify_internal` itself
-        // doesn't consult lockout state). Best-effort: when Magnetar
-        // isn't initialised (test / dev configs that exercise the
-        // 2FA primitives without booting Magnetar), the gate
-        // short-circuits to "not locked" - same posture as the
-        // other brute-force interactions in this module.
-        if is_locked_best_effort(user.email()).await {
-            return Err(FrameworkError::domain(
-                "account is locked due to too many failed attempts",
-                429,
-            ));
-        }
-
-        // Use silent variants so a single bad proof counts as ONE
-        // failed attempt, not two (one from `verify` + one from
-        // `consume_recovery_code`). The outer layer records the
-        // canonical attempt once.
-        let totp_accepted = Self::verify_internal(user, proof).await?;
-        let proof_accepted = if totp_accepted {
-            true
-        } else {
-            Self::consume_recovery_internal(user, proof).await?
-        };
-
+        // One reserved attempt covers both proof forms, so a bad proof
+        // counts once, and a locked account is refused before the proof is
+        // read.
+        let proof_accepted = settle_attempt(user.user_id(), user.email(), || {
+            Self::verify_totp_or_recovery(user, proof)
+        })
+        .await?;
         if !proof_accepted {
-            record_2fa_failure(user.email()).await;
             return Err(FrameworkError::domain(
                 "re-enrollment proof is neither a valid TOTP code nor a recovery code",
                 401,
             ));
         }
-        reset_2fa_failures(user.email()).await;
 
-        Self::write_new_enrollment(user).await
+        let (response, encrypted_secret, encrypted_recovery) = Self::new_secret(user)?;
+        rotation::store(user.user_id(), encrypted_secret, encrypted_recovery).await?;
+        Ok(response)
     }
 
-    /// Internal helper - generate + persist a fresh secret. Used by
-    /// [`Self::enroll`] (no prior state) and [`Self::re_enroll`]
-    /// (after proof). Overwrites any existing row's secret, recovery
-    /// codes, and `confirmed_at` (re-confirmation required against
-    /// the new secret).
-    async fn write_new_enrollment<U: TwoFactorUser>(
+    /// Internal helper - mint a fresh secret and recovery codes. Returns the
+    /// one-time artifacts and their encrypted forms, for [`Self::enroll`]
+    /// (a pending enrollment) and [`Self::re_enroll`] (a pending rotation).
+    fn new_secret<U: TwoFactorUser>(
         user: &U,
-    ) -> Result<EnrollmentResponse, FrameworkError> {
+    ) -> Result<(EnrollmentResponse, String, String), FrameworkError> {
         let secret_bytes = Secret::generate_secret()
             .to_bytes()
             .map_err(|e| FrameworkError::internal(format!("totp secret bytes: {e}")))?;
@@ -257,53 +266,118 @@ impl TwoFactor {
             &recovery_codes.join("\n"),
         )?;
 
-        upsert_row(
-            user.user_id(),
+        Ok((
+            EnrollmentResponse {
+                otpauth_url,
+                qr_code_svg,
+                recovery_codes,
+            },
             encrypted_secret,
-            None,
-            Some(encrypted_recovery),
-        )
-        .await?;
-
-        Ok(EnrollmentResponse {
-            otpauth_url,
-            qr_code_svg,
-            recovery_codes,
-        })
+            encrypted_recovery,
+        ))
     }
 
     /// Confirm a pending enrollment with a TOTP code from the user's
     /// authenticator app. On success, stamps `confirmed_at` and
     /// dispatches [`TwoFactorEnrolled`].
     ///
+    /// The confirmation stamps exactly the enrollment the code was checked
+    /// against. When a concurrent [`Self::enroll`] replaces the secret
+    /// between the check and the stamp, nothing is confirmed: the code
+    /// proved possession of the old secret, not of the new one.
+    ///
     /// # Errors
     ///
     /// - `FrameworkError::domain(.., 401)` if no row exists for this
     ///   user, or if the supplied code does not match.
+    /// - `FrameworkError::domain(.., 409)` if the enrollment was replaced
+    ///   or removed while the code was being checked, or is already
+    ///   confirmed.
+    /// - `FrameworkError::domain(.., 429)` while wrong codes have locked
+    ///   the second factor (see [`Self::verify`]), and `.., 503` when the
+    ///   attempt store fails before the confirmation commits. A failure to
+    ///   settle the attempt after it commits is logged, not returned: the
+    ///   second factor is live, and [`TwoFactorEnrolled`] fires.
     pub async fn confirm<U: TwoFactorUser>(user: &U, code: &str) -> Result<(), FrameworkError> {
-        // Throttle confirmation like every other code-checking path
-        // (`verify`, `complete_challenge`, `re_enroll`). Without a gate the
-        // 6-digit TOTP on a pending enrollment is online-grindable. Best-effort
-        // lockout: when Magnetar isn't initialised the gate reads "not locked",
-        // the same posture as the other brute-force interactions in this module.
-        if is_locked_best_effort(user.email()).await {
-            return Err(FrameworkError::domain(
-                "account is locked due to too many failed attempts",
-                429,
-            ));
-        }
-
-        let secret_b32 = load_secret(user.user_id())
+        let enrollment = load_secret(user.user_id())
             .await?
             .ok_or_else(|| FrameworkError::domain("no pending 2FA enrollment", 401))?;
+        // A confirmed row has nothing to confirm unless a proven rotation
+        // waits; the code is then checked against the rotation's secret.
+        let pending_rotation = if enrollment.confirmed {
+            match rotation::find(user.user_id()).await? {
+                Some(rotation) => Some(rotation),
+                None => {
+                    return Err(FrameworkError::domain(
+                        "2FA is already confirmed for this account",
+                        409,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let checked_secret = pending_rotation
+            .as_ref()
+            .map_or(enrollment.secret_b32.as_str(), |rotation| {
+                rotation.secret_b32.as_str()
+            });
 
-        if !check_code(&secret_b32, code)? {
-            record_2fa_failure(user.email()).await;
-            return Err(FrameworkError::domain("invalid 2FA code", 401));
+        // Confirmation is throttled like every other code-checking path:
+        // without it the 6-digit TOTP of a pending enrollment could be
+        // ground online.
+        let attempt = ProofAttempt::admit(user.user_id(), user.email()).await?;
+        let stamped = async {
+            let now = crate::clock::now();
+            if !check_code(checked_secret, code, now.timestamp())? {
+                return Ok(false);
+            }
+            let timestep = totp_timestep_at(now.timestamp());
+            let committed = match &pending_rotation {
+                None => {
+                    stamp_confirmation(user.user_id(), &enrollment.ciphertext, timestep, now)
+                        .await?
+                }
+                Some(rotation) => {
+                    rotation::promote(
+                        user.user_id(),
+                        &enrollment.ciphertext,
+                        &rotation.ciphertext,
+                        timestep,
+                        now,
+                    )
+                    .await?
+                }
+            };
+            if !committed {
+                return Err(FrameworkError::domain(
+                    "the 2FA enrollment changed while it was being confirmed; confirm a code from the current enrollment",
+                    409,
+                ));
+            }
+            Ok(true)
         }
-        reset_2fa_failures(user.email()).await;
-
-        set_confirmed_at(user.user_id(), crate::clock::now()).await?;
+        .await;
+        match stamped {
+            Ok(true) => {
+                // The confirmation has committed. A failure to settle the
+                // attempt after it must not report the live second factor as
+                // not enabled: the reservation stays counted until it ages
+                // out, which errs toward a lock, and the error is logged.
+                if let Err(error) = attempt.accepted().await {
+                    tracing::error!(
+                        error = %error,
+                        "a two-factor confirmation committed but its attempt could not be settled; \
+                         the attempt stays counted until the window passes"
+                    );
+                }
+            }
+            Ok(false) => {
+                attempt.rejected().await?;
+                return Err(FrameworkError::domain("invalid 2FA code", 401));
+            }
+            Err(error) => return Err(attempt.abandon(error).await),
+        }
 
         // Discard dispatch errors - the confirmation has already
         // committed; a downstream listener failure must not surface
@@ -345,97 +419,48 @@ impl TwoFactor {
     /// conditional `UPDATE ... WHERE last_used_timestep IS NULL OR
     /// last_used_timestep < :current`, and the verify only succeeds
     /// when that statement affects exactly one row. Two concurrent
-    /// verifies in the same timestep therefore cannot both win: the
-    /// first flips the column, the second's predicate no longer
-    /// matches and it is treated as a replay. A plain read-modify-write
+    /// verifies therefore cannot both win, even when they straddle a
+    /// timestep boundary: the first flips the column, the second's
+    /// predicate no longer matches and it is treated as a replay. A plain read-modify-write
     /// would be a TOCTOU race - both verifies read the pre-stamp row,
     /// both validate the same code, both stamp - that silently defeats
     /// the guard under concurrency.
     ///
     /// # Brute-force throttling
     ///
-    /// Failed verifies are recorded against the user's email via
-    /// `crate::auth_flows::BruteForce::record_failed_attempt`.
-    /// Crossing the configured threshold locks the account from
-    /// **both** 2FA and password login until an admin unlocks it or
-    /// the lockout window expires - defense in depth against online
-    /// brute-force of the TOTP search space. Successful verifies
-    /// reset the failed-attempt counter via
-    /// `crate::auth_flows::BruteForce::reset_attempts`.
+    /// Each call reserves one attempt in the second-factor counter before
+    /// the code is read - the counter every proof path of this facade
+    /// shares, [`Self::complete_challenge`] included. A wrong code, a
+    /// replay or a lost claim race turns the reservation into a failed
+    /// attempt. The configured number of failures inside the configured
+    /// window ([`TwoFactorLockout`]: five in fifteen minutes by default)
+    /// lock the second factor
+    /// until they age out or [`Self::unlock`] clears them. A locked user is
+    /// refused before any code is evaluated, so the right code cannot open
+    /// it either, and parallel guesses cannot all pass one status read. A
+    /// successful verify clears the failures.
+    ///
+    /// The counter is the framework's `two_factor_attempts` table, keyed by
+    /// the user id, not the per-email password counter: a successful
+    /// password check does not clear second-factor failures, and the lock
+    /// works with no Magnetar engine installed.
+    ///
+    /// # Errors
+    ///
+    /// - [`FrameworkError::domain`] with status `429` when the account is
+    ///   locked by brute-force throttling.
+    /// - [`FrameworkError::domain`] with status `503` when the attempt
+    ///   store cannot reserve or settle the attempt, including after a
+    ///   correct code whose success could not be recorded.
+    /// - Storage and decryption failures.
     pub async fn verify<U: TwoFactorUser>(user: &U, code: &str) -> Result<bool, FrameworkError> {
-        let db = DB::connection()?;
-        let Some(row) = entity::Entity::find_by_id(user.user_id().to_string())
-            .one(db.inner())
-            .await
-            .map_err(|e| FrameworkError::internal(format!("two_factor find: {e}")))?
-        else {
-            return Ok(false);
-        };
-        if row.confirmed_at.is_none() {
+        if !Self::is_enabled(user).await? {
             return Ok(false);
         }
-
-        let current_timestep = current_totp_timestep();
-        if let Some(last) = row.last_used_timestep
-            && current_timestep <= last
-        {
-            // Fast-path replay rejection: this user already verified at
-            // or after the current timestep, so refuse ANY code without
-            // even decrypting the secret. This is an optimization and a
-            // UX nicety, NOT the authoritative guard - under concurrency
-            // two verifies can both read the pre-stamp row and pass here.
-            // The atomic claim below is what actually closes the race.
-            // Counted as a failed attempt - replays from an observer
-            // should trip the lockout.
-            record_2fa_failure(user.email()).await;
-            return Ok(false);
-        }
-
-        let secret_b32 =
-            Crypt::decrypt_string(crate::crypto::CryptPurpose::TwoFactorSecret, &row.secret)?;
-        if !check_code(&secret_b32, code)? {
-            record_2fa_failure(user.email()).await;
-            return Ok(false);
-        }
-
-        // Atomically claim this timestep. The conditional WHERE turns
-        // check-and-stamp into a single statement: the first verify in a
-        // given timestep flips `last_used_timestep` to `claim_to`, and
-        // any concurrent verify's predicate no longer matches, so it
-        // affects zero rows. This is what makes the replay guard hold
-        // under concurrency - the previous read-modify-write let two
-        // racing verifies both stamp and both succeed (a TOCTOU race).
-        //
-        // `claim_to` is the *forward* edge of the TOTP skew window
-        // (`current + TOTP_SKEW_STEPS`). Stamping the bare `current`
-        // would leave the same code replayable at the next timestep,
-        // because `check_code` accepts codes for [T-1, T, T+1] at server
-        // time T - a captured code from T is still in [T, T+1, T+2] at
-        // T+1, and a bare-current stamp would not block it.
-        let claim_to = current_timestep + TOTP_SKEW_STEPS;
-        let claim = entity::Entity::update_many()
-            .col_expr(entity::Column::LastUsedTimestep, Expr::value(claim_to))
-            .col_expr(entity::Column::UpdatedAt, Expr::value(crate::clock::now()))
-            .filter(entity::Column::UserId.eq(user.user_id()))
-            .filter(
-                Condition::any()
-                    .add(entity::Column::LastUsedTimestep.is_null())
-                    .add(entity::Column::LastUsedTimestep.lt(claim_to)),
-            )
-            .exec(db.inner())
-            .await
-            .map_err(|e| FrameworkError::internal(format!("two_factor replay claim: {e}")))?;
-
-        if claim.rows_affected == 0 {
-            // A concurrent verify in the same timestep beat us to the
-            // claim. Identical outcome to a sequential replay: reject and
-            // count it as a failed attempt.
-            record_2fa_failure(user.email()).await;
-            return Ok(false);
-        }
-
-        reset_2fa_failures(user.email()).await;
-        Ok(true)
+        settle_attempt(user.user_id(), user.email(), || {
+            Self::verify_internal(user, code)
+        })
+        .await
     }
 
     /// Try to consume one recovery code. Returns `true` if a code
@@ -449,6 +474,16 @@ impl TwoFactor {
     /// victim account (or any flow that creates the row without
     /// confirming) could authenticate using only a fresh recovery
     /// code, bypassing TOTP entirely.
+    ///
+    /// Brute-force throttling is the same as [`Self::verify`]'s: the
+    /// attempt is reserved before the code is read, a wrong code counts
+    /// as a failed attempt, and a locked account is refused before any
+    /// code is consumed.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::verify`]: `429` while the account is locked,
+    /// `503` when the lockout store fails, and storage failures.
     pub async fn consume_recovery_code<U: TwoFactorUser>(
         user: &U,
         code: &str,
@@ -456,16 +491,10 @@ impl TwoFactor {
         if !Self::is_enabled(user).await? {
             return Ok(false);
         }
-        let consumed = recovery::consume(user.user_id(), code).await?;
-        // Same brute-force throttling as TwoFactor::verify - a wrong
-        // recovery code counts as a failed attempt against the user's
-        // email, so an attacker can't grind the 40-bit code space.
-        if consumed {
-            reset_2fa_failures(user.email()).await;
-        } else {
-            record_2fa_failure(user.email()).await;
-        }
-        Ok(consumed)
+        settle_attempt(user.user_id(), user.email(), || {
+            recovery::consume(user.user_id(), code)
+        })
+        .await
     }
 
     /// Internal silent variant of [`Self::verify`]: runs the full
@@ -484,48 +513,10 @@ impl TwoFactor {
         user: &U,
         code: &str,
     ) -> Result<bool, FrameworkError> {
-        let db = DB::connection()?;
-        let Some(row) = entity::Entity::find_by_id(user.user_id().to_string())
-            .one(db.inner())
-            .await
-            .map_err(|e| FrameworkError::internal(format!("two_factor find: {e}")))?
-        else {
+        let Some(current_timestep) = prepare_totp_claim(user.user_id(), code).await? else {
             return Ok(false);
         };
-        if row.confirmed_at.is_none() {
-            return Ok(false);
-        }
-
-        let current_timestep = current_totp_timestep();
-        if let Some(last) = row.last_used_timestep
-            && current_timestep <= last
-        {
-            return Ok(false);
-        }
-
-        let secret_b32 =
-            Crypt::decrypt_string(crate::crypto::CryptPurpose::TwoFactorSecret, &row.secret)?;
-        if !check_code(&secret_b32, code)? {
-            return Ok(false);
-        }
-
-        // Stamp the forward edge of the skew window - see
-        // [`Self::verify`]'s comment block for the full reasoning.
-        let claim_to = current_timestep + TOTP_SKEW_STEPS;
-        let claim = entity::Entity::update_many()
-            .col_expr(entity::Column::LastUsedTimestep, Expr::value(claim_to))
-            .col_expr(entity::Column::UpdatedAt, Expr::value(crate::clock::now()))
-            .filter(entity::Column::UserId.eq(user.user_id()))
-            .filter(
-                Condition::any()
-                    .add(entity::Column::LastUsedTimestep.is_null())
-                    .add(entity::Column::LastUsedTimestep.lt(claim_to)),
-            )
-            .exec(db.inner())
-            .await
-            .map_err(|e| FrameworkError::internal(format!("two_factor replay claim: {e}")))?;
-
-        Ok(claim.rows_affected > 0)
+        claim_totp_timestep(user.user_id(), current_timestep).await
     }
 
     /// Internal silent variant of [`Self::consume_recovery_code`]:
@@ -543,11 +534,47 @@ impl TwoFactor {
         recovery::consume(user.user_id(), code).await
     }
 
+    /// Check `proof` as a TOTP code, then as an unused recovery code,
+    /// without touching the attempt counter. The caller settles the one
+    /// attempt that covers both forms.
+    async fn verify_totp_or_recovery<U: TwoFactorUser>(
+        user: &U,
+        proof: &str,
+    ) -> Result<bool, FrameworkError> {
+        if Self::verify_internal(user, proof).await? {
+            return Ok(true);
+        }
+        Self::consume_recovery_internal(user, proof).await
+    }
+
     /// Returns `true` when an active (confirmed) 2FA enrollment
     /// exists for this user. Sugar over [`Self::is_enabled_by_id`]
     /// for callers that already hold a [`TwoFactorUser`].
     pub async fn is_enabled<U: TwoFactorUser>(user: &U) -> Result<bool, FrameworkError> {
         Self::is_enabled_by_id(user.user_id()).await
+    }
+
+    /// Whether the framework's TOTP must stop a sign-in of `user_id` that
+    /// did not go through [`Self::complete_challenge`]: Magnetar's own
+    /// sign-ins never read `two_factor_credentials`.
+    ///
+    /// An application without a default database connection, or without
+    /// the two-factor tables, has no framework TOTP, so the answer there is
+    /// `false`; any other failure is returned.
+    pub(crate) async fn gates_sign_in(user_id: &str) -> Result<bool, FrameworkError> {
+        let Ok(db) = DB::connection() else {
+            return Ok(false);
+        };
+        match entity::Entity::find_by_id(user_id.to_string())
+            .one(db.inner())
+            .await
+        {
+            Ok(row) => Ok(row.is_some_and(|row| row.confirmed_at.is_some())),
+            Err(error) if names_missing_credentials_table(&error.to_string()) => Ok(false),
+            Err(error) => Err(FrameworkError::internal(format!(
+                "two_factor find: {error}"
+            ))),
+        }
     }
 
     /// Returns `true` when an active (confirmed) 2FA enrollment
@@ -637,6 +664,10 @@ impl TwoFactor {
         // whose remember-me rows to delete, but the slot has to go
         // first for fail-closed safety.
         let saved_id = crate::auth::Auth::id();
+        // The auth epoch `Auth::attempt` read with the password in this
+        // request, if it signed this user in. Read before the auth slot is
+        // cleared, which forgets it.
+        let recorded_epoch = crate::session::middleware::recorded_host_sign_in_epoch(&user_id);
 
         // STEP 1: Tear down auth state. Pending and authed are
         // mutually exclusive - clear the auth slot, the request-
@@ -646,7 +677,7 @@ impl TwoFactor {
         // /login, no bypass through stale session state).
         crate::session::middleware::clear_auth_user();
         crate::auth::request_state::clear_current_user();
-        crate::session::middleware::set_two_factor_pending(user_id);
+        crate::session::middleware::set_two_factor_pending(user_id.clone());
         crate::session::middleware::set_two_factor_pending_remember(remember);
 
         // STEP 2: Revoke remember-me using the saved id. `Auth::id()`
@@ -667,7 +698,33 @@ impl TwoFactor {
             let clear = crate::session::middleware::create_forget_remember_cookie(&config);
             let _ = crate::session::middleware::push_pending_cookie(clear);
         }
-        Ok(())
+
+        // STEP 3: With the Magnetar engine installed, the promoted login
+        // will need a Magnetar session. Carry the auth epoch the password
+        // was checked at, so a password reset or sign-out-everywhere during
+        // the challenge cancels it, and refuse now an account the engine
+        // cannot sign in this way. The epoch is the one `Auth::attempt` read
+        // with the password; only a caller that checked the password itself
+        // gets the epoch current now. A current epoch past the recorded one
+        // means a reset already committed, and the challenge is refused.
+        match crate::magnetar_integration::admit_host_sign_in(&user_id).await {
+            Ok(current) => {
+                let auth_epoch = match (recorded_epoch, current) {
+                    (Some(recorded), Some(current)) if recorded != current => {
+                        Self::cancel_challenge();
+                        return Err(crate::magnetar_integration::expired_host_sign_in());
+                    }
+                    (Some(recorded), Some(_)) => Some(recorded),
+                    (_, current) => current,
+                };
+                crate::session::middleware::set_two_factor_pending_epoch(auth_epoch);
+                Ok(())
+            }
+            Err(error) => {
+                Self::cancel_challenge();
+                Err(error)
+            }
+        }
     }
 
     /// Read the user-id of a session that has a 2FA challenge
@@ -710,9 +767,9 @@ impl TwoFactor {
     /// 2FA-specific [`crate::auth_flows::events::TwoFactorChallenged`].
     /// On a bad code, dispatches
     /// [`crate::auth_flows::events::TwoFactorChallengeFailed`] and
-    /// records exactly one failed attempt against the brute-force
-    /// counter - single-attempt accounting even though both TOTP and
-    /// recovery-code paths are tried. Returns the full
+    /// records exactly one failed attempt in the second-factor counter -
+    /// single-attempt accounting even though both TOTP and recovery-code
+    /// paths are tried. Returns the full
     /// [`crate::magnetar_integration::User`] on success so the caller
     /// can branch the post-login redirect on user attributes.
     ///
@@ -724,19 +781,14 @@ impl TwoFactor {
     ///
     /// # Brute-force gating
     ///
-    /// The challenge endpoint is the symmetric counterpart of the
-    /// password endpoint that [`crate::auth_flows::LoginThrottleMiddleware`]
-    /// gates. This method enforces the same gate in-method via
-    /// [`crate::auth_flows::BruteForce::is_locked`] so a locked
-    /// account cannot bypass the lockout by submitting the right
-    /// code: a 429 fires before any code is checked. (Composing
-    /// `LoginThrottleMiddleware` in front of the challenge route is
-    /// also fine - both gates are idempotent.) Failed submissions
-    /// increment the counter exactly once even though both the TOTP
-    /// and recovery-code paths are tried - the silent
-    /// `verify_internal` / `consume_recovery_internal` cores skip BF
-    /// interaction so this method can record the single canonical
-    /// attempt itself.
+    /// The challenge reserves one attempt in the second-factor counter
+    /// that every proof path shares (see [`Self::verify`]) before it reads
+    /// the code, so a locked user cannot bypass the lock by submitting the
+    /// right code: a 429 fires before any code is checked. A failed
+    /// submission counts exactly once even though both the TOTP and the
+    /// recovery-code forms are tried. The counter is not the password
+    /// lockout that [`crate::auth_flows::LoginThrottleMiddleware`] checks:
+    /// a successful password check does not clear second-factor failures.
     ///
     /// # Promotion contract
     ///
@@ -749,7 +801,10 @@ impl TwoFactor {
     /// `Login` / `Authenticated` dispatches are the same shape and
     /// guard-attribution as a no-2FA password login, so listeners
     /// that hook those events (last-login timestamps, audit logs,
-    /// post-login redirects, …) fire here too.
+    /// post-login redirects, …) fire here too. With the Magnetar engine
+    /// installed, [`crate::SessionMiddleware`] backs the promoted login
+    /// with a Magnetar session at the end of the request, as it does for
+    /// [`crate::auth::Auth::login_id`].
     ///
     /// Remember-me issuance is best-effort after an accepted factor proof:
     /// a failure cannot make a single-use TOTP timestep or recovery code
@@ -766,6 +821,9 @@ impl TwoFactor {
     ///   user-id no longer resolves to a Magnetar user (deleted mid-
     ///   challenge) or the supplied code validates as neither a TOTP
     ///   code nor a recovery code.
+    /// - [`FrameworkError::domain`] with status `429` while wrong codes
+    ///   have locked the second factor, and `503` when the attempt store
+    ///   fails.
     pub async fn complete_challenge(
         code: &str,
     ) -> Result<crate::magnetar_integration::User, FrameworkError> {
@@ -794,27 +852,49 @@ impl TwoFactor {
             ));
         }
 
-        // Reserve the attempt before touching proof material. The lockout
-        // store serializes reservations for this identity, so concurrent
-        // requests cannot all pass a separate status read and then verify.
-        let admission =
-            crate::auth_flows::BruteForce::admit_attempt(&user.email, Some("two-factor challenge"))
-                .await?;
-        if !admission.admitted {
-            let _ = crate::events::EventFacade::dispatch(TwoFactorChallengeFailed {
-                user_id: pending_id.clone(),
-            })
-            .await;
-            return Err(FrameworkError::domain(
-                "account is locked due to too many failed attempts",
-                429,
-            ));
-        }
+        // The promotion needs a Magnetar session when the engine requires
+        // one. Ask before the code is read, so a refusal burns no code and
+        // fires no event: an account with a Magnetar second factor this
+        // challenge does not prove, or an auth epoch that moved since the
+        // password was checked (a password reset, sign-out-everywhere).
+        let recorded_epoch = crate::session::middleware::two_factor_pending_epoch();
+        let host_auth_epoch = match crate::magnetar_integration::admit_host_sign_in(&pending_id)
+            .await
+        {
+            Ok(Some(current)) if recorded_epoch.is_some_and(|recorded| recorded != current) => {
+                Self::cancel_challenge();
+                return Err(FrameworkError::domain(
+                    "the sign-in expired because the account's sessions were revoked; sign in again",
+                    401,
+                ));
+            }
+            Ok(current) => recorded_epoch.or(current),
+            Err(error) => {
+                if matches!(error.status_code(), 401 | 409) {
+                    Self::cancel_challenge();
+                }
+                return Err(error);
+            }
+        };
 
-        // Adapter so we can call the existing TwoFactorUser-keyed
-        // primitives - the silent variants don't thread the email
-        // through to brute-force (the wrapper layer below does that),
-        // but the trait still wants both.
+        // Reserve the attempt before touching proof material. The store
+        // serializes reservations per user, so concurrent requests cannot
+        // all pass a separate status read and then verify.
+        let attempt = match ProofAttempt::admit(&pending_id, &user.email).await {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                if error.status_code() == 429 {
+                    let _ = crate::events::EventFacade::dispatch(TwoFactorChallengeFailed {
+                        user_id: pending_id.clone(),
+                    })
+                    .await;
+                }
+                return Err(error);
+            }
+        };
+
+        // Adapter so the TwoFactorUser-keyed primitives can run against
+        // the pending user.
         struct ChallengeAdapter<'a> {
             user_id: &'a str,
             email: &'a str,
@@ -833,63 +913,25 @@ impl TwoFactor {
             email: &user.email,
         };
 
-        // TOTP first (fast path); fall back to recovery-code consume
-        // so the user isn't locked out when they've lost their
-        // authenticator app. The admission reservation above is the one
-        // canonical attempt record even though both proof paths are tried.
-        let totp_accepted = match Self::verify_internal(&adapter, code).await {
+        // TOTP first; fall back to a recovery code so the user isn't
+        // locked out when they've lost their authenticator app. The one
+        // reservation above is the canonical attempt for both forms.
+        let accepted = match Self::verify_totp_or_recovery(&adapter, code).await {
             Ok(accepted) => accepted,
-            Err(proof_error) => {
-                if let Err(cancel_error) =
-                    crate::auth_flows::BruteForce::cancel_admitted_attempt(&user.email, &admission)
-                        .await
-                {
-                    tracing::error!(
-                        original_error = %proof_error,
-                        cancellation_error = %cancel_error,
-                        "two-factor proof failed and attempt cancellation left state uncertain"
-                    );
-                    return Err(cancel_error);
-                }
-                return Err(proof_error);
-            }
-        };
-        let accepted = if totp_accepted {
-            true
-        } else {
-            match Self::consume_recovery_internal(&adapter, code).await {
-                Ok(accepted) => accepted,
-                Err(proof_error) => {
-                    if let Err(cancel_error) =
-                        crate::auth_flows::BruteForce::cancel_admitted_attempt(
-                            &user.email,
-                            &admission,
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            original_error = %proof_error,
-                            cancellation_error = %cancel_error,
-                            "two-factor recovery proof failed and attempt cancellation left state uncertain"
-                        );
-                        return Err(cancel_error);
-                    }
-                    return Err(proof_error);
-                }
-            }
+            Err(proof_error) => return Err(attempt.abandon(proof_error).await),
         };
         if !accepted {
-            crate::auth_flows::BruteForce::finish_admitted_failure(&user.email, &admission).await?;
+            attempt.rejected().await?;
             let _ = crate::events::EventFacade::dispatch(TwoFactorChallengeFailed {
                 user_id: pending_id.clone(),
             })
             .await;
             return Err(FrameworkError::domain("invalid 2FA code", 401));
         }
-        // Reset the failed-attempt counter so a user who finally gets
-        // the code right after a typo or two isn't carrying a stale
-        // count into their next session.
-        reset_admitted_2fa_failure(&user.email, &admission).await?;
+        // Clear the failures so a user who finally gets the code right
+        // after a typo or two isn't carrying a stale count into their next
+        // session.
+        attempt.accepted().await?;
 
         // Read the remember-me preference the user supplied at
         // password-login time BEFORE clearing the pending bag - the
@@ -903,6 +945,9 @@ impl TwoFactor {
         // post-challenge auth.
         crate::session::regenerate_session_id();
         crate::session::middleware::set_auth_user(&pending_id);
+        if let Some(auth_epoch) = host_auth_epoch {
+            crate::session::middleware::record_host_sign_in_epoch(&pending_id, auth_epoch);
+        }
         crate::session::middleware::clear_two_factor_pending();
         crate::session::middleware::clear_two_factor_pending_remember();
         crate::session::session_mut(|session| {
@@ -987,6 +1032,9 @@ impl TwoFactor {
     /// - [`FrameworkError::domain`] with status `401` when `proof`
     ///   validates as neither a current TOTP code nor an unused
     ///   recovery code.
+    /// - [`FrameworkError::domain`] with status `429` while wrong codes have locked
+    ///   the second factor (see [`Self::verify`]), and `503` when the
+    ///   attempt store fails.
     pub async fn regenerate_recovery_codes<U: TwoFactorUser>(
         user: &U,
         proof: &str,
@@ -998,40 +1046,19 @@ impl TwoFactor {
             ));
         }
 
-        // Reject early if the account is locked by brute-force
-        // throttling - symmetric with [`Self::complete_challenge`]'s
-        // and [`Self::re_enroll`]'s gates. A session-hijacked
-        // attacker who tripped lockout cannot blow away the
-        // legitimate user's recovery codes by guessing the right
-        // proof after the lockout window opened a sliver.
-        // Best-effort posture (matches `record_2fa_failure` /
-        // `reset_2fa_failures`): a test / dev config that runs
-        // without Magnetar initialised sees no gating, not a hard error.
-        if is_locked_best_effort(user.email()).await {
-            return Err(FrameworkError::domain(
-                "account is locked due to too many failed attempts",
-                429,
-            ));
-        }
-
-        // Use silent variants so a single bad proof counts as ONE
-        // failed attempt, not two (one from `verify` + one from
-        // `consume_recovery_code`). The outer layer records once.
-        let totp_accepted = Self::verify_internal(user, proof).await?;
-        let proof_accepted = if totp_accepted {
-            true
-        } else {
-            Self::consume_recovery_internal(user, proof).await?
-        };
-
+        // One reserved attempt covers both proof forms, and a locked
+        // account is refused before the proof is read: a session-hijacked
+        // attacker cannot grind proofs to blow away the user's codes.
+        let proof_accepted = settle_attempt(user.user_id(), user.email(), || {
+            Self::verify_totp_or_recovery(user, proof)
+        })
+        .await?;
         if !proof_accepted {
-            record_2fa_failure(user.email()).await;
             return Err(FrameworkError::domain(
                 "regenerate-recovery-codes proof is neither a valid TOTP code nor a recovery code",
                 401,
             ));
         }
-        reset_2fa_failures(user.email()).await;
 
         let new_codes = recovery::generate(RECOVERY_CODE_COUNT);
         let encrypted = Crypt::encrypt_string(
@@ -1057,6 +1084,30 @@ impl TwoFactor {
         Ok(new_codes)
     }
 
+    /// Clear the second-factor attempt counter for `user`, ending a
+    /// lock before its window passes - the admin counterpart of
+    /// [`crate::auth_flows::BruteForce::unlock_account`] for the
+    /// second factor, whose failures have a counter of their own.
+    ///
+    /// Returns `true` when the user was locked, and dispatches
+    /// [`super::events::AccountUnlocked`] only then, so audit listeners
+    /// see one entry per real unlock.
+    ///
+    /// # Errors
+    ///
+    /// [`FrameworkError::domain`] with status `503` when the attempt
+    /// store fails.
+    pub async fn unlock<U: TwoFactorUser>(user: &U) -> Result<bool, FrameworkError> {
+        let was_locked = attempts::clear(user.user_id()).await?;
+        if was_locked {
+            let _ = crate::events::EventFacade::dispatch(super::events::AccountUnlocked {
+                email: user.email().to_owned(),
+            })
+            .await;
+        }
+        Ok(was_locked)
+    }
+
     /// Disable 2FA entirely. Deletes the row and dispatches
     /// [`TwoFactorDisabled`] **only** when a row was actually
     /// removed.
@@ -1067,6 +1118,9 @@ impl TwoFactor {
     /// audit listeners see one entry per actual disable, not one per
     /// click on a no-op button.
     pub async fn disable<U: TwoFactorUser>(user: &U) -> Result<(), FrameworkError> {
+        // A pending rotation goes first: left behind, it could later be
+        // confirmed over a new enrollment by whoever saw its secret.
+        rotation::discard(user.user_id()).await?;
         let db = DB::connection()?;
         let result = entity::Entity::delete_by_id(user.user_id().to_string())
             .exec(db.inner())
@@ -1086,77 +1140,141 @@ impl TwoFactor {
     }
 }
 
-async fn upsert_row(
+/// Whether a database error reports `two_factor_credentials` as missing.
+fn names_missing_credentials_table(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("two_factor_credentials")
+        && (message.contains("no such table")
+            || message.contains("does not exist")
+            || message.contains("doesn't exist"))
+}
+
+/// Persist the secret and recovery codes of a new, unconfirmed enrollment.
+///
+/// The write is conditional, not a read-modify-write: the
+/// `confirmed_at IS NULL` condition makes "not yet confirmed" part of the
+/// write, so a confirmed secret - including one with a rotation pending -
+/// is never replaced without the proof `re_enroll` takes, even when the
+/// confirmation lands while `enroll` runs.
+///
+/// # Errors
+///
+/// `FrameworkError::domain(.., 409)` when the row is already confirmed.
+async fn write_enrollment_row(
     user_id: &str,
     encrypted_secret: String,
-    confirmed_at: Option<chrono::DateTime<chrono::Utc>>,
-    encrypted_recovery: Option<String>,
+    encrypted_recovery: String,
 ) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
     let conn = db.inner();
     let now = crate::clock::now();
-    // SeaORM has no portable upsert across MySQL/Postgres/SQLite, so
-    // we read-modify-write. Re-enrolling overwrites secret +
-    // recovery_codes and clears `confirmed_at`, forcing the user
-    // through the confirm flow again with the new authenticator.
-    if let Some(existing) = entity::Entity::find_by_id(user_id.to_string())
-        .one(conn)
-        .await
-        .map_err(|e| FrameworkError::internal(format!("two_factor find: {e}")))?
-    {
-        let mut active: entity::ActiveModel = existing.into();
-        active.secret = Set(encrypted_secret);
-        active.confirmed_at = Set(confirmed_at);
-        active.recovery_codes = Set(encrypted_recovery);
-        // Re-enrollment generates a fresh secret - any timestep
-        // remembered against the old secret is meaningless.
-        active.last_used_timestep = Set(None);
-        active.updated_at = Set(now);
-        active
-            .update(conn)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("two_factor update: {e}")))?;
-    } else {
-        entity::ActiveModel {
-            user_id: Set(user_id.to_string()),
-            secret: Set(encrypted_secret),
-            confirmed_at: Set(confirmed_at),
-            recovery_codes: Set(encrypted_recovery),
-            // Fresh enrollment - no prior verification timestep to
-            // guard against replay yet.
+    let update = entity::Entity::update_many()
+        .set(entity::ActiveModel {
+            user_id: sea_orm::ActiveValue::NotSet,
+            secret: Set(encrypted_secret.clone()),
+            confirmed_at: Set(None),
+            recovery_codes: Set(Some(encrypted_recovery.clone())),
+            // A fresh secret makes any timestep remembered against the
+            // old one meaningless.
             last_used_timestep: Set(None),
-            created_at: Set(now),
+            created_at: sea_orm::ActiveValue::NotSet,
             updated_at: Set(now),
-        }
-        .insert(conn)
-        .await
-        .map_err(|e| FrameworkError::internal(format!("two_factor insert: {e}")))?;
-    }
-    Ok(())
-}
-
-async fn set_confirmed_at(
-    user_id: &str,
-    when: chrono::DateTime<chrono::Utc>,
-) -> Result<(), FrameworkError> {
-    let db = DB::connection()?;
-    let conn = db.inner();
-    let row = entity::Entity::find_by_id(user_id.to_string())
-        .one(conn)
-        .await
-        .map_err(|e| FrameworkError::internal(format!("two_factor find: {e}")))?
-        .ok_or_else(|| FrameworkError::internal("two_factor row missing"))?;
-    let mut active: entity::ActiveModel = row.into();
-    active.confirmed_at = Set(Some(when));
-    active.updated_at = Set(crate::clock::now());
-    active
-        .update(conn)
+        })
+        .filter(entity::Column::UserId.eq(user_id))
+        .filter(entity::Column::ConfirmedAt.is_null());
+    let replaced = update
+        .exec(conn)
         .await
         .map_err(|e| FrameworkError::internal(format!("two_factor update: {e}")))?;
+    if replaced.rows_affected > 0 {
+        return Ok(());
+    }
+
+    // No row matched. Either there is no enrollment yet, or a fresh
+    // enrollment met a row that is confirmed by now.
+    let existing = entity::Entity::find_by_id(user_id.to_string())
+        .one(conn)
+        .await
+        .map_err(|e| FrameworkError::internal(format!("two_factor find: {e}")))?;
+    if existing.is_some() {
+        return Err(FrameworkError::domain(
+            "2FA is already enabled for this account; call re_enroll with a valid TOTP or recovery code as proof to rotate the secret",
+            409,
+        ));
+    }
+    // No enrollment at all: drop any rotation a deleted enrollment left
+    // behind, so it cannot be confirmed over this one later.
+    rotation::discard(user_id).await?;
+    entity::ActiveModel {
+        user_id: Set(user_id.to_string()),
+        secret: Set(encrypted_secret),
+        confirmed_at: Set(None),
+        recovery_codes: Set(Some(encrypted_recovery)),
+        // Fresh enrollment - no prior verification timestep to
+        // guard against replay yet.
+        last_used_timestep: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(conn)
+    .await
+    .map_err(|e| FrameworkError::internal(format!("two_factor insert: {e}")))?;
     Ok(())
 }
 
-async fn load_secret(user_id: &str) -> Result<Option<String>, FrameworkError> {
+/// Stamp `confirmed_at` on the enrollment whose code was just checked, and
+/// use the code up. Returns `false` when that enrollment is gone or already
+/// confirmed, or its code's window is already claimed.
+///
+/// `checked_ciphertext` is the stored secret the code was checked against.
+/// Each enrollment encrypts a fresh secret with a fresh nonce, so the
+/// ciphertext names one enrollment exactly. Making the stamp conditional on
+/// it means a concurrent enroll that replaced the secret after the check
+/// leaves this stamp with nothing to match: the code proved possession of
+/// the old secret, not of the new one.
+///
+/// The same write claims `current_timestep` the way [`claim_totp_timestep`]
+/// does, so the confirmation code cannot be replayed at sign-in.
+async fn stamp_confirmation(
+    user_id: &str,
+    checked_ciphertext: &str,
+    current_timestep: i64,
+    when: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, FrameworkError> {
+    let db = DB::connection()?;
+    let stamp = entity::Entity::update_many()
+        .col_expr(entity::Column::ConfirmedAt, Expr::value(Some(when)))
+        .col_expr(
+            entity::Column::LastUsedTimestep,
+            Expr::value(current_timestep + TOTP_SKEW_STEPS),
+        )
+        .col_expr(entity::Column::UpdatedAt, Expr::value(crate::clock::now()))
+        .filter(entity::Column::UserId.eq(user_id))
+        .filter(entity::Column::Secret.eq(checked_ciphertext))
+        // A confirmation is stamped once. A second confirmation of the same
+        // enrollment racing this one must neither re-stamp it nor fire
+        // `TwoFactorEnrolled` again.
+        .filter(entity::Column::ConfirmedAt.is_null())
+        .filter(
+            Condition::any()
+                .add(entity::Column::LastUsedTimestep.is_null())
+                .add(entity::Column::LastUsedTimestep.lt(current_timestep)),
+        )
+        .exec(db.inner())
+        .await
+        .map_err(|e| FrameworkError::internal(format!("two_factor confirm: {e}")))?;
+    Ok(stamp.rows_affected > 0)
+}
+
+/// The stored secret of one enrollment: its ciphertext, which identifies
+/// this exact enrollment, and the decrypted base32 secret.
+struct StoredSecret {
+    ciphertext: String,
+    secret_b32: String,
+    confirmed: bool,
+}
+
+async fn load_secret(user_id: &str) -> Result<Option<StoredSecret>, FrameworkError> {
     let db = DB::connection()?;
     let Some(row) = entity::Entity::find_by_id(user_id.to_string())
         .one(db.inner())
@@ -1165,123 +1283,316 @@ async fn load_secret(user_id: &str) -> Result<Option<String>, FrameworkError> {
     else {
         return Ok(None);
     };
-    Ok(Some(Crypt::decrypt_string(
-        crate::crypto::CryptPurpose::TwoFactorSecret,
-        &row.secret,
-    )?))
+    let secret_b32 =
+        Crypt::decrypt_string(crate::crypto::CryptPurpose::TwoFactorSecret, &row.secret)?;
+    Ok(Some(StoredSecret {
+        ciphertext: row.secret,
+        secret_b32,
+        confirmed: row.confirmed_at.is_some(),
+    }))
 }
 
-/// Current server-side TOTP timestep. Used by [`TwoFactor::verify`]
-/// for replay protection - a successful verify stamps the row with
+/// Read the enrollment and check `code` against it at the current timestep.
+///
+/// Returns the timestep the code was checked at when the code may be
+/// claimed, and `None` for a missing or unconfirmed enrollment, a replay the
+/// stored stamp already covers, or a mismatch. The stamp check here reads a
+/// snapshot and is only a fast path: two racing requests can both pass it,
+/// so [`claim_totp_timestep`] repeats it atomically against the same
+/// timestep.
+async fn prepare_totp_claim(user_id: &str, code: &str) -> Result<Option<i64>, FrameworkError> {
+    let db = DB::connection()?;
+    let Some(row) = entity::Entity::find_by_id(user_id.to_string())
+        .one(db.inner())
+        .await
+        .map_err(|e| FrameworkError::internal(format!("two_factor find: {e}")))?
+    else {
+        return Ok(None);
+    };
+    if row.confirmed_at.is_none() {
+        return Ok(None);
+    }
+
+    let now = crate::clock::now().timestamp();
+    let current_timestep = totp_timestep_at(now);
+    if let Some(last) = row.last_used_timestep
+        && current_timestep <= last
+    {
+        return Ok(None);
+    }
+
+    let secret_b32 =
+        Crypt::decrypt_string(crate::crypto::CryptPurpose::TwoFactorSecret, &row.secret)?;
+    if !check_code(&secret_b32, code, now)? {
+        return Ok(None);
+    }
+    Ok(Some(current_timestep))
+}
+
+/// Atomically claim `current_timestep` for `user_id`. Returns `true` for
+/// exactly one caller per covered window.
+///
+/// The conditional WHERE turns check-and-stamp into one statement: the
+/// first verify flips `last_used_timestep` to `claim_to`, and a racing
+/// verify's predicate no longer matches, so it affects zero rows. A plain
+/// read-modify-write would let two racing verifies both stamp and both
+/// succeed.
+///
+/// The predicate compares the stored stamp with `current_timestep`, the
+/// same test the snapshot check in [`prepare_totp_claim`] makes. Comparing
+/// with `claim_to` instead would let a request at T+1 that read the row
+/// before a request at T stamped it (T+1 < T+2) win as well, so one code
+/// would be accepted twice across the boundary.
+///
+/// `claim_to` is the *forward* edge of the TOTP skew window
+/// (`current + TOTP_SKEW_STEPS`). Stamping the bare `current` would leave
+/// the same code replayable at the next timestep, because `check_code`
+/// accepts codes for [T-1, T, T+1] at server time T - a captured code from
+/// T is still in [T, T+1, T+2] at T+1, and a bare-current stamp would not
+/// block it.
+async fn claim_totp_timestep(user_id: &str, current_timestep: i64) -> Result<bool, FrameworkError> {
+    let db = DB::connection()?;
+    let claim_to = current_timestep + TOTP_SKEW_STEPS;
+    let claim = entity::Entity::update_many()
+        .col_expr(entity::Column::LastUsedTimestep, Expr::value(claim_to))
+        .col_expr(entity::Column::UpdatedAt, Expr::value(crate::clock::now()))
+        .filter(entity::Column::UserId.eq(user_id))
+        .filter(
+            Condition::any()
+                .add(entity::Column::LastUsedTimestep.is_null())
+                .add(entity::Column::LastUsedTimestep.lt(current_timestep)),
+        )
+        .exec(db.inner())
+        .await
+        .map_err(|e| FrameworkError::internal(format!("two_factor replay claim: {e}")))?;
+    Ok(claim.rows_affected > 0)
+}
+
+/// The TOTP timestep of a Unix time. Used by [`TwoFactor::verify`]
+/// for replay protection - a successful verify stamps the row from
 /// this value, and subsequent verifies at the same or earlier
 /// timestep are refused even when the code itself would structurally
 /// validate. 30-second step matches the TOTP construction in
 /// [`check_code`] / enrollment.
-fn current_totp_timestep() -> i64 {
-    crate::clock::now().timestamp() / 30
+fn totp_timestep_at(unix_seconds: i64) -> i64 {
+    unix_seconds / 30
 }
 
-/// Best-effort record of a failed 2FA attempt against
-/// `BruteForce::record_failed_attempt`. Logs and swallows errors -
-/// the throttling layer must never break the auth check it's
-/// supplementing. This includes the "Magnetar not initialised" case
-/// (test environments that don't boot Magnetar get no throttling, which
-/// is acceptable - production deployments always init Magnetar when 2FA
-/// is in play).
-#[cfg(any(
-    feature = "database-sqlite",
-    feature = "database-postgres",
-    feature = "database-mysql"
-))]
-async fn record_2fa_failure(email: &str) {
-    if let Err(e) = crate::auth_flows::BruteForce::record_failed_attempt(email, None).await {
-        tracing::debug!(
-            "BruteForce::record_failed_attempt skipped for 2FA failure on {email}: {e}"
-        );
+/// One attempt reserved in the second-factor counter before a code is
+/// read. Every proof path - [`TwoFactor::verify`],
+/// [`TwoFactor::consume_recovery_code`], [`TwoFactor::confirm`],
+/// [`TwoFactor::re_enroll`], [`TwoFactor::regenerate_recovery_codes`] and
+/// [`TwoFactor::complete_challenge`] - goes through it, so they share one
+/// counter and one threshold.
+struct ProofAttempt<'a> {
+    email: &'a str,
+    reservation: attempts::Reservation,
+}
+
+impl<'a> ProofAttempt<'a> {
+    /// Reserve the attempt, or refuse with `429` while the user is locked.
+    async fn admit(user_id: &str, email: &'a str) -> Result<Self, FrameworkError> {
+        match attempts::admit(user_id).await? {
+            attempts::Admission::Admitted(reservation) => Ok(Self { email, reservation }),
+            attempts::Admission::Locked => Err(FrameworkError::domain(
+                "account is locked due to too many failed attempts",
+                429,
+            )),
+        }
     }
-}
 
-#[cfg(not(any(
-    feature = "database-sqlite",
-    feature = "database-postgres",
-    feature = "database-mysql"
-)))]
-async fn record_2fa_failure(_email: &str) {}
-
-/// Best-effort reset of the failed-attempt counter after a successful
-/// 2FA verify or recovery-code consume. Same swallow-and-log posture
-/// as [`record_2fa_failure`].
-#[cfg(any(
-    feature = "database-sqlite",
-    feature = "database-postgres",
-    feature = "database-mysql"
-))]
-async fn reset_2fa_failures(email: &str) {
-    if let Err(e) = crate::auth_flows::BruteForce::reset_attempts(email).await {
-        tracing::debug!("BruteForce::reset_attempts skipped for 2FA success on {email}: {e}");
+    /// The proof was accepted: clear the user's failures.
+    async fn accepted(self) -> Result<(), FrameworkError> {
+        attempts::record_success(&self.reservation).await
     }
-}
 
-#[cfg(not(any(
-    feature = "database-sqlite",
-    feature = "database-postgres",
-    feature = "database-mysql"
-)))]
-async fn reset_2fa_failures(_email: &str) {}
+    /// The proof was rejected: count the failure, and announce the lock
+    /// when this failure is the one that set it.
+    async fn rejected(self) -> Result<(), FrameworkError> {
+        let failure = attempts::record_failure(&self.reservation).await?;
+        if failure.locked_now {
+            let _ =
+                crate::events::EventFacade::dispatch(crate::auth_flows::events::AccountLocked {
+                    email: self.email.to_owned(),
+                    failed_attempts: u32::try_from(failure.failed_attempts).unwrap_or(u32::MAX),
+                })
+                .await;
+        }
+        Ok(())
+    }
 
-#[cfg(any(
-    feature = "database-sqlite",
-    feature = "database-postgres",
-    feature = "database-mysql"
-))]
-async fn reset_admitted_2fa_failure(
-    email: &str,
-    admission: &crate::magnetar_integration::engine::LockoutAdmission,
-) -> Result<(), FrameworkError> {
-    crate::auth_flows::BruteForce::reset_admitted_attempt(email, admission).await
-}
-
-/// Best-effort lockout check. Returns `false` (= not locked) if Magnetar
-/// isn't initialised - same posture as [`record_2fa_failure`]: the
-/// throttling layer is opt-in, so an environment without Magnetar sees
-/// no lockout gating, not a hard error. Production deployments
-/// running 2FA always init Magnetar, so the `false` fallback is purely
-/// for tests / dev configs that exercise the 2FA primitives
-/// without booting the full Magnetar stack.
-#[cfg(any(
-    feature = "database-sqlite",
-    feature = "database-postgres",
-    feature = "database-mysql"
-))]
-async fn is_locked_best_effort(email: &str) -> bool {
-    match crate::auth_flows::BruteForce::is_locked(email).await {
-        Ok(locked) => locked,
-        Err(e) => {
-            tracing::debug!("BruteForce::is_locked skipped for 2FA gate on {email}: {e}");
-            false
+    /// The proof could not be evaluated: release the reservation, and
+    /// return the error the caller reports. A failed release wins, because
+    /// the counter's state is then unknown.
+    async fn abandon(self, proof_error: FrameworkError) -> FrameworkError {
+        match attempts::release(&self.reservation).await {
+            Ok(()) => proof_error,
+            Err(release_error) => {
+                tracing::error!(
+                    original_error = %proof_error,
+                    release_error = %release_error,
+                    "two-factor proof failed and attempt release left state uncertain"
+                );
+                FrameworkError::domain("two-factor attempt state is uncertain", 503)
+            }
         }
     }
 }
 
-#[cfg(not(any(
-    feature = "database-sqlite",
-    feature = "database-postgres",
-    feature = "database-mysql"
-)))]
-async fn is_locked_best_effort(_email: &str) -> bool {
-    false
+/// Evaluate one proof under one reserved attempt and settle the attempt.
+///
+/// Returns whether the proof was accepted. A locked user gets `429` before
+/// `evaluate` runs, a store failure gets `503`, and an error from
+/// `evaluate` releases the reservation and is returned.
+async fn settle_attempt<F, Fut>(
+    user_id: &str,
+    email: &str,
+    evaluate: F,
+) -> Result<bool, FrameworkError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<bool, FrameworkError>>,
+{
+    let attempt = ProofAttempt::admit(user_id, email).await?;
+    match evaluate().await {
+        Ok(true) => {
+            attempt.accepted().await?;
+            Ok(true)
+        }
+        Ok(false) => {
+            attempt.rejected().await?;
+            Ok(false)
+        }
+        Err(error) => Err(attempt.abandon(error).await),
+    }
 }
 
-/// Verify a TOTP code against a base32-encoded secret. Centralised so
-/// `confirm` and `verify` share identical parameters (SHA1 / 6
-/// digits / skew=1 / 30s step - matching the enrollment-time
-/// construction).
-fn check_code(secret_b32: &str, code: &str) -> Result<bool, FrameworkError> {
+/// Verify a TOTP code against a base32-encoded secret at `unix_seconds`.
+/// Centralised so `confirm` and `verify` share identical parameters
+/// (SHA1 / 6 digits / skew=1 / 30s step - matching the enrollment-time
+/// construction). The time comes from [`crate::clock::now`], like every
+/// other time read in the framework, so the replay timestep and the code
+/// check see the same instant and a test can move them together.
+fn check_code(secret_b32: &str, code: &str, unix_seconds: i64) -> Result<bool, FrameworkError> {
     let secret_bytes = Secret::Encoded(secret_b32.into())
         .to_bytes()
         .map_err(|e| FrameworkError::internal(format!("decode totp secret: {e}")))?;
     let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes, None, "user".into())
         .map_err(|e| FrameworkError::internal(format!("totp new: {e}")))?;
-    totp.check_current(code)
-        .map_err(|e| FrameworkError::internal(format!("totp check: {e}")))
+    let time = u64::try_from(unix_seconds)
+        .map_err(|_| FrameworkError::internal("totp check: clock is before the Unix epoch"))?;
+    Ok(totp.check(code, time))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Interleavings that the public API cannot pin from outside: each test
+    //! runs one request's read phase, lets a second request finish, then runs
+    //! the first request's write phase.
+
+    use super::*;
+    use crate::testing::{TestClock, TestDatabase};
+    use chrono::{DateTime, Utc};
+
+    struct Migrator;
+
+    impl sea_orm_migration::MigratorTrait for Migrator {
+        fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
+            vec![
+                Box::new(migration::Migration),
+                Box::new(migration_replay::Migration),
+                Box::new(migration_attempts::Migration),
+                Box::new(migration_rotation::Migration),
+            ]
+        }
+    }
+
+    struct User;
+
+    impl TwoFactorUser for User {
+        fn user_id(&self) -> &str {
+            "interleaved-user"
+        }
+        fn email(&self) -> &str {
+            "interleaved@example.test"
+        }
+    }
+
+    fn ensure_crypt() {
+        if !Crypt::is_initialized() {
+            Crypt::init(crate::EncryptionKey::generate());
+        }
+    }
+
+    fn at(unix_seconds: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(unix_seconds, 0).expect("test time is in range")
+    }
+
+    /// The code the stored secret produces at `unix_seconds`.
+    async fn stored_code_at(unix_seconds: i64) -> String {
+        let db = DB::connection().expect("test connection");
+        let row = entity::Entity::find_by_id(User.user_id().to_owned())
+            .one(db.inner())
+            .await
+            .expect("read enrollment")
+            .expect("enrollment exists");
+        let secret =
+            Crypt::decrypt_string(crate::crypto::CryptPurpose::TwoFactorSecret, &row.secret)
+                .expect("decrypt secret");
+        let bytes = Secret::Encoded(secret).to_bytes().expect("decode secret");
+        TOTP::new(Algorithm::SHA1, 6, 1, 30, bytes, None, "user".into())
+            .expect("totp")
+            .generate(u64::try_from(unix_seconds).expect("positive time"))
+    }
+
+    #[tokio::test]
+    async fn racing_verifications_across_a_timestep_boundary_accept_one_code_once() {
+        ensure_crypt();
+        let _db = TestDatabase::fresh::<Migrator>().await.expect("fresh db");
+
+        // Request A runs in the last second of step S, request B in the
+        // first second of step S+1. Both submit the code of step S, which
+        // the skew window accepts at either time.
+        let step = Utc::now().timestamp() / 30;
+        let a_time = step * 30 + 29;
+        let b_time = (step + 1) * 30;
+        // Enroll and confirm two steps earlier: a confirmation uses its
+        // code up, so it must not claim the window under test.
+        let confirm_time = (step - 2) * 30 + 5;
+        let clock = TestClock::travel_to(at(confirm_time));
+
+        TwoFactor::enroll(&User).await.expect("enroll");
+        TwoFactor::confirm(&User, &stored_code_at(confirm_time).await)
+            .await
+            .expect("confirm");
+        clock.set(at(a_time));
+        let code = stored_code_at(a_time).await;
+
+        // B reads the row before A stamps it, so B's snapshot passes.
+        clock.set(at(b_time));
+        let b_timestep = prepare_totp_claim(User.user_id(), &code)
+            .await
+            .expect("B prepares")
+            .expect("B's snapshot predates A's stamp");
+        assert_eq!(b_timestep, step + 1);
+
+        // A finishes first and stamps the forward edge of its window, S+1.
+        clock.set(at(a_time));
+        assert!(
+            TwoFactor::verify_internal(&User, &code)
+                .await
+                .expect("A verifies"),
+            "A is the first verification of this code"
+        );
+
+        // B's claim now runs against A's stamp. The stamp already covers
+        // B's timestep, so B must lose: one code, one acceptance.
+        clock.set(at(b_time));
+        assert!(
+            !claim_totp_timestep(User.user_id(), b_timestep)
+                .await
+                .expect("B claims"),
+            "a code accepted at step S must not be accepted again at step S+1"
+        );
+    }
 }

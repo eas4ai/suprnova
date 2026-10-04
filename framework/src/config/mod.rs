@@ -63,7 +63,9 @@ impl Config {
     /// value that fails to parse, or when a session setting checked at
     /// boot (`SESSION_COOKIE_PREFIX`, `SESSION_TABLE`) is invalid, or when a
     /// Live limit (`LIVE_MAX_REQUEST_BYTES` and the other `LIVE_*` limit keys)
-    /// is not a whole number or breaks its rule.
+    /// is not a whole number or breaks its rule, or when a second-factor
+    /// lockout key (`TWO_FACTOR_MAX_ATTEMPTS`, `TWO_FACTOR_LOCKOUT_MINUTES`)
+    /// is not a whole number of at least 1.
     /// Missing `.env` files are not an error.
     ///
     /// # Example
@@ -122,6 +124,11 @@ impl Config {
         // so a bad value aborts boot with its key named, rather than when the
         // first Live route prepares the runtime.
         crate::live::LiveConfig::from_env()?;
+        // The second-factor lockout (`TWO_FACTOR_MAX_ATTEMPTS`,
+        // `TWO_FACTOR_LOCKOUT_MINUTES`), checked here for the same reason: a
+        // bad value must stop boot, not weaken the lockout or fail the first
+        // sign-in.
+        crate::auth_flows::two_factor::TwoFactorLockout::from_env()?;
 
         Ok(env)
     }

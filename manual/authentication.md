@@ -180,16 +180,88 @@ application user ID, and records an opaque Magnetar web binding. The framework
 continues to own HTTP middleware, cookies, mail, events, and its guard/provider
 contracts.
 
+#### Framework logins under the engine
+
+The framework's own login paths check credentials outside Magnetar:
+`Auth::login_id`, `Auth::attempt`, `Auth::login`, `Auth::login_using_id`, and
+`TwoFactor::complete_challenge`. With the engine installed, every web login
+needs a Magnetar session, so revocation and auth epochs reach it. For these
+paths, `SessionMiddleware` issues the user's Magnetar session at the end of the
+request and records its binding before it stores the session. This issuance is
+host-trusted, like Laravel's `Auth::loginUsingId`: the engine takes the
+framework's word for who signed in, and no Magnetar plugin can reach it.
+
+- **Same user ids.** The default guard's `UserProvider` must resolve
+  Magnetar's user ids, for example a provider over Magnetar's `app_users`
+  table. The framework cannot check this at boot, because a provider is opaque
+  until it resolves a user. A login whose id Magnetar does not know fails with
+  a `500` that names the cause.
+- **Second factors.** An account with a confirmed Magnetar second factor is
+  refused with `409`, because the framework login did not prove it. The
+  session guards, including the once-only paths (`Auth::once`,
+  `Auth::once_using_id` and `BasicAuthMiddleware::once()`),
+  `Auth::login_remember` and `TwoFactor` ask before they log in or read a
+  code, so a refusal fires no `Login` event, consumes no code,
+  and issues no remember-me credential. `Auth::login_id` cannot await the engine, so its refusal arrives
+  at the end of the request, which then stores nothing and retires a
+  remember-me credential issued during it.
+- **Framework TOTP.** The reverse holds too. Magnetar's own sign-ins -
+  `Auth::password()`, `Auth::magic_link()`, `Auth::passkey()` and
+  `Auth::oauth()` - never read the framework's `TwoFactor` table, so each of
+  them refuses an account with confirmed framework TOTP with `409` before a
+  session or challenge exists. That account signs in through the
+  application's login and `TwoFactor::complete_challenge`. A remembered
+  sign-in still passes, because a remember-me credential is issued only
+  after a full sign-in. An account with both a Magnetar factor and framework
+  TOTP is refused by every path until one of them is disabled.
+- **Auth epochs.** `Auth::attempt` issues the session at the auth epoch read
+  with the password, and carries that epoch into `TwoFactor::start_challenge`
+  rather than reading it again. A password reset or "sign out everywhere"
+  that commits after the password was read therefore cancels the sign-in
+  with `401`, and one between `start_challenge` and `complete_challenge`
+  cancels the challenge with `401` before its code is read. The epoch comes
+  from the same row read as the password hash when the user model returns it
+  from `Authenticatable::auth_epoch`; otherwise the session guard reads it
+  right after looking the user up and before checking the password.
+  They never see a password elsewhere: `Auth::login_id` reads the epoch when
+  the request commits, and a `start_challenge` after the application's own
+  password check reads it when it runs.
+- **Remember-me.** The factor check covers remember-me credentials issued
+  during these logins. A credential issued later with
+  `Auth::issue_remember_cookie` is not checked: Magnetar treats a remembered
+  sign-in as having proved every factor, so issue one only for a user who
+  did.
+- **Replaced logins.** When a login replaces a bound identity, or a logout
+  ends one, the old Magnetar session is revoked.
+- **Custom engines.** A custom engine signs these logins in only if it
+  implements `admit_host_sign_in` and `issue_host_session`. Their default
+  bodies refuse, so under an engine without them every framework login fails
+  closed with `503` instead of storing an identity the next request would
+  drop.
+
+When the engine refuses or fails, the request answers with that error and
+stores nothing. The browser is never told it signed in when the next request
+would sign it out.
+
 ### Password authentication
 
 Use the Magnetar password facade when the application wants the integrated
 credential, lockout, factor-gate, and session path:
 
 ```rust,ignore
-let user = Auth::password()
+use suprnova::{Auth, HttpResponse, Registration};
+
+// Both outcomes get the same answer, so the endpoint does not reveal which
+// addresses already have an account.
+let _registration: Registration = Auth::password()
     .register("alice@example.com", password)
     .await?;
+let response = HttpResponse::json(serde_json::json!({
+    "message": "Registration received. Sign in with your email and password."
+}))
+.status(202);
 
+// Later, on the sign-in endpoint:
 let (user, session) = Auth::password()
     .authenticate(
         "alice@example.com",
@@ -199,6 +271,30 @@ let (user, session) = Auth::password()
     )
     .await?;
 ```
+
+`register` returns a `Registration`. `Registration::Created(user)` carries the
+new account. An address that already has an account returns
+`Registration::Accepted`, which carries nothing: that account is neither
+changed nor returned, so registration can never sign the requester in as its
+owner. Signing a `Created` account in at once is safe, because its password is
+the one just submitted, but that answer differs from the one `Accepted` can
+give, so it shows that the address was free. Answer both variants the same way
+when registration must not reveal which addresses have accounts.
+
+The two outcomes cost nearly, not exactly, the same. Both hash the submitted
+password, the expensive step, before the address is looked up, and both read
+an account back. Only a new address writes a row, so over many requests the
+response time can still tell a free address from a taken one where a write is
+slow. Registration goes through the auth abuse limiter, which keeps that kind
+of probing slow; don't rely on the timing alone to hide an address.
+
+### Why Suprnova diverges
+
+Laravel's starter kits validate registration with a `unique:users` rule, which
+answers "The email has already been taken" and so tells any visitor which
+addresses have accounts. `register` instead reports an existing address as
+`Registration::Accepted` and returns nothing about its account, so the
+application can give one answer to every registration.
 
 `authenticate` returns HTTP 401 errors for invalid credentials, lockout, or a
 required second factor. Storage and engine failures remain server errors. The

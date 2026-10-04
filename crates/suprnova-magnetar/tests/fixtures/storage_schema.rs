@@ -87,6 +87,13 @@ entity_common!(lockouts, "storage_lockouts", {
     pub locked_at: Option<ChronoDateTime<ChronoUtc>>,
     pub reason: Option<String>,
 });
+entity_common!(second_factor_lockouts, "storage_second_factor_lockouts", {
+    #[sea_orm(primary_key)] pub id: i64,
+    pub identity: String,
+    pub attempted_at: ChronoDateTime<ChronoUtc>,
+    pub locked_at: Option<ChronoDateTime<ChronoUtc>>,
+    pub reason: Option<String>,
+});
 entity_common!(two_factor, "storage_two_factor", {
     #[sea_orm(primary_key, auto_increment = false)] pub user_id: String,
     pub secret: Vec<u8>,
@@ -140,6 +147,7 @@ bind!(
     tokens,
     ceremonies,
     lockouts,
+    second_factor_lockouts,
     remembers,
     provider_tokens
 );
@@ -159,6 +167,21 @@ impl AuthSchema for StorageSchema {
 
 impl BrokerSchema for StorageSchema {
     type ProviderToken = provider_tokens::Entity;
+}
+
+/// The fixture schema with second-factor attempts in a table of their own,
+/// as `DefaultSecondFactorSchema` does for the default schema.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SecondFactorStorageSchema;
+impl AuthSchema for SecondFactorStorageSchema {
+    type User = users::Entity;
+    type Session = sessions::Entity;
+    type LinkedAccount = accounts::Entity;
+    type Passkey = methods::Entity;
+    type Token = tokens::Entity;
+    type Ceremony = ceremonies::Entity;
+    type Lockout = second_factor_lockouts::Entity;
+    type TokenRecord = tokens::Entity;
 }
 
 impl UserFields for users::Entity {
@@ -655,6 +678,45 @@ impl magnetar::schema::LockoutFields for lockouts::Entity {
     }
     fn attempted_at_column() -> Self::Column {
         lockouts::Column::AttemptedAt
+    }
+    fn write_attempted_at(m: &mut Self::ActiveModel, v: DateTime<Utc>) {
+        m.attempted_at = Set(v);
+    }
+    fn read_locked_at(m: &Self::Model) -> Option<DateTime<Utc>> {
+        m.locked_at
+    }
+    fn read_reason(m: &Self::Model) -> Option<String> {
+        m.reason.clone()
+    }
+    fn write_reason(m: &mut Self::ActiveModel, v: Option<&str>) {
+        m.reason = Set(v.map(ToOwned::to_owned));
+    }
+    fn write_locked_at(m: &mut Self::ActiveModel, v: Option<DateTime<Utc>>) {
+        m.locked_at = Set(v);
+    }
+}
+
+impl magnetar::schema::LockoutFields for second_factor_lockouts::Entity {
+    fn read_lockout_id(m: &Self::Model) -> String {
+        m.id.to_string()
+    }
+    fn write_lockout_id(m: &mut Self::ActiveModel, v: &str) {
+        m.id = Set(v.parse().expect("fixture lockout ids are i64"));
+    }
+    fn read_user_id(m: &Self::Model) -> String {
+        m.identity.clone()
+    }
+    fn user_id_column() -> Self::Column {
+        second_factor_lockouts::Column::Identity
+    }
+    fn write_user_id(m: &mut Self::ActiveModel, v: &str) {
+        m.identity = Set(v.to_owned());
+    }
+    fn read_attempted_at(m: &Self::Model) -> DateTime<Utc> {
+        m.attempted_at
+    }
+    fn attempted_at_column() -> Self::Column {
+        second_factor_lockouts::Column::AttemptedAt
     }
     fn write_attempted_at(m: &mut Self::ActiveModel, v: DateTime<Utc>) {
         m.attempted_at = Set(v);
@@ -1172,9 +1234,9 @@ pub mod sql_two_factor {
     async fn set_confirmed_in(
         transaction: &mut AuthTransaction<'_>,
         user_id: &str,
-        enrollment_auth_epoch: i64,
-        enrollment_session_id: Option<&str>,
-        enrollment_expires_at: Option<DateTime<Utc>>,
+        snapshot: &EnrollmentActorSnapshot,
+        expected_secret: &[u8],
+        matched_step: i64,
         at: DateTime<Utc>,
     ) -> Result<bool> {
         let Some(enrollment) = two_factor::Entity::find_by_id(user_id.to_owned())
@@ -1184,16 +1246,27 @@ pub mod sql_two_factor {
         else {
             return Ok(false);
         };
-        if enrollment.enrollment_auth_epoch != enrollment_auth_epoch
-            || enrollment.enrollment_session_id.as_deref() != enrollment_session_id
-            || enrollment.enrollment_expires_at != enrollment_expires_at
+        if enrollment.enrollment_auth_epoch != snapshot.auth_epoch
+            || enrollment.enrollment_session_id != snapshot.session_id
+            || enrollment.enrollment_expires_at != snapshot.expires_at
         {
             return Err(stale_actor());
         }
         let update = two_factor::Entity::update_many()
             .col_expr(two_factor::Column::ConfirmedAt, Expr::value(at))
             .col_expr(two_factor::Column::RotationPending, Expr::value(false))
+            .col_expr(
+                two_factor::Column::LastUsedTimestep,
+                Expr::value(matched_step),
+            )
             .filter(two_factor::Column::UserId.eq(user_id.to_owned()))
+            .filter(two_factor::Column::Secret.eq(expected_secret.to_vec()))
+            .filter(two_factor::Column::ConfirmedAt.is_null())
+            .filter(
+                Condition::any()
+                    .add(two_factor::Column::LastUsedTimestep.is_null())
+                    .add(two_factor::Column::LastUsedTimestep.lt(matched_step)),
+            )
             .exec(transaction.connection())
             .await
             .map_err(db_error)?;
@@ -1381,20 +1454,25 @@ pub mod sql_two_factor {
             .await
         }
 
-        async fn set_confirmed(&self, actor: &CredentialActor, at: DateTime<Utc>) -> Result<bool> {
+        async fn set_confirmed(
+            &self,
+            actor: &CredentialActor,
+            expected_secret: &[u8],
+            matched_step: i64,
+            at: DateTime<Utc>,
+        ) -> Result<bool> {
             let user_id = actor.user_id().to_owned();
-            let enrollment_auth_epoch = actor_epoch(actor)?;
-            let enrollment_session_id = actor.opaque_session_id().map(str::to_owned);
-            let enrollment_expires_at = actor.expires_at();
+            let snapshot = enrollment_actor_snapshot(actor)?;
+            let expected_secret = expected_secret.to_vec();
             let storage = SeaOrmStorage::<StorageSchema>::new(self.0.clone());
             fenced_credential_write(&storage, actor, move |transaction| {
                 Box::pin(async move {
                     set_confirmed_in(
                         transaction,
                         &user_id,
-                        enrollment_auth_epoch,
-                        enrollment_session_id.as_deref(),
-                        enrollment_expires_at,
+                        &snapshot,
+                        &expected_secret,
+                        matched_step,
                         at,
                     )
                     .await
@@ -1575,6 +1653,10 @@ pub async fn database() -> DatabaseConnection {
             .to_string(SqliteQueryBuilder),
         schema
             .create_table_from_entity(lockouts::Entity)
+            .if_not_exists()
+            .to_string(SqliteQueryBuilder),
+        schema
+            .create_table_from_entity(second_factor_lockouts::Entity)
             .if_not_exists()
             .to_string(SqliteQueryBuilder),
         schema

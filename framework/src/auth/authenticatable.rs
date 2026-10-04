@@ -98,6 +98,22 @@ pub trait Authenticatable: Send + Sync + 'static {
         None
     }
 
+    /// The account's auth epoch, read in the same row read as
+    /// [`Self::get_auth_password`], or `None` when the provider did not
+    /// read it.
+    ///
+    /// With the Magnetar engine installed, a framework sign-in is issued at
+    /// the epoch read with the password: a password reset or "sign out
+    /// everywhere" that commits after the password was read then cancels
+    /// the sign-in. A model over a table that holds the epoch, such as
+    /// Magnetar's `app_users`, returns it here so the epoch and the hash
+    /// come from one read. With `None`, the session guard reads the epoch
+    /// itself, right after the user lookup and before the password check,
+    /// which leaves only the span between those two reads uncovered.
+    fn auth_epoch(&self) -> Option<u64> {
+        None
+    }
+
     /// Allow downcasting to concrete type
     ///
     /// This is used by `Auth::user_as::<T>()` to cast the trait object

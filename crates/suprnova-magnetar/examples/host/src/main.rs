@@ -51,10 +51,10 @@ use serde_json::{Value, json};
 mod fixture;
 #[path = "../../../tests/fixtures/fakes.rs"]
 mod fixture_fakes;
-use fixture_fakes::SequentialFirstProofStore;
-use fixture::StorageSchema;
 use fixture::sql_stores::{SqlRememberStore, SqlSessionStore};
 use fixture::sql_two_factor::SqlTwoFactorStore;
+use fixture::{SecondFactorStorageSchema, StorageSchema};
+use fixture_fakes::SequentialFirstProofStore;
 
 const EMAIL: &str = "jordan@example.test";
 const PASSWORD: &str = "orange tabby cat";
@@ -304,10 +304,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         links.clone(),
     ));
     let crypto = Arc::new(AeadEncryptor::new([9; 32]));
+    // The second factor counts its failures in a table of its own, which
+    // no password identity can reach.
+    let second_factor_lockout = Arc::new(LockoutService::new(
+        Arc::new(SeaOrmStorage::<SecondFactorStorageSchema>::new(db.clone())),
+        storage.clone(),
+        LockoutConfig::default(),
+    ));
     let two_factor = Arc::new(TwoFactorService::new(
         Arc::new(SqlTwoFactorStore(db.clone())),
         storage.clone(),
-        lockout.clone(),
+        second_factor_lockout,
         crypto.clone(),
         TwoFactorConfig::default(),
     ));

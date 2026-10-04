@@ -278,30 +278,22 @@ where
     }
 
     async fn mark_email_verified(&self, id: &str) -> Result<(), FrameworkError> {
-        // load → mutate → `Model::save`: this (a) fires the full model
-        // lifecycle (Saving/Updating/Updated/Saved) so observers and audit see
-        // the change, and (b) is a read-modify-write of the whole row, so a
-        // concurrent flow on the same user could clobber a field - acceptable
-        // here as both verify/reset paths are token-gated. Absent id → no-op.
-        if let Some(mut user) = self.find_by_identifier(id).await? {
-            user.set_email_verified_at(Some(crate::clock::now()));
-            <M as Model>::save(&user).await?;
+        // Absent id → no-op.
+        if let Some(user) = self.find_by_identifier(id).await? {
+            write_changed_columns(user, |user| {
+                user.set_email_verified_at(Some(crate::clock::now()));
+            })
+            .await?;
         }
         Ok(())
     }
 
     async fn set_password(&self, id: &str, hashed: &str) -> Result<(), FrameworkError> {
-        // load → mutate → `Model::save`: this (a) fires the full model
-        // lifecycle (Saving/Updating/Updated/Saved) so observers and audit see
-        // the change, and (b) is a read-modify-write of the whole row, so a
-        // concurrent flow on the same user could clobber a field - acceptable
-        // here as both verify/reset paths are token-gated. Absent id → no-op.
-        if let Some(mut user) = self.find_by_identifier(id).await? {
-            // `hashed` arrives ALREADY HASHED - store it verbatim. `save()`
-            // overlays the full serialized model onto the ActiveModel, so the
-            // password column persists regardless of fillable/guarded.
-            user.set_password_hash(hashed);
-            <M as Model>::save(&user).await?;
+        // Absent id → no-op.
+        if let Some(user) = self.find_by_identifier(id).await? {
+            // `hashed` arrives ALREADY HASHED - store it verbatim: the write
+            // bypasses mutators and fillable/guarded alike.
+            write_changed_columns(user, |user| user.set_password_hash(hashed)).await?;
         }
         Ok(())
     }
@@ -313,4 +305,41 @@ where
             .map(|u| u.is_email_verified())
             .unwrap_or(false))
     }
+}
+
+/// Persist the columns `change` alters on a loaded `user`, and no others.
+///
+/// The verification and password flows each own one column. Saving the
+/// whole loaded row would write every other column back as it was read, so
+/// a flow racing another on the same account could undo it: email
+/// verification restoring a password hash that a concurrent reset just
+/// replaced, or a reset clearing a verification made meanwhile. Token
+/// admission does not serialize writes to one user, so the write itself
+/// must be narrow.
+///
+/// The value is written exactly as `change` sets it - a finished password
+/// hash must not pass through a hashing mutator again - and whatever the
+/// model's serde attributes say; see
+/// [`crate::eloquent::model::save_changed_columns`]. The model lifecycle
+/// events still fire for observers and audit.
+async fn write_changed_columns<M>(
+    user: M,
+    change: impl FnOnce(&mut M),
+) -> Result<(), FrameworkError>
+where
+    // `Model`'s where-clause does not propagate to an `M: Model` bound.
+    M: Model,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    let mut changed = user.clone();
+    change(&mut changed);
+    crate::eloquent::model::save_changed_columns(&user, changed).await?;
+    Ok(())
 }

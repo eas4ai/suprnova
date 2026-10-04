@@ -392,7 +392,7 @@ impl MagnetarPasswordAuthEngine for PasswordEngine {
     async fn password_register(
         &self,
         _: magnetar::plugins::password::RegisterInput,
-    ) -> magnetar::Result<User> {
+    ) -> magnetar::Result<suprnova::Registration> {
         FactorEngine::unsupported()
     }
 

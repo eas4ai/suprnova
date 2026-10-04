@@ -22,7 +22,9 @@ async fn password_register_and_authenticate_round_trip() {
     let user = Auth::password()
         .register("parity@example.test", "correct-password")
         .await
-        .expect("register through Magnetar");
+        .expect("register through Magnetar")
+        .created()
+        .expect("registration creates a new account");
     let slot = suprnova::session::new_session_slot_for_test();
     let (authenticated, session) = suprnova::session::session_bind_scopes_for_test(slot, async {
         Auth::password()
@@ -47,7 +49,9 @@ async fn wrong_password_fails_authentication() {
     Auth::password()
         .register("wrong-password@example.test", "correct-password")
         .await
-        .expect("register user");
+        .expect("register user")
+        .created()
+        .expect("registration creates a new account");
     let error = Auth::password()
         .authenticate(
             "wrong-password@example.test",
@@ -89,7 +93,9 @@ async fn direct_user_lookup_uses_the_installed_engine() {
     let user = Auth::password()
         .register("lookup@example.test", "lookup-password")
         .await
-        .expect("register user");
+        .expect("register user")
+        .created()
+        .expect("registration creates a new account");
     let found = suprnova::magnetar_integration::find_user_by_id(user.id.as_str())
         .await
         .expect("lookup succeeds")

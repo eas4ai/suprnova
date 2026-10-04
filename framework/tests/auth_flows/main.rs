@@ -3,6 +3,8 @@
 
 #[path = "../support/env_lock.rs"]
 mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
 #[path = "../support/http_wire.rs"]
 mod http_wire;
 #[cfg(feature = "testing")]
@@ -20,3 +22,4 @@ pub mod two_factor;
 pub mod two_factor_brute_force_integration;
 pub mod two_factor_challenge_flow;
 pub mod two_factor_challenge_middleware;
+pub mod two_factor_engines;

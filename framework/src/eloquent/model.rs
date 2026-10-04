@@ -47,6 +47,99 @@ use crate::eloquent::events::ModelEventHooks;
 use crate::eloquent::fillable::Fillable;
 use crate::error::FrameworkError;
 
+/// Persist the columns whose stored value differs between `previous`, the
+/// row as loaded, and `changed`, writing `changed`'s values exactly, and no
+/// other column besides the `updated_at` bump.
+///
+/// For writes the framework makes on a user's behalf, such as the
+/// verification stamp and the password hash of
+/// [`crate::auth::EloquentUserProvider`]. Unlike [`Model::update`], the
+/// values do not pass through mutators or the mass-assignment filter, and
+/// they do not depend on how the model serializes: each column holds the
+/// in-memory field value, converted by the field's cast. A hashing
+/// mutator would otherwise hash a finished hash again, and a field kept
+/// out of serialization would never be written. Writing only the changed
+/// columns keeps a concurrent write to another column of the row intact.
+///
+/// A column whose cast stores a new value on every write, such as an
+/// encrypted one, counts as changed only when its decoded value did.
+///
+/// The model lifecycle runs as for [`Model::save`]: `Updating` and
+/// `Saving` before the write, either of which can cancel it, then
+/// `Updated` and `Saved`. The `Updating`/`Saving` payload lists the
+/// columns being written; changes a listener makes to it are not applied,
+/// because these values are not mass-assigned input.
+pub(crate) async fn save_changed_columns<M>(previous: &M, changed: M) -> Result<M, FrameworkError>
+where
+    // `Model`'s where-clause does not propagate to an `M: Model` bound.
+    M: Model,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    use sea_orm::{ActiveModelTrait, ActiveValue, IdenStatic};
+
+    let stored_row = previous.clone().try_into_storage()?;
+    let changed_row = changed.clone().try_into_storage()?;
+    let stored = stored_row.clone().into_active_model();
+    let mut am = changed.into_active_model_for_update()?;
+    let mut written = Attrs::new();
+    for column in <M::Entity as EntityTrait>::Column::iter() {
+        let ActiveValue::Set(new) = am.get(column) else {
+            continue;
+        };
+        // A cast that stores a new value on every write, such as an
+        // encrypted column, differs in storage even when its value did not
+        // change; compare such a column by its decoded value. Writing it
+        // back would revert a concurrent change to it.
+        let unchanged = stored.get(column).into_value().as_ref() == Some(&new)
+            || M::__decoded_values_equal(column.as_str(), &stored_row, &changed_row)?;
+        if unchanged {
+            am.not_set(column);
+        } else {
+            written.insert(column.as_str(), sea_value_to_json_loose(&new));
+        }
+    }
+
+    let shared = std::sync::Arc::new(tokio::sync::Mutex::new(written));
+    M::__dispatch_updating(previous, shared.clone()).await?;
+    M::__dispatch_saving(shared.clone(), false).await?;
+    let touch_plan = M::__plan_touches(Some(previous), &*shared.lock().await)?;
+    let current = crate::render_cache::orm::atomic(M::default_connection_name(), || async move {
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            None,
+            None,
+            M::default_connection_name(),
+        )
+        .await?;
+        let updated = exec
+            .update_active(am)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let current = M::try_from_storage(updated)?;
+        crate::render_cache::orm::after_model_write(&current).await?;
+        Ok(current)
+    })
+    .await?;
+
+    record_save_on(
+        previous.__eager_cache(),
+        current.__eager_cache(),
+        false,
+        M::__decoded_values_equal,
+    )?;
+    M::__dispatch_updated(previous, &current).await?;
+    M::__dispatch_saved(&current).await?;
+    current.__touch_planned(&touch_plan).await?;
+    crate::eloquent::changes::finish_save(row_state(current.__eager_cache()));
+    Ok(current)
+}
+
 /// Records a table read and hands the error back unchanged.
 ///
 /// Used on every failure path of a point read, so a read that failed is

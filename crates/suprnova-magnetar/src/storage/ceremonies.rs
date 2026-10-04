@@ -173,8 +173,10 @@ where
                 .filter(S::Ceremony::used_at_column().is_null())
                 .filter(S::Ceremony::expires_at_column().gt(now));
             if let Some(consume_id) = consume_id.as_ref() {
-                grant_query =
-                    grant_query.filter(S::Ceremony::ceremony_id_column().eq(consume_id.clone()));
+                grant_query = grant_query.filter(
+                    S::Ceremony::ceremony_id_column()
+                        .eq(S::Ceremony::ceremony_id_value(consume_id)),
+                );
             }
             let grant_row = grant_query.one(&transaction).await.map_err(db_error)?;
             let Some(grant_row) = grant_row else {
@@ -205,7 +207,9 @@ where
             }
 
             let deleted = <<S::Ceremony as EntityBinding>::Entity as EntityTrait>::delete_many()
-                .filter(S::Ceremony::ceremony_id_column().eq(grant_id))
+                .filter(
+                    S::Ceremony::ceremony_id_column().eq(S::Ceremony::ceremony_id_value(&grant_id)),
+                )
                 .filter(S::Ceremony::selector_column().eq(consume_selector))
                 .filter(S::Ceremony::kind_column().eq(consume_kind))
                 .filter(S::Ceremony::used_at_column().is_null())
@@ -299,7 +303,10 @@ where
                 let id = S::Ceremony::read_ceremony_id(&row);
                 let deleted =
                     <<S::Ceremony as EntityBinding>::Entity as EntityTrait>::delete_many()
-                        .filter(S::Ceremony::ceremony_id_column().eq(id.clone()))
+                        .filter(
+                            S::Ceremony::ceremony_id_column()
+                                .eq(S::Ceremony::ceremony_id_value(&id)),
+                        )
                         .filter(S::Ceremony::kind_column().eq(kind.clone()))
                         .exec(tx.connection())
                         .await
@@ -364,7 +371,9 @@ where
                 let id = S::Ceremony::read_ceremony_id(&row);
                 let result = <<S::Ceremony as EntityBinding>::Entity as EntityTrait>::update_many()
                     .col_expr(S::Ceremony::state_column(), Expr::value(next.clone()))
-                    .filter(S::Ceremony::ceremony_id_column().eq(id))
+                    .filter(
+                        S::Ceremony::ceremony_id_column().eq(S::Ceremony::ceremony_id_value(&id)),
+                    )
                     .filter(S::Ceremony::kind_column().eq(kind))
                     .filter(S::Ceremony::state_column().eq(expected))
                     .filter(S::Ceremony::used_at_column().is_null())
@@ -406,5 +415,122 @@ where
 
         self.transition_and_consume_matching(request, Some(consume_id))
             .await
+    }
+}
+
+#[cfg(all(test, feature = "seaorm-postgres"))]
+mod tests {
+    use chrono::{Duration, Utc};
+    use sea_orm::{DatabaseConnection, DbBackend, MockDatabase, MockExecResult, Value};
+
+    use super::{CeremonyRef, CeremonyStore, TransitionAndConsume};
+    use crate::default_schema::{DefaultAuthSchema, ceremonies};
+    use crate::storage::SeaOrmStorage;
+
+    // PostgreSQL has no implicit text-to-bigint cast: the default schema's
+    // integer ceremony id bound as text fails every statement that names the
+    // row with `operator does not exist: bigint = text`.
+
+    const ID: i64 = 42;
+
+    fn ceremony() -> ceremonies::Model {
+        ceremonies::Model {
+            id: ID,
+            kind: "kind".to_owned(),
+            selector: "selector".to_owned(),
+            payload: Vec::new(),
+            state: "pending".to_owned(),
+            expires_at: Utc::now() + Duration::minutes(5),
+            used_at: None,
+        }
+    }
+
+    fn one_row_affected() -> MockExecResult {
+        MockExecResult {
+            last_insert_id: 0,
+            rows_affected: 1,
+        }
+    }
+
+    /// Every statement that bound the ceremony id bound it as an integer.
+    fn assert_id_bound_as_integer(db: DatabaseConnection) {
+        let mut as_integer = 0;
+        for transaction in db.into_transaction_log() {
+            for statement in transaction.statements() {
+                for value in statement.values.iter().flat_map(|values| values.0.iter()) {
+                    assert!(
+                        !matches!(value, Value::String(Some(text)) if text.as_str() == ID.to_string()),
+                        "the ceremony id is bound as text: {}",
+                        statement.sql
+                    );
+                    if matches!(value, Value::BigInt(Some(id)) if *id == ID) {
+                        as_integer += 1;
+                    }
+                }
+            }
+        }
+        assert!(as_integer > 0, "a statement names the ceremony by its id");
+    }
+
+    #[tokio::test]
+    async fn transition_names_an_integer_ceremony_id_as_an_integer() {
+        let db = MockDatabase::new(DbBackend::Postgres)
+            .append_query_results([[ceremony()]])
+            .append_exec_results([one_row_affected()])
+            .into_connection();
+        let storage = SeaOrmStorage::<DefaultAuthSchema>::new(db.clone());
+
+        assert!(
+            storage
+                .transition("selector", "kind", "pending", "approved")
+                .await
+                .unwrap()
+        );
+        drop(storage);
+        assert_id_bound_as_integer(db);
+    }
+
+    #[tokio::test]
+    async fn consume_names_an_integer_ceremony_id_as_an_integer() {
+        let db = MockDatabase::new(DbBackend::Postgres)
+            .append_query_results([[ceremony()]])
+            .append_exec_results([one_row_affected()])
+            .into_connection();
+        let storage = SeaOrmStorage::<DefaultAuthSchema>::new(db.clone());
+
+        assert!(storage.consume("selector", "kind").await.unwrap().is_some());
+        drop(storage);
+        assert_id_bound_as_integer(db);
+    }
+
+    #[tokio::test]
+    async fn exact_transition_and_consume_names_an_integer_ceremony_id_as_an_integer() {
+        let db = MockDatabase::new(DbBackend::Postgres)
+            .append_query_results([[ceremony()]])
+            .append_exec_results([one_row_affected(), one_row_affected()])
+            .into_connection();
+        let storage = SeaOrmStorage::<DefaultAuthSchema>::new(db.clone());
+        let request = TransitionAndConsume {
+            transition: CeremonyRef {
+                selector: "other",
+                kind: "kind",
+            },
+            expected: "pending",
+            next: "approved",
+            consume: CeremonyRef {
+                selector: "selector",
+                kind: "kind",
+            },
+        };
+
+        assert!(
+            storage
+                .transition_and_consume_exact(request, &ID.to_string())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        drop(storage);
+        assert_id_bound_as_integer(db);
     }
 }

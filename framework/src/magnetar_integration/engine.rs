@@ -30,7 +30,10 @@ use secrecy::{ExposeSecret, SecretString};
 use async_trait::async_trait;
 use magnetar::{
     Error, Result,
-    auth::{FactorGate, FactorVerifier, OpaqueFactorGate, SignInDecision, VerifiedPrincipal},
+    auth::{
+        AuthenticationContext, FactorGate, FactorVerifier, OpaqueFactorGate, SignInDecision,
+        SignInMethod, VerifiedPrincipal,
+    },
     crypto::Encryptor,
     first_email_proof::{FirstEmailProofMutation, FirstEmailProofStore},
     passkey::{
@@ -63,7 +66,7 @@ use sea_orm::DatabaseConnection;
 use uuid::Uuid;
 use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential};
 
-use super::{LockoutStatus, Session, SessionToken, User, UserId};
+use super::{LockoutStatus, Registration, Session, SessionToken, User, UserId};
 
 /// The connection and typed Magnetar storage used by an authentication engine.
 ///
@@ -677,6 +680,67 @@ pub struct MagnetarHostEngineParts<
     /// Positive lease interval for one lifecycle forward attempt.
     pub lifecycle_lease_duration: chrono::Duration,
 }
+/// The resource of the conflict [`FrameworkTotpGate`] refuses with; the
+/// facades answer it with `409`.
+pub(crate) const FRAMEWORK_SECOND_FACTOR: &str = "framework second factor";
+
+/// The factor gate Magnetar's own sign-ins go through: password, magic
+/// link, passkey, OAuth and device approval.
+///
+/// Those sign-ins never read the framework's own TOTP in
+/// `two_factor_credentials`, so this gate refuses, before any session or
+/// challenge exists, an account that has it, the way the framework logins
+/// refuse an account with a Magnetar factor. Such an account signs in
+/// through the application's login and `TwoFactor::complete_challenge`.
+/// A remembered sign-in passes: Magnetar treats a remember credential as
+/// proof of every factor, and the framework issues one only after a full
+/// sign-in. Host sign-ins never come here; they call the concrete gate.
+struct FrameworkTotpGate<C, F, O>
+where
+    C: CeremonyStore,
+    F: FactorVerifier,
+    O: OpaqueSessionStore,
+{
+    inner: Arc<OpaqueFactorGate<C, F, O>>,
+}
+
+#[async_trait]
+impl<C, F, O> FactorGate for FrameworkTotpGate<C, F, O>
+where
+    C: CeremonyStore,
+    F: FactorVerifier,
+    O: OpaqueSessionStore,
+{
+    async fn complete_sign_in(
+        &self,
+        principal: VerifiedPrincipal,
+        context: AuthenticationContext,
+    ) -> Result<SignInDecision> {
+        if !matches!(principal.method(), SignInMethod::Remembered) {
+            let gated = crate::auth_flows::TwoFactor::gates_sign_in(principal.user_id())
+                .await
+                .map_err(|error| Error::DependencyUnavailable {
+                    dependency: "framework two-factor store".to_owned(),
+                    message: error.to_string(),
+                })?;
+            if gated {
+                return Err(Error::Conflict {
+                    resource: FRAMEWORK_SECOND_FACTOR.to_owned(),
+                    message: "this account has the application's two-factor authentication, \
+                              which this sign-in does not verify; sign in through the \
+                              application's login and its two-factor challenge"
+                        .to_owned(),
+                });
+            }
+        }
+        self.inner.complete_sign_in(principal, context).await
+    }
+
+    async fn complete_challenge(&self, selector: &str, code: &str) -> Result<SessionGrant> {
+        self.inner.complete_challenge(selector, code).await
+    }
+}
+
 /// Concrete application composition for Magnetar password, factor, and session
 /// execution.
 ///
@@ -702,6 +766,9 @@ pub struct MagnetarHostEngine<
     ceremonies: Arc<C>,
     session_provider: Arc<OpaqueSessionProvider<O>>,
     factor_gate: Arc<OpaqueFactorGate<C, F, O>>,
+    /// The gate Magnetar's own sign-ins go through; see
+    /// [`FrameworkTotpGate`].
+    sign_in_gate: Arc<dyn FactorGate>,
     remember: RememberSignInService<SeaOrmStorage<S>>,
     encryptor: Arc<dyn Encryptor>,
     magic_links: MagicLinkService,
@@ -756,20 +823,23 @@ where
             Arc::clone(&encryptor),
             Arc::clone(&session_provider),
         ));
+        let sign_in_gate: Arc<dyn FactorGate> = Arc::new(FrameworkTotpGate {
+            inner: Arc::clone(&factor_gate),
+        });
         let remember = RememberSignInService::new(
             Arc::new(RememberService::new(
                 remember_store,
                 chrono::Duration::days(30),
             )?),
             Arc::new(SeaOrmStorage::<S>::new(binding.database().clone())),
-            factor_gate.clone(),
+            Arc::clone(&sign_in_gate),
         );
         let magic_storage = Arc::new(SeaOrmStorage::<S>::new(binding.database().clone()));
         let magic_links = MagicLinkService::new(
             magic_storage.clone(),
             magic_storage,
             first_email_proof.clone(),
-            factor_gate.clone(),
+            Arc::clone(&sign_in_gate),
             RegistrationPolicy::Open,
         );
         let lifecycle =
@@ -781,6 +851,7 @@ where
             ceremonies,
             session_provider,
             factor_gate,
+            sign_in_gate,
             remember,
             encryptor,
             magic_links,
@@ -837,7 +908,7 @@ where
         S::Ceremony: CeremonyFields,
     {
         let storage = Arc::new(SeaOrmStorage::<S>::new(self.binding.database().clone()));
-        let factor_gate: Arc<dyn FactorGate> = self.factor_gate.clone();
+        let factor_gate = Arc::clone(&self.sign_in_gate);
         let service = PasskeyAuthService::new(
             config,
             storage.clone(),
@@ -1029,7 +1100,7 @@ where
     ) -> Result<HostSignInDecision> {
         let context = principal.context().clone();
         match self
-            .factor_gate
+            .sign_in_gate
             .complete_sign_in(principal, context)
             .await?
         {
@@ -1058,18 +1129,28 @@ where
         let decision = self.complete_sign_in(principal).await?;
         Ok((user, decision))
     }
-    /// Register through the initialized Magnetar password provider and map the
-    /// resulting application row through the host users adapter.
-    pub async fn password_register(&self, input: RegisterInput) -> Result<User>
+    /// Register through the initialized Magnetar password provider and map a
+    /// newly created row through the host users adapter.
+    ///
+    /// An existing address maps to [`Registration::Accepted`] without reading
+    /// the existing row: its account must never reach the caller.
+    pub async fn password_register(&self, input: RegisterInput) -> Result<Registration>
     where
         A: HostUserAdapter<User = User>,
     {
-        let user_id = match self.register_password(input).await? {
-            RegistrationOutcome::Created { user_id, .. }
-            | RegistrationOutcome::Existing { user_id } => user_id,
-        };
-
-        self.users.user_for_id(&user_id).await
+        match self.register_password(input).await? {
+            RegistrationOutcome::Created { user_id, .. } => Ok(Registration::Created(
+                self.users.user_for_id(&user_id).await?,
+            )),
+            RegistrationOutcome::Existing { user_id } => {
+                // Both outcomes have hashed the password, the expensive
+                // step. Read the existing account back as a new one is read
+                // back, so a taken address costs what a free one does short
+                // of the row write; the result is not used either way.
+                let _ = self.users.user_for_id(&user_id).await;
+                Ok(Registration::Accepted)
+            }
+        }
     }
     /// Mint one plaintext magic-link token through Magnetar's single-use
     /// token store. The returned plaintext is for app-owned delivery only.
@@ -1113,6 +1194,39 @@ where
             .try_into()
     }
 
+    /// Admit a host sign-in: refuse an unknown user or one with a confirmed
+    /// second factor, and return the user's current auth epoch. See
+    /// [`MagnetarFactorAuthEngine::admit_host_sign_in`].
+    pub async fn admit_host_sign_in(&self, user_id: &str) -> Result<u64> {
+        let user = self
+            .binding
+            .storage()
+            .find_by_id(user_id)
+            .await?
+            .ok_or_else(|| Error::NotFound {
+                resource: "user".to_owned(),
+                identifier: user_id.to_owned(),
+            })?;
+        self.factor_gate.check_host_sign_in(&user.user_id).await?;
+        Ok(user.auth_epoch)
+    }
+
+    /// Issue a host-trusted session for a user the host application signed
+    /// in itself, at the epoch its credential was checked at and behind the
+    /// shared factor gate's enrollment check. See
+    /// [`MagnetarFactorAuthEngine::issue_host_session`].
+    pub async fn issue_host_session(
+        &self,
+        user_id: &str,
+        auth_epoch: u64,
+        metadata: SessionMetadata,
+    ) -> Result<MagnetarIssuedSession> {
+        self.factor_gate
+            .complete_host_sign_in(user_id, auth_epoch, metadata)
+            .await?
+            .try_into()
+    }
+
     /// Forward one post-commit Magnetar lifecycle event through Suprnova.
     pub async fn forward_lifecycle(&self, event: LifecycleEvent) -> Result<LifecycleForwardResult> {
         self.lifecycle.forward(event).await
@@ -1140,6 +1254,62 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
             message: "factor challenge completion is unavailable".to_owned(),
         })
     }
+    /// Admit a host sign-in for `user_id`: refuse a user this engine cannot
+    /// sign in that way, and return the user's current auth epoch.
+    ///
+    /// The framework calls this when it checks a credential of its own - in
+    /// `Auth::attempt` / `Auth::login` before it logs the user in, in
+    /// `TwoFactor::start_challenge` and again in
+    /// `TwoFactor::complete_challenge` before it reads the code - and passes
+    /// the epoch to [`Self::issue_host_session`] later. A refusal here
+    /// therefore costs no proof and fires no login event. An implementation
+    /// must refuse a user whose confirmed second factor the host did not
+    /// verify, and an id that is not one of its users.
+    ///
+    /// The default refuses, which keeps existing custom engines
+    /// source-compatible; framework logins under such an engine then fail
+    /// closed.
+    async fn admit_host_sign_in(&self, user_id: &str) -> Result<u64> {
+        let _ = user_id;
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar session authority".to_owned(),
+            message: "host sign-in is unavailable".to_owned(),
+        })
+    }
+
+    /// Issue an opaque session for a user the host application has already
+    /// signed in itself: through a framework session guard (`Auth::login_id`,
+    /// `Auth::attempt`, `Auth::login`) or the framework TOTP challenge
+    /// (`TwoFactor::complete_challenge`).
+    ///
+    /// **Host-trusted.** Like Laravel's `Auth::loginUsingId`, this mints a
+    /// session from a bare user id; the framework calls it only for an
+    /// identity its own login code established, and plugins never see it.
+    ///
+    /// With a password/session engine installed, `SessionMiddleware`
+    /// requires every default-guard identity to carry a binding to a live
+    /// session in this store, so revocation and auth epochs reach it. The
+    /// middleware asks for the session here before it stores the identity.
+    /// `auth_epoch` is the epoch [`Self::admit_host_sign_in`] returned when
+    /// the credential was checked; issuance must fail when it is no longer
+    /// current, and must refuse a user whose confirmed second factor the
+    /// host did not verify.
+    ///
+    /// The default refuses, which keeps existing custom engines
+    /// source-compatible; a framework login under such an engine then fails
+    /// closed instead of storing an identity the next request would drop.
+    async fn issue_host_session(
+        &self,
+        user_id: &str,
+        auth_epoch: u64,
+        metadata: SessionMetadata,
+    ) -> Result<MagnetarIssuedSession> {
+        let _ = (user_id, auth_epoch, metadata);
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar password authentication engine".to_owned(),
+            message: "host sign-in sessions are unavailable".to_owned(),
+        })
+    }
     /// Issue a password-reset token through Magnetar's unified token store.
     async fn issue_password_reset(&self, email: &str) -> Result<Option<HostPasswordResetIssued>>;
     /// Check one password-reset token without consuming it.
@@ -1150,8 +1320,10 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
         token: SecretString,
         password: SecretString,
     ) -> Result<PasswordResetFlowOutcome>;
-    /// Register one password credential through Magnetar and map its user row.
-    async fn password_register(&self, input: RegisterInput) -> Result<User>;
+    /// Register one password credential through Magnetar. A new account maps
+    /// its user row; an address that already has an account must yield
+    /// [`Registration::Accepted`], never that account.
+    async fn password_register(&self, input: RegisterInput) -> Result<Registration>;
     /// Resolve one bearer token through the initialized Magnetar session store.
     async fn bearer_user_id(&self, token: &str) -> Result<Option<String>>;
     /// Issue an epoch-bound remember credential.
@@ -1307,6 +1479,63 @@ pub trait MagnetarFactorAuthEngine: Send + Sync {
 
     /// List active opaque sessions for one application user.
     async fn list_sessions(&self, user_id: &str) -> Result<Vec<SessionSummary>>;
+
+    /// Admit a host sign-in for `user_id`: refuse a user this engine cannot
+    /// sign in that way, and return the user's current auth epoch.
+    ///
+    /// The framework calls this when it checks a credential of its own - in
+    /// `Auth::attempt` / `Auth::login` before it logs the user in, in
+    /// `TwoFactor::start_challenge` and again in
+    /// `TwoFactor::complete_challenge` before it reads the code - and passes
+    /// the epoch to [`Self::issue_host_session`] later. A refusal here
+    /// therefore costs no proof and fires no login event. An implementation
+    /// must refuse a user whose confirmed second factor the host did not
+    /// verify, and an id that is not one of its users.
+    ///
+    /// The default refuses, which keeps existing custom engines
+    /// source-compatible; framework logins under such an engine then fail
+    /// closed.
+    async fn admit_host_sign_in(&self, user_id: &str) -> Result<u64> {
+        let _ = user_id;
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar session authority".to_owned(),
+            message: "host sign-in is unavailable".to_owned(),
+        })
+    }
+
+    /// Issue an opaque session for a user the host application has already
+    /// signed in itself: through a framework session guard (`Auth::login_id`,
+    /// `Auth::attempt`, `Auth::login`) or the framework TOTP challenge
+    /// (`TwoFactor::complete_challenge`).
+    ///
+    /// **Host-trusted.** Like Laravel's `Auth::loginUsingId`, this mints a
+    /// session from a bare user id; the framework calls it only for an
+    /// identity its own login code established, and plugins never see it.
+    ///
+    /// With a password/session engine installed, `SessionMiddleware`
+    /// requires every default-guard identity to carry a binding to a live
+    /// session in this store, so revocation and auth epochs reach it. The
+    /// middleware asks for the session here before it stores the identity.
+    /// `auth_epoch` is the epoch [`Self::admit_host_sign_in`] returned when
+    /// the credential was checked; issuance must fail when it is no longer
+    /// current, and must refuse a user whose confirmed second factor the
+    /// host did not verify.
+    ///
+    /// The default refuses, which keeps existing custom engines
+    /// source-compatible; a framework login under such an engine then fails
+    /// closed instead of storing an identity the next request would drop.
+    async fn issue_host_session(
+        &self,
+        user_id: &str,
+        auth_epoch: u64,
+        metadata: SessionMetadata,
+    ) -> Result<MagnetarIssuedSession> {
+        let _ = (user_id, auth_epoch, metadata);
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar factor/session authority".to_owned(),
+            message: "host sign-in sessions are unavailable".to_owned(),
+        })
+    }
 }
 
 #[async_trait]
@@ -1362,6 +1591,19 @@ where
     async fn list_sessions(&self, user_id: &str) -> Result<Vec<SessionSummary>> {
         self.session_provider.list_for_user(user_id).await
     }
+
+    async fn admit_host_sign_in(&self, user_id: &str) -> Result<u64> {
+        MagnetarHostEngine::admit_host_sign_in(self, user_id).await
+    }
+
+    async fn issue_host_session(
+        &self,
+        user_id: &str,
+        auth_epoch: u64,
+        metadata: SessionMetadata,
+    ) -> Result<MagnetarIssuedSession> {
+        MagnetarHostEngine::issue_host_session(self, user_id, auth_epoch, metadata).await
+    }
 }
 
 #[async_trait]
@@ -1390,7 +1632,20 @@ where
         MagnetarHostEngine::complete_challenge(self, selector, code).await
     }
 
-    async fn password_register(&self, input: RegisterInput) -> Result<User> {
+    async fn admit_host_sign_in(&self, user_id: &str) -> Result<u64> {
+        MagnetarHostEngine::admit_host_sign_in(self, user_id).await
+    }
+
+    async fn issue_host_session(
+        &self,
+        user_id: &str,
+        auth_epoch: u64,
+        metadata: SessionMetadata,
+    ) -> Result<MagnetarIssuedSession> {
+        MagnetarHostEngine::issue_host_session(self, user_id, auth_epoch, metadata).await
+    }
+
+    async fn password_register(&self, input: RegisterInput) -> Result<Registration> {
         MagnetarHostEngine::password_register(self, input).await
     }
 
@@ -1844,9 +2099,9 @@ where
     providers: OAuthProviderRegistry,
     provider_config: HashMap<&'static str, MagnetarOAuthProviderSettings>,
     transport: Arc<dyn HttpTransport>,
-    factor_gate: Arc<OpaqueFactorGate<C, F, O>>,
+    factor_gate: Arc<dyn FactorGate>,
     users: Arc<A>,
-    _schema: PhantomData<S>,
+    _schema: PhantomData<(S, C, F, O)>,
 }
 
 #[cfg(feature = "magnetar-oauth")]
@@ -1893,7 +2148,7 @@ where
             providers: config.providers,
             provider_config: config.provider_config,
             transport: config.transport,
-            factor_gate: Arc::clone(&self.factor_gate),
+            factor_gate: Arc::clone(&self.sign_in_gate),
             users: Arc::clone(&self.users),
             _schema: PhantomData,
         })

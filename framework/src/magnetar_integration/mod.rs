@@ -34,7 +34,7 @@ pub use default_engine::{MagnetarConfig, init_magnetar};
 #[cfg(feature = "magnetar-oauth")]
 pub use default_engine::{MagnetarOAuthOnlyConfig, init_magnetar_oauth_only};
 pub use engine::MagnetarFactorAuthEngine;
-pub use sign_in::SignInOutcome;
+pub use sign_in::{Registration, SignInOutcome};
 
 /// Completion facade for factor challenges returned by Magnetar sign-in providers.
 pub struct FactorAuth;
@@ -491,6 +491,21 @@ impl engine::MagnetarFactorAuthEngine for PasswordFactorEngine {
     ) -> magnetar::Result<Vec<magnetar::sessions::SessionSummary>> {
         self.password.list_sessions(user_id).await
     }
+
+    async fn admit_host_sign_in(&self, user_id: &str) -> magnetar::Result<u64> {
+        self.password.admit_host_sign_in(user_id).await
+    }
+
+    async fn issue_host_session(
+        &self,
+        user_id: &str,
+        auth_epoch: u64,
+        metadata: magnetar::sessions::SessionMetadata,
+    ) -> magnetar::Result<engine::MagnetarIssuedSession> {
+        self.password
+            .issue_host_session(user_id, auth_epoch, metadata)
+            .await
+    }
 }
 
 pub(crate) fn password_factor_engine(
@@ -905,58 +920,6 @@ pub(crate) async fn record_failed_attempt(
     feature = "database-postgres",
     feature = "database-mysql"
 ))]
-pub(crate) async fn admit_attempt(
-    email: &str,
-    context: Option<&str>,
-) -> Result<engine::LockoutAdmission, FrameworkError> {
-    let engine = password_engine()?;
-    engine
-        .admit_attempt(email, context)
-        .await
-        .map_err(|error| FrameworkError::internal(format!("admit authentication attempt: {error}")))
-}
-
-#[cfg(any(
-    feature = "database-sqlite",
-    feature = "database-postgres",
-    feature = "database-mysql"
-))]
-pub(crate) async fn cancel_attempt(
-    email: &str,
-    admission: &engine::LockoutAdmission,
-) -> Result<(), FrameworkError> {
-    let engine = password_engine()?;
-    engine
-        .cancel_attempt(email, admission)
-        .await
-        .map_err(|error| {
-            FrameworkError::internal(format!("cancel authentication attempt: {error}"))
-        })
-}
-
-#[cfg(any(
-    feature = "database-sqlite",
-    feature = "database-postgres",
-    feature = "database-mysql"
-))]
-pub(crate) async fn finalize_failed_attempt(
-    email: &str,
-    admission: &engine::LockoutAdmission,
-) -> Result<engine::LockoutFinalization, FrameworkError> {
-    let engine = password_engine()?;
-    engine
-        .finalize_failed_attempt(email, admission)
-        .await
-        .map_err(|error| {
-            FrameworkError::internal(format!("finalize authentication attempt: {error}"))
-        })
-}
-
-#[cfg(any(
-    feature = "database-sqlite",
-    feature = "database-postgres",
-    feature = "database-mysql"
-))]
 pub(crate) async fn lockout_status(email: &str) -> Result<LockoutStatus, FrameworkError> {
     let engine = password_engine()?;
     engine
@@ -1007,6 +970,74 @@ pub(crate) async fn unlock_account(email: &str) -> Result<bool, FrameworkError> 
         .unlock_account(email)
         .await
         .map_err(|error| FrameworkError::internal(format!("unlock account: {error}")))
+}
+
+/// The session authority that framework logins must be bound to, when the
+/// installed engine requires it.
+///
+/// A full password/session installation signs out every default-guard
+/// identity without a binding (see `SessionMiddleware`), so a framework
+/// login there needs a Magnetar session. OAuth-only installations do not.
+pub(crate) fn host_sign_in_authority() -> Option<Arc<dyn engine::MagnetarFactorAuthEngine>> {
+    optional_password_engine()?;
+    optional_factor_engine()
+}
+
+/// Admit a framework login of `user_id` before it happens, when the
+/// installed engine requires a binding.
+///
+/// Returns the user's auth epoch to issue the session at, or `None` when no
+/// binding is required. Called before the login reads a proof or fires an
+/// event, so a refusal costs neither.
+///
+/// # Errors
+///
+/// See [`host_sign_in_error`].
+pub(crate) async fn admit_host_sign_in(user_id: &str) -> Result<Option<u64>, FrameworkError> {
+    let Some(authority) = host_sign_in_authority() else {
+        return Ok(None);
+    };
+    authority
+        .admit_host_sign_in(user_id)
+        .await
+        .map(Some)
+        .map_err(host_sign_in_error)
+}
+
+/// The refusal of a sign-in whose auth epoch moved after its credential was
+/// read: a password reset or "sign out everywhere" committed in between.
+pub(crate) fn expired_host_sign_in() -> FrameworkError {
+    FrameworkError::domain(
+        "the sign-in expired because the account's sessions were revoked; sign in again",
+        401,
+    )
+}
+
+/// Map an engine refusal of a framework login to the error the request
+/// answers with.
+///
+/// - `409` for an account with a second factor the framework login did not
+///   prove: it must sign in through the engine's own flow.
+/// - `401` for a stale auth epoch: a password reset or sign-out-everywhere
+///   happened after the credential was checked, so the sign-in expired.
+/// - `500` for an id the engine does not know: the default guard's provider
+///   must resolve the engine's user ids, and this one did not.
+/// - `503` for anything else, an engine that cannot answer.
+pub(crate) fn host_sign_in_error(error: magnetar::Error) -> FrameworkError {
+    match error {
+        magnetar::Error::Conflict { .. } => FrameworkError::domain(
+            "this account has a second factor that this sign-in did not verify; sign in through Auth::password()",
+            409,
+        ),
+        magnetar::Error::InvalidInput { .. } => expired_host_sign_in(),
+        magnetar::Error::NotFound { .. } => FrameworkError::internal(
+            "the signed-in id is not a Magnetar user; with the Magnetar engine installed, the default guard's user provider must resolve Magnetar user ids",
+        ),
+        error => {
+            tracing::error!(%error, "Magnetar host sign-in failed");
+            FrameworkError::domain("the sign-in engine is unavailable", 503)
+        }
+    }
 }
 
 /// Look up a Suprnova [`User`] by its opaque application identifier.
