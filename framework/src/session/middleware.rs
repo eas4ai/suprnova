@@ -1413,11 +1413,23 @@ impl SessionMiddleware {
                     _ => None,
                 };
                 if session.user_id.is_some() && valid_user_id.is_none() {
-                    session.user_id = None;
+                    let lost_user_id = session.user_id.take();
                     session.remove_auth_guard(&default_guard_name);
                     session.clear_magnetar_web_binding();
                     session.dirty = true;
                     crate::auth::request_state::clear_guard_user(&default_guard_name);
+                    // The session survives and loses its user, as a plain
+                    // logout does, so the Live memberships it opened for
+                    // that user end here on this node (LIVE-021). Without
+                    // this, they kept receiving events until their
+                    // subscription expired.
+                    if let Some(principal) = lost_user_id {
+                        crate::live::revocation::session_deauthenticated(
+                            session.id.as_bytes(),
+                            &principal,
+                        )
+                        .await;
+                    }
                 } else if let Some(valid_user_id) = valid_user_id {
                     session.set_auth_guard_id(&default_guard_name, valid_user_id);
                 } else if session.user_id.is_none() && binding_key_present {
