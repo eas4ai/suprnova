@@ -164,7 +164,10 @@ challenge (`Auth::factor()`), but in a table of their own,
 address, and anyone can register any string as one, so a shared table would
 let an address reach a user's second-factor counter. A correct password
 therefore doesn't clear second-factor failures, a failed sign-in can't lock a
-second factor, and wrong codes don't lock password sign-in. A password reset proves the mailbox, not the second factor, so it
+second factor, and wrong codes don't lock password sign-in. The second factor's
+keys aren't addresses, so its locks and unlocks never touch an `app_users` row:
+an account registered under an address equal to a key is never locked or
+unlocked by it. A password reset proves the mailbox, not the second factor, so it
 leaves a second-factor lock in place until the window passes. Confirming an
 enrollment, rotating the secret, and regenerating recovery codes count their
 wrong codes in the same table. Each of these paths reserves its attempt before
@@ -172,7 +175,12 @@ it reads the code, so parallel guesses never get past the limit, and a failure
 the lockout store can't record is returned as an error instead of a wrong code.
 A confirmation confirms only the secret its code was checked against, once, and
 uses the code up: if another request replaces the enrollment in between,
-nothing is confirmed and the caller gets a conflict.
+nothing is confirmed and the caller gets a conflict. A rotation waits beside
+the confirmed secret in `auth_two_factor`'s pending columns, which
+`default_schema::migrate` adds to an existing table. The confirmed secret and
+its recovery codes keep gating sign-in until a code from the new secret
+confirms the rotation, a plain enrollment can't replace a waiting rotation,
+and disabling the factor discards it.
 
 Password reset normalizes an unknown or provider-backed unverified address to
 `Ok(())` only after the abuse-limiter, mail configuration, provider/engine, and
