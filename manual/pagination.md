@@ -537,8 +537,11 @@ pub async fn index(_req: suprnova::Request) -> suprnova::Response {
 
 All three paginators work here - `LengthAwarePaginator`, `Paginator`, and
 `CursorPaginator`. The metadata page-name comes from the paginator
-itself: `"page"` for the two offset paginators, `"cursor"` for
-`CursorPaginator`. The client receives the rows under the chosen prop key
+itself, and it is the query parameter the paginator reads: the name a
+`LengthAwarePaginator` got from `paginate_using` or `with_page_name`
+(`"page"` by default), `"page"` for `Paginator`, and the name a
+`CursorPaginator` got from `with_cursor_name` (`"cursor"` by default).
+The client receives the rows under the chosen prop key
 plus a `ScrollMetadata` descriptor with `current_page`, `next_page`,
 `previous_page` (page identifiers for the offset paginators; cursor
 strings for cursor paginators) - which the `useInfiniteScroll` /

@@ -291,6 +291,33 @@ async fn pagination_cursor_last_page_no_next() {
     panic!("walked too many pages; last page: {last_page_rows:?}");
 }
 
+/// DATA-020: the Inertia scroll metadata names the query parameter the
+/// paginator reads, so infinite scroll asks for `posts_page=2`, not
+/// `page=2`.
+#[test]
+fn inertia_scroll_metadata_uses_the_paginators_page_name() {
+    let (meta, _) = LengthAwarePaginator::new(vec![1, 2], 10, 2, 1)
+        .with_page_name("posts_page")
+        .into_inertia_scroll();
+    assert_eq!(meta.page_name, "posts_page");
+
+    let (meta, _) = LengthAwarePaginator::new(vec![1, 2], 10, 2, 1).into_inertia_scroll();
+    assert_eq!(meta.page_name, "page", "the default name stays `page`");
+}
+
+/// DATA-020: the cursor paginator's metadata names its cursor parameter.
+#[test]
+fn inertia_scroll_metadata_uses_the_paginators_cursor_name() {
+    let (meta, _) = CursorPaginator::new(vec![1, 2], 2, Some("next".to_string()), None)
+        .with_cursor_name("after")
+        .into_inertia_scroll();
+    assert_eq!(meta.page_name, "after");
+
+    let (meta, _) =
+        CursorPaginator::new(vec![1, 2], 2, Some("next".to_string()), None).into_inertia_scroll();
+    assert_eq!(meta.page_name, "cursor", "the default name stays `cursor`");
+}
+
 // --- Live-DB tests (gated by #[ignore]) ---
 //
 // These exercise `Pagination::cursor` against real Postgres / MySQL,
