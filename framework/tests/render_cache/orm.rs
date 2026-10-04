@@ -1833,22 +1833,184 @@ async fn reload_invalidates_the_cached_evaluator() {
     );
 }
 
-/// A flag the snapshot does not hold at any scope key records no `Feature`
-/// dependency: the render depended on the caller's compiled default, not on
-/// stored state, and a generation for it would be a row nothing writes.
+/// DRIVERS-076: a flag the snapshot does not hold at any scope key still
+/// records its `Feature` dependency. The render used the caller's compiled
+/// default, and that answer changes the moment the first rule for the flag
+/// is stored: `set_flag` (or a `reload` that finds the new row) advances
+/// exactly this generation. Without the dependency, nothing could reach the
+/// entry, and the default's output was served until its freshness ran out.
 #[tokio::test]
-async fn a_flag_the_snapshot_does_not_hold_records_no_feature_dependency() {
+async fn an_absent_flag_records_its_dependency_so_the_first_stored_rule_invalidates_the_entry() {
     boot().await;
     let features = bootstrap_flags().await;
+    features.cached.invalidate_all();
 
-    let report = feature_report(&features.cached, "orm-suite-absent").await;
+    let (observed, epoch) = observed_feature_window(&features.cached, "orm-suite-absent").await;
     assert!(
-        !report.observed.iter().any(|identity| matches!(
-            identity,
-            DependencyIdentity::Feature(name) if name == "orm-suite-absent"
-        )),
-        "an absent flag records nothing, got {:?}",
-        report.observed
+        observed
+            .get(&DependencyIdentity::feature("orm-suite-absent"))
+            .is_some(),
+        "the render that used the compiled default observed the flag's generation"
+    );
+    assert!(
+        !entry_is_invalidated(&observed, epoch).await,
+        "nothing has changed yet"
+    );
+
+    features
+        .database
+        .set_flag("orm-suite-absent", "", true)
+        .await
+        .expect("store the first rule");
+
+    assert!(
+        entry_is_invalidated(&observed, epoch).await,
+        "the first stored rule changes the answer, so it must reach the entry"
+    );
+}
+
+/// The probe `a_render_during_a_flag_write_is_invalidated_once_the_write_completes`
+/// installs in the cache slot ahead of the `CachedEvaluator`. When the write
+/// tells caches, it runs what a concurrent render would run at that instant:
+/// a flag read through the cache, closed against the ledger.
+struct RenderDuringTheWrite {
+    cached: Arc<suprnova::features::CachedEvaluator>,
+    feature: &'static str,
+    window: std::sync::Mutex<
+        Option<(
+            suprnova_live::render_cache::generation::GenerationSet,
+            u64,
+            Option<bool>,
+        )>,
+    >,
+}
+
+impl RenderDuringTheWrite {
+    async fn render(&self) {
+        use suprnova::features::Evaluator as _;
+
+        let answer = self
+            .cached
+            .is_enabled(self.feature, &suprnova::features::Context::root());
+        let (observed, epoch) = observed_feature_window(&self.cached, self.feature).await;
+        *self.window.lock().expect("probe lock") = Some((observed, epoch, answer));
+    }
+
+    fn take(
+        &self,
+    ) -> (
+        suprnova_live::render_cache::generation::GenerationSet,
+        u64,
+        Option<bool>,
+    ) {
+        self.window
+            .lock()
+            .expect("probe lock")
+            .take()
+            .expect("the write told its caches")
+    }
+}
+
+#[async_trait::async_trait]
+impl suprnova::features::FeatureSync for RenderDuringTheWrite {
+    async fn on_flag_changed(&self, feature: &str, _scope_key: &str) {
+        if feature == self.feature {
+            self.render().await;
+        }
+    }
+
+    async fn on_snapshot_reloaded(&self, changed: &[String]) {
+        if changed.iter().any(|name| name == self.feature) {
+            self.render().await;
+        }
+    }
+}
+
+/// Binds `probe` ahead of the `CachedEvaluator` in the cache slot, so it runs
+/// while the cache still holds whatever it held when the write began.
+fn bind_probe_ahead_of_the_cache(
+    features: &suprnova::features::BootstrappedFeatures,
+    probe: &Arc<RenderDuringTheWrite>,
+) {
+    use suprnova::features::{CompositeFeatureSync, FeatureSync};
+    use suprnova::testing::TestContainer;
+
+    TestContainer::bind::<dyn FeatureSync>(Arc::new(CompositeFeatureSync::new(
+        vec![features.database.clone() as Arc<dyn FeatureSync>],
+        vec![
+            Arc::clone(probe) as Arc<dyn FeatureSync>,
+            features.cached.clone() as Arc<dyn FeatureSync>,
+        ],
+    )));
+}
+
+/// DRIVERS-078: a render that reads a flag while `set_flag` is in progress
+/// is invalidated once the write completes. The `CachedEvaluator` keeps
+/// answering with the old value until the write tells it, so if the
+/// `Feature` generation had already advanced by then, that render would
+/// publish the old answer under the new generation and look coherent until
+/// its freshness ran out. The write now tells its caches before it advances.
+#[tokio::test]
+async fn a_render_during_a_flag_write_is_invalidated_once_the_write_completes() {
+    boot().await;
+    let features = bootstrap_flags().await;
+    features
+        .database
+        .set_flag("orm-suite-in-flight", "", false)
+        .await
+        .expect("seed the flag");
+    let probe = Arc::new(RenderDuringTheWrite {
+        cached: features.cached.clone(),
+        feature: "orm-suite-in-flight",
+        window: std::sync::Mutex::new(None),
+    });
+    let _ = observed_feature_window(&features.cached, "orm-suite-in-flight").await;
+    bind_probe_ahead_of_the_cache(&features, &probe);
+
+    features
+        .database
+        .set_flag("orm-suite-in-flight", "", true)
+        .await
+        .expect("flip the flag");
+
+    let (observed, epoch, answer) = probe.take();
+    assert!(
+        answer == Some(true) || entry_is_invalidated(&observed, epoch).await,
+        "a render that read {answer:?} during the write must not stay coherent after it"
+    );
+}
+
+/// The `reload` half of DRIVERS-078: an out-of-band change picked up by
+/// `reload` tells the caches before it advances the generation, for the
+/// same reason as `set_flag`.
+#[tokio::test]
+async fn a_render_during_a_reload_is_invalidated_once_the_reload_completes() {
+    boot().await;
+    let features = bootstrap_flags().await;
+    features
+        .database
+        .set_flag("orm-suite-reload-in-flight", "", false)
+        .await
+        .expect("seed the flag");
+    let probe = Arc::new(RenderDuringTheWrite {
+        cached: features.cached.clone(),
+        feature: "orm-suite-reload-in-flight",
+        window: std::sync::Mutex::new(None),
+    });
+    let _ = observed_feature_window(&features.cached, "orm-suite-reload-in-flight").await;
+    bind_probe_ahead_of_the_cache(&features, &probe);
+
+    DB::table("features")
+        .filter("name", "orm-suite-reload-in-flight")
+        .update(attrs! { enabled: true })
+        .await
+        .expect("write the row out of band");
+    features.database.reload().await.expect("reload");
+
+    let (observed, epoch, answer) = probe.take();
+    assert!(
+        answer == Some(true) || entry_is_invalidated(&observed, epoch).await,
+        "a render that read {answer:?} during the reload must not stay coherent after it"
     );
 }
 

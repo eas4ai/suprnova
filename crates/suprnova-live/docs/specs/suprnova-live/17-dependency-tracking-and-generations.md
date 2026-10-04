@@ -81,9 +81,13 @@ flip or an out-of-band change invalidates a published entry that depended on
 the flag through the ordinary coherence path rather than leaving it to age out.
 A snapshot refresh reflecting an out-of-band change SHALL advance that
 generation and SHALL notify the cached evaluator in front of it, so no reader
-keeps serving stale identity-scope bits past the change. No `Feature`
-dependency SHALL be recorded for a flag with no scoped rule at all, preserving
-the property that a flag which does not depend on the reader costs nothing.
+keeps serving stale identity-scope bits past the change. A flag write or
+refresh SHALL notify the cached evaluator before it advances the generation,
+so no render can read a cached answer the write already replaced and still
+close on the advanced generation. The `Feature` dependency SHALL be recorded
+for a flag the snapshot holds no rule for as well: that read used the
+caller's compiled default, and the first rule stored for the flag changes the
+answer and advances exactly this generation.
 
 ### ORM query and model dependencies
 
@@ -241,6 +245,14 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-04 -- A read of a flag the snapshot holds no rule for now records
+  its `Feature` dependency, reversing the 2026-09-08 rule that such a read
+  records nothing. A page rendered from the compiled default stayed cached
+  after the first rule for the flag was stored, because nothing it observed
+  was advanced (audit DRIVERS-076). `set_flag` and a reload now notify the
+  cached evaluator before they advance the generation, so a render that read
+  the replaced cached answer during the write closes on the old generation
+  and is invalidated once the write completes (audit DRIVERS-078).
 - 2026-10-04 -- A dedicated advancement that fails or is dropped before it
   lands records its identities as unresolved, and serving stays suspended
   until a later advancement carries every one of them; an unrelated success

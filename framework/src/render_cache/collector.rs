@@ -46,13 +46,15 @@
 //!
 //! # Limitations, by design
 //!
-//! - **Config and Feature identities have no automatic producer.** No
-//!   framework read observes a config or feature generation and no write
-//!   path advances one, so observing them would spend the bounded
-//!   observation budget while contributing nothing to invalidation - the
-//!   same reasoning as ruling R24 on query classes. `Config::get::<T>()` is
-//!   also type-keyed rather than name-keyed, so there is no stable name to
-//!   build an identity from at that seam. The one reserved exception is
+//! - **Config identities have no automatic producer.** No framework read
+//!   observes a config generation and no write path advances one, so
+//!   observing them would spend the bounded observation budget while
+//!   contributing nothing to invalidation - the same reasoning as ruling R24
+//!   on query classes. `Config::get::<T>()` is also type-keyed rather than
+//!   name-keyed, so there is no stable name to build an identity from at
+//!   that seam. Feature identities do have a producer: the framework's flag
+//!   evaluators observe one per read ([`observe_feature_read`]) and its flag
+//!   writes advance it. The one reserved config exception is
 //!   [`permission_version_identity`], a `Config` identity this crate itself
 //!   both observes (for every render whose key carries a resolved
 //!   `Principal`) and advances
@@ -691,15 +693,15 @@ pub fn observe_record_read_json(table: &str, key: &serde_json::Value) {
     }
 }
 
-/// A read of one feature flag whose rules the snapshot holds, at any scope
-/// key including the global default.
+/// A read of one feature flag through the framework's evaluators.
 ///
 /// Records a [`DependencyIdentity::Feature`], so a change to any of the
 /// flag's rules invalidates the entry through the coherence path the same
-/// way a table write does. A flag the snapshot holds at no scope key
-/// records nothing: that render depended on the caller's compiled default,
-/// not on stored state, and a generation for it would be a row nothing ever
-/// writes. See [`observe_table_read`] for the bound-failure behaviour.
+/// way a table write does. A flag the snapshot holds at no scope key is
+/// recorded too: that render used the caller's compiled default, and the
+/// first rule stored for the flag changes the answer and advances exactly
+/// this generation. See [`observe_table_read`] for the bound-failure
+/// behaviour.
 pub fn observe_feature_read(feature: &str) {
     if !is_active() {
         return;

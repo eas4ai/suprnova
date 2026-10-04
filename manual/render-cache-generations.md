@@ -156,13 +156,15 @@ narrows the render to `Uncacheable` and names itself in the decline, so an
 invisible tenant filter costs you the cache rather than costing your
 visitors each other's rows.
 
-**Feature flags.** A read of a flag the `features` table holds - at any scope
-key, the global default included - observes that flag's own generation.
-`DatabaseEvaluator::set_flag` advances it after the new value is visible to
-readers, and `DatabaseEvaluator::reload()` advances it for every flag whose
-stored rules changed and tells the cached evaluator which ones those were. A
-flag the table does not hold records nothing: that render depended on the
-default compiled into `is_enabled!`, not on stored state.
+**Feature flags.** Every read of a flag through the framework's evaluators
+observes that flag's own generation, whether the `features` table holds a
+rule for it at any scope key or not. A flag the table does not hold yet
+renders the default compiled into `is_enabled!`, and the first rule stored
+for it changes that answer, so the read depends on it all the same.
+`DatabaseEvaluator::set_flag` and `DatabaseEvaluator::reload()` make the new
+value visible to readers, tell the cached evaluator which flags changed, and
+only then advance each changed flag's generation, so a render that read the
+old answer during the write is invalidated once the write completes.
 
 **The write side.** Every process whose configuration enables RenderCache and
 whose database holds the RenderCache migration advances generations, so a
