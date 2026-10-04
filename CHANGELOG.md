@@ -728,6 +728,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Live uploads, private responses and tooling.** Finalized uploads free
+  their pending slots when finalization commits, so a session no longer
+  runs out of upload capacity until restart, and are reclaimed when they
+  expire. A finalization that failed or stalled is reclaimed at expiry,
+  and an app without a finalizer leaves uploads Ready instead of stuck in
+  Finalizing. Cleanup deletes only temporary and uncommitted bytes; bytes
+  finalization committed as output are never deleted. Every RenderCache
+  response without shared-cache permission, public pages without
+  `s-maxage` and zero-slot composites included, is `private, no-cache`.
+  Making room for a file-store publication reads only the entries it
+  evicts. A Live tooling timeout kills every process the helper started,
+  and Ctrl+C still reaches the helper. A Live action with `validate =
+  "arguments"` and a typed `#[validate(action = ...)]` hook compiles
+  without a component-level `#[validate]` hook. Generated route helpers
+  handle optional parameters (`{id?}`) as `route()` does, leaving an empty
+  one out of the URL. Schema dump and load reach Postgres over a Unix
+  socket named in the URL host (`postgres://%2Frun%2Fpostgresql/db`). This
+  landed after the `v3.1.0` tag.
 - **Scaffolded apps on MySQL 8.4 and Postgres, and dates past 2038.** The
   auth-flow token table's hash is `VARCHAR(64)`; MySQL 8.4 refused the
   UNIQUE key on the old `TEXT` column (error 1170), so a new app's
