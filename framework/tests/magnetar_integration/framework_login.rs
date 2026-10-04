@@ -7,6 +7,11 @@
 //! `TwoFactor::complete_challenge` - authenticate outside Magnetar. These
 //! tests drive the manual's flows through `handle_request` over a loopback
 //! socket and check the user is still signed in on the next request.
+//!
+//! The engine, the database and the provider are installed once per
+//! process, but every test signs up an account of its own and changes only
+//! that account's state, so the tests hold under `cargo test`, which runs
+//! them side by side in one process, as well as under nextest.
 
 #![cfg(all(feature = "testing", feature = "database-sqlite"))]
 
@@ -14,7 +19,8 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -43,8 +49,12 @@ const PASSWORD: &str = "correct-horse-battery";
 
 static SETUP: OnceCell<()> = OnceCell::const_new();
 
-/// The Magnetar user the framework provider below resolves.
-static ACCOUNT: OnceCell<Account> = OnceCell::const_new();
+/// Every account a test signed up; the framework provider below resolves
+/// them by id and by email.
+static ACCOUNTS: Mutex<Vec<Account>> = Mutex::new(Vec::new());
+
+/// Numbers the accounts, so every test's addresses are its own.
+static NEXT_ACCOUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// The Magnetar database, for the tests that change engine state behind
 /// the facades' back.
@@ -85,9 +95,25 @@ impl MigratorTrait for TwoFactorMigrator {
     }
 }
 
+/// An address no other test uses.
+fn unique_email(label: &str) -> String {
+    format!(
+        "{label}-{}-{}@example.test",
+        std::process::id(),
+        NEXT_ACCOUNT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn accounts() -> std::sync::MutexGuard<'static, Vec<Account>> {
+    ACCOUNTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Install the default Magnetar engine, the framework 2FA tables, and a
-/// session guard whose provider resolves the registered Magnetar user, the
-/// way an application that keeps its own login forms is wired.
+/// session guard whose provider resolves the registered Magnetar users, the
+/// way an application that keeps its own login forms is wired, once per
+/// process. Then sign up an account for the calling test alone.
 async fn setup() -> Account {
     SETUP
         .get_or_init(|| async {
@@ -130,26 +156,23 @@ async fn setup() -> Account {
                 .set(connection.clone())
                 .unwrap_or_else(|_| panic!("connection is set once"));
             App::singleton(DbConnection::from_raw(connection));
-
-            let user = Auth::password()
-                .register("framework-login@example.test", PASSWORD)
-                .await
-                .expect("register the Magnetar user")
-                .created()
-                .expect("registration creates a new account");
-            ACCOUNT
-                .set(Account {
-                    id: user.id.to_string(),
-                    email: user.email.clone(),
-                })
-                .unwrap_or_else(|_| panic!("account is set once"));
-
             App::singleton(AuthManager::new(AuthConfig::default()));
             Auth::register_provider("users", Arc::new(AccountProvider))
                 .expect("register users provider");
         })
         .await;
-    ACCOUNT.get().expect("account registered").clone()
+    let user = Auth::password()
+        .register(&unique_email("framework-login"), PASSWORD)
+        .await
+        .expect("register the Magnetar user")
+        .created()
+        .expect("registration creates a new account");
+    let account = Account {
+        id: user.id.to_string(),
+        email: user.email.clone(),
+    };
+    accounts().push(account.clone());
+    account
 }
 
 struct AccountUser(Account);
@@ -185,18 +208,21 @@ impl UserProvider for AccountProvider {
         &self,
         id: &str,
     ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
-        let account = ACCOUNT.get().expect("account registered");
-        Ok((id == account.id).then(|| Arc::new(AccountUser(account.clone())) as _))
+        Ok(accounts()
+            .iter()
+            .find(|account| account.id == id)
+            .map(|account| Arc::new(AccountUser(account.clone())) as _))
     }
 
     async fn retrieve_by_credentials(
         &self,
         credentials: &serde_json::Value,
     ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
-        let account = ACCOUNT.get().expect("account registered");
         let email = credentials.get("email").and_then(|v| v.as_str());
-        Ok((email == Some(account.email.as_str()))
-            .then(|| Arc::new(AccountUser(account.clone())) as _))
+        Ok(accounts()
+            .iter()
+            .find(|account| Some(account.email.as_str()) == email)
+            .map(|account| Arc::new(AccountUser(account.clone())) as _))
     }
 
     async fn validate_credentials(
@@ -556,11 +582,12 @@ async fn registering_an_existing_address_never_signs_in_as_its_owner() {
 
     // A fresh address registers and signs in as the new account.
     let mut newcomer = Browser::open().await;
+    let newcomer_email = unique_email("newcomer");
     let (status, body) = newcomer
         .get(
             "/register",
             &[
-                ("x-email", "newcomer@example.test"),
+                ("x-email", &newcomer_email),
                 ("x-password", "newcomer-password"),
             ],
         )
@@ -703,7 +730,9 @@ async fn a_magnetar_second_factor_refuses_the_framework_challenge_up_front() {
     // The password step's own Login event (Auth::attempt, then demotion)
     // has fired; the refused challenge must add none.
     let logins_before =
-        suprnova::events::testing::dispatched_count::<suprnova::auth::events::Login>(|_| true);
+        suprnova::events::testing::dispatched_count::<suprnova::auth::events::Login>(|login| {
+            login.user_id == account.id
+        });
 
     let (status, body) = browser
         .get("/two-factor-challenge", &[("x-code", &code)])
@@ -715,13 +744,15 @@ async fn a_magnetar_second_factor_refuses_the_framework_challenge_up_front() {
     );
     assert_eq!(browser.whoami().await, "guest");
     assert_eq!(
-        suprnova::events::testing::dispatched_count::<suprnova::auth::events::Login>(|_| true),
+        suprnova::events::testing::dispatched_count::<suprnova::auth::events::Login>(|login| login
+            .user_id
+            == account.id),
         logins_before,
         "the refused challenge fires no Login"
     );
     suprnova::events::testing::assert_not_dispatched::<
         suprnova::auth_flows::events::TwoFactorChallenged,
-    >(|_| true);
+    >(|challenged| challenged.user_id == account.id);
     assert_eq!(session_count(&account).await, 0);
     assert!(
         TwoFactor::verify(&account, &code).await.expect("verify"),
@@ -751,7 +782,9 @@ async fn a_magnetar_second_factor_refuses_a_session_guard_login_up_front() {
     assert_eq!(status, 409, "{body}");
     assert!(!browser.cookies.contains_key("remember_me"));
     assert_eq!(browser.whoami().await, "guest");
-    suprnova::events::testing::assert_not_dispatched::<suprnova::auth::events::Login>(|_| true);
+    suprnova::events::testing::assert_not_dispatched::<suprnova::auth::events::Login>(|login| {
+        login.user_id == account.id
+    });
     assert_eq!(session_count(&account).await, 0);
 }
 
@@ -821,16 +854,21 @@ async fn replacing_or_ending_a_bound_login_retires_its_magnetar_session() {
 #[tokio::test]
 async fn a_failed_session_save_retires_the_issued_magnetar_session() {
     let account = setup().await;
-    magnetar_sql(
-        "CREATE TRIGGER refuse_session_insert BEFORE INSERT ON sessions \
+    // Refuse only this account's session, so the tests beside it still
+    // store theirs.
+    let trigger = format!("refuse_session_insert_{}", account.id);
+    magnetar_sql(&format!(
+        "CREATE TRIGGER {trigger} BEFORE INSERT ON sessions \
+         WHEN NEW.user_id = '{}' \
          BEGIN SELECT RAISE(ABORT, 'injected session write failure'); END",
-    )
+        account.id
+    ))
     .await;
     let mut browser = Browser::open().await;
     let (status, _) = browser
         .get("/login-id", &[("x-user-id", &account.id)])
         .await;
-    magnetar_sql("DROP TRIGGER refuse_session_insert").await;
+    magnetar_sql(&format!("DROP TRIGGER {trigger}")).await;
 
     assert_eq!(status, 500);
     assert_eq!(browser.whoami().await, "guest");
