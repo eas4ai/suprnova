@@ -1266,3 +1266,53 @@ async fn a_sweep_examines_a_bounded_number_of_entries_however_large_the_store() 
     );
     assert_eq!(store.inspect().await.expect("inspect").entries, 200);
 }
+
+/// A publication that has to make room evicts oldest-first and looks at a
+/// bounded number of entries, not every entry in the store. It used to
+/// collect, clone and sort every tracked entry under the lock on each
+/// publication past the byte bound, so a full store made every new entry
+/// pay for its whole size.
+#[tokio::test]
+async fn making_room_for_a_publication_examines_a_bounded_number_of_entries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileRenderStore::open(dir.path(), 200 * 8).expect("open");
+    for n in 0..200_u64 {
+        store
+            .publish(
+                &key(&format!("/full/{n}")),
+                Bytes::from(vec![1_u8; 8]),
+                fence(n + 1),
+                1_000 + n,
+                3_600_000,
+            )
+            .await
+            .expect("publish");
+    }
+    assert_eq!(store.inspect().await.expect("inspect").entries, 200);
+    let _ = store.take_eviction_examined_for_test();
+
+    assert_eq!(
+        store
+            .publish(
+                &key("/one-more"),
+                Bytes::from(vec![1_u8; 8]),
+                fence(1_000),
+                2_000,
+                3_600_000,
+            )
+            .await
+            .expect("publish"),
+        PublishOutcome::Published
+    );
+    assert!(
+        store.get(&key("/full/0")).await.expect("get").is_none(),
+        "the oldest entry made room"
+    );
+    assert!(store.get(&key("/full/1")).await.expect("get").is_some());
+    assert_eq!(store.inspect().await.expect("inspect").entries, 200);
+    let examined = store.take_eviction_examined_for_test();
+    assert!(
+        examined < 16,
+        "evicting one entry looks at a handful, not all 200: examined {examined}"
+    );
+}
