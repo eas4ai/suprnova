@@ -337,9 +337,13 @@ tags. Two consequences worth knowing:
 - Overwriting `tags_put(&["a"], …)` with `tags_put(&["b"], …)` makes
   the entry respond only to `flush_tags(&["b"])`.
 
-Stale forward-index references are pruned during the flush walk and on
-`flush()`, so they don't accumulate indefinitely for tags that are
-written but never flushed.
+A tag's index of keys drops entries that can no longer be reached, so it
+doesn't grow without bound for a tag that is written often but rarely
+flushed. Flushing one tag removes the deleted keys from the indexes of their
+other tags too. On the in-memory backend the periodic sweep removes expired
+keys from the indexes. On Redis every tagged write checks a sample of the
+tag's index and removes keys that expired, were forgotten, or were
+overwritten without the tag, and `flush()` clears every index.
 
 ## Two backends
 

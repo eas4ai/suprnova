@@ -112,9 +112,11 @@ pub trait CacheStore: Send + Sync {
     /// `tagged_put_raw(["a"], ...)` with `tagged_put_raw(["b"], ...)`
     /// makes the entry only respond to `flush_tags(["b"])`.
     ///
-    /// Stale forward-index references are pruned during the flush walk
-    /// and on `flush()` so they do not accumulate against keys that
-    /// have been overwritten or expired.
+    /// The forward index of every tag must stay near its live size: a
+    /// flush removes the keys it deletes from the indexes of their other
+    /// tags too, and keys that expired, were forgotten, or were overwritten
+    /// without a tag must leave the index eventually rather than accumulate
+    /// for a tag that is written often and never flushed.
     async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError>;
 
     /// Try to acquire a distributed lock for `key` with a TTL. On success,

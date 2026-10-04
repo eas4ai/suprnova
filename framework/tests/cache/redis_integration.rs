@@ -782,3 +782,59 @@ async fn redis_touch_keeps_a_tagged_value_flushable_past_its_first_ttl() {
         "a touched tagged value must still be removed by its tag"
     );
 }
+
+/// DRIVERS-004: a tag's forward index stops growing with entries that can
+/// no longer be reached. Expired, forgotten, overwritten and flushed-by-
+/// another-tag members are pruned as the tag is written, instead of staying
+/// in the set until that exact tag is flushed.
+#[tokio::test]
+#[ignore = "requires Redis at CACHE_REDIS_TEST_URL or default localhost"]
+async fn redis_tag_index_drops_members_that_can_no_longer_be_reached() {
+    let prefix = format!("tag-gc{}:", uuid::Uuid::new_v4().simple());
+    let s = store_at(&redis_url(), prefix.clone()).await;
+    let index = format!("{prefix}\0tag:b");
+    let mut raw = raw_connection().await;
+
+    // Dead in four ways: expired, forgotten, overwritten untagged, and
+    // flushed through their other tag.
+    for i in 0..3 {
+        s.tagged_put_raw(
+            &["b"],
+            &format!("exp{i}"),
+            "v",
+            Some(Duration::from_millis(50)),
+        )
+        .await
+        .unwrap();
+        s.tagged_put_raw(&["b"], &format!("gone{i}"), "v", None)
+            .await
+            .unwrap();
+        s.forget(&format!("gone{i}")).await.unwrap();
+        s.tagged_put_raw(&["b"], &format!("plain{i}"), "v", None)
+            .await
+            .unwrap();
+        s.put_raw(&format!("plain{i}"), "v", None).await.unwrap();
+        s.tagged_put_raw(&["a", "b"], &format!("both{i}"), "v", None)
+            .await
+            .unwrap();
+    }
+    s.flush_tags(&["a"]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // One more live write to the tag is what prunes it.
+    s.tagged_put_raw(&["b"], "live", "v", None).await.unwrap();
+
+    let members: Vec<String> = redis::cmd("SMEMBERS")
+        .arg(&index)
+        .query_async(&mut raw)
+        .await
+        .expect("read the forward index");
+    assert_eq!(
+        members,
+        vec![format!("{prefix}live")],
+        "the forward index for tag b must hold only the live member"
+    );
+
+    s.flush_tags(&["b"]).await.unwrap();
+    assert!(!s.has("live").await.unwrap());
+}

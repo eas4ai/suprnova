@@ -48,11 +48,45 @@ fn data_key(prefix: &str, key: &str) -> String {
     }
 }
 
+/// How many members of a tag's forward index each tagged write checks, and
+/// prunes when they can no longer be reached.
+///
+/// A member stays in the forward index after its value expires, is
+/// forgotten, or is overwritten untagged, because none of those touch the
+/// index. Checking a fixed sample on every write to the tag keeps the index
+/// close to its live size: each write adds one member and removes most of
+/// the dead ones it samples, so a tag written often never grows without
+/// bound. A tag whose index holds fewer members than this is checked whole.
+const TAG_PRUNE_SAMPLE: usize = 16;
+
+/// Prune a sample of a tag's forward index.
+///
+/// `KEYS[1]` is the tag index, `ARGV[1]` the tag, `ARGV[2]` the prefix of
+/// every aux tag-membership key, and `ARGV[3]` the sample size. A member
+/// whose aux set no longer names the tag is unreachable through this tag -
+/// its value expired, was forgotten, or was overwritten without it - so it
+/// is removed. The aux set is the same source of truth `flush_tags` uses, so
+/// a member this removes is one a flush would have skipped.
+const PRUNE_TAG_SAMPLE_LUA: &str = r#"
+local sample = redis.call('SRANDMEMBER', KEYS[1], tonumber(ARGV[3]))
+for _, member in ipairs(sample) do
+    if redis.call('SISMEMBER', ARGV[2] .. member, ARGV[1]) == 0 then
+        redis.call('SREM', KEYS[1], member)
+    end
+end
+return #sample
+"#;
+
 /// Atomically settle one `SSCAN` batch of a tag's forward index.
 ///
-/// `KEYS[1]` is the tag index; `ARGV[1]` is the tag; `ARGV[2..]` alternates
-/// `member, aux` (the value key and its tag-membership set), computed by
-/// the caller so the aux-key format lives in exactly one place.
+/// `KEYS[1]` is the tag index; `ARGV[1]` is the tag; `ARGV[2]` is the
+/// prefix of every tag index key; `ARGV[3..]` alternates `member, aux` (the
+/// value key and its tag-membership set), computed by the caller so the
+/// key formats live in exactly one place.
+///
+/// A deleted value is also removed from the indexes of its *other* tags.
+/// Leaving it there would grow those indexes with a member nothing can
+/// reach until each of those tags is flushed in turn.
 ///
 /// Why a script rather than the SISMEMBER-then-DEL it replaces: those were
 /// two round trips with a gap between them. A concurrent untagged
@@ -68,11 +102,17 @@ fn data_key(prefix: &str, key: &str) -> String {
 /// goes away once the last member is removed.
 const FLUSH_TAG_BATCH_LUA: &str = r#"
 local tag = ARGV[1]
+local index_prefix = ARGV[2]
 local flushed = 0
-for i = 2, #ARGV, 2 do
+for i = 3, #ARGV, 2 do
     local member = ARGV[i]
     local aux = ARGV[i + 1]
     if redis.call('SISMEMBER', aux, tag) == 1 then
+        for _, other in ipairs(redis.call('SMEMBERS', aux)) do
+            if other ~= tag then
+                redis.call('SREM', index_prefix .. other, member)
+            end
+        end
         redis.call('DEL', member, aux)
         flushed = flushed + 1
     end
@@ -233,6 +273,18 @@ impl RedisCache {
     /// `Cache::put/forget/get`.
     fn key_tags_set(&self, prefixed_key: &str) -> String {
         namespaced_key(&self.prefix, "key_tags", prefixed_key)
+    }
+
+    /// The part every aux tag-membership key shares, for the Lua scripts
+    /// that derive an aux key from a member name.
+    fn key_tags_prefix(&self) -> String {
+        namespaced_key(&self.prefix, "key_tags", "")
+    }
+
+    /// The part every tag forward-index key shares, for the Lua scripts
+    /// that derive an index key from a tag name.
+    fn tag_index_prefix(&self) -> String {
+        namespaced_key(&self.prefix, "tag", "")
     }
 }
 
@@ -488,9 +540,21 @@ impl CacheStore for RedisCache {
         // Forward index: tag -> set of value keys. Used as the candidate
         // list by flush_tags; the aux set is the source of truth for
         // "is this key still tagged with t" at deletion time.
+        let aux_prefix = self.key_tags_prefix();
         for t in tags {
             let tag_key = self.tag_index_key(t);
             pipe.cmd("SADD").arg(&tag_key).arg(&pkey).ignore();
+            // Prune a sample of the same index in the same transaction, so
+            // a tag that is written often but rarely flushed stays near its
+            // live size. See `TAG_PRUNE_SAMPLE`.
+            pipe.cmd("EVAL")
+                .arg(PRUNE_TAG_SAMPLE_LUA)
+                .arg(1)
+                .arg(&tag_key)
+                .arg(*t)
+                .arg(&aux_prefix)
+                .arg(TAG_PRUNE_SAMPLE)
+                .ignore();
         }
         pipe.query_async::<()>(&mut conn)
             .await
@@ -500,6 +564,7 @@ impl CacheStore for RedisCache {
 
     async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError> {
         let mut conn = self.conn.clone();
+        let index_prefix = self.tag_index_prefix();
         for t in tags {
             let tag_key = self.tag_index_key(t);
             let mut cursor: u64 = 0;
@@ -537,7 +602,12 @@ impl CacheStore for RedisCache {
 
                 if !members.is_empty() {
                     let mut script = redis::cmd("EVAL");
-                    script.arg(FLUSH_TAG_BATCH_LUA).arg(1).arg(&tag_key).arg(*t);
+                    script
+                        .arg(FLUSH_TAG_BATCH_LUA)
+                        .arg(1)
+                        .arg(&tag_key)
+                        .arg(*t)
+                        .arg(&index_prefix);
                     for member in &members {
                         script.arg(member).arg(self.key_tags_set(member));
                     }
