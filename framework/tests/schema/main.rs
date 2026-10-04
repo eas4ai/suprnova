@@ -18,8 +18,11 @@
 
 mod cases;
 mod catalog;
+#[path = "../support/http_wire.rs"]
+mod http_wire;
 mod laravel_cases;
 mod laravel_defaults;
 mod mysql;
 mod postgres;
 mod sqlite;
+mod unsigned_keys;

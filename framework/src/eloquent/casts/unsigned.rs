@@ -72,6 +72,25 @@ impl From<StoredU64> for u64 {
     }
 }
 
+/// Parses the decimal digits of a `u64`, so a route parameter binds a
+/// `u64`-keyed model: route-model binding parses the segment as the
+/// entity's key type, which is this one.
+impl std::str::FromStr for StoredU64 {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        text.parse().map(Self)
+    }
+}
+
+/// The bare number, as the `u64` it holds displays, so the key of a bare
+/// SeaORM model formats the way it did when the entity stored a `u64`.
+impl std::fmt::Display for StoredU64 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
 /// The bare number, so a stored key can be a query's value, as the
 /// soft-delete `find` passes it to `filter`.
 impl From<StoredU64> for serde_json::Value {
@@ -325,6 +344,18 @@ mod tests {
             serde_json::from_value::<StoredU64>(serde_json::json!(7)).expect("deserialize"),
             StoredU64(7)
         );
+    }
+
+    #[test]
+    fn the_storage_type_parses_and_displays_as_the_number() {
+        assert_eq!(
+            "18446744073709551615".parse::<StoredU64>().ok(),
+            Some(StoredU64(u64::MAX))
+        );
+        for not_a_u64 in ["", "abc", "-1", "18446744073709551616"] {
+            assert!(not_a_u64.parse::<StoredU64>().is_err(), "{not_a_u64:?}");
+        }
+        assert_eq!(StoredU64(42).to_string(), "42");
     }
 
     #[test]
