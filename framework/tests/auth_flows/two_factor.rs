@@ -1307,3 +1307,26 @@ async fn a_lockout_bound_in_code_sets_the_threshold() {
         .expect_err("the third attempt is refused at a threshold of 2");
     assert_eq!(error.status_code(), 429);
 }
+
+/// An application that upgraded without adding the attempt-counter
+/// migration gets 503 from every proof path. The log says why, naming the
+/// migration to add.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_missing_attempt_table_logs_the_migration_to_add() {
+    ensure_crypt();
+    let db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let (user, resp) = enrolled_user("missing-attempt-table").await;
+    db.execute_unprepared("DROP TABLE two_factor_attempts")
+        .await
+        .unwrap();
+
+    let error = TwoFactor::verify(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .expect_err("no attempt can be counted");
+    assert_eq!(error.status_code(), 503);
+    assert!(
+        logs_contain("migration_attempts"),
+        "the log names the missing migration"
+    );
+}

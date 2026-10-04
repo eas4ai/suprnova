@@ -80,9 +80,35 @@ pub(crate) struct Failure {
 
 /// Every store failure answers 503: the attempt could not be counted, so
 /// the proof must not be evaluated or reported as settled.
+///
+/// A missing `two_factor_attempts` table gets its own log line naming the
+/// migration that creates it, so an operator who upgraded without adding it
+/// sees why every proof path answers 503.
 fn unavailable(error: impl std::fmt::Display) -> FrameworkError {
-    tracing::error!(%error, "two-factor attempt store failed");
+    let message = error.to_string();
+    if names_missing_attempt_table(&message) {
+        tracing::error!(
+            error = %message,
+            "the two_factor_attempts table is missing: add \
+             suprnova::auth_flows::two_factor::migration_attempts::Migration to the \
+             application's migrator and run the migrations; until then every \
+             two-factor proof answers 503"
+        );
+    } else {
+        tracing::error!(error = %message, "two-factor attempt store failed");
+    }
     FrameworkError::domain("two-factor attempt store unavailable", 503)
+}
+
+/// Whether a database error reports the attempt table as missing, in the
+/// wording SQLite ("no such table"), PostgreSQL ("does not exist") and
+/// MySQL ("doesn't exist") use.
+fn names_missing_attempt_table(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("two_factor_attempts")
+        && (message.contains("no such table")
+            || message.contains("does not exist")
+            || message.contains("doesn't exist"))
 }
 
 /// Run `work` in one transaction that holds the user's write lock.
@@ -244,4 +270,26 @@ pub(crate) async fn clear(user_id: &str) -> Result<bool, FrameworkError> {
         })
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::names_missing_attempt_table;
+
+    #[test]
+    fn missing_table_wordings_of_each_engine_are_recognized() {
+        for message in [
+            "error returned from database: (code: 1) no such table: two_factor_attempts",
+            "error returned from database: relation \"two_factor_attempts\" does not exist",
+            "error returned from database: 1146 (42S02): Table 'app.two_factor_attempts' doesn't exist",
+        ] {
+            assert!(names_missing_attempt_table(message), "{message}");
+        }
+        assert!(!names_missing_attempt_table(
+            "error returned from database: database is locked"
+        ));
+        assert!(!names_missing_attempt_table(
+            "no such table: two_factor_credentials"
+        ));
+    }
 }
