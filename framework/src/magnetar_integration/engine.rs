@@ -684,6 +684,31 @@ pub struct MagnetarHostEngineParts<
 /// facades answer it with `409`.
 pub(crate) const FRAMEWORK_SECOND_FACTOR: &str = "framework second factor";
 
+/// The framework's own TOTP (`TwoFactor`) as the second factor a Magnetar
+/// `TwoFactorService` must not enroll beside.
+///
+/// Each factor system refuses the sign-ins that do not verify it, so an
+/// account with both could sign in by no path. `init_magnetar` gives its
+/// service this check. A host that builds its own `TwoFactorService` passes
+/// it to `TwoFactorService::with_other_second_factor`, and the service then
+/// refuses `enroll` and `confirm` while the account has the framework's TOTP,
+/// confirmed or waiting for its confirmation, the way `TwoFactor::enroll` and
+/// `TwoFactor::confirm` refuse an account with a Magnetar factor.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameworkTotpEnrollment;
+
+#[async_trait]
+impl magnetar::two_factor::OtherSecondFactor for FrameworkTotpEnrollment {
+    async fn enrolled_or_pending(&self, user_id: &str) -> Result<bool> {
+        crate::auth_flows::TwoFactor::enrolled_or_pending(user_id)
+            .await
+            .map_err(|error| Error::DependencyUnavailable {
+                dependency: "framework two-factor store".to_owned(),
+                message: error.to_string(),
+            })
+    }
+}
+
 /// The factor gate Magnetar's own sign-ins go through: password, magic
 /// link, passkey, OAuth and device approval.
 ///
@@ -766,6 +791,9 @@ pub struct MagnetarHostEngine<
     ceremonies: Arc<C>,
     session_provider: Arc<OpaqueSessionProvider<O>>,
     factor_gate: Arc<OpaqueFactorGate<C, F, O>>,
+    /// The factor verifier behind `factor_gate`, asked whether an account
+    /// has a factor at all; see [`MagnetarFactorAuthEngine::has_second_factor`].
+    factors: Arc<F>,
     /// The gate Magnetar's own sign-ins go through; see
     /// [`FrameworkTotpGate`].
     sign_in_gate: Arc<dyn FactorGate>,
@@ -819,7 +847,7 @@ where
         ));
         let factor_gate = Arc::new(OpaqueFactorGate::new(
             Arc::clone(&ceremonies),
-            factors,
+            Arc::clone(&factors),
             Arc::clone(&encryptor),
             Arc::clone(&session_provider),
         ));
@@ -851,6 +879,7 @@ where
             ceremonies,
             session_provider,
             factor_gate,
+            factors,
             sign_in_gate,
             remember,
             encryptor,
@@ -1194,6 +1223,12 @@ where
             .try_into()
     }
 
+    /// Whether `user_id` has a second factor here, confirmed or waiting for
+    /// its confirmation. See [`MagnetarFactorAuthEngine::has_second_factor`].
+    pub async fn has_second_factor(&self, user_id: &str) -> Result<bool> {
+        self.factors.has_enrollment(user_id).await
+    }
+
     /// Admit a host sign-in: refuse an unknown user or one with a confirmed
     /// second factor, and return the user's current auth epoch. See
     /// [`MagnetarFactorAuthEngine::admit_host_sign_in`].
@@ -1275,6 +1310,18 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
             dependency: "Magnetar session authority".to_owned(),
             message: "host sign-in is unavailable".to_owned(),
         })
+    }
+
+    /// Whether `user_id` has a second factor in this engine, confirmed or
+    /// waiting for its confirmation. See
+    /// [`MagnetarFactorAuthEngine::has_second_factor`], whose default this
+    /// one shares.
+    async fn has_second_factor(&self, user_id: &str) -> Result<bool> {
+        match self.admit_host_sign_in(user_id).await {
+            Ok(_) | Err(Error::NotFound { .. }) => Ok(false),
+            Err(Error::Conflict { .. }) => Ok(true),
+            Err(error) => Err(error),
+        }
     }
 
     /// Issue an opaque session for a user the host application has already
@@ -1503,6 +1550,24 @@ pub trait MagnetarFactorAuthEngine: Send + Sync {
         })
     }
 
+    /// Whether `user_id` has a second factor in this engine, confirmed or
+    /// waiting for its confirmation.
+    ///
+    /// The framework's `TwoFactor::enroll` and `TwoFactor::confirm` refuse
+    /// such an account: each factor system refuses the sign-ins that do not
+    /// verify it, so an account with both could sign in by no path.
+    ///
+    /// The default answers from [`Self::admit_host_sign_in`], whose conflict
+    /// means a confirmed factor; it cannot see one that waits for its
+    /// confirmation, and an engine without a host sign-in fails closed.
+    async fn has_second_factor(&self, user_id: &str) -> Result<bool> {
+        match self.admit_host_sign_in(user_id).await {
+            Ok(_) | Err(Error::NotFound { .. }) => Ok(false),
+            Err(Error::Conflict { .. }) => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Issue an opaque session for a user the host application has already
     /// signed in itself: through a framework session guard (`Auth::login_id`,
     /// `Auth::attempt`, `Auth::login`) or the framework TOTP challenge
@@ -1596,6 +1661,10 @@ where
         MagnetarHostEngine::admit_host_sign_in(self, user_id).await
     }
 
+    async fn has_second_factor(&self, user_id: &str) -> Result<bool> {
+        MagnetarHostEngine::has_second_factor(self, user_id).await
+    }
+
     async fn issue_host_session(
         &self,
         user_id: &str,
@@ -1634,6 +1703,10 @@ where
 
     async fn admit_host_sign_in(&self, user_id: &str) -> Result<u64> {
         MagnetarHostEngine::admit_host_sign_in(self, user_id).await
+    }
+
+    async fn has_second_factor(&self, user_id: &str) -> Result<bool> {
+        MagnetarHostEngine::has_second_factor(self, user_id).await
     }
 
     async fn issue_host_session(

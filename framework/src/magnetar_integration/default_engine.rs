@@ -546,13 +546,17 @@ async fn build_default_engines(
         )),
         config.lockout,
     ));
-    let factors = Arc::new(TwoFactorService::new(
-        Arc::new(SqlTwoFactorStore(config.connection.clone())),
-        storage.clone(),
-        second_factor_lockout,
-        encryptor.clone(),
-        config.two_factor,
-    ));
+    // An account holds the framework's TOTP or this factor, never both.
+    let factors = Arc::new(
+        TwoFactorService::new(
+            Arc::new(SqlTwoFactorStore(config.connection.clone())),
+            storage.clone(),
+            second_factor_lockout,
+            encryptor.clone(),
+            config.two_factor,
+        )
+        .with_other_second_factor(Arc::new(super::engine::FrameworkTotpEnrollment)),
+    );
     let verifier = Arc::new(
         PasswordVerifier::new(
             Arc::new(StandardPasswordHashDriver),

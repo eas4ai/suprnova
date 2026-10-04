@@ -47,6 +47,25 @@ pub fn lockout_identity(user_id: &str) -> String {
     format!("two-factor:{user_id}")
 }
 
+/// The resource of the conflict [`TwoFactorService`] answers when the
+/// account has a second factor outside it; see [`OtherSecondFactor`].
+pub const OTHER_SECOND_FACTOR: &str = "other second factor";
+
+/// A second factor kept outside [`TwoFactorService`], such as an
+/// application's own TOTP.
+///
+/// An account may hold one of the two, not both. Each refuses the sign-ins
+/// that do not verify it, so an account with both could sign in by no path.
+/// A service given one through [`TwoFactorService::with_other_second_factor`]
+/// refuses to enroll, or to confirm an enrollment, while it reports a factor
+/// for the account; the other system refuses the same way in return.
+#[async_trait]
+pub trait OtherSecondFactor: Send + Sync {
+    /// Whether `user_id` has the other second factor, confirmed or waiting
+    /// for its confirmation.
+    async fn enrolled_or_pending(&self, user_id: &str) -> Result<bool>;
+}
+
 /// Two-factor configuration (the `APP_NAME` lineage).
 #[derive(Clone, Debug)]
 pub struct TwoFactorConfig {
@@ -158,6 +177,7 @@ pub struct TwoFactorService {
     lockout: Arc<LockoutService>,
     encryptor: Arc<dyn Encryptor>,
     config: TwoFactorConfig,
+    other: Option<Arc<dyn OtherSecondFactor>>,
 }
 
 impl TwoFactorService {
@@ -189,7 +209,32 @@ impl TwoFactorService {
             lockout,
             encryptor,
             config,
+            other: None,
         }
+    }
+
+    /// Refuse an enrollment, and the confirmation of one, while `other`
+    /// reports a second factor for the account. See [`OtherSecondFactor`].
+    #[must_use]
+    pub fn with_other_second_factor(mut self, other: Arc<dyn OtherSecondFactor>) -> Self {
+        self.other = Some(other);
+        self
+    }
+
+    /// Refuse when the account has the other second factor.
+    async fn refuse_other_second_factor(&self, user_id: &str) -> Result<()> {
+        let Some(other) = &self.other else {
+            return Ok(());
+        };
+        if other.enrolled_or_pending(user_id).await? {
+            return Err(Error::Conflict {
+                resource: OTHER_SECOND_FACTOR.to_owned(),
+                message: "this account has another second factor; an account holds one, \
+                          so disable that one first"
+                    .to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// Begin enrollment: mint a secret and ten recovery codes, persist
@@ -197,7 +242,11 @@ impl TwoFactorService {
     /// confirmed enrollment already exists - a session-hijacked attacker
     /// must not pivot from "I have a session" to "I own 2FA"; rotation
     /// goes through [`TwoFactorService::re_enroll`] with proof.
+    ///
+    /// Also refused, with a conflict on [`OTHER_SECOND_FACTOR`], while the
+    /// service's [`OtherSecondFactor`] reports a factor for the account.
     pub async fn enroll(&self, actor: &CredentialActor) -> Result<EnrollmentResponse> {
+        self.refuse_other_second_factor(actor.user_id()).await?;
         let prepared = self.prepare_enrollment(actor.user_id()).await?;
         if !self
             .store
@@ -273,8 +322,13 @@ impl TwoFactorService {
     /// rotation replaces the secret between the check and the stamp,
     /// nothing is confirmed and the caller gets a conflict: the code proved
     /// possession of the old secret, not of the new one.
+    ///
+    /// Refused, before the code is read, while the service's
+    /// [`OtherSecondFactor`] reports a factor for the account: of two
+    /// enrollments racing each other, the second to confirm loses.
     pub async fn confirm(&self, actor: &CredentialActor, code: &str) -> Result<()> {
         let user_id = actor.user_id();
+        self.refuse_other_second_factor(user_id).await?;
         self.with_reserved_attempt(user_id, "two-factor confirm", async {
             let row = self.store.find_enrollment(user_id).await?;
             // An unconfirmed row is an initial enrollment; a confirmed one
@@ -683,6 +737,10 @@ impl FactorVerifier for TwoFactorService {
 
     async fn has_confirmed_enrollment(&self, user_id: &str) -> Result<bool> {
         self.is_enabled(user_id).await
+    }
+
+    async fn has_enrollment(&self, user_id: &str) -> Result<bool> {
+        Ok(self.store.find_enrollment(user_id).await?.is_some())
     }
 
     async fn prepare_code(

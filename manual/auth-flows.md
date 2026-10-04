@@ -777,6 +777,41 @@ signs in with a later code.
 `enroll` checks that the row is still unconfirmed in the statement that
 writes it, so a confirmation that lands while it runs also gets the `409`.
 
+### One second factor per account
+
+With Magnetar installed, an account holds the framework's TOTP or a Magnetar
+second factor, never both. Each refuses the sign-ins that don't verify it: the
+framework's logins refuse an account with a Magnetar factor, and Magnetar's own
+sign-ins refuse an account with the framework's TOTP. An account with both
+could sign in by no path, so neither system lets the second one in.
+
+- `TwoFactor::enroll` and `TwoFactor::confirm` return `409` while the account
+  has a Magnetar factor, confirmed or waiting for its confirmation. `confirm`
+  checks before it reads the code, so of two enrollments racing each other the
+  second to confirm loses.
+- Magnetar's `TwoFactorService` returns a conflict on
+  `magnetar::two_factor::OTHER_SECOND_FACTOR` from `enroll` and `confirm` while
+  the account has the framework's TOTP, confirmed or pending. `init_magnetar`
+  gives its service that check; a host that builds its own service passes
+  `suprnova::magnetar_integration::engine::FrameworkTotpEnrollment` to
+  `TwoFactorService::with_other_second_factor`.
+
+An account can still hold both if it enrolled before these checks, or if a
+migration imported a Magnetar factor for an account that has the framework's
+TOTP. Every sign-in path refuses it with `409` until one factor is disabled,
+and disabling either one is the recovery. The user can't sign in to do it, so
+it's an administrator's action:
+
+```rust
+// Disable the framework TOTP. Auth::password() and Magnetar's other
+// sign-ins then ask for the Magnetar factor.
+TwoFactor::disable(&user_2fa).await?;
+```
+
+A host that holds its `TwoFactorService` can disable the Magnetar factor
+instead. The account then signs in through the application's login and
+`TwoFactor::complete_challenge`.
+
 ### Replay protection
 
 `verify` writes the current TOTP timestep to `last_used_timestep` on

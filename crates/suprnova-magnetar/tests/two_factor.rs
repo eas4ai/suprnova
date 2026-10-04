@@ -30,8 +30,8 @@ use magnetar::storage::{
     AttemptFinalization, AttemptReservation, AttemptStats, CredentialActor, LockoutStore, UserStore,
 };
 use magnetar::two_factor::{
-    TwoFactorConfig, TwoFactorProofClaim, TwoFactorRow, TwoFactorService, TwoFactorStore, totp,
-    totp::STEP_SECONDS,
+    OtherSecondFactor, TwoFactorConfig, TwoFactorProofClaim, TwoFactorRow, TwoFactorService,
+    TwoFactorStore, totp, totp::STEP_SECONDS,
 };
 use parking_lot::Mutex;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, EntityTrait, IntoActiveModel};
@@ -2557,4 +2557,83 @@ async fn a_confirmation_racing_a_re_enrollment_confirms_neither_secret() {
             && row.pending_secret.as_deref() == Some(replacement.as_slice()),
         "the replacement rotation was never proven and stays pending beside the confirmed secret"
     );
+}
+
+/// A second factor kept outside the service that always answers `present`.
+struct FixedOtherSecondFactor {
+    present: bool,
+}
+
+#[async_trait]
+impl OtherSecondFactor for FixedOtherSecondFactor {
+    async fn enrolled_or_pending(&self, _user_id: &str) -> magnetar::Result<bool> {
+        Ok(self.present)
+    }
+}
+
+/// An account has one second-factor system, not both: each refuses the
+/// sign-ins that do not verify it, so an account with both could sign in by
+/// no path. While the other system holds a factor for the account, enrolling
+/// is refused, and so is confirming an enrollment that began before it.
+#[tokio::test]
+async fn enroll_and_confirm_are_refused_while_another_second_factor_exists() {
+    let world = factor_world().await;
+    let user_id = registered_user(&world).await;
+    let actor = credential_actor(&world, &user_id).await;
+    let pending = world.two_factor.enroll(&actor).await.unwrap();
+    let service = TwoFactorService::new(
+        Arc::new(storage_schema::sql_two_factor::SqlTwoFactorStore(
+            world.db.clone(),
+        )),
+        world.storage.clone(),
+        world.second_factor_lockout.clone(),
+        Arc::new(AeadEncryptor::new([21; 32])),
+        TwoFactorConfig::default(),
+    )
+    .with_other_second_factor(Arc::new(FixedOtherSecondFactor { present: true }));
+
+    let enrolled = service.enroll(&actor).await;
+    let confirmed = service
+        .confirm(&actor, &totp_code_now(&pending.otpauth_url))
+        .await;
+
+    for outcome in [enrolled.map(|_| ()), confirmed] {
+        assert!(
+            matches!(
+                &outcome,
+                Err(magnetar::Error::Conflict { resource, .. })
+                    if resource == magnetar::two_factor::OTHER_SECOND_FACTOR
+            ),
+            "{outcome:?}"
+        );
+    }
+    assert!(!world.two_factor.is_enabled(&user_id).await.unwrap());
+    let key = magnetar::two_factor::lockout_identity(&user_id);
+    assert_eq!(
+        world
+            .second_factor_lockout
+            .status(&key)
+            .await
+            .unwrap()
+            .failed_attempts,
+        0,
+        "a refusal is not a wrong code"
+    );
+
+    // Without the other factor the same enrollment confirms.
+    let service = TwoFactorService::new(
+        Arc::new(storage_schema::sql_two_factor::SqlTwoFactorStore(
+            world.db.clone(),
+        )),
+        world.storage.clone(),
+        world.second_factor_lockout.clone(),
+        Arc::new(AeadEncryptor::new([21; 32])),
+        TwoFactorConfig::default(),
+    )
+    .with_other_second_factor(Arc::new(FixedOtherSecondFactor { present: false }));
+    service
+        .confirm(&actor, &totp_code_now(&pending.otpauth_url))
+        .await
+        .unwrap();
+    assert!(world.two_factor.is_enabled(&user_id).await.unwrap());
 }

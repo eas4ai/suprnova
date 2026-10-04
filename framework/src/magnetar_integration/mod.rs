@@ -496,6 +496,10 @@ impl engine::MagnetarFactorAuthEngine for PasswordFactorEngine {
         self.password.admit_host_sign_in(user_id).await
     }
 
+    async fn has_second_factor(&self, user_id: &str) -> magnetar::Result<bool> {
+        self.password.has_second_factor(user_id).await
+    }
+
     async fn issue_host_session(
         &self,
         user_id: &str,
@@ -1002,6 +1006,23 @@ pub(crate) async fn admit_host_sign_in(user_id: &str) -> Result<Option<u64>, Fra
         .await
         .map(Some)
         .map_err(host_sign_in_error)
+}
+
+/// Whether `user_id` has a second factor in the installed Magnetar engine,
+/// confirmed or waiting for its confirmation. `false` when no engine with a
+/// factor authority is installed.
+///
+/// # Errors
+///
+/// `503` when the engine cannot answer.
+pub(crate) async fn magnetar_second_factor(user_id: &str) -> Result<bool, FrameworkError> {
+    let Some(authority) = optional_factor_engine() else {
+        return Ok(false);
+    };
+    authority.has_second_factor(user_id).await.map_err(|error| {
+        tracing::error!(%error, "the Magnetar engine could not report a second factor");
+        FrameworkError::domain("the sign-in engine is unavailable", 503)
+    })
 }
 
 /// The refusal of a sign-in whose auth epoch moved after its credential was
