@@ -48,7 +48,8 @@ struct CeremonyRow {
 ///
 /// Returns `Ok(())` on success. A UNIQUE constraint conflict on
 /// `selector` propagates as a database error rather than being
-/// swallowed.
+/// swallowed. A `ttl_minutes` whose expiry falls outside the dates the
+/// clock can hold is an error too.
 pub async fn issue<P: Serialize>(
     selector: &str,
     kind: &str,
@@ -58,7 +59,13 @@ pub async fn issue<P: Serialize>(
     let payload_json = serde_json::to_string(payload)
         .map_err(|e| FrameworkError::internal(format!("ceremony: serialize payload: {e}")))?;
     let now = crate::clock::now();
-    let expires_at = now + Duration::minutes(ttl_minutes);
+    let expires_at = Duration::try_minutes(ttl_minutes)
+        .and_then(|lifetime| now.checked_add_signed(lifetime))
+        .ok_or_else(|| {
+            FrameworkError::internal(format!(
+                "ceremony lifetime of {ttl_minutes} minutes runs past the dates the clock can hold"
+            ))
+        })?;
     let conn = DB::connection()?;
     let backend = conn.inner().get_database_backend();
     let model = entity::ActiveModel {
@@ -197,4 +204,34 @@ pub mod entity {
     pub enum Relation {}
 
     impl ActiveModelBehavior for ActiveModel {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lifetime no date can hold is an error, not a panic: `i64::MAX`
+    /// minutes overflows the duration, and a smaller one that fits the
+    /// duration still runs past the last date chrono represents.
+    #[tokio::test]
+    async fn issue_refuses_a_lifetime_no_date_can_hold() {
+        for ttl_minutes in [i64::MAX, i64::MIN, 100_000_000_000_000] {
+            let outcome = tokio::spawn(async move {
+                issue(
+                    "overflow-ceremony",
+                    kind::OAUTH,
+                    &serde_json::json!({}),
+                    ttl_minutes,
+                )
+                .await
+            })
+            .await;
+            // The error names the lifetime: no database is registered here,
+            // so any other error would come from a later step.
+            assert!(
+                matches!(&outcome, Ok(Err(error)) if error.to_string().contains("lifetime")),
+                "ttl_minutes {ttl_minutes} must return an error, got {outcome:?}"
+            );
+        }
+    }
 }

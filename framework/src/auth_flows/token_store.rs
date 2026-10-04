@@ -175,6 +175,11 @@ impl TokenStore {
     /// `ttl` is added to the current time to compute `expires_at`; a
     /// non-positive `ttl` yields an already-expired row (useful for
     /// tests and a harmless no-op in production).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] when the expiry falls outside the dates
+    /// the clock can hold, or when the database refuses the row.
     pub async fn issue(
         user_id: &str,
         purpose: TokenPurpose,
@@ -213,7 +218,11 @@ impl TokenStore {
     ) -> Result<String, FrameworkError> {
         let token_hash = hash_token(&plaintext);
         let now = crate::clock::now().naive_utc();
-        let expires_at = now + ttl;
+        let expires_at = now.checked_add_signed(ttl).ok_or_else(|| {
+            FrameworkError::internal(format!(
+                "auth-flow token lifetime of {ttl} runs past the dates the clock can hold"
+            ))
+        })?;
 
         let conn = DB::connection()?;
         let backend = conn.inner().get_database_backend();
@@ -468,6 +477,25 @@ pub mod entity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lifetime no date can hold is an error, not a panic.
+    #[tokio::test]
+    async fn issue_refuses_a_lifetime_no_date_can_hold() {
+        for ttl in [Duration::MAX, Duration::MIN] {
+            let outcome = tokio::spawn(TokenStore::issue(
+                "overflow-user",
+                TokenPurpose::PasswordReset,
+                ttl,
+            ))
+            .await;
+            // The error names the lifetime: no database is registered here,
+            // so any other error would come from a later step.
+            assert!(
+                matches!(&outcome, Ok(Err(error)) if error.to_string().contains("lifetime")),
+                "a ttl of {ttl} must return an error, got {outcome:?}"
+            );
+        }
+    }
 
     #[test]
     fn purpose_strings_are_stable() {

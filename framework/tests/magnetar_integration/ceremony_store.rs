@@ -78,6 +78,12 @@ async fn issue_consume_and_prune(url: &str) {
     ceremony::issue("ceremony-3", ceremony::kind::OAUTH, &payload, -5)
         .await
         .expect("issue an expired ceremony");
+    // A lifetime too large for a date is an error, not a panic.
+    assert!(
+        ceremony::issue("ceremony-4", ceremony::kind::OAUTH, &payload, i64::MAX)
+            .await
+            .is_err()
+    );
     assert_eq!(ceremony::prune_expired().await.expect("prune"), 1);
 
     database

@@ -177,15 +177,46 @@ pub async fn generate_token() -> Result<(String, String, String), FrameworkError
     Ok((selector, verifier_plaintext, verifier_hash))
 }
 
+/// `ttl_minutes` as a lifetime, and the moment a token issued now with it
+/// expires.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] naming the lifetime when no date can hold
+/// it: the minutes overflow a duration, or the expiry runs past the dates
+/// the clock represents. `ttl_minutes` comes from configuration and from
+/// callers of the public API, so a value that large is an error, not a
+/// panic.
+pub(crate) fn remember_expiry(
+    ttl_minutes: i64,
+) -> Result<(Duration, chrono::DateTime<chrono::Utc>), FrameworkError> {
+    Duration::try_minutes(ttl_minutes)
+        .and_then(|lifetime| {
+            crate::clock::now()
+                .checked_add_signed(lifetime)
+                .map(|expires_at| (lifetime, expires_at))
+        })
+        .ok_or_else(|| {
+            FrameworkError::internal(format!(
+                "remember-me lifetime of {ttl_minutes} minutes runs past the dates the clock can hold"
+            ))
+        })
+}
+
 /// Issue a new remember token for `user_id`. Inserts a row keyed on a
 /// random selector and storing the bcrypt hash of the verifier;
 /// returns the composite plaintext `"{selector}.{verifier}"` to the
 /// caller. The caller is responsible for shipping the plaintext to the
 /// client (via the session middleware's pending-cookies slot, set by
 /// `Auth::login_remember`).
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] when `ttl_minutes` puts the expiry outside
+/// the dates the clock can hold, or when hashing or the database fails.
 pub async fn issue(user_id: &str, ttl_minutes: i64) -> Result<String, FrameworkError> {
+    let (_, expires_at) = remember_expiry(ttl_minutes)?;
     let (selector, verifier_plaintext, verifier_hash) = generate_token().await?;
-    let expires_at = crate::clock::now() + Duration::minutes(ttl_minutes);
     let now = crate::clock::now();
 
     let conn = DB::connection()?;
@@ -488,5 +519,21 @@ mod tests {
             !hashing::verify(&ver2, &hash).expect("verify"),
             "wrong verifier must not verify"
         );
+    }
+
+    /// A lifetime no date can hold is an error, not a panic: `i64::MAX`
+    /// minutes overflows the duration, and a smaller one that fits the
+    /// duration still runs past the last date chrono represents.
+    #[tokio::test]
+    async fn issue_refuses_a_lifetime_no_date_can_hold() {
+        for ttl_minutes in [i64::MAX, i64::MIN, 100_000_000_000_000] {
+            let outcome = tokio::spawn(issue("overflow-user", ttl_minutes)).await;
+            // The error names the lifetime: no database is registered here,
+            // so any other error would come from a later step.
+            assert!(
+                matches!(&outcome, Ok(Err(error)) if error.to_string().contains("lifetime")),
+                "ttl_minutes {ttl_minutes} must return an error, got {outcome:?}"
+            );
+        }
     }
 }

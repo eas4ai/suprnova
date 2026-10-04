@@ -269,11 +269,14 @@ impl Auth {
         // a live token. Single task = task-local cannot vanish mid-fn,
         // so no TOCTOU between this check and the push.
         Self::ensure_remember_issue_scopes()?;
+        // A lifetime no date can hold is an error here rather than a panic
+        // in the duration arithmetic of either branch below.
+        let (lifetime, _) = super::remember::remember_expiry(ttl_minutes)?;
 
         let plaintext =
             if let Some(engine) = crate::magnetar_integration::optional_password_engine() {
                 let credential = engine
-                    .issue_remember(user_id, chrono::Duration::minutes(ttl_minutes))
+                    .issue_remember(user_id, lifetime)
                     .await
                     .map_err(|error| {
                         crate::error::FrameworkError::internal(format!(
