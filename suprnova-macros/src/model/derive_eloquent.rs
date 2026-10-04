@@ -926,7 +926,9 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
             impl #struct_ident {
                 /// Soft-delete: `UPDATE table SET deleted_at = NOW()
-                /// WHERE pk = ?` instead of DELETE. Takes `self` by
+                /// WHERE pk = ?` instead of DELETE, which also sets
+                /// `updated_at` when the model manages timestamps, as
+                /// Laravel's soft delete does. Takes `self` by
                 /// value to override `Model::delete(self)` cleanly -
                 /// a `&self` inherent override would lose to the
                 /// trait default through auto-ref resolution.
@@ -949,9 +951,14 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                         &::suprnova::eloquent::Attrs::new(),
                     )?;
 
-                    let now = ::core::option::Option::Some(::suprnova::clock::now());
-                    let deleted_at =
-                        <#soft_delete_cast as ::suprnova::eloquent::casts::Cast>::to_storage(&now)?;
+                    // The tombstone, and "now" in `updated_at` when the
+                    // model manages timestamps - Laravel's
+                    // `runSoftDelete` - the same stamp `delete_all` and
+                    // `delete_or_fail` write.
+                    let stamp = <Self as ::suprnova::eloquent::EloquentModel>::__soft_delete_stamp()?
+                        .ok_or_else(|| ::suprnova::FrameworkError::internal(
+                            "a soft-delete model has no soft-delete stamp",
+                        ))?;
                     let table = <Self as ::suprnova::eloquent::EloquentModel>::TABLE;
                     let pk_name = <Self as ::suprnova::eloquent::Model>::primary_key_name();
                     // Route through `resolve_write` so the tombstone
@@ -974,25 +981,30 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                             )
                             .await?;
                             let backend = exec.backend();
-                            let deleted_at_placeholder =
-                                ::suprnova::database::__macro_support::placeholder(backend, 1)?;
-                            let pk_placeholder =
-                                ::suprnova::database::__macro_support::placeholder(backend, 2)?;
-                            let sql = ::std::format!(
-                                "UPDATE {table} SET {} = {deleted_at_placeholder} WHERE {pk_name} = {pk_placeholder}",
+                            let mut values: ::std::vec::Vec<::suprnova::sea_orm::Value> =
+                                ::std::vec![::core::clone::Clone::clone(&stamp.deleted_at)];
+                            let mut sql = ::std::format!(
+                                "UPDATE {table} SET {} = {}",
                                 #soft_delete_col,
+                                ::suprnova::database::__macro_support::placeholder(backend, values.len())?,
                             );
+                            if let ::core::option::Option::Some(updated_at) = &stamp.updated_at {
+                                values.push(::core::clone::Clone::clone(updated_at));
+                                sql.push_str(&::std::format!(
+                                    ", {} = {}",
+                                    <Self as ::suprnova::eloquent::EloquentModel>::UPDATED_AT_COLUMN,
+                                    ::suprnova::database::__macro_support::placeholder(backend, values.len())?,
+                                ));
+                            }
+                            values.push(::suprnova::eloquent::model::json_value_to_sea_value(
+                                &<Self as ::suprnova::eloquent::Model>::primary_key_value_json(&self),
+                            ));
+                            sql.push_str(&::std::format!(
+                                " WHERE {pk_name} = {}",
+                                ::suprnova::database::__macro_support::placeholder(backend, values.len())?,
+                            ));
                             exec.run(
-                                ::suprnova::sea_orm::Statement::from_sql_and_values(
-                                    backend,
-                                    &sql,
-                                    ::std::vec![
-                                        ::suprnova::sea_orm::Value::from(deleted_at),
-                                        ::suprnova::eloquent::model::json_value_to_sea_value(
-                                            &<Self as ::suprnova::eloquent::Model>::primary_key_value_json(&self),
-                                        ),
-                                    ],
-                                ),
+                                ::suprnova::sea_orm::Statement::from_sql_and_values(backend, &sql, values),
                             )
                             .await
                             .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
