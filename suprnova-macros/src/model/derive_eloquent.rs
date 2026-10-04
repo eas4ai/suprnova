@@ -710,16 +710,25 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // unsigned number it is, so the builder settles a comparison with it
     // (no such column holds it) and refuses to write it, where as text
     // Postgres refused the comparison and SQLite stored a rounded real.
+    // A text field binds such a value as its digits, what its column holds;
+    // as the number it is, Postgres would refuse to compare it with text.
     cast_arms.extend(fields.iter().filter_map(|field| {
         let ident = field.ident.as_ref()?;
-        let has_cast = input.casts.iter().any(|(cast, _)| cast == ident);
-        if has_cast || !super::parse::is_integer_below_u64(&field.ty) {
+        if input.casts.iter().any(|(cast, _)| cast == ident) {
             return None;
         }
         let name = ident.to_string();
-        Some(quote! {
-            #name => ::suprnova::eloquent::casts::__bind_integer(value),
-        })
+        if super::parse::is_integer_below_u64(&field.ty) {
+            Some(quote! {
+                #name => ::suprnova::eloquent::casts::__bind_integer(value),
+            })
+        } else if super::parse::is_text(&field.ty) {
+            Some(quote! {
+                #name => ::suprnova::eloquent::casts::__bind_text(value),
+            })
+        } else {
+            None
+        }
     }));
     let bind_column_impl = if cast_arms.is_empty() {
         quote! {}

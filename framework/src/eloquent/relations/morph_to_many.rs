@@ -93,7 +93,8 @@ use crate::eloquent::collection::Collection;
 use crate::eloquent::lazy_loading::LazyLoadGuard;
 use crate::eloquent::model::{Model, json_value_to_sea_value};
 use crate::eloquent::relations::belongs_to_many::{
-    PivotExtra, PivotMatch, load_pivot_rows, pivot_extras_through_casts, unique_pivot_ids,
+    PivotExtra, PivotMatch, PivotTarget, bind_pivot_comparison, bind_pivot_extra, bind_pivot_write,
+    load_pivot_rows, pivot_extras_through_casts, pivot_key_json, unique_pivot_ids,
 };
 use crate::eloquent::relations::pivot_filters::{PivotFilters, pivot_filter_methods};
 use crate::eloquent::relations::{Relation, RelationKind};
@@ -324,6 +325,32 @@ where
         Ok(())
     }
 
+    /// The pivot's `<morph_name>_id` and `<morph_name>_type` columns.
+    fn morph_columns(&self) -> (String, String) {
+        (
+            format!("{}_id", self.morph_name),
+            format!("{}_type", self.morph_name),
+        )
+    }
+
+    /// The pivot as the pivot statements address it, given the columns
+    /// [`Self::morph_columns`] names, with the binders that type its
+    /// columns.
+    fn morph_pivot<'a>(&'a self, id_col: &'a str, type_col: &'a str) -> MorphPivot<'a> {
+        MorphPivot {
+            target: PivotTarget {
+                table: &self.pivot_table,
+                foreign_key: id_col,
+                related_key: &self.pivot_related_key,
+                pivot: <P as EloquentModel>::bind_column,
+                parent: (<L as EloquentModel>::bind_column, &self.parent_key),
+                related: (<R as EloquentModel>::bind_column, &self.related_key),
+            },
+            type_col,
+            morph_type: &self.parent_morph_type,
+        }
+    }
+
     /// Insert a pivot row linking the parent (`<morph_name>_id =
     /// parent.id AND <morph_name>_type = parent_morph_type`) to
     /// `related_id`. Equivalent to `attach_with(related_id,
@@ -370,21 +397,16 @@ where
         // pivot INSERT lands on the ambient transaction when CURRENT_TX
         // is active.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
-        let backend = exec.backend();
-        let id_col = format!("{}_id", self.morph_name);
-        let type_col = format!("{}_type", self.morph_name);
+        let (id_col, type_col) = self.morph_columns();
+        let pivot = self.morph_pivot(&id_col, &type_col);
         let extra =
             pivot_extras_through_casts::<P>(extra, &[&self.pivot_related_key, &id_col, &type_col])?;
         match &exec {
             ExecutorChoice::Tx(t, _) => {
                 morph_attach_one(
                     t.as_ref(),
-                    backend,
-                    &self.pivot_table,
-                    &self.morph_name,
-                    &self.pivot_related_key,
+                    &pivot,
                     &self.parent_key_value,
-                    &self.parent_morph_type,
                     &id,
                     extra,
                     self.with_timestamps,
@@ -394,12 +416,8 @@ where
             ExecutorChoice::Pool(c, _) => {
                 morph_attach_one(
                     c.inner(),
-                    backend,
-                    &self.pivot_table,
-                    &self.morph_name,
-                    &self.pivot_related_key,
+                    &pivot,
                     &self.parent_key_value,
-                    &self.parent_morph_type,
                     &id,
                     extra,
                     self.with_timestamps,
@@ -431,33 +449,14 @@ where
     async fn detach_inner(self, id: serde_json::Value) -> Result<(), FrameworkError> {
         // Phase 10C audit-fix AF2 - see attach_with above.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
-        let backend = exec.backend();
+        let (id_col, type_col) = self.morph_columns();
+        let pivot = self.morph_pivot(&id_col, &type_col);
         match &exec {
             ExecutorChoice::Tx(t, _) => {
-                morph_detach_one(
-                    t.as_ref(),
-                    backend,
-                    &self.pivot_table,
-                    &self.morph_name,
-                    &self.pivot_related_key,
-                    &self.parent_key_value,
-                    &self.parent_morph_type,
-                    &id,
-                )
-                .await
+                morph_detach_one(t.as_ref(), &pivot, &self.parent_key_value, &id).await
             }
             ExecutorChoice::Pool(c, _) => {
-                morph_detach_one(
-                    c.inner(),
-                    backend,
-                    &self.pivot_table,
-                    &self.morph_name,
-                    &self.pivot_related_key,
-                    &self.parent_key_value,
-                    &self.parent_morph_type,
-                    &id,
-                )
-                .await
+                morph_detach_one(c.inner(), &pivot, &self.parent_key_value, &id).await
             }
         }?;
         crate::render_cache::orm::after_bulk_write(&self.pivot_table).await
@@ -521,44 +520,46 @@ where
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
 
-        let id_col = format!("{}_id", self.morph_name);
-        let type_col = format!("{}_type", self.morph_name);
+        let (id_col, type_col) = self.morph_columns();
+        let pivot = self.morph_pivot(&id_col, &type_col);
 
-        // SELECT current pivot rows: keyed by the parent's id + type.
-        let (id_ph, type_ph) = match backend {
-            DatabaseBackend::Postgres => ("$1".to_string(), "$2".to_string()),
-            _ => ("?".to_string(), "?".to_string()),
-        };
-        let select_sql = format!(
-            "SELECT {related_key} AS __sn_related FROM {table} \
-              WHERE {id_col} = {id_ph} AND {type_col} = {type_ph}",
-            related_key = self.pivot_related_key,
-            table = self.pivot_table,
-            id_col = id_col,
-            type_col = type_col,
-            id_ph = id_ph,
-            type_ph = type_ph,
-        );
-        let select_stmt = Statement::from_sql_and_values(
+        // SELECT current pivot rows: keyed by the parent's id + type. A
+        // parent id no pivot row can hold has no rows.
+        let parent = bind_pivot_comparison(
             backend,
-            &select_sql,
-            vec![
-                json_value_to_sea_value(&self.parent_key_value),
-                sea_orm::Value::from(self.parent_morph_type.clone()),
-            ],
+            pivot
+                .target
+                .typed(&id_col, Some(pivot.target.parent), &self.parent_key_value),
+            &self.parent_key_value,
         );
-        let rows = exec
-            .query_all(select_stmt)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let rows = match parent {
+            Some(parent) => {
+                let id_ph = crate::database::placeholder::typed_placeholder(backend, 1, &parent)?;
+                let type_ph = match backend {
+                    DatabaseBackend::Postgres => "$2".to_string(),
+                    _ => "?".to_string(),
+                };
+                let select_sql = format!(
+                    "SELECT {related_key} AS __sn_related FROM {table} \
+                      WHERE {id_col} = {id_ph} AND {type_col} = {type_ph}",
+                    related_key = self.pivot_related_key,
+                    table = self.pivot_table,
+                );
+                let select_stmt = Statement::from_sql_and_values(
+                    backend,
+                    &select_sql,
+                    vec![parent, sea_orm::Value::from(self.parent_morph_type.clone())],
+                );
+                exec.query_all(select_stmt)
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?
+            }
+            None => Vec::new(),
+        };
 
         let mut current_map: HashMap<String, serde_json::Value> = HashMap::new();
         for r in rows.iter() {
-            if let Ok(n) = r.try_get::<i64>("", "__sn_related") {
-                let v = serde_json::Value::from(n);
-                current_map.insert(v.to_string(), v);
-            } else if let Ok(s) = r.try_get::<String>("", "__sn_related") {
-                let v = serde_json::Value::from(s);
+            if let Some(v) = pivot_key_json(r, "__sn_related") {
                 current_map.insert(v.to_string(), v);
             }
         }
@@ -586,27 +587,14 @@ where
         match &exec {
             ExecutorChoice::Tx(t, _) => {
                 for related_id in detach_set.iter() {
-                    morph_detach_one(
-                        t.as_ref(),
-                        backend,
-                        &self.pivot_table,
-                        &self.morph_name,
-                        &self.pivot_related_key,
-                        &self.parent_key_value,
-                        &self.parent_morph_type,
-                        related_id,
-                    )
-                    .await?;
+                    morph_detach_one(t.as_ref(), &pivot, &self.parent_key_value, related_id)
+                        .await?;
                 }
                 for related_id in attach_set.iter() {
                     morph_attach_one(
                         t.as_ref(),
-                        backend,
-                        &self.pivot_table,
-                        &self.morph_name,
-                        &self.pivot_related_key,
+                        &pivot,
                         &self.parent_key_value,
-                        &self.parent_morph_type,
                         related_id,
                         Vec::new(),
                         self.with_timestamps,
@@ -621,27 +609,13 @@ where
                     .await
                     .map_err(|e| FrameworkError::database(e.to_string()))?;
                 for related_id in detach_set.iter() {
-                    morph_detach_one(
-                        &txn,
-                        backend,
-                        &self.pivot_table,
-                        &self.morph_name,
-                        &self.pivot_related_key,
-                        &self.parent_key_value,
-                        &self.parent_morph_type,
-                        related_id,
-                    )
-                    .await?;
+                    morph_detach_one(&txn, &pivot, &self.parent_key_value, related_id).await?;
                 }
                 for related_id in attach_set.iter() {
                     morph_attach_one(
                         &txn,
-                        backend,
-                        &self.pivot_table,
-                        &self.morph_name,
-                        &self.pivot_related_key,
+                        &pivot,
                         &self.parent_key_value,
-                        &self.parent_morph_type,
                         related_id,
                         Vec::new(),
                         self.with_timestamps,
@@ -716,10 +690,8 @@ where
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let mut related_ids: Vec<serde_json::Value> = Vec::with_capacity(id_rows.len());
         for r in id_rows.iter() {
-            if let Ok(n) = r.try_get::<i64>("", "__sn_related") {
-                related_ids.push(serde_json::Value::from(n));
-            } else if let Ok(s) = r.try_get::<String>("", "__sn_related") {
-                related_ids.push(serde_json::Value::from(s));
+            if let Some(v) = pivot_key_json(r, "__sn_related") {
+                related_ids.push(v);
             }
         }
         if related_ids.is_empty() {
@@ -1359,45 +1331,74 @@ where
 
 // ---- Internal helpers ----------------------------------------------------
 
-/// INSERT path shared by `attach` / `attach_with` / `sync`. The
-/// `morph_name` controls the `<morph_name>_id` and `<morph_name>_type`
-/// column names; `parent_morph_type` is the string written to the
-/// type column. Same connection-or-transaction abstraction as
-/// BelongsToMany.
-#[allow(clippy::too_many_arguments)]
+/// A polymorphic pivot as its statements address it: the pivot target,
+/// whose `foreign_key` is the `<morph_name>_id` column, plus the
+/// `<morph_name>_type` column and the parent's morph type it must equal.
+struct MorphPivot<'a> {
+    /// The pivot table, its key columns and their binders.
+    target: PivotTarget<'a>,
+    /// The `<morph_name>_type` column.
+    type_col: &'a str,
+    /// The string the type column holds for this parent.
+    morph_type: &'a str,
+}
+
+/// INSERT path shared by `attach` / `attach_with` / `sync`. Same
+/// connection-or-transaction abstraction as BelongsToMany, and the same
+/// binding: each id and extra binds by the type its column has, and a
+/// `u64` a signed column cannot hold is refused before anything is sent.
 async fn morph_attach_one<C: ConnectionTrait>(
     conn: &C,
-    backend: DatabaseBackend,
-    pivot_table: &str,
-    morph_name: &str,
-    pivot_related_key: &str,
+    pivot: &MorphPivot<'_>,
     parent_id: &serde_json::Value,
-    parent_morph_type: &str,
     related_id: &serde_json::Value,
     extra: Vec<PivotExtra>,
     with_timestamps: bool,
 ) -> Result<(), FrameworkError> {
-    let id_col = format!("{morph_name}_id");
-    let type_col = format!("{morph_name}_type");
+    let backend = conn.get_database_backend();
+    let target = &pivot.target;
+    let pivot_table = target.table;
+    let pivot_related_key = target.related_key;
+    let id_col = target.foreign_key;
+    let type_col = pivot.type_col;
 
     let mut columns: Vec<String> = vec![
         pivot_related_key.to_string(),
-        id_col.clone(),
-        type_col.clone(),
+        id_col.to_string(),
+        type_col.to_string(),
     ];
     // `None` represents an explicit JSON null from pivot extras. Framework-
     // managed IDs, morph type, and timestamps remain bound values.
     let mut values: Vec<Option<sea_orm::Value>> = vec![
-        Some(json_value_to_sea_value(related_id)),
-        Some(json_value_to_sea_value(parent_id)),
-        Some(sea_orm::Value::from(parent_morph_type.to_string())),
+        Some(
+            bind_pivot_write(
+                conn,
+                pivot_table,
+                pivot_related_key,
+                target.typed(pivot_related_key, Some(target.related), related_id),
+                related_id,
+            )
+            .await?,
+        ),
+        Some(
+            bind_pivot_write(
+                conn,
+                pivot_table,
+                id_col,
+                target.typed(id_col, Some(target.parent), parent_id),
+                parent_id,
+            )
+            .await?,
+        ),
+        Some(sea_orm::Value::from(pivot.morph_type.to_string())),
     ];
     // Extras arrive encoded through the pivot model's casts, their
     // names checked and the framework-written columns dropped - see
     // `belongs_to_many::pivot_extras_through_casts`.
     for (column, value) in extra {
+        let bound = bind_pivot_extra(conn, pivot_table, &column, value).await?;
         columns.push(column);
-        values.push(value);
+        values.push(bound);
     }
     if with_timestamps {
         let now = crate::clock::now();
@@ -1421,15 +1422,17 @@ async fn morph_attach_one<C: ConnectionTrait>(
         .map(|value| match value {
             Some(value) => {
                 bind_position += 1;
+                let ph = crate::database::placeholder::typed_placeholder(
+                    backend,
+                    bind_position,
+                    &value,
+                )?;
                 bound_values.push(value);
-                match backend {
-                    DatabaseBackend::Postgres => format!("${bind_position}"),
-                    _ => "?".to_string(),
-                }
+                Ok(ph)
             }
-            None => "NULL".to_string(),
+            None => Ok("NULL".to_string()),
         })
-        .collect();
+        .collect::<Result<_, FrameworkError>>()?;
 
     let sql = format!(
         "INSERT INTO {table} ({cols}) VALUES ({phs})",
@@ -1446,41 +1449,49 @@ async fn morph_attach_one<C: ConnectionTrait>(
 
 /// DELETE path shared by `detach` / `sync`. Filters by all three of
 /// `pivot_related_key = related_id`, `<morph_name>_id = parent_id`,
-/// and `<morph_name>_type = parent_morph_type`.
-#[allow(clippy::too_many_arguments)]
+/// and `<morph_name>_type = parent_morph_type`. An id no pivot row can
+/// hold deletes nothing, and is not sent.
 async fn morph_detach_one<C: ConnectionTrait>(
     conn: &C,
-    backend: DatabaseBackend,
-    pivot_table: &str,
-    morph_name: &str,
-    pivot_related_key: &str,
+    pivot: &MorphPivot<'_>,
     parent_id: &serde_json::Value,
-    parent_morph_type: &str,
     related_id: &serde_json::Value,
 ) -> Result<(), FrameworkError> {
-    let id_col = format!("{morph_name}_id");
-    let type_col = format!("{morph_name}_type");
-    let (ph1, ph2, ph3) = match backend {
-        DatabaseBackend::Postgres => ("$1".to_string(), "$2".to_string(), "$3".to_string()),
-        _ => ("?".to_string(), "?".to_string(), "?".to_string()),
+    let backend = conn.get_database_backend();
+    let target = &pivot.target;
+    let related = bind_pivot_comparison(
+        backend,
+        target.typed(target.related_key, Some(target.related), related_id),
+        related_id,
+    );
+    let parent = bind_pivot_comparison(
+        backend,
+        target.typed(target.foreign_key, Some(target.parent), parent_id),
+        parent_id,
+    );
+    let (Some(related), Some(parent)) = (related, parent) else {
+        return Ok(());
+    };
+    let ph1 = crate::database::placeholder::typed_placeholder(backend, 1, &related)?;
+    let ph2 = crate::database::placeholder::typed_placeholder(backend, 2, &parent)?;
+    let ph3 = match backend {
+        DatabaseBackend::Postgres => "$3".to_string(),
+        _ => "?".to_string(),
     };
     let sql = format!(
         "DELETE FROM {table} WHERE {rk} = {ph1} AND {id_col} = {ph2} AND {type_col} = {ph3}",
-        table = pivot_table,
-        rk = pivot_related_key,
-        id_col = id_col,
-        type_col = type_col,
-        ph1 = ph1,
-        ph2 = ph2,
-        ph3 = ph3,
+        table = target.table,
+        rk = target.related_key,
+        id_col = target.foreign_key,
+        type_col = pivot.type_col,
     );
     let stmt = Statement::from_sql_and_values(
         backend,
         &sql,
         vec![
-            json_value_to_sea_value(related_id),
-            json_value_to_sea_value(parent_id),
-            sea_orm::Value::from(parent_morph_type.to_string()),
+            related,
+            parent,
+            sea_orm::Value::from(pivot.morph_type.to_string()),
         ],
     );
     conn.execute_raw(stmt)

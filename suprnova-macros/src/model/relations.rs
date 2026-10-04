@@ -439,6 +439,8 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
     let avg_of_fn = quote::format_ident!("{}_avg_of", name);
     let min_of_fn = quote::format_ident!("{}_min_of", name);
     let max_of_fn = quote::format_ident!("{}_max_of", name);
+    let min_as_fn = quote::format_ident!("{}_min_as", name);
+    let max_as_fn = quote::format_ident!("{}_max_as", name);
     let with_where_fn = quote::format_ident!("with_where_{}", name);
     // For Through kinds the parser stores generics left-to-right as
     // `(rel.target, rel.through)` where the first generic is the
@@ -603,8 +605,10 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
             #[doc = "Outer `Option` is \"did `with_min` populate this cell?\" \
                      - `None` means the call was not made. Inner `Option` is \
                      \"is the result NULL?\" - `Some(None)` means `with_min` \
-                     was called but the group was empty (SQL's NULL-on-empty). \
-                     `Some(Some(value))` is the populated, non-empty case."]
+                     was called but the group was empty (SQL's NULL-on-empty) \
+                     or the minimum is not a number, such as a date; read \
+                     that with `<rel>_min_as`. `Some(Some(value))` is the \
+                     populated, numeric case."]
             pub fn #min_of_fn(
                 &self,
                 col: &str,
@@ -634,6 +638,50 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
                 self.__eager
                     .get_aggregate::<::core::option::Option<f64>>(&key)
                     .copied()
+            }
+
+            #[doc = "Read the `with_min((\"...\", col))` aggregate as `T`, \
+                     whatever the column's type: a date, a time, text or a \
+                     number, as Laravel's `withMin` attribute holds it. A \
+                     date or a time reads from the ISO 8601 text serde \
+                     writes for it, so `T` can be the chrono type of the \
+                     column. `None` when `with_min` was not called for this \
+                     column, the group was empty, or the value does not \
+                     read as `T`."]
+            pub fn #min_as_fn<T: ::suprnova::serde::de::DeserializeOwned>(
+                &self,
+                col: &str,
+            ) -> ::core::option::Option<T> {
+                let key = ::suprnova::eloquent::relations::aggregate_value_cache_key(
+                    &::suprnova::eloquent::relations::aggregate_cache_key(
+                        #name_str,
+                        ::suprnova::AggregateKind::Min,
+                        col,
+                    ),
+                );
+                self.__eager
+                    .get_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(&key)
+                    .and_then(|value| value.clone())
+                    .and_then(|value| ::suprnova::serde_json::from_value(value).ok())
+            }
+
+            #[doc = "Read the `with_max((\"...\", col))` aggregate as `T`, \
+                     whatever the column's type. See `<rel>_min_as`."]
+            pub fn #max_as_fn<T: ::suprnova::serde::de::DeserializeOwned>(
+                &self,
+                col: &str,
+            ) -> ::core::option::Option<T> {
+                let key = ::suprnova::eloquent::relations::aggregate_value_cache_key(
+                    &::suprnova::eloquent::relations::aggregate_cache_key(
+                        #name_str,
+                        ::suprnova::AggregateKind::Max,
+                        col,
+                    ),
+                );
+                self.__eager
+                    .get_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(&key)
+                    .and_then(|value| value.clone())
+                    .and_then(|value| ::suprnova::serde_json::from_value(value).ok())
             }
 
             #with_where_block
@@ -4891,7 +4939,16 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .await?
                             .into_vec();
                     use ::std::collections::HashMap;
-                    let mut by_fk: HashMap<::std::string::String, f64> = HashMap::new();
+                    // The column's value as an `f64` when it is a number,
+                    // and as JSON whatever its type, which `_min_as` /
+                    // `_max_as` read (a date has no `f64`).
+                    let mut by_fk: HashMap<
+                        ::std::string::String,
+                        (
+                            ::core::option::Option<f64>,
+                            ::core::option::Option<::suprnova::serde_json::Value>,
+                        ),
+                    > = HashMap::new();
                     for r in rows.iter() {
                         let key = ::suprnova::eloquent::relations::eager_row_column(
                             r,
@@ -4900,17 +4957,16 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        let col_val = ::suprnova::eloquent::relations::eager_row_column(
+                        let col = ::suprnova::eloquent::relations::eager_row_column(
                             r,
                             ::suprnova::eloquent::Model::field_value(r, column),
                             column,
                         )
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0);
+                            .filter(|v| !v.is_null());
                         // Each parent's group has 0-or-1 row, so the
                         // aggregate function is the same on every kind -
                         // just record the column value.
-                        by_fk.insert(key, col_val);
+                        by_fk.insert(key, (col.as_ref().and_then(|v| v.as_f64()), col));
                     }
                     // Sum/Avg over an empty group stores 0.0
                     // (consistent with the framework's COALESCE
@@ -4934,7 +4990,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        let opt_v: ::core::option::Option<f64> = by_fk.get(&key).copied();
+                        let (opt_v, value) = by_fk.get(&key).cloned().unwrap_or_default();
                         match kind {
                             ::suprnova::AggregateKind::Sum
                             | ::suprnova::AggregateKind::Avg => {
@@ -4948,6 +5004,14 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
                                     &__sn_agg_key,
                                     opt_v,
+                                );
+                                p.__eager.set_aggregate::<
+                                    ::core::option::Option<::suprnova::serde_json::Value>,
+                                >(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(
+                                        &__sn_agg_key,
+                                    ),
+                                    value,
                                 );
                             }
                         }
@@ -4998,7 +5062,15 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .into_vec()
                     };
                     use ::std::collections::HashMap;
-                    let mut by_pk: HashMap<::std::string::String, f64> = HashMap::new();
+                    // As in the HasOne arm: the value as an `f64` when it
+                    // is a number, and as JSON whatever its type.
+                    let mut by_pk: HashMap<
+                        ::std::string::String,
+                        (
+                            ::core::option::Option<f64>,
+                            ::core::option::Option<::suprnova::serde_json::Value>,
+                        ),
+                    > = HashMap::new();
                     for r in parent_rows.iter() {
                         let key = ::suprnova::eloquent::relations::eager_row_column(
                             r,
@@ -5007,14 +5079,13 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        let col_val = ::suprnova::eloquent::relations::eager_row_column(
+                        let col = ::suprnova::eloquent::relations::eager_row_column(
                             r,
                             ::suprnova::eloquent::Model::field_value(r, column),
                             column,
                         )
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0);
-                        by_pk.insert(key, col_val);
+                            .filter(|v| !v.is_null());
+                        by_pk.insert(key, (col.as_ref().and_then(|v| v.as_f64()), col));
                     }
                     // Sum/Avg over an empty group stores 0.0
                     // (framework COALESCE behaviour). Min/Max over an
@@ -5032,11 +5103,11 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     for p in parents.iter_mut() {
                         let v: ::core::option::Option<::suprnova::serde_json::Value> =
                             #per_parent_key_expr;
-                        let opt_v: ::core::option::Option<f64> = match &v {
+                        let (opt_v, value) = match &v {
                             ::core::option::Option::Some(jv) => {
-                                by_pk.get(&jv.to_string()).copied()
+                                by_pk.get(&jv.to_string()).cloned().unwrap_or_default()
                             }
-                            ::core::option::Option::None => ::core::option::Option::None,
+                            ::core::option::Option::None => ::core::default::Default::default(),
                         };
                         match kind {
                             ::suprnova::AggregateKind::Sum
@@ -5051,6 +5122,14 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
                                     &__sn_agg_key,
                                     opt_v,
+                                );
+                                p.__eager.set_aggregate::<
+                                    ::core::option::Option<::suprnova::serde_json::Value>,
+                                >(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(
+                                        &__sn_agg_key,
+                                    ),
+                                    value,
                                 );
                             }
                         }
@@ -5233,14 +5312,17 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         ::std::string::String,
                         ::core::option::Option<f64>,
                     > = HashMap::new();
+                    let mut by_fk_value: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<::suprnova::serde_json::Value>,
+                    > = HashMap::new();
                     for r in rows.iter() {
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> =
-                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
-                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                        by_fk.insert(key, agg);
+                        let agg = ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg");
+                        by_fk.insert(key.clone(), agg.number);
+                        by_fk_value.insert(key, agg.value);
                     }
 
                     let __sn_agg_key: ::std::string::String =
@@ -5272,6 +5354,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
                                     &__sn_agg_key,
                                     agg,
+                                );
+                                p.__eager.set_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(&__sn_agg_key),
+                                    by_fk_value.get(&key).cloned().flatten(),
                                 );
                             }
                         }
@@ -5439,14 +5525,17 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         ::std::string::String,
                         ::core::option::Option<f64>,
                     > = HashMap::new();
+                    let mut by_fk_value: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<::suprnova::serde_json::Value>,
+                    > = HashMap::new();
                     for r in rows.iter() {
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> =
-                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
-                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                        by_fk.insert(key, agg);
+                        let agg = ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg");
+                        by_fk.insert(key.clone(), agg.number);
+                        by_fk_value.insert(key, agg.value);
                     }
 
                     // Cache key is the wide `<rel>_<kind>_<col>` form
@@ -5478,6 +5567,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
                                     &__sn_agg_key,
                                     agg,
+                                );
+                                p.__eager.set_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(&__sn_agg_key),
+                                    by_fk_value.get(&key).cloned().flatten(),
                                 );
                             }
                         }
@@ -5648,14 +5741,17 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         ::std::string::String,
                         ::core::option::Option<f64>,
                     > = HashMap::new();
+                    let mut by_fk_value: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<::suprnova::serde_json::Value>,
+                    > = HashMap::new();
                     for r in rows.iter() {
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> =
-                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
-                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                        by_fk.insert(key, agg);
+                        let agg = ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg");
+                        by_fk.insert(key.clone(), agg.number);
+                        by_fk_value.insert(key, agg.value);
                     }
 
                     // Cache key is the wide `<rel>_<kind>_<col>` form
@@ -5687,6 +5783,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
                                     &__sn_agg_key,
                                     agg,
+                                );
+                                p.__eager.set_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(&__sn_agg_key),
+                                    by_fk_value.get(&key).cloned().flatten(),
                                 );
                             }
                         }
@@ -5842,14 +5942,17 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         ::std::string::String,
                         ::core::option::Option<f64>,
                     > = HashMap::new();
+                    let mut by_fk_value: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<::suprnova::serde_json::Value>,
+                    > = HashMap::new();
                     for r in rows.iter() {
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> =
-                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
-                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                        by_fk.insert(key, agg);
+                        let agg = ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg");
+                        by_fk.insert(key.clone(), agg.number);
+                        by_fk_value.insert(key, agg.value);
                     }
 
                     // Cache key is the wide `<rel>_<kind>_<col>` form
@@ -5881,6 +5984,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
                                     &__sn_agg_key,
                                     agg,
+                                );
+                                p.__eager.set_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(&__sn_agg_key),
+                                    by_fk_value.get(&key).cloned().flatten(),
                                 );
                             }
                         }
@@ -6056,14 +6163,17 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         ::std::string::String,
                         ::core::option::Option<f64>,
                     > = HashMap::new();
+                    let mut by_fk_value: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<::suprnova::serde_json::Value>,
+                    > = HashMap::new();
                     for r in rows.iter() {
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> =
-                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
-                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                        by_fk.insert(key, agg);
+                        let agg = ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg");
+                        by_fk.insert(key.clone(), agg.number);
+                        by_fk_value.insert(key, agg.value);
                     }
 
                     // Cache key is the wide `<rel>_<kind>_<col>` form
@@ -6095,6 +6205,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
                                     &__sn_agg_key,
                                     agg,
+                                );
+                                p.__eager.set_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(&__sn_agg_key),
+                                    by_fk_value.get(&key).cloned().flatten(),
                                 );
                             }
                         }
@@ -6273,14 +6387,17 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         ::std::string::String,
                         ::core::option::Option<f64>,
                     > = HashMap::new();
+                    let mut by_fk_value: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<::suprnova::serde_json::Value>,
+                    > = HashMap::new();
                     for r in rows.iter() {
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> =
-                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
-                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                        by_fk.insert(key, agg);
+                        let agg = ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg");
+                        by_fk.insert(key.clone(), agg.number);
+                        by_fk_value.insert(key, agg.value);
                     }
 
                     // Cache key is the wide `<rel>_<kind>_<col>` form
@@ -6312,6 +6429,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
                                     &__sn_agg_key,
                                     agg,
+                                );
+                                p.__eager.set_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(&__sn_agg_key),
+                                    by_fk_value.get(&key).cloned().flatten(),
                                 );
                             }
                         }

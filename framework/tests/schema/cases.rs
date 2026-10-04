@@ -700,13 +700,18 @@ pub async fn native_timestamps_round_trip(conn: &DatabaseConnection) {
         .await
         .expect("with_trashed naive")
         .expect("the soft deleted naive post");
-    assert_eq!(trashed.deleted_at, Some(at(15)));
+    // The soft delete stamps `updated_at` with `deleted_at`, as Laravel's
+    // does.
+    assert_eq!(
+        (trashed.deleted_at, trashed.updated_at),
+        (Some(at(15)), at(15))
+    );
     trashed.restore().await.expect("restore naive");
     assert_eq!(
         NaivePost::query()
             .where_between(
                 "updated_at",
-                "2031-03-14T13:30:00Z"..="2031-03-14T14:30:00Z"
+                "2031-03-14T14:30:00Z"..="2031-03-14T15:30:00Z"
             )
             .count()
             .await

@@ -196,6 +196,15 @@ pub fn aggregate_cache_key(name: &str, kind: AggregateKind, column: &str) -> Str
     s
 }
 
+/// The cache key under which `with_min` / `with_max` keep the aggregate's
+/// value as JSON, beside the `f64` cell at `key` (an
+/// [`aggregate_cache_key`]). A date or text minimum has no `f64`, and this
+/// cell is what `<rel>_min_as` / `<rel>_max_as` read. A `:` cannot appear
+/// in a relation or column name, so the key never meets another cell's.
+pub fn aggregate_value_cache_key(key: &str) -> String {
+    format!("{key}:value")
+}
+
 /// The loaded rows of one relation, taken out of every parent's cache
 /// for a nested eager load, and put back when this value drops.
 ///
