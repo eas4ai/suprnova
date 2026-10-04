@@ -157,12 +157,12 @@ impl Snapshot {
         self.flags.insert((name, scope_key), enabled);
     }
 
-    /// Note that the snapshot holds `name`, and at whichever identity scope
-    /// `scope_key` names, if any. An application-defined scope key that is
-    /// neither `user:` nor `team:` still marks the flag known - a change to
-    /// it must still invalidate a render that read the flag - but records
-    /// no axis: this framework has no way to tell which dimension it
-    /// partitions, so it is outside what the render-cache guard can see.
+    /// Note the identity scope `scope_key` names, if any. An
+    /// application-defined scope key that is neither `user:` nor `team:`
+    /// records no axis: this framework has no way to tell which dimension it
+    /// partitions, so it is outside what the render-cache guard can see. A
+    /// change to it still invalidates a render that read the flag, through
+    /// the `Feature` generation every read records.
     fn record_scope(&mut self, name: &str, scope_key: &str) {
         // `entry` would take an owned key, a copy of the name per row; a
         // feature already recorded needs none.
@@ -170,7 +170,6 @@ impl Snapshot {
             Some(entry) => entry,
             None => self.identity.entry(name.to_owned()).or_default(),
         };
-        entry.known = true;
         entry.principal |= scope_key.starts_with(USER_SCOPE_PREFIX);
         entry.tenant |= scope_key.starts_with(TEAM_SCOPE_PREFIX);
     }
@@ -311,13 +310,16 @@ impl DatabaseEvaluator {
                 );
             }
         }
+        // Caches first, then generations, for the reason `set_flag` gives:
+        // a render that reads a cached answer after its flag's generation
+        // advanced would publish the old answer under the new generation.
+        crate::features::sync::notify_reloaded(&changed).await;
         // Only for a swap that actually happened, and only for what it
         // actually changed: a reload that abandoned its replace changed
         // nothing, and one that found the same rows advances nothing.
         for name in &changed {
             crate::render_cache::orm::after_feature_write(name).await?;
         }
-        crate::features::sync::notify_reloaded(&changed).await;
         Ok(())
     }
 
@@ -391,19 +393,20 @@ impl DatabaseEvaluator {
             self.write_counter.fetch_add(1, Ordering::SeqCst);
         }
 
-        // After the snapshot swap and before the fan-out, and the order is
-        // load-bearing: a render that read the old value *after* the
-        // advance would publish under the new generation and never be
-        // invalidated. Advancing once the new value is visible to readers
-        // closes that window.
-        crate::render_cache::orm::after_feature_write(name).await?;
-
         // Fan out to other `FeatureSync` implementors (caches,
         // listeners) so any state ahead of the DB sees the change
         // before this call returns. The composite executes data
         // sources before caches, so a `CachedEvaluator` wrapping this
         // evaluator invalidates *after* the snapshot update above.
         crate::features::sync::notify(name, scope_key).await;
+
+        // Last, once the new value is visible to every reader - the
+        // snapshot above and every cache the fan-out just cleared - and the
+        // order is load-bearing: a render that read the old value *after*
+        // the advance, from the snapshot or from a cached answer the
+        // fan-out had not reached yet, would publish under the new
+        // generation and never be invalidated (DRIVERS-078).
+        crate::render_cache::orm::after_feature_write(name).await?;
 
         Ok(())
     }

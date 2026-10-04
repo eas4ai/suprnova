@@ -30,6 +30,8 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use suprnova_live::render_cache::generation::DependencyIdentity;
+
 use crate::FrameworkError;
 use crate::database::DB;
 
@@ -51,6 +53,11 @@ pub enum WriteSideDecision {
 /// answer, and the two fixed answers can never disagree, since they are
 /// computed from process-lifetime facts), so a racing pair of writes can
 /// only ever store the same value twice.
+///
+/// Whether a runtime is installed is not one of those facts: a process can
+/// write once before it installs RenderCache. So `installed` is read before
+/// the fixed answer, never cached in it, and a `CLOSED` fixed earlier cannot
+/// outlive an install (DATA-028).
 const UNKNOWN: u8 = 0;
 const OPEN: u8 = 1;
 const CLOSED: u8 = 2;
@@ -113,8 +120,10 @@ fn enabled() -> bool {
 ///
 /// A runtime installed here answers `true` *without* fixing the state, so a
 /// test that uninstalls the runtime gets the probe it would get in a worker
-/// rather than the serving process's answer frozen in. `Undecided` fixes
-/// nothing either: the next write asks again.
+/// rather than the serving process's answer frozen in. It is also read
+/// before the fixed state, so a `Closed` fixed by a write made before the
+/// install does not keep an installed, serving process from advancing.
+/// `Undecided` fixes nothing either: the next write asks again.
 ///
 /// `caller_holds_pool_connection` is true when the call is made from inside
 /// a transaction - ambient (`CURRENT_TX`) or an explicit `_with_tx` /
@@ -140,15 +149,21 @@ fn enabled() -> bool {
 pub(crate) async fn write_side_open(
     caller_holds_pool_connection: bool,
 ) -> Result<bool, FrameworkError> {
+    // `decide` answers Open for an installed process whatever the other
+    // facts are, so that row is taken here, before the fixed state an
+    // earlier, pre-install write may have left behind.
+    if super::is_installed() {
+        return Ok(true);
+    }
     match STATE.load(Ordering::Relaxed) {
         OPEN => return Ok(true),
         CLOSED => return Ok(false),
         _ => {}
     }
-    let installed = super::is_installed();
+    let installed = false;
     let enabled = enabled();
     let connected = DB::is_connected();
-    let needs_schema_probe = !installed && enabled && connected;
+    let needs_schema_probe = enabled && connected;
     if needs_schema_probe && caller_holds_pool_connection {
         return Ok(false);
     }
@@ -159,9 +174,7 @@ pub(crate) async fn write_side_open(
     };
     match decide(installed, enabled, connected, migration) {
         WriteSideDecision::Open => {
-            if !installed {
-                STATE.store(OPEN, Ordering::Relaxed);
-            }
+            STATE.store(OPEN, Ordering::Relaxed);
             Ok(true)
         }
         WriteSideDecision::Closed => {
@@ -182,24 +195,65 @@ pub fn decision() -> WriteSideDecision {
     }
 }
 
-/// Returns the probe to `Unknown`, so the next write decides again.
 /// CACHE-009: set when an advancement that could not share its row write's
 /// transaction (a write on a named connection, whose ledger lives on the
-/// primary) failed after the row landed. While set, every lookup in this
-/// process misses, so no entry whose invalidation is uncertain is served;
-/// the next successful advancement clears it. Process-local: another node
-/// learns nothing from it, which Live spec 17 records as the limit of this
-/// fallback.
+/// primary) failed, or was dropped part-way, after the row landed. While
+/// set, every lookup in this process misses, so no entry whose invalidation
+/// is uncertain is served. Process-local: another node learns nothing from
+/// it, which Live spec 17 records as the limit of this fallback.
+///
+/// Cleared only by [`resolve`], once every identity in [`UNRESOLVED`] has
+/// been advanced. An unrelated success used to clear it, which put the
+/// entries the failed advance missed back in service on their old
+/// generations (DATA-029).
 static SERVING_SUSPENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Stops serving stored entries until [`confirm_advancement`].
-pub(crate) fn suspend_serving() {
+/// The identities whose advancement this process could not record after
+/// their rows committed. The next advancement that can land carries them
+/// along with its own, so the missed invalidation is repaired rather than
+/// forgotten.
+static UNRESOLVED: std::sync::Mutex<std::collections::BTreeSet<DependencyIdentity>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn unresolved_set() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<DependencyIdentity>>
+{
+    UNRESOLVED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Stops serving stored entries until every one of `missed` is advanced.
+///
+/// The set is bounded by the most identities one representation may
+/// observe: past that, it collapses to the broad identity every
+/// representation observes, so one advance of it still repairs everything
+/// the missed ones would have invalidated.
+pub(crate) fn suspend_serving(missed: &[DependencyIdentity]) {
+    let mut unresolved = unresolved_set();
+    unresolved.extend(missed.iter().cloned());
+    if unresolved.len() > suprnova_live::render_cache::generation::MAX_OBSERVATIONS {
+        unresolved.clear();
+        unresolved.insert(DependencyIdentity::broad());
+    }
     SERVING_SUSPENDED.store(true, Ordering::Relaxed);
 }
 
-/// An advancement landed, so stored entries are trustworthy again.
-pub(crate) fn confirm_advancement() {
-    SERVING_SUSPENDED.store(false, Ordering::Relaxed);
+/// The identities a failed advancement left behind, for the next
+/// advancement to carry.
+pub(crate) fn unresolved() -> Vec<DependencyIdentity> {
+    unresolved_set().iter().cloned().collect()
+}
+
+/// `advanced` landed: they leave the unresolved set, and serving resumes
+/// once nothing is left in it.
+pub(crate) fn resolve(advanced: &[DependencyIdentity]) {
+    let mut unresolved = unresolved_set();
+    for identity in advanced {
+        unresolved.remove(identity);
+    }
+    if unresolved.is_empty() {
+        SERVING_SUSPENDED.store(false, Ordering::Relaxed);
+    }
 }
 
 /// Whether [`suspend_serving`] is in force.
@@ -208,6 +262,7 @@ pub(crate) fn serving_suspended() -> bool {
     SERVING_SUSPENDED.load(Ordering::Relaxed)
 }
 
+/// Returns the probe to `Unknown`, so the next write decides again.
 #[cfg(any(test, feature = "testing"))]
 pub(crate) fn reset_for_test() {
     STATE.store(UNKNOWN, Ordering::Relaxed);

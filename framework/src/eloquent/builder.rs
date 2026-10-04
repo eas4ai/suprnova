@@ -6196,6 +6196,52 @@ where
     // with `get()` and call `.save()` / `.update(...)` / `.delete()`
     // on each row instead.
 
+    /// Runs one mass write and the generation advance it triggers as one
+    /// unit (DATA-039).
+    ///
+    /// With an explicit `with_tx` handle both run in the caller's
+    /// transaction, as before. Without one, the write and its advance go
+    /// through [`crate::render_cache::orm::atomic`]: on the primary they
+    /// share one transaction, so a future dropped between them rolls the
+    /// row back with the advance instead of leaving it committed ahead of
+    /// its generations. A write on a named connection cannot share the
+    /// ledger's transaction; its advance suspends serving if it is dropped
+    /// or fails. `write` gets the executor resolved inside that transaction.
+    async fn bulk_write<F, Fut>(
+        tx_override: Option<&crate::database::TxHandle>,
+        connection_override: Option<&str>,
+        write: F,
+    ) -> Result<u64, FrameworkError>
+    where
+        F: FnOnce(crate::database::transaction::ExecutorChoice) -> Fut,
+        Fut: std::future::Future<Output = Result<u64, FrameworkError>>,
+    {
+        if let Some(handle) = tx_override {
+            let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                Some(handle),
+                connection_override,
+                M::default_connection_name(),
+            )
+            .await?;
+            let affected = write(exec).await?;
+            crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?;
+            return Ok(affected);
+        }
+        let connection = connection_override.or(M::default_connection_name());
+        crate::render_cache::orm::atomic(connection, || async move {
+            let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                None,
+                connection_override,
+                M::default_connection_name(),
+            )
+            .await?;
+            let affected = write(exec).await?;
+            crate::render_cache::orm::after_bulk_write(M::TABLE).await?;
+            Ok(affected)
+        })
+        .await
+    }
+
     /// `UPDATE table SET <attrs> WHERE <where_terms>`. Returns the
     /// affected row count. Does NOT fire model events - for per-row
     /// hook dispatch iterate with `get()` and call `.update(attrs)`
@@ -6220,55 +6266,65 @@ where
         let this = self.into_effective();
         this.refuse_joins("update_all")?;
         this.validate_inputs()?;
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            this.tx_override.as_ref(),
-            this.connection_override.as_deref(),
-            M::default_connection_name(),
+        let tx_override = this.tx_override.clone();
+        let connection_override = this.connection_override.clone();
+        Self::bulk_write(
+            tx_override.as_ref(),
+            connection_override.as_deref(),
+            move |exec| async move {
+                let backend = exec.backend();
+
+                let mut values: Vec<SeaValue> = Vec::new();
+                let mut n: usize = 0;
+
+                let mut sql = String::new();
+                sql.push_str("UPDATE ");
+                sql.push_str(M::TABLE);
+                sql.push_str(" SET ");
+                let set_parts: Vec<String> = attrs
+                    .iter()
+                    .map(|(col, v)| {
+                        let expression = write_value_expression(
+                            backend,
+                            col,
+                            v,
+                            &mut values,
+                            &mut n,
+                            M::bind_column,
+                        )?;
+                        Ok(format!("{col} = {expression}"))
+                    })
+                    .collect::<Result<Vec<_>, FrameworkError>>()?;
+                sql.push_str(&set_parts.join(", "));
+
+                if !this.where_terms.is_empty() {
+                    sql.push_str(" WHERE ");
+                    let parts: Vec<String> = this
+                        .where_terms
+                        .iter()
+                        .map(|t| {
+                            Self::render_where_term(
+                                backend,
+                                t,
+                                &mut values,
+                                &mut n,
+                                this.binder,
+                                None,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    sql.push_str(&parts.join(" AND "));
+                }
+
+                let stmt = Statement::from_sql_and_values(backend, &sql, values);
+                let result = exec
+                    .run(stmt)
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                Ok(result.rows_affected())
+            },
         )
-        .await?;
-        let backend = exec.backend();
-
-        let mut values: Vec<SeaValue> = Vec::new();
-        let mut n: usize = 0;
-
-        let mut sql = String::new();
-        sql.push_str("UPDATE ");
-        sql.push_str(M::TABLE);
-        sql.push_str(" SET ");
-        let set_parts: Vec<String> = attrs
-            .iter()
-            .map(|(col, v)| {
-                let expression =
-                    write_value_expression(backend, col, v, &mut values, &mut n, M::bind_column)?;
-                Ok(format!("{col} = {expression}"))
-            })
-            .collect::<Result<Vec<_>, FrameworkError>>()?;
-        sql.push_str(&set_parts.join(", "));
-
-        if !this.where_terms.is_empty() {
-            sql.push_str(" WHERE ");
-            let parts: Vec<String> = this
-                .where_terms
-                .iter()
-                .map(|t| {
-                    Self::render_where_term(backend, t, &mut values, &mut n, this.binder, None)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            sql.push_str(&parts.join(" AND "));
-        }
-
-        let stmt = Statement::from_sql_and_values(backend, &sql, values);
-        let result = exec
-            .run(stmt)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        match this.tx_override.as_ref() {
-            Some(handle) => {
-                crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?
-            }
-            None => crate::render_cache::orm::after_bulk_write(M::TABLE).await?,
-        }
-        Ok(result.rows_affected())
+        .await
     }
 
     /// Delete every row the query matches and return how many. No
@@ -6288,58 +6344,62 @@ where
         this.refuse_joins("delete_all")?;
         this.validate_inputs()?;
         crate::database::validate_identifier(M::SOFT_DELETES_COLUMN)?;
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            this.tx_override.as_ref(),
-            this.connection_override.as_deref(),
-            M::default_connection_name(),
+        let tx_override = this.tx_override.clone();
+        let connection_override = this.connection_override.clone();
+        Self::bulk_write(
+            tx_override.as_ref(),
+            connection_override.as_deref(),
+            move |exec| async move {
+                let backend = exec.backend();
+
+                let mut values: Vec<SeaValue> = Vec::new();
+                let mut n: usize = 0;
+                n += 1;
+                values.push(stamp.deleted_at);
+                let mut sql = format!(
+                    "UPDATE {} SET {} = {}",
+                    M::TABLE,
+                    M::SOFT_DELETES_COLUMN,
+                    placeholder(backend, n)?
+                );
+                if let Some(updated_at) = stamp.updated_at {
+                    crate::database::validate_identifier(M::UPDATED_AT_COLUMN)?;
+                    n += 1;
+                    values.push(updated_at);
+                    sql.push_str(&format!(
+                        ", {} = {}",
+                        M::UPDATED_AT_COLUMN,
+                        placeholder(backend, n)?
+                    ));
+                }
+                if !this.where_terms.is_empty() {
+                    sql.push_str(" WHERE ");
+                    let parts: Vec<String> = this
+                        .where_terms
+                        .iter()
+                        .map(|t| {
+                            Self::render_where_term(
+                                backend,
+                                t,
+                                &mut values,
+                                &mut n,
+                                this.binder,
+                                None,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    sql.push_str(&parts.join(" AND "));
+                }
+
+                let stmt = Statement::from_sql_and_values(backend, &sql, values);
+                let result = exec
+                    .run(stmt)
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                Ok(result.rows_affected())
+            },
         )
-        .await?;
-        let backend = exec.backend();
-
-        let mut values: Vec<SeaValue> = Vec::new();
-        let mut n: usize = 0;
-        n += 1;
-        values.push(stamp.deleted_at);
-        let mut sql = format!(
-            "UPDATE {} SET {} = {}",
-            M::TABLE,
-            M::SOFT_DELETES_COLUMN,
-            placeholder(backend, n)?
-        );
-        if let Some(updated_at) = stamp.updated_at {
-            crate::database::validate_identifier(M::UPDATED_AT_COLUMN)?;
-            n += 1;
-            values.push(updated_at);
-            sql.push_str(&format!(
-                ", {} = {}",
-                M::UPDATED_AT_COLUMN,
-                placeholder(backend, n)?
-            ));
-        }
-        if !this.where_terms.is_empty() {
-            sql.push_str(" WHERE ");
-            let parts: Vec<String> = this
-                .where_terms
-                .iter()
-                .map(|t| {
-                    Self::render_where_term(backend, t, &mut values, &mut n, this.binder, None)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            sql.push_str(&parts.join(" AND "));
-        }
-
-        let stmt = Statement::from_sql_and_values(backend, &sql, values);
-        let result = exec
-            .run(stmt)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        match this.tx_override.as_ref() {
-            Some(handle) => {
-                crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?
-            }
-            None => crate::render_cache::orm::after_bulk_write(M::TABLE).await?,
-        }
-        Ok(result.rows_affected())
+        .await
     }
 
     /// `DELETE FROM table WHERE <where_terms>`: remove every row the
@@ -6352,26 +6412,23 @@ where
     pub async fn force_delete_all(self) -> Result<u64, FrameworkError> {
         let this = self.into_effective();
         this.validate_inputs()?;
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            this.tx_override.as_ref(),
-            this.connection_override.as_deref(),
-            M::default_connection_name(),
+        let tx_override = this.tx_override.clone();
+        let connection_override = this.connection_override.clone();
+        Self::bulk_write(
+            tx_override.as_ref(),
+            connection_override.as_deref(),
+            move |exec| async move {
+                let backend = exec.backend();
+                let (sql, vals) = this.render_model_delete_sql_with_bindings(backend)?;
+                let stmt = Statement::from_sql_and_values(backend, &sql, vals);
+                let result = exec
+                    .run(stmt)
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                Ok(result.rows_affected())
+            },
         )
-        .await?;
-        let backend = exec.backend();
-        let (sql, vals) = this.render_model_delete_sql_with_bindings(backend)?;
-        let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let result = exec
-            .run(stmt)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        match this.tx_override.as_ref() {
-            Some(handle) => {
-                crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?
-            }
-            None => crate::render_cache::orm::after_bulk_write(M::TABLE).await?,
-        }
-        Ok(result.rows_affected())
+        .await
     }
 
     /// Increment each column in `columns` by its mapped step. Atomic
@@ -6395,52 +6452,56 @@ where
         let this = self.into_effective();
         this.refuse_joins("increment_each")?;
         this.validate_inputs()?;
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            this.tx_override.as_ref(),
-            this.connection_override.as_deref(),
-            M::default_connection_name(),
+        let tx_override = this.tx_override.clone();
+        let connection_override = this.connection_override.clone();
+        Self::bulk_write(
+            tx_override.as_ref(),
+            connection_override.as_deref(),
+            move |exec| async move {
+                let backend = exec.backend();
+                let mut values: Vec<SeaValue> = Vec::new();
+                let mut n: usize = 0;
+                let mut sql = String::new();
+                sql.push_str("UPDATE ");
+                sql.push_str(M::TABLE);
+                sql.push_str(" SET ");
+                let set_parts: Vec<String> = owned
+                    .iter()
+                    .map(|(col, step)| {
+                        n += 1;
+                        let ph = placeholder(backend, n)?;
+                        values.push(SeaValue::BigInt(Some(*step)));
+                        Ok(format!("{col} = {col} + {ph}"))
+                    })
+                    .collect::<Result<Vec<_>, FrameworkError>>()?;
+                sql.push_str(&set_parts.join(", "));
+                if !this.where_terms.is_empty() {
+                    sql.push_str(" WHERE ");
+                    let parts: Vec<String> = this
+                        .where_terms
+                        .iter()
+                        .map(|t| {
+                            Self::render_where_term(
+                                backend,
+                                t,
+                                &mut values,
+                                &mut n,
+                                this.binder,
+                                None,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    sql.push_str(&parts.join(" AND "));
+                }
+                let stmt = Statement::from_sql_and_values(backend, &sql, values);
+                let result = exec
+                    .run(stmt)
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                Ok(result.rows_affected())
+            },
         )
-        .await?;
-        let backend = exec.backend();
-        let mut values: Vec<SeaValue> = Vec::new();
-        let mut n: usize = 0;
-        let mut sql = String::new();
-        sql.push_str("UPDATE ");
-        sql.push_str(M::TABLE);
-        sql.push_str(" SET ");
-        let set_parts: Vec<String> = owned
-            .iter()
-            .map(|(col, step)| {
-                n += 1;
-                let ph = placeholder(backend, n)?;
-                values.push(SeaValue::BigInt(Some(*step)));
-                Ok(format!("{col} = {col} + {ph}"))
-            })
-            .collect::<Result<Vec<_>, FrameworkError>>()?;
-        sql.push_str(&set_parts.join(", "));
-        if !this.where_terms.is_empty() {
-            sql.push_str(" WHERE ");
-            let parts: Vec<String> = this
-                .where_terms
-                .iter()
-                .map(|t| {
-                    Self::render_where_term(backend, t, &mut values, &mut n, this.binder, None)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            sql.push_str(&parts.join(" AND "));
-        }
-        let stmt = Statement::from_sql_and_values(backend, &sql, values);
-        let result = exec
-            .run(stmt)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        match this.tx_override.as_ref() {
-            Some(handle) => {
-                crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?
-            }
-            None => crate::render_cache::orm::after_bulk_write(M::TABLE).await?,
-        }
-        Ok(result.rows_affected())
+        .await
     }
 
     /// Decrement each column in `columns` by its mapped step. Sugar
@@ -6515,72 +6576,76 @@ where
                 .collect(),
         };
 
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            self.tx_override.as_ref(),
-            self.connection_override.as_deref(),
-            M::default_connection_name(),
-        )
-        .await?;
-        let backend = exec.backend();
+        let tx_override = self.tx_override.clone();
+        let connection_override = self.connection_override.clone();
+        Self::bulk_write(
+            tx_override.as_ref(),
+            connection_override.as_deref(),
+            move |exec| async move {
+                let backend = exec.backend();
 
-        let mut values: Vec<SeaValue> = Vec::new();
-        let mut n: usize = 0;
+                let mut values: Vec<SeaValue> = Vec::new();
+                let mut n: usize = 0;
 
-        let mut sql = String::new();
-        sql.push_str("INSERT INTO ");
-        sql.push_str(M::TABLE);
-        sql.push_str(" (");
-        sql.push_str(&cols.join(", "));
-        sql.push_str(") VALUES ");
-        let row_parts: Vec<String> = rows
-            .iter()
-            .map(|attrs| {
-                let phs: Vec<String> = cols
+                let mut sql = String::new();
+                sql.push_str("INSERT INTO ");
+                sql.push_str(M::TABLE);
+                sql.push_str(" (");
+                sql.push_str(&cols.join(", "));
+                sql.push_str(") VALUES ");
+                let row_parts: Vec<String> = rows
                     .iter()
-                    .map(|c| {
-                        let v = attrs.get(c).cloned().unwrap_or(Value::Null);
-                        write_value_expression(backend, c, &v, &mut values, &mut n, M::bind_column)
+                    .map(|attrs| {
+                        let phs: Vec<String> = cols
+                            .iter()
+                            .map(|c| {
+                                let v = attrs.get(c).cloned().unwrap_or(Value::Null);
+                                write_value_expression(
+                                    backend,
+                                    c,
+                                    &v,
+                                    &mut values,
+                                    &mut n,
+                                    M::bind_column,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, FrameworkError>>()?;
+                        Ok(format!("({})", phs.join(", ")))
                     })
                     .collect::<Result<Vec<_>, FrameworkError>>()?;
-                Ok(format!("({})", phs.join(", ")))
-            })
-            .collect::<Result<Vec<_>, FrameworkError>>()?;
-        sql.push_str(&row_parts.join(", "));
+                sql.push_str(&row_parts.join(", "));
 
-        match backend {
-            DbBackend::Postgres | DbBackend::Sqlite => {
-                sql.push_str(" ON CONFLICT (");
-                sql.push_str(&unique_by.join(", "));
-                sql.push_str(") DO UPDATE SET ");
-                let set_parts: Vec<String> = update_cols
-                    .iter()
-                    .map(|c| format!("{c} = EXCLUDED.{c}"))
-                    .collect();
-                sql.push_str(&set_parts.join(", "));
-            }
-            DbBackend::MySql => {
-                sql.push_str(" ON DUPLICATE KEY UPDATE ");
-                let set_parts: Vec<String> = update_cols
-                    .iter()
-                    .map(|c| format!("{c} = VALUES({c})"))
-                    .collect();
-                sql.push_str(&set_parts.join(", "));
-            }
-            _ => return Err(crate::database::unsupported_database_backend(backend)),
-        }
+                match backend {
+                    DbBackend::Postgres | DbBackend::Sqlite => {
+                        sql.push_str(" ON CONFLICT (");
+                        sql.push_str(&unique_by.join(", "));
+                        sql.push_str(") DO UPDATE SET ");
+                        let set_parts: Vec<String> = update_cols
+                            .iter()
+                            .map(|c| format!("{c} = EXCLUDED.{c}"))
+                            .collect();
+                        sql.push_str(&set_parts.join(", "));
+                    }
+                    DbBackend::MySql => {
+                        sql.push_str(" ON DUPLICATE KEY UPDATE ");
+                        let set_parts: Vec<String> = update_cols
+                            .iter()
+                            .map(|c| format!("{c} = VALUES({c})"))
+                            .collect();
+                        sql.push_str(&set_parts.join(", "));
+                    }
+                    _ => return Err(crate::database::unsupported_database_backend(backend)),
+                }
 
-        let stmt = Statement::from_sql_and_values(backend, &sql, values);
-        let result = exec
-            .run(stmt)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        match self.tx_override.as_ref() {
-            Some(handle) => {
-                crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?
-            }
-            None => crate::render_cache::orm::after_bulk_write(M::TABLE).await?,
-        }
-        Ok(result.rows_affected())
+                let stmt = Statement::from_sql_and_values(backend, &sql, values);
+                let result = exec
+                    .run(stmt)
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                Ok(result.rows_affected())
+            },
+        )
+        .await
     }
 }
 

@@ -62,9 +62,10 @@
 //! bound on what the caller actually asked to cache keeps it meaningful
 //! even if the frame's fixed overhead changes later.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -106,10 +107,62 @@ struct TrackedEntry {
 
 /// In-memory byte tally, guarded by an async mutex so a publish can hold it
 /// across the `fsync` and rename it performs.
+///
+/// Every entry is also indexed by when it dies, two ways, so
+/// [`FileRenderStore::sweep`] reaches its dead entries in order without
+/// looking at the live ones: `by_deadline` orders entries by the instant
+/// their retention elapses, and `by_epoch` by the fence epoch an epoch
+/// advance retires. [`Self::insert`] and [`Self::remove`] are the only
+/// writers, so the indexes and the byte total cannot drift from `entries`.
+#[derive(Default)]
 struct TallyState {
     /// Keyed by `key.to_base64url()`, which is also the file stem.
     entries: BTreeMap<String, TrackedEntry>,
     total_bytes: u64,
+    by_deadline: BTreeSet<(u64, String)>,
+    by_epoch: BTreeSet<(u64, String)>,
+}
+
+impl TallyState {
+    /// Tracks `entry` under `name`, replacing and returning whatever was
+    /// tracked there before.
+    fn insert(&mut self, name: String, entry: TrackedEntry) -> Option<TrackedEntry> {
+        let previous = self.remove(&name);
+        self.total_bytes += entry.payload_bytes;
+        self.by_deadline
+            .insert((retention_deadline(&entry), name.clone()));
+        self.by_epoch.insert((entry.fence.epoch, name.clone()));
+        self.entries.insert(name, entry);
+        previous
+    }
+
+    /// Stops tracking `name`, returning what was tracked.
+    fn remove(&mut self, name: &str) -> Option<TrackedEntry> {
+        let removed = self.entries.remove(name)?;
+        self.total_bytes -= removed.payload_bytes;
+        self.by_deadline
+            .remove(&(retention_deadline(&removed), name.to_owned()));
+        self.by_epoch
+            .remove(&(removed.fence.epoch, name.to_owned()));
+        Some(removed)
+    }
+}
+
+/// The `by_deadline` key: the first instant at which `entry`'s retention
+/// has elapsed. An explicitly zero retention is dead from the start, at any
+/// clock reading, so it sorts first.
+fn retention_deadline(entry: &TrackedEntry) -> u64 {
+    if entry.retention_ms == 0 {
+        0
+    } else {
+        entry.published_at_ms.saturating_add(entry.retention_ms)
+    }
+}
+
+/// Whether `entry` is dead at `now_ms` under ledger epoch `epoch`: its
+/// retention has elapsed, or its fence epoch is below the current one.
+fn is_dead(entry: &TrackedEntry, now_ms: u64, epoch: u64) -> bool {
+    now_ms.saturating_sub(entry.published_at_ms) >= entry.retention_ms || entry.fence.epoch < epoch
 }
 
 /// File-backed L1 store. See the module documentation for the on-disk frame
@@ -117,14 +170,39 @@ struct TallyState {
 pub struct FileRenderStore {
     directory: PathBuf,
     max_bytes: u64,
-    state: AsyncMutex<TallyState>,
+    /// Shared with the blocking thread a publication's file work runs on,
+    /// which holds the lock until that work and its tally update are both
+    /// done, even if the publishing future is dropped (DATA-024).
+    state: Arc<AsyncMutex<TallyState>>,
     /// Publications since open, for the every-256th automatic [`Self::sweep`]
     /// (see the module documentation). A plain atomic, not guarded by
     /// `state`: each call's `fetch_add` returns a value no other call can
     /// also observe, so exactly one call crosses each multiple-of-256
     /// boundary regardless of concurrent publishers.
     publish_count: std::sync::atomic::AtomicU64,
+    /// A test's hook into each publication's blocking file work; always
+    /// `None` outside tests. See `set_publish_io_hook_for_test`.
+    publish_io_hook: std::sync::Mutex<Option<PublishIoHook>>,
+    /// Tracked entries [`Self::sweep`] has looked at, for the test that
+    /// bounds its work. See `take_sweep_examined_for_test`.
+    sweep_examined: std::sync::atomic::AtomicU64,
 }
+
+/// A point inside one publication's blocking file work, where a test hook
+/// set by `FileRenderStore::set_publish_io_hook_for_test` runs.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublishIoStage {
+    /// The frame is written and synced to its temporary file, and the rename
+    /// that makes it live has not run.
+    BeforeRename,
+    /// The rename has landed: the frame is the live entry on disk.
+    AfterRename,
+}
+
+/// The hook `FileRenderStore::set_publish_io_hook_for_test` installs.
+#[doc(hidden)]
+pub type PublishIoHook = std::sync::Arc<dyn Fn(PublishIoStage) + Send + Sync>;
 
 impl FileRenderStore {
     /// Opens (creating if needed) a file store rooted at `directory`,
@@ -147,8 +225,7 @@ impl FileRenderStore {
         std::fs::create_dir_all(&directory).map_err(|err| {
             FrameworkError::from_external_with("creating the render cache L1 directory", err)
         })?;
-        let mut entries = BTreeMap::new();
-        let mut total_bytes: u64 = 0;
+        let mut state = TallyState::default();
         let read_dir = std::fs::read_dir(&directory).map_err(|err| {
             FrameworkError::from_external_with("reading the render cache L1 directory", err)
         })?;
@@ -180,13 +257,11 @@ impl FileRenderStore {
             };
             match decode_frame(&Bytes::from(data)) {
                 Ok(frame) => {
-                    let payload_bytes = frame.payload.len() as u64;
-                    total_bytes += payload_bytes;
-                    entries.insert(
+                    state.insert(
                         name.to_owned(),
                         TrackedEntry {
                             fence: frame.fence,
-                            payload_bytes,
+                            payload_bytes: frame.payload.len() as u64,
                             published_at_ms: frame.published_at_ms,
                             retention_ms: frame.retention_ms,
                         },
@@ -200,12 +275,52 @@ impl FileRenderStore {
         Ok(Self {
             directory,
             max_bytes,
-            state: AsyncMutex::new(TallyState {
-                entries,
-                total_bytes,
-            }),
+            state: Arc::new(AsyncMutex::new(state)),
             publish_count: std::sync::atomic::AtomicU64::new(0),
+            publish_io_hook: std::sync::Mutex::new(None),
+            sweep_examined: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Test-only: runs `hook` on the blocking thread of every later
+    /// publication, at each [`PublishIoStage`] of its file work. It is how a
+    /// test holds a publication inside that work, cancels the future that
+    /// started it, and observes what the store does next (DATA-024). `None`
+    /// removes it.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_publish_io_hook_for_test(&self, hook: Option<PublishIoHook>) {
+        *self
+            .publish_io_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
+    fn publish_io_hook(&self) -> Option<PublishIoHook> {
+        self.publish_io_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Test-only: how many tracked entries [`Self::sweep`] has looked at
+    /// since the last call, and resets the count. A sweep's work is bounded
+    /// by the batch it removes, not by the size of the store, and this is
+    /// what a test measures that by (DATA-025).
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn take_sweep_examined_for_test(&self) -> u64 {
+        self.sweep_examined
+            .swap(0, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Counts `examined` tracked entries toward the test-only
+    /// `take_sweep_examined_for_test`.
+    fn note_sweep_examined(&self, examined: usize) {
+        self.sweep_examined.fetch_add(
+            u64::try_from(examined).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     fn path_for_name(&self, name: &str) -> PathBuf {
@@ -283,16 +398,12 @@ impl RenderStore for FileRenderStore {
                         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                         Err(_) => return Ok(None),
                     }
-                    if let Some(removed) = state.entries.remove(&name) {
-                        state.total_bytes -= removed.payload_bytes;
-                    }
+                    state.remove(&name);
                     Ok(None)
                 }
             },
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                if let Some(removed) = state.entries.remove(&name) {
-                    state.total_bytes -= removed.payload_bytes;
-                }
+                state.remove(&name);
                 Ok(None)
             }
             Err(_) => Err(RenderCacheError::new(
@@ -323,7 +434,9 @@ impl RenderStore for FileRenderStore {
             return Ok(PublishOutcome::Rejected);
         }
         let name = key.to_base64url();
-        let mut state = self.state.lock().await;
+        // Owned, so the blocking thread the file work runs on can hold it
+        // past this future (DATA-024): see the write step below.
+        let mut state = Arc::clone(&self.state).lock_owned().await;
         if let Some(existing) = state.entries.get(&name)
             && !fence.supersedes(&existing.fence)
         {
@@ -391,9 +504,7 @@ impl RenderStore for FileRenderStore {
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                     Err(_) => continue,
                 }
-                if let Some(removed) = state.entries.remove(&victim) {
-                    state.total_bytes -= removed.payload_bytes;
-                }
+                state.remove(&victim);
             }
             if state.total_bytes - existing_len + payload_len > self.max_bytes {
                 // The pre-check above found enough room theoretically
@@ -417,7 +528,32 @@ impl RenderStore for FileRenderStore {
         let framed = encode_frame(&fence, now_ms, retention_ms, &bytes);
         let final_path = self.path_for_name(&name);
         let temp_path = self.temp_path_for(&name, fence.token);
-        match write_frame_atomically(temp_path, final_path, framed).await {
+        let hook = self.publish_io_hook();
+        let tracked = TrackedEntry {
+            fence,
+            payload_bytes: payload_len,
+            published_at_ms: now_ms,
+            retention_ms,
+        };
+        // The write, the rename and the tally update run together on the
+        // blocking thread, which owns the lock until all three are done. A
+        // blocking task cannot be aborted, so when this future is dropped
+        // part-way the file work still finishes; before, the lock went with
+        // the dropped future, a newer publication could take it and land,
+        // and then the older frame was renamed over it with the tally never
+        // told (DATA-024). Now the newer publication waits for the lock,
+        // finds the older entry tracked, and fences against it.
+        let written = tokio::task::spawn_blocking(move || {
+            let written = write_frame_atomically(&temp_path, &final_path, &framed, hook.as_ref());
+            if written.is_ok() {
+                state.insert(name, tracked);
+            }
+            drop(state);
+            written
+        })
+        .await
+        .unwrap_or_else(|join_err| Err(std::io::Error::other(join_err)));
+        match written {
             Ok(Published::Durable) => {}
             Ok(Published::RenamedWithoutDirectorySync(sync_error)) => {
                 // The rename already landed: the frame is live and correct
@@ -445,17 +581,6 @@ impl RenderStore for FileRenderStore {
                 ));
             }
         }
-        state.total_bytes = state.total_bytes - existing_len + payload_len;
-        state.entries.insert(
-            name,
-            TrackedEntry {
-                fence,
-                payload_bytes: payload_len,
-                published_at_ms: now_ms,
-                retention_ms,
-            },
-        );
-        drop(state);
         // Every 256th publication triggers a sweep using the epoch this
         // very publication was fenced under, which is exactly "the current
         // ledger epoch" from this call's point of view: nothing is published
@@ -501,9 +626,7 @@ impl RenderStore for FileRenderStore {
                 ));
             }
         }
-        if let Some(removed) = state.entries.remove(&name) {
-            state.total_bytes -= removed.payload_bytes;
-        }
+        state.remove(&name);
         Ok(())
     }
 
@@ -531,8 +654,14 @@ impl FileRenderStore {
     ///
     /// # Bounded work (fix round 1, R94/F5)
     ///
-    /// At most `SWEEP_BATCH_LIMIT` entries are removed per call, oldest
-    /// `published_at_ms` first. `sweep` runs inline on the request path
+    /// At most `SWEEP_BATCH_LIMIT` entries are removed per call: entries
+    /// whose retention has elapsed, in the order it elapsed, then entries
+    /// from an older epoch, oldest epoch first. They are read off two
+    /// indexes the tally keeps in death order, so finding them never looks
+    /// at a live entry beyond the one that ends each walk (DATA-025). An
+    /// earlier version collected, cloned and sorted every dead entry, then
+    /// scanned every entry again for `more_remain`, all under the lock.
+    /// `sweep` runs inline on the request path
     /// (triggered every 256th publication) with the tally lock held across
     /// every removal it performs - moving it off the request path with
     /// `tokio::spawn` would lose that request's task-locals and lifecycle
@@ -576,25 +705,42 @@ impl FileRenderStore {
     /// failure without a signature change.
     pub async fn sweep(&self, now_ms: u64, epoch: u64) -> Result<SweepOutcome, RenderCacheError> {
         let mut state = self.state.lock().await;
-        let is_dead = |tracked: &TrackedEntry| {
-            now_ms.saturating_sub(tracked.published_at_ms) >= tracked.retention_ms
-                || tracked.fence.epoch < epoch
-        };
-        let mut dead: Vec<(String, u64)> = state
-            .entries
-            .iter()
-            .filter(|(_, tracked)| is_dead(tracked))
-            .map(|(name, tracked)| (name.clone(), tracked.published_at_ms))
-            .collect();
-        dead.sort_by_key(|&(_, published_at_ms)| published_at_ms);
-        dead.truncate(SWEEP_BATCH_LIMIT);
+        // DATA-025: the candidates come off the two death-order indexes,
+        // never a scan of every tracked entry. Retention-dead entries are
+        // the front of `by_deadline` up to `now_ms`, and epoch-dead ones the
+        // front of `by_epoch` below `epoch`, so the work is the batch plus
+        // the one entry at each front that ends the walk, however many live
+        // entries the store holds.
+        let mut examined = 0_usize;
+        let mut batch: Vec<String> = Vec::with_capacity(SWEEP_BATCH_LIMIT);
+        for (deadline, name) in &state.by_deadline {
+            if batch.len() >= SWEEP_BATCH_LIMIT || *deadline > now_ms {
+                break;
+            }
+            examined += 1;
+            if state
+                .entries
+                .get(name)
+                .is_some_and(|tracked| is_dead(tracked, now_ms, epoch))
+            {
+                batch.push(name.clone());
+            }
+        }
+        for (entry_epoch, name) in &state.by_epoch {
+            if batch.len() >= SWEEP_BATCH_LIMIT || *entry_epoch >= epoch {
+                break;
+            }
+            examined += 1;
+            if !batch.contains(name) {
+                batch.push(name.clone());
+            }
+        }
 
         let mut removed = 0_usize;
-        for (name, _) in &dead {
+        for name in &batch {
             match tokio::fs::remove_file(self.path_for_name(name)).await {
                 Ok(()) => {
-                    if let Some(tracked) = state.entries.remove(name) {
-                        state.total_bytes -= tracked.payload_bytes;
+                    if state.remove(name).is_some() {
                         removed += 1;
                     }
                 }
@@ -602,22 +748,30 @@ impl FileRenderStore {
                     // F8: the file was already gone; this is not a removal
                     // this call performed, so it is not counted, but the
                     // index must still be corrected to match the disk.
-                    if let Some(tracked) = state.entries.remove(name) {
-                        state.total_bytes -= tracked.payload_bytes;
-                    }
+                    state.remove(name);
                 }
                 Err(_) => {}
             }
         }
-        // Recomputed after the loop rather than derived from
-        // `dead.len() > SWEEP_BATCH_LIMIT`: a candidate within the batch
-        // whose removal failed for a real reason is still dead and still
-        // tracked, and must also be reported as remaining work, not just a
-        // backlog beyond the cap.
-        let more_remain = state.entries.values().any(is_dead);
+        // Read off the two fronts after the loop rather than derived from
+        // the batch: a candidate whose removal failed for a real reason is
+        // still dead and still tracked, and must also be reported as
+        // remaining work, not just a backlog beyond the batch.
+        let retention_front_dead = state.by_deadline.first().is_some_and(|(_, name)| {
+            state
+                .entries
+                .get(name)
+                .is_some_and(|tracked| is_dead(tracked, now_ms, epoch))
+        });
+        let epoch_front_dead = state
+            .by_epoch
+            .first()
+            .is_some_and(|(entry_epoch, _)| *entry_epoch < epoch);
+        examined += 2;
+        self.note_sweep_examined(examined);
         Ok(SweepOutcome {
             removed,
-            more_remain,
+            more_remain: retention_front_dead || epoch_front_dead,
         })
     }
 }
@@ -742,7 +896,7 @@ enum Published {
 }
 
 /// Writes `framed` to `temp_path`, `fsync`s it, renames it over
-/// `final_path`, then `fsync`s the parent directory. Runs on a blocking
+/// `final_path`, then `fsync`s the parent directory. Called on a blocking
 /// thread: `File::create`, `write_all`, `sync_all`, `rename`, and opening
 /// the directory are all synchronous syscalls.
 ///
@@ -762,45 +916,45 @@ enum Published {
 /// reported as [`Published::RenamedWithoutDirectorySync`] rather than an
 /// error: the caller must update its bookkeeping either way, since the
 /// disk already has the new content.
-async fn write_frame_atomically(
-    temp_path: PathBuf,
-    final_path: PathBuf,
-    framed: Vec<u8>,
+fn write_frame_atomically(
+    temp_path: &Path,
+    final_path: &Path,
+    framed: &[u8],
+    hook: Option<&PublishIoHook>,
 ) -> std::io::Result<Published> {
-    match tokio::task::spawn_blocking(move || -> std::io::Result<Published> {
-        let result = (|| -> std::io::Result<Published> {
-            let mut file = std::fs::File::create(&temp_path)?;
-            file.write_all(&framed)?;
-            file.sync_all()?;
-            drop(file);
-            std::fs::rename(&temp_path, &final_path)?;
-            // The rename has landed: everything from here on is a
-            // durability question about the directory entry, not about
-            // whether the publication itself succeeded.
-            let synced_directory: std::io::Result<()> = (|| {
-                let parent = final_path.parent().ok_or_else(|| {
-                    std::io::Error::other("render cache entry path has no parent directory")
-                })?;
-                std::fs::OpenOptions::new()
-                    .read(true)
-                    .open(parent)?
-                    .sync_all()
-            })();
-            Ok(match synced_directory {
-                Ok(()) => Published::Durable,
-                Err(sync_error) => Published::RenamedWithoutDirectorySync(sync_error),
-            })
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temp_path);
+    let result = (|| -> std::io::Result<Published> {
+        let mut file = std::fs::File::create(temp_path)?;
+        file.write_all(framed)?;
+        file.sync_all()?;
+        drop(file);
+        if let Some(hook) = hook {
+            hook(PublishIoStage::BeforeRename);
         }
-        result
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(join_err) => Err(std::io::Error::other(join_err)),
+        std::fs::rename(temp_path, final_path)?;
+        if let Some(hook) = hook {
+            hook(PublishIoStage::AfterRename);
+        }
+        // The rename has landed: everything from here on is a durability
+        // question about the directory entry, not about whether the
+        // publication itself succeeded.
+        let synced_directory: std::io::Result<()> = (|| {
+            let parent = final_path.parent().ok_or_else(|| {
+                std::io::Error::other("render cache entry path has no parent directory")
+            })?;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .open(parent)?
+                .sync_all()
+        })();
+        Ok(match synced_directory {
+            Ok(()) => Published::Durable,
+            Err(sync_error) => Published::RenamedWithoutDirectorySync(sync_error),
+        })
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp_path);
     }
+    result
 }
 
 #[cfg(test)]
