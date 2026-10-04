@@ -184,8 +184,11 @@ impl OAuthProvider for AcmeProvider {
 ```
 
 Return `None` for a missing or empty picture rather than an error: a profile
-without a picture still signs in. If the provider's API omits fields that the
-request doesn't name, add the picture field to `userinfo_endpoint`.
+without a picture still signs in. Keep the picture out of the struct
+`resolve_identity` deserializes, as the example does: there, a picture of a
+shape you didn't expect fails the whole profile, and the sign-in with it. If
+the provider's API omits fields that the request doesn't name, add the
+picture field to `userinfo_endpoint`.
 
 
 ## Session binding
@@ -243,8 +246,9 @@ email. Persist the provider and subject as the stable external identity. Email
 is not a stable provider identifier.
 
 `OAuthIdentity.avatar_url` holds the account picture URL when the provider
-reports one. It's `None` when the profile has no picture or an empty one, and
-a missing picture never fails the callback. The owner of the provider account
+reports one. It's `None` when the profile has no picture, an empty one, or one
+that isn't the string the provider documents, and the picture never fails the
+callback. The owner of the provider account
 controls this value, so treat it as untrusted profile data. Before you render,
 fetch, or store it, check its scheme and length:
 

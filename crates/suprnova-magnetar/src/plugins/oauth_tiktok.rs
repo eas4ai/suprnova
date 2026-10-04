@@ -110,7 +110,6 @@ struct TikTokUserInfoData {
 struct TikTokUser {
     open_id: Option<String>,
     display_name: Option<String>,
-    avatar_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -217,12 +216,7 @@ impl OAuthProvider for TikTokOAuthProvider {
         let ProviderResponse::UserInfo { body } = response else {
             return None;
         };
-        let envelope: TikTokUserInfoEnvelope = serde_json::from_str(body).ok()?;
-        envelope
-            .data?
-            .user?
-            .avatar_url
-            .filter(|url| !url.trim().is_empty())
+        super::oauth_profile_picture(body, "/data/user/avatar_url")
     }
 
     async fn revoke(&self, token: &str, hint: TokenHint) -> OAuthResult<()> {

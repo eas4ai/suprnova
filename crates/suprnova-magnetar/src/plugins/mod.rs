@@ -31,6 +31,27 @@ pub mod password_management;
 #[cfg(feature = "two-factor")]
 pub mod two_factor;
 
+/// The account picture at `pointer` in a provider's JSON profile `body`,
+/// for [`crate::oauth::OAuthProvider::avatar_url`]: the string as the
+/// provider reported it, or `None` when the profile has no picture, an
+/// empty one, or a value of any other shape.
+///
+/// Read as untyped JSON, apart from the struct `resolve_identity`
+/// deserializes, because the picture is optional profile data: a picture
+/// in a shape the provider did not document costs the picture, never the
+/// sign-in.
+#[cfg(any(
+    feature = "oauth-google",
+    feature = "oauth-facebook",
+    feature = "oauth-tiktok",
+    feature = "oauth-x"
+))]
+pub(crate) fn oauth_profile_picture(body: &str, pointer: &str) -> Option<String> {
+    let profile: serde_json::Value = serde_json::from_str(body).ok()?;
+    let url = profile.pointer(pointer)?.as_str()?;
+    (!url.trim().is_empty()).then(|| url.to_owned())
+}
+
 #[cfg(any(
     feature = "password",
     feature = "email-verification",
