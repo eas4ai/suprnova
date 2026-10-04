@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::database::DB;
+use crate::database::stored_datetime::StoredDateTime;
 use crate::error::FrameworkError;
 use crate::session::store::{
     SessionData, SessionMigrationError, SessionStore, guard_principal_ids_in,
@@ -57,7 +58,8 @@ pub(crate) fn valid_session_table(name: &str) -> bool {
 /// - user_id: VARCHAR (nullable) - authenticated user ID (string, supports both numeric and opaque IDs)
 /// - payload: TEXT - JSON serialized session data
 /// - csrf_token: VARCHAR - CSRF protection token
-/// - last_activity: TIMESTAMP - last access time
+/// - last_activity: TIMESTAMP or DATETIME (`timestamp` or `timestamptz` on
+///   Postgres) - last access time, in UTC
 ///
 /// The queries are sea-query statements over the table name held at run
 /// time. A SeaORM entity fixes its table at compile time, which is why
@@ -79,13 +81,17 @@ enum SessionColumn {
 }
 
 /// One stored session row, decoded by column name.
+///
+/// `last_activity` is a [`StoredDateTime`]: the scaffold creates it with
+/// `.timestamp()`, which is `TIMESTAMP` on MySQL and MariaDB, and a plain
+/// `NaiveDateTime` decodes only from `DATETIME` there.
 #[derive(FromQueryResult)]
 struct SessionRow {
     id: String,
     user_id: Option<String>,
     payload: String,
     csrf_token: String,
-    last_activity: chrono::NaiveDateTime,
+    last_activity: StoredDateTime,
 }
 
 fn database_error(error: DbErr) -> FrameworkError {
@@ -225,6 +231,7 @@ impl SessionStore for DatabaseSessionDriver {
             let now = crate::clock::now().naive_utc();
             let expiry = session
                 .last_activity
+                .0
                 .checked_add_signed(chrono::Duration::seconds(self.lifetime_secs_capped()))
                 .unwrap_or(chrono::NaiveDateTime::MAX);
 

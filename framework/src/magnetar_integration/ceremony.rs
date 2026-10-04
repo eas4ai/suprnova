@@ -17,12 +17,26 @@
 //! bail.
 
 use chrono::Duration;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Set};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::database::DB;
+use crate::database::stored_datetime::storable_expiry;
 use crate::error::FrameworkError;
+
+/// The columns [`consume`] reads from a ceremony row.
+///
+/// The time columns are left out on purpose: the lookup filters on
+/// `expires_at` in SQL, and a table created with `.timestamp()` has
+/// `TIMESTAMP` columns on MySQL and MariaDB, which the public
+/// [`entity::Model`]'s `NaiveDateTime` cannot decode there.
+#[derive(FromQueryResult)]
+struct CeremonyRow {
+    id: i64,
+    selector: String,
+    payload: String,
+}
 
 /// Issue a ceremony token. `selector` MUST be globally unique
 /// (UUID v4 is the canonical choice). `payload` is serialised to
@@ -46,11 +60,12 @@ pub async fn issue<P: Serialize>(
     let now = crate::clock::now();
     let expires_at = now + Duration::minutes(ttl_minutes);
     let conn = DB::connection()?;
+    let backend = conn.inner().get_database_backend();
     let model = entity::ActiveModel {
         selector: Set(selector.to_string()),
         kind: Set(kind.to_string()),
         payload: Set(payload_json),
-        expires_at: Set(expires_at.naive_utc()),
+        expires_at: Set(storable_expiry(backend, expires_at.naive_utc())),
         created_at: Set(now.naive_utc()),
         ..Default::default()
     };
@@ -81,6 +96,13 @@ pub async fn consume<P: DeserializeOwned>(
         .filter(entity::Column::Selector.eq(selector))
         .filter(entity::Column::Kind.eq(kind))
         .filter(entity::Column::ExpiresAt.gt(now))
+        .select_only()
+        .columns([
+            entity::Column::Id,
+            entity::Column::Selector,
+            entity::Column::Payload,
+        ])
+        .into_model::<CeremonyRow>()
         .one(conn.inner())
         .await
         .map_err(|e| FrameworkError::database(format!("ceremony lookup: {e}")))?;
@@ -139,6 +161,12 @@ pub mod kind {
 }
 
 /// SeaORM entity for the `auth_ceremony_tokens` table.
+///
+/// `expires_at` and `created_at` may be `TIMESTAMP` or `DATETIME`
+/// (`timestamp` or `timestamptz` on Postgres): the functions above work
+/// with each. `Model`'s `NaiveDateTime` fields decode only from `DATETIME`
+/// on MySQL and `timestamp` on Postgres, so reading whole rows through
+/// this entity fails on the other types.
 pub mod entity {
     use sea_orm::entity::prelude::*;
 

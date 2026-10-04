@@ -83,9 +83,13 @@
 //! Same reason passwords are hashed.
 
 use chrono::Duration;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Select, Set,
+    TransactionTrait,
+};
 
 use crate::database::DB;
+use crate::database::stored_datetime::storable_expiry;
 use crate::error::FrameworkError;
 use crate::hashing;
 
@@ -107,6 +111,33 @@ const VERIFIER_BYTES: usize = 32;
 /// cookie."
 #[doc(hidden)]
 pub const COOKIE_NAME: &str = "remember_me";
+
+/// The columns verification and revocation read from a token row.
+///
+/// The time columns are left out on purpose. The queries filter on
+/// `expires_at` in SQL, and the scaffold creates it with `.timestamp()`:
+/// `TIMESTAMP` on MySQL and MariaDB, which the public [`entity::Model`]'s
+/// `NaiveDateTime` cannot decode there.
+#[derive(FromQueryResult)]
+struct TokenRow {
+    id: i64,
+    user_id: String,
+    selector: String,
+    token_hash: String,
+}
+
+/// Narrow `select` to the [`TokenRow`] columns.
+fn token_rows(select: Select<entity::Entity>) -> sea_orm::Selector<sea_orm::SelectModel<TokenRow>> {
+    select
+        .select_only()
+        .columns([
+            entity::Column::Id,
+            entity::Column::UserId,
+            entity::Column::Selector,
+            entity::Column::TokenHash,
+        ])
+        .into_model::<TokenRow>()
+}
 
 /// Generate a fresh `(selector, verifier_plaintext, verifier_hash)`
 /// triple.
@@ -158,11 +189,12 @@ pub async fn issue(user_id: &str, ttl_minutes: i64) -> Result<String, FrameworkE
     let now = crate::clock::now();
 
     let conn = DB::connection()?;
+    let backend = conn.inner().get_database_backend();
     let model = entity::ActiveModel {
         user_id: Set(user_id.to_string()),
         selector: Set(selector.clone()),
         token_hash: Set(verifier_hash),
-        expires_at: Set(expires_at.naive_utc()),
+        expires_at: Set(storable_expiry(backend, expires_at.naive_utc())),
         created_at: Set(now.naive_utc()),
         last_used_at: Set(None),
         ..Default::default()
@@ -210,12 +242,14 @@ pub async fn verify_and_rotate(
 
     // O(1) indexed lookup: the UNIQUE constraint on `selector` means
     // this returns 0 or 1 rows.
-    let rows = entity::Entity::find()
-        .filter(entity::Column::Selector.eq(selector))
-        .filter(entity::Column::ExpiresAt.gt(now))
-        .all(conn.inner())
-        .await
-        .map_err(|e| FrameworkError::database(format!("look up remember token: {e}")))?;
+    let rows = token_rows(
+        entity::Entity::find()
+            .filter(entity::Column::Selector.eq(selector))
+            .filter(entity::Column::ExpiresAt.gt(now)),
+    )
+    .all(conn.inner())
+    .await
+    .map_err(|e| FrameworkError::database(format!("look up remember token: {e}")))?;
 
     let mut rows = rows.into_iter().filter(|row| row.selector == selector);
     let row = match rows.next() {
@@ -285,16 +319,18 @@ pub(crate) async fn revoke_by_selector(
         FrameworkError::database(format!("begin remember selector revocation: {error}"))
     })?;
     let result = async {
-        let rows = entity::Entity::find()
-            .filter(entity::Column::UserId.eq(user_id))
-            .filter(entity::Column::Selector.eq(selector))
-            .all(&transaction)
-            .await
-            .map_err(|error| {
-                FrameworkError::database(format!(
-                    "find remember token for selector revocation: {error}"
-                ))
-            })?;
+        let rows = token_rows(
+            entity::Entity::find()
+                .filter(entity::Column::UserId.eq(user_id))
+                .filter(entity::Column::Selector.eq(selector)),
+        )
+        .all(&transaction)
+        .await
+        .map_err(|error| {
+            FrameworkError::database(format!(
+                "find remember token for selector revocation: {error}"
+            ))
+        })?;
         let mut rows = rows
             .into_iter()
             .filter(|row| row.user_id == user_id && row.selector == selector);
@@ -386,6 +422,12 @@ pub async fn prune_expired() -> Result<u64, FrameworkError> {
 /// - `expires_at`   TIMESTAMP not null - token TTL boundary
 /// - `created_at`   TIMESTAMP not null
 /// - `last_used_at` TIMESTAMP null - currently informational (rotation deletes the row before update)
+///
+/// The time columns may be `TIMESTAMP` or `DATETIME` (`timestamp` or
+/// `timestamptz` on Postgres). The functions above work with each, but
+/// `Model`'s `NaiveDateTime` fields decode only from `DATETIME` on MySQL
+/// and `timestamp` on Postgres, so reading whole rows through this entity
+/// fails on the other types.
 pub mod entity {
     use sea_orm::entity::prelude::*;
 

@@ -19,5 +19,7 @@ pub mod eloquent_provider;
 pub mod http_middleware;
 pub mod providerless_fallback;
 pub mod remember_me;
+#[cfg(feature = "testing")]
+pub mod scaffold_tables;
 pub mod session_commit_boundary;
 pub mod session_guard;

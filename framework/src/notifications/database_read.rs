@@ -16,6 +16,7 @@
 //! writes.
 
 use crate::database::placeholder::placeholder;
+use crate::database::stored_datetime::StoredDateTime;
 use crate::error::FrameworkError;
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, FromQueryResult, QueryResult, Statement, Value,
@@ -54,9 +55,15 @@ impl FromQueryResult for StoredNotification {
             notifiable_type: res.try_get("", "notifiable_type")?,
             notifiable_id: res.try_get("", "notifiable_id")?,
             data,
-            read_at: res.try_get("", "read_at").ok(),
-            created_at: res.try_get("", "created_at")?,
-            updated_at: res.try_get("", "updated_at")?,
+            // The migration creates these with `.timestamp()`: `TIMESTAMP`
+            // on MySQL and MariaDB, which a plain `NaiveDateTime` cannot be
+            // decoded from. A read time that fails to decode is an error,
+            // not an unread notification.
+            read_at: res
+                .try_get::<Option<StoredDateTime>>("", "read_at")?
+                .map(|read_at| read_at.0),
+            created_at: res.try_get::<StoredDateTime>("", "created_at")?.0,
+            updated_at: res.try_get::<StoredDateTime>("", "updated_at")?.0,
         })
     }
 }
