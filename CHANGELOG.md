@@ -885,8 +885,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   concurrent miss and holds at most 4096 entries. Read-through promotions
   stream into the primary instead of holding the object in memory,
   unpromoted reads fetch only their range, a delete or move during a
-  promotion is not undone within one process, versioned and conditional
-  reads reach the fallback, and a refused move keeps the fallback copy.
+  promotion is not undone, on the same node or another one (a promotion
+  re-checks the fallback after publishing and withdraws its own copy),
+  versioned and conditional reads reach the fallback, and a refused move
+  keeps the fallback copy. Ranged reads stop at the requested range: a
+  server that ignores `Range` can no longer make a small read buffer the
+  whole object, and S3, Azure Blob and GCS refuse a response that is not
+  the requested range before reading its body, open-ended ranges included.
   This landed after the `v3.1.0` tag.
 - **Queues, events and processes.** Cancelling `Transaction::commit()`
   while its COMMIT was in flight could drop its `after_commit` callbacks and
