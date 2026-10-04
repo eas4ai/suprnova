@@ -580,12 +580,22 @@ fn process_args(
 /// The probe reads the first frame only (`[0]`). `-format` writes no
 /// separator between frames, so probing a whole animation prints
 /// `100 100100 100` for two 100x100 frames, and the second number reads as a
-/// height of 100100. The first frame is also the one the dimensions describe.
+/// height of 100100.
+///
+/// A GIF reports its logical screen (`%W %H`), not its first frame's own
+/// size (`%w %h`): a GIF frame can be smaller than the screen it is placed
+/// on, and the built-in driver composes the frame onto that screen, so both
+/// drivers answer with the screen. Every other format reports its pixels,
+/// because a page offset stored in, say, a PNG is not part of the image the
+/// built-in driver decodes.
 fn dimensions_args(config: &ImageConfig, detected: Option<sniff::InputFormat>) -> Vec<String> {
     let mut args = vec!["identify".to_string()];
     args.extend(limit_args(config));
     args.push("-format".into());
-    args.push("%w %h".into());
+    args.push(match detected {
+        Some(sniff::InputFormat::Gif) => "%W %H".into(),
+        _ => "%w %h".into(),
+    });
     args.push(format!("{}[0]", input_spec(detected)));
     args
 }
@@ -948,10 +958,20 @@ mod tests {
 
     #[test]
     fn dimensions_probe_uses_the_identify_subcommand() {
-        let args = dimensions_args(&config(), Some(sniff::InputFormat::Gif));
+        let args = dimensions_args(&config(), Some(sniff::InputFormat::Png));
         assert_eq!(args[0], "identify");
-        assert_eq!(args[args.len() - 3..], ["-format", "%w %h", "gif:-[0]"]);
+        assert_eq!(args[args.len() - 3..], ["-format", "%w %h", "png:-[0]"]);
         assert!(args.contains(&"-limit".to_string()));
+    }
+
+    #[test]
+    fn a_gif_probe_reports_the_logical_screen() {
+        // A first frame can be smaller than the screen it sits on; the
+        // built-in driver composes it onto the screen and reports that.
+        let args = dimensions_args(&config(), Some(sniff::InputFormat::Gif));
+        assert_eq!(args[args.len() - 3..], ["-format", "%W %H", "gif:-[0]"]);
+        let unknown = dimensions_args(&config(), None);
+        assert_eq!(unknown[unknown.len() - 3..], ["-format", "%w %h", "-[0]"]);
     }
 
     #[test]

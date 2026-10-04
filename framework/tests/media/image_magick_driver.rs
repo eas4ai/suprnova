@@ -338,4 +338,33 @@ fn an_animation_reports_the_dimensions_of_its_first_frame() {
         driver().dimensions(&processed).expect("dimensions"),
         (100, 100)
     );
+
+    // A first frame smaller than its logical screen: the built-in driver
+    // composes it onto the screen, so the answer is the screen, 100x80, not
+    // the frame's own 40x30.
+    let made = Command::new(driver().binary())
+        .args([
+            "-size",
+            "40x30",
+            "xc:red",
+            "-set",
+            "page",
+            "100x80+10+10",
+            "-size",
+            "100x80",
+            "xc:blue",
+            "-set",
+            "page",
+            "100x80+0+0",
+            "-loop",
+            "0",
+            "gif:-",
+        ])
+        .output()
+        .expect("magick must run");
+    assert!(made.status.success(), "magick must write the animation");
+    assert_eq!(
+        driver().dimensions(&made.stdout).expect("dimensions"),
+        (100, 80)
+    );
 }
