@@ -712,7 +712,19 @@ async fn handler_identity_transition_retires_a_retryable_successor() {
         .await
         .expect("install retry-transition session failure trigger");
 
-    let transition_user = user.id.to_string();
+    // The handler signs in a second account. The trigger above refuses every
+    // Magnetar session for the remembered user, and a framework login is
+    // bound to a fresh Magnetar session at commit, so a transition back to
+    // the same user would fail closed instead of exercising the cleanup.
+    let transition_user = Auth::password()
+        .register(
+            "remember-retry-transition-target@example.test",
+            "correct-password",
+        )
+        .await
+        .expect("register transition target")
+        .id
+        .to_string();
     let transition_next: suprnova::middleware::Next = Arc::new(move |_request| {
         let transition_user = transition_user.clone();
         Box::pin(async move {

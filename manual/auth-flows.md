@@ -830,7 +830,9 @@ they log in - after the rotation, the planted id is dead and only the
 freshly-generated id carries the authenticated state. The contract
 matches `Auth::login_id` / `Auth::login_using_id`, so 2FA logins are
 indistinguishable from no-2FA logins in terms of session state and
-listener observability.
+listener observability. With the Magnetar engine installed, the promoted
+login is backed by a Magnetar session like every other web login - see
+[Magnetar-backed facade methods](authentication.md#magnetar-backed-facade-methods).
 
 Gate every protected route group with `TwoFactorChallengeMiddleware`
 **before** `AuthMiddleware` so a pending session is bounced to the

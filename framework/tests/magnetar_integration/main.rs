@@ -10,6 +10,7 @@ pub mod atomic_install;
 pub mod binding;
 pub mod default_engine;
 pub mod factor_completion;
+pub mod framework_login;
 pub mod host_engine;
 pub mod integration;
 pub mod missing_engine_diagnostics;

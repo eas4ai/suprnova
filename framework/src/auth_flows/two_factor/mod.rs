@@ -691,7 +691,10 @@ impl TwoFactor {
     /// `Login` / `Authenticated` dispatches are the same shape and
     /// guard-attribution as a no-2FA password login, so listeners
     /// that hook those events (last-login timestamps, audit logs,
-    /// post-login redirects, …) fire here too.
+    /// post-login redirects, …) fire here too. With the Magnetar engine
+    /// installed, [`crate::SessionMiddleware`] backs the promoted login
+    /// with a Magnetar session at the end of the request, as it does for
+    /// [`crate::auth::Auth::login_id`].
     ///
     /// Remember-me issuance is best-effort after an accepted factor proof:
     /// a failure cannot make a single-use TOTP timestep or recovery code

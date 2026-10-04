@@ -222,6 +222,25 @@ impl MagnetarPasswordAuthEngine for TestEngine {
         Ok(user)
     }
 
+    async fn issue_host_session(
+        &self,
+        user_id: &str,
+        _metadata: magnetar::sessions::SessionMetadata,
+    ) -> magnetar::Result<MagnetarIssuedSession> {
+        let user = self
+            .state
+            .lock()
+            .expect("test engine state")
+            .users_by_id
+            .get(user_id)
+            .cloned()
+            .ok_or_else(|| magnetar::Error::NotFound {
+                resource: "user".to_owned(),
+                identifier: user_id.to_owned(),
+            })?;
+        Ok(self.issue_session(&user))
+    }
+
     async fn issue_password_reset(
         &self,
         _email: &str,

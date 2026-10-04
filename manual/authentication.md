@@ -180,6 +180,18 @@ application user ID, and records an opaque Magnetar web binding. The framework
 continues to own HTTP middleware, cookies, mail, events, and its guard/provider
 contracts.
 
+The framework's own login paths check credentials outside Magnetar:
+`Auth::login_id`, `Auth::attempt`, `Auth::login`, `Auth::login_using_id`, and
+`TwoFactor::complete_challenge`. With the engine installed, every web login
+needs a Magnetar session, so revocation and auth epochs reach it. For these
+paths, `SessionMiddleware` issues the user's Magnetar session at the end of the
+request and records its binding before it stores the session. The issuance
+keeps Magnetar's factor policy: an account with a confirmed Magnetar second
+factor is refused, because the framework login did not prove it. When the
+engine refuses or fails, the request ends with a `500` and nothing is stored.
+The browser is never told it signed in when the next request would sign it
+out.
+
 ### Password authentication
 
 Use the Magnetar password facade when the application wants the integrated

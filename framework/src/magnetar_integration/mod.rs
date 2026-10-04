@@ -491,6 +491,14 @@ impl engine::MagnetarFactorAuthEngine for PasswordFactorEngine {
     ) -> magnetar::Result<Vec<magnetar::sessions::SessionSummary>> {
         self.password.list_sessions(user_id).await
     }
+
+    async fn issue_host_session(
+        &self,
+        user_id: &str,
+        metadata: magnetar::sessions::SessionMetadata,
+    ) -> magnetar::Result<engine::MagnetarIssuedSession> {
+        self.password.issue_host_session(user_id, metadata).await
+    }
 }
 
 pub(crate) fn password_factor_engine(

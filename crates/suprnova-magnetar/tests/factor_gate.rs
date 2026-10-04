@@ -293,3 +293,126 @@ mod concurrent_completion {
         );
     }
 }
+
+#[cfg(feature = "seaorm-sqlite")]
+mod host_sign_in {
+    use async_trait::async_trait;
+    use magnetar::auth::{FactorVerifier, OpaqueFactorGate, PreparedFactorProof};
+    use magnetar::crypto::AeadEncryptor;
+    use magnetar::sessions::{
+        HostSessionApproval, OpaqueConfig, OpaqueSessionProvider, SessionMetadata, SessionQueries,
+    };
+    use magnetar::storage::SeaOrmStorage;
+    use magnetar::{Error, Result};
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set};
+    use std::sync::Arc;
+
+    use super::storage_schema::sql_stores::SqlSessionStore;
+    use super::storage_schema::{StorageSchema, database, users};
+
+    const USER_ID: &str = "42";
+    const EPOCH: u64 = 3;
+
+    /// A verifier whose only answer that matters here is whether the user
+    /// has a confirmed second factor.
+    struct Enrollment(bool);
+
+    #[async_trait]
+    impl FactorVerifier for Enrollment {
+        type PreparedProof = ();
+
+        async fn has_confirmed_enrollment(&self, _user_id: &str) -> Result<bool> {
+            Ok(self.0)
+        }
+
+        async fn prepare_code(&self, _: &str, _: &str) -> Result<PreparedFactorProof<()>> {
+            Ok(PreparedFactorProof::invalid(()))
+        }
+
+        async fn claim_prepared(&self, _: &str, _: ()) -> Result<bool> {
+            Ok(false)
+        }
+    }
+
+    type Gate = OpaqueFactorGate<SeaOrmStorage<StorageSchema>, Enrollment, SqlSessionStore>;
+
+    async fn gate(enrolled: bool) -> (Gate, Arc<OpaqueSessionProvider<SqlSessionStore>>) {
+        let db = database().await;
+        users::ActiveModel {
+            id: Set(42),
+            email: Set("host-sign-in@example.test".to_owned()),
+            auth_epoch: Set(EPOCH as i64),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("seed host sign-in user");
+        let sessions = Arc::new(OpaqueSessionProvider::new(
+            Arc::new(SqlSessionStore(db.clone())),
+            OpaqueConfig::default(),
+        ));
+        let gate = OpaqueFactorGate::new(
+            Arc::new(SeaOrmStorage::<StorageSchema>::new(db)),
+            Arc::new(Enrollment(enrolled)),
+            Arc::new(AeadEncryptor::new([42; 32])),
+            sessions.clone(),
+        );
+        (gate, sessions)
+    }
+
+    #[tokio::test]
+    async fn a_host_verified_user_without_a_second_factor_gets_a_bound_session() {
+        let (gate, sessions) = gate(false).await;
+
+        let grant = gate
+            .complete_host_sign_in(USER_ID, EPOCH, SessionMetadata::default())
+            .await
+            .expect("the host verified the user and no factor is enrolled");
+
+        let verified = sessions
+            .resolve_web_binding(&grant.web_binding(), &HostSessionApproval::authenticated())
+            .await
+            .expect("the issued web binding resolves");
+        assert_eq!(verified.user_id(), USER_ID);
+        assert_eq!(
+            sessions.list_for_user(USER_ID).await.expect("list").len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_user_with_a_confirmed_second_factor_is_refused() {
+        let (gate, sessions) = gate(true).await;
+
+        let error = gate
+            .complete_host_sign_in(USER_ID, EPOCH, SessionMetadata::default())
+            .await
+            .expect_err("the host proved no factor this gate owns");
+        assert!(matches!(error, Error::Conflict { .. }), "{error:?}");
+        assert!(
+            sessions
+                .list_for_user(USER_ID)
+                .await
+                .expect("list")
+                .is_empty(),
+            "a refused sign-in issues no session"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_epoch_issues_no_session() {
+        let (gate, sessions) = gate(false).await;
+
+        gate.complete_host_sign_in(USER_ID, EPOCH - 1, SessionMetadata::default())
+            .await
+            .expect_err("an epoch read before a revocation is no longer current");
+        assert!(
+            sessions
+                .list_for_user(USER_ID)
+                .await
+                .expect("list")
+                .is_empty(),
+            "a stale sign-in issues no session"
+        );
+    }
+}

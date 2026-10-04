@@ -99,6 +99,16 @@ impl Auth {
     ///
     /// Regenerates the session ID to prevent session fixation, and rotates the
     /// CSRF token.
+    ///
+    /// # With Magnetar installed
+    ///
+    /// Every web login then needs a Magnetar session, so revocation and auth
+    /// epochs reach it. This method cannot await the engine, so
+    /// [`SessionMiddleware`](crate::SessionMiddleware) issues the session for
+    /// `user_id` at the end of the request and records its binding before it
+    /// stores the session. When the engine refuses - an unknown user, or a
+    /// Magnetar second factor this login did not prove - the request fails
+    /// with a 500 and nothing is stored.
     pub fn login_id(user_id: impl Into<String>) -> Result<(), crate::error::FrameworkError> {
         Self::refuse_custom_default_guard("login_id", "login")?;
         Self::login_guard_id(&Self::default_guard_name(), user_id)

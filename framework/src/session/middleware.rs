@@ -92,6 +92,12 @@ tokio::task_local! {
     /// Fresh Magnetar session awaiting the framework row and response cookie.
     /// Ownership remains here until `SessionMiddleware` commits both halves.
     pub(crate) static PENDING_OPAQUE_SESSION: Arc<Mutex<Vec<PendingOpaqueSession>>>;
+    /// The default-guard user that a framework login signed in during this
+    /// request: `Auth::login_id`, the session guards behind `Auth::attempt`
+    /// and `Auth::login`, or `TwoFactor::complete_challenge`. Those paths
+    /// authenticate outside Magnetar, so `SessionMiddleware` issues the
+    /// user's Magnetar session before it stores the identity.
+    pub(crate) static PENDING_HOST_SIGN_IN: Arc<Mutex<Option<String>>>;
 }
 
 pub(crate) fn register_pending_opaque_session(
@@ -1106,6 +1112,37 @@ struct PersistInput {
     loaded_two_factor_pending: bool,
 }
 
+/// What [`SessionMiddleware::bind_host_sign_in`] reads after the handler.
+struct HostSignIn<'a> {
+    /// The user a framework login signed in, if any.
+    signed_in: &'a Arc<Mutex<Option<String>>>,
+    /// The installed password engine; its presence makes the binding
+    /// required.
+    magnetar_engine: &'a Option<PasswordEngine>,
+    /// The session owner that issues and later validates the binding.
+    magnetar_session_authority: &'a Option<SessionAuthority>,
+    /// The session the handler wrote.
+    slot: &'a Arc<Mutex<Option<SessionData>>>,
+    /// The cookies queued for the response.
+    pending: &'a Arc<Mutex<Vec<Cookie>>>,
+    /// The fresh Magnetar sessions awaiting the framework row.
+    pending_opaque_session: &'a Arc<Mutex<Vec<PendingOpaqueSession>>>,
+    /// The request's metadata for the issued session.
+    metadata: magnetar::sessions::SessionMetadata,
+}
+
+/// The metadata a Magnetar session issued during `request` records.
+fn magnetar_session_metadata(request: &Request) -> magnetar::sessions::SessionMetadata {
+    magnetar::sessions::SessionMetadata {
+        user_agent: request
+            .headers()
+            .get(hyper::header::USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned),
+        ip_address: None,
+    }
+}
+
 impl SessionMiddleware {
     /// Read the session ID from the inbound cookie. The cookie
     /// value is AES-256-GCM ciphertext; decrypt failure (tamper,
@@ -1251,6 +1288,8 @@ impl SessionMiddleware {
         // `StartSession::storeCurrentUrl` behaviour and is what
         // [`Redirect::back`] reads.
         let previous_url = Self::capture_previous_url_candidate(&request);
+        let host_session_metadata = magnetar_session_metadata(&request);
+        let pending_host_sign_in: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
         // Bind both the session and the pending-cookies slot to
         // `tokio::task_local!` so they survive `.await` points that
@@ -1266,8 +1305,11 @@ impl SessionMiddleware {
                         pending.clone(),
                         PENDING_REMEMBER_REVOCATIONS.scope(
                             pending_remember_revocations.clone(),
-                            PENDING_OPAQUE_SESSION
-                                .scope(pending_opaque_session.clone(), next(request)),
+                            PENDING_OPAQUE_SESSION.scope(
+                                pending_opaque_session.clone(),
+                                PENDING_HOST_SIGN_IN
+                                    .scope(pending_host_sign_in.clone(), next(request)),
+                            ),
                         ),
                     ),
                 ),
@@ -1288,6 +1330,21 @@ impl SessionMiddleware {
             &pending,
         )
         .await
+        {
+            return response;
+        }
+
+        if let ControlFlow::Break(response) = self
+            .bind_host_sign_in(HostSignIn {
+                signed_in: &pending_host_sign_in,
+                magnetar_engine: &magnetar_engine,
+                magnetar_session_authority: &magnetar_session_authority,
+                slot: &slot,
+                pending: &pending,
+                pending_opaque_session: &pending_opaque_session,
+                metadata: host_session_metadata,
+            })
+            .await
         {
             return response;
         }
@@ -1517,14 +1574,7 @@ impl SessionMiddleware {
                     || (is_default && session.user_id.is_some());
                 if !already_authenticated {
                     if let Some(engine) = magnetar_engine.as_ref() {
-                        let metadata = magnetar::sessions::SessionMetadata {
-                            user_agent: request
-                                .headers()
-                                .get(hyper::header::USER_AGENT)
-                                .and_then(|value| value.to_str().ok())
-                                .map(ToOwned::to_owned),
-                            ip_address: None,
-                        };
+                        let metadata = magnetar_session_metadata(request);
                         let replacement_lifetime = chrono::Duration::from_std(
                             self.config.remember_lifetime,
                         )
@@ -1889,6 +1939,100 @@ impl SessionMiddleware {
         }
 
         ControlFlow::Continue(())
+    }
+
+    /// Issues the Magnetar session of a framework login made during the
+    /// handler, and binds it into the session before the session is stored.
+    ///
+    /// With a password engine installed, [`Self::validate_magnetar_identity`]
+    /// signs out every default-guard identity that carries no binding to a
+    /// live Magnetar session, so revocation and auth epochs always reach a
+    /// web login. A framework login - `Auth::login_id`, the session guards,
+    /// `TwoFactor::complete_challenge` - authenticates outside Magnetar and
+    /// stores the identity unbound; without this step the next request would
+    /// sign the user out again. The session is issued here, at commit,
+    /// because `Auth::login_id` is synchronous and cannot await the engine.
+    ///
+    /// When the engine refuses - an id it does not know, a Magnetar second
+    /// factor the login did not prove, a store failure - the login fails
+    /// closed: the response is a 500, nothing is stored, and a remember
+    /// credential issued for the login is suppressed and retired.
+    async fn bind_host_sign_in(&self, input: HostSignIn<'_>) -> ControlFlow<Response> {
+        let HostSignIn {
+            signed_in,
+            magnetar_engine,
+            magnetar_session_authority,
+            slot,
+            pending,
+            pending_opaque_session,
+            metadata,
+        } = input;
+        let Some(user_id) = crate::lock::recover(signed_in).take() else {
+            return ControlFlow::Continue(());
+        };
+        // OAuth-only installations own no binding-less legacy identities;
+        // only a full password/session installation requires the binding.
+        let (Some(_), Some(authority)) = (magnetar_engine, magnetar_session_authority) else {
+            return ControlFlow::Continue(());
+        };
+        // A poisoned slot is never stored (`persist_and_rotate` fails closed),
+        // so it gets no session either.
+        if slot.is_poisoned() {
+            return ControlFlow::Continue(());
+        }
+        // A later step of the same request may have bound a Magnetar session
+        // itself, or replaced or cleared the identity.
+        let needs_binding = crate::lock::recover(slot).as_ref().is_some_and(|session| {
+            session.user_id.as_deref() == Some(user_id.as_str())
+                && !matches!(session.checked_magnetar_web_binding(), Ok(Some(_)))
+        });
+        if !needs_binding {
+            return ControlFlow::Continue(());
+        }
+
+        let error = match authority.issue_host_session(&user_id, metadata).await {
+            Ok(issued) => {
+                let guard_name = crate::auth::Auth::default_guard_name();
+                crate::lock::recover(pending_opaque_session).push(PendingOpaqueSession {
+                    guard_name: guard_name.clone(),
+                    session_id: issued.session_id,
+                    binding: issued.web_binding.clone(),
+                });
+                if let Some(session) = crate::lock::recover(slot).as_mut() {
+                    session
+                        .set_auth_guard_magnetar_binding(&guard_name, issued.web_binding.clone());
+                    session.set_magnetar_web_binding(issued.web_binding);
+                    session.dirty = true;
+                }
+                return ControlFlow::Continue(());
+            }
+            Err(error) => FrameworkError::internal(format!(
+                "issue the Magnetar session of a framework login: {error}"
+            )),
+        };
+
+        retire_unpersisted_opaque_session(
+            Some(authority),
+            pending_opaque_session,
+            "framework login could not be bound",
+        )
+        .await;
+        let mut pending_cookies = std::mem::take(&mut *crate::lock::recover(pending));
+        let session = crate::lock::recover(slot).clone();
+        if let Some(session) = session.as_ref() {
+            suppress_and_retire_uncommitted_remember(session, &self.config, &mut pending_cookies)
+                .await;
+        }
+        tracing::error!(
+            %error,
+            "framework login could not be bound to a Magnetar session; failing closed"
+        );
+        let failure = Err(crate::http::HttpResponse::text(
+            "Internal Server Error: sign-in could not be bound to a session",
+        )
+        .status(500)
+        .with_error_report_from(&error));
+        ControlFlow::Break(attach_pending_cookies(failure, pending_cookies))
     }
 
     /// Takes the session back out of the slot of the handler, stores it, and
@@ -2516,6 +2660,12 @@ pub(crate) fn set_guard_auth_user(guard_name: &str, user_id: impl Into<String>) 
             session.dirty = true;
         }
     });
+    if is_default {
+        // The binding was just cleared: ask the middleware for a Magnetar
+        // session for this user before it stores the identity.
+        let _ = PENDING_HOST_SIGN_IN
+            .try_with(|signed_in| *crate::lock::recover(signed_in) = Some(user_id.clone()));
+    }
     crate::auth::request_state::set_guard_user_id(guard_name, user_id);
 }
 
@@ -2535,6 +2685,9 @@ pub(crate) fn clear_guard_auth_user(guard_name: &str) {
             session.dirty = true;
         }
     });
+    if is_default {
+        let _ = PENDING_HOST_SIGN_IN.try_with(|signed_in| *crate::lock::recover(signed_in) = None);
+    }
     crate::auth::request_state::clear_guard_user(guard_name);
 }
 
