@@ -1560,9 +1560,10 @@ impl DB {
     /// Run a raw SELECT, return the FIRST column of the FIRST row.
     /// Mirrors Laravel's `DB::scalar($sql, $bindings)`.
     ///
-    /// `T` must implement `sea_orm::TryGetable` - the framework
-    /// re-exports the trait at the crate root. Inside a RenderCache render
-    /// this marks the render unstorable; see [`DB::select`].
+    /// `T` is any [`ColumnValue`](crate::ColumnValue): a SeaORM
+    /// `TryGetable` type, with `u64` read on every database. Inside a
+    /// RenderCache render this marks the render unstorable; see
+    /// [`DB::select`].
     ///
     /// ```rust,no_run
     /// # use suprnova::DB;
@@ -1576,7 +1577,7 @@ impl DB {
         values: impl IntoIterator<Item = SeaValue>,
     ) -> Result<T, FrameworkError>
     where
-        T: sea_orm::TryGetable,
+        T: crate::ColumnValue,
     {
         crate::render_cache::collector::observe_unobservable_read();
         let exec =
@@ -1589,8 +1590,9 @@ impl DB {
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?
             .ok_or_else(|| FrameworkError::database("DB::scalar: query returned no rows"))?;
-        row.try_get_by_index::<T>(0)
-            .map_err(|e| FrameworkError::database(format!("DB::scalar: {e}")))
+        T::from_column(&row, 0_usize).map_err(|e| {
+            FrameworkError::database(format!("DB::scalar: {}", sea_orm::DbErr::from(e)))
+        })
     }
 
     /// [`DB::scalar`] for a statement whose tables the caller knows. See
@@ -1601,7 +1603,7 @@ impl DB {
         tables: &[&str],
     ) -> Result<T, FrameworkError>
     where
-        T: sea_orm::TryGetable,
+        T: crate::ColumnValue,
     {
         for table in tables {
             crate::render_cache::collector::observe_table_read(table);
@@ -1617,8 +1619,9 @@ impl DB {
             .ok_or_else(|| {
                 FrameworkError::database("DB::scalar_observing: query returned no rows")
             })?;
-        row.try_get_by_index::<T>(0)
-            .map_err(|e| FrameworkError::database(format!("DB::scalar_observing: {e}")))
+        T::from_column(&row, 0_usize).map_err(|e| {
+            FrameworkError::database(format!("DB::scalar_observing: {}", sea_orm::DbErr::from(e)))
+        })
     }
 
     /// Run a raw INSERT statement. Returns `true` when at least one row

@@ -54,6 +54,7 @@ pub(crate) mod after_commit;
 // The WHERE and JOIN pieces `DbTableBuilder` and the model builder share.
 // Internal; its public types re-export below.
 pub(crate) mod clauses;
+pub mod column_value;
 pub mod config;
 pub mod connection;
 pub mod connection_registry;
@@ -95,6 +96,7 @@ pub mod testing;
 pub mod transaction;
 
 pub use clauses::{IntoWhereIn, JoinClause, WhereIn};
+pub use column_value::ColumnValue;
 pub use config::{DatabaseConfig, DatabaseConfigBuilder, DatabaseType, UrlSource};
 pub use connection::DbConnection;
 pub use connection_registry::{
