@@ -756,11 +756,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   like HTTP ones, subprotocol negotiation echoes the client's own spelling
   as RFC 6455 requires, and `sse::last_event_id` returns Unicode event ids
   instead of `None`. This landed after the `v3.1.0` tag.
-- **Each middleware of a group runs once.** A middleware group included by
-  two sibling groups, or an alias listed twice, ran twice per request, so a
-  throttle there counted each request twice. A resolved group now keeps
-  each middleware once, identified by its alias and parsed arguments, as
-  Laravel's `uniqueMiddleware` does. This landed after the `v3.1.0` tag.
+- **Each named middleware runs once per route.** A middleware group
+  included by two sibling groups, an alias listed twice, or a middleware
+  named both through a group and on the route itself ran twice per
+  request, so a throttle there counted each request twice. A route now runs
+  each named middleware once, identified by its alias and parsed arguments,
+  at its first occurrence, as Laravel's `uniqueMiddleware` does. Middleware
+  added by type with `.middleware(M)` is never dropped. This landed after
+  the `v3.1.0` tag.
 - **Gates, OAuth starts, CSRF bootstraps and registrations.** A gate
   callback that calls `Gate::define` no longer deadlocks the request. An
   OAuth start that is the browser's first request (JSON or POST) sets the
