@@ -414,6 +414,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **Cron steps count from the first value.** `*/N` in the day-of-month and
+  month fields counts from 1, as cron and Laravel do, so `*/2` means odd
+  days and schedules using it shift; the timezone display now agrees with
+  the scheduler. Ranges with steps (`1-15/7`) and mixed lists parse. This
+  landed after the `v3.1.0` tag.
+- **Workflow steps are named by module path and function name**, so
+  same-named steps in different modules are different steps. Runs recorded
+  with bare names still replay. This landed after the `v3.1.0` tag.
+- **`TestContainerGuard` can no longer be built directly**; use
+  `TestContainer::fake()`. `dispatch_argv_with_init` boots the process and
+  waits for queued listeners after the command; `dispatch_argv` does
+  neither. This landed after the `v3.1.0` tag.
 - **`save` and `update` refuse a model that was never inserted.** A
   replica, or a new model from `first_or_new` or `find_or_new`, still has
   its reset key, and `save` updated the row with key 0. It now returns an
@@ -688,6 +700,30 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Workers, the console and process lifecycle.** Queue, schedule and
+  workflow workers, the `queue:*` commands and console commands boot the
+  `#[injectable]` and `#[service]` inventory, so a job or command that
+  resolves an action no longer fails with `ServiceNotFound`. The console
+  also boots the runtime drivers and `#[policy]` gates, warns on stderr and
+  goes on when a driver cannot boot, and waits for queued listeners before
+  it exits; `down`, `up` and `schedule:list` run the application's
+  bootstrap hook. `schedule:work` stops on SIGTERM while an inline task
+  runs, stopping a task still running after the 30-second grace. A
+  panicking `Terminable` hook no longer skips the hooks after it, and a
+  graceful shutdown waits up to 5 seconds for hooks still running.
+  `Context::get` and `Context::hidden_get` no longer deadlock when a custom
+  `Deserialize` writes to the context. A `TestContainerGuard` or
+  `TestQueryGuard` dropped on another thread clears only what it installed.
+  Binding an `#[injectable]` by hand before boot no longer requires the
+  dependencies only its generated constructor reads. `db:seed
+  --class=<Name>` fails with not-found on an empty registry, and a
+  poisoned registry fails instead of reporting nothing to run. A
+  supervisor spawned during or after shutdown no longer starts outside the
+  drain. A second `init_telemetry` while the first guard lives no longer
+  takes over the global meter provider. `start_workflow!` accepts
+  imported, re-exported, `crate::`, `self::` and `super::` paths, and
+  `workflow:work` on a database other than Postgres exits with an error at
+  startup instead of retrying forever. This landed after the `v3.1.0` tag.
 - **Relations and soft deletes.** `destroy`, `delete_quietly`,
   `delete_or_fail` and trait-dispatched `delete` permanently deleted
   soft-delete rows; they now tombstone them, and `delete_or_fail` on an
@@ -1246,6 +1282,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **The environment is written only where that is sound.** `Config::init`
+  and `config::load_dotenv` refuse to write the process environment inside
+  a Tokio runtime or after `#[suprnova::main]` loaded it, where another
+  thread could read it mid-write. A failed load restores the real system
+  values and registers no config. This landed after the `v3.1.0` tag.
 - **Route bindings and pivot extras respect what models declare.**
   `RouteParam<Model>` ignored global scopes on models without
   `soft_deletes`, so a guessed id of another tenant's row bound to the
