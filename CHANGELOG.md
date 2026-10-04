@@ -603,8 +603,28 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   still decode through `oxideav-mjpeg` and are refused by name above 67
   million samples. This landed after the `v3.1.0` tag.
 
+- **Guard names, verification links and the default auth schema.** A guard
+  name other than the default session or token guard may not contain `:`,
+  because a non-default guard's principal is now `<guard>:<id>`. A token
+  guard other than the default no longer copies its user into the default
+  `Auth` view, so `Auth::has_user()` stays false for it. Email verification
+  links issued before this change are refused and must be sent again. The
+  default auth schema enforces one account per email with a unique index,
+  so a migration over an `app_users` table that already holds duplicate
+  emails stops with an error until they are merged. New, with defaults:
+  `TokenGuard::named` and `UserProvider::verification_email`. This landed
+  after the `v3.1.0` tag.
+
 ### Fixed
 
+- **Gates, OAuth starts, CSRF bootstraps and registrations.** A gate
+  callback that calls `Gate::define` no longer deadlocks the request. An
+  OAuth start that is the browser's first request (JSON or POST) sets the
+  session cookie, so the callback binds instead of answering 400. A
+  cookieless JSON or HEAD request that receives `XSRF-TOKEN` also receives
+  its session, so the next POST no longer gets 419. Two registrations
+  racing for one email create one account. This landed after the `v3.1.0`
+  tag.
 - **Images decode correctly at the sizes the framework allows.** JPEGs
   above about 22 megapixels decoded on no driver; they now decode up to the
   budget. JPEG colours were off by about 6 levels, arithmetic-coded,
@@ -975,6 +995,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **A route uses the guard that authenticated it.** Behind a guard other
+  than the default, the email-verified gate, the role and permission
+  middleware, the Live principal and render-cache identity reads all used
+  the default guard's user, so a verified or privileged default-guard user
+  let another guard's user through, and a page built for one guard could be
+  served from cache to a visitor without that sign-in. A second token guard
+  over another provider answered with the first guard's user. Each now
+  reads the user of the route's own guard through that guard's provider.
+- **Encoded cookie names cannot stand in for prefixed cookies.** A cookie
+  named `%5F%5FHost-suprnova_session` resumed the `__Host-` session; a
+  prefix that appears only after decoding is now dropped.
+- **A verification link verifies only the address it was sent to.**
+  Changing the account's email no longer lets an old link verify the new
+  address.
+- **Password reset checks the token before hashing.** A dead or made-up
+  token made the server compute an Argon2id hash first.
+- **A session that loses its Magnetar authority ends its Live
+  memberships** on this node, so it stops receiving events.
 - **An image cannot allocate past its decode budget.** A crafted PNG
   inflated past `IMAGE_MAX_ALLOC_BYTES`, a lossless WebP's prefix-code
   tables were unbounded, a JPEG could be measured at one frame header and
