@@ -526,8 +526,8 @@ Field shapes:
 
 Built-in validators in `suprnova::http::upload::validators`:
 
-- `MaxSize<N>` - short-circuits at the byte boundary when the running
-  total exceeds `N` bytes (HTTP 413).
+- `MaxSize<N>` - stops reading the body at the chunk that takes the file
+  past `N` bytes.
 - `ImageFile` - rejects parts whose magic bytes don't claim `image/*`.
   (Named after Laravel's own rule; the plain `Image` name belongs to the
   image-manipulation pipeline - see [Images](images.md).)
@@ -537,6 +537,78 @@ Built-in validators in `suprnova::http::upload::validators`:
 
 Validators compose as tuples: `(ImageFile, MaxSize<5_242_880>)` runs both,
 short-circuiting on the first failure.
+
+### Validation errors
+
+A failure that belongs to one field answers `422` with Laravel's
+`{ "message", "errors" }` body, the message under the field's form input
+name. The name is the one in `#[field(...)]`, with a trailing `[]`
+replaced by the part's zero-based index, so a PDF sent as the second file
+of `#[field("photos[]")]` reports under `photos.1`. For an Inertia form,
+`InertiaValidationRedirectMiddleware` turns that `422` into a redirect back
+with the errors, and the form shows each one under its field.
+
+Every failing field is reported at once. Each message comes from the
+validation catalog by its key:
+
+| Failure | Catalog key |
+|---|---|
+| A required field is missing | `validation-required` |
+| Text that doesn't parse as an integer, a float or a `bool` field | `validation-integer`, `validation-numeric`, `validation-boolean` |
+| Text that doesn't parse as any other type | `validation-format` |
+| A text part where a file belongs | `validation-file` |
+| A file part where text belongs | `validation-string` |
+| A file over `MaxSize<N>`, the limit in kilobytes as Laravel words it | `validation-max-file` |
+| A file `ImageFile` refuses | `validation-image` |
+| A file `MimeType<L>` refuses, with the allowed types | `validation-mimetypes` |
+
+To change a message, define its key in your own catalog:
+
+```ftl
+# lang/en/validation.ftl
+validation-image = Choose a picture for { $field }.
+```
+
+A file input left empty arrives as a file part with no file name and no
+bytes, and Inertia sends a `null` file as an empty text part. Both count as
+a missing file: an optional field is `None`, and a required one reports
+`validation-required`.
+
+A file that fails while the body streams, as one over `MaxSize<N>` does,
+stops the read after the chunk that crossed the limit. The hooks and the
+handler don't run, and every temp file the request wrote is removed.
+
+#### Custom validators
+
+Implement `UploadValidator` to check a file yourself. Return
+`FrameworkError::invalid_upload` with a keyed message for a file that is
+invalid input, so it reports under the field's name like the built-ins.
+Return any other error for a failure to check the file; that error keeps
+its own status.
+
+```rust
+use suprnova::http::upload::validators::UploadValidator;
+use suprnova::{FrameworkError, ValidationMessage};
+
+#[derive(Default)]
+pub struct PdfOnly;
+
+impl UploadValidator for PdfOnly {
+    fn validate_final(
+        &self,
+        sniff: &[u8],
+        _size: u64,
+        _content_type: Option<&str>,
+    ) -> Result<(), FrameworkError> {
+        if !sniff.starts_with(b"%PDF-") {
+            return Err(FrameworkError::invalid_upload(
+                ValidationMessage::keyed("validation-pdf").fallback("The file must be a PDF."),
+            ));
+        }
+        Ok(())
+    }
+}
+```
 
 ### Per-field caps and array bounds
 
@@ -554,8 +626,19 @@ pub struct Gallery {
 }
 ```
 
-The (`max_count` + 1)-th part with that name returns HTTP 422 before
-allocating, so the extra part never reaches `Vec` growth.
+The (`max_count` + 1)-th part with that name returns HTTP `413` before
+allocating, so the extra part never reaches `Vec` growth. The three limits
+on the whole request - the body's byte cap, the part ceiling and a field's
+`max_count` - all answer `413` without reading the body further. When one
+chunk crosses the byte cap and a file's `MaxSize` together, the `413`
+wins.
+
+### Why Suprnova diverges
+
+Laravel checks an array's size with `array|max:N`, a validation rule that
+runs after PHP has buffered the whole request, so too many files is a `422`.
+`max_count` bounds the request while it streams, before the extra part is
+read, so it refuses the request the way the byte cap does.
 
 ### Authorize and after-validation hooks
 
@@ -564,31 +647,57 @@ allocating, so the extra part never reaches `Vec` growth.
 impl; opt in to your own with `#[multipart(custom_hooks)]`:
 
 ```rust
-use suprnova::{MultipartRequest, Request, ValidationErrors};
+use suprnova::{AsyncRule, MultipartRequest, Request, Unique, ValidationErrors, async_trait};
 use suprnova::http::upload::{MultipartRequestHooks, UploadedFile};
 
 #[derive(MultipartRequest)]
 #[multipart(custom_hooks)]
-pub struct GuardedUpload {
-    #[field("file")]
-    pub file: UploadedFile,
+pub struct NewAlbum {
+    #[field("slug")]
+    pub slug: String,
+    #[field("photos[]")]
+    pub photos: Vec<UploadedFile>,
 }
 
-impl MultipartRequestHooks for GuardedUpload {
+#[async_trait]
+impl MultipartRequestHooks for NewAlbum {
     fn authorize(req: &Request) -> bool {
         req.header("X-Admin-Token").is_some()
     }
 
     fn after_validation(&self) -> Result<(), ValidationErrors> {
-        if self.file.size == 0 {
-            let mut errs = ValidationErrors::new();
-            errs.add("file", "empty file");
-            return Err(errs);
+        let mut errs = ValidationErrors::new();
+        if self.photos.is_empty() {
+            errs.add("photos", "Add at least one photo.");
         }
-        Ok(())
+        errs.into_result()
+    }
+
+    async fn after_validation_async(&self) -> Result<(), ValidationErrors> {
+        let mut errs = ValidationErrors::new();
+        Unique::new("albums", "slug")
+            .check_async(&self.slug, &mut errs, "slug")
+            .await;
+        errs.into_result()
     }
 }
 ```
+
+The stages run in this order, each only after the one before it
+succeeded:
+
+1. `authorize`, before any byte of the body is read. `false` answers `403`.
+2. The extraction, with each field's validation.
+3. `after_validation`.
+4. `after_validation_async`, where database checks such as `Unique` and
+   `Exists` go.
+5. The handler.
+
+A hook's non-empty `ValidationErrors` answers `422` like a field failure;
+an empty set counts as success. Hook errors use the same input names: an
+error under a Rust field name, such as `photos.1` on the `photos` field,
+reports under that field's `#[field(...)]` name. The impl needs
+`#[async_trait]` only when it overrides `after_validation_async`.
 
 ### Streaming to storage
 

@@ -11,8 +11,17 @@
 //! plus the **total accumulated size** in bytes. Validators that care
 //! about content (e.g. [`ImageFile`], [`MimeType`]) consult `sniff`; validators
 //! that care about size (e.g. [`MaxSize`]) consult `size`.
+//!
+//! # Refusing a file
+//!
+//! A validator answers in one of two ways. A file it refuses as invalid
+//! input returns [`FrameworkError::invalid_upload`] with a catalog-keyed
+//! message, which the extractor reports as a 422 under the field's input
+//! name. Any other error is a failure to check the file and keeps its own
+//! status.
 
 use crate::FrameworkError;
+use crate::validation::message::ValidationMessage;
 
 /// Streaming upload validator.
 ///
@@ -39,6 +48,13 @@ use crate::FrameworkError;
 /// `(ImageFile, MaxSize<5_242_880>)` runs `ImageFile::validate_chunk` first,
 /// then `MaxSize::validate_chunk` (per chunk); `validate_final` runs in
 /// the same order. Short-circuits on first `Err`.
+///
+/// # Errors
+///
+/// Return [`FrameworkError::invalid_upload`] for a file that is invalid
+/// input, so the client gets a 422 under the field's name with a message an
+/// application can translate. Return any other `FrameworkError` for a
+/// failure to check the file; it answers with its own status.
 pub trait UploadValidator: Send + Sync + Default {
     /// Called after each chunk lands.
     ///
@@ -49,9 +65,9 @@ pub trait UploadValidator: Send + Sync + Default {
     /// - `size` is the running total of bytes received for this part.
     ///
     /// Return `Err` to short-circuit oversized uploads at the chunk
-    /// boundary without buffering further. Size-based validators
-    /// (`MaxSize<N>`) check `size`; content-based validators don't
-    /// usually need to act per-chunk.
+    /// boundary: the extractor reads no further byte of the body. Size-based
+    /// validators (`MaxSize<N>`) check `size`; content-based validators
+    /// don't usually need to act per-chunk.
     fn validate_chunk(&self, sniff: &[u8], size: u64) -> Result<(), FrameworkError> {
         let _ = (sniff, size);
         Ok(())
@@ -79,16 +95,16 @@ pub trait UploadValidator: Send + Sync + Default {
 impl UploadValidator for () {}
 
 /// `MaxSize<N>` - short-circuits at byte boundary when accumulated > N.
+///
+/// A file over the limit is invalid input (`validation-max-file`), reported
+/// with the limit in kilobytes as Laravel's `max` rule words it.
 #[derive(Default)]
 pub struct MaxSize<const N: usize>;
 
 impl<const N: usize> UploadValidator for MaxSize<N> {
     fn validate_chunk(&self, _sniff: &[u8], size: u64) -> Result<(), FrameworkError> {
         if size > N as u64 {
-            return Err(FrameworkError::Domain {
-                message: format!("file exceeds {N} bytes"),
-                status_code: 413,
-            });
+            return Err(FrameworkError::invalid_upload(max_file_message(N)));
         }
         Ok(())
     }
@@ -123,17 +139,13 @@ impl UploadValidator for ImageFile {
     ) -> Result<(), FrameworkError> {
         // `infer::get` only needs the first ~32 bytes for every format it
         // recognises; the bounded sniff buffer (≤ 16 KiB) is generous.
-        let kind = infer::get(sniff).ok_or_else(|| FrameworkError::Domain {
-            message: "could not identify file type".into(),
-            status_code: 422,
-        })?;
-        if !kind.mime_type().starts_with("image/") {
-            return Err(FrameworkError::Domain {
-                message: format!("expected image, got {}", kind.mime_type()),
-                status_code: 422,
-            });
+        // Unidentifiable bytes are not an image either.
+        match infer::get(sniff) {
+            Some(kind) if kind.mime_type().starts_with("image/") => Ok(()),
+            _ => Err(FrameworkError::invalid_upload(
+                ValidationMessage::keyed("validation-image").fallback("The file must be an image."),
+            )),
         }
-        Ok(())
     }
 }
 
@@ -156,15 +168,14 @@ fn validate_against_allowlist(
     content_type: Option<&str>,
     allowed: &[&str],
 ) -> Result<(), FrameworkError> {
+    let refused = || FrameworkError::invalid_upload(mimetypes_message(allowed));
+
     if let Some(kind) = infer::get(sniff) {
         // Detected via magic bytes - the content itself, not the header.
         if allowed.iter().any(|m| *m == kind.mime_type()) {
             return Ok(());
         }
-        return Err(FrameworkError::Domain {
-            message: format!("disallowed mime type: {}", kind.mime_type()),
-            status_code: 422,
-        });
+        return Err(refused());
     }
 
     // `infer` could not recognise the bytes. Text-based payloads (SVG,
@@ -173,10 +184,7 @@ fn validate_against_allowlist(
     // part whose leading bytes look like markup or a script before
     // considering the (untrusted) client header at all.
     if looks_like_markup_or_script(sniff) {
-        return Err(FrameworkError::Domain {
-            message: "file content does not match its declared type".into(),
-            status_code: 422,
-        });
+        return Err(refused());
     }
 
     // Genuinely unidentifiable, non-markup bytes: fall back to the client
@@ -184,18 +192,39 @@ fn validate_against_allowlist(
     let declared = content_type
         .map(|ct| ct.split(';').next().unwrap_or(ct).trim())
         .filter(|ct| !ct.is_empty())
-        .ok_or_else(|| FrameworkError::Domain {
-            message: "could not identify file type".into(),
-            status_code: 422,
-        })?;
+        .ok_or_else(refused)?;
 
     if !allowed.iter().any(|m| m.eq_ignore_ascii_case(declared)) {
-        return Err(FrameworkError::Domain {
-            message: format!("disallowed mime type: {declared}"),
-            status_code: 422,
-        });
+        return Err(refused());
     }
     Ok(())
+}
+
+/// `validation-mimetypes`, naming the allowed types as Laravel's
+/// `mimetypes` rule does.
+fn mimetypes_message(allowed: &[&str]) -> ValidationMessage {
+    let values = allowed.join(", ");
+    ValidationMessage::keyed("validation-mimetypes")
+        .arg("values", values.clone())
+        .fallback(format!("The file must be a file of type: {values}."))
+}
+
+/// `validation-max-file` for a limit of `max_bytes`. Laravel's `max` rule
+/// takes a file limit in kilobytes and its message repeats that number, so
+/// the limit is stated in kilobytes: whole when it divides evenly, else
+/// rounded down to two decimal places, so a file within the stated limit
+/// always passes.
+fn max_file_message(max_bytes: usize) -> ValidationMessage {
+    let kilobytes = if max_bytes.is_multiple_of(1024) {
+        serde_json::Value::from(max_bytes / 1024)
+    } else {
+        serde_json::Value::from((max_bytes as f64 / 1024.0 * 100.0).floor() / 100.0)
+    };
+    ValidationMessage::keyed("validation-max-file")
+        .arg("max", kilobytes.clone())
+        .fallback(format!(
+            "The file must not be greater than {kilobytes} kilobytes."
+        ))
 }
 
 /// Heuristic: do the leading bytes look like text markup (SVG/HTML/XML) or
@@ -346,5 +375,47 @@ mod tests {
         // Wrong / missing header on unidentifiable bytes is rejected.
         assert!(run(opaque, Some("text/plain")).is_err());
         assert!(run(opaque, None).is_err());
+    }
+
+    fn refused_key(result: Result<(), FrameworkError>) -> String {
+        match result {
+            Err(FrameworkError::InvalidUpload(message)) => message.key.into_owned(),
+            other => panic!("expected a refused file, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn built_in_refusals_are_validation_failures_with_catalog_keys() {
+        assert_eq!(
+            refused_key(MaxSize::<2048>.validate_chunk(&[], 2049)),
+            "validation-max-file"
+        );
+        assert_eq!(
+            refused_key(ImageFile.validate_final(b"%PDF-1.4", 8, None)),
+            "validation-image"
+        );
+        assert_eq!(
+            refused_key(ImageFile.validate_final(&[0u8; 8], 8, None)),
+            "validation-image"
+        );
+        assert_eq!(
+            refused_key(run(b"<svg/>", Some("image/png"))),
+            "validation-mimetypes"
+        );
+        assert_eq!(
+            refused_key(run(&[1u8, 2, 3, 4], None)),
+            "validation-mimetypes"
+        );
+    }
+
+    #[test]
+    fn the_messages_carry_laravels_arguments() {
+        assert_eq!(max_file_message(2048).args["max"], serde_json::json!(2));
+        // Rounded down: a file within the stated limit always passes.
+        assert_eq!(max_file_message(1000).args["max"], serde_json::json!(0.97));
+        assert_eq!(
+            mimetypes_message(&["image/png", "image/jpeg"]).args["values"],
+            "image/png, image/jpeg"
+        );
     }
 }

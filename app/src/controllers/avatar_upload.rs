@@ -31,10 +31,10 @@ const MAX_AVATAR_BYTES: usize = 5 * 1024 * 1024;
 
 /// Multipart request body for the avatar upload endpoint.
 ///
-/// Validators compose left-to-right: `ImageFile` rejects non-image magic bytes
-/// (422), `MaxSize` short-circuits past 5 MiB (413). Both run inside the
-/// derived `FromRequest::from_request` impl before the handler body is
-/// entered.
+/// Validators compose left-to-right: `ImageFile` rejects non-image magic bytes,
+/// `MaxSize` stops reading the body past 5 MiB; both answer 422 with the
+/// error under `avatar`. Both run inside the derived
+/// `FromRequest::from_request` impl before the handler body is entered.
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
     #[field("avatar")]

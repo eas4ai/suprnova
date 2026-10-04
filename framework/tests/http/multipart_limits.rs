@@ -133,7 +133,8 @@ async fn per_field_max_count_rejects_before_reading_the_extra_part() {
     .err()
     .expect("a 3rd 'files' part must be rejected when max_count is 2");
 
-    assert_eq!(err.status_code(), 422);
+    // A request-wide limit, like the part ceiling: 413.
+    assert_eq!(err.status_code(), 413);
     assert!(
         err.to_string().contains("exceeds max_count 2"),
         "got: {err}"

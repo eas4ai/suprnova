@@ -4,7 +4,8 @@
 //! - `#[derive(MultipartRequest)]` - strongly-typed extractor for handlers
 //! - `UploadedFile<V>` - single uploaded file with validator `V`
 //! - `parse_multipart_streaming` - low-level helper for advanced parsers
-//! - `MultipartRequestHooks` - `authorize` / `after_validation` lifecycle hooks
+//! - `MultipartRequestHooks` - `authorize` / `after_validation` /
+//!   `after_validation_async` lifecycle hooks
 //!
 //! # Streaming model
 //!
@@ -23,8 +24,17 @@
 //! Body is consumed exactly once per request. The derive macro
 //! dispatches by `#[field("name")]` so multiple files + text fields
 //! in one handler share the same parse.
+//!
+//! # Failures
+//!
+//! A failure that belongs to one field - a missing required field, a
+//! value that does not parse, a file a validator refuses - answers 422
+//! with [`ValidationErrors`] under the field's input name, so a form can
+//! show it under the field. A limit on the whole request - the body's
+//! byte cap, the part ceiling, a field's `max_count` - answers 413.
 
-use crate::error::FrameworkError;
+use crate::error::{FrameworkError, ValidationErrors};
+use crate::validation::message::ValidationMessage;
 use bytes::Bytes;
 use futures::StreamExt;
 use http_body_util::BodyDataStream;
@@ -56,6 +66,10 @@ pub const DEFAULT_UPLOAD_SPILL_THRESHOLD: usize = 2 * 1024 * 1024;
 /// format it recognises; 16 KiB is comfortably generous and bounds the
 /// buffer size for arbitrarily large parts.
 const SNIFF_BYTES: usize = 16 * 1024;
+
+/// File name prefix of the temp files large parts spill to, so an operator
+/// can tell them from other temp files.
+const SPILL_FILE_PREFIX: &str = "suprnova-upload-";
 
 /// Streaming chunk size used when copying a disk-backed part to the
 /// destination storage. 64 KiB matches the cross-disk streaming helper
@@ -199,9 +213,10 @@ pub struct MultipartLimits<'a> {
     pub spill_threshold: usize,
     /// Per-field count ceilings keyed by wire field name. When a field
     /// reaches its ceiling, the next part carrying that name is rejected
-    /// with HTTP 422 before it is read - so the (ceiling + 1)-th part
-    /// never allocates. Names absent from this list are bounded only by
-    /// `max_parts`.
+    /// with HTTP 413 before it is read - so the (ceiling + 1)-th part
+    /// never allocates. Like the other two ceilings it bounds the whole
+    /// request, so it answers 413 rather than a field error. Names absent
+    /// from this list are bounded only by `max_parts`.
     pub per_field_max_counts: &'a [(&'a str, usize)],
 }
 
@@ -581,9 +596,12 @@ where
                         });
                     }
                     UPLOAD_TEMPFILES_SPILLED.fetch_add(1, Ordering::SeqCst);
-                    let temp = NamedTempFile::new().map_err(|e| {
-                        FrameworkError::internal(format!("create upload tempfile: {e}"))
-                    })?;
+                    let temp = tempfile::Builder::new()
+                        .prefix(SPILL_FILE_PREFIX)
+                        .tempfile()
+                        .map_err(|e| {
+                            FrameworkError::internal(format!("create upload tempfile: {e}"))
+                        })?;
                     let mut writer = tokio::fs::File::create(temp.path()).await.map_err(|e| {
                         FrameworkError::internal(format!("open upload tempfile: {e}"))
                     })?;
@@ -606,7 +624,9 @@ where
         // buffer + total accumulated size. Validators that care about
         // content (ImageFile) consult sniff; validators that care about
         // size (MaxSize) consult size. Fires AFTER the body cap so a
-        // 413 from the cap takes precedence.
+        // 413 from the cap takes precedence when one chunk crosses both.
+        // Returning here reads no further chunk, and drops the spill file
+        // this part was writing.
         per_field_validator(name, &sniff, size)?;
     }
 
@@ -657,12 +677,19 @@ where
 /// # Errors
 ///
 /// - 400 if the request is malformed (missing content-type, bad boundary)
-/// - 413 if a declared `Content-Length`, the accumulated body size, or the
-///   number of parts exceeds the configured ceiling
-/// - 422 if a part would push a field past its `per_field_max_counts` ceiling
-/// - Whatever `per_field_validator` returns (typically 413 for individual
-///   field size caps via `MaxSize<N>`, or 422 for content checks)
+/// - 413 if a declared `Content-Length`, the accumulated body size, the
+///   number of parts, or the parts of one field (`per_field_max_counts`)
+///   exceed the configured ceiling, before the body is read further
+/// - 422 [`FrameworkError::Validation`] when `per_field_validator` refuses
+///   a file with [`FrameworkError::invalid_upload`]: the message goes under
+///   the part's input name, a trailing `[]` replaced by the part's
+///   zero-based index among the parts of its name, and the body is read no
+///   further
+/// - Any other error `per_field_validator` returns, unchanged
 /// - 500 for I/O failures spilling to / writing the temp file
+///
+/// On any error, every temp file the parse wrote is removed before this
+/// returns.
 pub async fn parse_multipart_streaming_with_limits<F>(
     req: crate::http::Request,
     limits: MultipartLimits<'_>,
@@ -780,13 +807,13 @@ where
     let mut total_bytes: usize = 0;
 
     // Per-field count ceilings (`max_count`) enforced during streaming.
-    // `cap_for` maps a field's wire name to its ceiling; `seen_for` tracks
-    // how many parts with that name have been accepted so far. Keying
-    // `seen_for` by the `&str` borrowed from `cap_for` (not the per-part
-    // `String`) satisfies the borrow checker without cloning names.
+    // `cap_for` maps a field's wire name to its ceiling; `seen_for` counts
+    // the parts seen per name, which is also each part's zero-based index
+    // among the parts of its name (`files[]` -> `files.1`). Its size is
+    // bounded by `max_parts`.
     let cap_for: std::collections::HashMap<&str, usize> =
         per_field_max_counts.iter().copied().collect();
-    let mut seen_for: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut seen_for: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut part_count: usize = 0;
 
     while let Some(mut field) = multipart
@@ -812,17 +839,28 @@ where
             });
         }
 
+        // Clones the name only for its first part.
+        let index = match seen_for.get_mut(name.as_str()) {
+            Some(seen) => {
+                let index = *seen;
+                *seen += 1;
+                index
+            }
+            None => {
+                seen_for.insert(name.clone(), 1);
+                0
+            }
+        };
+
         // Per-field `max_count`: reject the (ceiling + 1)-th part carrying
         // this name before it is read, so the extra part never allocates.
-        if let Some((field_key, &cap)) = cap_for.get_key_value(name.as_str()) {
-            let seen = seen_for.entry(*field_key).or_insert(0);
-            *seen += 1;
-            if *seen > cap {
-                return Err(FrameworkError::Domain {
-                    message: format!("field '{name}' exceeds max_count {cap}"),
-                    status_code: 422,
-                });
-            }
+        if let Some(&cap) = cap_for.get(name.as_str())
+            && index >= cap
+        {
+            return Err(FrameworkError::Domain {
+                message: format!("field '{name}' exceeds max_count {cap}"),
+                status_code: 413,
+            });
         }
 
         let collected = collect_part(
@@ -837,7 +875,15 @@ where
             },
             file_name.is_none(),
         )
-        .await?;
+        .await
+        .map_err(|err| match err {
+            FrameworkError::InvalidUpload(message) => {
+                let mut errors = ValidationErrors::new();
+                errors.add(field_error_key(&name, Some(index)), *message);
+                FrameworkError::validation_errors(errors)
+            }
+            other => other,
+        })?;
 
         // Classification: presence of `filename=` in Content-Disposition
         // is the canonical marker of a file part. Text parts may carry
@@ -948,12 +994,32 @@ where
 }
 
 /// Lifecycle hooks for multipart request structs. Mirrors
-/// `FormRequest::authorize` / `FormRequest::after_validation` so users
-/// have one mental model.
+/// `FormRequest::authorize` / `after_validation` /
+/// `after_validation_async` so users have one mental model.
 ///
 /// `#[derive(MultipartRequest)]` emits an empty `impl MultipartRequestHooks for MyStruct {}`
 /// unless the struct carries `#[multipart(custom_hooks)]`. With
-/// `custom_hooks`, the user provides the impl themselves.
+/// `custom_hooks`, the user provides the impl themselves; it needs
+/// `#[async_trait]` only when it overrides `after_validation_async`.
+///
+/// # Stage order
+///
+/// The extractor runs `authorize`, before any byte of the body is read;
+/// then the extraction, with each field's validation; then
+/// `after_validation`; then `after_validation_async`; then the handler.
+/// Each stage runs only after the one before it succeeded, so a database
+/// check in the async hook never sees a malformed or missing field.
+///
+/// # Hook errors
+///
+/// A hook's non-empty `ValidationErrors` answers 422 with `errors`, which
+/// `InertiaValidationRedirectMiddleware` turns into a redirect back with the
+/// errors for an Inertia form. An empty set counts as success. Errors use
+/// the input names extraction errors use: a key that starts with a Rust
+/// field name is reported under that field's `#[field(...)]` name, with a
+/// trailing `[]` dropped, so `photos.1` on a field read from `photos[]` is
+/// the second photo.
+#[async_trait::async_trait]
 pub trait MultipartRequestHooks {
     /// Called BEFORE the body is consumed. Return `false` to short-circuit
     /// with `FrameworkError::Unauthorized` (maps to HTTP 403 in this codebase).
@@ -961,10 +1027,268 @@ pub trait MultipartRequestHooks {
         true
     }
 
-    /// Called AFTER the struct is fully constructed. Return
-    /// `Err(ValidationErrors)` to surface cross-field validation
-    /// failures as a 422 response.
+    /// Called AFTER the struct is fully constructed and every field passed
+    /// its own validation. Return a non-empty `Err(ValidationErrors)` to
+    /// surface cross-field validation failures as a 422 response.
     fn after_validation(&self) -> Result<(), crate::error::ValidationErrors> {
         Ok(())
+    }
+
+    /// Async cross-field hook, run after [`after_validation`] succeeded and
+    /// before the handler: the place for database checks such as `Unique`
+    /// or `Exists`, which need `.await`. Return a non-empty
+    /// `Err(ValidationErrors)` to answer 422.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::http::upload::{MultipartRequestHooks, UploadedFile};
+    /// use suprnova::{AsyncRule, MultipartRequest, Unique, ValidationErrors, async_trait};
+    ///
+    /// #[derive(MultipartRequest)]
+    /// #[multipart(custom_hooks)]
+    /// pub struct NewAlbum {
+    ///     #[field("slug")]
+    ///     pub slug: String,
+    ///     #[field("photos[]")]
+    ///     pub photos: Vec<UploadedFile>,
+    /// }
+    ///
+    /// #[async_trait]
+    /// impl MultipartRequestHooks for NewAlbum {
+    ///     async fn after_validation_async(&self) -> Result<(), ValidationErrors> {
+    ///         let mut errs = ValidationErrors::new();
+    ///         Unique::new("albums", "slug")
+    ///             .check_async(&self.slug, &mut errs, "slug")
+    ///             .await;
+    ///         errs.into_result()
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// The default succeeds.
+    ///
+    /// [`after_validation`]: Self::after_validation
+    async fn after_validation_async(&self) -> Result<(), crate::error::ValidationErrors> {
+        Ok(())
+    }
+}
+
+/// The key a field's validation error goes under: the form input name,
+/// with a trailing `[]` replaced by the part's zero-based index among the
+/// parts of that name, as Laravel names array elements (`files[]` gives
+/// `files.1` for the second file). Without an index, as for a missing
+/// field, the name without its `[]`.
+#[doc(hidden)]
+pub fn field_error_key(name: &str, index: Option<usize>) -> String {
+    match (name.strip_suffix("[]"), index) {
+        (Some(base), Some(index)) => format!("{base}.{index}"),
+        (Some(base), None) => base.to_string(),
+        (None, _) => name.to_string(),
+    }
+}
+
+/// A hook error's key in input names. `names` pairs each name a hook may
+/// use for a field - its Rust name, its `#[field]` name with `[]` - with
+/// that field's input name; the first segment of `key` is looked up in it,
+/// and a key that names no field is kept as it is.
+#[doc(hidden)]
+pub fn hook_error_key(key: &str, names: &[(&str, &str)]) -> String {
+    let (head, rest) = match key.split_once('.') {
+        Some((head, rest)) => (head, Some(rest)),
+        None => (key, None),
+    };
+    let input = names
+        .iter()
+        .find(|(name, _)| *name == head)
+        .map_or(head, |(_, input)| *input);
+    match rest {
+        Some(rest) => format!("{input}.{rest}"),
+        None => input.to_string(),
+    }
+}
+
+/// Why one field failed extraction, which picks the catalog key of its
+/// message.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldFailure {
+    /// A required field is missing (`validation-required`).
+    Required,
+    /// Text that does not parse as an integer type (`validation-integer`).
+    Integer,
+    /// Text that does not parse as a float type (`validation-numeric`).
+    Numeric,
+    /// Text that does not parse as `bool` (`validation-boolean`).
+    Boolean,
+    /// Text that does not parse as any other type (`validation-format`).
+    Format,
+    /// A text part where a file belongs (`validation-file`).
+    File,
+    /// A file part where text belongs (`validation-string`).
+    String,
+}
+
+impl FieldFailure {
+    /// The catalog-keyed message, with an English fallback naming `key`
+    /// the way the catalog's `$field` does.
+    fn message(self, key: &str) -> ValidationMessage {
+        let field = key.replace('_', " ");
+        let (catalog_key, fallback) = match self {
+            Self::Required => (
+                "validation-required",
+                format!("The {field} field is required."),
+            ),
+            Self::Integer => (
+                "validation-integer",
+                format!("The {field} field must be an integer."),
+            ),
+            Self::Numeric => (
+                "validation-numeric",
+                format!("The {field} field must be a number."),
+            ),
+            Self::Boolean => (
+                "validation-boolean",
+                format!("The {field} field must be true or false."),
+            ),
+            Self::Format => (
+                "validation-format",
+                format!("The {field} field format is invalid."),
+            ),
+            Self::File => (
+                "validation-file",
+                format!("The {field} field must be a file."),
+            ),
+            Self::String => (
+                "validation-string",
+                format!("The {field} field must be a string."),
+            ),
+        };
+        ValidationMessage::keyed(catalog_key).fallback(fallback)
+    }
+}
+
+/// File `failure` for the part named `name` at `index` in `errors`.
+#[doc(hidden)]
+pub fn add_field_failure(
+    errors: &mut ValidationErrors,
+    name: &str,
+    index: Option<usize>,
+    failure: FieldFailure,
+) {
+    let key = field_error_key(name, index);
+    let message = failure.message(&key);
+    errors.add(key, message);
+}
+
+/// What one part gave the field it belongs to.
+#[doc(hidden)]
+pub enum Taken<T> {
+    /// The field's value.
+    Value(T),
+    /// Nothing: the way a client leaves a file out.
+    Absent,
+    /// A failure, already filed in the error set.
+    Invalid,
+}
+
+/// Turn one part into a file field's value.
+///
+/// An empty text part (Inertia's `null` file) and a file part with no file
+/// name and no bytes (an empty file input) are how clients leave a file
+/// out, so they are [`Taken::Absent`], never an empty file a validator
+/// would refuse. Other text is a failure, as is a file `validator` refuses
+/// with [`FrameworkError::invalid_upload`]; both are filed under the
+/// part's key. Any other validator error is returned.
+#[doc(hidden)]
+pub fn take_file<V: UploadValidator>(
+    validator: &V,
+    value: MultipartValue,
+    name: &str,
+    index: usize,
+    errors: &mut ValidationErrors,
+) -> Result<Taken<UploadedFile<V>>, FrameworkError> {
+    match value {
+        MultipartValue::Text(text) if text.is_empty() => Ok(Taken::Absent),
+        MultipartValue::Text(_) => {
+            add_field_failure(errors, name, Some(index), FieldFailure::File);
+            Ok(Taken::Invalid)
+        }
+        MultipartValue::File {
+            size: 0, file_name, ..
+        } if file_name.as_deref().is_none_or(str::is_empty) => Ok(Taken::Absent),
+        MultipartValue::File {
+            backing,
+            size,
+            file_name,
+            content_type,
+            inferred_extension,
+            sniff,
+        } => match validator.validate_final(&sniff, size, content_type.as_deref()) {
+            Ok(()) => Ok(Taken::Value(match backing {
+                UploadedFileBacking::Memory(bytes) => {
+                    UploadedFile::from_memory(bytes, file_name, content_type, inferred_extension)
+                }
+                UploadedFileBacking::Disk(temp) => {
+                    UploadedFile::from_disk(temp, size, file_name, content_type, inferred_extension)
+                }
+            })),
+            Err(FrameworkError::InvalidUpload(message)) => {
+                errors.add(field_error_key(name, Some(index)), *message);
+                Ok(Taken::Invalid)
+            }
+            Err(other) => Err(other),
+        },
+    }
+}
+
+/// Turn one part into a text field's value: the text parsed as `T`. Text
+/// that does not parse files `failure`, the key for `T`'s kind; a file part
+/// files [`FieldFailure::String`].
+#[doc(hidden)]
+pub fn take_text<T: std::str::FromStr>(
+    value: MultipartValue,
+    name: &str,
+    index: usize,
+    failure: FieldFailure,
+    errors: &mut ValidationErrors,
+) -> Taken<T> {
+    match value {
+        MultipartValue::Text(text) => match text.parse() {
+            Ok(parsed) => Taken::Value(parsed),
+            Err(_) => {
+                add_field_failure(errors, name, Some(index), failure);
+                Taken::Invalid
+            }
+        },
+        MultipartValue::File { .. } => {
+            add_field_failure(errors, name, Some(index), FieldFailure::String);
+            Taken::Invalid
+        }
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn an_array_name_takes_the_parts_index() {
+        assert_eq!(field_error_key("files[]", Some(1)), "files.1");
+        assert_eq!(field_error_key("files[]", None), "files");
+        assert_eq!(field_error_key("avatar", Some(3)), "avatar");
+        assert_eq!(field_error_key("avatar", None), "avatar");
+    }
+
+    #[test]
+    fn a_hook_key_moves_to_the_input_name() {
+        let names = [
+            ("cover", "covers"),
+            ("covers[]", "covers"),
+            ("caption", "title"),
+        ];
+        assert_eq!(hook_error_key("cover.1", &names), "covers.1");
+        assert_eq!(hook_error_key("covers[].1", &names), "covers.1");
+        assert_eq!(hook_error_key("caption", &names), "title");
+        assert_eq!(hook_error_key("covers.1", &names), "covers.1");
+        assert_eq!(hook_error_key("elsewhere.2", &names), "elsewhere.2");
     }
 }
