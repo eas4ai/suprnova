@@ -43,7 +43,7 @@ async-trait = "0.1"
 futures-util = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
-tokio = { version = "1", default-features = false, features = ["time"] }
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 redis = { version = "0.32", optional = true, default-features = false, features = ["aio", "script", "tokio-comp"] }
 sea-orm = { version = "2.0", default-features = false, features = ["macros", "with-chrono", "postgres-use-serial-pk"] }
 secrecy = { version = "0.10", features = ["serde"] }

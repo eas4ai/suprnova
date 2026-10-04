@@ -1444,7 +1444,10 @@ where
                 identifier: PASSWORD_RESET_PURPOSE.to_owned(),
             });
         }
-        let password_hash = self.password_verifier.mint_target(&password)?;
+        let password_hash = self
+            .password_verifier
+            .mint_target_blocking(password)
+            .await?;
         let commit = self
             .first_email_proof
             .apply(FirstEmailProofMutation::PasswordReset {
