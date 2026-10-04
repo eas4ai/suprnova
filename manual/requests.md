@@ -423,6 +423,59 @@ streaming byte counter during read.
 For multipart bodies (`multipart/form-data`), see
 [file uploads](#file-uploads-multipartrequest) below.
 
+## Empty values and repeated names
+
+A form can't send `null`. An HTML form sends an empty input as `name=`, and
+Inertia sends a `null` value as an empty field when it posts `FormData`.
+Laravel's default `ConvertEmptyStringsToNull` middleware reads the empty
+value as `null`. A form-urlencoded `FormRequest` and a `MultipartRequest`
+read it the same way:
+
+- An `Option` field is `None`, an `Option<String>` included.
+- A required field is missing, a `String` included, so the request fails
+  with a `422`.
+- A `Vec` field of a `MultipartRequest` leaves the element out.
+
+A name sent more than once keeps its last value, as PHP does. The body
+`title=&title=Holiday` gives `Holiday`, and `title=Holiday&title=` gives
+`null`. A form-urlencoded name that ends in `[]` is a list, so it keeps every
+value. `req.form()` and the form-urlencoded branch of `req.input()` read the
+body by the same rules.
+
+```rust
+use suprnova::{handler, json_response, request, Response};
+
+#[request]
+pub struct UpdateProfile {
+    pub name: String,
+    pub bio: Option<String>,
+}
+
+#[handler]
+pub async fn update(form: UpdateProfile) -> Response {
+    // `name=Ada&bio=` arrives with `bio` as `None`, and `name=&bio=Hi`
+    // fails with a `422` before this code runs.
+    json_response!({ "name": form.name, "has_bio": form.bio.is_some() })
+}
+```
+
+### Why Suprnova diverges
+
+- A JSON body keeps `""` as an empty string. JSON has its own `null`, and
+  Inertia sends a `null` value as one, so an empty string in JSON is text
+  the client chose. To require text there, validate `length(min = 1)`.
+  Laravel converts a JSON `""` to `null` too.
+- Text isn't trimmed. Laravel's `TrimStrings` middleware runs before
+  `ConvertEmptyStringsToNull`, so a value of spaces is `null` in Laravel and
+  text in Suprnova.
+- A list leaves a `null` element out, where Laravel keeps `null` at its
+  index: a Rust `Vec<T>` has no place for `null`. An error still names the
+  part by its own index, such as `ids.2`.
+- A `MultipartRequest` field that holds one file takes the first file part
+  of its name, where PHP keeps the last. The extractor checks a file while
+  the body streams, before it knows whether a later part of the same name
+  follows, so it decides on the first one.
+
 ## Reading the body directly
 
 For one-off endpoints or middleware that doesn't want a full
@@ -530,17 +583,15 @@ takes what forms send: `1` and `0`, as Inertia sends them, `true` and
 case. An unchecked checkbox sends nothing, so declare it `Option<bool>` and
 read a missing value as `false` with `unwrap_or(false)`.
 
-Inertia sends a `null` value as an empty text part. For a type that can't
-hold empty text, such as `u32`, `f64` or `bool`, an empty part counts as a
-missing value: an `Option` field is `None`, a required field reports
+An empty text part is `null`, as
+[empty values and repeated names](#empty-values-and-repeated-names)
+describes: an `Option` field is `None`, a required field reports
 `validation-required`, and a `Vec` field leaves the element out. A `String`
-field keeps the empty string, as a `FormRequest` does for a JSON `""` or a
-urlencoded `name=`.
+field is no exception.
 
-A field that holds one value, rather than a `Vec`, is decided by the first
-part of its name that isn't missing in this sense. If that part doesn't
-parse, the field reports that one error, and any later part of the name is
-ignored.
+A text field that holds one value, rather than a `Vec`, takes the last part
+of its name. Only that part is parsed, so an earlier part that doesn't parse
+reports nothing, and a last part that doesn't parse reports one error.
 
 Built-in validators in `suprnova::http::upload::validators`:
 
