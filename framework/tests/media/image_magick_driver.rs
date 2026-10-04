@@ -290,13 +290,28 @@ fn heic_decodes_when_the_host_carries_the_delegate() {
     assert_eq!((width, height), (4, 2));
 }
 
-#[tokio::test]
+/// Runs alone in a child process (see `own_process`). The facade's default
+/// driver is installed once per process, by whichever test first reaches
+/// the facade, and most tests in this binary go through the facade with the
+/// default driver. Run alongside them (`--include-ignored`), this test
+/// could not install the magick driver.
+#[test]
 #[ignore = "requires a host ImageMagick 7 binary"]
-async fn the_image_facade_drives_the_magick_driver() {
+fn the_image_facade_drives_the_magick_driver() {
+    crate::own_process::run_alone(
+        "image_magick_driver::the_image_facade_drives_the_magick_driver_child",
+    );
+}
+
+#[tokio::test]
+async fn the_image_facade_drives_the_magick_driver_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     // Installed explicitly rather than through IMAGE_DRIVER, so the test does
     // not depend on process-global env ordering.
     suprnova::media::set_default_driver(Box::new(MagickCliDriver::from_env()))
-        .expect("this binary must be the first to install a driver, or the test exercises OxideAV while claiming magick");
+        .expect("the child process must be the first to install a driver, or the test exercises OxideAV while claiming magick");
 
     let bytes = Image::from_bytes(RED_PNG_1X1)
         .resize(9, 3)
