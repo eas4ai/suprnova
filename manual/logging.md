@@ -107,7 +107,8 @@ sees an error. That covers a driver's sink that returns an error from
 `write` or `flush`, and buffered lines a file cannot flush, such as on a
 full disk. `Log::channels()` lists the channels in use,
 `Log::forget_channel(name)` closes one, which is resolved again on its
-next use, reopening a file rotated away, and `Log::default_channel()` and
+next use, reopening a file rotated away; every stack that lists it, the
+default channel included, reopens it too. `Log::default_channel()` and
 `Log::set_default_channel(name)` read and move the default.
 
 `Log::extend` adds a driver for anything else, such as Slack or a log

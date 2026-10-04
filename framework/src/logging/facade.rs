@@ -37,6 +37,11 @@ impl Leaf {
             Leaf::Sink(sink, level) => Leaf::Sink(sink, narrowed(level)),
         }
     }
+
+    /// Whether this leaf writes to `sink`.
+    fn writes_to(&self, sink: &Arc<dyn LogSink>) -> bool {
+        matches!(self, Leaf::Sink(own, _) if Arc::ptr_eq(own, sink))
+    }
 }
 
 #[derive(Default)]
@@ -421,15 +426,39 @@ impl Log {
     /// closing its files. It is resolved again the next time it is used,
     /// the default channel by the next `tracing` event, which reopens its
     /// file, as Laravel's `forgetChannel` does after a file was rotated
-    /// away.
+    /// away. A stack that lists the channel is dropped with it, the
+    /// default channel among them, so the stack reopens the file too
+    /// rather than writing on into the rotated one. A [`Logger`] taken
+    /// before keeps the sinks it holds.
     pub fn forget_channel(name: &str) {
-        let removed = write().resolved.remove(name);
-        for leaf in removed.into_iter().flatten() {
-            if let Leaf::Sink(sink, _) = leaf {
-                let _ = sink.flush();
-            }
+        let (forgotten, default_affected) = {
+            let mut registry = write();
+            let forgotten: Vec<Arc<dyn LogSink>> = registry
+                .resolved
+                .remove(name)
+                .into_iter()
+                .flatten()
+                .filter_map(|leaf| match leaf {
+                    Leaf::Sink(sink, _) => Some(sink),
+                    _ => None,
+                })
+                .collect();
+            let shares_a_sink = |leaves: &[Leaf]| {
+                leaves
+                    .iter()
+                    .any(|leaf| forgotten.iter().any(|sink| leaf.writes_to(sink)))
+            };
+            registry.resolved.retain(|_, leaves| !shares_a_sink(leaves));
+            let default_affected = registry.default.as_deref() == Some(name)
+                || shares_a_sink(&registry.default_leaves);
+            (forgotten, default_affected)
+        };
+        // Flushed outside the registry lock: a driver's flush may log.
+        for sink in &forgotten {
+            // A failure is reported by the sink, or by its `ReportedSink`.
+            let _ = sink.flush();
         }
-        if read().default.as_deref() == Some(name) {
+        if default_affected {
             DEFAULT_FORGOTTEN.store(true, Ordering::Relaxed);
         }
     }

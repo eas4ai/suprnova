@@ -1071,3 +1071,44 @@ fn a_refused_second_init_keeps_the_format_and_the_default_channel() {
         "the line is still JSON: {line}"
     );
 }
+
+/// DRIVERS-031: forgetting a channel reopens its file for every stack that
+/// lists it, the default channel's included, not only for the channel
+/// itself.
+#[test]
+#[serial]
+fn forgetting_a_channel_reopens_its_file_in_the_stacks_that_list_it() {
+    let _env = lock_env();
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    let dir = tempfile::tempdir().unwrap();
+    let (live, rotated) = (dir.path().join("app.log"), dir.path().join("app.log.1"));
+    let (child, parent) = (unique("rotating"), unique("parent"));
+    Log::define(&child, LogChannel::single(&live));
+    Log::define(&parent, LogChannel::stack([child.as_str()]));
+    set_env("LOG_CHANNEL", Some(&parent));
+
+    let subscriber = build_subscriber(LogConfig::from_env()).unwrap();
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::error!("default-before");
+        Log::channel(&parent).unwrap().error("named-before");
+        std::fs::rename(&live, &rotated).unwrap();
+        Log::forget_channel(&child);
+        tracing::error!("default-after");
+        Log::channel(&parent).unwrap().error("named-after");
+    });
+
+    let old = read(&rotated);
+    let new = read(&live);
+    assert!(
+        old.contains("default-before") && old.contains("named-before"),
+        "{old}"
+    );
+    assert!(
+        new.contains("default-after") && new.contains("named-after"),
+        "the stacks write to the reopened file: {new}"
+    );
+    assert!(
+        !old.contains("default-after") && !old.contains("named-after"),
+        "{old}"
+    );
+}
