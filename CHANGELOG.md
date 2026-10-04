@@ -414,6 +414,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **`save` and `update` refuse a model that was never inserted.** A
+  replica, or a new model from `first_or_new` or `find_or_new`, still has
+  its reset key, and `save` updated the row with key 0. It now returns an
+  error naming `persist()`, which inserts the model and returns it with its
+  new key. Laravel's `save` inserts such a model; `save` here takes `&self`
+  and cannot hand the new key back, which the Eloquent manual explains. This
+  landed after the `v3.1.0` tag.
 - **The broadcast fanout no longer uses sea-streamer.**
   `SeaStreamerBroadcastHub` keeps its name and runs on the framework's own
   Redis client, and `sea-streamer` and `sea-streamer-redis` left the
@@ -681,6 +688,33 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Query builder, pagination and Eloquent.** Paginating, ordering and
+  taking `first` of a union works on every engine, and `total` counts its
+  rows; as in Laravel, ordering, limit and offset set before `union` apply
+  to the first query and those set after it to the whole union. `count`,
+  `sum`, `avg`, `min` and `max` work after `select(...)`, after an
+  ordering, on a union and with `having`. `in_random_order` works on MySQL,
+  and `skip` or `offset` without `limit` works on SQLite and MySQL.
+  `chunk_by_id`, `lazy_by_id`, `cursor_paginate` and `Pagination::cursor`
+  visit every row once whatever the query was ordered by, and apply an
+  offset once. `filter_json_contains` works on Postgres and MySQL with
+  strings, objects and arrays. `create_or_first` inside a Postgres
+  transaction returns the existing row, and a lost race creating a Live
+  record no longer aborts the host's Postgres transaction. `Unique` and
+  `Exists` inside `DB::transaction` see the transaction's own rows and no
+  longer wait on its connection. `Collection::sort_by` and the by-value
+  `Distinct` rule compare integers above 2^53 exactly. Index and foreign key
+  names holding a backtick or double quote create and drop.
+  `decrement(col, i64::MIN)` subtracts instead of panicking.
+  `UniqueIdKind::Ulid.is_valid` rejects strings that overflow 128 bits.
+  `QueryExecuted::to_raw_sql()` returns the SQL unchanged when a binding is
+  missing or left over, and `QueryBuilder::count` and
+  `Pagination::length_aware` report the `COUNT(*)` they ran to `DB::listen`
+  and the query log. Inertia infinite scroll asks for the paginator's own
+  page or cursor parameter. Concurrent `Schema::dump` calls to one path each
+  write a whole file. `test_database!()` with no argument compiles and uses
+  the crate's own `migrations::Migrator`. This landed after the `v3.1.0`
+  tag.
 - **Sessions and remember-me tokens restore on MySQL and MariaDB.** A
   scaffolded application's session, remember-me and auth-flow token time
   columns are `TIMESTAMP` there, and the framework read them as a type the
