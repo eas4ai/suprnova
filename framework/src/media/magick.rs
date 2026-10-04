@@ -576,12 +576,17 @@ fn process_args(
 }
 
 /// Full argv for a dimensions probe.
+///
+/// The probe reads the first frame only (`[0]`). `-format` writes no
+/// separator between frames, so probing a whole animation prints
+/// `100 100100 100` for two 100x100 frames, and the second number reads as a
+/// height of 100100. The first frame is also the one the dimensions describe.
 fn dimensions_args(config: &ImageConfig, detected: Option<sniff::InputFormat>) -> Vec<String> {
     let mut args = vec!["identify".to_string()];
     args.extend(limit_args(config));
     args.push("-format".into());
     args.push("%w %h".into());
-    args.push(input_spec(detected));
+    args.push(format!("{}[0]", input_spec(detected)));
     args
 }
 
@@ -644,6 +649,11 @@ fn parse_dimensions(raw: &str) -> Result<(u32, u32), FrameworkError> {
     let mut parts = raw.split_whitespace();
     let width = parts.next().ok_or_else(malformed)?;
     let height = parts.next().ok_or_else(malformed)?;
+    // More values mean more than one frame's output ran together; the first
+    // two would then be a wrong answer rather than an error.
+    if parts.next().is_some() {
+        return Err(malformed());
+    }
     Ok((
         width.parse().map_err(|_| malformed())?,
         height.parse().map_err(|_| malformed())?,
@@ -940,8 +950,19 @@ mod tests {
     fn dimensions_probe_uses_the_identify_subcommand() {
         let args = dimensions_args(&config(), Some(sniff::InputFormat::Gif));
         assert_eq!(args[0], "identify");
-        assert_eq!(args[args.len() - 3..], ["-format", "%w %h", "gif:-"]);
+        assert_eq!(args[args.len() - 3..], ["-format", "%w %h", "gif:-[0]"]);
         assert!(args.contains(&"-limit".to_string()));
+    }
+
+    #[test]
+    fn dimensions_probe_reads_only_the_first_frame() {
+        // `-format` writes no separator between frames, so an animation probed
+        // whole prints `100 100100 100`. `[0]` selects the first frame, for a
+        // recognised coder and for the bare stdin marker alike.
+        let named = dimensions_args(&config(), Some(sniff::InputFormat::Gif));
+        assert_eq!(named[named.len() - 1], "gif:-[0]");
+        let bare = dimensions_args(&config(), None);
+        assert_eq!(bare[bare.len() - 1], "-[0]");
     }
 
     #[test]
@@ -963,6 +984,15 @@ mod tests {
         assert!(parse_dimensions("").is_err());
         assert!(parse_dimensions("640").is_err());
         assert!(parse_dimensions("wide tall").is_err());
+    }
+
+    #[test]
+    fn dimensions_output_with_more_than_one_frame_is_an_error() {
+        // Two frames' output run together. Reading the first two values would
+        // report a height of 100100; refusing makes the probe fail loudly
+        // instead.
+        assert!(parse_dimensions("100 100100 100").is_err());
+        assert!(parse_dimensions("100 100 100 100").is_err());
     }
 
     #[test]
@@ -1018,7 +1048,7 @@ mod tests {
     #[test]
     fn every_probe_pins_the_coder_when_the_format_is_known() {
         let dims = dimensions_args(&config(), Some(sniff::InputFormat::Png));
-        assert_eq!(dims[dims.len() - 1], "png:-");
+        assert_eq!(dims[dims.len() - 1], "png:-[0]");
         let colour = dominant_color_args(&config(), Some(sniff::InputFormat::Jpeg));
         assert!(colour.contains(&"jpeg:-".to_string()));
     }

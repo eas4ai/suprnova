@@ -306,3 +306,36 @@ async fn the_image_facade_drives_the_magick_driver() {
         .expect("pipeline");
     assert!(bytes.starts_with(b"\x89PNG"));
 }
+
+#[test]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn an_animation_reports_the_dimensions_of_its_first_frame() {
+    // ImageMagick writes the fixture, because it does not read the GIFs
+    // OxideAV's encoder writes, and this test is about the probe.
+    let made = Command::new(driver().binary())
+        .args([
+            "-size", "100x100", "xc:red", "-size", "100x100", "xc:blue", "-loop", "0", "gif:-",
+        ])
+        .output()
+        .expect("magick must run");
+    assert!(made.status.success(), "magick must write the animation");
+    let animation = made.stdout;
+
+    // `-format` writes no separator between frames, so probing every frame
+    // of a two-frame 100x100 GIF prints `100 100100 100`, which reads as a
+    // height of 100100.
+    assert_eq!(
+        driver().dimensions(&animation).expect("dimensions"),
+        (100, 100)
+    );
+
+    // The facade probes the processed output, and a GIF processed without a
+    // conversion keeps every frame.
+    let processed = driver()
+        .process(&animation, &ImagePipeline::default())
+        .expect("magick must re-encode the animation");
+    assert_eq!(
+        driver().dimensions(&processed).expect("dimensions"),
+        (100, 100)
+    );
+}
