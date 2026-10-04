@@ -790,6 +790,10 @@ fn validate_navigation(context: &mut DirectiveContext<'_, '_>) {
 /// the server places on one action's argument schema.
 const MAX_ACTION_ARGUMENTS: usize = 128;
 
+/// The longest action directive value, in UTF-16 units: the bound the
+/// browser runtime places on every directive value it reads.
+const MAX_ACTION_VALUE_UNITS: usize = 2_048;
+
 /// An action directive's value: the action's name and the literal arguments
 /// written after it, empty when the value is the bare name.
 #[derive(Debug, PartialEq)]
@@ -819,21 +823,25 @@ impl ActionLiteral {
     }
 }
 
-/// Parses `name` or `name(literal, ...)`. The grammar is closed and shared
+/// Parses `name` or `name(literal, ...)`, at most 2,048 UTF-16 units. The
+/// grammar is closed and shared
 /// with the browser runtime: literals are JSON numbers, strings in single or
 /// double quotes with JSON escapes (plus `\'`), `true`, `false`, and `null`,
 /// separated by commas, with JSON whitespace around them. Nothing is
 /// evaluated, so the same text always yields the same arguments.
 fn parse_action_call(value: &str) -> Option<ActionCall<'_>> {
+    if value.encode_utf16().count() > MAX_ACTION_VALUE_UNITS {
+        return None;
+    }
     let Some(open) = value.find('(') else {
-        return local_identifier(value).then(|| ActionCall {
+        return action_name(value).then(|| ActionCall {
             name: value,
             arguments: Vec::new(),
         });
     };
     let name = value.get(..open)?;
     let body = value.get(open + 1..)?.strip_suffix(')')?;
-    if !local_identifier(name) {
+    if !action_name(name) {
         return None;
     }
     let mut scanner = LiteralScanner { rest: body };
@@ -854,6 +862,13 @@ fn parse_action_call(value: &str) -> Option<ActionCall<'_>> {
         scanner.rest = scanner.rest.strip_prefix(',')?;
         scanner.skip_space();
     }
+}
+
+/// An action name in the directive token grammar of the reviewed fixture,
+/// the grammar the browser runtime applies: a lowercase letter first, then
+/// lowercase letters, digits, `_`, `.`, `:`, or `-`, at most 64 bytes.
+fn action_name(name: &str) -> bool {
+    valid_directive_scalar_value(DirectiveValue::Action, name) == Some(true)
 }
 
 struct LiteralScanner<'t> {
@@ -1045,10 +1060,34 @@ mod tests {
             let value = value.as_str().expect("vector value");
             assert_eq!(parse_action_call(value), None, "accepted {value:?}");
         }
+        let limits = &vectors["limits"];
+        assert_eq!(
+            limits["maximum_arguments"].as_u64(),
+            u64::try_from(MAX_ACTION_ARGUMENTS).ok()
+        );
         let at_bound = format!("save({})", vec!["1"; MAX_ACTION_ARGUMENTS].join(","));
         assert!(parse_action_call(&at_bound).is_some());
         let past_bound = format!("save({})", vec!["1"; MAX_ACTION_ARGUMENTS + 1].join(","));
         assert_eq!(parse_action_call(&past_bound), None);
+
+        let name_bytes = limits["name"]["maximum_bytes"]
+            .as_u64()
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .expect("name bound");
+        assert!(parse_action_call(&format!("{}(1)", "a".repeat(name_bytes))).is_some());
+        assert_eq!(
+            parse_action_call(&format!("{}(1)", "a".repeat(name_bytes + 1))),
+            None
+        );
+        // The bound counts UTF-16 units, as the browser measures an attribute
+        // value: each `é` is one unit in two bytes.
+        let units = limits["value_maximum_utf16_units"]
+            .as_u64()
+            .and_then(|units| usize::try_from(units).ok())
+            .expect("value bound");
+        let filler = |units: usize| format!("say('{}')", "é".repeat(units - "say('')".len()));
+        assert!(parse_action_call(&filler(units)).is_some());
+        assert_eq!(parse_action_call(&filler(units + 1)), None);
     }
 
     #[test]

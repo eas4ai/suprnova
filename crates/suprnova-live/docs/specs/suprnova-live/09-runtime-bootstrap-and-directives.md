@@ -128,7 +128,10 @@ Acceptance criteria:
   pass positional literal arguments, as in `remove(42)` or
   `rename('draft', true)`: JSON numbers, strings in single or double quotes
   with JSON escapes plus `\'`, `true`, `false`, and `null`, comma-separated,
-  with JSON whitespace, at most 128. Each literal binds the action's
+  with JSON whitespace, at most 128. The action name follows the directive
+  token grammar (a lowercase letter, then lowercase letters, digits, `_`,
+  `.`, `:`, or `-`, at most 64 bytes), and the whole value is at most 2,048
+  UTF-16 units, on both sides. Each literal binds the action's
   declared parameter at its position, and a trailing optional parameter may
   be left out. The checker refuses too many literals, a missing required
   parameter, and a literal the parameter's codec refuses. The island root
