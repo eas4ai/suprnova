@@ -26,6 +26,7 @@ use hyper_util::rt::TokioIo;
 use sea_orm::{ConnectOptions, ConnectionTrait, Database};
 use sea_orm_migration::MigratorTrait;
 use suprnova::auth_flows::two_factor::migration::Migration as TwoFactorMigration;
+use suprnova::auth_flows::two_factor::migration_attempts::Migration as TwoFactorAttemptsMigration;
 use suprnova::auth_flows::two_factor::migration_replay::Migration as TwoFactorReplayMigration;
 use suprnova::auth_flows::{TwoFactor, TwoFactorUser};
 use suprnova::database::DbConnection;
@@ -75,6 +76,7 @@ impl MigratorTrait for TwoFactorMigrator {
         vec![
             Box::new(TwoFactorMigration),
             Box::new(TwoFactorReplayMigration),
+            Box::new(TwoFactorAttemptsMigration),
         ]
     }
 }
@@ -538,4 +540,37 @@ async fn registering_an_existing_address_never_signs_in_as_its_owner() {
     let newcomer_id = newcomer.whoami().await;
     assert_ne!(newcomer_id, "guest");
     assert_ne!(newcomer_id, victim.id);
+}
+
+/// Second-factor failures have a counter of their own. A correct password
+/// check between wrong codes must not clear them: otherwise four wrong
+/// codes and one sign-in, repeated, guess codes forever.
+#[tokio::test]
+async fn a_password_success_does_not_clear_second_factor_failures() {
+    let account = setup().await;
+    let enrollment = TwoFactor::enroll(&account).await.expect("enroll");
+    let code = current_code(&enrollment.otpauth_url);
+    TwoFactor::confirm(&account, &code).await.expect("confirm");
+
+    let mut evaluated = 0;
+    let mut refused = 0;
+    for _round in 0..2 {
+        for _ in 0..4 {
+            match TwoFactor::verify(&account, "000000").await {
+                Ok(false) => evaluated += 1,
+                Err(error) if error.status_code() == 429 => refused += 1,
+                other => panic!("unexpected verify outcome: {other:?}"),
+            }
+        }
+        Auth::password()
+            .authenticate(&account.email, PASSWORD, None, None)
+            .await
+            .expect("the password is right");
+    }
+    assert_eq!(evaluated, 5, "the counter locks at the threshold");
+    assert_eq!(refused, 3, "every later guess is refused");
+    let error = TwoFactor::verify(&account, &code)
+        .await
+        .expect_err("the right code is refused while locked");
+    assert_eq!(error.status_code(), 429);
 }

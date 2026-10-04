@@ -32,8 +32,9 @@ use tokio::sync::Mutex;
 use suprnova::auth::events::{Authenticated, Login};
 use suprnova::auth_flows::events::{AccountLocked, TwoFactorChallengeFailed, TwoFactorChallenged};
 use suprnova::auth_flows::two_factor::migration::Migration as TwoFactorMigration;
+use suprnova::auth_flows::two_factor::migration_attempts::Migration as TwoFactorAttemptsMigration;
 use suprnova::auth_flows::two_factor::migration_replay::Migration as TwoFactorReplayMigration;
-use suprnova::auth_flows::{BruteForce, TwoFactor, TwoFactorUser};
+use suprnova::auth_flows::{TwoFactor, TwoFactorUser};
 use suprnova::events::testing::{assert_dispatched, assert_not_dispatched, dispatched_count};
 use suprnova::http::cookie::Cookie;
 use suprnova::middleware::{Middleware, Next};
@@ -82,6 +83,7 @@ impl MigratorTrait for LocalMigrator {
         vec![
             Box::new(TwoFactorMigration),
             Box::new(TwoFactorReplayMigration),
+            Box::new(TwoFactorAttemptsMigration),
             Box::new(CreateRememberTokensTable),
         ]
     }
@@ -249,6 +251,54 @@ fn current_csrf() -> String {
     suprnova::session::session()
         .map(|s| s.csrf_token)
         .expect("session scope must be installed")
+}
+
+/// Start a challenge for `user_id` and submit `code`, in one request.
+async fn submit_challenge(user_id: &str, code: &str) -> Result<suprnova::User, FrameworkError> {
+    let user_id = user_id.to_owned();
+    let code = code.to_owned();
+    run_in_request(async move {
+        TwoFactor::start_challenge(&user_id, false)
+            .await
+            .expect("start_challenge");
+        TwoFactor::complete_challenge(&code).await
+    })
+    .await
+}
+
+fn status_of(outcome: &Result<suprnova::User, FrameworkError>) -> u16 {
+    outcome
+        .as_ref()
+        .err()
+        .map_or(200, FrameworkError::status_code)
+}
+
+async fn execute(sql: &str) {
+    use sea_orm::ConnectionTrait;
+    suprnova::DB::connection()
+        .unwrap()
+        .inner()
+        .execute_unprepared(sql)
+        .await
+        .expect("test SQL");
+}
+
+/// Second-factor attempt rows of `user_id`: settled failures when
+/// `failed`, pending reservations otherwise.
+async fn attempt_rows(user_id: &str, failed: bool) -> i64 {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let row = suprnova::DB::connection()
+        .unwrap()
+        .inner()
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT COUNT(*) AS n FROM two_factor_attempts WHERE user_id = ? AND failed = ?",
+            [user_id.into(), failed.into()],
+        ))
+        .await
+        .expect("count attempts")
+        .expect("one row");
+    row.try_get::<i64>("", "n").expect("count")
 }
 
 /// Helper: register a fresh magnetar user + enroll/confirm 2FA against
@@ -1283,42 +1333,19 @@ fn complete_challenge_with_bad_code_records_single_brute_force_attempt() {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
-        let (user_id, email, _otpauth_url) = register_and_enroll("bf-single").await;
+        let (user_id, _email, _otpauth_url) = register_and_enroll("bf-single-count").await;
 
-        // Baseline: zero failed attempts.
-        let before = BruteForce::get_lockout_status(&email).await.unwrap();
-        assert_eq!(
-            before.failed_attempts, 0,
-            "fresh user must start with zero failed attempts"
-        );
-
-        run_in_request(async {
-            TwoFactor::start_challenge(&user_id, false)
-                .await
-                .expect("start_challenge");
-            // "000000" is overwhelmingly likely to not be the current
-            // TOTP and not a recovery code (recovery codes are 8-char
-            // alnum). Both validation paths reject it.
-            let err = TwoFactor::complete_challenge("000000")
-                .await
-                .expect_err("bad code must fail");
-            assert_eq!(err.status_code(), 401, "wrong code is 401, not 429");
-        })
-        .await;
-
-        // The single bad submission must count as ONE attempt, not two
-        // (one from verify failing + one from consume_recovery_code
-        // failing). The fix factors out silent verify/consume_recovery
-        // cores and records the canonical attempt at the outer layer.
-        let after = BruteForce::get_lockout_status(&email).await.unwrap();
-        assert_eq!(
-            after.failed_attempts, 1,
-            "bad code must record exactly one failed attempt; got {}",
-            after.failed_attempts
-        );
+        // Each bad submission tries both the TOTP and the recovery-code
+        // form, and must count as ONE attempt: five are evaluated before
+        // the lock, not three.
+        let mut statuses = Vec::new();
+        for _ in 0..6 {
+            statuses.push(status_of(&submit_challenge(&user_id, "000000").await));
+        }
+        assert_eq!(statuses, [401, 401, 401, 401, 401, 429]);
+        assert_eq!(attempt_rows(&user_id, true).await, 5);
     });
 }
-
 #[test]
 fn complete_challenge_fails_closed_when_attempt_admission_cannot_persist() {
     Lazy::force(&SETUP);
@@ -1326,22 +1353,28 @@ fn complete_challenge_fails_closed_when_attempt_admission_cannot_persist() {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
-        let (user_id, _email, _otpauth_url) = register_and_enroll("admission-write-failure").await;
-        magnetar_auth::fail_next_attempt_write();
-
-        run_in_request(async {
-            TwoFactor::start_challenge(&user_id, false)
-                .await
-                .expect("start_challenge");
-            let error = TwoFactor::complete_challenge("invalid-code")
-                .await
-                .expect_err("an unavailable attempt store must close challenge completion");
-            assert_eq!(error.status_code(), 503);
-        })
+        let (user_id, _email, otpauth_url) = register_and_enroll("admission-write-failure").await;
+        execute(&format!(
+            "CREATE TRIGGER refuse_attempt_insert BEFORE INSERT ON two_factor_attempts \
+             WHEN NEW.user_id = '{user_id}' \
+             BEGIN SELECT RAISE(ABORT, 'injected attempt write failure'); END"
+        ))
         .await;
+        let code = totp_code_for(&otpauth_url);
+        let outcome = submit_challenge(&user_id, &code).await;
+        execute("DROP TRIGGER refuse_attempt_insert").await;
+
+        assert_eq!(
+            status_of(&outcome),
+            503,
+            "an unavailable attempt store must close challenge completion"
+        );
+        // The code was never evaluated, so it still works.
+        submit_challenge(&user_id, &code)
+            .await
+            .expect("the unread code is still valid");
     });
 }
-
 #[test]
 fn complete_challenge_cancels_attempt_after_totp_read_error() {
     Lazy::force(&SETUP);
@@ -1360,27 +1393,19 @@ fn complete_challenge_cancels_attempt_after_totp_read_error() {
         row.secret = Set("not-valid-ciphertext".to_owned());
         row.update(db.inner()).await.unwrap();
 
-        run_in_request(async {
-            TwoFactor::start_challenge(&user_id, false)
-                .await
-                .expect("start_challenge");
-            TwoFactor::complete_challenge("000000")
-                .await
-                .expect_err("corrupt TOTP state must fail");
-        })
-        .await;
+        submit_challenge(&user_id, "000000")
+            .await
+            .expect_err("corrupt TOTP state must fail");
 
         assert_eq!(
-            BruteForce::get_lockout_status(&email)
-                .await
-                .unwrap()
-                .failed_attempts,
-            0
+            attempt_rows(&user_id, false).await,
+            0,
+            "no reservation left"
         );
+        assert_eq!(attempt_rows(&user_id, true).await, 0, "no failure counted");
         assert_not_dispatched::<AccountLocked>(|event| event.email == email);
     });
 }
-
 #[test]
 fn complete_challenge_cancels_attempt_after_recovery_read_error() {
     Lazy::force(&SETUP);
@@ -1399,27 +1424,19 @@ fn complete_challenge_cancels_attempt_after_recovery_read_error() {
         row.recovery_codes = Set(Some("not-valid-ciphertext".to_owned()));
         row.update(db.inner()).await.unwrap();
 
-        run_in_request(async {
-            TwoFactor::start_challenge(&user_id, false)
-                .await
-                .expect("start_challenge");
-            TwoFactor::complete_challenge("000000")
-                .await
-                .expect_err("corrupt recovery state must fail");
-        })
-        .await;
+        submit_challenge(&user_id, "000000")
+            .await
+            .expect_err("corrupt recovery state must fail");
 
         assert_eq!(
-            BruteForce::get_lockout_status(&email)
-                .await
-                .unwrap()
-                .failed_attempts,
-            0
+            attempt_rows(&user_id, false).await,
+            0,
+            "no reservation left"
         );
+        assert_eq!(attempt_rows(&user_id, true).await, 0, "no failure counted");
         assert_not_dispatched::<AccountLocked>(|event| event.email == email);
     });
 }
-
 #[test]
 fn cancellation_failure_returns_state_uncertain_and_keeps_capacity_reserved() {
     Lazy::force(&SETUP);
@@ -1429,9 +1446,7 @@ fn cancellation_failure_returns_state_uncertain_and_keeps_capacity_reserved() {
 
         let (user_id, email, _otpauth_url) = register_and_enroll("cancel-failure").await;
         for _ in 0..4 {
-            BruteForce::record_failed_attempt(&email, None)
-                .await
-                .expect("seed failed attempt");
+            assert_eq!(status_of(&submit_challenge(&user_id, "000000").await), 401);
         }
         let db = suprnova::DB::connection().unwrap();
         let row = suprnova::auth_flows::two_factor::entity::Entity::find_by_id(user_id.clone())
@@ -1442,42 +1457,35 @@ fn cancellation_failure_returns_state_uncertain_and_keeps_capacity_reserved() {
         let mut row = row.into_active_model();
         row.secret = Set("not-valid-ciphertext".to_owned());
         row.update(db.inner()).await.unwrap();
-        magnetar_auth::fail_next_attempt_cancel();
-
-        run_in_request(async {
-            TwoFactor::start_challenge(&user_id, false)
-                .await
-                .expect("start_challenge");
-            let error = TwoFactor::complete_challenge("000000")
-                .await
-                .expect_err("failed cancellation must close with uncertain state");
-            assert_eq!(error.status_code(), 503);
-        })
+        execute(&format!(
+            "CREATE TRIGGER refuse_attempt_release BEFORE DELETE ON two_factor_attempts \
+             WHEN OLD.user_id = '{user_id}' \
+             BEGIN SELECT RAISE(ABORT, 'injected attempt release failure'); END"
+        ))
         .await;
+        let outcome = submit_challenge(&user_id, "000000").await;
+        execute("DROP TRIGGER refuse_attempt_release").await;
 
         assert_eq!(
-            BruteForce::get_lockout_status(&email)
-                .await
-                .unwrap()
-                .failed_attempts,
-            4,
-            "a pending reservation is not a finalized public failure"
+            status_of(&outcome),
+            503,
+            "a failed release must close with uncertain state"
+        );
+        assert_eq!(attempt_rows(&user_id, true).await, 4);
+        assert_eq!(
+            attempt_rows(&user_id, false).await,
+            1,
+            "the unreleased reservation stays counted"
         );
         assert_not_dispatched::<AccountLocked>(|event| event.email == email);
 
-        run_in_request(async {
-            TwoFactor::start_challenge(&user_id, false)
-                .await
-                .expect("restart challenge");
-            let error = TwoFactor::complete_challenge("000000")
-                .await
-                .expect_err("uncertain pending reservation must retain admission capacity");
-            assert_eq!(error.status_code(), 429);
-        })
-        .await;
+        assert_eq!(
+            status_of(&submit_challenge(&user_id, "000000").await),
+            429,
+            "the uncertain reservation keeps holding admission capacity"
+        );
     });
 }
-
 #[test]
 fn complete_challenge_caps_concurrent_proof_evaluation_at_attempt_limit() {
     Lazy::force(&SETUP);
@@ -1486,52 +1494,33 @@ fn complete_challenge_caps_concurrent_proof_evaluation_at_attempt_limit() {
         let _fake = EventFacade::fake();
 
         const ATTEMPT_LIMIT: usize = 5;
-        let (user_id, _email, otpauth_url) = register_and_enroll("admission-race").await;
-        let valid_code = totp_code_for(&otpauth_url);
-        let mut codes = (0..(ATTEMPT_LIMIT + 1))
-            .map(|index| format!("invalid-{index}"))
-            .collect::<Vec<_>>();
-        codes.push(valid_code);
-        let _barrier = magnetar_auth::synchronize_attempt_admission(codes.len());
+        let (user_id, _email, _otpauth_url) = register_and_enroll("admission-race").await;
 
         let mut tasks = Vec::new();
-        for code in codes {
+        for index in 0..(ATTEMPT_LIMIT + 2) {
             let user_id = user_id.clone();
             tasks.push(tokio::spawn(async move {
-                run_in_request(async move {
-                    TwoFactor::start_challenge(&user_id, false)
-                        .await
-                        .expect("start_challenge");
-                    TwoFactor::complete_challenge(&code).await
-                })
-                .await
+                submit_challenge(&user_id, &format!("invalid-{index}")).await
             }));
         }
 
         let mut statuses = Vec::new();
         for task in tasks {
-            statuses.push(match task.await.expect("challenge attempt task joins") {
-                Ok(_) => 200,
-                Err(error) => error.status_code(),
-            });
+            statuses.push(status_of(&task.await.expect("challenge attempt task joins")));
         }
 
         assert_eq!(
             statuses.iter().filter(|status| **status == 429).count(),
             2,
-            "requests beyond the atomic admission budget must be rejected before proof evaluation"
+            "requests beyond the atomic admission budget must be rejected before proof evaluation: {statuses:?}"
         );
         assert_eq!(
-            statuses
-                .iter()
-                .filter(|status| matches!(**status, 200 | 401))
-                .count(),
+            statuses.iter().filter(|status| **status == 401).count(),
             ATTEMPT_LIMIT,
-            "only admitted requests may evaluate the submitted proof"
+            "only admitted requests may evaluate the submitted proof: {statuses:?}"
         );
     });
 }
-
 #[test]
 fn threshold_crossing_invalid_challenge_dispatches_account_locked() {
     Lazy::force(&SETUP);
@@ -1541,99 +1530,34 @@ fn threshold_crossing_invalid_challenge_dispatches_account_locked() {
 
         let (user_id, email, _otpauth_url) = register_and_enroll("admission-lock-event").await;
         for _ in 0..4 {
-            BruteForce::record_failed_attempt(&email, None)
-                .await
-                .expect("seed failed attempt");
+            assert_eq!(
+                status_of(&submit_challenge(&user_id, "invalid-code").await),
+                401
+            );
         }
-
-        run_in_request(async {
-            TwoFactor::start_challenge(&user_id, false)
-                .await
-                .expect("start_challenge");
-            let error = TwoFactor::complete_challenge("invalid-code")
-                .await
-                .expect_err("invalid threshold attempt must fail");
-            assert_eq!(error.status_code(), 401);
-        })
-        .await;
-
-        assert_eq!(
-            dispatched_count::<AccountLocked>(|event| event.email == email),
-            1,
-            "invalid threshold finalization must emit exactly one lock event"
-        );
-    });
-}
-
-#[test]
-fn finalized_failure_repairs_lock_and_dispatches_event_on_next_admission() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
-        let _serial = TEST_LOCK.lock().await;
-        let _fake = EventFacade::fake();
-
-        let (user_id, email, _otpauth_url) = register_and_enroll("admission-lock-repair").await;
-        for _ in 0..4 {
-            BruteForce::record_failed_attempt(&email, None)
-                .await
-                .expect("seed failed attempt");
-        }
-        magnetar_auth::fail_next_attempt_lock();
-
-        run_in_request(async {
-            TwoFactor::start_challenge(&user_id, false)
-                .await
-                .expect("start challenge before scripted lock failure");
-            let error = TwoFactor::complete_challenge("invalid-code")
-                .await
-                .expect_err("uncertain durable lock transition must fail closed");
-            assert_eq!(error.status_code(), 503);
-        })
-        .await;
         assert_not_dispatched::<AccountLocked>(|event| event.email == email);
-        assert_eq!(
-            BruteForce::get_lockout_status(&email)
-                .await
-                .unwrap()
-                .failed_attempts,
-            5,
-            "the failed proof is durable even though the user lock write failed"
-        );
 
-        run_in_request(async {
-            TwoFactor::start_challenge(&user_id, false)
-                .await
-                .expect("restart challenge for lock repair");
-            let error = TwoFactor::complete_challenge("invalid-code")
-                .await
-                .expect_err("repaired locked account remains rejected");
-            assert_eq!(error.status_code(), 429);
-        })
-        .await;
+        assert_eq!(
+            status_of(&submit_challenge(&user_id, "invalid-code").await),
+            401
+        );
         assert_eq!(
             dispatched_count::<AccountLocked>(|event| event.email == email),
             1,
-            "the rejected admission that wins the repair transition owns the event"
+            "the failure that locks emits exactly one lock event"
         );
 
-        run_in_request(async {
-            TwoFactor::start_challenge(&user_id, false)
-                .await
-                .expect("restart challenge after repair");
-            let error = TwoFactor::complete_challenge("invalid-code")
-                .await
-                .expect_err("already-repaired locked account remains rejected");
-            assert_eq!(error.status_code(), 429);
-        })
-        .await;
+        assert_eq!(
+            status_of(&submit_challenge(&user_id, "invalid-code").await),
+            429
+        );
         assert_eq!(
             dispatched_count::<AccountLocked>(|event| event.email == email),
             1,
-            "subsequent rejected admissions must not duplicate the lock event"
+            "refused attempts must not repeat the lock event"
         );
     });
 }
-
 #[test]
 fn threshold_reservation_with_valid_challenge_resets_without_lock_event() {
     Lazy::force(&SETUP);
@@ -1643,32 +1567,21 @@ fn threshold_reservation_with_valid_challenge_resets_without_lock_event() {
 
         let (user_id, email, otpauth_url) = register_and_enroll("admission-valid-reset").await;
         for _ in 0..4 {
-            BruteForce::record_failed_attempt(&email, None)
-                .await
-                .expect("seed failed attempt");
+            assert_eq!(status_of(&submit_challenge(&user_id, "000000").await), 401);
         }
-
-        run_in_request(async {
-            TwoFactor::start_challenge(&user_id, false)
-                .await
-                .expect("start_challenge");
-            TwoFactor::complete_challenge(&totp_code_for(&otpauth_url))
-                .await
-                .expect("valid threshold reservation completes");
-        })
-        .await;
+        submit_challenge(&user_id, &totp_code_for(&otpauth_url))
+            .await
+            .expect("valid threshold reservation completes");
 
         assert_not_dispatched::<AccountLocked>(|event| event.email == email);
         assert_eq!(
-            BruteForce::get_lockout_status(&email)
-                .await
-                .unwrap()
-                .failed_attempts,
-            0
+            attempt_rows(&user_id, true).await,
+            0,
+            "the success cleared the failures"
         );
+        assert_eq!(attempt_rows(&user_id, false).await, 0);
     });
 }
-
 #[test]
 fn complete_challenge_with_bad_code_dispatches_failed_event_and_no_login() {
     Lazy::force(&SETUP);
@@ -1709,43 +1622,34 @@ fn complete_challenge_rejects_locked_account_without_checking_code() {
 
         let (user_id, email, otpauth_url) = register_and_enroll("locked").await;
         let captured_user_id = user_id.clone();
-
-        // Drive the failed-attempt counter past the default threshold
-        // (5) so the account is genuinely locked. Mirrors the lockout
-        // setup pattern in `tests/brute_force.rs`.
-        for _ in 0..6 {
-            BruteForce::record_failed_attempt(&email, None)
-                .await
-                .expect("record_failed_attempt");
+        for _ in 0..5 {
+            assert_eq!(status_of(&submit_challenge(&user_id, "000000").await), 401);
         }
-        assert!(
-            BruteForce::is_locked(&email).await.unwrap(),
-            "lockout precondition: account must be locked before complete_challenge"
-        );
 
-        // Even the CORRECT TOTP code must be rejected with 429 - a
-        // locked account cannot bypass the lockout by submitting the
-        // right code. This is the symmetric counterpart of the
-        // password path's `LoginThrottleMiddleware` gate.
-        run_in_request(async {
-            TwoFactor::start_challenge(&user_id, false)
-                .await
-                .expect("start_challenge");
-            let valid_totp = totp_code_for(&otpauth_url);
-            let err = TwoFactor::complete_challenge(&valid_totp)
-                .await
-                .expect_err("locked account must be rejected");
-            assert_eq!(
-                err.status_code(),
-                429,
-                "locked-account rejection must be 429 Too Many Requests, not 401"
-            );
-        })
-        .await;
+        // Even the CORRECT TOTP code must be rejected with 429 - a locked
+        // account cannot bypass the lockout by submitting the right code.
+        let valid_totp = totp_code_for(&otpauth_url);
+        let outcome = submit_challenge(&user_id, &valid_totp).await;
+        assert_eq!(
+            status_of(&outcome),
+            429,
+            "locked-account rejection must be 429 Too Many Requests, not 401"
+        );
 
         assert_dispatched::<TwoFactorChallengeFailed>(|e| e.user_id == captured_user_id);
         assert_not_dispatched::<Login>(|_| true);
         assert_not_dispatched::<Authenticated>(|_| true);
         assert_not_dispatched::<TwoFactorChallenged>(|_| true);
+
+        // The refused attempt never read the code: after an unlock the
+        // same code completes the challenge.
+        let tf_user = ChallengeUser {
+            user_id: user_id.clone(),
+            email,
+        };
+        assert!(TwoFactor::unlock(&tf_user).await.unwrap());
+        submit_challenge(&user_id, &valid_totp)
+            .await
+            .expect("the unread code is still valid");
     });
 }

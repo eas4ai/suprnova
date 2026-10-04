@@ -9,6 +9,7 @@
 
 use sea_orm_migration::prelude::*;
 use suprnova::auth_flows::two_factor::migration::Migration as TwoFactorMigration;
+use suprnova::auth_flows::two_factor::migration_attempts::Migration as TwoFactorAttemptsMigration;
 use suprnova::auth_flows::two_factor::migration_replay::Migration as TwoFactorReplayMigration;
 use suprnova::auth_flows::{TwoFactor, TwoFactorUser};
 use suprnova::testing::TestDatabase;
@@ -35,6 +36,7 @@ impl sea_orm_migration::MigratorTrait for TestMigrator {
         vec![
             Box::new(TwoFactorMigration),
             Box::new(TwoFactorReplayMigration),
+            Box::new(TwoFactorAttemptsMigration),
             Box::new(CreateRememberTokensTable),
         ]
     }
@@ -1002,4 +1004,145 @@ async fn verify_replay_state_resets_on_re_enrollment() {
         TwoFactor::verify(&user, &live2).await.unwrap(),
         "re-enrollment must reset replay state so verify succeeds against the new secret"
     );
+}
+
+// ---- Brute-force lockout without a Magnetar engine -------------------------
+//
+// This file runs with no Magnetar engine installed. The second factor keeps
+// its own attempt counter, so the lockout holds here too.
+
+async fn enrolled_user(id: &str) -> (FakeUser, suprnova::auth_flows::EnrollmentResponse) {
+    let user = FakeUser {
+        id: id.into(),
+        email: format!("{id}@example.com"),
+    };
+    let resp = TwoFactor::enroll(&user).await.expect("enroll");
+    TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .expect("confirm");
+    (user, resp)
+}
+
+/// The manual gates login on `verify`. Without an engine it must still
+/// stop after the threshold and refuse even the right code.
+#[tokio::test]
+async fn verify_locks_without_a_magnetar_engine() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let (user, resp) = enrolled_user("no-engine-verify").await;
+
+    for _ in 0..5 {
+        assert!(!TwoFactor::verify(&user, "000000").await.unwrap());
+    }
+    let live = totp_code_for(&resp.otpauth_url);
+    let error = TwoFactor::verify(&user, &live)
+        .await
+        .expect_err("a locked second factor refuses the right code");
+    assert_eq!(error.status_code(), 429);
+    let error = TwoFactor::consume_recovery_code(&user, &resp.recovery_codes[0])
+        .await
+        .expect_err("recovery codes share the lock");
+    assert_eq!(error.status_code(), 429);
+}
+
+/// Parallel wrong confirmations are each reserved before their code is
+/// read, so no more than the threshold is evaluated.
+#[tokio::test]
+async fn parallel_wrong_confirmations_evaluate_at_most_the_threshold() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let user = FakeUser {
+        id: "parallel-confirm".into(),
+        email: "parallel-confirm@example.com".into(),
+    };
+    TwoFactor::enroll(&user).await.expect("enroll");
+
+    let guesses = (0..8).map(|_| TwoFactor::confirm(&user, "000000"));
+    let outcomes = futures::future::join_all(guesses).await;
+    let statuses: Vec<u16> = outcomes
+        .iter()
+        .map(|outcome| outcome.as_ref().err().map_or(200, |e| e.status_code()))
+        .collect();
+    assert_eq!(
+        statuses.iter().filter(|status| **status == 401).count(),
+        5,
+        "only the threshold of guesses is evaluated: {statuses:?}"
+    );
+    assert_eq!(
+        statuses.iter().filter(|status| **status == 429).count(),
+        3,
+        "every guess past it is refused: {statuses:?}"
+    );
+}
+
+/// Re-enrollment and recovery-code rotation take a proof too, and share the
+/// counter: wrong proofs lock both, and the right proof is then refused.
+#[tokio::test]
+async fn re_enroll_and_regenerate_share_the_lock() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let (user, resp) = enrolled_user("proof-paths-lock").await;
+
+    for _ in 0..3 {
+        let error = TwoFactor::re_enroll(&user, "000000")
+            .await
+            .expect_err("a wrong proof is rejected");
+        assert_eq!(error.status_code(), 401);
+    }
+    for _ in 0..2 {
+        let error = TwoFactor::regenerate_recovery_codes(&user, "000000")
+            .await
+            .expect_err("a wrong proof is rejected");
+        assert_eq!(error.status_code(), 401);
+    }
+    let error = TwoFactor::regenerate_recovery_codes(&user, &resp.recovery_codes[0])
+        .await
+        .expect_err("locked");
+    assert_eq!(error.status_code(), 429);
+    let error = TwoFactor::re_enroll(&user, &resp.recovery_codes[0])
+        .await
+        .expect_err("locked");
+    assert_eq!(error.status_code(), 429);
+}
+
+/// A lockout store that cannot record an attempt closes every proof path
+/// with 503 instead of evaluating the code unthrottled.
+#[tokio::test]
+async fn an_unavailable_attempt_store_fails_closed() {
+    ensure_crypt();
+    let db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let (user, resp) = enrolled_user("store-down").await;
+    let pending = FakeUser {
+        id: "store-down-pending".into(),
+        email: "store-down-pending@example.com".into(),
+    };
+    TwoFactor::enroll(&pending).await.expect("enroll pending");
+    db.execute_unprepared("DROP TABLE two_factor_attempts")
+        .await
+        .unwrap();
+
+    let live = totp_code_for(&resp.otpauth_url);
+    let statuses = [
+        TwoFactor::verify(&user, &live)
+            .await
+            .err()
+            .map(|e| e.status_code()),
+        TwoFactor::consume_recovery_code(&user, &resp.recovery_codes[0])
+            .await
+            .err()
+            .map(|e| e.status_code()),
+        TwoFactor::re_enroll(&user, &live)
+            .await
+            .err()
+            .map(|e| e.status_code()),
+        TwoFactor::regenerate_recovery_codes(&user, &live)
+            .await
+            .err()
+            .map(|e| e.status_code()),
+        TwoFactor::confirm(&pending, "000000")
+            .await
+            .err()
+            .map(|e| e.status_code()),
+    ];
+    assert_eq!(statuses, [Some(503); 5]);
 }

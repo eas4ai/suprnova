@@ -18,8 +18,9 @@ Five surfaces ship under the namespace:
   the installed Magnetar engine.
 - `TwoFactor` is the framework-owned TOTP facade over
   `two_factor_credentials`. It provides enrollment, confirmation, verification,
-  recovery codes, secret rotation, challenge promotion, and timestep replay
-  protection.
+  recovery codes, secret rotation, challenge promotion, timestep replay
+  protection, and a second-factor brute-force counter of its own in
+  `two_factor_attempts`.
 - `remember_me` re-exports the legacy framework remember module for namespace
   compatibility. When Magnetar is installed, normal `Auth` and
   `SessionMiddleware` remember flows use Magnetar credentials instead.
@@ -165,7 +166,7 @@ remember-revocation results.
 
 ### Registering the 2FA migrations
 
-The framework ships the schema; your app opts in by listing both
+The framework ships the schema; your app opts in by listing all three
 migrations in its own migrator:
 
 ```rust
@@ -183,15 +184,22 @@ impl MigratorTrait for Migrator {
             Box::new(suprnova::auth_flows::two_factor::migration::Migration),
             // Adds `last_used_timestep` for TOTP replay protection.
             Box::new(suprnova::auth_flows::two_factor::migration_replay::Migration),
+            // Creates `two_factor_attempts`, the second-factor
+            // brute-force counter.
+            Box::new(suprnova::auth_flows::two_factor::migration_attempts::Migration),
         ]
     }
 }
 ```
 
-Both are idempotent against an already-applied database (the v1 uses
-`CREATE TABLE IF NOT EXISTS`; the v2 is a column add). Re-running
-`suprnova migrate` against a production database that already has the
-schema is a no-op.
+The migrations are idempotent against an already-applied database (the
+v1 and the attempt table use `CREATE TABLE IF NOT EXISTS`; the v2 is a
+column add). Re-running `suprnova migrate` against a production database
+that already has the schema is a no-op.
+
+An application that upgrades from a release without the attempt counter
+must add the third migration. Until it runs, every `TwoFactor` proof path
+answers `503`: the attempt cannot be counted, so no code is evaluated.
 
 ### Environment
 
@@ -653,13 +661,25 @@ if !ok {
 }
 ```
 
-`verify` reserves one brute-force attempt against the user's email
-before it reads the code, and a wrong code turns the reservation into a
-failed attempt. Once the account is locked, `verify` returns `429 Too Many
-Requests` without evaluating the code, so the right code cannot open a
-locked account either. `consume_recovery_code` shares the same gate. The
-lockout lives in the installed Magnetar engine; without one, both methods
-check codes with no lockout.
+Every method that checks a code or a recovery code - `verify`,
+`consume_recovery_code`, `confirm`, `re_enroll`,
+`regenerate_recovery_codes` and `complete_challenge` - reserves one
+attempt in the second-factor counter before it reads the code. A wrong
+code turns the reservation into a failure. Five failures inside fifteen
+minutes lock the second factor: every one of those methods then returns
+`429 Too Many Requests` without evaluating the code, so the right code
+cannot open a locked account either. A correct code clears the failures,
+and parallel guesses cannot all pass one status read. When the counter
+cannot record an attempt, the methods answer `503` rather than evaluate
+the code unthrottled.
+
+The counter is the framework's `two_factor_attempts` table, keyed by the
+user id. It is separate from the per-email password lockout that
+`BruteForce` and `LoginThrottleMiddleware` use: a successful password
+check does not clear second-factor failures, and the lock works with no
+Magnetar engine installed. A wrong code fires `AccountLocked` once, on
+the failure that sets the lock. `TwoFactor::unlock(&user)` clears the
+counter early and fires `AccountUnlocked` when a lock was in effect.
 
 `enroll` returns plaintext recovery codes **exactly once**. There is
 no API to retrieve them later - the encrypted column is one-way from
@@ -696,7 +716,7 @@ replay. A plain
 read-modify-write would be a TOCTOU race - both verifies read the
 pre-stamp row, both validate the same code, both stamp, both succeed.
 Concurrent racers are also counted as failed attempts so the
-brute-force counter records them.
+second-factor counter records them.
 
 ### Recovery codes
 
@@ -737,7 +757,7 @@ re-pairing. Errors:
 - `400` - no confirmed enrollment exists; call `enroll`/`confirm` first.
 - `401` - `proof` validates as neither a TOTP code nor an unused
   recovery code.
-- `429` - the account is locked by brute-force throttling.
+- `429` - wrong codes have locked the second factor.
 
 To rotate the **secret** (re-pair to a new device) without disabling
 2FA first:
@@ -865,23 +885,21 @@ path first and falls back to consuming a recovery code, so a user who
 lost their authenticator can still get in. Each recovery code is
 single-use.
 
-**Brute-force linkage.** Failed challenge codes feed the per-account
-brute-force counter, the same way bare `TwoFactor::verify` does. An
-attacker grinding the
-challenge form will trip `AccountLocked` after the configured
-threshold. A single bad submission counts as **one** failed attempt
-even though `complete_challenge` tries both the TOTP and recovery-code
-paths internally - the silent-validation cores skip the brute-force
-counter so the outer layer records the canonical attempt exactly once.
+**Brute-force linkage.** Failed challenge codes feed the second-factor
+counter, the same one bare `TwoFactor::verify` uses. An attacker
+grinding the challenge form trips `AccountLocked` after five failures.
+A single bad submission counts as **one** failed attempt even though
+`complete_challenge` tries both the TOTP and recovery-code forms. Signing
+in with the password again does not clear the count.
 
 **Lockout gate.** `complete_challenge` reserves its attempt up front
 and returns `429 Too Many Requests` if the account is already locked -
 even when the submitted code is correct. Without this in-method gate an
 attacker who tripped the lockout could still get in by submitting the
-right code on the next request. `verify` and `consume_recovery_code`
-apply the same gate. The password path's `LoginThrottleMiddleware`
-enforces the same constraint at the route layer; composing it in front
-of the challenge POST route is fine - both gates are idempotent.
+right code on the next request. Every other code-checking method applies
+the same gate. `LoginThrottleMiddleware` guards the password path with
+the separate password lockout; composing it in front of the challenge
+POST route is fine.
 
 **Failure event.** `complete_challenge` dispatches
 `TwoFactorChallengeFailed { user_id }` on a bad code (or a locked

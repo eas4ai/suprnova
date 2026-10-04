@@ -1,6 +1,9 @@
 #![cfg(feature = "testing")]
 
-//! Cross-facade lockout test for failed two-factor and recovery-code attempts.
+//! Lockout of the two-factor proof paths with a Magnetar engine installed.
+//!
+//! Second-factor failures have a counter of their own, keyed by the
+//! enrollment's user id; these tests drive it through the public facade.
 
 use crate::magnetar_auth;
 
@@ -12,8 +15,9 @@ use std::sync::OnceLock;
 use tokio::runtime::Runtime;
 
 use suprnova::auth_flows::two_factor::migration::Migration as TwoFactorMigration;
+use suprnova::auth_flows::two_factor::migration_attempts::Migration as TwoFactorAttemptsMigration;
 use suprnova::auth_flows::two_factor::migration_replay::Migration as TwoFactorReplayMigration;
-use suprnova::auth_flows::{BruteForce, TwoFactor, TwoFactorUser};
+use suprnova::auth_flows::{TwoFactor, TwoFactorUser};
 use suprnova::container::App;
 use suprnova::database::DbConnection;
 
@@ -44,6 +48,7 @@ static SETUP: Lazy<()> = Lazy::new(|| {
                 vec![
                     Box::new(TwoFactorMigration),
                     Box::new(TwoFactorReplayMigration),
+                    Box::new(TwoFactorAttemptsMigration),
                 ]
             }
         }
@@ -92,79 +97,44 @@ fn totp_code_for(otpauth_url: &str) -> String {
     .expect("generate")
 }
 
+async fn enrolled(id: &str) -> (FakeUser, suprnova::auth_flows::EnrollmentResponse) {
+    let user = FakeUser {
+        id: format!("{id}-uid"),
+        email: format!("{id}@example.com"),
+    };
+    let resp = TwoFactor::enroll(&user).await.expect("enroll");
+    TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .expect("confirm");
+    (user, resp)
+}
+
 #[test]
 #[serial]
-fn failed_2fa_verifies_lock_the_account() {
+fn failed_2fa_verifies_lock_the_second_factor() {
     Lazy::force(&SETUP);
 
     RT.block_on(async {
-        // Register through magnetar so the user row exists for the
-        // brute-force email lookups.
-        suprnova::Auth::password()
-            .register("victim-bf-2fa@example.com", "longpassword123")
-            .await
-            .expect("register")
-            .created()
-            .expect("registration creates a new account");
+        let (user, resp) = enrolled("victim-bf-2fa").await;
 
-        let user = FakeUser {
-            id: "victim-bf-2fa-uid".into(),
-            email: "victim-bf-2fa@example.com".into(),
-        };
-        let resp = TwoFactor::enroll(&user).await.expect("enroll");
-        TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
-            .await
-            .expect("confirm");
-
-        // Precondition.
-        assert!(
-            !BruteForce::is_locked(user.email()).await.unwrap(),
-            "freshly-enrolled account must not be locked"
-        );
-
-        // 5 wrong codes = default BruteForceProtectionConfig threshold.
-        // Each failed verify records a brute-force attempt; the 5th
-        // crosses the lockout.
+        // Five wrong codes reach the threshold; each is evaluated.
         for _ in 0..5 {
-            let _ = TwoFactor::verify(&user, "000000").await.unwrap();
+            assert!(!TwoFactor::verify(&user, "000000").await.unwrap());
         }
-
-        assert!(
-            BruteForce::is_locked(user.email()).await.unwrap(),
-            "5 failed 2FA verifies must lock the account via BruteForce"
-        );
+        let error = TwoFactor::verify(&user, &totp_code_for(&resp.otpauth_url))
+            .await
+            .expect_err("the sixth attempt is refused");
+        assert_eq!(error.status_code(), 429);
     });
 }
 
 #[test]
 #[serial]
-fn failed_recovery_code_consumes_lock_the_account() {
+fn failed_recovery_code_consumes_lock_the_second_factor() {
     Lazy::force(&SETUP);
 
     RT.block_on(async {
-        suprnova::Auth::password()
-            .register("victim-rec-bf@example.com", "longpassword123")
-            .await
-            .expect("register")
-            .created()
-            .expect("registration creates a new account");
-
-        let user = FakeUser {
-            id: "victim-rec-bf-uid".into(),
-            email: "victim-rec-bf@example.com".into(),
-        };
-        let resp = TwoFactor::enroll(&user).await.expect("enroll");
-        TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
-            .await
-            .expect("confirm");
-
-        // Clear any failed counter from the previous test (#[serial]
-        // gives ordering but the static magnetar instance persists across
-        // tests in this binary - a residual counter from a prior file
-        // would let this test pass for the wrong reason).
-        BruteForce::reset_attempts(user.email()).await.unwrap();
-        BruteForce::unlock_account(user.email()).await.unwrap();
-        assert!(!BruteForce::is_locked(user.email()).await.unwrap());
+        let (user, resp) = enrolled("victim-rec-bf").await;
 
         for _ in 0..5 {
             let consumed = TwoFactor::consume_recovery_code(&user, "no-such-code-zzz")
@@ -172,11 +142,10 @@ fn failed_recovery_code_consumes_lock_the_account() {
                 .unwrap();
             assert!(!consumed);
         }
-
-        assert!(
-            BruteForce::is_locked(user.email()).await.unwrap(),
-            "5 failed recovery-code consumes must lock the account via BruteForce"
-        );
+        let error = TwoFactor::consume_recovery_code(&user, &resp.recovery_codes[0])
+            .await
+            .expect_err("the sixth attempt is refused");
+        assert_eq!(error.status_code(), 429);
     });
 }
 
@@ -186,83 +155,54 @@ fn successful_2fa_verify_resets_failed_attempts() {
     Lazy::force(&SETUP);
 
     RT.block_on(async {
-        suprnova::Auth::password()
-            .register("success-resets@example.com", "longpassword123")
-            .await
-            .expect("register")
-            .created()
-            .expect("registration creates a new account");
+        let (user, resp) = enrolled("success-resets").await;
 
-        let user = FakeUser {
-            id: "success-resets-uid".into(),
-            email: "success-resets@example.com".into(),
-        };
-        let resp = TwoFactor::enroll(&user).await.expect("enroll");
-        TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
-            .await
-            .expect("confirm");
-
-        // Pile up some failures - but stop one short of lockout.
-        BruteForce::reset_attempts(user.email()).await.unwrap();
-        BruteForce::unlock_account(user.email()).await.unwrap();
+        // Four failures, one short of the lock, then the right code.
         for _ in 0..4 {
-            let _ = TwoFactor::verify(&user, "000000").await.unwrap();
+            assert!(!TwoFactor::verify(&user, "000000").await.unwrap());
         }
-        let status_pre = BruteForce::get_lockout_status(user.email()).await.unwrap();
-        assert!(status_pre.failed_attempts >= 4);
-        assert!(!status_pre.is_locked);
-
-        // A successful verify clears the counter.
-        let live = totp_code_for(&resp.otpauth_url);
-        assert!(TwoFactor::verify(&user, &live).await.unwrap());
-
-        let status_post = BruteForce::get_lockout_status(user.email()).await.unwrap();
-        assert_eq!(
-            status_post.failed_attempts, 0,
-            "successful verify must reset the failed-attempt counter"
+        assert!(
+            TwoFactor::verify(&user, &totp_code_for(&resp.otpauth_url))
+                .await
+                .unwrap()
         );
+
+        // The success cleared them: four more wrong codes are evaluated
+        // rather than refused.
+        for _ in 0..4 {
+            assert!(!TwoFactor::verify(&user, "000000").await.unwrap());
+        }
     });
 }
 
-/// Five wrong codes through the direct `verify` primitive lock the account,
-/// and the lock then holds against the right code: `verify` refuses with 429
-/// instead of evaluating it, and the refusal does not reset the counter. The
-/// manual gates login on `verify`, so without this the TOTP space is
-/// guessable at request rate by anyone who knows the password.
+/// Five wrong codes through the direct `verify` primitive lock it, and the
+/// lock then holds against the right code: `verify` refuses with 429
+/// instead of evaluating it. The manual gates login on `verify`, so without
+/// this the TOTP space is guessable at request rate by anyone who knows the
+/// password.
 #[test]
 #[serial]
 fn verify_refuses_a_valid_code_once_the_account_is_locked() {
     Lazy::force(&SETUP);
 
     RT.block_on(async {
-        let user = FakeUser {
-            id: "locked-verify-uid".into(),
-            email: "locked-verify@example.com".into(),
-        };
-        let resp = TwoFactor::enroll(&user).await.expect("enroll");
-        TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
-            .await
-            .expect("confirm");
-        BruteForce::reset_attempts(user.email()).await.unwrap();
+        let (user, resp) = enrolled("locked-verify").await;
 
         for _ in 0..5 {
             assert!(!TwoFactor::verify(&user, "000000").await.unwrap());
         }
-        assert!(BruteForce::is_locked(user.email()).await.unwrap());
-
         let live = totp_code_for(&resp.otpauth_url);
         let error = TwoFactor::verify(&user, &live)
             .await
             .expect_err("a locked account must not accept even the right code");
         assert_eq!(error.status_code(), 429);
-        assert!(
-            BruteForce::is_locked(user.email()).await.unwrap(),
-            "the refused attempt must leave the lock in place"
-        );
 
-        // After an unlock the same code still verifies: the locked attempt
-        // never claimed its timestep.
-        BruteForce::unlock_account(user.email()).await.unwrap();
+        // After an admin unlock the same code still verifies: the refused
+        // attempt never claimed its timestep.
+        assert!(
+            TwoFactor::unlock(&user).await.unwrap(),
+            "the user was locked"
+        );
         assert!(TwoFactor::verify(&user, &live).await.unwrap());
     });
 }
@@ -275,15 +215,7 @@ fn consume_recovery_code_refuses_a_valid_code_once_the_account_is_locked() {
     Lazy::force(&SETUP);
 
     RT.block_on(async {
-        let user = FakeUser {
-            id: "locked-recovery-uid".into(),
-            email: "locked-recovery@example.com".into(),
-        };
-        let resp = TwoFactor::enroll(&user).await.expect("enroll");
-        TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
-            .await
-            .expect("confirm");
-        BruteForce::reset_attempts(user.email()).await.unwrap();
+        let (user, resp) = enrolled("locked-recovery").await;
 
         for _ in 0..5 {
             assert!(
@@ -292,16 +224,13 @@ fn consume_recovery_code_refuses_a_valid_code_once_the_account_is_locked() {
                     .unwrap()
             );
         }
-        assert!(BruteForce::is_locked(user.email()).await.unwrap());
-
         let valid = resp.recovery_codes[0].clone();
         let error = TwoFactor::consume_recovery_code(&user, &valid)
             .await
             .expect_err("a locked account must not accept even a valid recovery code");
         assert_eq!(error.status_code(), 429);
-        assert!(BruteForce::is_locked(user.email()).await.unwrap());
 
-        BruteForce::unlock_account(user.email()).await.unwrap();
+        assert!(TwoFactor::unlock(&user).await.unwrap());
         assert!(
             TwoFactor::consume_recovery_code(&user, &valid)
                 .await
@@ -320,15 +249,7 @@ fn verify_admits_no_more_guesses_than_the_threshold() {
     Lazy::force(&SETUP);
 
     RT.block_on(async {
-        let user = FakeUser {
-            id: "threshold-verify-uid".into(),
-            email: "threshold-verify@example.com".into(),
-        };
-        let resp = TwoFactor::enroll(&user).await.expect("enroll");
-        TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
-            .await
-            .expect("confirm");
-        BruteForce::reset_attempts(user.email()).await.unwrap();
+        let (user, _resp) = enrolled("threshold-verify").await;
 
         let guesses = (0..8).map(|_| TwoFactor::verify(&user, "000000"));
         let outcomes = futures::future::join_all(guesses).await;
