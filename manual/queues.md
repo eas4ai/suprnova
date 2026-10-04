@@ -1623,6 +1623,11 @@ the queue are recorded as failed and the batch is cancelled. If that leaves
 nothing pending, because the jobs that were queued have already settled,
 `dispatch()` fires the callbacks itself before it returns the push error.
 
+The [`sync` driver](#drivers) runs each job inline inside `dispatch()` and
+settles it against the batch as a worker would, so a batch on `sync` finishes
+and fires its callbacks before `dispatch()` returns. A job that a middleware
+releases is left pending: nothing runs it again on `sync`, as in Laravel.
+
 ### Durable batches
 
 `MemoryBatchRepository` is lost on restart, which strands every in-flight

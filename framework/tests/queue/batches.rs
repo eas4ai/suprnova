@@ -700,6 +700,7 @@ mod m38_partial_push {
 mod terminal_settlement {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use suprnova::queue::SyncQueueDriver;
     use suprnova::queue::driver::{Reservation, ReservationToken};
     use suprnova::queue::{Envelope, QueueDriver};
     use tokio::sync::Notify;
@@ -832,5 +833,68 @@ mod terminal_settlement {
         );
         assert_eq!(FINALLY_FIRED.load(Ordering::SeqCst), 1);
         assert_eq!(THEN_FIRED.load(Ordering::SeqCst), 0);
+    }
+
+    /// DRIVERS-060: the sync driver ran each batch job inline and recorded
+    /// nothing, so the batch stayed pending forever and fired no callback.
+    #[tokio::test]
+    #[serial]
+    async fn a_batch_on_the_sync_driver_settles_and_fires_then() {
+        reset();
+        register_job::<BatchedJob>();
+        BATCHED_RUNS.store(0, Ordering::SeqCst);
+        Queue::set_driver(Arc::new(SyncQueueDriver::new()));
+
+        let id = Queue::batch()
+            .name("sync-settles")
+            .add(BatchedJob { n: 1 })
+            .add(BatchedJob { n: 2 })
+            .then("terminal-then")
+            .finally("terminal-finally")
+            .dispatch()
+            .await
+            .expect("both jobs ran inline");
+
+        assert_eq!(BATCHED_RUNS.load(Ordering::SeqCst), 3);
+        let batch = Queue::batch_repository()
+            .unwrap()
+            .find(&id)
+            .await
+            .unwrap()
+            .expect("stored");
+        assert_eq!(batch.pending_jobs, 0, "the inline jobs were never settled");
+        assert!(batch.finished());
+        assert_eq!(THEN_FIRED.load(Ordering::SeqCst), 1);
+        assert_eq!(FINALLY_FIRED.load(Ordering::SeqCst), 1);
+    }
+
+    /// DRIVERS-060, failure side: a job that fails inline is recorded failed,
+    /// cancels the batch, and fires catch and finally once.
+    #[tokio::test]
+    #[serial]
+    async fn a_sync_batch_job_that_fails_inline_fires_catch_once() {
+        reset();
+        register_job::<BatchedJob>();
+        register_job::<FailingJob>();
+        Queue::set_driver(Arc::new(SyncQueueDriver::new()));
+
+        Queue::batch()
+            .name("sync-fails")
+            .add(BatchedJob { n: 1 })
+            .add(FailingJob)
+            .then("terminal-then")
+            .catch("terminal-catch")
+            .finally("terminal-finally")
+            .dispatch()
+            .await
+            .expect_err("the second job failed inline");
+
+        assert_eq!(THEN_FIRED.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            CATCH_FIRED.load(Ordering::SeqCst),
+            1,
+            "the inline success was never recorded, so the batch never reached zero"
+        );
+        assert_eq!(FINALLY_FIRED.load(Ordering::SeqCst), 1);
     }
 }

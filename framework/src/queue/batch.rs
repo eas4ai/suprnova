@@ -1505,6 +1505,36 @@ impl PendingBatch {
     }
 }
 
+/// Settle a batch job that ran outside any worker, as the
+/// [`SyncQueueDriver`](crate::queue::SyncQueueDriver) runs every job: record
+/// its outcome, cancel the batch on a failure it does not allow, and fire the
+/// terminal callbacks when it was the batch's last pending job.
+///
+/// A worker does exactly this when it settles a job; a job that runs inline
+/// has no worker, so without it a batch dispatched to the sync driver stays
+/// pending forever and its callbacks never fire. A job outside any batch, or
+/// with no repository installed, has nothing to settle.
+pub(crate) async fn settle_inline(env: &Envelope, succeeded: bool) -> Result<(), FrameworkError> {
+    let (Some(batch_id), Some(repo)) = (env.batch_id.as_deref(), current_repository()) else {
+        return Ok(());
+    };
+    let counts = if succeeded {
+        repo.record_successful_job(batch_id, env.id).await?
+    } else {
+        repo.record_failed_job(batch_id, env.id).await?
+    };
+    let Some(batch) = repo.find(batch_id).await? else {
+        return Ok(());
+    };
+    if !succeeded && !batch.options.allow_failures && !batch.cancelled() {
+        repo.cancel(batch_id).await?;
+    }
+    if counts.pending_jobs == 0 {
+        crate::queue::worker::claim_and_fire_terminal_callbacks(repo.as_ref(), batch).await?;
+    }
+    Ok(())
+}
+
 /// Close out the jobs a failed [`PendingBatch::dispatch`] never enqueued.
 ///
 /// Repository errors here are logged, never returned: the caller needs the
