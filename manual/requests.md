@@ -625,7 +625,7 @@ impl UploadValidator for PdfOnly {
 
 ### Per-field caps and array bounds
 
-The byte cap on the total body is global (8 MiB by default for
+The byte cap on the total body is global (25 MiB by default for
 multipart, configurable via
 `suprnova::http::upload::set_global_max_multipart_body_bytes`). Per-field
 caps prevent abuse where a body of many small parts grows
