@@ -13,7 +13,8 @@
 //! - `pivot_foreign_key` (pivot column → L): `<snake(parent_struct)>_id`
 //! - `pivot_related_key` (pivot column → R): `<snake(target_struct)>_id`
 //! - `pivot_table`: `<P as EloquentModel>::TABLE`
-//! - `parent_key` / `related_key`: `"id"`
+//! - `parent_key` / `related_key`: the parent's and the related model's
+//!   primary keys
 //!
 //! All four customisable via the macro's `pivot_foreign_key = "..."` /
 //! `pivot_related_key = "..."` / `pivot_table = "..."` / `lk = "..."`
@@ -136,11 +137,11 @@ where
     /// Pivot column pointing at the related (`R`). Default:
     /// `<snake(target_struct)>_id`. Override via `pivot_related_key`.
     pivot_related_key: String,
-    /// Parent table's key column. Default `"id"`. Honoured by the
-    /// [`Relation`] impl.
+    /// Parent table's key column. Default: the parent model's primary
+    /// key. Honoured by the [`Relation`] impl.
     parent_key: String,
-    /// Related table's key column. Default `"id"`. Used by the JOIN
-    /// in [`Self::get`].
+    /// Related table's key column. Default: the related model's
+    /// primary key. Used by the JOIN in [`Self::get`].
     related_key: String,
     /// Extra pivot columns to project into `__pivot`. Always includes
     /// the two FK columns implicitly - `pivot_columns` is for the
@@ -227,8 +228,8 @@ where
             pivot_table,
             pivot_foreign_key,
             pivot_related_key,
-            parent_key: "id".into(),
-            related_key: "id".into(),
+            parent_key: L::PRIMARY_KEY.into(),
+            related_key: R::PRIMARY_KEY.into(),
             pivot_columns: Vec::new(),
             with_timestamps: false,
             scope_rewrite: None,
@@ -294,10 +295,9 @@ where
     /// Override the related-side primary-key COLUMN name used by
     /// [`Self::get`]'s IN-set filter and the macro-emitted aggregate
     /// JOIN (`__sn_r.<col> = __sn_p.<pivot_related_key>`). Defaults to
-    /// `"id"`. Set this when the related model declares a non-`id`
-    /// primary key via `#[model(primary_key = "uuid")]` (or similar) -
-    /// without it, `.get()` filters on the wrong column and the
-    /// aggregate JOIN errors with "no such column: __sn_r.id".
+    /// the related model's primary key. Set this when the pivot holds
+    /// another column of the related model, as the macro does for a
+    /// relation that declares `related_key = "..."`.
     ///
     /// Named `related_pk` (not `related_key`) so it doesn't collide
     /// with the existing [`Self::related_key`] builder, which sets the

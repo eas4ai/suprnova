@@ -1278,3 +1278,238 @@ async fn has_on_a_morphed_by_many_correlates_on_its_pivot_foreign_key() {
     let tagged = RdGroup::query().has("tags").get().await.unwrap();
     assert_eq!(labels(tagged.iter().map(|g| &g.name)), vec!["group"]);
 }
+
+// ---- A Through second local key defaults to the intermediate's key ------
+
+#[model(table = "rd_hubs", relations = {
+    rims: HasManyThrough<RdSpoke, RdRim>,
+})]
+pub struct RdHub {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "rd_spokes", primary_key = "uid")]
+pub struct RdSpoke {
+    pub uid: i64,
+    pub rd_hub_id: i64,
+    pub name: String,
+}
+
+#[model(table = "rd_rims")]
+pub struct RdRim {
+    pub id: i64,
+    pub rd_spoke_id: i64,
+    pub size: i64,
+}
+
+/// Hub 1 reaches spoke 30 and its two rims. The spokes table has no `id`
+/// column, so a join that named one fails outright.
+async fn hub_fixture() -> TestDatabase {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for sql in [
+        "CREATE TABLE rd_hubs (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE rd_spokes (uid INTEGER PRIMARY KEY, rd_hub_id INTEGER NOT NULL, \
+            name TEXT NOT NULL)",
+        "CREATE TABLE rd_rims (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            rd_spoke_id INTEGER NOT NULL, size INTEGER NOT NULL)",
+        "INSERT INTO rd_hubs (id, name) VALUES (1, 'hub')",
+        "INSERT INTO rd_spokes (uid, rd_hub_id, name) VALUES (30, 1, 'spoke')",
+        "INSERT INTO rd_rims (rd_spoke_id, size) VALUES (30, 15), (30, 17)",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+    db
+}
+
+/// `hub.rims().get()` and `.count()` join the spokes on their primary
+/// key, `uid`.
+#[tokio::test]
+async fn lazy_through_joins_the_intermediate_on_its_primary_key() {
+    let _db = hub_fixture().await;
+    let hub = RdHub::find(1).await.unwrap().unwrap();
+    let mut sizes: Vec<i64> = hub
+        .rims()
+        .get()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.size)
+        .collect();
+    sizes.sort();
+    assert_eq!(sizes, vec![15, 17]);
+    assert_eq!(hub.rims().count().await.unwrap(), 2);
+}
+
+/// The eager load, `with_count` and `with_sum` of a `HasManyThrough` join
+/// the spokes on their primary key, `uid`.
+#[tokio::test]
+async fn eager_through_joins_the_intermediate_on_its_primary_key() {
+    let _db = hub_fixture().await;
+    let hubs = RdHub::query()
+        .with(["rims"])
+        .with_count(["rims"])
+        .with_sum(("rims", "size"))
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(hubs[0].rims_loaded().len(), 2);
+    assert_eq!(hubs[0].rims_count(), 2);
+    assert_eq!(hubs[0].rims_sum_of("size"), Some(32.0));
+}
+
+// ---- Morph relations name the key the target model declares -------------
+
+#[model(table = "rd_keyed_docs", primary_key = "uid", morph_type = "rd_keyed_doc", relations = {
+    remarks: MorphMany<RdRemarkRow> { name = "remarkable" },
+})]
+pub struct RdKeyedDoc {
+    pub uid: i64,
+    pub title: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[model(
+    table = "rd_keyed_sheets",
+    primary_key = "uid",
+    morph_type = "rd_keyed_sheet"
+)]
+pub struct RdKeyedSheet {
+    pub uid: i64,
+    pub title: String,
+}
+
+#[model(table = "rd_plain_sheets", morph_type = "rd_plain_sheet")]
+pub struct RdPlainSheet {
+    pub id: i64,
+    pub title: String,
+}
+
+#[model(table = "rd_remark_rows", touches = ["remarkable"], relations = {
+    remarkable: MorphTo { name = "remarkable", targets = [RdKeyedDoc, RdKeyedSheet] },
+    anything: MorphTo { name = "anything", targets = [RdKeyedDoc, RdPlainSheet] },
+})]
+pub struct RdRemarkRow {
+    pub id: i64,
+    pub remarkable_id: i64,
+    pub remarkable_type: String,
+    pub anything_id: i64,
+    pub anything_type: String,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// The relation registry names each relation's owner-side key from the
+/// models: a `MorphTo` whose targets all key on `uid` names `uid`; one
+/// whose targets key on different columns names none, because the key
+/// is chosen per row; a `MorphMany` names its parent's primary key.
+#[tokio::test]
+async fn the_registry_names_morph_keys_from_the_models() {
+    use suprnova::eloquent::relations::find_relation;
+    let agreed = find_relation::<RdRemarkRow>("remarkable").unwrap();
+    assert_eq!(agreed.parent_key, "uid");
+    let mixed = find_relation::<RdRemarkRow>("anything").unwrap();
+    assert_eq!(mixed.parent_key, "", "no one key covers every target");
+    let remarks = find_relation::<RdKeyedDoc>("remarks").unwrap();
+    assert_eq!(remarks.parent_key, "uid");
+}
+
+/// A `MorphTo` resolves a row's owner key through the morph registry at
+/// run time, from the type the row names.
+#[tokio::test]
+async fn morph_relations_report_the_models_keys_at_run_time() {
+    use suprnova::Relation;
+    let keyed = suprnova::MorphTo::<RdRemarkRow>::__new(
+        suprnova::serde_json::json!(1),
+        "rd_keyed_doc".to_string(),
+    );
+    assert_eq!(keyed.parent_key(), "uid");
+    let plain = suprnova::MorphTo::<RdRemarkRow>::__new(
+        suprnova::serde_json::json!(1),
+        "rd_plain_sheet".to_string(),
+    );
+    assert_eq!(plain.parent_key(), "id");
+    let unknown = suprnova::MorphTo::<RdRemarkRow>::__new(
+        suprnova::serde_json::json!(1),
+        "no_such_type".to_string(),
+    );
+    assert_eq!(unknown.parent_key(), "", "an unknown type has no key");
+}
+
+/// A `MorphMany` reports its parent's primary key as its parent key.
+#[tokio::test]
+async fn morph_many_reports_its_parents_primary_key() {
+    use suprnova::Relation;
+    let doc = RdKeyedDoc {
+        uid: 5,
+        title: "doc".into(),
+        ..Default::default()
+    };
+    assert_eq!(doc.remarks().parent_key(), "uid");
+}
+
+/// A row touches its `MorphTo` owner, found by the owner's primary key.
+/// Guards the run-time path the registry key comes from.
+#[tokio::test]
+async fn morph_to_touches_find_the_owner_by_its_primary_key() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for sql in [
+        "CREATE TABLE rd_keyed_docs (uid INTEGER PRIMARY KEY, title TEXT NOT NULL, \
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        "CREATE TABLE rd_remark_rows (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            remarkable_id INTEGER NOT NULL, remarkable_type TEXT NOT NULL, \
+            anything_id INTEGER NOT NULL, anything_type TEXT NOT NULL, body TEXT NOT NULL, \
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        "INSERT INTO rd_keyed_docs (uid, title, created_at, updated_at) VALUES \
+            (5, 'doc', '2001-01-01T00:00:00+00:00', '2001-01-01T00:00:00+00:00')",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+    RdRemarkRow::create(attrs! {
+        remarkable_id: 5,
+        remarkable_type: "rd_keyed_doc",
+        anything_id: 5,
+        anything_type: "rd_keyed_doc",
+        body: "remark",
+    })
+    .await
+    .unwrap();
+    let doc = RdKeyedDoc::find(5).await.unwrap().unwrap();
+    assert_ne!(doc.updated_at.to_rfc3339(), "2001-01-01T00:00:00+00:00");
+}
+
+#[model(table = "rd_lk_holders", primary_key = "uid", relations = {
+    teams: BelongsToMany<RdTeam, RdLkHolderTeam> { lk = "id" },
+    tasks: HasManyThrough<RdSquad, RdTask> { first_key = "owner_key", lk = "id" },
+})]
+pub struct RdLkHolder {
+    pub uid: i64,
+    pub id: i64,
+}
+
+#[model(
+    table = "rd_lk_holder_team",
+    primary_key = "row_id",
+    timestamps = false
+)]
+pub struct RdLkHolderTeam {
+    pub row_id: i64,
+    pub rd_lk_holder_id: i64,
+    pub rd_team_id: i64,
+}
+
+/// A relation that declares `lk = "id"` on a model keyed on `uid`
+/// reports `id`, the key it reads, not the model's primary key.
+#[tokio::test]
+async fn a_declared_local_key_named_id_is_reported_as_declared() {
+    use suprnova::Relation;
+    let holder = RdLkHolder {
+        uid: 1,
+        id: 2,
+        ..Default::default()
+    };
+    assert_eq!(holder.teams().parent_key(), "id");
+    assert_eq!(holder.tasks().parent_key(), "id");
+}

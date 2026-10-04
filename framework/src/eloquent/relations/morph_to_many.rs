@@ -170,11 +170,12 @@ where
     /// Pivot column pointing at the related row (`R`). Default:
     /// `<snake(R)>_id`. Override via `pivot_related_key = "..."`.
     pivot_related_key: String,
-    /// Parent table's key column. Default `"id"`. Honoured by the
-    /// [`Relation`] impl + admin introspection.
+    /// Parent table's key column. Default: the parent model's primary
+    /// key. Honoured by the [`Relation`] impl + admin introspection.
     parent_key: String,
-    /// Related table's primary-key COLUMN name used by the JOIN in
-    /// [`Self::get`]. Default `"id"`. Set via `.related_pk(...)`.
+    /// Related table's key COLUMN used by the JOIN in [`Self::get`].
+    /// Default: the related model's primary key. Set via
+    /// `.related_pk(...)`.
     related_key: String,
     /// Extra pivot columns to project into `__pivot`. Always includes
     /// the implicit pivot FKs + the morph discriminator pair.
@@ -253,8 +254,8 @@ where
             morph_name,
             pivot_table,
             pivot_related_key,
-            parent_key: "id".into(),
-            related_key: "id".into(),
+            parent_key: L::PRIMARY_KEY.into(),
+            related_key: R::PRIMARY_KEY.into(),
             pivot_columns: Vec::new(),
             with_timestamps: false,
             scope_rewrite: None,
@@ -303,9 +304,8 @@ where
         self
     }
 
-    /// Override the related-side primary-key COLUMN name used by
-    /// [`Self::get`]'s IN-set filter. Defaults to `"id"`. Set this
-    /// when the related model declares a non-`id` primary key.
+    /// Override the related-side key COLUMN used by [`Self::get`]'s
+    /// IN-set filter. Defaults to the related model's primary key.
     pub fn related_pk(mut self, key: impl Into<String>) -> Self {
         self.related_key = key.into();
         self
@@ -974,11 +974,11 @@ where
     /// Pivot column pointing at the m2m side (`L=Tag`). Default
     /// `<snake(L)>_id`.
     pivot_foreign_key: String,
-    /// Related-side primary-key COLUMN name used by the JOIN.
-    /// Default `"id"`.
+    /// Related-side key COLUMN used by the JOIN. Default: the related
+    /// model's primary key.
     related_key: String,
-    /// Tag-side key column. Default `"id"`. Honoured by the
-    /// [`Relation`] impl.
+    /// Tag-side key column. Default: the tag model's primary key.
+    /// Honoured by the [`Relation`] impl.
     parent_key: String,
     /// Deferred soft-delete scope rewrite applied to the related-row
     /// query at [`Self::get`] time. See [`MorphToMany::scope_rewrite`]
@@ -1048,8 +1048,8 @@ where
             morph_name,
             pivot_table,
             pivot_foreign_key,
-            related_key: "id".into(),
-            parent_key: "id".into(),
+            related_key: R::PRIMARY_KEY.into(),
+            parent_key: L::PRIMARY_KEY.into(),
             scope_rewrite: None,
             pivot_filters: PivotFilters::default(),
             lazy_load: LazyLoadGuard::default(),
@@ -1066,14 +1066,15 @@ where
         self
     }
 
-    /// Override the related-side primary-key column name used by the
-    /// JOIN in [`Self::get`]. Default `"id"`.
+    /// Override the related-side key column used by the JOIN in
+    /// [`Self::get`]. Default: the related model's primary key.
     pub fn related_pk(mut self, key: impl Into<String>) -> Self {
         self.related_key = key.into();
         self
     }
 
-    /// Override the tag-side (parent's) key column. Default `"id"`.
+    /// Override the tag-side (parent's) key column. Default: the tag
+    /// model's primary key.
     pub fn local_key(mut self, key: impl Into<String>) -> Self {
         self.parent_key = key.into();
         self

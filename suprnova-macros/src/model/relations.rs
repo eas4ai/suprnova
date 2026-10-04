@@ -845,9 +845,21 @@ fn emit_relation_inventory(
         // BelongsTo: parent_key is the COLUMN on the related table the
         // child's FK references.
         RelationKindAttr::BelongsTo => owner_key_expr(rel, target_ty),
-        // MorphTo: parent_key is the PK on the (variable) target
-        // table - Laravel default "id".
-        RelationKindAttr::MorphTo => quote! { "id" },
+        // MorphTo: parent_key is the key on the (variable) target
+        // table. When every declared target keys on the same column,
+        // that column; when they differ there is no one key, so `""`,
+        // and the key is chosen per row from the type the row names,
+        // through the morph registry (`MorphTypeEntry::primary_key`),
+        // as the owner-touch cascade and `MorphTo::parent_key` do.
+        RelationKindAttr::MorphTo => match morph_targets(rel) {
+            Some(targets) if !targets.is_empty() => {
+                let keys = targets.iter().map(|target| {
+                    quote! { <#target as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY }
+                });
+                quote! { ::suprnova::eloquent::relations::__shared_key(&[#(#keys),*]) }
+            }
+            _ => quote! { "" },
+        },
     };
 
     // Foreign key - what the child / pivot / morph row carries.
@@ -1330,14 +1342,29 @@ fn second_key_override(rel: &RelationDecl) -> Option<&str> {
 
 /// Look up the user-declared `second_local_key = "..."` override for
 /// `HasOneThrough` / `HasManyThrough` - the column on the intermediate
-/// `B` matched by `second_key`. Defaults to `"id"`. Required when the
-/// intermediate model declares `#[model(primary_key = "...")]` with a
-/// non-`id` PK.
+/// `B` matched by `second_key`. See [`second_local_key_expr`] for the
+/// default.
 fn second_local_key_override(rel: &RelationDecl) -> Option<&str> {
     rel.options.iter().find_map(|o| match o {
         RelationOpt::SecondLocalKey(s) => Some(s.as_str()),
         _ => None,
     })
+}
+
+/// The column on a Through relation's intermediate `B` that the target's
+/// `second_key` holds, as a `&str` expression: the declared
+/// `second_local_key`, else `B`'s own primary key, as Laravel's
+/// `hasManyThrough` defaults its `secondLocalKey` to the intermediate's
+/// key name.
+///
+/// The lazy relation and the eager, count and aggregate arms all read
+/// this one expression. They used to default to `id`, which an
+/// intermediate keyed on another column does not have.
+fn second_local_key_expr(rel: &RelationDecl, through_ty: &syn::Type) -> TokenStream {
+    match second_local_key_override(rel) {
+        Some(key) => quote! { #key },
+        None => quote! { <#through_ty as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY },
+    }
 }
 
 /// True when `with_timestamps` (bare flag or `= true`) is declared.
@@ -1665,7 +1692,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
     match rel.kind {
         RelationKindAttr::HasOne => {
             // FK on the child = <snake(parent_struct)>_id by default.
-            // LK on the parent = the parent's PK by default ("id").
+            // LK on the parent = the parent's primary key by default.
             let fk = fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_has_fk(&parent_name));
@@ -1750,7 +1777,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
         RelationKindAttr::HasMany => {
             // FK on the child table = <snake(parent_struct)>_id by
             // default - same default as HasOne. LK = parent's PK by
-            // default ("id"), configurable via `lk = "..."`.
+            // default, configurable via `lk = "..."`.
             let fk = fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_has_fk(&parent_name));
@@ -1828,11 +1855,10 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             } else {
                 quote! {}
             };
-            let local_key_chain = if lk == "id" {
-                quote! {}
-            } else {
-                quote! { .local_key(#lk) }
-            };
+            // Always chained: the runtime default is the model's primary
+            // key, so a declared `lk` that happens to be `id` still has
+            // to be passed on.
+            let local_key_chain = quote! { .local_key(#lk) };
             // Related-side key column - see `related_key_expr`. Chained
             // as `.related_pk(...)` so the runtime IN-filter (`.get()`)
             // reads the column the eager arm and the aggregate JOIN read.
@@ -1906,23 +1932,16 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             let lk = lk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| pk_name.clone());
-            let local_key_chain = if lk == "id" {
-                quote! {}
-            } else {
-                quote! { .local_key(#lk) }
-            };
+            // Always chained: the runtime default is the model's primary
+            // key, so a declared `lk` that happens to be `id` still has
+            // to be passed on.
+            let local_key_chain = quote! { .local_key(#lk) };
             // Second local key - column on the intermediate `B`
-            // matched by `second_key`. Defaults to `"id"`. Chained as
-            // `.second_local_key(...)` so the runtime JOIN reads the
-            // right column for intermediates declaring a non-`id` PK.
-            let second_local_key = second_local_key_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
-            let second_local_key_chain = if second_local_key == "id" {
-                quote! {}
-            } else {
-                quote! { .second_local_key(#second_local_key) }
-            };
+            // matched by `second_key` (`second_local_key_expr`).
+            // Chained as `.second_local_key(...)` so the runtime JOIN
+            // reads the column the eager, count and aggregate arms read.
+            let second_local_key = second_local_key_expr(rel, through_ty);
+            let second_local_key_chain = quote! { .second_local_key(#second_local_key) };
 
             // Pick the runtime struct name based on the kind. Both
             // wrappers share the same `__new` shape.
@@ -1980,6 +1999,14 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             //    to equal for the row to belong to this parent.
             let morph_name = morph_name_or_default(rel);
             let morph_type_value = morph_type_of(input);
+            // A declared `lk` is the parent column the relation reads
+            // (`local_key_ident`); the runtime metadata names it too.
+            // Without one, the runtime default is the parent's primary
+            // key.
+            let local_key_chain = match lk_override(rel) {
+                Some(lk) => quote! { .local_key(#lk) },
+                None => quote! {},
+            };
             let wrapper = match rel.kind {
                 RelationKindAttr::MorphMany => quote! { MorphMany },
                 RelationKindAttr::MorphOne => quote! { MorphOne },
@@ -2008,6 +2035,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                             ::std::string::String::from(#morph_name),
                             ::std::string::String::from(#morph_type_value),
                         )
+                        #local_key_chain
                         .__lazy_load(#lazy_load)
                     }
                 }
@@ -2386,11 +2414,10 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             } else {
                 quote! {}
             };
-            let local_key_chain = if lk == "id" {
-                quote! {}
-            } else {
-                quote! { .local_key(#lk) }
-            };
+            // Always chained: the runtime default is the model's primary
+            // key, so a declared `lk` that happens to be `id` still has
+            // to be passed on.
+            let local_key_chain = quote! { .local_key(#lk) };
             let related_key = related_key_expr(rel, target_ty);
             let related_key_chain = quote! { .related_pk(#related_key) };
 
@@ -2462,11 +2489,10 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             let lk = lk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| pk_name.clone());
-            let local_key_chain = if lk == "id" {
-                quote! {}
-            } else {
-                quote! { .local_key(#lk) }
-            };
+            // Always chained: the runtime default is the model's primary
+            // key, so a declared `lk` that happens to be `id` still has
+            // to be passed on.
+            let local_key_chain = quote! { .local_key(#lk) };
             let related_key = related_key_expr(rel, target_ty);
             let related_key_chain = quote! { .related_pk(#related_key) };
 
@@ -3050,14 +3076,11 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             let second_key = second_key_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(through_ty))));
-            // Column on B matched by `second_key`. Defaults to "id";
-            // overridable for intermediates declaring a non-`id` PK
-            // via `second_local_key = "..."`. Query 1 below `SELECT`s
-            // this column as `__sn_b_id` so the b->parent map keys
-            // off the correct join target.
-            let second_local_key = second_local_key_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            // Column on B matched by `second_key`
+            // (`second_local_key_expr`). Query 1 below `SELECT`s this
+            // column as `__sn_b_id` so the b->parent map keys off the
+            // correct join target.
+            let second_local_key = second_local_key_expr(rel, through_ty);
             let is_one = matches!(rel.kind, RelationKindAttr::HasOneThrough);
             // Distribute branch: HasOneThrough stores `set_one`
             // (None if no row); HasManyThrough stores `set_many`
@@ -4319,12 +4342,8 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             let second_key = second_key_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(through_ty))));
-            // JOIN-target column on B. Defaults to `"id"`; overridable
-            // via `second_local_key = "..."` for intermediates with a
-            // non-`id` PK.
-            let second_local_key = second_local_key_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            // JOIN-target column on B (`second_local_key_expr`).
+            let second_local_key = second_local_key_expr(rel, through_ty);
 
             Ok(Some(quote! {
                 #name_str => {
@@ -5615,12 +5634,8 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
             let second_key = second_key_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(through_ty))));
-            // JOIN-target column on B. Defaults to `"id"`; overridable
-            // via `second_local_key = "..."` for intermediates with a
-            // non-`id` PK.
-            let second_local_key = second_local_key_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            // JOIN-target column on B (`second_local_key_expr`).
+            let second_local_key = second_local_key_expr(rel, through_ty);
 
             Ok(Some(quote! {
                 #name_str => {
