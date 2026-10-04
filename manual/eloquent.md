@@ -2193,8 +2193,15 @@ The macro emits matching accessors on each model:
   (`None` if the matching `with_sum` / `with_avg` was not called).
 - `<rel>_min_of(col)` / `<rel>_max_of(col)` - return
   `Option<Option<f64>>`: outer `Option` is "was `with_min` /
-  `with_max` called?", inner `Option` is "did SQL return NULL because
-  the group was empty?".
+  `with_max` called?", inner `Option` is "is there a numeric
+  minimum?". It is `None` when the group was empty or the minimum is
+  not a number, such as a date.
+- `<rel>_min_as::<T>(col)` / `<rel>_max_as::<T>(col)` - return
+  `Option<T>`: the minimum or maximum read as `T`, whatever the column's
+  type, as Laravel's `withMax('posts', 'created_at')` attribute holds
+  it. A date or a time reads from its ISO 8601 text, so `T` can be the
+  chrono type of the column. `None` when the call was not made, the
+  group was empty, or the value doesn't read as `T`.
 
 The accessors are the ergonomic surface - read through them rather
 than reaching into `__eager.get_aggregate::<T>(...)` directly. They
@@ -2227,15 +2234,21 @@ match u.posts_min_of("id") {
 
 // Accessor returns `None` when the matching `with_*` was skipped:
 assert!(u.posts_avg_of("score").is_none()); // never called with col="score"
+
+// The latest post's date, as Laravel's withMax('posts', 'created_at'):
+let users = User::with_max(("posts", "created_at")).get().await?;
+let latest: Option<DateTime<Utc>> = users[0].posts_max_as("created_at");
 ```
 
 ### Aggregates and INTEGER columns
 
-SUM over an INTEGER column lands in the cache as `f64`. The
-dispatcher arms try `try_get::<Option<f64>>` first, then fall back to
-`try_get::<Option<i64>>().map(|n| n as f64)` so SQLite's INTEGER-
-preserving COUNT/SUM types don't silently coerce to `0.0`. Read via
-the macro-emitted accessors regardless of the source column type.
+SUM over an INTEGER column lands in the cache as `f64`. The database
+chooses the type of an aggregate: an integer of the column's width, a
+real, or `numeric` / `DECIMAL` (Postgres and MySQL sum and average
+integers that way). The dispatcher reads whichever arrives, and a value
+that is not a number, such as the maximum of a date column, is kept for
+`<rel>_max_as` rather than failing the query. Read via the
+macro-emitted accessors regardless of the source column type.
 
 ### `with_where` predicate routing
 
