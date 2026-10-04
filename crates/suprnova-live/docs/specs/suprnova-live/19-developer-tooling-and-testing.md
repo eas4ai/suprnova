@@ -514,6 +514,11 @@ unbounded framework memory, queues, connections, or diagnostic retention.
   `{% let y = x|safe %}{{ y }}`, `x|safe|lower`, and `escape("none")`. A
   `set` block's name holds escaped text, as Askama 0.16 stores the rendered
   block as a string and escapes it on output.
+- 2026-10-04 -- `live:inspect` reports every configured Live limit by the
+  `.env` key that sets it, with its value and unit, instead of three named
+  byte and lifetime fields. The CLI and the application helper moved to
+  tooling protocol 2 together; the CLI refuses a protocol 1 helper and any
+  limit whose key is not a `LIVE_*` key or whose unit is not a plain word.
 - 2026-09-16 -- The checker renders an empty call block to a macro that
   splices `caller()` as empty caller content, and fails a component whose view
   renders no branch (LIVE-025). The empty caller had rendered zero branches,

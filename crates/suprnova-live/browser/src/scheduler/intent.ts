@@ -2,6 +2,7 @@ import type { JsonValue } from "../canonical.js";
 import type { ParsedDirective } from "../directives/types.js";
 import type { IslandRecord } from "../islands/record.js";
 import { createPromotionNonce } from "../islands/nonce.js";
+import { JSON_DEPTH_CEILING } from "../limits.js";
 import type { RuntimeRandomness } from "../runtime/ports.js";
 import type { FreshRenderReason } from "../features/contract.js";
 
@@ -28,25 +29,25 @@ export type IntentFinishReason =
   "accepted" | "terminal" | "canceled" | "superseded" | "retired" | "exhausted" | "rejected";
 export type IntentFinishObserver = (reason: IntentFinishReason) => void;
 
-// The operations one request carries, the framework server's bound: a submit
-// proposes every model control of its form, one operation each (LIVE-028).
-const MAX_OPERATIONS_PER_INTENT = 128;
-const MAX_MODEL_PROPOSALS_PER_INTENT = 128;
-const MAX_INTENT_JSON_DEPTH = 32;
-const MAX_INTENT_JSON_NODES = 2_048;
+// An intent has no count or size limits of its own: the request it becomes is
+// checked against the server's configured limits when it is built
+// (`validateUpdateRequest`), where an over-limit request fails with the
+// setting to raise. A duplicate bound here refused what the server accepted
+// (LIVE-028). The copy below is recursive, so it keeps a depth guard at the
+// ceiling no server configuration exceeds.
+const MAX_INTENT_JSON_DEPTH = JSON_DEPTH_CEILING;
 const MAX_FINISH_CALLBACKS = 64;
 const MODEL_FIELD = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/u;
 
-function immutableJson(value: JsonValue, depth: number, budget: { remaining: number }): JsonValue {
-  if (depth > MAX_INTENT_JSON_DEPTH || budget.remaining <= 0) throw new Error("intent_json_limit");
-  budget.remaining -= 1;
+function immutableJson(value: JsonValue, depth: number): JsonValue {
+  if (depth > MAX_INTENT_JSON_DEPTH) throw new Error("intent_json_limit");
   if (Array.isArray(value)) {
-    return Object.freeze(value.map((item) => immutableJson(item as JsonValue, depth + 1, budget)));
+    return Object.freeze(value.map((item) => immutableJson(item as JsonValue, depth + 1)));
   }
   if (value !== null && typeof value === "object") {
     const result: Record<string, JsonValue> = Object.create(null) as Record<string, JsonValue>;
     for (const [key, item] of Object.entries(value)) {
-      result[key] = immutableJson(item, depth + 1, budget);
+      result[key] = immutableJson(item, depth + 1);
     }
     return Object.freeze(result);
   }
@@ -55,10 +56,9 @@ function immutableJson(value: JsonValue, depth: number, budget: { remaining: num
 
 function immutableOperation(operation: ServerOperation): ServerOperation {
   if (operation.kind !== "invoke_action") return Object.freeze({ ...operation });
-  const budget = { remaining: MAX_INTENT_JSON_NODES };
   return Object.freeze({
     ...operation,
-    arguments: immutableJson(operation.arguments, 0, budget) as Readonly<Record<string, JsonValue>>,
+    arguments: immutableJson(operation.arguments, 0) as Readonly<Record<string, JsonValue>>,
   });
 }
 
@@ -80,17 +80,12 @@ export class ServerIntent {
     modelEditSequences: Readonly<Record<string, bigint>> = Object.freeze({}),
     childParameters?: Readonly<Record<string, JsonValue>>,
   ) {
-    if (operations.length === 0 || operations.length > MAX_OPERATIONS_PER_INTENT) {
-      throw new Error("intent_operation_limit");
-    }
+    if (operations.length === 0) throw new Error("intent_operation_limit");
     this.source = Object.freeze(source);
     this.operations = Object.freeze(operations.map(immutableOperation));
     const proposalEntries = Object.entries(modelProposals);
     const sequenceEntries = Object.entries(modelEditSequences);
-    if (
-      proposalEntries.length > MAX_MODEL_PROPOSALS_PER_INTENT ||
-      sequenceEntries.length !== proposalEntries.length
-    ) {
+    if (sequenceEntries.length !== proposalEntries.length) {
       throw new Error("intent_model_proposal_limit");
     }
     const synchronizedOperations = this.operations.filter(
@@ -99,7 +94,6 @@ export class ServerIntent {
     const synchronized = new Set(synchronizedOperations.map((operation) => operation.field));
     const proposals: Record<string, JsonValue> = {};
     const sequences: Record<string, bigint> = {};
-    const proposalBudget = { remaining: MAX_INTENT_JSON_NODES };
     for (const [field, value] of proposalEntries) {
       const sequence = modelEditSequences[field];
       if (
@@ -110,7 +104,7 @@ export class ServerIntent {
       ) {
         throw new Error("intent_model_proposal_invalid");
       }
-      proposals[field] = immutableJson(value, 0, proposalBudget);
+      proposals[field] = immutableJson(value, 0);
       sequences[field] = sequence;
     }
     if (
@@ -125,9 +119,7 @@ export class ServerIntent {
     this.childParameters =
       childParameters === undefined
         ? undefined
-        : (immutableJson(childParameters, 0, {
-            remaining: MAX_INTENT_JSON_NODES,
-          }) as Readonly<Record<string, JsonValue>>);
+        : (immutableJson(childParameters, 0) as Readonly<Record<string, JsonValue>>);
     this.#nonce = nonce;
     Object.freeze(this);
   }

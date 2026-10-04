@@ -547,6 +547,103 @@ suprnova live:assets --out public/__live
 The publication is atomic and refuses to replace a directory whose bytes
 differ unless you pass `--replace`.
 
+## Limits
+
+Every limit Live applies is a setting with a default sized for large pages: a
+data table of tens of thousands of rows renders, travels and morphs without
+touching one. The server's configuration is the only source. The bootstrap
+writes every value into the page's configuration element, and the browser
+runtime applies what it reads there, so it never refuses what the server
+allows.
+
+Set a limit in the application's `.env` file:
+
+```bash
+LIVE_MAX_HTML_BYTES=67108864
+LIVE_MAX_RESPONSE_BYTES=67108864
+LIVE_MAX_REQUEST_BYTES=67108864
+LIVE_MORPH_MAX_NODES=5000000
+```
+
+Or build the configuration in code and bind it before the runtime assembles.
+The builder starts from the defaults, and `LiveConfigBuilder::from_env()`
+starts from the `.env` values instead:
+
+```rust
+use suprnova::App;
+use suprnova::live::LiveConfig;
+
+let config = LiveConfig::builder()
+    .max_html_bytes(64 * 1024 * 1024)
+    .max_response_bytes(64 * 1024 * 1024)
+    .max_request_bytes(64 * 1024 * 1024)
+    .morph_max_nodes(5_000_000)
+    .build()
+    .expect("the Live limits nest");
+App::singleton(config);
+```
+
+| Key | Default | Bounds |
+|---|---|---|
+| `LIVE_MAX_REQUEST_BYTES` | 16 MiB | One request body, the snapshot included |
+| `LIVE_MAX_RESPONSE_BYTES` | 16 MiB | One response body |
+| `LIVE_MAX_HTML_BYTES` | 16 MiB | One island render's HTML |
+| `LIVE_MAX_JSON_DEPTH` | 32 | JSON nesting |
+| `LIVE_MAX_JSON_ENTRIES` | 1,000,000 | Entries in one request |
+| `LIVE_MAX_REQUEST_ITEMS` | 65,536 | Proposals, operations or arguments in one request |
+| `LIVE_MAX_RESPONSE_ITEMS` | 65,536 | Validation entries, events, effects, or children of one render |
+| `LIVE_MAX_CONTEXT_LIFETIME_MS` | 30,000 | The trusted request context's validity |
+| `LIVE_REQUEST_TIMEOUT_MS` | 60,000 | The browser's wait for one response |
+| `LIVE_MAX_QUEUED_PER_ISLAND` | 8 | Requests one island queues |
+| `LIVE_MAX_PARALLEL_PER_ISLAND` | 1 | Requests one island runs at once |
+| `LIVE_MORPH_MAX_NODES` | 1,000,000 | Nodes in one morphed island |
+| `LIVE_MORPH_MAX_DEPTH` | 512 | Element nesting in one morphed island |
+| `LIVE_MORPH_MAX_KEYS` | 1,000,000 | Keyed elements in one morphed island |
+| `LIVE_MORPH_MAX_ATTRIBUTES` | 10,000,000 | Attributes in one morphed island |
+| `LIVE_MORPH_MAX_ATTRIBUTES_PER_ELEMENT` | 4,096 | Attributes on one element |
+| `LIVE_MORPH_DEADLINE_MS` | 0, no deadline | How long one morph may run |
+| `LIVE_ASYNC_MAX_PAYLOAD_BYTES` | 1 MiB | One asynchronous event payload |
+| `LIVE_ASYNC_MAX_BUFFER_BYTES` | 16 MiB | One open document's delivery queue |
+| `LIVE_ASYNC_MAX_QUEUED_EVENTS` | 4,096 | Events one open document holds before its islands apply them |
+| `LIVE_ASYNC_MAX_REPLAY_EVENTS` | 4,096 | Events in one reconnect replay |
+| `LIVE_MAX_REDIRECT_BYTES` | 64 KiB | One redirect or reflected URL |
+| `LIVE_UPLOAD_CHUNK_BYTES` | 8 MiB | One upload chunk request |
+| `LIVE_UPLOAD_MAX_ACTIVE` | 8 | Upload transfers running at once |
+| `LIVE_UPLOAD_MAX_FILE_BYTES` | 1 GiB | One uploaded file |
+| `LIVE_UPLOAD_MAX_PENDING_FILES` | 1,024 | Files selected and not yet finished |
+| `LIVE_UPLOAD_MAX_PENDING_BYTES` | 4 GiB | Bytes across the files selected and not yet finished |
+| `LIVE_UPLOAD_MAX_STORAGE_BYTES` | 16 GiB | The temporary upload store, across every visitor |
+
+The byte limits nest: the island HTML travels inside the response, and the
+response's snapshot comes back in the next request, so `LIVE_MAX_HTML_BYTES`
+must be at most `LIVE_MAX_RESPONSE_BYTES`, which must be at most
+`LIVE_MAX_REQUEST_BYTES`. A setting you leave unset follows the one it must fit
+inside, so lowering only `LIVE_MAX_REQUEST_BYTES` lowers all three. The upload
+limits nest the other way: a chunk is part of one file, one file is part of the
+pending bytes, and the pending bytes are part of the store, so an unset pending
+or store limit grows to hold a larger file. Every key's
+type and range is in [Environment Variables](env-vars.md#live).
+
+When a limit trips, the message names the limit, both values and the key to
+change. The browser prints it to the console unless the runtime boots with
+`diagnostics: "off"`, and the server writes it to the log:
+
+```text
+Suprnova Live island HTML size limit exceeded: measured 20971520 bytes,
+configured 16777216 bytes. Raise LIVE_MAX_HTML_BYTES in the application's .env
+file to allow it.
+```
+
+A request the browser would have to send over `LIVE_MAX_REQUEST_BYTES` fails in
+the browser before it is sent. A render over `LIVE_MAX_HTML_BYTES` fails on the
+server, which logs the `limit` field beside the failed operation's cause. A
+published payload over `LIVE_ASYNC_MAX_PAYLOAD_BYTES` fails with a
+`LiveStreamError` whose `limit()` names the setting. A file over
+`LIVE_UPLOAD_MAX_FILE_BYTES`, or a selection past the pending limits, is
+refused in the browser before any transfer starts; the server refuses the same
+file with a 413 and logs the key. `suprnova live:inspect` prints every limit the
+application runs under, by its key.
+
 ## Component library
 
 Suprnova ships the foundations of a component library for Live: a token
@@ -874,8 +971,9 @@ body; a missing principal answers `401`.
 - `suprnova live:inspect` reports the bound registry, configuration limits,
   installed upload capabilities, assembled runtime services, and the asset
   identity without exposing state or secrets.
-- `LiveConfig` bounds request and response bytes and the trusted context
-  lifetime; bind a custom one before the runtime assembles.
+- `LiveConfig` holds every limit Live applies; set them with the `LIVE_*`
+  keys in `.env` or bind a custom one before the runtime assembles. See
+  [Limits](#limits).
 - Errors carry closed kinds such as `live_document_context_rejected` and
   `invalid_live_bootstrap`; telemetry labels are closed enumerations.
 

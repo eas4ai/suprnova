@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { canonicalize, type JsonValue } from "../src/canonical.js";
 import type { AsyncEnvelopeDispatcher } from "../src/async-updates/dispatch.js";
-import { AsyncSubscription } from "../src/async-updates/subscription.js";
+import { AsyncDocumentQueueBudget, AsyncSubscription } from "../src/async-updates/subscription.js";
+import type { LiveLimitBreach } from "../src/limits.js";
 import type {
   AsyncPayload,
   AuthorizedLogicalSubscription,
@@ -180,7 +181,9 @@ describe("browser asynchronous subscription continuity", () => {
     expect(applied).toEqual([]);
   });
 
-  it("rejects a replay transcript whose aggregate bytes exceed the document bound", () => {
+  it("applies a replay transcript larger than the old 256 KiB browser bound", () => {
+    // The server bounds what it holds in flight (LIVE_ASYNC_MAX_BUFFER_BYTES);
+    // the browser applies the transcript it is sent.
     const membership = {
       ...authorized(),
       presentationSignals: Object.freeze([
@@ -207,8 +210,8 @@ describe("browser asynchronous subscription continuity", () => {
       }),
     );
 
-    expect(() => subscription.receiveReplay(transcript)).toThrow("async_replay_too_large");
-    expect(subscription.position()).toEqual(position(4n, 40n));
+    expect(() => subscription.receiveReplay(transcript)).not.toThrow();
+    expect(subscription.position()).toEqual(position(4n, 49n));
   });
 
   it("claims current after a complete validated reconnect replay and not socket open", () => {
@@ -294,11 +297,13 @@ describe("browser asynchronous subscription continuity", () => {
     expect(browserEvent).toHaveBeenCalledOnce();
   });
 
-  it("bounds payloads by canonical UTF-8 bytes rather than UTF-16 code units", () => {
+  it("accepts a multibyte payload past the old 32 KiB browser bound", () => {
+    // The server encodes each payload under LIVE_ASYNC_MAX_PAYLOAD_BYTES; the
+    // browser has no payload cap of its own.
     const { subscription } = fixture();
     const astralPayload = Array.from({ length: 9 }, () => "💥".repeat(1_000));
 
-    expect(() =>
+    expect(
       subscription.receive(
         envelope(
           position(4n, 41n),
@@ -311,10 +316,10 @@ describe("browser asynchronous subscription continuity", () => {
           }),
         ),
       ),
-    ).toThrow("async_payload_too_large");
+    ).toBe("applied");
   });
 
-  it("accepts the exact UTF-8 payload boundary and rejects the first multibyte overflow", () => {
+  it("accepts the old 32 KiB boundary and the first multibyte past it", () => {
     const fields = {
       event: "orders.updated",
       kind: "browser_event",
@@ -341,9 +346,9 @@ describe("browser asynchronous subscription continuity", () => {
       { dispatch: () => "observed" },
       { now: () => 1_000 },
     );
-    expect(() =>
-      overflow.receive(envelope(position(4n, 41n), fields as unknown as AsyncPayload)),
-    ).toThrow("async_payload_too_large");
+    expect(overflow.receive(envelope(position(4n, 41n), fields as unknown as AsyncPayload))).toBe(
+      "applied",
+    );
   });
 
   it("retains the applied position but requires proof after restored authorization", () => {
@@ -369,5 +374,57 @@ describe("browser asynchronous subscription continuity", () => {
       ]),
     ).toEqual({ applied: 1, through: position(4n, 42n) });
     expect(subscription.state()).toBe("current");
+  });
+});
+
+describe("the asynchronous queue and replay limits the server configured", () => {
+  function heartbeats(count: number): string[] {
+    return Array.from({ length: count }, (_, index) =>
+      envelope(position(4n, 41n + BigInt(index)), Object.freeze({ kind: "heartbeat" })),
+    );
+  }
+
+  it("applies a 2,000-event replay, past the old 1,024-event and 64-event bounds", () => {
+    const { subscription } = fixture();
+    expect(subscription.receiveReplay(heartbeats(2_000))).toEqual({
+      applied: 2_000,
+      through: position(4n, 2_040n),
+    });
+  });
+
+  it("refuses a replay over the configured count and names the key", () => {
+    const breaches: LiveLimitBreach[] = [];
+    const subscription = new AsyncSubscription(
+      authorized(),
+      { dispatch: () => "observed" },
+      { now: () => 1_000 },
+      undefined,
+      undefined,
+      undefined,
+      new AsyncDocumentQueueBudget(100, 10, (breach) => breaches.push(breach)),
+    );
+    expect(() => subscription.receiveReplay(heartbeats(11))).toThrow(
+      "Raise LIVE_ASYNC_MAX_REPLAY_EVENTS",
+    );
+    expect(breaches.map(({ message }) => message)).toEqual([
+      "Suprnova Live async replay event count limit exceeded: measured 11 events, configured " +
+        "10 events. Raise LIVE_ASYNC_MAX_REPLAY_EVENTS in the application's .env file to allow it.",
+    ]);
+    expect(subscription.receiveReplay(heartbeats(10))).toEqual({
+      applied: 10,
+      through: position(4n, 50n),
+    });
+  });
+
+  it("queues past 64 events and refuses past the configured depth, naming the key", () => {
+    const breaches: LiveLimitBreach[] = [];
+    const budget = new AsyncDocumentQueueBudget(100, 100, (breach) => breaches.push(breach));
+    expect(budget.reserve(65, 1)).toBe(true);
+    expect(budget.reserve(36, 1)).toBe(false);
+    expect(breaches.map(({ key }) => key)).toEqual(["LIVE_ASYNC_MAX_QUEUED_EVENTS"]);
+    expect(breaches[0]?.message).toContain("measured 101 events, configured 100 events");
+    expect(() => new AsyncDocumentQueueBudget(10, 11)).toThrow(
+      "async_document_queue_limits_invalid",
+    );
   });
 });

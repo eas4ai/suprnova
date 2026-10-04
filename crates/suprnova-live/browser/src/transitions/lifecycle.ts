@@ -1,7 +1,6 @@
 import { KEYED_SELECTOR, stableKeyOf } from "../morph/keys.js";
 import type { MorphIdentityEntry, MorphPlan } from "../morph/types.js";
 import {
-  MAX_TRANSITION_TARGETS,
   type TransitionCancelReason,
   type TransitionCompletion,
   type TransitionHandle,
@@ -93,6 +92,10 @@ function resolve(root: HTMLElement, entry: MorphIdentityEntry): Element | null {
 export function prepareMorphTransitions(plan: MorphPlan): MorphTransitions {
   const before: TransitionTarget[] = [];
   const after: PendingTransition[] = [];
+  // A set, not `moved.includes` per entry: a reorder of every row moves every
+  // entry, and scanning the moved list for each one was quadratic in the
+  // island's keyed elements.
+  const moved = new Set(plan.identity.moved);
   for (const entry of plan.identity.entries) {
     if (entry.kind === "nested_island") continue;
     let kind: TransitionKind;
@@ -103,7 +106,7 @@ export function prepareMorphTransitions(plan: MorphPlan): MorphTransitions {
     } else if (entry.replacement === null) {
       kind = "leave";
       parsed = parseTransition(entry.current);
-    } else if (plan.identity.moved.includes(identityLabel(entry))) {
+    } else if (moved.has(identityLabel(entry))) {
       kind = "move";
       parsed = parseTransition(entry.replacement) ?? parseTransition(entry.current);
     } else if (changed(entry)) {
@@ -118,9 +121,6 @@ export function prepareMorphTransitions(plan: MorphPlan): MorphTransitions {
       if (entry.current === null) throw new Error("transition_identity_invalid");
       before.push(target(entry.current, transition));
     } else after.push(Object.freeze({ entry, spec: transition }));
-    if (before.length + after.length > MAX_TRANSITION_TARGETS) {
-      throw new Error("transition_target_limit");
-    }
   }
   return Object.freeze({
     after: (root: HTMLElement) =>

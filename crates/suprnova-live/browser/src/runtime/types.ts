@@ -1,3 +1,4 @@
+import type { LiveLimits } from "../limits.js";
 import type { RuntimePortOverrides } from "./ports.js";
 import type { RuntimeCallRegistration } from "../extensions/calls.js";
 import type { EffectRegistration } from "../extensions/effects.js";
@@ -21,7 +22,8 @@ export interface RuntimeConfig {
   readonly endpoint: URL;
   readonly credentials: "same-origin" | "include";
   readonly requestTimeoutMs: number;
-  readonly maxResponseBytes: number;
+  /// The server's configured page limits, read from the configuration element.
+  readonly limits: LiveLimits;
   readonly maxQueuedPerIsland: number;
   readonly maxParallelPerIsland: number;
   readonly assetIdentity: string;

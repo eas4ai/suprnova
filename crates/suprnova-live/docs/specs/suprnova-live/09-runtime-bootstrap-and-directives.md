@@ -77,10 +77,8 @@ Acceptance criteria:
   morph cannot enqueue duplicate completion for the same surviving identity.
 - Invalid metadata cannot cause arbitrary endpoint calls or controller lookup.
 - Multiple islands connect independently in deterministic document order.
-- The optional lifecycle driver retains at most 256 active island ports per
-  document. A later island fails only optional-capability admission with one
-  bounded `resource_exhausted` diagnostic; ordinary Live and already admitted
-  optional owners continue, and retiring an admitted island releases capacity.
+- The optional lifecycle driver retains one port for every connected island
+  the server rendered, with no count cap; retiring an island releases its port.
 - The upload slot receives one typed `proposeUploadHandle` capability. Core
   validates current island ownership, the declared upload field, canonical
   handle grammar, cross-field/cross-island claims, and retirement; no generic
@@ -252,6 +250,23 @@ UX flow:
   `data-suprnova-live-actions` attribute gives the runtime the parameter
   names to send them under. The grammar stays closed: literals only, no
   expressions.
+- 2026-10-04 -- The configuration element also carries
+  `async_max_queued_events`, `async_max_replay_events`, `max_redirect_bytes`
+  and the five `upload_*` limits, and the runtime hands them to every optional
+  feature through its document context, with a callback that prints a tripped
+  limit's key. A feature holds no limit of its own.
+- 2026-10-04 -- The configuration element carries every page limit the
+  browser applies, as the server configured it: `max_request_bytes`,
+  `max_response_bytes`, `max_html_bytes`, `max_json_depth`,
+  `max_json_entries`, `max_request_items`, `max_response_items` and the
+  `morph_*` limits, alongside `request_timeout_ms` (60 seconds by default,
+  since a 16 MiB response takes tens of seconds on a slow link). The runtime
+  requires every key and keeps no constant of its own beyond fallbacks equal to
+  the server's defaults. Directive, feature, signal, binding, transition,
+  bfcache, metadata and island-count scans no longer stop at 256 to 10,000
+  items: those caps silently dropped behavior past them on large pages. A
+  tripped limit prints its name, both values and the key to the console
+  unless diagnostics are off.
 - 2026-09-30 -- An immediate `live:model` edit on a seed-backed island is its
   first request and promotes the seed; the server now accepts that model
   synchronization as it accepts a first action.

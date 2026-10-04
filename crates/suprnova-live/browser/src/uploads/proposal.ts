@@ -19,13 +19,11 @@ export interface UploadProposalContext {
   write(value: JsonValue): boolean;
 }
 
-const MAX_DECLARATION_ELEMENTS = 4_096;
-const MAX_DECLARATION_ATTRIBUTES = 64;
-
 export function declaresUploadField(root: Element, field: string): boolean {
   validateUploadField(field);
+  // The whole island is searched: a cap on elements or attributes here made
+  // an upload field in a large island read as undeclared and refused it.
   const pending: Element[] = [root];
-  let scanned = 0;
   let declared = false;
   let modelConflict = false;
   try {
@@ -33,13 +31,6 @@ export function declaresUploadField(root: Element, field: string): boolean {
       const element = pending.pop();
       if (element === undefined) break;
       if (element !== root && element.matches(ISLAND_ROOT_SELECTOR)) continue;
-      scanned += 1;
-      if (
-        scanned > MAX_DECLARATION_ELEMENTS ||
-        element.attributes.length > MAX_DECLARATION_ATTRIBUTES
-      ) {
-        return false;
-      }
       for (const attribute of element.attributes) {
         if (attribute.name === "live:upload" && attribute.value === field) declared = true;
         if (
@@ -71,8 +62,11 @@ export class UploadProposalAuthority<Owner extends object> {
   readonly #claims = new Map<UploadHandle, UploadHandleClaim<Owner>>();
   readonly #maximumClaims: number;
 
-  constructor(maximumClaims = 4_096) {
-    if (!Number.isSafeInteger(maximumClaims) || maximumClaims < 1 || maximumClaims > 65_536) {
+  // Claims live until the document goes, so the bound counts every handle a
+  // page proposes in its lifetime; it guards memory against a feature that
+  // proposes handles without end, not the uploads a real page makes.
+  constructor(maximumClaims = 1_048_576) {
+    if (!Number.isSafeInteger(maximumClaims) || maximumClaims < 1 || maximumClaims > 16_777_216) {
       throw new RangeError("feature_upload_handle_limit_invalid");
     }
     this.#maximumClaims = maximumClaims;

@@ -625,7 +625,7 @@ pub(crate) fn parse_update_response_v2_fields(
         .map(|value| parse_render(value, limits))
         .transpose()?;
     let redirect = take_optional(&mut fields, "redirect")
-        .map(parse_redirect)
+        .map(|value| parse_redirect(value, limits))
         .transpose()?;
     let validation = parse_bounded_object(
         take(&mut fields, "validation")?,
@@ -642,7 +642,7 @@ pub(crate) fn parse_update_response_v2_fields(
         limits.max_events(),
         limits,
     )?;
-    let url_intent = parse_url_intent(take(&mut fields, "url_intent")?)?;
+    let url_intent = parse_url_intent(take(&mut fields, "url_intent")?, limits)?;
     validate_v2_outcome(
         outcome,
         accepted_revision,
@@ -708,14 +708,17 @@ fn parse_child_deliveries(
         .collect()
 }
 
-fn parse_url_intent(value: CanonicalValue) -> Result<Option<UrlIntent>, ProtocolError> {
+fn parse_url_intent(
+    value: CanonicalValue,
+    limits: &ProtocolLimits,
+) -> Result<Option<UrlIntent>, ProtocolError> {
     if matches!(value, CanonicalValue::Null) {
         return Ok(None);
     }
     let mut fields = object(value)?;
     require_exact_keys(&fields, &["kind", "target"])?;
     let kind = take_string(&mut fields, "kind")?;
-    let target = parse_redirect(take(&mut fields, "target")?)?;
+    let target = parse_redirect(take(&mut fields, "target")?, limits)?;
     match kind.as_str() {
         "reflected" => Ok(Some(UrlIntent::Reflected { target })),
         "navigated" => Ok(Some(UrlIntent::Navigated { target })),

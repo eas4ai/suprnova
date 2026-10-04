@@ -2343,13 +2343,14 @@ pub fn project_live_response_for_test<'header>(
             .map_err(|_| crate::FrameworkError::internal("invalid test response header"))?;
         header_map.append(name, value);
     }
-    super::ports::response::SuprnovaResponseIntentPort.project(
-        suprnova_live::endpoint::LiveEndpointResponse {
-            status,
-            headers: header_map,
-            body: bytes::Bytes::copy_from_slice(body),
-        },
+    super::ports::response::SuprnovaResponseIntentPort::new(
+        super::LiveConfig::standard().max_redirect_bytes(),
     )
+    .project(suprnova_live::endpoint::LiveEndpointResponse {
+        status,
+        headers: header_map,
+        body: bytes::Bytes::copy_from_slice(body),
+    })
 }
 
 /// Runs the production post-acceptance event adapter with bounded metadata.

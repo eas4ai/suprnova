@@ -1,6 +1,7 @@
 import type { JsonValue } from "../canonical.js";
 import type { AsyncRegisteredEventContract, SubscriptionState } from "../async-updates/types.js";
 import type { IslandExtensionIdentity } from "../extensions/registry.js";
+import type { LiveLimitBreach, LiveLimits } from "../limits.js";
 import type { StimulusBootstrapOptions } from "../stimulus/port.js";
 import type { UploadHandleProposal, UploadHandleProposalDisposition } from "../uploads/types.js";
 import type { CoreResourceKind, Disposable } from "../lifecycle/resources.js";
@@ -47,6 +48,10 @@ export interface RegisteredBrowserEventDispatch {
 
 export interface RuntimeFeatureDriverDocumentPort {
   diagnose(detail: RuntimeFeatureDiagnosticDetail): void;
+  /// The server's configured limits, handed to every feature.
+  readonly limits?: LiveLimits | undefined;
+  /// Prints a limit a feature refused something for.
+  limit?(breach: LiveLimitBreach): void;
   readonly stimulus?: StimulusBootstrapOptions | undefined;
   trackResource?(kind: CoreResourceKind, dispose: () => void): Disposable;
 }

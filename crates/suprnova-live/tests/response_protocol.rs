@@ -5,7 +5,7 @@ mod protocol_support;
 use protocol_support::{accepted_html_response, identity, instance_snapshot, limits};
 use suprnova_live::error::{ErrorCategory, RecoveryInstruction};
 use suprnova_live::protocol::{
-    ProtocolErrorKind, RenderPayload, ResponseOutcome, parse_update_response,
+    MAX_REDIRECT_BYTES, ProtocolErrorKind, RenderPayload, ResponseOutcome, parse_update_response,
 };
 
 #[test]
@@ -51,6 +51,35 @@ fn terminal_redirect_is_structurally_exclusive() {
             .kind(),
         ProtocolErrorKind::OutcomeMismatch
     );
+}
+
+#[test]
+fn a_redirect_is_bounded_by_the_configured_size_not_a_fixed_one() {
+    // 2,048 bytes was a fixed cap; the configured size now decides.
+    let target = format!("/reports?{}", "q=x&".repeat(2_500));
+    let redirect = format!(
+        r#"{{"correlation_id":"{}","effects":[],"events":[],"extensions":{{}},"outcome":"accepted","protocol_version":1,"redirect":"{target}","validation":{{}}}}"#,
+        identity::<16>(0x10),
+    );
+    let response = parse_update_response(redirect.as_bytes(), &limits())
+        .expect("a 10,000-byte redirect parses under the default size");
+    assert_eq!(response.redirect(), Some(target.as_str()));
+
+    let tight = limits()
+        .with_max_redirect_bytes(4_096)
+        .expect("a smaller configured size");
+    assert_eq!(
+        parse_update_response(redirect.as_bytes(), &tight)
+            .expect_err("over the configured size")
+            .kind(),
+        ProtocolErrorKind::UnsafeRedirect
+    );
+    assert!(
+        limits()
+            .with_max_redirect_bytes(MAX_REDIRECT_BYTES + 1)
+            .is_err()
+    );
+    assert!(limits().with_max_redirect_bytes(0).is_err());
 }
 
 #[test]

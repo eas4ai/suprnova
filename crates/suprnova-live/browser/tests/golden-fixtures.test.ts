@@ -357,12 +357,14 @@ describe("shared versioned Live fixtures", () => {
       maxEntries: 64,
       maxStringBytes: 4_096,
     });
+    // The server's async v1 ceilings; the configured payload limit
+    // (LIVE_ASYNC_MAX_PAYLOAD_BYTES) applies below them.
     assertCodecSemantics(asRecord(required(fixtures, "async-envelope.json")), "envelope_cases", {
-      maxBytes: 65_536,
-      maxDepth: 8,
-      maxEntries: 1_024,
-      maxStringBytes: 4_096,
-      maxPayloadBytes: 32_768,
+      maxBytes: 16_781_312,
+      maxDepth: 64,
+      maxEntries: 100_000_000,
+      maxStringBytes: 16_777_216,
+      maxPayloadBytes: 16_777_216,
     });
   });
 

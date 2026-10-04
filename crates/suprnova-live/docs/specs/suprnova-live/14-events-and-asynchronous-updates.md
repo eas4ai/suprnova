@@ -1,7 +1,7 @@
 # Suprnova Live -- 14 Events and Asynchronous Updates
 
 Status: Normative design specification
-Last revised: 2026-09-15
+Last revised: 2026-10-04
 
 ## Scope
 
@@ -396,8 +396,10 @@ transport, document authorization scope)` and multiplexes island subscriptions
 - Server delivery pressure is one policy wrapper over the shared resource owner,
   bounded queue, permit pool, and cancellation flag. It does not create a
   second queue, permit counter, lifetime owner, detached worker, or sequence
-  authority. One owning document delivery queue retains at most 64 unapplied
-  envelopes and 256 KiB of canonical envelope bytes across all of that
+  authority. One owning document delivery queue retains at most the
+  configured `LIVE_ASYNC_MAX_QUEUED_EVENTS` (4,096 by default, 65,536 ceiling)
+  unapplied envelopes and the configured `LIVE_ASYNC_MAX_BUFFER_BYTES` (16 MiB by
+  default, 1 GiB ceiling) of canonical envelope bytes across all of that
   document transport's logical memberships. The document transport polls one
   logical source fairly and immediately offers that one item; Live owns no
   hidden per-membership ingress buffer in front of the aggregate queue. A host
@@ -442,7 +444,9 @@ transport, document authorization scope)` and multiplexes island subscriptions
   dispatch consumes a private-construction resolved-delivery capability carrying
   the exact accepted target-scope digest, resolved count, and deployment limit;
   the dispatcher cannot substitute caller-proposed recipients.
-- Admission checks the 32 KiB canonical payload ceiling, replay count and
+- Admission checks the configured canonical payload limit
+  (`LIVE_ASYNC_MAX_PAYLOAD_BYTES`, 1 MiB by default, 16 MiB ceiling), replay
+  count and
   aggregate bytes, current descriptor-bound event fanout, deployment fanout
   policy, queue count/bytes, and owner cancellation before per-target cloning or
   delivery work. Delivery acquires one shared permit before removing a queued
@@ -626,6 +630,28 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-04 -- The queue depth and the replay count are configuration too:
+  `LIVE_ASYNC_MAX_QUEUED_EVENTS` (4,096) replaces the 64-event document queue
+  on the server and in the browser, and `LIVE_ASYNC_MAX_REPLAY_EVENTS` (4,096,
+  at most the queue depth, because a replay is queued whole) replaces the
+  1,024-envelope replay count and the 256-entry replay log. Both reach the
+  browser in the configuration element; the engine ceilings are 65,536. An
+  event or replay past its limit is refused with the limit, both values and
+  the key, and the island re-renders fresh. WebSocket control frames keep
+  their 512-byte bound: a subscribe or unsubscribe record is a fixed set of
+  identifiers, so its size follows from the format.
+- 2026-10-04 -- Asynchronous payload and queue limits are configuration:
+  `LIVE_ASYNC_MAX_PAYLOAD_BYTES` (1 MiB default) replaces the locked 32 KiB
+  payload ceiling and `LIVE_ASYNC_MAX_BUFFER_BYTES` (16 MiB default) replaces
+  the 256 KiB per-document queue and the 64 KiB per-subscription replay log,
+  which evicted any larger payload before it could be replayed. The v1 codec
+  profile is the engine's ceiling, not the operating limit. Publishing a
+  payload over the limit fails with the limit, both sizes and the key. The
+  browser decodes envelopes, SSE records, replay transcripts and control
+  responses without byte caps of its own (64 KiB, 32 KiB, 256 KiB before),
+  because the server encoded each one under its configured limit. (The
+  64-item queue depth and 1,024-envelope replay count it kept then became
+  settings in the entry above.)
 - 2026-09-15 -- The official live feed and notification bell render the
   runtime's stream status: the server renders the disconnected announcement
   as the default in a polite status element, the runtime announces every

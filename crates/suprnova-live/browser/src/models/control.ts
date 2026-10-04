@@ -1,7 +1,6 @@
 import type { JsonValue } from "../canonical.js";
 import { immutableModelValue } from "./value.js";
 
-const MAX_SELECT_OPTIONS = 4_096;
 const NON_VALUE_INPUT_TYPES = new Set(["button", "image", "reset", "submit"]);
 
 export type ModelControlRead =
@@ -77,7 +76,6 @@ function readSelect(element: HTMLSelectElement): ModelControlRead {
   } catch {
     return invalidControl();
   }
-  if (options.length > MAX_SELECT_OPTIONS) return invalidControl();
   return modelValue(options.filter((option) => option.selected).map((option) => option.value));
 }
 

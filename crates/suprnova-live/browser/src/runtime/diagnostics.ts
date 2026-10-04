@@ -1,3 +1,4 @@
+import type { LiveLimitBreach } from "../limits.js";
 import { MAX_DIAGNOSTIC_ENTRIES, MAX_DIAGNOSTIC_SEQUENCE, boundedInteger } from "./limits.js";
 import type { DiagnosticMode } from "./types.js";
 
@@ -68,10 +69,44 @@ export interface RuntimeDiagnosticsOptions {
   readonly maxEntries?: number;
   readonly initialSequence?: number;
   readonly emit?: (diagnostic: RuntimeDiagnostic) => void;
+  readonly console?: DiagnosticConsole | null;
 }
 
 export interface RuntimeDiagnosticSink {
   record(input: RuntimeDiagnosticInput, unsafeContext?: unknown): void;
+  /// Reports a configured limit that tripped. A closed diagnostic code says
+  /// only that a limit was hit; the developer also needs which one, by how
+  /// much, and the setting to raise, so this path prints the breach.
+  limit?(breach: LiveLimitBreach): void;
+}
+
+/// The one console method a limit report uses, injectable for tests.
+export interface DiagnosticConsole {
+  error(message: string): void;
+}
+
+function defaultConsole(): DiagnosticConsole | null {
+  const candidate: unknown = Reflect.get(globalThis, "console");
+  return candidate !== null &&
+    typeof candidate === "object" &&
+    typeof Reflect.get(candidate, "error") === "function"
+    ? (candidate as DiagnosticConsole)
+    : null;
+}
+
+/// Writes a breach to the console unless diagnostics are off. The breach holds
+/// only sizes and fixed names, never page content, so it is safe to print.
+function printBreach(
+  mode: DiagnosticMode,
+  console: DiagnosticConsole | null,
+  breach: LiveLimitBreach,
+): void {
+  if (mode === "off" || console === null) return;
+  try {
+    console.error(breach.message);
+  } catch {
+    // A replaced console cannot change runtime control flow.
+  }
 }
 
 function contains<const Values extends readonly string[]>(
@@ -95,13 +130,19 @@ function validInput(input: unknown): input is RuntimeDiagnosticInput {
 
 export class CoreRuntimeDiagnostics implements RuntimeDiagnosticSink {
   readonly #mode: DiagnosticMode;
+  readonly #console: DiagnosticConsole | null;
   #sequence = 0;
 
-  constructor(mode: unknown) {
+  constructor(mode: unknown, console: DiagnosticConsole | null = defaultConsole()) {
     if (!contains(["off", "errors", "verbose"] as const, mode)) {
       throw new RangeError("runtime_diagnostic_mode");
     }
     this.#mode = mode;
+    this.#console = console;
+  }
+
+  limit(breach: LiveLimitBreach): void {
+    printBreach(this.#mode, this.#console, breach);
   }
 
   record(input: unknown, unsafeContext?: unknown): void {
@@ -124,6 +165,7 @@ export class RuntimeDiagnostics implements RuntimeDiagnosticSink {
   readonly #mode: DiagnosticMode;
   readonly #maximum: number;
   readonly #emit: ((diagnostic: RuntimeDiagnostic) => void) | undefined;
+  readonly #console: DiagnosticConsole | null;
   readonly #entries: RuntimeDiagnostic[] = [];
   #sequence: number;
 
@@ -143,6 +185,11 @@ export class RuntimeDiagnostics implements RuntimeDiagnosticSink {
     this.#maximum = maximum;
     this.#sequence = sequence;
     this.#emit = options.emit;
+    this.#console = options.console === undefined ? defaultConsole() : options.console;
+  }
+
+  limit(breach: LiveLimitBreach): void {
+    printBreach(this.#mode, this.#console, breach);
   }
 
   record(input: RuntimeDiagnosticInput, unsafeContext?: unknown): RuntimeDiagnostic | null {

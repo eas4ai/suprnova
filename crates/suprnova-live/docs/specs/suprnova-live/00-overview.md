@@ -1,7 +1,7 @@
 # Suprnova Live -- System Overview
 
 Status: Normative design specification
-Last revised: 2026-09-30
+Last revised: 2026-10-04
 
 ## Purpose
 
@@ -334,7 +334,7 @@ for those 100 subscriptions.
 | Composite assembly | Assemble `C64+4` in at most 2 ms p95 on `S1`, excluding slot rendering and provider I/O, with at most two full-response-sized byte copies. |
 | Publication generation reread | One publication performs one batched fresh authority query and spends at most 3 ms p95 on the `S1` loopback database for 12 dependency keys. |
 | Upload resource envelope | `U4/16` retains at most two configured chunk buffers per active transfer plus 256 KiB browser-manager overhead and two configured chunk buffers per active server transfer plus 512 KiB server-manager overhead. Progress application is at most 16 ms p95 on `B1`; control-plane framework overhead is at most 2 ms p95 on `S1`, excluding body I/O, provider work, scanning, and application validation. |
-| Asynchronous event envelope | `E100/1K` retains at most 8 KiB framework memory per active subscription excluding native transport, DOM, and the currently dispatched payload. Queued unapplied browser events are capped at 64 items and 256 KiB per document; typed presentation dispatch is at most 8 ms p95 on `B1`; invalidations retain at most one queued plus one in-flight refresh per island. |
+| Asynchronous event envelope | `E100/1K` retains at most 8 KiB framework memory per active subscription excluding native transport, DOM, and the currently dispatched payload. Queued unapplied browser events are bounded per document by the server's configured `LIVE_ASYNC_MAX_QUEUED_EVENTS`, their bytes by its configured payload and queue limits; typed presentation dispatch is at most 8 ms p95 on `B1`; invalidations retain at most one queued plus one in-flight refresh per island. |
 | Reconnect storm | `R100` permits at most eight concurrent reconnect handshakes per origin, creates no synchronized polling burst, and returns within the 12 KiB retained-runtime-per-island cap after currentness is reestablished. |
 
 These budgets are measured by the on-demand benchmark tools and reported as
@@ -520,6 +520,20 @@ Suprnova Live is complete when all of the following are true:
 
 ## Decisions and revisions
 
+- 2026-10-04 -- The asynchronous event envelope budget bounds queued browser
+  events by the configured `LIVE_ASYNC_MAX_QUEUED_EVENTS` rather than a fixed
+  64 items.
+- 2026-10-04 -- Adopted the rule that Live has no arbitrary small caps.
+  Every limit is tied to a real resource and is configurable; the server's
+  configuration is the single source, read from `LIVE_*` keys in the
+  application's `.env` or set through `LiveConfig`; defaults are sized for
+  modern pages (16 MiB, not KiB; hundreds of thousands of nodes, not
+  thousands); and the browser never enforces a limit tighter than the server's,
+  taking each value from the boot configuration. Limits on content the trusted
+  server rendered went entirely unless they guard a resource such as a
+  recursive walk's stack. Limits that protect the server from browser input
+  stay, configurable. A tripped limit names itself, the measured and
+  configured values and the key to change.
 - 2026-09-14 -- Raised the supported baseline from Safari 16.4 and Chrome and
   Edge 111 to Safari 17 and Chrome and Edge 114; Firefox stays at 128. The
   official overlay components own their open state through the native

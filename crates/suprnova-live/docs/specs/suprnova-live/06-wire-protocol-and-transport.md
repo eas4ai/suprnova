@@ -1,7 +1,7 @@
 # Suprnova Live -- 06 Wire Protocol and Transport
 
 Status: Normative design specification
-Last revised: 2026-09-30
+Last revised: 2026-10-04
 
 ## Scope
 
@@ -273,6 +273,26 @@ blob store merely to replay bytes.
 
 ## Decisions and revisions
 
+- 2026-10-04 -- A redirect or reflected URL is bounded by
+  `LIVE_MAX_REDIRECT_BYTES` (64 KiB by default, at most the response limit and
+  at most 2 MiB, the longest URL a browser follows) instead of a fixed 2,048
+  bytes, in the engine's response parser, the host's navigation targets and
+  the browser's validator. A longer one fails with the limit, both values and
+  the key.
+- 2026-10-04 -- Removed every arbitrary small cap on Live messages. The
+  server's configuration is the single source of each limit, with defaults
+  sized for modern pages: `LIVE_MAX_REQUEST_BYTES`, `LIVE_MAX_RESPONSE_BYTES`
+  and `LIVE_MAX_HTML_BYTES` default to 16 MiB with a 1 GiB ceiling, and the
+  JSON, item and morph limits travel with them. The bootstrap writes every
+  value into the configuration element and the browser validates requests and
+  responses against those values only, never a constant of its own: the 32 KiB
+  island render cap, the 64 KiB canonical parse cap, the 4 MiB response
+  ceiling and the browser's fixed 128-item counts are gone, and the boot
+  element no longer clamps the response limit. The asynchronous WebSocket envelope frame
+  ceiling is the async payload ceiling plus the envelope around it, replacing
+  the 65,536-byte frame cap; control frames stay at 512 bytes, a fixed-shape
+  grammar. A limit that trips names the limit, the measured and configured
+  values and the key, in the browser console and the server log.
 - 2026-09-30 -- The first request on a public seed may be a model
   synchronization with no action, and it promotes the seed as a first action
   does. The browser runtime already sent an immediate `live:model` edit on a

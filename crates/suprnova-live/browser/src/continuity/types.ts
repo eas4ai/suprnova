@@ -1,18 +1,10 @@
 import type { SignalContinuity } from "../signals/lifecycle.js";
 
-export interface ContinuityLimits {
-  readonly maxControls: number;
-  readonly maxRetainedBytes: number;
-  readonly maxScrollScopes: number;
-  readonly maxSelections: number;
-}
-
-export const DEFAULT_CONTINUITY_LIMITS: ContinuityLimits = Object.freeze({
-  maxControls: 64,
-  maxRetainedBytes: 16_384,
-  maxScrollScopes: 32,
-  maxSelections: 32,
-});
+// Continuity carries what the user typed, chose, scrolled and selected across
+// one morph. It has no size or count limits of its own: the values already live
+// in the island's DOM, every record belongs to a keyed element the morph's key
+// limit (`LIVE_MORPH_MAX_KEYS`) already counted, and a cap here dropped a long
+// textarea or a large form's edits mid-update.
 
 export type ControlContinuity =
   | {
@@ -94,21 +86,8 @@ export interface ContinuityRecord {
 }
 
 export class ContinuityError extends Error {
-  constructor(
-    readonly code:
-      "incompatible_state" | "invalid_authority" | "invalid_identity" | "resource_exhausted",
-  ) {
+  constructor(readonly code: "incompatible_state" | "invalid_authority" | "invalid_identity") {
     super(`continuity_${code}`);
     this.name = "ContinuityError";
   }
-}
-
-export interface ContinuityBudget {
-  bytes: number;
-  readonly limit: number;
-}
-
-export function consumeContinuityBytes(budget: ContinuityBudget, value: string): void {
-  budget.bytes += new TextEncoder().encode(value).byteLength;
-  if (budget.bytes > budget.limit) throw new ContinuityError("resource_exhausted");
 }

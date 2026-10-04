@@ -98,18 +98,33 @@ describe("browser async envelope boundary", () => {
     );
   });
 
-  it("enforces the bounded canonical envelope and payload limits", () => {
+  it("accepts payloads the server sent past the old 32 KiB cap and guards only depth", () => {
+    // The server encodes each payload under LIVE_ASYNC_MAX_PAYLOAD_BYTES.
+    expect(
+      decodeAsyncEnvelope(
+        encoded({
+          event: "orders.updated",
+          kind: "browser_event",
+          payload: "x".repeat(2 * 1024 * 1024),
+          schema_version: 1,
+          target: "self",
+        }),
+        membership(),
+      ).payload.kind,
+    ).toBe("browser_event");
+    let deep: JsonValue = 1;
+    for (let index = 0; index < 70; index += 1) deep = [deep];
     expect(() =>
       decodeAsyncEnvelope(
         encoded({
           event: "orders.updated",
           kind: "browser_event",
-          payload: "x".repeat(33 * 1024),
+          payload: deep,
           schema_version: 1,
           target: "self",
         }),
         membership(),
       ),
-    ).toThrow(/async_(?:envelope_invalid|payload_too_large)/u);
+    ).toThrow("async_envelope_invalid");
   });
 });

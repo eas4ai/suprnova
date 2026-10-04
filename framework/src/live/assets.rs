@@ -46,15 +46,6 @@ const ESM_ASYNC_BOOT_SOURCE: &str = "import { boot } from \"./suprnova-live.esm.
 /// The classic asynchronous artifact publishes its default host on a global;
 /// the classic boot configures it when present and boots either way.
 const CLASSIC_BOOT_SOURCE: &str = "var suprnovaLiveAsync = window.SuprnovaLiveAsync;\nif (suprnovaLiveAsync && typeof suprnovaLiveAsync.browserOptions === \"function\") {\n  window[Symbol.for(\"suprnova.live.features.v1\")].configureAsync(suprnovaLiveAsync.browserOptions());\n}\nwindow.SuprnovaLive.boot();\n";
-const REQUEST_TIMEOUT_MS: u32 = 5_000;
-const MAX_QUEUED_PER_ISLAND: u8 = 8;
-const MAX_PARALLEL_PER_ISLAND: u8 = 1;
-/// The browser runtime accepts only this response budget range in its
-/// configuration. `LiveConfig` may set a larger or smaller server-side
-/// response limit; the configuration element reports the configured value
-/// bounded to this range, which is the budget the runtime actually applies.
-const MIN_RUNTIME_RESPONSE_BYTES: usize = 1_024;
-const MAX_RUNTIME_RESPONSE_BYTES: usize = 4_194_304;
 const MAX_NONCE_BYTES: usize = 256;
 const CONFIG_ELEMENT_ID: &str = "suprnova-live-config";
 
@@ -609,50 +600,113 @@ fn valid_nonce(value: &str) -> bool {
         })
 }
 
+/// Writes the inert configuration element the browser runtime reads at
+/// startup. It carries every limit the browser applies, at the configured
+/// value: the server's configuration is their single source, so the browser
+/// never enforces a limit tighter than the one set here.
 fn config_element(identity: &str, config: LiveConfig, protocol: (u16, u16)) -> String {
-    let max_response_bytes = config
-        .max_response_bytes()
-        .clamp(MIN_RUNTIME_RESPONSE_BYTES, MAX_RUNTIME_RESPONSE_BYTES);
+    let morph = config.morph();
+    // The store's total size is the server's own business; the browser gets
+    // the limits it applies before it sends anything.
+    let upload = config.upload();
     let mut protocol_object = serde_json::Map::new();
     protocol_object.insert("maximum".to_owned(), serde_json::Value::from(protocol.1));
     protocol_object.insert("minimum".to_owned(), serde_json::Value::from(protocol.0));
+    let number = |value: u64| serde_json::Value::from(value);
+    // Canonical form: keys in sorted order, so the element's bytes are the
+    // same whichever way the JSON map orders its insertions.
+    let mut entries: Vec<(&str, serde_json::Value)> = vec![
+        (
+            "asset_identity",
+            serde_json::Value::String(identity.to_owned()),
+        ),
+        (
+            "credentials",
+            serde_json::Value::String("same-origin".to_owned()),
+        ),
+        (
+            "endpoint",
+            serde_json::Value::String(LIVE_UPDATE_PATH.to_owned()),
+        ),
+        ("max_html_bytes", number(config.max_html_bytes() as u64)),
+        ("max_json_depth", number(config.max_json_depth() as u64)),
+        ("max_json_entries", number(config.max_json_entries() as u64)),
+        (
+            "max_parallel_per_island",
+            number(u64::from(config.max_parallel_per_island())),
+        ),
+        (
+            "max_queued_per_island",
+            number(u64::from(config.max_queued_per_island())),
+        ),
+        (
+            "max_request_bytes",
+            number(config.max_request_bytes() as u64),
+        ),
+        (
+            "max_request_items",
+            number(config.max_request_items() as u64),
+        ),
+        (
+            "max_response_bytes",
+            number(config.max_response_bytes() as u64),
+        ),
+        (
+            "max_response_items",
+            number(config.max_response_items() as u64),
+        ),
+        ("morph_deadline_ms", number(u64::from(morph.deadline_ms()))),
+        (
+            "morph_max_attributes",
+            number(u64::from(morph.max_attributes())),
+        ),
+        (
+            "morph_max_attributes_per_element",
+            number(u64::from(morph.max_attributes_per_element())),
+        ),
+        ("morph_max_depth", number(u64::from(morph.max_depth()))),
+        ("morph_max_keys", number(u64::from(morph.max_keys()))),
+        ("morph_max_nodes", number(u64::from(morph.max_nodes()))),
+        ("protocol", serde_json::Value::Object(protocol_object)),
+        (
+            "request_timeout_ms",
+            number(u64::from(config.request_timeout_ms())),
+        ),
+        (
+            "runtime_contract_version",
+            number(u64::from(
+                suprnova_live::artifacts::RUNTIME_CONTRACT_VERSION,
+            )),
+        ),
+        (
+            "async_max_queued_events",
+            number(config.async_max_queued_events() as u64),
+        ),
+        (
+            "async_max_replay_events",
+            number(config.async_max_replay_events() as u64),
+        ),
+        (
+            "max_redirect_bytes",
+            number(config.max_redirect_bytes() as u64),
+        ),
+        ("upload_chunk_bytes", number(upload.chunk_bytes() as u64)),
+        ("upload_max_active", number(upload.max_active() as u64)),
+        ("upload_max_file_bytes", number(upload.max_file_bytes())),
+        (
+            "upload_max_pending_bytes",
+            number(upload.max_pending_bytes()),
+        ),
+        (
+            "upload_max_pending_files",
+            number(upload.max_pending_files() as u64),
+        ),
+    ];
+    entries.sort_by(|left, right| left.0.cmp(right.0));
     let mut object = serde_json::Map::new();
-    object.insert(
-        "asset_identity".to_owned(),
-        serde_json::Value::String(identity.to_owned()),
-    );
-    object.insert(
-        "credentials".to_owned(),
-        serde_json::Value::String("same-origin".to_owned()),
-    );
-    object.insert(
-        "endpoint".to_owned(),
-        serde_json::Value::String(LIVE_UPDATE_PATH.to_owned()),
-    );
-    object.insert(
-        "max_parallel_per_island".to_owned(),
-        serde_json::Value::from(MAX_PARALLEL_PER_ISLAND),
-    );
-    object.insert(
-        "max_queued_per_island".to_owned(),
-        serde_json::Value::from(MAX_QUEUED_PER_ISLAND),
-    );
-    object.insert(
-        "max_response_bytes".to_owned(),
-        serde_json::Value::from(max_response_bytes),
-    );
-    object.insert(
-        "protocol".to_owned(),
-        serde_json::Value::Object(protocol_object),
-    );
-    object.insert(
-        "request_timeout_ms".to_owned(),
-        serde_json::Value::from(REQUEST_TIMEOUT_MS),
-    );
-    object.insert(
-        "runtime_contract_version".to_owned(),
-        serde_json::Value::from(suprnova_live::artifacts::RUNTIME_CONTRACT_VERSION),
-    );
+    for (name, value) in entries {
+        object.insert(name.to_owned(), value);
+    }
     let json = serde_json::Value::Object(object)
         .to_string()
         .replace('<', "\\u003c");
@@ -709,27 +763,95 @@ mod tests {
     }
 
     #[test]
-    fn the_reported_response_budget_is_bounded_to_the_runtime_range() {
+    fn the_element_reports_every_configured_limit_unclamped() {
+        // The element once clamped the response limit to 1 KiB..4 MiB, so a
+        // server configured for 8 MiB told the browser 4 MiB.
+        let large = LiveConfig::builder()
+            .max_request_bytes(1024 * 1024 * 1024)
+            .max_response_bytes(1024 * 1024 * 1024)
+            .max_html_bytes(512 * 1024 * 1024)
+            .morph_max_nodes(5_000_000)
+            .morph_deadline_ms(30_000)
+            .request_timeout_ms(120_000)
+            .async_max_queued_events(65_536)
+            .async_max_replay_events(20_000)
+            .max_redirect_bytes(2 * 1024 * 1024)
+            .upload_chunk_bytes(64 * 1024 * 1024)
+            .upload_max_active(16)
+            .upload_max_file_bytes(1024 * 1024 * 1024 * 1024)
+            .upload_max_pending_files(100_000)
+            .build()
+            .expect("the hard maxima are legal");
+        let element = config_element("id", large, (1, 2));
+        for expected in [
+            "\"async_max_queued_events\":65536",
+            "\"async_max_replay_events\":20000",
+            "\"max_redirect_bytes\":2097152",
+            "\"upload_chunk_bytes\":67108864",
+            "\"upload_max_active\":16",
+            "\"upload_max_file_bytes\":1099511627776",
+            "\"upload_max_pending_bytes\":1099511627776",
+            "\"upload_max_pending_files\":100000",
+            "\"max_request_bytes\":1073741824",
+            "\"max_response_bytes\":1073741824",
+            "\"max_html_bytes\":536870912",
+            "\"morph_max_nodes\":5000000",
+            "\"morph_deadline_ms\":30000",
+            "\"request_timeout_ms\":120000",
+        ] {
+            assert!(
+                element.contains(expected),
+                "{expected} missing from {element}"
+            );
+        }
         let small = LiveConfig::builder()
-            .max_response_bytes(16)
+            .max_request_bytes(16)
             .build()
             .expect("a small server limit is legal");
-        assert!(config_element("id", small, (1, 2)).contains("\"max_response_bytes\":1024"));
-        let large = LiveConfig::builder()
-            .max_request_bytes(16 * 1024 * 1024)
-            .max_response_bytes(8 * 1024 * 1024)
-            .build()
-            .expect("a large server limit is legal");
-        assert!(config_element("id", large, (1, 2)).contains("\"max_response_bytes\":4194304"));
-        let standard = LiveConfig::standard();
+        let element = config_element("id", small, (1, 2));
+        assert!(element.contains("\"max_request_bytes\":16"), "{element}");
+        assert!(element.contains("\"max_response_bytes\":16"), "{element}");
+        assert!(element.contains("\"max_html_bytes\":16"), "{element}");
+    }
+
+    #[test]
+    fn the_element_carries_the_defaults_for_large_pages() {
+        let element = config_element("id", LiveConfig::standard(), (1, 2));
+        for expected in [
+            "\"max_html_bytes\":16777216",
+            "\"max_json_depth\":32",
+            "\"max_json_entries\":1000000",
+            "\"max_parallel_per_island\":1",
+            "\"max_queued_per_island\":8",
+            "\"max_request_bytes\":16777216",
+            "\"max_request_items\":65536",
+            "\"max_response_bytes\":16777216",
+            "\"max_response_items\":65536",
+            "\"morph_deadline_ms\":0",
+            "\"morph_max_attributes\":10000000",
+            "\"morph_max_attributes_per_element\":4096",
+            "\"morph_max_depth\":512",
+            "\"morph_max_keys\":1000000",
+            "\"morph_max_nodes\":1000000",
+            "\"request_timeout_ms\":60000",
+            "\"async_max_queued_events\":4096",
+            "\"async_max_replay_events\":4096",
+            "\"max_redirect_bytes\":65536",
+            "\"upload_chunk_bytes\":8388608",
+            "\"upload_max_active\":8",
+            "\"upload_max_file_bytes\":1073741824",
+            "\"upload_max_pending_bytes\":4294967296",
+            "\"upload_max_pending_files\":1024",
+        ] {
+            assert!(
+                element.contains(expected),
+                "{expected} missing from {element}"
+            );
+        }
         assert!(
-            (MIN_RUNTIME_RESPONSE_BYTES..=MAX_RUNTIME_RESPONSE_BYTES)
-                .contains(&standard.max_response_bytes())
+            !element.contains("upload_max_storage"),
+            "the store's total size stays on the server: {element}"
         );
-        assert!(config_element("id", standard, (1, 2)).contains(&format!(
-            "\"max_response_bytes\":{}",
-            standard.max_response_bytes()
-        )));
     }
 
     #[test]
@@ -739,9 +861,9 @@ mod tests {
             element.starts_with("<script id=\"suprnova-live-config\" type=\"application/json\">")
         );
         assert!(element.ends_with("</script>"));
-        assert!(
-            element.contains("\"asset_identity\":\"suprnova-live-0.1.0-abcdef\",\"credentials\"")
-        );
+        assert!(element.contains(
+            "\"asset_identity\":\"suprnova-live-0.1.0-abcdef\",\"async_max_queued_events\""
+        ));
         assert!(element.contains("\"protocol\":{\"maximum\":2,\"minimum\":1}"));
         assert!(!element.contains('<') || element.matches('<').count() == 2);
     }

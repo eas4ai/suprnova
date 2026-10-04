@@ -1,13 +1,6 @@
-import { parseCanonicalJson } from "../canonical.js";
+import { DEFAULT_CANONICAL_LIMITS, parseCanonicalJson } from "../canonical.js";
 
-const MAX_SNAPSHOT_BYTES = 131_072;
 const MAX_UNSIGNED_64 = 18_446_744_073_709_551_615n;
-const SNAPSHOT_LIMITS = Object.freeze({
-  maxBytes: MAX_SNAPSHOT_BYTES,
-  maxDepth: 32,
-  maxEntries: 4_096,
-  maxStringBytes: MAX_SNAPSHOT_BYTES,
-});
 
 export type SnapshotForm = "seed" | "instance";
 
@@ -21,7 +14,7 @@ export interface SnapshotPublicView {
 }
 
 export class SnapshotViewError extends Error {
-  constructor(readonly code: "encoding" | "shape" | "limit") {
+  constructor(readonly code: "encoding" | "shape") {
     super(`snapshot_view_${code}`);
     this.name = "SnapshotViewError";
   }
@@ -71,12 +64,11 @@ function binaryIdentity(value: unknown, bytes: number): value is string {
   }
 }
 
+// The snapshot is the server's signed state, already bounded by the server's
+// snapshot limit (the request limit, since every action carries it back), so
+// the browser decodes it without a size cap of its own.
 function decode(encoded: string): string {
-  if (
-    encoded.length === 0 ||
-    encoded.length > Math.ceil((MAX_SNAPSHOT_BYTES * 4) / 3) ||
-    !/^[A-Za-z0-9_-]+$/u.test(encoded)
-  ) {
+  if (encoded.length === 0 || !/^[A-Za-z0-9_-]+$/u.test(encoded)) {
     throw new SnapshotViewError("encoding");
   }
   const padding = "=".repeat((4 - (encoded.length % 4)) % 4);
@@ -86,7 +78,6 @@ function decode(encoded: string): string {
   } catch {
     throw new SnapshotViewError("encoding");
   }
-  if (binary.length > MAX_SNAPSHOT_BYTES) throw new SnapshotViewError("limit");
   const bytes = Uint8Array.from(binary, (unit) => unit.codePointAt(0) ?? 0);
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -149,10 +140,15 @@ export function inspectSnapshotPublicView(value: unknown): SnapshotPublicView {
   });
 }
 
-export function decodeSnapshotPublicView(encoded: string): SnapshotPublicView {
+/// `maxJsonDepth` is the server's configured JSON nesting, the bound the
+/// snapshot was encoded under.
+export function decodeSnapshotPublicView(
+  encoded: string,
+  maxJsonDepth: number = DEFAULT_CANONICAL_LIMITS.maxDepth,
+): SnapshotPublicView {
   let parsed: unknown;
   try {
-    parsed = parseCanonicalJson(decode(encoded), SNAPSHOT_LIMITS);
+    parsed = parseCanonicalJson(decode(encoded), { maxDepth: maxJsonDepth });
   } catch (error: unknown) {
     if (error instanceof SnapshotViewError) throw error;
     throw new SnapshotViewError("shape");

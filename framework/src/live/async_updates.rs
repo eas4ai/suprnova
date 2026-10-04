@@ -31,16 +31,14 @@ use suprnova_live::async_updates::{
     CapabilityVersion, CloseDisposition, CurrentSubscriptionRegistration,
     DocumentAuthorizationScope, DocumentTransportHandle, DocumentTransportKind,
     DocumentTransportLimits, DocumentTransportSession, EventTarget, Heartbeat,
-    MAX_ASYNC_BUFFER_BYTES, MAX_ASYNC_BUFFER_EVENTS, MAX_ASYNC_PAYLOAD_BYTES,
-    MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, MAX_EVENT_FANOUT, MAX_REPLAY_TRANSCRIPT_ENVELOPES,
-    PollFallbackPolicy, PollInitialBehavior, PollVisibilityPolicy, RegisteredBrowserEvent,
-    RegisteredRefresh, ResolvedAsyncDelivery, ResolvedEventFanout, SequenceDisposition, SseEncoder,
-    SseMembershipControl, StreamEpoch, StreamName, StreamPosition, StreamSequence,
-    SubscriptionBinding, SubscriptionDescriptor, SubscriptionError, SubscriptionErrorKind,
-    SubscriptionId, SubscriptionIssueRequest, SubscriptionModes, SubscriptionService, TopicName,
-    TrustedMountParameters, VerifiedOrigin, WebSocketCodec, WebSocketControlRecord,
-    WebSocketMembershipAcknowledgment, WebSocketMembershipControl, WebSocketMembershipRequest,
-    encode_async_envelope,
+    MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, MAX_EVENT_FANOUT, PollFallbackPolicy, PollInitialBehavior,
+    PollVisibilityPolicy, RegisteredBrowserEvent, RegisteredRefresh, ResolvedAsyncDelivery,
+    ResolvedEventFanout, SequenceDisposition, SseEncoder, SseMembershipControl, StreamEpoch,
+    StreamName, StreamPosition, StreamSequence, SubscriptionBinding, SubscriptionDescriptor,
+    SubscriptionError, SubscriptionErrorKind, SubscriptionId, SubscriptionIssueRequest,
+    SubscriptionModes, SubscriptionService, TopicName, TrustedMountParameters, VerifiedOrigin,
+    WebSocketCodec, WebSocketControlRecord, WebSocketMembershipAcknowledgment,
+    WebSocketMembershipControl, WebSocketMembershipRequest, encode_async_envelope,
 };
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::clock::Clock;
@@ -92,8 +90,6 @@ const MAX_TRANSPORTS_PER_SCOPE: usize = 8;
 /// rotating sessions cannot grow the transport table without limit.
 const MAX_TRANSPORTS_TOTAL: usize = 4_096;
 const MAX_ISSUED_PER_SCOPE: usize = 512;
-const MAX_LOG_ENTRIES: usize = 256;
-const MAX_LOG_BYTES: usize = 64 * 1024;
 const MAX_REMEMBERED_NONCES: usize = 256;
 pub(crate) const MAX_SOCKET_CONTROLS: u32 = 64;
 const OUTBOUND_CAPACITY: usize = 16;
@@ -230,6 +226,8 @@ pub(crate) enum StreamPayloadSpec {
 pub(crate) enum PublishError {
     InvalidTopic,
     InvalidPayload,
+    /// The payload is over `LIVE_ASYNC_MAX_PAYLOAD_BYTES`.
+    PayloadTooLarge(super::LiveLimitExceeded),
 }
 
 /// Exact browser-facing transport kind.
@@ -296,17 +294,25 @@ pub(crate) struct SubscriptionLog {
     next_sequence: u64,
     entries: VecDeque<LogEntry>,
     bytes: usize,
+    /// The configured per-document queue limit, which the replay log of one
+    /// subscription shares: an entry larger than this could never be replayed.
+    max_bytes: usize,
+    /// The configured replay count (`LIVE_ASYNC_MAX_REPLAY_EVENTS`): the log
+    /// keeps as many entries as one replay may carry, and no more.
+    max_entries: usize,
     waker: Option<Waker>,
     last_append_ms: u64,
 }
 
 impl SubscriptionLog {
-    fn new(epoch: u64, now_ms: u64) -> Self {
+    fn new(epoch: u64, now_ms: u64, max_bytes: usize, max_entries: usize) -> Self {
         Self {
             epoch,
             next_sequence: 1,
             entries: VecDeque::new(),
             bytes: 0,
+            max_bytes,
+            max_entries,
             waker: None,
             last_append_ms: now_ms,
         }
@@ -336,7 +342,7 @@ impl SubscriptionLog {
             envelope,
             encoded,
         });
-        while self.entries.len() > MAX_LOG_ENTRIES || self.bytes > MAX_LOG_BYTES {
+        while self.entries.len() > self.max_entries || self.bytes > self.max_bytes {
             if let Some(evicted) = self.entries.pop_front() {
                 self.bytes = self.bytes.saturating_sub(evicted.encoded.len());
             } else {
@@ -620,6 +626,27 @@ struct ConstructingClaims {
     events: suprnova_live::async_updates::BoundedEventContracts,
 }
 
+/// The configured asynchronous limits (`LIVE_ASYNC_MAX_PAYLOAD_BYTES`,
+/// `LIVE_ASYNC_MAX_BUFFER_BYTES`), copied out of [`super::LiveConfig`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AsyncLimits {
+    pub(crate) max_payload_bytes: usize,
+    pub(crate) max_buffer_bytes: usize,
+    pub(crate) max_queued_events: usize,
+    pub(crate) max_replay_events: usize,
+}
+
+impl AsyncLimits {
+    pub(crate) const fn from_config(config: super::LiveConfig) -> Self {
+        Self {
+            max_payload_bytes: config.async_max_payload_bytes(),
+            max_buffer_bytes: config.async_max_buffer_bytes(),
+            max_queued_events: config.async_max_queued_events(),
+            max_replay_events: config.async_max_replay_events(),
+        }
+    }
+}
+
 /// Shared asynchronous-update state behind the immutable runtime graph.
 pub(crate) struct AsyncState {
     tables: Mutex<AsyncTables>,
@@ -632,6 +659,7 @@ pub(crate) struct AsyncState {
     source: LogEventSource,
     retirement: Notify,
     signals: BoundedPresentationSignalContracts,
+    limits: AsyncLimits,
 }
 
 impl AsyncState {
@@ -639,6 +667,7 @@ impl AsyncState {
         keys: SnapshotKeyRing,
         clock: Arc<dyn Clock>,
         engine_registry: Arc<ComponentRegistry>,
+        limits: AsyncLimits,
     ) -> Result<Arc<Self>, FrameworkError> {
         let signals = BoundedPresentationSignalContracts::new(Vec::new())
             .map_err(|_| FrameworkError::internal("Live async signal contracts were rejected"))?;
@@ -653,6 +682,7 @@ impl AsyncState {
             source: LogEventSource(weak.clone()),
             retirement: Notify::new(),
             signals,
+            limits,
         }))
     }
 
@@ -811,6 +841,8 @@ impl AsyncState {
         let log = Arc::new(Mutex::new(SubscriptionLog::new(
             baseline.epoch().get(),
             now.get(),
+            self.limits.max_buffer_bytes,
+            self.limits.max_replay_events,
         )));
         let mut guard = self.tables();
         let tables = &mut *guard;
@@ -1166,6 +1198,7 @@ impl AsyncState {
             DocumentTransportKind::ServerSentEvents,
             transport.handle.clone(),
             transport.scope.clone(),
+            self.limits,
         )?;
         transport.document = Arc::new(tokio::sync::Mutex::new(Some(document)));
         transport.retained_events = 0;
@@ -1228,6 +1261,7 @@ impl AsyncState {
             DocumentTransportKind::WebSocket,
             handle.clone(),
             scope.clone(),
+            self.limits,
         )?;
         let (sender, receiver) = mpsc::channel(OUTBOUND_CAPACITY);
         let wake = Arc::new(Notify::new());
@@ -1674,6 +1708,7 @@ impl AsyncState {
         let tables = self.tables();
         let mut accepted = 0_usize;
         let mut rejected = 0_usize;
+        let mut too_large = None;
         for id in allowed {
             let Some(record) = tables.issued.get(&id) else {
                 continue;
@@ -1712,11 +1747,20 @@ impl AsyncState {
                     }
                 }
             };
-            if append_payload(record, payload, now).is_ok() {
-                accepted += 1;
-            } else {
-                rejected += 1;
+            match append_payload(record, payload, now, self.limits.max_payload_bytes) {
+                Ok(()) => accepted += 1,
+                Err(AppendError::TooLarge(breach)) => {
+                    too_large = Some(breach);
+                    rejected += 1;
+                }
+                Err(AppendError::Invalid) => rejected += 1,
             }
+        }
+        if let Some(breach) = too_large {
+            // Every subscriber receives the same payload, so one over the limit
+            // is over it for all of them; the operator sees which setting to raise.
+            tracing::warn!(topic, limit = %breach, "Live stream payload was refused");
+            return Err(PublishError::PayloadTooLarge(breach));
         }
         if accepted == 0 && rejected > 0 {
             return Err(PublishError::InvalidPayload);
@@ -1842,7 +1886,12 @@ impl AsyncState {
                     >= u64::try_from(HEARTBEAT_INTERVAL.as_millis()).unwrap_or(u64::MAX)
             };
             if idle {
-                let _ = append_payload(record, AsyncPayload::Heartbeat(Heartbeat), now);
+                let _ = append_payload(
+                    record,
+                    AsyncPayload::Heartbeat(Heartbeat),
+                    now,
+                    self.limits.max_payload_bytes,
+                );
             }
         }
     }
@@ -1963,12 +2012,35 @@ impl Drop for MembershipLease {
     }
 }
 
-fn append_payload(record: &IssuedRecord, payload: AsyncPayload, now: UnixMillis) -> Result<(), ()> {
-    let context = record.context().ok_or(())?;
+enum AppendError {
+    Invalid,
+    TooLarge(super::LiveLimitExceeded),
+}
+
+fn append_payload(
+    record: &IssuedRecord,
+    payload: AsyncPayload,
+    now: UnixMillis,
+    max_payload_bytes: usize,
+) -> Result<(), AppendError> {
+    let context = record.context().ok_or(AppendError::Invalid)?;
     let mut log = lock_log(&record.log);
     let position = log.next_position();
-    let envelope = AsyncEnvelope::new(context, position, payload).map_err(|_| ())?;
-    let encoded = encode_async_envelope(&envelope, &AsyncCodecLimits::v1()).map_err(|_| ())?;
+    let envelope =
+        AsyncEnvelope::new(context, position, payload).map_err(|_| AppendError::Invalid)?;
+    let payload_bytes = envelope
+        .canonical_payload_len()
+        .map_err(|_| AppendError::Invalid)?;
+    if payload_bytes > max_payload_bytes {
+        return Err(AppendError::TooLarge(
+            super::LiveLimitExceeded::async_payload_bytes(
+                payload_bytes as u64,
+                max_payload_bytes as u64,
+            ),
+        ));
+    }
+    let encoded = encode_async_envelope(&envelope, &AsyncCodecLimits::v1())
+        .map_err(|_| AppendError::Invalid)?;
     log.append(envelope, Bytes::from(encoded), now.get());
     drop(log);
     if let Some(wake) = &record.transport_wake {
@@ -2000,19 +2072,23 @@ fn new_document(
     kind: DocumentTransportKind,
     handle: DocumentTransportHandle,
     scope: DocumentAuthorizationScope,
+    async_limits: AsyncLimits,
 ) -> Result<BoundedDocumentTransportSession, AsyncErrorKind> {
     let limits = DocumentTransportLimits::new(MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS)
         .map_err(|_| AsyncErrorKind::Unavailable)?;
     let transport = DocumentTransportSession::new(origin, kind, handle, limits, scope);
     BoundedDocumentTransportSession::new(
         transport,
-        ResourceBounds::new(MAX_ASYNC_BUFFER_EVENTS, MAX_ASYNC_BUFFER_BYTES)
-            .map_err(|_| AsyncErrorKind::Unavailable)?,
+        ResourceBounds::new(
+            async_limits.max_queued_events,
+            async_limits.max_buffer_bytes,
+        )
+        .map_err(|_| AsyncErrorKind::Unavailable)?,
         PermitPool::new(1).map_err(|_| AsyncErrorKind::Unavailable)?,
         AsyncPolicy {
-            max_payload_bytes: NonZeroUsize::new(MAX_ASYNC_PAYLOAD_BYTES)
+            max_payload_bytes: NonZeroUsize::new(async_limits.max_payload_bytes)
                 .ok_or(AsyncErrorKind::Unavailable)?,
-            max_replay_events: NonZeroUsize::new(MAX_REPLAY_TRANSCRIPT_ENVELOPES)
+            max_replay_events: NonZeroUsize::new(async_limits.max_replay_events)
                 .ok_or(AsyncErrorKind::Unavailable)?,
             max_fanout: NonZeroUsize::new(usize::from(MAX_EVENT_FANOUT))
                 .ok_or(AsyncErrorKind::Unavailable)?,

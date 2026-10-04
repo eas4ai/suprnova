@@ -883,13 +883,16 @@ impl<'a> LiveDocument<'a> {
         response: DocumentResponseIntent,
         assets: AssetSet,
     ) -> Result<HttpResponse, LiveDocumentError> {
+        // A whole document is one response: its body is bounded by the
+        // response limit, its islands and children by the response item limit,
+        // and the snapshots it embeds by the request limit they come back under.
         let config = self.runtime.config();
         let limits = RenderLimits::new(
             config.max_response_bytes(),
-            128,
-            128,
-            128,
-            config.max_response_bytes().min(512 * 1024),
+            config.max_response_items(),
+            config.max_response_items(),
+            config.max_response_items(),
+            config.max_request_bytes(),
         )
         .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::RenderRejected))?;
         let render = ViewRenderer::new(limits)

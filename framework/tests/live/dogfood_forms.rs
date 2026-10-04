@@ -479,3 +479,91 @@ async fn a_directive_argument_reaches_the_action_as_its_typed_parameter() {
         "the action received its argument: {answer}"
     );
 }
+
+/// The 2026-10-04 limits ruling, through the production stack: a model
+/// proposal of 10,000 entries, one of them a 100 KiB string, saves under the
+/// default limits, and the snapshot that carries it comes back in the next
+/// request and is accepted. The old defaults refused it twice over: a
+/// 1 MiB request, 8,192 JSON entries and a 64 KiB field encoding bound.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_large_model_state_round_trips_under_the_default_limits() {
+    let _container = TestContainer::fake();
+    form_fixture();
+    let router = Arc::new(build_form_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+    let middleware = production_middleware();
+
+    let (status, headers, body) =
+        dispatch(router.clone(), middleware.clone(), get(FORM_DOCUMENT_PATH)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let cookie = session_cookie(&headers);
+    let seed = decoded_snapshot(&body);
+
+    let mut topics: Vec<String> = (0..10_000).map(|index| format!("topic-{index}")).collect();
+    topics[0] = "t".repeat(100 * 1024);
+    let (status, _, body) = dispatch(
+        router.clone(),
+        middleware.clone(),
+        form_action_request(
+            ActionRequest {
+                snapshot: seed,
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "SEhISEhISEhISEhISEhISA",
+            },
+            json!({"seats": 4, "topics": topics}),
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body[..body.len().min(512)])
+    );
+    let answer: Value = serde_json::from_slice(&body).expect("action JSON");
+    assert_eq!(answer["outcome"], "accepted");
+    let snapshot = answer["snapshot"].clone();
+    let state = &snapshot["body"]["state"]["topics"];
+    assert_eq!(state.as_array().map(Vec::len), Some(10_000));
+    assert_eq!(state[0].as_str().map(str::len), Some(100 * 1024));
+
+    let (status, _, body) = dispatch(
+        router,
+        middleware,
+        form_action_request(
+            ActionRequest {
+                snapshot,
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "SUlJSUlJSUlJSUlJSUlJSQ",
+            },
+            json!({"seats": 5}),
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body[..body.len().min(512)])
+    );
+    let answer: Value = serde_json::from_slice(&body).expect("second action JSON");
+    assert_eq!(
+        answer["outcome"], "accepted",
+        "the large snapshot came back and was accepted"
+    );
+    let html = answer["render"]["html"].as_str().expect("render html");
+    assert!(html.contains("<p id=\"saves\">2</p>"), "both saves ran");
+    assert_eq!(
+        answer["snapshot"]["body"]["state"]["topics"]
+            .as_array()
+            .map(Vec::len),
+        Some(10_000)
+    );
+}

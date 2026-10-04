@@ -1,12 +1,13 @@
+/// Bounds on the shape of the bootstrap's configuration element itself: the
+/// in-flight request structure of one island and the bootstrap options. The
+/// page limits it carries are the server's values (`../limits.ts`), never
+/// these. Each bound here is tied to a resource: a request timeout above
+/// `setTimeout`'s largest delay fires at once, and the queue and parallel
+/// bounds are the sizes the scheduler's per-island structures are built for;
+/// the server validates its configuration against the same ranges.
 export const RUNTIME_CONFIG_LIMITS = Object.freeze({
-  maxBytes: 16_384,
-  maxDepth: 8,
-  maxEntries: 64,
-  maxStringBytes: 2_048,
-  minRequestTimeoutMs: 100,
-  maxRequestTimeoutMs: 120_000,
-  minResponseBytes: 1_024,
-  maxResponseBytes: 4_194_304,
+  minRequestTimeoutMs: 1,
+  maxRequestTimeoutMs: 2_147_483_647,
   maxQueuedPerIsland: 64,
   maxParallelPerIsland: 8,
   maxAllowedOrigins: 32,

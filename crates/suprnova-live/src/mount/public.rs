@@ -20,7 +20,7 @@ use crate::view::{
     MountSnapshotKind, TrustedHtml, ViewRenderer, assemble_island_root,
 };
 
-const HARD_MAX_METADATA_BYTES: usize = 1_048_576;
+const HARD_MAX_METADATA_BYTES: usize = crate::limits::HARD_MAX_INPUT_BYTES;
 
 /// Dependencies required for public seed publication, deliberately excluding ledger and identity generation.
 pub struct PublicMountProviders {
@@ -293,7 +293,8 @@ impl PublicSeedMountService {
             .map(UnixMillis::new)
             .ok_or_else(|| MountError::new(MountErrorKind::ClockUnavailable))?;
         let revision = Revision::new(0);
-        let render_context = RenderContext::for_public_seed(context, revision, expires_at);
+        let render_context = RenderContext::for_public_seed(context, revision, expires_at)
+            .with_render_limits(self.views.limits());
         let mount_context = MountContext::new(render_context, &parameters);
         let lifecycle = ComponentExecutor::new()
             .initial_public_mount(descriptor, &mount_context)

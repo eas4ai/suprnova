@@ -1,3 +1,4 @@
+import { limitBreach, utf8Length, type LiveLimitBreach } from "../limits.js";
 import type { MorphLimits } from "./types.js";
 
 const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
@@ -8,14 +9,24 @@ export interface MorphHtmlParser {
 }
 
 export class MorphHtmlError extends Error {
-  constructor(readonly detail: string) {
-    super("morph_html_invalid");
+  readonly liveLimit: LiveLimitBreach | null;
+
+  constructor(
+    readonly detail: string,
+    breach: LiveLimitBreach | null = null,
+  ) {
+    super(breach === null ? "morph_html_invalid" : `${breach.message} (morph_html_invalid)`);
     this.name = "MorphHtmlError";
+    this.liveLimit = breach;
   }
 }
 
 function fail(detail: string): never {
   throw new MorphHtmlError(detail);
+}
+
+function overLimit(detail: string, breach: LiveLimitBreach): never {
+  throw new MorphHtmlError(detail, breach);
 }
 
 function isElement(node: Node): node is Element {
@@ -54,8 +65,12 @@ function validateTree(document: Document, root: Element, limits: MorphLimits): v
   while (stack.length > 0) {
     const [node, depth] = stack.pop() ?? fail("tree");
     nodes += 1;
-    if (nodes > limits.maxNodes) fail("node_limit");
-    if (depth > limits.maxDepth) fail("depth_limit");
+    if (nodes > limits.maxNodes) {
+      overLimit("node_limit", limitBreach("morphMaxNodes", nodes, limits.maxNodes));
+    }
+    if (depth > limits.maxDepth) {
+      overLimit("depth_limit", limitBreach("morphMaxDepth", depth, limits.maxDepth));
+    }
     if (node.ownerDocument !== document) fail("cross_document_node");
     if (node.nodeType !== 1 && node.nodeType !== 3 && node.nodeType !== 8) {
       fail("node_type");
@@ -64,9 +79,23 @@ function validateTree(document: Document, root: Element, limits: MorphLimits): v
       if (node.localName.toLowerCase() === "parsererror" || prohibited(node)) {
         fail("prohibited_structure");
       }
-      if (node.attributes.length > limits.maxAttributesPerElement) fail("attribute_limit");
+      if (node.attributes.length > limits.maxAttributesPerElement) {
+        overLimit(
+          "attribute_limit",
+          limitBreach(
+            "morphMaxAttributesPerElement",
+            node.attributes.length,
+            limits.maxAttributesPerElement,
+          ),
+        );
+      }
       attributes += node.attributes.length;
-      if (attributes > limits.maxAttributes) fail("attribute_limit");
+      if (attributes > limits.maxAttributes) {
+        overLimit(
+          "attribute_limit",
+          limitBreach("morphMaxAttributes", attributes, limits.maxAttributes),
+        );
+      }
     }
     const children = [...node.childNodes];
     for (let index = children.length - 1; index >= 0; index -= 1) {
@@ -82,9 +111,11 @@ export function parseMorphHtml(
   limits: MorphLimits,
   parser: MorphHtmlParser = parserFor(ownerDocument),
 ): HTMLElement {
-  const htmlBytes = new TextEncoder().encode(html).byteLength;
+  const htmlBytes = utf8Length(html);
   if (htmlBytes === 0) fail("empty");
-  if (htmlBytes > limits.maxHtmlBytes) fail("byte_limit");
+  if (htmlBytes > limits.maxHtmlBytes) {
+    overLimit("byte_limit", limitBreach("maxHtmlBytes", htmlBytes, limits.maxHtmlBytes));
+  }
   let parsed: Document;
   try {
     parsed = parser.parseFromString(html, "text/html");

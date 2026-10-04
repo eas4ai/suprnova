@@ -88,7 +88,8 @@ export class ContinuityMachine {
   }
 
   validateReplay(positions: readonly StreamPosition[]): void {
-    if (this.#state === "closed" || positions.length === 0 || positions.length > 1_024) {
+    // The caller checked the count against `LIVE_ASYNC_MAX_REPLAY_EVENTS`.
+    if (this.#state === "closed" || positions.length === 0) {
       throw new Error("async_replay_invalid");
     }
     let prior = this.#position;

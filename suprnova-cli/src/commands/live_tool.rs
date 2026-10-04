@@ -2,7 +2,7 @@
 //!
 //! The CLI has no framework dependency, so every registry, checker, runtime,
 //! and artifact fact comes from the generated application's console binary,
-//! started as `__suprnova:live-tool --protocol 1 --operation <op>` through the
+//! started as `__suprnova:live-tool --protocol 2 --operation <op>` through the
 //! explicit-binary Cargo wrapper. The helper writes one JSON envelope per
 //! stdout line; human and build output stays on stderr. This module owns the
 //! transport side only: it validates version, sequence, identity, shape,
@@ -22,8 +22,9 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-/// Protocol version this CLI speaks.
-pub const PROTOCOL_VERSION: u16 = 1;
+/// Protocol version this CLI speaks. Version 2 carries every configured Live
+/// limit by its `.env` key; it changed together with the framework's helper.
+pub const PROTOCOL_VERSION: u16 = 2;
 /// Hidden console command exposed by applications built on the framework.
 pub const HELPER_COMMAND: &str = "__suprnova:live-tool";
 /// Longest encoded envelope line, including its newline.
@@ -42,6 +43,8 @@ pub const MAX_ASSETS: usize = 16;
 pub const MAX_ASSET_BYTES: usize = 4 * 1024 * 1024;
 /// Longest text any field other than asset content may carry.
 pub const MAX_TEXT_BYTES: usize = 256;
+/// Most configured limits one runtime report carries.
+pub const MAX_LIMITS: usize = 64;
 /// Longest asset file name.
 pub const MAX_FILE_NAME_BYTES: usize = 128;
 
@@ -193,16 +196,25 @@ pub struct ComponentReport {
     pub contract_digest: String,
 }
 
-/// Configured limits.
+/// Every configured Live limit.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigReport {
-    /// Largest accepted request body.
-    pub max_request_bytes: u64,
-    /// Largest produced response body.
-    pub max_response_bytes: u64,
-    /// Longest request context lifetime.
-    pub max_context_lifetime_ms: u64,
+    /// One entry per `LIVE_*` limit key, in the order the manual lists them.
+    pub limits: Vec<LimitReport>,
+}
+
+/// One configured Live limit, by the `.env` key that sets it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LimitReport {
+    /// The `.env` setting, such as `LIVE_MAX_HTML_BYTES`. Named `setting`,
+    /// not `key`, so nothing in an inspection reads as key material.
+    pub setting: String,
+    /// The configured value.
+    pub value: u64,
+    /// The unit the value is counted in, such as `bytes`.
+    pub unit: String,
 }
 
 /// Installed upload capabilities, by presence only.
@@ -417,6 +429,8 @@ pub enum ToolFailure {
     AssetLength(String),
     /// An asset's digest or integrity value does not match its bytes.
     DigestMismatch(String),
+    /// A configured limit carries a malformed key or unit, or too many came.
+    InvalidLimit(usize),
 }
 
 impl fmt::Display for ToolFailure {
@@ -515,6 +529,10 @@ impl fmt::Display for ToolFailure {
                 f,
                 "Asset {file} does not match its declared SHA-256 digest or integrity value"
             ),
+            Self::InvalidLimit(line) => write!(
+                f,
+                "Envelope {line} reports a configured limit with a malformed key or unit, or more than {MAX_LIMITS} limits"
+            ),
         }
     }
 }
@@ -529,6 +547,23 @@ fn text_ok(value: &str) -> bool {
 
 fn optional_text_ok(value: Option<&String>) -> bool {
     value.is_none_or(|value| text_ok(value))
+}
+
+/// A limit's key is a `LIVE_*` configuration key and its unit a short plain
+/// word or two, so neither can carry anything to the terminal but a name.
+fn limit_ok(limit: &LimitReport) -> bool {
+    limit.setting.len() <= 64
+        && limit.setting.starts_with("LIVE_")
+        && limit
+            .setting
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        && !limit.unit.is_empty()
+        && limit.unit.len() <= 32
+        && limit
+            .unit
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b' ')
 }
 
 fn file_name_ok(name: &str) -> bool {
@@ -655,6 +690,11 @@ pub fn consume<R: BufRead>(reader: R, operation: Operation) -> Result<Session, T
                     || report.protocol_versions.len() > 16
                 {
                     return Err(ToolFailure::TextTooLong(line));
+                }
+                if report.config.limits.len() > MAX_LIMITS
+                    || !report.config.limits.iter().all(limit_ok)
+                {
+                    return Err(ToolFailure::InvalidLimit(line));
                 }
                 if session.runtime.replace(report).is_some() {
                     return Err(ToolFailure::Duplicate("runtime report"));
@@ -797,6 +837,25 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limits_carry_only_configuration_keys_and_plain_units() {
+        let limit = |setting: &str, unit: &str| LimitReport {
+            setting: setting.to_owned(),
+            value: 1,
+            unit: unit.to_owned(),
+        };
+        assert!(limit_ok(&limit("LIVE_MAX_HTML_BYTES", "bytes")));
+        assert!(limit_ok(&limit("LIVE_MORPH_MAX_KEYS", "keyed elements")));
+        assert!(!limit_ok(&limit("APP_KEY", "bytes")));
+        assert!(!limit_ok(&limit("LIVE_MAX_HTML_BYTES\u{1b}[2J", "bytes")));
+        assert!(!limit_ok(&limit("LIVE_MAX_HTML_BYTES", "")));
+        assert!(!limit_ok(&limit("LIVE_MAX_HTML_BYTES", "bytes\n")));
+        assert!(!limit_ok(&limit(
+            &format!("LIVE_{}", "A".repeat(60)),
+            "bytes"
+        )));
+    }
 
     #[test]
     fn file_names_are_single_safe_components() {

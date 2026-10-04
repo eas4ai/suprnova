@@ -16,6 +16,7 @@ use std::fmt;
 use bytes::Bytes;
 
 use crate::identity::{IslandSlot, ViewName};
+use crate::limits::SizeBreach;
 
 pub(crate) use contract::ChildMountTransition;
 pub use contract::{
@@ -147,9 +148,7 @@ impl ViewRenderer {
         if output.children.len() > self.limits.max_children() {
             return Err(ViewError::at(ViewErrorKind::TooManyChildren, &view));
         }
-        if output.body.len() > self.limits.max_body_bytes() {
-            return Err(ViewError::at(ViewErrorKind::BodyTooLarge, &view));
-        }
+        self.check_body(&view, output.body.len())?;
         let text = std::str::from_utf8(&output.body)
             .map_err(|_| ViewError::at(ViewErrorKind::TemplateRenderFailed, &view))?;
         let inspection = island::inspect_html(text);
@@ -176,9 +175,7 @@ impl ViewRenderer {
         if output.children.len() > self.limits.max_children() {
             return Err(ViewError::at(ViewErrorKind::TooManyChildren, &view));
         }
-        if output.body.len() > self.limits.max_body_bytes() {
-            return Err(ViewError::at(ViewErrorKind::BodyTooLarge, &view));
-        }
+        self.check_body(&view, output.body.len())?;
         let body = output.body;
         let text = std::str::from_utf8(&body)
             .map_err(|_| ViewError::at(ViewErrorKind::TemplateRenderFailed, &view))?;
@@ -236,22 +233,52 @@ impl ViewRenderer {
         template: &T,
     ) -> Result<Bytes, ViewError> {
         let mut output = BoundedOutput::new(self.limits.max_body_bytes());
+        let overflow = |output: &BoundedOutput| {
+            ViewError::body_too_large(
+                view,
+                SizeBreach {
+                    measured: output.max_bytes.saturating_add(1),
+                    configured: output.max_bytes,
+                    at_least: true,
+                },
+            )
+        };
         if let Err(failure) = template.render_view(&mut output) {
-            let kind = if output.overflowed {
-                ViewErrorKind::BodyTooLarge
-            } else {
-                match failure {
-                    TemplateFailure::MissingData => ViewErrorKind::MissingViewData,
-                    TemplateFailure::InvalidData => ViewErrorKind::InvalidViewData,
-                    TemplateFailure::Failed => ViewErrorKind::TemplateRenderFailed,
-                }
+            if output.overflowed {
+                return Err(overflow(&output));
+            }
+            let kind = match failure {
+                TemplateFailure::MissingData => ViewErrorKind::MissingViewData,
+                TemplateFailure::InvalidData => ViewErrorKind::InvalidViewData,
+                TemplateFailure::Failed => ViewErrorKind::TemplateRenderFailed,
             };
             return Err(ViewError::at(kind, view));
         }
         if output.overflowed {
-            return Err(ViewError::at(ViewErrorKind::BodyTooLarge, view));
+            return Err(overflow(&output));
         }
         Ok(Bytes::from(output.body))
+    }
+
+    fn check_body(&self, view: &ViewName, bytes: usize) -> Result<(), ViewError> {
+        if bytes > self.limits.max_body_bytes() {
+            return Err(ViewError::body_too_large(
+                view,
+                SizeBreach {
+                    measured: bytes,
+                    configured: self.limits.max_body_bytes(),
+                    at_least: false,
+                },
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns the bounds this renderer applies, so a component's own render
+    /// can run under the same configured limits.
+    #[must_use]
+    pub const fn limits(&self) -> RenderLimits {
+        self.limits
     }
 }
 

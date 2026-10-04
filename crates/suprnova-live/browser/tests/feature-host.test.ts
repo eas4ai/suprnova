@@ -669,35 +669,47 @@ describe("one driver claim and optional owner per island", () => {
     ]);
   });
 
-  it("fails closed after bounded hostile attribute inspection", () => {
-    let inspected = 0;
-    const attributes = {
-      *[Symbol.iterator]() {
-        for (let index = 0; index < 10_000; index += 1) {
-          inspected += 1;
-          yield {
-            name: index === 0 ? "live:upload" : `data-hostile-${String(index)}`,
-            value: index === 0 ? "avatar" : "sentinel",
-          };
-        }
-      },
-    } as unknown as Element["attributes"];
-    const root = {
-      attributes,
-      children: [],
-      matches: () => true,
-      nodeType: 1,
-      shadowRoot: null,
-    } as unknown as Element;
+  it("bounds an element's live directives by the grammar, not its plain attributes", () => {
+    // A large element's ordinary attributes no longer disable its features;
+    // only more `live:` directives than the directive grammar allows do.
+    function rootWith(names: readonly string[]): Element {
+      const attributes = names.map((name, index) => ({
+        name,
+        value: index === 0 ? "avatar" : "sentinel",
+      }));
+      return {
+        attributes,
+        children: [],
+        matches: () => true,
+        nodeType: 1,
+        shadowRoot: null,
+      } as unknown as Element;
+    }
+    const plain = rootWith([
+      "live:upload",
+      ...Array.from({ length: 10_000 }, (_, index) => `data-cell-${String(index)}`),
+    ]);
     const runtime = new FeatureRuntime();
     const uploads = feature("uploads");
     runtime.register(uploads.feature);
     runtime.start();
-    runtime.connectIsland(islandSource("hostile-attributes", root));
+    runtime.connectIsland(islandSource("many-attributes", plain));
+    expect(uploads.islandPorts[0]?.queryDirectiveOwnership(parseFeatureDirective)).toHaveLength(1);
+    expect(runtime.driver.diagnostics).toEqual([]);
 
-    expect(uploads.islandPorts[0]?.queryDirectiveOwnership(parseFeatureDirective)).toEqual([]);
-    expect(inspected).toBe(MAX_PRESENT_DIRECTIVES + 1);
-    expect(runtime.driver.diagnostics).toEqual(["resource_exhausted"]);
+    const directives = rootWith([
+      "live:upload",
+      ...Array.from({ length: MAX_PRESENT_DIRECTIVES }, (_, index) => `live:x${String(index)}`),
+    ]);
+    const hostile = new FeatureRuntime();
+    const hostileUploads = feature("uploads");
+    hostile.register(hostileUploads.feature);
+    hostile.start();
+    hostile.connectIsland(islandSource("too-many-directives", directives));
+    expect(hostileUploads.islandPorts[0]?.queryDirectiveOwnership(parseFeatureDirective)).toEqual(
+      [],
+    );
+    expect(hostile.driver.diagnostics).toEqual(["resource_exhausted"]);
   });
 
   it("connects existing, dynamic, and late-second-slot islands exactly once", () => {
@@ -718,32 +730,28 @@ describe("one driver claim and optional owner per island", () => {
     expect(asynchronous.counters.connectIsland).toHaveBeenCalledTimes(2);
   });
 
-  it("bounds optional island ownership at 256 and frees capacity on retirement", () => {
+  it("admits every island the server rendered to the optional features", () => {
+    // The driver once stopped at 256 islands, so the 257th island of a long
+    // feed lost its uploads and streams. Every island connects; retirement
+    // still releases its port.
     const runtime = new FeatureRuntime();
     const uploads = feature("uploads");
     runtime.register(uploads.feature);
     runtime.start();
-    const admitted = Array.from({ length: 256 }, (_, index) =>
-      islandSource(`bounded-${String(index)}`),
+    const admitted = Array.from({ length: 1_000 }, (_, index) =>
+      islandSource(`admitted-${String(index)}`),
     );
     for (const island of admitted) expect(runtime.connectIsland(island)).toBe("connected");
+    expect(uploads.counters.connectIsland).toHaveBeenCalledTimes(1_000);
+    expect(runtime.driver.diagnostics).toEqual([]);
 
-    const overflow = islandSource("bounded-overflow");
-    expect(runtime.connectIsland(overflow)).toBe("connected");
-    expect(uploads.counters.connectIsland).toHaveBeenCalledTimes(256);
-    expect(runtime.driver.diagnostics).toEqual(["resource_exhausted"]);
-
-    const uploadPort = uploads.islandPorts[0] as UploadsRuntimeIslandPort | undefined;
+    const uploadPort = uploads.islandPorts[999] as UploadsRuntimeIslandPort | undefined;
     expect(uploadPort?.proposeUploadHandle("avatar", null)).toBe("accepted");
-    expect(admitted[0]?.proposeUploadHandle).toHaveBeenCalledWith("avatar", null);
+    expect(admitted[999]?.proposeUploadHandle).toHaveBeenCalledWith("avatar", null);
     const retired = admitted[0];
-    if (retired === undefined) throw new Error("bounded island fixture missing");
+    if (retired === undefined) throw new Error("admitted island fixture missing");
     runtime.retireIsland(retired.element);
-
-    expect(runtime.connectIsland(islandSource("bounded-replacement"))).toBe("connected");
-    expect(uploads.counters.connectIsland).toHaveBeenCalledTimes(257);
     expect(uploads.counters.disposeIsland).toHaveBeenCalledOnce();
-    expect(runtime.driver.diagnostics).toEqual(["resource_exhausted"]);
   });
 
   it("gives each optional artifact only its slot-specific productive runtime effects", () => {

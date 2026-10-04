@@ -6,6 +6,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../canonical.js";
+import { JSON_DEPTH_CEILING } from "../limits.js";
 import { isSignalName } from "../signals/name.js";
 import type {
   AsyncPayload,
@@ -21,13 +22,11 @@ const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 const OPERATION_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
 const SIGNAL_SCOPE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SUBSCRIPTION_ID = /^[A-Za-z0-9_-]{16,128}$/u;
-const ASYNC_LIMITS: CanonicalLimits = Object.freeze({
-  maxBytes: 64 * 1024,
-  maxDepth: 8,
-  maxEntries: 1_024,
-  maxStringBytes: 4_096,
-});
-const MAX_PAYLOAD_BYTES = 32 * 1024;
+// The server encodes every envelope under its own configured payload limit
+// (`LIVE_ASYNC_MAX_PAYLOAD_BYTES`) before it is queued, so the browser bounds
+// only the recursive walk's depth, at the ceiling no server configuration can
+// exceed.
+const ASYNC_LIMITS: CanonicalLimits = Object.freeze({ maxDepth: JSON_DEPTH_CEILING });
 
 export class AsyncEnvelopeError extends Error {
   constructor(readonly code: string) {
@@ -138,9 +137,6 @@ function targetValid(target: string): boolean {
 function payload(value: JsonValue, membership: AuthorizedLogicalSubscription): AsyncPayload {
   const fields = record(value, "async_payload_invalid");
   const kind = string(fields["kind"], "async_payload_invalid");
-  if (new TextEncoder().encode(canonicalize(fields)).byteLength > MAX_PAYLOAD_BYTES) {
-    fail("async_payload_too_large");
-  }
   switch (kind) {
     case "refresh": {
       exact(fields, ["kind", "name"], "async_payload_invalid");

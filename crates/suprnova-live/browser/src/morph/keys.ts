@@ -1,4 +1,5 @@
 import { keyConflict, stableKeyOf } from "../directives/key.js";
+import { limitBreach, LiveLimitError } from "../limits.js";
 import type { IdentityPlan, MorphIdentityEntry, MorphIdentityKind, MorphLimits } from "./types.js";
 
 const ISLAND_ATTRIBUTE = "data-suprnova-live-island";
@@ -11,6 +12,9 @@ export {
   stableKeyOf,
 } from "../directives/key.js";
 const STATUS_ATTRIBUTE = "data-suprnova-live-status";
+// The key alphabet the server's checker shares. It is ASCII, so the 128
+// characters it allows are also its 128-byte ceiling; this is the identity
+// grammar, not a size limit.
 const SAFE_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 
 interface TreeIdentity {
@@ -26,14 +30,8 @@ function fail(detail: string): never {
   throw new Error(`morph_identity_${detail}`);
 }
 
-function utf8Length(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
-}
-
-function validKey(value: string | null, limits: MorphLimits): string {
-  if (value === null || !SAFE_KEY.test(value) || utf8Length(value) > limits.maxKeyBytes) {
-    return fail("key_invalid");
-  }
+function validKey(value: string | null): string {
+  if (value === null || !SAFE_KEY.test(value)) return fail("key_invalid");
   return value;
 }
 
@@ -65,7 +63,7 @@ function scanOwnedTree(root: Element, limits: MorphLimits): readonly TreeIdentit
     const liveKey = stableKeyOf(element);
     const id = element.getAttribute("id");
     if (id !== null) {
-      const validatedId = validKey(id, limits);
+      const validatedId = validKey(id);
       if (seenIds.has(validatedId)) fail("duplicate_key");
       seenIds.add(validatedId);
     }
@@ -73,20 +71,25 @@ function scanOwnedTree(root: Element, limits: MorphLimits): readonly TreeIdentit
     let value: string | null = null;
     if (nested) {
       kind = "nested_island";
-      value = validKey(element.getAttribute(DOCUMENT_KEY_ATTRIBUTE), limits);
-      if (liveKey !== null && validKey(liveKey, limits) !== value) return fail("ambiguous_key");
+      value = validKey(element.getAttribute(DOCUMENT_KEY_ATTRIBUTE));
+      if (liveKey !== null && validKey(liveKey) !== value) return fail("ambiguous_key");
     } else if (liveKey !== null) {
       kind = "live_key";
-      value = validKey(liveKey, limits);
+      value = validKey(liveKey);
     } else if (id !== null) {
       kind = "id";
-      value = validKey(id, limits);
+      value = validKey(id);
     }
     let childParent = parentIdentity;
     if (kind !== null && value !== null) {
       const token = `${kind}:${value}`;
       if (seen.has(token)) fail("duplicate_key");
-      if (identities.length >= limits.maxKeys) fail("key_limit");
+      if (identities.length >= limits.maxKeys) {
+        throw new LiveLimitError(
+          "morph_identity_key_limit",
+          limitBreach("morphMaxKeys", identities.length + 1, limits.maxKeys),
+        );
+      }
       seen.add(token);
       identities.push(
         Object.freeze({

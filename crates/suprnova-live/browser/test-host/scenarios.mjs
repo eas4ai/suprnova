@@ -102,9 +102,9 @@ function integrity(value) {
   return `sha256-${sha256(value)}`;
 }
 
-const externalModuleIntegrity = "sha256-KIWpCJwrVrepZcBKPKE9pu74W/Btc1FK2HZ5kJ4Dd8s=";
+const externalModuleIntegrity = "sha256-i0gzTGHsUccGT0i6dk/7sXlng3B+pu2GN2qSIWi/+dw=";
 const externalClassicBootIntegrity = "sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=";
-const externalClassicRuntimeIntegrity = "sha256-nsTeeJBuyY38SmGD2AnJteQz78XSNxITvAqnj/noLUg=";
+const externalClassicRuntimeIntegrity = "sha256-n7A8irIOUtA3mraoTSXds1OK1sCb2TXvXY6ixj6nDhI=";
 
 function requireReviewedIntegrity(value, expected, name) {
   if (integrity(value) !== expected) throw new Error(`${name}_integrity_drift`);
@@ -119,7 +119,7 @@ function externalModuleScript(variant = "plain") {
   }
   if (variant === "integrity") {
     requireReviewedIntegrity(externalModuleBootSource, externalModuleIntegrity, "module_boot");
-    return '<script type="module" src="/test-boot/module.js" integrity="sha256-KIWpCJwrVrepZcBKPKE9pu74W/Btc1FK2HZ5kJ4Dd8s=" crossorigin="anonymous"></script>';
+    return '<script type="module" src="/test-boot/module.js" integrity="sha256-i0gzTGHsUccGT0i6dk/7sXlng3B+pu2GN2qSIWi/+dw=" crossorigin="anonymous"></script>';
   }
   throw new Error("unsupported_external_module_script_variant");
 }
@@ -156,7 +156,7 @@ function hashOnlyClassicDocument() {
   requireReviewedIntegrity(externalClassicBootSource, externalClassicBootIntegrity, "classic_boot");
   return document(
     island(),
-    '<script src="/assets/suprnova-live.classic.js" integrity="sha256-nsTeeJBuyY38SmGD2AnJteQz78XSNxITvAqnj/noLUg=" crossorigin="anonymous"></script><script src="/test-boot/classic.js" integrity="sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=" crossorigin="anonymous"></script>',
+    '<script src="/assets/suprnova-live.classic.js" integrity="sha256-n7A8irIOUtA3mraoTSXds1OK1sCb2TXvXY6ixj6nDhI=" crossorigin="anonymous"></script><script src="/test-boot/classic.js" integrity="sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=" crossorigin="anonymous"></script>',
   );
 }
 
@@ -177,6 +177,9 @@ function nestedMarkup(depth, body) {
   return result;
 }
 
+// A large initial island: deep nesting, thousands of controls, hundreds of
+// attributes on one element and a megabyte of text. The server rendered all
+// of it, so every directive binds, the last button included.
 function hostileInitialLimits() {
   const attributes = Array.from({ length: 257 }, (_, index) => `data-hostile-${index}="x"`).join(
     " ",
@@ -298,6 +301,44 @@ export function stimulusChild() {
   });
 }
 
+// The page limits the framework server writes into the configuration element,
+// at its defaults (framework/src/live/config.rs).
+export const SERVER_DEFAULT_LIMIT_CONFIG = Object.freeze({
+  async_max_queued_events: 4_096,
+  async_max_replay_events: 4_096,
+  max_html_bytes: 16_777_216,
+  max_json_depth: 32,
+  max_json_entries: 1_000_000,
+  max_redirect_bytes: 65_536,
+  max_request_bytes: 16_777_216,
+  max_request_items: 65_536,
+  max_response_bytes: 16_777_216,
+  max_response_items: 65_536,
+  morph_deadline_ms: 0,
+  morph_max_attributes: 10_000_000,
+  morph_max_attributes_per_element: 4_096,
+  morph_max_depth: 512,
+  morph_max_keys: 1_000_000,
+  morph_max_nodes: 1_000_000,
+  upload_chunk_bytes: 8_388_608,
+  upload_max_active: 8,
+  upload_max_file_bytes: 1_073_741_824,
+  upload_max_pending_bytes: 4_294_967_296,
+  upload_max_pending_files: 1_024,
+});
+
+// The Rust reference host runs the engine's reference upload profile
+// (`UploadLimitConfig::reference()`), so a page it serves describes that
+// profile: the browser takes its upload limits from this element, and a page
+// that claimed the framework defaults would send chunks the host refuses.
+const REFERENCE_UPLOAD_LIMIT_CONFIG = Object.freeze({
+  upload_chunk_bytes: 262_144,
+  upload_max_active: 8,
+  upload_max_file_bytes: 67_108_864,
+  upload_max_pending_bytes: 268_435_456,
+  upload_max_pending_files: 128,
+});
+
 function config(overrides = {}) {
   return `<script id="suprnova-live-config" type="application/json">${JSON.stringify({
     asset_identity: "suprnova-live-test-v1",
@@ -305,10 +346,10 @@ function config(overrides = {}) {
     endpoint: "/live",
     max_parallel_per_island: 1,
     max_queued_per_island: 8,
-    max_response_bytes: 1_048_576,
     protocol: { maximum: 2, minimum: 1 },
-    request_timeout_ms: 5_000,
+    request_timeout_ms: 60_000,
     runtime_contract_version: 1,
+    ...SERVER_DEFAULT_LIMIT_CONFIG,
     ...overrides,
   })}</script>`;
 }
@@ -871,7 +912,6 @@ function uploadsBoot() {
       chunkBytes: 256 * 1024,
       maxActive: 1,
       maxItems: 8,
-      maxQueueBytes: 256 * 1024,
       randomness: {
         next: 0,
         idempotencyKey() {
@@ -1023,7 +1063,7 @@ function iteration004Scenario(searchParams = new URLSearchParams()) {
       <a href="/scenario/iteration004Destination">Ordinary destination</a>
       <form action="/scenario/iteration004Destination" method="get"><button type="submit">Continue ordinarily</button></form>`,
     scripts,
-    { endpoint: "/__live/async/poll" },
+    { endpoint: "/__live/async/poll", ...REFERENCE_UPLOAD_LIMIT_CONFIG },
   );
   return page.replace(
     '<html lang="en">',
@@ -1059,9 +1099,12 @@ export const scenarios = Object.freeze({
   hostileMalformedUtf8: { html: hostileScenario("hostile-malformed-utf8") },
   hostileHugeJson: { html: hostileScenario("hostile-huge-json") },
   hostilePrototypeKey: { html: hostileScenario("hostile-prototype-key") },
+  // The morph's depth limit is the server's configured value; this page sets
+  // it to 128 so a 129-deep render is over the configured limit.
   hostileExtremeMorph: {
-    html: hostileScenario("hostile-extreme-morph", { max_response_bytes: 4_194_304 }),
+    html: hostileScenario("hostile-extreme-morph", { morph_max_depth: 128 }),
   },
+  largeTableMorph: { html: hostileScenario("large-table-morph") },
   hostileDuplicateIdentity: { html: hostileScenario("hostile-duplicate-identity") },
   hostileInitialLimits: { html: hostileInitialLimits() },
   lifecycle: { html: lifecycleScenario() },

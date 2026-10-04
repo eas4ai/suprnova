@@ -1,7 +1,6 @@
 import {
   MAX_TRANSITION_DURATION_MS,
   MAX_TRANSITION_NAME_BYTES,
-  MAX_TRANSITION_TARGETS,
   type TransitionCancelReason,
   type TransitionCompletion,
   type TransitionHandle,
@@ -53,7 +52,6 @@ export class TransitionRunner {
   }
 
   start(targets: readonly TransitionTarget[]): TransitionRun {
-    if (targets.length > MAX_TRANSITION_TARGETS) throw new Error("transition_target_limit");
     if (this.#epoch >= Number.MAX_SAFE_INTEGER) throw new Error("transition_epoch_exhausted");
     for (const target of targets) {
       if (!validSpec(target.spec) || typeof target.applyFinalState !== "function") {

@@ -61,7 +61,9 @@ impl Config {
     /// `.env` file cannot be read or parsed, or when a typed
     /// framework knob (e.g. `SERVER_PORT`, `APP_DEBUG`) is set to a
     /// value that fails to parse, or when a session setting checked at
-    /// boot (`SESSION_COOKIE_PREFIX`, `SESSION_TABLE`) is invalid.
+    /// boot (`SESSION_COOKIE_PREFIX`, `SESSION_TABLE`) is invalid, or when a
+    /// Live limit (`LIVE_MAX_REQUEST_BYTES` and the other `LIVE_*` limit keys)
+    /// is not a whole number or breaks its rule.
     /// Missing `.env` files are not an error.
     ///
     /// # Example
@@ -116,6 +118,10 @@ impl Config {
                 crate::session::driver::database::SESSION_TABLE_RULE
             )));
         }
+        // Live's limits (`LIVE_MAX_REQUEST_BYTES` and the rest), checked here
+        // so a bad value aborts boot with its key named, rather than when the
+        // first Live route prepares the runtime.
+        crate::live::LiveConfig::from_env()?;
 
         Ok(env)
     }

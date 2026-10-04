@@ -1,12 +1,9 @@
 import type { MorphPlan } from "../morph/types.js";
-import { ContinuityError, type ContinuityLimits, type ScrollContinuity } from "./types.js";
+import type { ScrollContinuity } from "./types.js";
 
 const SCROLL_ATTRIBUTE = "data-suprnova-live-scroll";
 
-export function captureScroll(
-  plan: MorphPlan,
-  limits: ContinuityLimits,
-): readonly ScrollContinuity[] {
+export function captureScroll(plan: MorphPlan): readonly ScrollContinuity[] {
   const records: ScrollContinuity[] = [];
   for (const entry of plan.identity.entries) {
     if (!(entry.current instanceof HTMLElement) || !entry.current.hasAttribute(SCROLL_ATTRIBUTE)) {
@@ -20,9 +17,6 @@ export function captureScroll(
         top: entry.current.scrollTop,
       }),
     );
-    if (records.length > limits.maxScrollScopes) {
-      throw new ContinuityError("resource_exhausted");
-    }
   }
   return Object.freeze(records);
 }

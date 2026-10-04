@@ -33,10 +33,11 @@ use super::registry::LiveRegistry;
 use super::runtime::LiveRuntime;
 use super::tooling_protocol::{
     AssetKind, AssetReport, Body, COMMAND_NAME, CheckSummary, ComponentReport, ConfigReport,
-    DiagnosticReport, EndReport, Envelope, MAX_ASSET_BYTES, MAX_ASSETS, MAX_COMPONENTS,
-    MAX_DIAGNOSTICS, MAX_ENVELOPES, MAX_LINE_BYTES, MAX_TEMPLATE_DEPTH, MAX_TEMPLATE_FILE_BYTES,
-    MAX_TEMPLATE_FILES, MAX_TEMPLATE_ROOTS, MAX_TEMPLATE_TOTAL_BYTES, MAX_TOTAL_BYTES, Operation,
-    Outcome, PROTOCOL_VERSION, ReadinessReport, RuntimeReport, Severity, UploadHostReport,
+    DiagnosticReport, EndReport, Envelope, LimitReport, MAX_ASSET_BYTES, MAX_ASSETS,
+    MAX_COMPONENTS, MAX_DIAGNOSTICS, MAX_ENVELOPES, MAX_LINE_BYTES, MAX_TEMPLATE_DEPTH,
+    MAX_TEMPLATE_FILE_BYTES, MAX_TEMPLATE_FILES, MAX_TEMPLATE_ROOTS, MAX_TEMPLATE_TOTAL_BYTES,
+    MAX_TOTAL_BYTES, Operation, Outcome, PROTOCOL_VERSION, ReadinessReport, RuntimeReport,
+    Severity, UploadHostReport,
 };
 use super::upload_host::LiveUploadHost;
 use crate::App;
@@ -434,7 +435,7 @@ fn walk_templates(
 
 fn run_inspect(emitter: &mut Emitter<'_>) -> Result<(), ToolingError> {
     let registry = App::resolve::<LiveRegistry>().ok();
-    let config = App::resolve::<LiveConfig>().unwrap_or_default();
+    let config = LiveConfig::resolve().unwrap_or_default();
     let upload_host = App::resolve::<LiveUploadHost>().ok();
     let runtime = LiveRuntime::bind().ok();
     let readiness = runtime.as_ref().map(|runtime| {
@@ -465,9 +466,15 @@ fn run_inspect(emitter: &mut Emitter<'_>) -> Result<(), ToolingError> {
         components: u32::try_from(names.len())
             .map_err(|_| ToolingError::new(ToolingErrorKind::ComponentLimitExceeded))?,
         config: ConfigReport {
-            max_request_bytes: config.max_request_bytes() as u64,
-            max_response_bytes: config.max_response_bytes() as u64,
-            max_context_lifetime_ms: config.max_context_lifetime_ms(),
+            limits: config
+                .limit_values()
+                .into_iter()
+                .map(|(setting, unit, value)| LimitReport {
+                    setting: setting.to_owned(),
+                    value,
+                    unit: unit.to_owned(),
+                })
+                .collect(),
         },
         upload_host: UploadHostReport {
             installed: upload_host.is_some(),

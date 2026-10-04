@@ -880,7 +880,8 @@ impl ExecutionService {
             claimed.successor_revision,
             body.expires_at(),
         )
-        .with_browser_context(&request.browser);
+        .with_browser_context(&request.browser)
+        .with_render_limits(self.renderer.limits());
         let hydration = HydrationContext::new(render_context, body.state()).with_memo(body.memo());
         let output = ComponentExecutor::new()
             .coordinated_action(request.descriptor, &hydration, request.action)
@@ -941,7 +942,8 @@ impl ExecutionService {
             successor_revision,
             body.expires_at(),
         )
-        .with_browser_context(&request.browser);
+        .with_browser_context(&request.browser)
+        .with_render_limits(self.renderer.limits());
         let hydration = HydrationContext::new(render_context, body.state()).with_memo(body.memo());
         let output = match ComponentExecutor::new()
             .reconstruct(request.descriptor, &hydration)
@@ -1027,7 +1029,8 @@ impl ExecutionService {
             claimed.successor_revision,
             body.expires_at(),
         )
-        .with_browser_context(&request.browser);
+        .with_browser_context(&request.browser)
+        .with_render_limits(self.renderer.limits());
         let hydration = HydrationContext::new(render_context, body.state()).with_memo(body.memo());
         let output = match request.operation {
             InstancedLifecycleOperation::SyncModels(proposals) => {
@@ -1171,7 +1174,8 @@ impl ExecutionService {
             claimed.successor_revision,
             authority.expires_at(),
         )
-        .with_browser_context(&request.browser);
+        .with_browser_context(&request.browser)
+        .with_render_limits(self.renderer.limits());
         let (output, kind_override) = match self
             .prepare_promoted_output(
                 request.descriptor,
@@ -1635,7 +1639,7 @@ impl ExecutionService {
                     Err(error) => {
                         rollback(&mut transaction).await;
                         self.consume_failed_claim(claim).await;
-                        return execution_failed(ExecutionFailure::View(error.kind()));
+                        return execution_failed(ExecutionFailure::from_view(&error));
                     }
                 }
             }
@@ -1834,7 +1838,7 @@ impl ExecutionService {
             Some(render) => self
                 .renderer
                 .validate_island_fragment(descriptor.metadata().view().clone(), render)
-                .map_err(|error| ExecutionFailure::View(error.kind())),
+                .map_err(|error| ExecutionFailure::from_view(&error)),
             None => Ok(()),
         }
     }

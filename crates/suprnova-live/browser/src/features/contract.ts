@@ -2,6 +2,7 @@ import type { JsonValue } from "../canonical.js";
 import type { AuthorizedLogicalSubscription, SubscriptionState } from "../async-updates/types.js";
 import { MAX_PRESENT_DIRECTIVES } from "../directives/parser.js";
 import type { IslandExtensionIdentity } from "../extensions/registry.js";
+import type { LiveLimitBreach, LiveLimits } from "../limits.js";
 import { ISLAND_ROOT_SELECTOR } from "../islands/metadata.js";
 import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
 import type { CoreResourceKind, Disposable } from "../lifecycle/resources.js";
@@ -59,6 +60,12 @@ export interface RuntimeFeatureDirectiveOwnership {
 
 export interface RuntimeFeatureDocumentContext {
   diagnose(detail: RuntimeFeatureDiagnosticDetail): void;
+  /// The server's configured limits for this page, from the configuration
+  /// element. A feature reads its own limits here rather than holding any.
+  readonly limits?: LiveLimits | undefined;
+  /// Reports a configured limit the feature refused something for, so the
+  /// developer reads which key to raise.
+  limit?(breach: LiveLimitBreach): void;
   onDispose(dispose: () => void): void;
   trackResource?(kind: CoreResourceKind, dispose: () => void): Disposable;
 }
@@ -230,9 +237,6 @@ export interface OptionalFeatureDriver {
 }
 
 const MAXIMUM_DISPOSERS = 64;
-const MAXIMUM_DRIVER_ISLANDS = 256;
-const MAXIMUM_SCANNED_ELEMENTS = 4_096;
-const MAXIMUM_FEATURE_DIRECTIVES = 2_048;
 const UPLOADS = new WeakMap<object, RuntimeFeature>();
 const ASYNC = new WeakMap<object, RuntimeFeature>();
 
@@ -396,25 +400,23 @@ export function queryFeatureDirectiveOwnership(
 ): readonly RuntimeFeatureDirectiveOwnership[] {
   if (typeof parser !== "function") return Object.freeze([]);
   const found: RuntimeFeatureDirectiveOwnership[] = [];
-  let scanned = 0;
   try {
+    // Every element the server rendered is scanned: the walk covers markup the
+    // morph already counted, and an element or directive cap here dropped
+    // features past it without a word. One element's `live:` directives stay
+    // within the directive grammar's own per-element bound.
     for (const element of featureElements(root)) {
-      scanned += 1;
-      if (scanned > MAXIMUM_SCANNED_ELEMENTS) break;
       const attributes: { readonly name: string; readonly value: string }[] = [];
-      let inspectedAttributes = 0;
       for (const attribute of element.attributes) {
-        inspectedAttributes += 1;
-        if (inspectedAttributes > MAX_PRESENT_DIRECTIVES) {
-          diagnose("resource_exhausted");
-          return Object.freeze([]);
-        }
         const name = attribute.name;
         if (name.startsWith("live:")) attributes.push({ name, value: attribute.value });
       }
+      if (attributes.length > MAX_PRESENT_DIRECTIVES) {
+        diagnose("resource_exhausted");
+        return Object.freeze([]);
+      }
       const names = Object.freeze(attributes.map(({ name }) => name));
       for (const attribute of attributes) {
-        if (found.length >= MAXIMUM_FEATURE_DIRECTIVES) return Object.freeze(found);
         const directive = parser(attribute.name, attribute.value, names);
         if (directive.ok && directive.capability === capability) {
           found.push(Object.freeze({ attributeName: attribute.name, directive, element }));
@@ -455,10 +457,19 @@ function defineFeature(
       connected = true;
       const port = value;
       const track = port.trackResource?.bind(port);
+      const limit = port.limit?.bind(port);
       const context: RuntimeFeatureDocumentContext = Object.freeze({
         diagnose: (detail: RuntimeFeatureDiagnosticDetail) => {
           port.diagnose(detail);
         },
+        ...(port.limits === undefined ? {} : { limits: port.limits }),
+        ...(limit === undefined
+          ? {}
+          : {
+              limit: (breach: LiveLimitBreach) => {
+                limit(breach);
+              },
+            }),
         onDispose: (dispose: VoidFunction) => {
           own(documentDisposers, dispose);
         },
@@ -772,8 +783,17 @@ export function createOptionalFeatureDriver(): OptionalFeatureDriver {
     if (state !== 1 || (started & bit) !== 0 || documentPort === null) return;
     started |= bit;
     const track = documentPort.trackResource?.bind(documentPort);
+    const limit = documentPort.limit?.bind(documentPort);
     const context: RuntimeFeatureDocumentContext = Object.freeze({
       diagnose: report,
+      ...(documentPort.limits === undefined ? {} : { limits: documentPort.limits }),
+      ...(limit === undefined
+        ? {}
+        : {
+            limit: (breach: LiveLimitBreach) => {
+              limit(breach);
+            },
+          }),
       onDispose(dispose: VoidFunction) {
         if (typeof dispose !== "function") report("operation_rejected");
       },
@@ -803,11 +823,10 @@ export function createOptionalFeatureDriver(): OptionalFeatureDriver {
     }
     if (event === 1) {
       if (state !== 1 || value === null || !("element" in value)) return false;
+      // Every island connects: a port costs a small record per island the
+      // server rendered, and a count cap here dropped optional features from
+      // islands past it.
       if (islands.has(value.element)) return true;
-      if (islands.size >= MAXIMUM_DRIVER_ISLANDS) {
-        report("resource_exhausted");
-        return false;
-      }
       const island: DriverIsland = [value, 0];
       islands.set(value.element, island);
       for (const entry of [...entries]) if (entry !== null) connect(entry, island);

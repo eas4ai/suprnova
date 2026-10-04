@@ -100,12 +100,30 @@ fn a_failed_end_marker_is_reported_as_the_helper_failure() {
 }
 
 #[test]
+fn a_limit_that_is_not_a_live_key_fails_closed() {
+    let stream = inspect_stream().replace("\"LIVE_MORPH_MAX_KEYS\"", "\"APP_KEY\"");
+    let message = consume_text(&stream, Operation::Inspect)
+        .expect_err("a limit must be named by a LIVE_ key")
+        .to_string();
+    assert!(message.contains("configured limit"), "{message}");
+    assert!(
+        !message.contains("APP_KEY"),
+        "failure messages never echo stdout"
+    );
+    let session = consume_text(&inspect_stream(), Operation::Inspect).expect("a valid report");
+    let runtime = session.runtime.expect("one runtime report");
+    assert_eq!(runtime.config.limits.len(), 3);
+    assert_eq!(runtime.config.limits[1].unit, "keyed elements");
+}
+
+#[test]
 fn hostile_streams_fail_closed_without_echoing_content() {
     let secret = "SECRET_TOKEN=do-not-print";
     let cases: Vec<(String, &str)> = vec![
         (format!("{secret}\n{}", begin("check")), "unexpected"),
         (
-            begin("check").replace("\"protocol\":1", "\"protocol\":2"),
+            // A helper from before every limit was reported speaks protocol 1.
+            begin("check").replace("\"protocol\":2", "\"protocol\":1"),
             "protocol",
         ),
         (
@@ -334,6 +352,12 @@ fn live_inspect_prints_safe_state_and_optional_json() {
     assert!(text.contains(IDENTITY), "{text}");
     assert!(text.contains("demo.counter"), "{text}");
     assert!(text.contains("live/counter.html"), "{text}");
+    // Every configured limit, by the key that sets it.
+    assert!(text.contains("LIVE_MAX_REQUEST_BYTES"), "{text}");
+    assert!(text.contains("16777216 bytes"), "{text}");
+    assert!(text.contains("LIVE_MORPH_MAX_KEYS"), "{text}");
+    assert!(text.contains("1000000 keyed elements"), "{text}");
+    assert!(text.contains("LIVE_UPLOAD_MAX_FILE_BYTES"), "{text}");
 
     let json = run_cli(&["live:inspect", "--json"], &inspect_stream(), 0);
     assert_eq!(json.status.code(), Some(0), "{}", combined(&json));
@@ -341,5 +365,13 @@ fn live_inspect_prints_safe_state_and_optional_json() {
         serde_json::from_slice(&json.stdout).expect("stdout is exactly one JSON document");
     assert_eq!(value["assets"], IDENTITY);
     assert_eq!(value["runtime"]["registry_bound"], true);
+    assert_eq!(
+        value["runtime"]["config"]["limits"][2]["setting"],
+        "LIVE_UPLOAD_MAX_FILE_BYTES"
+    );
+    assert_eq!(
+        value["runtime"]["config"]["limits"][2]["value"],
+        1_073_741_824_u64
+    );
     assert_eq!(value["components"][0]["name"], "demo.counter");
 }

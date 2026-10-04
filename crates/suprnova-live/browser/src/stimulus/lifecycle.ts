@@ -5,7 +5,6 @@ const ISLAND_SELECTOR = "[data-suprnova-live-island]";
 const DOCUMENT_KEY_ATTRIBUTE = "data-suprnova-live-document-key";
 import { stableKeyOf } from "../directives/key.js";
 const SAFE_IDENTITY = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
-const MAX_CONTROLLER_ROOTS_PER_SCOPE = 1_024;
 
 export class StimulusLifecycleError extends Error {
   constructor(readonly code: "invalid_scope" | "invalid_identity" | "resource_exhausted") {
@@ -39,10 +38,9 @@ export function captureStimulusContinuity(scope: Element): StimulusContinuity {
   const scopeOwner = scope.closest(ISLAND_SELECTOR);
   const candidates: Element[] = [];
   if (scope.matches(CONTROLLER_SELECTOR)) candidates.push(scope);
-  candidates.push(...scope.querySelectorAll(CONTROLLER_SELECTOR));
-  if (candidates.length > MAX_CONTROLLER_ROOTS_PER_SCOPE) {
-    throw new StimulusLifecycleError("resource_exhausted");
-  }
+  // Every controller root the server rendered in the scope keeps its
+  // continuity; there is no count cap.
+  for (const item of scope.querySelectorAll(CONTROLLER_SELECTOR)) candidates.push(item);
 
   const identities = new Set<string>();
   const roots: StimulusContinuityRoot[] = [];

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { SERVER_DEFAULT_LIMITS } from "../src/limits.js";
 import type { RuntimeScheduler, TransportPort } from "../src/runtime/ports.js";
 import type { BuiltLiveRequest } from "../src/transport/request.js";
 import {
@@ -72,7 +73,7 @@ function options(transport: TransportPort, overrides: Record<string, unknown> = 
     credentials: "same-origin" as const,
     endpoint: new URL("https://example.test/live"),
     isOnline: () => true,
-    maxResponseBytes: 4_096,
+    limits: { ...SERVER_DEFAULT_LIMITS, maxHtmlBytes: 4_096, maxResponseBytes: 4_096 },
     requestTimeoutMs: 5_000,
     scheduler: scheduler(),
     transport,
@@ -189,7 +190,15 @@ describe("Live fetch transport", () => {
         ),
       );
       expect(error.kind).toBe(fixture.expected);
-      expect(error.message).toBe(`live_transport_${fixture.expected}`);
+      if (fixture.expected === "size") {
+        // A size refusal names the limit, both values and the setting, and
+        // still nothing from the response itself.
+        expect(error.message).toMatch(
+          /^Suprnova Live response size limit exceeded: measured (at least )?\d+ bytes, configured 4096 bytes\. Raise LIVE_MAX_RESPONSE_BYTES in the application's \.env file to allow it\. \(live_transport_size\)$/u,
+        );
+      } else {
+        expect(error.message).toBe(`live_transport_${fixture.expected}`);
+      }
     }
   });
 

@@ -14,7 +14,10 @@ use suprnova_live::limits::InputLimits;
 
 use crate::{FrameworkError, HttpResponse};
 
-pub(crate) struct SuprnovaResponseIntentPort;
+pub(crate) struct SuprnovaResponseIntentPort {
+    /// The configured redirect size (`LIVE_MAX_REDIRECT_BYTES`).
+    max_redirect_bytes: usize,
+}
 
 pub(crate) struct PreparedResponseIntents {
     endpoint: EndpointResponseIntents,
@@ -82,7 +85,31 @@ impl PreparedResponseCompletion {
     }
 }
 
+/// One redirect or reflected URL as a navigation target, refused with the
+/// setting to raise when it is longer than the configured redirect size.
+fn navigation_target(
+    target: &str,
+    max_redirect_bytes: usize,
+    rejected: &'static str,
+) -> Result<EndpointNavigationTarget, FrameworkError> {
+    if target.len() > max_redirect_bytes {
+        let limit = crate::live::LiveLimitExceeded::redirect_bytes(
+            target.len() as u64,
+            max_redirect_bytes as u64,
+        );
+        // The engine sees only a closed failure, so the setting to raise is
+        // recorded here for the developer.
+        tracing::warn!(limit = %limit, "{rejected}");
+        return Err(FrameworkError::internal(limit.to_string()));
+    }
+    EndpointNavigationTarget::parse(target).map_err(|_| FrameworkError::internal(rejected))
+}
+
 impl SuprnovaResponseIntentPort {
+    pub(crate) const fn new(max_redirect_bytes: usize) -> Self {
+        Self { max_redirect_bytes }
+    }
+
     pub(crate) fn bind(
         self: &Arc<Self>,
         completion: Arc<PreparedResponseCompletion>,
@@ -123,10 +150,11 @@ impl SuprnovaResponseIntentPort {
                         .map_err(|_| {
                             FrameworkError::internal("Live route intent could not be resolved")
                         })?;
-                endpoint = endpoint.with_redirect(
-                    EndpointNavigationTarget::parse(&target)
-                        .map_err(|_| FrameworkError::internal("Live route target was rejected"))?,
-                );
+                endpoint = endpoint.with_redirect(navigation_target(
+                    &target,
+                    self.max_redirect_bytes,
+                    "Live route target was rejected",
+                )?);
             }
             ActionOutcome::Render | ActionOutcome::NoRender => {
                 if let Some(intent) = metadata.url() {
@@ -139,11 +167,11 @@ impl SuprnovaResponseIntentPort {
                         FrameworkError::internal("Live document path authority was unavailable")
                     })?;
                     let target = reflected_url(path, intent.query())?;
-                    endpoint = endpoint.with_reflected_url(
-                        EndpointNavigationTarget::parse(&target).map_err(|_| {
-                            FrameworkError::internal("Live reflected target was rejected")
-                        })?,
-                    );
+                    endpoint = endpoint.with_reflected_url(navigation_target(
+                        &target,
+                        self.max_redirect_bytes,
+                        "Live reflected target was rejected",
+                    )?);
                 }
             }
         }
@@ -222,4 +250,29 @@ fn reflected_url(path: &str, query: &CanonicalValue) -> Result<String, Framework
         serializer.append_pair(key, &value);
     }
     Ok(format!("{path}?{}", serializer.finish()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::navigation_target;
+
+    #[test]
+    fn a_target_is_bounded_by_the_configured_redirect_size() {
+        // 2,048 bytes was a fixed cap; 64 KiB is the configured default.
+        let target = format!("/reports?{}", "q=x&".repeat(2_500));
+        let parsed = navigation_target(&target, 64 * 1024, "rejected").expect("a 10,000-byte URL");
+        assert_eq!(parsed.as_str(), target);
+
+        let message = navigation_target(&target, 4_096, "rejected")
+            .expect_err("over the configured size")
+            .to_string();
+        assert!(
+            message.contains(&format!(
+                "Suprnova Live redirect URL size limit exceeded: measured {} bytes, configured \
+                 4096 bytes. Raise LIVE_MAX_REDIRECT_BYTES in the application's .env file",
+                target.len()
+            )),
+            "{message}"
+        );
+    }
 }

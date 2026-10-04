@@ -21,11 +21,12 @@ use suprnova::live::testing::{
 };
 use suprnova::live::{
     BoundedHeaders, CanonicalValue, DirectPartReference, DirectTransferInstruction, DurableUpload,
-    DurableUploadId, FailedFinalize, FinalizeRequest, FinalizeToken, LiveComponent, LiveDocument,
-    LiveMount, LiveRegistry, LiveUploadHost, MountFlags, PreparedFinalize, ScanDisposition,
-    ScanInput, TransferMethod, TrustedProviderOrigin, TrustedProviderUrl, UnixMillis,
-    UploadFinalizer, UploadFuture, UploadLimitConfig, UploadLimits, UploadPart, UploadPolicy,
-    UploadReplacement, UploadScan, UploadScanFailure, UploadScanner, UploadType, live,
+    DurableUploadId, FailedFinalize, FinalizeRequest, FinalizeToken, LiveComponent, LiveConfig,
+    LiveDocument, LiveMount, LiveRegistry, LiveUploadHost, MountFlags, PreparedFinalize,
+    ScanDisposition, ScanInput, TransferMethod, TrustedProviderOrigin, TrustedProviderUrl,
+    UnixMillis, UploadFinalizer, UploadFuture, UploadLimitConfig, UploadLimits, UploadPart,
+    UploadPolicy, UploadReplacement, UploadScan, UploadScanFailure, UploadScanner, UploadType,
+    live,
 };
 use suprnova::view::{AssetSet, DocumentResponseIntent, TrustedHtml, ViewName};
 use suprnova::{
@@ -1980,6 +1981,15 @@ async fn cancellation_waits_for_finalization_and_cannot_retire_the_committed_upl
 async fn large_chunks_and_exact_retries_preserve_revision_and_provider_order() {
     ensure_crypt();
     let _container = TestContainer::fake();
+    // A configured 256 KiB chunk (`LIVE_UPLOAD_CHUNK_BYTES`), so one byte over
+    // it is refused before the body is read.
+    App::init();
+    App::singleton(
+        LiveConfig::builder()
+            .upload_chunk_bytes(256 * 1024)
+            .build()
+            .expect("a 256 KiB upload chunk"),
+    );
     let router = semantic_router();
     let middleware = Arc::new(MiddlewareRegistry::new().append(StrictUploadFacts));
     let mut first = vec![0_u8; 128 * 1024];
@@ -2229,6 +2239,16 @@ async fn authored_file_count_and_replacement_policy_are_atomic() {
 async fn aggregate_declared_bytes_are_reserved_per_scope_before_provider_work() {
     ensure_crypt();
     let _container = TestContainer::fake();
+    // Configured pending bytes (`LIVE_UPLOAD_MAX_PENDING_BYTES`) of 256 MiB:
+    // four 64 MiB files fill them.
+    App::init();
+    App::singleton(
+        LiveConfig::builder()
+            .upload_max_file_bytes(64 * 1024 * 1024)
+            .upload_max_pending_bytes(256 * 1024 * 1024)
+            .build()
+            .expect("a 256 MiB pending upload limit"),
+    );
     let router = semantic_router();
     let middleware = Arc::new(MiddlewareRegistry::new().append(StrictUploadFacts));
     for index in 0..4 {

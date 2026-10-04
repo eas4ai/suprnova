@@ -37,8 +37,6 @@ import type {
 const SUBSCRIPTION_PATH = "/__live/async/subscriptions";
 const MEMBERSHIP_PATH = "/__live/async/memberships";
 const CONTROL_MARKER = "async-v1";
-const MAX_CONTROL_RESPONSE_BYTES = 256 * 1024;
-const MAX_REPLAY_ENVELOPES = 4096;
 const MEMBERSHIP_TIMEOUT_MS = 10_000;
 const MAX_TEXT_BYTES = 1024;
 
@@ -77,38 +75,12 @@ function documentInstance(): string {
   return btoa(binary).replace(/\+/gu, "-").replace(/\//gu, "_").replace(/=+$/u, "");
 }
 
-async function boundedJson(response: Response): Promise<unknown> {
-  const declared = Number(response.headers.get("content-length") ?? "0");
-  if (Number.isFinite(declared) && declared > MAX_CONTROL_RESPONSE_BYTES) {
-    throw new Error("async_host_response_too_large");
-  }
-  const reader = response.body?.getReader();
-  if (reader === undefined) {
-    const fallback = await response.text();
-    if (new TextEncoder().encode(fallback).byteLength > MAX_CONTROL_RESPONSE_BYTES) {
-      throw new Error("async_host_response_too_large");
-    }
-    return JSON.parse(fallback) as unknown;
-  }
-  const chunks: Uint8Array[] = [];
-  let received = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    received += value.byteLength;
-    if (received > MAX_CONTROL_RESPONSE_BYTES) {
-      await reader.cancel();
-      throw new Error("async_host_response_too_large");
-    }
-    chunks.push(value);
-  }
-  const joined = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) {
-    joined.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return JSON.parse(new TextDecoder().decode(joined)) as unknown;
+// A control response is the framework server's own reply on a reserved route:
+// a descriptor, a membership, or a replay transcript of envelopes it encoded
+// under its configured payload limit. The browser reads it whole; a byte cap
+// of its own refused transcripts the server was configured to send.
+async function readControlJson(response: Response): Promise<unknown> {
+  return JSON.parse(await response.text()) as unknown;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -285,7 +257,9 @@ export function decodeAuthorizedSubscription(value: unknown): AuthorizedLogicalS
 function decodeAuthorization(value: unknown): AsyncAuthorizationResult {
   const fields = record(value);
   const replay = fields["replay"] ?? [];
-  if (!Array.isArray(replay) || replay.length > MAX_REPLAY_ENVELOPES) {
+  // The subscription checks the replay's length against the configured
+  // replay count (`LIVE_ASYNC_MAX_REPLAY_EVENTS`) before it decodes one.
+  if (!Array.isArray(replay)) {
     throw new Error("async_authority_invalid");
   }
   return Object.freeze({
@@ -351,7 +325,7 @@ export class BrowserAsyncAuthority implements AsyncAuthorityPort {
     if (response.status !== 200 && response.status !== 201) {
       throw new Error(`async_authority_rejected_${String(response.status)}`);
     }
-    return decodeAuthorization(await boundedJson(response));
+    return decodeAuthorization(await readControlJson(response));
   }
 }
 
@@ -405,7 +379,7 @@ export async function browserSseMembership(
     });
   }
   try {
-    const fields = record(await boundedJson(response));
+    const fields = record(await readControlJson(response));
     const kind = fields["kind"];
     if (
       (kind !== "authenticated" && kind !== "released") ||
