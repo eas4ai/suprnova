@@ -229,7 +229,7 @@ Suprnova refuses that before allocating anything.
 | Var | Default | Purpose |
 |---|---|---|
 | `IMAGE_MAX_DIMENSION` | `16384` | Cap on width and height in pixels |
-| `IMAGE_MAX_ALLOC_BYTES` | `268435456` (256 MiB) | Cap on the memory one decode may allocate, and on the size of the source file itself |
+| `IMAGE_MAX_ALLOC_BYTES` | `1073741824` (1 GiB) | Cap on the memory one decode may allocate, and on the size of the source file itself |
 | `IMAGE_MAGICK_TIMEOUT_SECS` | `30` | Wall-clock ceiling on one ImageMagick invocation (`magick` driver only) |
 
 The framework parses the input's own header - a few dozen bytes, no
@@ -252,7 +252,8 @@ more, and the default driver bounds that too:
   its last prefix code before it decodes, and the tables those codes build
   count toward the limit. How many tables there are is written in the
   compressed data, not in a header: 160 KiB of codes can ask for 250 MB
-  of tables for a 4x4 image. The read keeps no pixels and holds a few KiB.
+  of tables for a 4x4 image. The read keeps no pixels and holds one
+  group's tables at a time, at most about 17 KiB.
 - A file or stored source is read no further than
   `IMAGE_MAX_ALLOC_BYTES`, even when the size its storage reports is
   wrong or missing, as it is for a pipe.
@@ -268,8 +269,8 @@ decode will allocate, and refuses the image when that is over the limit.
 The refusal names the estimate:
 
 ```text
-image exceeds configured decode limits: decoding this 6000x4000 image/jpeg
-needs about 436792745 bytes, over the IMAGE_MAX_ALLOC_BYTES limit of 268435456
+image exceeds configured decode limits: decoding this 8000x6000 image/png
+needs about 1923381182 bytes, over the IMAGE_MAX_ALLOC_BYTES limit of 1073741824
 ```
 
 As a guide, a decode needs about this many times width x height x 4
@@ -286,10 +287,11 @@ bytes:
 | WebP | 1.7 to 2.6 |
 | BMP | 1.1 to 2.1 |
 
-So the default 256 MiB decodes a 12-megapixel photo in every format but
-16-bit PNG, and not every 24-megapixel one: a progressive 4:4:4 JPEG at
-6000x4000 needs about 440 MB. Raise `IMAGE_MAX_ALLOC_BYTES` if your users
-upload images that large.
+So the default 1 GiB decodes a 48-megapixel photo (8000x6000) in every
+8-bit format, a progressive 4:4:4 JPEG and a PNG of incompressible RGBA
+included. 16-bit PNG holds more and tops out lower, as the table says.
+Raise `IMAGE_MAX_ALLOC_BYTES` if your users upload larger images, or
+lower it on a small host.
 
 A limit hit is a 4xx-shaped `FrameworkError::param`, because oversized
 input is a client problem, not a server fault.

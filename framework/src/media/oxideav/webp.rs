@@ -21,10 +21,11 @@
 //! pixels: it decodes a sub-image's pixels only far enough to know where the
 //! next field starts, and the entropy image's only far enough to know the
 //! largest group it names. It holds one group at a time, so what it
-//! allocates does not grow with anything the file declares: at most a few
-//! KiB for a group, and the container's chunk list, which the header gate
-//! has already bounded. Its work is one pass over the bits it reads, plus
-//! one step a sub-image pixel, the same steps the decode takes.
+//! allocates does not grow with anything the file declares: at most about
+//! 17 KiB for a group, and the container's chunk list, which the header
+//! gate has already bounded. Its work is one pass over the bits it reads,
+//! one step a sub-image pixel, and building each group's tables: the same
+//! steps the decode takes before it decodes a pixel.
 //!
 //! The chunks are picked by the decoder's own container parser, so the walk
 //! measures the bitstream the decoder decodes: the first top-level `VP8L`
