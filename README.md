@@ -14,11 +14,11 @@ models, `#[handler]`, `#[command]`, `routes!` - on top of hyper, SeaORM and
 Tokio, so one long-lived process serves requests, runs queue workers and
 the scheduler, and holds WebSocket connections.
 
-Current `main` requires Rust 1.94.0 or newer. The tagged v3.0.0 release has
+Current `main` requires Rust 1.94.0 or newer. The tagged v3.1.0 release has
 the same Rust 1.94.0 floor.
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v3.0.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v3.1.0 suprnova-cli
 suprnova new myapp --frontend svelte
 cd myapp
 suprnova serve
@@ -261,7 +261,7 @@ See **[Starter Kits](./manual/starter-kits.md)** for the full rundown, or run
 
 Suprnova is distributed through git tags, not crates.io. A generated app
 depends on
-`suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0" }`,
+`suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.1.0" }`,
 and the CLI installs with `cargo install --git`. The adapter crates
 (`suprnova-payments-stripe`, `suprnova-payments-paddle`,
 `suprnova-payments-nowpayments` and `suprnova-web-push`) follow the same
