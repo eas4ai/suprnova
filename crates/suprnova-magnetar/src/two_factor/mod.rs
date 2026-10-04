@@ -4,7 +4,8 @@
 //! A near-whole adoption of the deployed `auth_flows::two_factor`:
 //! enrollment is inactive until confirmed, secrets and recovery codes are
 //! ciphertext under their distinct purposes, every code-checking path is
-//! gated on 05's lockout accounting, and rotation paths demand proof of
+//! gated on 05's lockout accounting under a second-factor identity of its
+//! own ([`lockout_identity`]), and rotation paths demand proof of
 //! possession. The one FLAGGED deviation is replay protection: the
 //! verifier records the timestep that actually matched and rejects
 //! `matched_step <= last_used_timestep`, closing the forward-edge replay
@@ -29,6 +30,19 @@ use crate::storage::{CredentialActor, UserStore};
 use crate::{Error, Result};
 
 pub use store::{TwoFactorProofClaim, TwoFactorRow, TwoFactorStore};
+
+/// The lockout identity that counts one user's second-factor failures.
+///
+/// Second-factor failures have a key of their own rather than the
+/// normalized email that password sign-in counts against. On the shared
+/// key, a successful password check cleared the second-factor failures, so
+/// wrong codes interleaved with correct sign-ins guessed codes forever, and
+/// wrong codes locked password sign-in. The key is the user id: it is
+/// stable when the email changes and cannot collide with an email key.
+#[must_use]
+pub fn lockout_identity(user_id: &str) -> String {
+    format!("two-factor:{user_id}")
+}
 
 /// Two-factor configuration (the `APP_NAME` lineage).
 #[derive(Clone, Debug)]
@@ -375,6 +389,16 @@ impl TwoFactorService {
         Ok(codes)
     }
 
+    /// Clear the user's second-factor failures, ending a lock before its
+    /// window passes. The admin counterpart of
+    /// [`LockoutService::unlock_account`] for the second factor, whose
+    /// failures have a lockout identity of their own (see
+    /// [`lockout_identity`]). Returns whether the second factor was locked.
+    pub async fn unlock(&self, user_id: &str) -> Result<bool> {
+        let identity = self.lockout_identity(user_id).await?;
+        self.lockout.unlock_account(&identity).await
+    }
+
     /// Disable 2FA. Idempotent; returns whether a row was actually
     /// removed so hosts fire their disabled notification only on a true
     /// transition.
@@ -392,7 +416,7 @@ impl TwoFactorService {
     }
 
     async fn prepare_enrollment(&self, user_id: &str) -> Result<PreparedEnrollment> {
-        let account = self.lockout_identity(user_id).await?;
+        let account = normalize_email(&self.existing_user(user_id).await?.email);
         let provisioned = totp::provision(&self.config.issuer, &account)?;
         let recovery_codes = recovery::generate(recovery::RECOVERY_CODE_COUNT);
         let secret_ciphertext = self.encryptor.encrypt(
@@ -526,17 +550,21 @@ impl TwoFactorService {
             })
     }
 
-    /// Lockout is keyed by normalized email, shared with 05's accounting.
+    /// The second-factor lockout identity of an existing user; see the
+    /// free function [`lockout_identity`].
     async fn lockout_identity(&self, user_id: &str) -> Result<String> {
-        let user = self
-            .users
+        let user = self.existing_user(user_id).await?;
+        Ok(lockout_identity(&user.user_id))
+    }
+
+    async fn existing_user(&self, user_id: &str) -> Result<crate::storage::UserRecord> {
+        self.users
             .find_by_id(user_id)
             .await?
             .ok_or_else(|| Error::NotFound {
                 resource: "user".to_owned(),
                 identifier: user_id.to_owned(),
-            })?;
-        Ok(normalize_email(&user.email))
+            })
     }
 
     async fn require_unlocked(&self, identity: &str) -> Result<()> {

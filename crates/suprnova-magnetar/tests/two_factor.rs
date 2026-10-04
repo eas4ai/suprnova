@@ -1661,7 +1661,9 @@ async fn rotation_paths_demand_proof_of_possession() {
     let enrollment = confirmed_enrollment(&world, &user_id).await;
     let actor = credential_actor(&world, &user_id).await;
 
-    // Wrong proof: refused and counted against the lockout budget.
+    // Wrong proof: refused and counted against the second factor's own
+    // lockout budget, not the password's.
+    let second_factor = magnetar::two_factor::lockout_identity(&user_id);
     let refused = world
         .two_factor
         .regenerate_recovery_codes(&actor, "000000")
@@ -1672,8 +1674,17 @@ async fn rotation_paths_demand_proof_of_possession() {
         magnetar::Error::InvalidInput { field, .. } if field == "proof"
     ));
     assert_eq!(
-        world.lockout.status(EMAIL).await.unwrap().failed_attempts,
+        world
+            .lockout
+            .status(&second_factor)
+            .await
+            .unwrap()
+            .failed_attempts,
         1
+    );
+    assert_eq!(
+        world.lockout.status(EMAIL).await.unwrap().failed_attempts,
+        0
     );
 
     // A recovery code is valid proof; rotation replaces the whole set and
@@ -1685,7 +1696,12 @@ async fn rotation_paths_demand_proof_of_possession() {
         .unwrap();
     assert_eq!(rotated.len(), 10);
     assert_eq!(
-        world.lockout.status(EMAIL).await.unwrap().failed_attempts,
+        world
+            .lockout
+            .status(&second_factor)
+            .await
+            .unwrap()
+            .failed_attempts,
         0
     );
     assert!(

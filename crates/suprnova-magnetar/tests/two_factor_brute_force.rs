@@ -1,5 +1,5 @@
-//! Failed second-factor attempts feed 05's lockout accounting - the ported
-//! cross-provider brute-force integration contract.
+//! Failed second-factor attempts feed 05's lockout accounting under a
+//! second-factor identity of their own, separate from password sign-in.
 
 #![cfg(all(
     feature = "password",
@@ -32,7 +32,7 @@ const EMAIL: &str = "sasha@example.test";
 const PASSWORD: &str = "orange tabby cat";
 
 #[tokio::test]
-async fn failed_challenges_lock_the_account_across_providers() {
+async fn failed_challenges_lock_the_second_factor_only() {
     let config = LockoutConfig {
         max_failed_attempts: 3,
         ..LockoutConfig::default()
@@ -46,6 +46,7 @@ async fn failed_challenges_lock_the_account_across_providers() {
         .unwrap()
         .unwrap()
         .user_id;
+    let second_factor = magnetar::two_factor::lockout_identity(&user_id);
     let actor = credential_actor(&world, &user_id).await;
     let enrollment = world.two_factor.enroll(&actor).await.unwrap();
     world
@@ -61,7 +62,7 @@ async fn failed_challenges_lock_the_account_across_providers() {
         .unwrap()
         .to_owned();
 
-    // Wrong codes count toward the shared lockout budget.
+    // Wrong codes count toward the second factor's own lockout budget.
     for attempt in 1..=3 {
         let reply = send(
             &world,
@@ -73,14 +74,30 @@ async fn failed_challenges_lock_the_account_across_providers() {
         .await;
         assert_eq!(reply.status, 401, "attempt {attempt} fails generically");
         assert_eq!(
-            world.lockout.status(EMAIL).await.unwrap().failed_attempts,
+            world
+                .lockout
+                .status(&second_factor)
+                .await
+                .unwrap()
+                .failed_attempts,
             attempt
         );
     }
-    assert!(world.lockout.status(EMAIL).await.unwrap().is_locked);
+    assert!(
+        world
+            .lockout
+            .status(&second_factor)
+            .await
+            .unwrap()
+            .is_locked
+    );
+    assert!(
+        !world.lockout.status(EMAIL).await.unwrap().is_locked,
+        "second-factor failures never lock password sign-in"
+    );
 
     // The factor challenge is already bound to a verified primary actor, so
-    // it may expose retry timing. A fresh password login remains generic.
+    // it may expose retry timing.
     let correct = totp_code_at(
         &enrollment.otpauth_url,
         Utc::now().timestamp() + STEP_SECONDS,
@@ -95,11 +112,9 @@ async fn failed_challenges_lock_the_account_across_providers() {
     .await;
     assert_eq!(refused.status, 429);
     assert!(refused.grant.is_none());
-    let login_refused = send(&world, login_request(EMAIL, PASSWORD)).await;
-    assert_eq!(login_refused.status, 401);
 
-    // Password reset remains the recovery path: it unlocks, and the next
-    // full sign-in (password + factor) succeeds.
+    // A password reset proves the mailbox, not the second factor, so it
+    // leaves the second-factor lock in place.
     send(
         &world,
         post_json("/forgot-password", json!({"email": EMAIL})),
@@ -119,8 +134,18 @@ async fn failed_challenges_lock_the_account_across_providers() {
     )
     .await;
     assert_eq!(reset.status, 200);
-    assert!(!world.lockout.status(EMAIL).await.unwrap().is_locked);
+    assert!(
+        world
+            .lockout
+            .status(&second_factor)
+            .await
+            .unwrap()
+            .is_locked
+    );
 
+    // An admin unlock of the second factor ends the lock, and the next full
+    // sign-in (password + factor) succeeds.
+    assert!(world.two_factor.unlock(&user_id).await.unwrap());
     let login = send(&world, login_request(EMAIL, "fresh honest password")).await;
     assert_eq!(login.status, 200);
     let selector = login.body.unwrap()["challenge_selector"]
@@ -146,7 +171,7 @@ async fn failed_challenges_lock_the_account_across_providers() {
 }
 
 #[tokio::test]
-async fn a_successful_challenge_resets_the_shared_counter() {
+async fn a_successful_challenge_resets_the_second_factor_counter() {
     let config = LockoutConfig {
         max_failed_attempts: 5,
         ..LockoutConfig::default()
@@ -160,6 +185,7 @@ async fn a_successful_challenge_resets_the_shared_counter() {
         .unwrap()
         .unwrap()
         .user_id;
+    let second_factor = magnetar::two_factor::lockout_identity(&user_id);
     let actor = credential_actor(&world, &user_id).await;
     let enrollment = world.two_factor.enroll(&actor).await.unwrap();
     world
@@ -184,7 +210,12 @@ async fn a_successful_challenge_resets_the_shared_counter() {
         .await;
     }
     assert_eq!(
-        world.lockout.status(EMAIL).await.unwrap().failed_attempts,
+        world
+            .lockout
+            .status(&second_factor)
+            .await
+            .unwrap()
+            .failed_attempts,
         2
     );
 
@@ -202,8 +233,76 @@ async fn a_successful_challenge_resets_the_shared_counter() {
     .await;
     assert_eq!(completed.status, 200);
     assert_eq!(
-        world.lockout.status(EMAIL).await.unwrap().failed_attempts,
+        world
+            .lockout
+            .status(&second_factor)
+            .await
+            .unwrap()
+            .failed_attempts,
         0,
         "success clears the earlier typos"
     );
+}
+
+#[tokio::test]
+async fn a_password_success_does_not_clear_second_factor_failures() {
+    let config = LockoutConfig {
+        max_failed_attempts: 3,
+        ..LockoutConfig::default()
+    };
+    let world = factor_world_with(RegistrationPolicy::Open, config).await;
+    send(&world, register_request(EMAIL, PASSWORD)).await;
+    let user_id = world
+        .storage
+        .find_by_email(EMAIL)
+        .await
+        .unwrap()
+        .unwrap()
+        .user_id;
+    let actor = credential_actor(&world, &user_id).await;
+    let enrollment = world.two_factor.enroll(&actor).await.unwrap();
+    world
+        .two_factor
+        .confirm(&actor, &totp_code_now(&enrollment.otpauth_url))
+        .await
+        .unwrap();
+
+    let mut evaluated = 0;
+    let mut refused = 0;
+    for _round in 0..2 {
+        let login = send(&world, login_request(EMAIL, PASSWORD)).await;
+        assert_eq!(login.status, 200, "the password is right");
+        let selector = login.body.unwrap()["challenge_selector"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for _ in 0..2 {
+            let reply = send(
+                &world,
+                post_json(
+                    "/two-factor-challenge",
+                    json!({"challenge_selector": selector, "code": "000000"}),
+                ),
+            )
+            .await;
+            match reply.status {
+                401 => evaluated += 1,
+                429 => refused += 1,
+                status => panic!("unexpected challenge status {status}"),
+            }
+        }
+    }
+    assert_eq!(
+        evaluated, 3,
+        "the second-factor counter locks at its threshold"
+    );
+    assert_eq!(refused, 1, "the next wrong code is refused");
+
+    // The wrong codes did not touch the password lockout.
+    assert_eq!(
+        world.lockout.status(EMAIL).await.unwrap().failed_attempts,
+        0
+    );
+    let login = send(&world, login_request(EMAIL, PASSWORD)).await;
+    assert_eq!(login.status, 200, "password sign-in is not locked");
 }

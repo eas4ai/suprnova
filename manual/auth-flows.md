@@ -157,6 +157,13 @@ an atomic first mailbox proof.
 lockout after five failed attempts for 15 minutes, retains audit rows for seven
 days, and fails closed when the lockout backend is unavailable.
 
+The same policy counts the failed codes of Magnetar's own second-factor
+challenge (`Auth::factor()`), but under a key of their own for each user, not
+the email that password sign-in counts against. A correct password therefore
+does not clear second-factor failures, and wrong codes do not lock password
+sign-in. A password reset proves the mailbox, not the second factor, so it
+leaves a second-factor lock in place until the window passes.
+
 Password reset normalizes an unknown or provider-backed unverified address to
 `Ok(())` only after the abuse-limiter, mail configuration, provider/engine, and
 storage checks succeed. Configuration and storage failures still surface.
