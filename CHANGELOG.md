@@ -812,8 +812,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `with_tx(&tx)` or `on(name)` query run on that transaction or connection,
   `MassPrunable` deletes on the connection its dry run counted, and factory
   inserts of plain SeaORM rows join the surrounding `DB::transaction`.
-  `with_min` and `with_max` of an integer column read on Postgres. This
-  landed after the `v3.1.0` tag.
+  `with_min` and `with_max` of an integer column read on Postgres. `has`,
+  `where_has` and `doesnt_have` work on models whose primary key is not
+  `id`, and join a many-to-many on its declared `related_key`. Lazy
+  `HasManyThrough` and `HasOneThrough` `get` and `count` apply the target
+  model's global scopes, as eager loads do. A pivot model's own global
+  scopes and soft-delete filter no longer drop attachments from
+  many-to-many reads; as in Laravel, they apply when the pivot model is
+  queried on its own. A soft `delete()` sets `updated_at` along with
+  `deleted_at`, and `delete_or_fail` touches the owners named in
+  `touches`, as `delete()` does. This landed after the `v3.1.0` tag.
 - **Magnetar hashing and sign-up races.** Magnetar password hashing runs on
   Tokio's blocking pool instead of stalling async workers. A magic-link or
   passkey sign-up that loses a race for a new email address answers as the
