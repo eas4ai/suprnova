@@ -1,3 +1,25 @@
+/* The macro's default variant. The base layer paints a type="button"
+   button as a secondary control so bare HTML reads right, so a click button
+   needs this rule to look like the primary action a submit button is. */
+.sn-button[data-sn-variant="primary"] {
+  background: var(--sn-color-primary);
+  border-color: var(--sn-color-primary);
+  color: var(--sn-color-primary-contrast);
+}
+
+.sn-button[data-sn-variant="primary"]:hover {
+  background: var(--sn-color-primary-hover);
+  border-color: var(--sn-color-primary-hover);
+  color: var(--sn-color-primary-contrast);
+}
+
+.sn-button[data-sn-variant="primary"]:active,
+.sn-button[data-sn-variant="primary"][aria-pressed="true"],
+.sn-button[data-sn-variant="primary"][aria-expanded="true"] {
+  background: var(--sn-color-primary-active);
+  border-color: var(--sn-color-primary-active);
+}
+
 .sn-button[data-sn-variant="secondary"] {
   background: var(--sn-color-surface);
   border-color: var(--sn-color-border-strong);
