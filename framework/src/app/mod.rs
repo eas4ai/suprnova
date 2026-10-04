@@ -643,6 +643,122 @@ fn report_background_outcome(
 /// SIGKILL, and the operator saw a scheduler that "didn't stop".
 const SCHEDULER_DRAIN_GRACE: Duration = Duration::from_secs(30);
 
+/// The `schedule:work` loop: run the due tasks on every `tick`, until
+/// `shutdown` fires, then give the work still running up to `grace`.
+///
+/// The inline run of a tick is raced against the signal. It used to be
+/// awaited to the end inside the tick arm, and the loop could not look at
+/// the signal again until it returned: a task that hung kept SIGTERM from
+/// ever starting the drain, and the orchestrator killed the process at the
+/// end of its own grace period, background tasks and all. Now a signal
+/// that arrives mid-run gives the inline run and the background tasks one
+/// shared grace window, and whatever is still running at its end is
+/// dropped or aborted - the bound every other drain in the framework has.
+///
+/// Split out of the daemon so a test can drive it with a riggable shutdown
+/// signal and a short grace.
+async fn run_scheduler_loop(
+    schedule: &Schedule,
+    mut tick: tokio::time::Interval,
+    shutdown: &crate::signals::ShutdownListener,
+    grace: Duration,
+) {
+    // Long-lived JoinSet for `.run_in_background()` tasks. These tasks
+    // are fire-and-forget within a tick - the loop polls completed ones
+    // before each tick and on shutdown awaits the rest before exit, so a
+    // slow background task never gets dropped mid-flight.
+    let mut bg_tasks: tokio::task::JoinSet<crate::schedule::ScheduledTaskJoin> =
+        tokio::task::JoinSet::new();
+
+    let signal = loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                // Surface any background tasks that completed since the
+                // last tick. `try_join_next` is non-blocking - anything
+                // still running stays in the set for the next sweep.
+                while let Some(joined) = bg_tasks.try_join_next() {
+                    report_background_outcome(joined);
+                }
+                // Run this tick's due tasks, racing the stop signal.
+                // `run_in_background` tasks land in `bg_tasks` and are
+                // observed on the next tick or at shutdown.
+                let deadline = {
+                    let run = schedule.run_due_tasks_into(&mut bg_tasks);
+                    tokio::pin!(run);
+                    tokio::select! {
+                        results = &mut run => {
+                            report_inline_outcomes(results);
+                            None
+                        }
+                        signal = shutdown.fired() => {
+                            println!(
+                                "suprnova: scheduler shutting down ({}); waiting up to {}s \
+                                 for the tasks still running.",
+                                signal.as_str(),
+                                grace.as_secs()
+                            );
+                            let deadline = tokio::time::Instant::now() + grace;
+                            match tokio::time::timeout_at(deadline, &mut run).await {
+                                Ok(results) => report_inline_outcomes(results),
+                                Err(_) => eprintln!(
+                                    "suprnova: stopped the inline scheduled task(s) still \
+                                     running after the {}s shutdown grace",
+                                    grace.as_secs()
+                                ),
+                            }
+                            Some(deadline)
+                        }
+                    }
+                };
+                if let Some(deadline) = deadline {
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    drain_background_at_shutdown(&mut bg_tasks, remaining, grace).await;
+                    return;
+                }
+            }
+            signal = shutdown.fired() => break signal,
+        }
+    };
+
+    println!("suprnova: scheduler shutting down ({}).", signal.as_str());
+    // Admission is closed by construction: the loop has ended, so no
+    // further tick can spawn into `bg_tasks`.
+    if !bg_tasks.is_empty() {
+        println!(
+            "suprnova: waiting up to {}s for {} background task(s) to finish…",
+            grace.as_secs(),
+            bg_tasks.len()
+        );
+    }
+    drain_background_at_shutdown(&mut bg_tasks, grace, grace).await;
+}
+
+/// Print the failures among a tick's inline results.
+fn report_inline_outcomes(results: Vec<crate::schedule::ScheduledTaskJoin>) {
+    for (name, result) in results {
+        if let Err(e) = result {
+            eprintln!("suprnova: scheduled task '{name}' failed: {e}");
+        }
+    }
+}
+
+/// Drain the background tasks for up to `wait`, and report the ones the
+/// shutdown `grace` cut off.
+async fn drain_background_at_shutdown(
+    bg_tasks: &mut tokio::task::JoinSet<crate::schedule::ScheduledTaskJoin>,
+    wait: Duration,
+    grace: Duration,
+) {
+    let abandoned = drain_with_grace(bg_tasks, wait).await;
+    if abandoned > 0 {
+        eprintln!(
+            "suprnova: aborted {abandoned} background task(s) still running after \
+             the {}s shutdown grace",
+            grace.as_secs()
+        );
+    }
+}
+
 /// Await every task in `tasks`, reporting each outcome, until `grace`
 /// expires. Returns the number still running at the deadline, which are
 /// aborted.
@@ -1474,55 +1590,7 @@ where
         // skip missed ticks and resume on the next aligned boundary.
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Long-lived JoinSet for `.run_in_background()` tasks. These tasks
-        // are fire-and-forget within a tick - the loop polls completed ones
-        // before each tick and on shutdown awaits the rest before exit, so a
-        // slow background task never gets dropped mid-flight.
-        let mut bg_tasks: tokio::task::JoinSet<crate::schedule::ScheduledTaskJoin> =
-            tokio::task::JoinSet::new();
-
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    // Surface any background tasks that completed since the
-                    // last tick. `try_join_next` is non-blocking - anything
-                    // still running stays in the set for the next sweep.
-                    while let Some(joined) = bg_tasks.try_join_next() {
-                        report_background_outcome(joined);
-                    }
-                    // Run this tick's due tasks. Inline tasks complete
-                    // before we return; `run_in_background` tasks land in
-                    // `bg_tasks` and are observed on the next tick or at
-                    // shutdown.
-                    for (name, result) in schedule.run_due_tasks_into(&mut bg_tasks).await {
-                        if let Err(e) = result {
-                            eprintln!("suprnova: scheduled task '{name}' failed: {e}");
-                        }
-                    }
-                }
-                signal = shutdown.fired() => {
-                    println!("suprnova: scheduler shutting down ({}).", signal.as_str());
-                    // Admission is closed by construction: this arm breaks the
-                    // loop, so no further tick can spawn into `bg_tasks`.
-                    if !bg_tasks.is_empty() {
-                        println!(
-                            "suprnova: waiting up to {}s for {} background task(s) to finish…",
-                            SCHEDULER_DRAIN_GRACE.as_secs(),
-                            bg_tasks.len()
-                        );
-                    }
-                    let abandoned = drain_with_grace(&mut bg_tasks, SCHEDULER_DRAIN_GRACE).await;
-                    if abandoned > 0 {
-                        eprintln!(
-                            "suprnova: aborted {abandoned} background task(s) still running after \
-                             the {}s shutdown grace",
-                            SCHEDULER_DRAIN_GRACE.as_secs()
-                        );
-                    }
-                    break;
-                }
-            }
-        }
+        run_scheduler_loop(&schedule, tick, &shutdown, SCHEDULER_DRAIN_GRACE).await;
     }
 
     /// `schedule:run`: evaluate and run the due tasks once, then exit. Exits
@@ -2608,6 +2676,51 @@ mod worker_boot_order_tests {
     #[serial]
     async fn schema_dump_boots_nothing() {
         assert_migrations_boot_nothing(&["app", "schema:dump"]).await;
+    }
+}
+
+#[cfg(test)]
+mod scheduler_loop_tests {
+    use super::*;
+    use crate::signals::ShutdownSignal;
+
+    /// A stop signal reaches the daemon while an inline task is running.
+    /// The tick arm used to await every inline task to the end before the
+    /// loop looked at the signal again, so a task that never returned kept
+    /// SIGTERM from ever starting the drain. The run is now raced against
+    /// the signal and gets the grace window, and no more.
+    #[tokio::test]
+    async fn a_hung_inline_task_does_not_keep_the_daemon_from_stopping() {
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let in_task = std::sync::Arc::clone(&started);
+        let mut schedule = Schedule::new();
+        let task = schedule
+            .call(move || {
+                let in_task = std::sync::Arc::clone(&in_task);
+                async move {
+                    in_task.notify_one();
+                    std::future::pending::<Result<(), FrameworkError>>().await
+                }
+            })
+            .cron("* * * * *")
+            .name("never-returns");
+        schedule.add(task);
+
+        let (stop, shutdown) = crate::signals::riggable();
+        let stopper = tokio::spawn(async move {
+            started.notified().await;
+            stop.send(Some(ShutdownSignal::Terminate))
+                .expect("the daemon still listens");
+        });
+        // An interval's first tick is immediate, so the task runs at once.
+        let tick = tokio::time::interval(Duration::from_secs(60));
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_scheduler_loop(&schedule, tick, &shutdown, Duration::from_millis(100)),
+        )
+        .await
+        .expect("the daemon stops within its grace once the signal arrives");
+        stopper.await.expect("the stopper does not panic");
     }
 }
 

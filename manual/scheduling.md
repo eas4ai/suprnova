@@ -624,7 +624,10 @@ schedule.add(
 with `catch_unwind`, so a panicking task surfaces as a `FrameworkError`
 recorded against the task's name rather than tearing down the scheduler. The
 `schedule:work` daemon drains the JoinSet on shutdown (Ctrl-C / SIGTERM) so
-in-flight background tasks complete before exit.
+in-flight background tasks complete before exit, within a 30-second grace.
+A stop signal that arrives while a tick's inline tasks are still running
+is seen at once: the inline tasks and the background tasks share the
+grace, and whatever is still running at its end is stopped.
 
 **Combine with `without_overlapping`.** The two flags compose - a background
 task with `without_overlapping()` will spawn into the JoinSet and acquire the
@@ -882,8 +885,9 @@ runtime that's already long-lived, so:
   Laravel spawns a child process per background task; we spawn into a
   `JoinSet` and surface completions on the next tick or at shutdown.
 - **Graceful shutdown is a `tokio::select!` arm.** Ctrl-C / SIGTERM
-  drains in-flight background tasks before exit; in-process tasks finish
-  their current call.
+  drains in-flight background tasks before exit, and in-process tasks
+  get the same bounded grace to finish their current call - a task that
+  hangs cannot keep the daemon from stopping.
 - **Same-minute dedup is in-process state.** A `last_run_minute` atomic
   per task guarantees a single process can't double-fire a minute-aligned
   task even if the loop ticks fast. PHP can't do this - every cron tick
