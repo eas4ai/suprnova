@@ -123,8 +123,10 @@ no workflow is orphaned mid-step on a clean shutdown.
 The claim path (`claim_next_workflow`) uses
 `FOR UPDATE SKIP LOCKED` against the `workflows` table, so the worker
 process **requires Postgres**. SQLite and MySQL work for tests and for
-the enqueue/persistence path, but the worker daemon will exit with an
-error at first claim if the connection isn't Postgres.
+the enqueue/persistence path, but the worker returns an error at
+startup, before its first claim, when the connection isn't Postgres:
+`workflow:work` exits non-zero instead of running a worker that can never
+claim a workflow.
 
 ## Configuration
 

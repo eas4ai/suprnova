@@ -310,12 +310,22 @@ impl WorkflowWorker {
     /// This is the path the application binary should use so SIGINT /
     /// SIGTERM cleanly drains the worker instead of orphaning in-flight
     /// workflows.
+    ///
+    /// # Errors
+    ///
+    /// Before the first claim, when the config is invalid or the database
+    /// is not Postgres, the only one the claim runs on.
     pub async fn run_with_cancel(self, cancel: CancellationToken) -> Result<(), FrameworkError> {
         self.run(cancel).await
     }
 
     async fn run(self, cancel: CancellationToken) -> Result<(), FrameworkError> {
         self.config.validate()?;
+        // A database the claim cannot run on is a startup error. Inside the
+        // loop it was a claim error like a transient one, logged and
+        // retried forever, so the worker reported itself started and never
+        // ran a workflow.
+        store::ensure_claim_backend()?;
 
         let poll = Duration::from_millis(self.config.poll_interval_ms);
         let semaphore = Arc::new(Semaphore::new(self.config.concurrency));
@@ -1292,6 +1302,26 @@ mod tests {
         );
     }
 
+    /// The worker fails at start on a database it cannot claim from. It used
+    /// to log each refused claim and retry forever, so `workflow:work`
+    /// reported a running worker that would never run a workflow.
+    #[tokio::test]
+    async fn a_worker_on_a_database_other_than_postgres_fails_at_start() {
+        let _db = setup_db().await;
+        let mut config = WorkflowConfig::from_env();
+        config.poll_interval_ms = 20;
+        let worker = WorkflowWorker::with_config(config);
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            worker.run_with_cancel(CancellationToken::new()),
+        )
+        .await
+        .expect("the worker returns instead of retrying the claim forever");
+        let err = outcome.expect_err("a SQLite database cannot run the worker");
+        assert!(err.to_string().contains("Postgres"), "got: {err}");
+    }
+
     #[tokio::test]
     async fn test_name_normalization() {
         let _db = setup_db().await;
@@ -2059,38 +2089,6 @@ mod tests {
             .err()
             .expect("the config is refused");
         assert_eq!(error.to_string(), expected.to_string());
-    }
-
-    // A cancelled worker must drain in-flight workflows before returning.
-    // Spawns a worker that has no rows to claim (so it idles in the
-    // poll/sleep path), cancels the token, and asserts run_with_cancel
-    // resolves cleanly to Ok(()) - i.e. the cancellation path exits the
-    // loop rather than blocking on the semaphore or the next claim.
-    #[tokio::test]
-    async fn test_worker_run_with_cancel_returns_cleanly() {
-        let _db = setup_db().await;
-
-        let mut config = WorkflowConfig::from_env();
-        // Tighten poll so the loop reaches a cancellation check fast.
-        config.poll_interval_ms = 20;
-        let worker = WorkflowWorker::with_config(config);
-        let cancel = CancellationToken::new();
-        let cancel_for_worker = cancel.clone();
-
-        let handle = tokio::spawn(async move { worker.run_with_cancel(cancel_for_worker).await });
-
-        // Let the worker reach its idle/sleep path.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        cancel.cancel();
-
-        // The worker must return within a small window after cancel.
-        // 1s budget covers the longest path (poll round-trip + drain).
-        let result = tokio::time::timeout(Duration::from_secs(1), handle)
-            .await
-            .expect("worker did not exit within 1s of cancellation")
-            .expect("worker task panicked");
-
-        result.expect("run_with_cancel must return Ok on graceful drain");
     }
 
     #[tokio::test]
