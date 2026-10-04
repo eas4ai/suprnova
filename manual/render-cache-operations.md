@@ -161,6 +161,11 @@ provider, or a backend:
 `hits` increments only for `l0`, `l1`, `conditional`, and `stale`.
 `publications` counts only a store answering "published", never a fenced or
 rejected attempt. `rebuilds` counts one per spawned background rebuild.
+A node runs at most one background rebuild per key at a time: a stale hit on
+a key whose rebuild is still running serves the stale copy and spawns
+nothing. A background rebuild renders only when the coordinator makes it the
+key's leader, so a rebuild another node is already running costs this node
+no handler run.
 
 The two island-stitch counters carry their own sets: `assembled` and
 `fail_document` for assemblies; `rendered`, `omitted`, `fallback`, and

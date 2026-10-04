@@ -612,6 +612,7 @@ impl RenderCache {
             hot_serves: std::sync::atomic::AtomicU64::new(0),
             #[cfg(any(test, feature = "testing"))]
             background_rebuilds: std::sync::atomic::AtomicU64::new(0),
+            background_refreshes: std::sync::Mutex::new(std::collections::BTreeSet::new()),
         });
         *runtime_slot().write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&runtime));
         // Appends, never clears: `register_global_middleware` is

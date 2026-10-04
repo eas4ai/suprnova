@@ -505,6 +505,44 @@ pub struct RenderCacheRuntime {
     /// [`super::RenderCache::install`], like `hot_serves` beside it.
     #[cfg(any(test, feature = "testing"))]
     pub(crate) background_rebuilds: std::sync::atomic::AtomicU64,
+    /// Keys with a background refresh in flight on this node (DATA-045).
+    /// A stale hit on a key already in here serves the stale entry and
+    /// starts nothing, so detached refresh work is bounded by the keys being
+    /// refreshed rather than by the rate stale hits arrive at.
+    pub(crate) background_refreshes: Mutex<std::collections::BTreeSet<RenderKey>>,
+}
+
+/// A key's claim on this node's one background refresh, held by the
+/// spawned task and released however that task ends.
+struct BackgroundRefreshClaim {
+    runtime: Arc<RenderCacheRuntime>,
+    key: RenderKey,
+}
+
+impl BackgroundRefreshClaim {
+    /// The claim on `key`, or `None` when a refresh of it is already in
+    /// flight here.
+    fn take(runtime: &Arc<RenderCacheRuntime>, key: &RenderKey) -> Option<Self> {
+        let inserted = runtime
+            .background_refreshes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone());
+        inserted.then(|| Self {
+            runtime: Arc::clone(runtime),
+            key: key.clone(),
+        })
+    }
+}
+
+impl Drop for BackgroundRefreshClaim {
+    fn drop(&mut self) {
+        self.runtime
+            .background_refreshes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+    }
 }
 
 impl RenderCacheRuntime {
@@ -1086,10 +1124,14 @@ impl RenderCacheMiddleware {
     }
 
     /// Spawns a bounded background rebuild for a stale-servable entry.
-    /// Bounded by the coordinator's own lease/waiter limits, not by
-    /// anything tracked here - a leaked task list is not a risk this
-    /// spawns into, since exactly one rebuild per key can ever be
-    /// admitted as leader at a time.
+    ///
+    /// Bounded twice (DATA-045). On this node, a key with a refresh already
+    /// in flight spawns nothing, so the detached tasks are bounded by the
+    /// keys being refreshed, not by how fast stale hits arrive. Across
+    /// nodes, the refresh renders only when the coordinator admits it as
+    /// the key's leader: a waiter or a bypass would render a response no
+    /// client is waiting for, and past `max_waiters` every such task used to
+    /// run the handler at once, uncached.
     fn spawn_background_rebuild(
         &self,
         runtime: Arc<RenderCacheRuntime>,
@@ -1098,10 +1140,14 @@ impl RenderCacheMiddleware {
         policy: RenderCachePolicy,
         job: RenderJob,
     ) {
+        let Some(claim) = BackgroundRefreshClaim::take(&runtime, job.key()) else {
+            return;
+        };
         Metrics::counter(render_cache_telemetry::REBUILDS).inc();
         runtime.count_background_rebuild();
         tokio::spawn(async move {
-            let _ = render_and_publish(&runtime, request, next, &policy, job, 0).await;
+            let _claim = claim;
+            refresh_in_background(&runtime, request, next, &policy, job).await;
         });
     }
 }
@@ -2192,6 +2238,25 @@ fn stale_on_error_fallback(
         now,
         warning_header(FreshnessState::StaleOnError),
     )
+}
+
+/// A background refresh: renders and publishes only as the key's leader.
+/// Waiting for another leader, or bypassing past its waiter limit, would
+/// render a response no client receives, so both end the refresh, as does a
+/// coordinator that cannot be reached. The stale entry was already served.
+async fn refresh_in_background(
+    runtime: &Arc<RenderCacheRuntime>,
+    request: Request,
+    next: Next,
+    policy: &RenderCachePolicy,
+    job: RenderJob,
+) {
+    let now = runtime.now_ms();
+    if let Ok(RebuildAdmission::Lead(lease)) =
+        runtime.coordinator.admit(job.key(), job.epoch(), now).await
+    {
+        let _ = lead_render(runtime, request, next, *lease, policy, job).await;
+    }
 }
 
 async fn render_and_publish(
@@ -4169,6 +4234,7 @@ mod tests {
             hot_serves: std::sync::atomic::AtomicU64::new(0),
             #[cfg(any(test, feature = "testing"))]
             background_rebuilds: std::sync::atomic::AtomicU64::new(0),
+            background_refreshes: Mutex::new(std::collections::BTreeSet::new()),
         }
     }
 

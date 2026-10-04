@@ -85,6 +85,47 @@ async fn stale_on_error_serves_stale_when_the_foreground_rebuild_fails() {
     );
 }
 
+/// DATA-045: stale hits that arrive while this node's background refresh
+/// of the same key is still running serve the stale entry and start no
+/// further refresh. Each of them used to spawn its own detached refresh:
+/// the coordinator parked them as waiters whose rebuilt response nobody
+/// would receive, and past `max_waiters` they all ran the handler at once
+/// as uncached bypasses. A background refresh now renders only as the
+/// key's leader, and at most one per key is in flight on a node.
+#[cfg(feature = "testing")]
+#[tokio::test]
+#[serial_test::serial]
+async fn stale_hits_during_a_running_background_refresh_start_no_more_refreshes() {
+    let harness = boot_with_render_cache().await;
+    let first = dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+
+    // Inside the stale-servable band: served stale, refreshed in the
+    // background. The refresh is held once it starts rendering.
+    clock(&harness).advance_ms(70_000);
+    counting_route::hold_next_render(&harness);
+    let stale = dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(stale.header("warning"), Some("110 - \"Response is Stale\""));
+    counting_route::wait_until_rendering_count(&harness, 2).await;
+    assert_eq!(RenderCache::background_rebuilds_for_test(), 1);
+
+    for _ in 0..5 {
+        let again = dispatch_get(&harness, "/stale/1", &[]).await;
+        assert_eq!(again.status, StatusCode::OK);
+        assert_eq!(again.header("warning"), Some("110 - \"Response is Stale\""));
+    }
+    assert_eq!(
+        RenderCache::background_rebuilds_for_test(),
+        1,
+        "a refresh of this key is already running, so no stale hit starts another"
+    );
+
+    counting_route::release_render(&harness);
+    // Two leads released: the cold publish and the one background refresh.
+    wait_until_background_finished(&harness, 2).await;
+    assert_eq!(counting_route::renders(), 2, "one background render ran");
+}
+
 /// DATA-041: the stale-on-error fallback judges the entry when the failed
 /// rebuild returns, not when the lookup began. A rebuild that outlasted the
 /// entry's stale-on-error window used to fall back to an entry that was Dead
