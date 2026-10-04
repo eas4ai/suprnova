@@ -8,14 +8,6 @@ use async_trait::async_trait;
 use std::time::Duration;
 use subtle::ConstantTimeEq;
 
-/// Maximum bytes we will buffer from a form-urlencoded request body to
-/// look for the `_token` field. A `_token` field is a 40-char hex
-/// string; the rest of the form might contain reasonably-sized fields
-/// (login form, contact form, etc.). 64 KiB is comfortable for those
-/// cases and small enough that a malicious large form won't pin the
-/// server's memory waiting on CSRF validation.
-const CSRF_BODY_BUFFER_CAP: usize = 64 * 1024;
-
 /// How `CsrfMiddleware` treats the browser's `Sec-Fetch-Site` header.
 ///
 /// Mirrors Laravel 13's `PreventRequestForgery::$allowSameSite` /
@@ -674,63 +666,46 @@ impl Middleware for CsrfMiddleware {
             None => return reject_with_419(),
         };
 
-        // Header tokens (AJAX / Inertia / framework conventions) are
-        // always checked first - they don't require body buffering.
-        if let Some(token) = request
-            .header("X-CSRF-TOKEN")
-            .or_else(|| request.header("X-XSRF-TOKEN"))
-        {
-            if constant_time_compare(token, &expected_token) {
-                request.record_live_security_check(
-                    crate::live::attestation::SecurityCheck::Csrf,
-                    None,
-                );
-                let response = next(request).await;
-                return self.maybe_attach_xsrf_cookie(response);
-            }
-            // Header was present but wrong - reject without parsing the
-            // body. A correct client picks one location for the token;
-            // we don't combine header + body to avoid token-splitting
-            // surprises.
-            return reject_with_419();
-        }
-
-        // No header - for `application/x-www-form-urlencoded` bodies
-        // we honor the documented `_token` field (the value emitted by
-        // `csrf_field()` in HTML forms). We buffer the body so the
-        // downstream handler can still read its form data.
-        let is_form_body = request
+        // Laravel's `getTokenFromRequest`: `$request->input('_token') ?:
+        // $request->header('X-CSRF-TOKEN')`, and `X-XSRF-TOKEN` only while
+        // the token is still empty. A form's own `_token` therefore decides
+        // whenever it has a value, whatever header came with it, and a
+        // value counts as empty as PHP's `?:` reads one: no value, `""`, or
+        // `"0"`. The body's `_token` is its last value, as PHP keeps a
+        // repeated name's last value and `req.form()` reads it.
+        let mut request = request;
+        let body_token = if request
             .content_type()
-            .is_some_and(crate::http::body::is_form_urlencoded);
-
-        if !is_form_body {
-            return reject_with_419();
-        }
-
-        // Buffer the body. CSRF_BODY_BUFFER_CAP caps this at 64 KiB -
-        // forms with `_token` are well under that, and a malicious large
-        // form won't pin memory on CSRF validation alone.
-        let mut request = match request.buffer_body(CSRF_BODY_BUFFER_CAP).await {
-            Ok(r) => r,
-            Err(_) => return reject_with_419(),
+            .is_some_and(crate::http::body::is_form_urlencoded)
+        {
+            // Buffered up to the server's request body limit, the size the
+            // handler reads the same body to; the handler still sees the
+            // whole form, `_token` included. A body over that limit is
+            // refused here with the `413` the handler would give it, as
+            // Laravel's `ValidatePostSize` refuses one before the token
+            // check.
+            request = match request
+                .buffer_body(crate::http::body::global_max_request_body_bytes())
+                .await
+            {
+                Ok(request) => request,
+                Err(error) => return Err(HttpResponse::from(error)),
+            };
+            request.cached_body().and_then(|body| {
+                url::form_urlencoded::parse(body)
+                    .filter(|(name, _)| name == "_token")
+                    .last()
+                    .map(|(_, value)| value.into_owned())
+            })
+        } else {
+            None
         };
+        let token = body_token
+            .filter(|token| has_value(token))
+            .or_else(|| header_token(&request, "X-CSRF-TOKEN"))
+            .or_else(|| header_token(&request, "X-XSRF-TOKEN"));
 
-        let Some(body) = request.cached_body() else {
-            return reject_with_419();
-        };
-
-        // Parse `_token=...` out of the form bag. `form_urlencoded::parse`
-        // URL-decodes values; the token is hex so decoding is a no-op,
-        // but using the parser keeps us consistent with how `req.form()`
-        // would later see the same body. A name sent twice keeps its last
-        // value, as PHP and `req.form()` both read it, so the token checked
-        // is the token Laravel's `$request->input('_token')` would check.
-        let token_field = url::form_urlencoded::parse(body)
-            .filter(|(k, _)| k == "_token")
-            .last()
-            .map(|(_, v)| v.into_owned());
-
-        match token_field {
+        match token {
             Some(token) if constant_time_compare(&token, &expected_token) => {
                 request.record_live_security_check(
                     crate::live::attestation::SecurityCheck::Csrf,
@@ -742,6 +717,20 @@ impl Middleware for CsrfMiddleware {
             _ => reject_with_419(),
         }
     }
+}
+
+/// Whether a token source has a value, as PHP's `?:` reads one: `""` and
+/// `"0"` are empty, so Laravel falls through to the next source.
+fn has_value(token: &str) -> bool {
+    !token.is_empty() && token != "0"
+}
+
+/// The token in header `name`, when it has a value.
+fn header_token(request: &Request, name: &str) -> Option<String> {
+    request
+        .header(name)
+        .filter(|token| has_value(token))
+        .map(str::to_string)
 }
 
 fn reject_with_419() -> Response {
@@ -1208,6 +1197,78 @@ mod tests {
 
         let (status, _) = drive_form_post(token, format!("_token={token}&_token=")).await;
         assert_eq!(status, 419, "an empty last _token is no token");
+    }
+
+    /// Laravel's `getTokenFromRequest`: `$request->input('_token') ?:
+    /// X-CSRF-TOKEN`, then `X-XSRF-TOKEN` only while the token is still
+    /// empty. The body's `_token` decides whenever it has a value.
+    #[tokio::test]
+    async fn the_body_token_comes_before_the_headers_as_laravel_reads_them() {
+        let token = "real-session-token-xyz";
+        let post = |headers: &[(&'static str, &'static str)], body: String| {
+            let mut builder = hyper::Request::builder()
+                .method("POST")
+                .uri("http://localhost/login")
+                .header("content-type", "application/x-www-form-urlencoded");
+            for (name, value) in headers {
+                builder = builder.header(*name, *value);
+            }
+            drive_request(Arc::new(CsrfMiddleware::new()), token, builder, Some(body))
+        };
+
+        // A right body token passes whatever header came with it.
+        let driven = post(&[("X-CSRF-TOKEN", "stale")], format!("_token={token}")).await;
+        assert_eq!(driven.status, 200, "the body token decides");
+
+        // A wrong body token fails even beside a right header.
+        let driven = post(
+            &[("X-CSRF-TOKEN", "real-session-token-xyz")],
+            "_token=stale".to_string(),
+        )
+        .await;
+        assert_eq!(driven.status, 419, "the body token decides");
+
+        // An empty body token falls through to the header.
+        let driven = post(
+            &[("X-CSRF-TOKEN", "real-session-token-xyz")],
+            "_token=&a=1".to_string(),
+        )
+        .await;
+        assert_eq!(driven.status, 200, "an empty body token is no token");
+
+        // An empty X-CSRF-TOKEN falls through to X-XSRF-TOKEN.
+        let driven = post(
+            &[
+                ("X-CSRF-TOKEN", ""),
+                ("X-XSRF-TOKEN", "real-session-token-xyz"),
+            ],
+            "a=1".to_string(),
+        )
+        .await;
+        assert_eq!(driven.status, 200, "an empty X-CSRF-TOKEN is no token");
+
+        // A set X-CSRF-TOKEN is the token: X-XSRF-TOKEN is not read.
+        let driven = post(
+            &[
+                ("X-CSRF-TOKEN", "stale"),
+                ("X-XSRF-TOKEN", "real-session-token-xyz"),
+            ],
+            "a=1".to_string(),
+        )
+        .await;
+        assert_eq!(driven.status, 419, "X-CSRF-TOKEN comes before X-XSRF-TOKEN");
+    }
+
+    /// A form bigger than the old 64 KiB buffer still has its `_token`
+    /// read: the body is buffered up to the server's request body limit,
+    /// the size the handler reads it to anyway.
+    #[tokio::test]
+    async fn a_large_form_has_its_body_token_read() {
+        let token = "real-session-token-xyz";
+        let body = format!("_token={token}&notes={}", "a".repeat(200 * 1024));
+        let (status, fields) = drive_form_post(token, body).await;
+        assert_eq!(status, 200, "a 200 KiB form passes on its body token");
+        assert_eq!(fields.get("notes").map(String::len), Some(200 * 1024));
     }
 
     #[tokio::test]
