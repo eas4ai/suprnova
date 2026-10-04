@@ -21,6 +21,7 @@ pub mod collection_surface;
 pub mod dump;
 pub mod eager;
 pub mod eager_cache;
+pub mod eager_cache_rows;
 pub mod eager_dispatcher;
 pub mod eager_named_connection;
 pub mod eager_query_count;

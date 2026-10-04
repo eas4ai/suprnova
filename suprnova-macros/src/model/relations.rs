@@ -6551,32 +6551,23 @@ fn emit_recurse_batched_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Op
         | RelationKindAttr::MorphedByMany => Ok(Some(quote! {
             #name_str => {
                 #split_rest
-                // Take every parent's children out by value, recording the
-                // per-parent counts so they can be restored in order.
-                let mut owned: ::std::vec::Vec<#target_ty> = ::std::vec::Vec::new();
-                let mut takes: ::std::vec::Vec<(usize, usize)> = ::std::vec::Vec::new();
-                for (i, p) in parents.iter_mut().enumerate() {
-                    if let ::core::option::Option::Some(mut children) =
-                        p.__eager.take_many::<#target_ty>(#name_str)
-                    {
-                        let n = children.len();
-                        owned.append(&mut children);
-                        takes.push((i, n));
-                    }
-                }
+                // Take every parent's children out by value. The guard
+                // puts each parent's own children back, in order, when it
+                // drops: after the load, and also when the load fails or
+                // the caller stops awaiting it.
+                let mut __sn_taken = ::suprnova::eloquent::relations::__TakenRows::take(
+                    parents,
+                    |p: &mut Self| p.__eager.take_many::<#target_ty>(#name_str),
+                    |p: &mut Self, children: ::std::vec::Vec<#target_ty>| {
+                        p.__eager.set_many(#name_str, children)
+                    },
+                );
+                let owned: &mut ::std::vec::Vec<#target_ty> = __sn_taken.rows();
                 if owned.is_empty() {
                     #walk_without_children
                     return ::core::result::Result::Ok(());
                 }
                 #process_owned
-                // Put the (now-populated) children back into each parent in
-                // the same order they were taken.
-                let mut drained = owned.into_iter();
-                for (i, n) in takes {
-                    let chunk: ::std::vec::Vec<#target_ty> =
-                        drained.by_ref().take(n).collect();
-                    parents[i].__eager.set_many(#name_str, chunk);
-                }
                 return ::core::result::Result::Ok(());
             }
         })),
@@ -6587,27 +6578,25 @@ fn emit_recurse_batched_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Op
         | RelationKindAttr::MorphOne => Ok(Some(quote! {
             #name_str => {
                 #split_rest
-                let mut owned: ::std::vec::Vec<#target_ty> = ::std::vec::Vec::new();
-                let mut takes: ::std::vec::Vec<usize> = ::std::vec::Vec::new();
-                for (i, p) in parents.iter_mut().enumerate() {
-                    if let ::core::option::Option::Some(child) =
-                        p.__eager.take_one::<#target_ty>(#name_str)
-                    {
-                        owned.push(child);
-                        takes.push(i);
-                    }
-                }
+                // Same take-and-guard as the many kinds: the guard puts
+                // each parent's child back however the load ends.
+                let mut __sn_taken = ::suprnova::eloquent::relations::__TakenRows::take(
+                    parents,
+                    |p: &mut Self| {
+                        p.__eager
+                            .take_one::<#target_ty>(#name_str)
+                            .map(|child| ::std::vec![child])
+                    },
+                    |p: &mut Self, mut child: ::std::vec::Vec<#target_ty>| {
+                        p.__eager.set_one(#name_str, child.pop())
+                    },
+                );
+                let owned: &mut ::std::vec::Vec<#target_ty> = __sn_taken.rows();
                 if owned.is_empty() {
                     #walk_without_children
                     return ::core::result::Result::Ok(());
                 }
                 #process_owned
-                let mut drained = owned.into_iter();
-                for i in takes {
-                    if let ::core::option::Option::Some(child) = drained.next() {
-                        parents[i].__eager.set_one(#name_str, ::core::option::Option::Some(child));
-                    }
-                }
                 return ::core::result::Result::Ok(());
             }
         })),
@@ -6687,27 +6676,24 @@ fn emit_recurse_batched_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Op
                         ::core::option::Option::None => (rest, ::core::option::Option::None),
                     };
                     #family_check
-                    let mut owned: ::std::vec::Vec<#enum_ident> = ::std::vec::Vec::new();
-                    let mut takes: ::std::vec::Vec<usize> = ::std::vec::Vec::new();
-                    for (i, p) in parents.iter_mut().enumerate() {
-                        if let ::core::option::Option::Some(value) =
-                            p.__eager.take_one::<#enum_ident>(#name_str)
-                        {
-                            owned.push(value);
-                            takes.push(i);
-                        }
-                    }
+                    // The guard puts every value back into the parent it
+                    // came from however the load ends.
+                    let mut __sn_taken = ::suprnova::eloquent::relations::__TakenRows::take(
+                        parents,
+                        |p: &mut Self| {
+                            p.__eager
+                                .take_one::<#enum_ident>(#name_str)
+                                .map(|value| ::std::vec![value])
+                        },
+                        |p: &mut Self, mut value: ::std::vec::Vec<#enum_ident>| {
+                            p.__eager.set_one(#name_str, value.pop())
+                        },
+                    );
+                    let owned: &mut ::std::vec::Vec<#enum_ident> = __sn_taken.rows();
                     if owned.is_empty() {
                         return ::core::result::Result::Ok(());
                     }
                     #( #per_target )*
-                    // Put every value back into the parent it came from.
-                    let mut drained = owned.into_iter();
-                    for i in takes {
-                        if let ::core::option::Option::Some(value) = drained.next() {
-                            parents[i].__eager.set_one(#name_str, ::core::option::Option::Some(value));
-                        }
-                    }
                     return ::core::result::Result::Ok(());
                 }
             }))

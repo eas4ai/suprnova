@@ -2167,7 +2167,10 @@ let users = User::query()
 
 The per-row `__eager` cache cells are keyed by:
 
-- `<rel>` (relation NAME alone) for `with` and `with_count`.
+- `<rel>` (relation NAME alone) for `with` and `with_count`. The rows
+  and the count are kept in separate cells, so `with(["posts"])` and
+  `with_count(["posts"])` on one query keep both, and a count alone
+  does not count as loaded rows for `load_missing`.
 - `<rel>_<kind>_<col>` (e.g. `posts_sum_views`) for the four
   aggregate kinds - `with_sum` / `with_avg` / `with_min` / `with_max`.
   This wide key lets multiple aggregates on the same relation coexist

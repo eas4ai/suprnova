@@ -179,9 +179,8 @@ impl AggregateKind {
 /// single eager-load plan can stack multiple aggregates on the same
 /// relation without colliding on the cache cell.
 ///
-/// Count keys keep the unadorned `<rel>` form (separate
-/// `RelationCell::Count(u64)` variant; zero collision risk with the
-/// aggregate cell).
+/// Count keys keep the unadorned `<rel>` form; the cache keeps counts
+/// apart from loaded rows and aggregates, so they never collide.
 ///
 /// This helper is the single source of truth for the key format. The
 /// macro's aggregate arms call it on write; the per-relation
@@ -195,6 +194,71 @@ pub fn aggregate_cache_key(name: &str, kind: AggregateKind, column: &str) -> Str
     s.push('_');
     s.push_str(column);
     s
+}
+
+/// The loaded rows of one relation, taken out of every parent's cache
+/// for a nested eager load, and put back when this value drops.
+///
+/// A nested load (`posts.comments`) moves each parent's cached `posts`
+/// into one owned list, loads `comments` across that list, and returns
+/// the posts to their parents. The return used to run only after a
+/// successful load, so a load that failed, or a caller that stopped
+/// awaiting it, left every parent with an empty relation still marked
+/// loaded: rows already in hand were lost, and `load_missing` would not
+/// load them again. Putting the rows back on drop returns them on every
+/// way out - success, error, and cancellation.
+///
+/// **Not part of the public API.** It is `pub` because the
+/// `#[suprnova::model]` macro's nested-load arms use it.
+#[doc(hidden)]
+pub struct __TakenRows<'a, 'b, P, C> {
+    parents: &'a mut [&'b mut P],
+    rows: Vec<C>,
+    takes: Vec<(usize, usize)>,
+    put_back: fn(&mut P, Vec<C>),
+}
+
+impl<'a, 'b, P, C> __TakenRows<'a, 'b, P, C> {
+    /// Take every parent's rows with `take`, recording how many came
+    /// from which parent, so that `put_back` returns each parent its
+    /// own rows in their order.
+    pub fn take(
+        parents: &'a mut [&'b mut P],
+        take: fn(&mut P) -> Option<Vec<C>>,
+        put_back: fn(&mut P, Vec<C>),
+    ) -> Self {
+        let mut rows = Vec::new();
+        let mut takes = Vec::new();
+        for (index, parent) in parents.iter_mut().enumerate() {
+            if let Some(mut taken) = take(parent) {
+                takes.push((index, taken.len()));
+                rows.append(&mut taken);
+            }
+        }
+        Self {
+            parents,
+            rows,
+            takes,
+            put_back,
+        }
+    }
+
+    /// The taken rows, for the nested load to work on.
+    pub fn rows(&mut self) -> &mut Vec<C> {
+        &mut self.rows
+    }
+}
+
+impl<P, C> Drop for __TakenRows<'_, '_, P, C> {
+    fn drop(&mut self) {
+        let mut rows = std::mem::take(&mut self.rows).into_iter();
+        for &(index, count) in &self.takes {
+            let own: Vec<C> = rows.by_ref().take(count).collect();
+            if let Some(parent) = self.parents.get_mut(index) {
+                (self.put_back)(parent, own);
+            }
+        }
+    }
 }
 
 /// Collapse a target model's [`EloquentModel::HAS_TIMESTAMPS`] and
