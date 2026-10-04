@@ -583,3 +583,101 @@ async fn a_mixed_case_form_media_type_is_still_read_for_the_identity() {
         "the address in a mixed-case form body must be keyed, not skipped"
     );
 }
+
+/// A JSON login names its address in the body as well. Unless the key
+/// reads it, a JSON route is keyed on the caller's IP, and
+/// `only_when(names_identity)` stands the per-address limit aside.
+#[tokio::test]
+async fn a_json_body_names_the_identity_too() {
+    let mw = RateLimitMiddleware::new(limiter(), one_per_window(), |req| {
+        identity_key(req, "email", "issuance")
+    })
+    .key_reads_body(4096)
+    .only_when(|req| suprnova::rate_limit::names_identity(req, "email"));
+
+    let addr = spawn_server(echo_router(mw), 6).await;
+
+    let body = r#"{"email":"victim@example.com","password":"x"}"#;
+    let (first, echoed) = post_with_type(addr, "/issue", body, "application/json").await;
+    let (second, _) = post_with_type(
+        addr,
+        "/issue",
+        r#"{"email":" Victim@Example.com "}"#,
+        "Application/JSON; charset=utf-8",
+    )
+    .await;
+    let (form, _) = post_form(addr, "/issue", "email=victim@example.com").await;
+
+    assert_eq!(first, 200);
+    assert_eq!(echoed, body, "the handler still reads the JSON it was sent");
+    assert_eq!(
+        second, 429,
+        "the same address in a JSON body must share its bucket"
+    );
+    assert_eq!(
+        form, 429,
+        "the JSON and the form spelling of one address are one identity"
+    );
+}
+
+/// The IDENTITY-012 rule holds for a JSON body: a query decoy beside a
+/// JSON address is ambiguous, and every ambiguous request shares one
+/// bucket, so a fresh decoy per request buys nothing.
+#[tokio::test]
+async fn a_query_decoy_does_not_buy_a_fresh_bucket_for_a_json_body_address() {
+    let mw = RateLimitMiddleware::new(limiter(), one_per_window(), |req| {
+        identity_key(req, "email", "issuance")
+    })
+    .key_reads_body(4096);
+
+    let addr = spawn_server(echo_router(mw), 6).await;
+
+    let body = r#"{"email":"victim@example.com"}"#;
+    let (first, _) = post_with_type(
+        addr,
+        "/issue?email=decoy-1@example.com",
+        body,
+        "application/json",
+    )
+    .await;
+    let (second, _) = post_with_type(
+        addr,
+        "/issue?email=decoy-2@example.com",
+        body,
+        "application/json",
+    )
+    .await;
+
+    assert_eq!(first, 200);
+    assert_eq!(
+        second, 429,
+        "a new query decoy must not open a fresh bucket for a JSON body address"
+    );
+}
+
+/// Only a top-level string names an identity. A JSON body whose field is
+/// a number, an array or nested names nobody, so it falls back like a
+/// request without the field.
+#[tokio::test]
+async fn a_json_field_that_is_no_string_names_nobody() {
+    let mw = RateLimitMiddleware::new(limiter(), one_per_window(), |req| {
+        identity_key(req, "email", "issuance")
+    })
+    .key_reads_body(4096)
+    .only_when(|req| suprnova::rate_limit::names_identity(req, "email"));
+
+    let addr = spawn_server(echo_router(mw), 8).await;
+
+    for body in [
+        r#"{"email":["victim@example.com"]}"#,
+        r#"{"email":42}"#,
+        r#"{"user":{"email":"victim@example.com"}}"#,
+        r#"["victim@example.com"]"#,
+    ] {
+        let (status, _) = post_with_type(addr, "/issue", body, "application/json").await;
+        assert_eq!(
+            status, 200,
+            "{body} names nobody, so the limiter stands aside"
+        );
+    }
+}
