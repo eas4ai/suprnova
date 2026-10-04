@@ -8,6 +8,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Second-factor attempt limits.** `TWO_FACTOR_MAX_ATTEMPTS` (default 5)
+  and `TWO_FACTOR_LOCKOUT_MINUTES` (default 15, at most 43,200) set the
+  sliding window in which second-factor failures lock an account's second
+  factor; `TwoFactor::unlock` and Magnetar's `TwoFactorService::unlock`
+  lift it. Password and second-factor lockouts count separately, so a
+  password reset no longer lifts a second-factor lock.
+  `Authenticatable::auth_epoch` lets a provider carry the epoch it read
+  with the password hash through sign-in. This landed after the `v3.1.0`
+  tag.
 - **`Lang::reload`.** `Lang::reload().await` reloads the translation
   catalogs and, when their text changed, makes RenderCache pages built from
   the old translations miss; dev hot reload does the same. Call it from a
@@ -405,6 +414,29 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **Two-factor needs two new migrations.** Add
+  `suprnova::auth_flows::two_factor::migration_attempts` (the
+  `two_factor_attempts` table) and `migration_rotation` (the
+  `two_factor_rotations` table) to your migrator. Without the first, every
+  two-factor proof path answers 503 and names the migration; without the
+  second, `TwoFactor::re_enroll` answers 503. A pending rotation keeps the
+  confirmed secret gating sign-in until `confirm` promotes the new one,
+  `enroll` cannot replace a pending rotation, and `disable` discards it.
+  `enroll` answers 422 for a user id longer than 255 characters. This
+  landed after the `v3.1.0` tag.
+- **`Auth::password().register` returns a `Registration`**:
+  `Created(user)` or `Accepted`, never the existing account. The
+  `MagnetarPasswordAuthEngine::password_register` trait method returns it, and a
+  custom engine gains `admit_host_sign_in` and `issue_host_session`, which
+  refuse with 503 by default. The API starter answers every registration
+  with one generic 202. This landed after the `v3.1.0` tag.
+- **Magnetar's second-factor lockouts have their own table.** The default
+  schema's migrate creates `auth_second_factor_lockouts`
+  (`DefaultSecondFactorSchema`), and `TwoFactorService::new` takes a
+  lockout service over it. `TwoFactorStore::set_confirmed` takes the
+  enrollment snapshot that was checked, and the MySQL migration failures
+  (`SwapFailure`, `MySqlMigrationFailure`) are boxed. This landed after the
+  `v3.1.0` tag.
 - **`Cache::tags_put` without a TTL applies `CACHE_DEFAULT_TTL`**, as
   `Cache::put` does. A tagged value that must never expire uses the new
   `Cache::tags_forever`. This landed after the `v3.1.0` tag.
@@ -633,6 +665,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Two-factor flows on every engine.** A framework login completed with
+  `TwoFactor::complete_challenge` stays signed in under the Magnetar
+  engine. The two-factor credentials table and the attempt-counter
+  migration create on MySQL and MariaDB. Concurrent second-factor
+  admissions no longer deadlock across users on MySQL. On Postgres, a
+  correct Magnetar second-factor code, every ceremony state change, passkey
+  registration and removal, and account unlinking answered 500; they work.
+  A committed two-factor confirmation is reported as confirmed even when
+  its attempt record cannot settle. A password reset keeps an encrypted
+  column that changed while it ran, and stores the new hash verbatim
+  whatever the model's mutators. This landed after the `v3.1.0` tag.
 - **Cache, maintenance mode and read-through disks.**
   `Cache::remember_forever` and `Cache::sear` no longer expire after
   `CACHE_DEFAULT_TTL`, and `down` with `MAINTENANCE_DRIVER=cache` no longer
@@ -1072,6 +1115,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **Second-factor codes are rate limited and single use.**
+  `TwoFactor::verify` and `consume_recovery_code` ignored the account
+  lockout, so a caller with the password could guess TOTP codes without
+  limit; both now refuse while the second factor is locked, and every
+  framework login is refused before it spends a code. A confirmation code
+  and a TOTP code straddling a timestep are accepted once, and `confirm`
+  confirms only the secret whose code was checked, in the framework and in
+  Magnetar. Second-factor failures are counted in a table that no password
+  identity can reach, so a decoy account named after the second-factor key
+  can neither clear nor lock it. A password reset during the password
+  check cancels the sign-in or challenge. HTTP Basic once, `Auth::once` and
+  `once_using_id` refuse an account with a Magnetar second factor, and
+  Magnetar's password, magic link, passkey and OAuth sign-ins refuse an
+  account with framework TOTP. A remembered framework login is refused
+  before it issues a credential, and account flows write only the
+  verified-at or password column. This landed after the `v3.1.0` tag.
 - **Local disks stay inside their root.** On Unix, a directory inside a
   local disk root swapped for a symlink during an operation could redirect
   a read, write, copy, rename, delete, listing or publish outside the root.
