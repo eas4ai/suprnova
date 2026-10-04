@@ -1576,6 +1576,7 @@ export class AsyncDocumentOwner {
         : new DocumentConnectionPool({
             authorizationScheduler: this.#authorizationScheduler,
             handshakeScheduler: options.handshakeScheduler ?? new OriginHandshakeScheduler(),
+            maxQueuedEvents: limits.asyncMaxQueuedEvents,
             randomness: options.randomness,
             timers,
             transports: stream.transports,

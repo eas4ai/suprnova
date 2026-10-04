@@ -188,6 +188,15 @@ Acceptance criteria:
   numeric generation collides; foreign, never-authenticated, wrong-group,
   wrong-generation, or wrong-binding traffic retains the physical
   authorization-failure contract.
+- An SSE record for a membership whose subscribe control is still settling on
+  the current physical generation is held inert, within the document's
+  queued-event limit, and applied in arrival order once that exact
+  acknowledgment authenticates the membership. A rejected, timed-out, or
+  cancelled control drops it. The control travels as an HTTP request beside the
+  event stream, so a host that commits the membership and then delivers its
+  first record can have that record arrive first. A WebSocket acknowledgment
+  travels ahead of the membership's data on the same socket, so a WebSocket
+  record that precedes it still fails the physical transport.
 - Fresh-render scheduler exhaustion is a distinct `resource_exhausted`
   presentation outcome. It degrades and reauthorizes only the exact membership,
   reports one bounded resource diagnostic, activates the signed hybrid fallback,
@@ -630,6 +639,15 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-04 -- An SSE record that overtakes its membership's acknowledgment is
+  held, not a physical authorization failure. The framework host commits an SSE
+  membership, wakes its delivery loop, and only then answers the control, so a
+  heartbeat or an event published meanwhile can reach the browser before the
+  answer that authenticates the membership. Failing that record as lost
+  authorization retired the whole document transport and degraded every island
+  on it, with no reconnect. The record now stays inert until the exact
+  acknowledgment for that membership and generation settles, bounded by the
+  document's queued-event limit; WebSocket ordering is unchanged.
 - 2026-10-04 -- Replay memory is bounded per subscription and per process:
   `LIVE_ASYNC_MAX_REPLAY_BYTES` (4 MiB) bounds one subscription's log, which
   shared the 16 MiB per-document queue limit before, and

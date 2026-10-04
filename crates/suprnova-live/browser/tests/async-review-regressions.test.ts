@@ -314,10 +314,12 @@ describe("reviewed reconnect authority", () => {
     expect(sources[1]?.close).not.toHaveBeenCalled();
     expect(first.envelope).not.toHaveBeenCalled();
 
+    // The record overtakes the replacement's successor acknowledgment. An
+    // inherited quarantine would drop it silently; instead it is held inert
+    // and applied once that acknowledgment authenticates the membership.
     sources[1]?.emit(heartbeat(1, 1));
 
-    expect(sources[1]?.close).toHaveBeenCalledExactlyOnceWith("transport_replaced");
-    expect(first.state).toHaveBeenLastCalledWith("degraded");
+    expect(sources[1]?.close).not.toHaveBeenCalled();
     expect(first.envelope).not.toHaveBeenCalled();
     acknowledge(
       Object.freeze({
@@ -329,7 +331,9 @@ describe("reviewed reconnect authority", () => {
       }),
     );
     await settle();
-    expect(first.state).toHaveBeenLastCalledWith("degraded");
+    expect(first.envelope).toHaveBeenCalledExactlyOnceWith(heartbeat(1, 1));
+    expect(first.state).toHaveBeenLastCalledWith("current");
+    expect(sources[1]?.close).not.toHaveBeenCalled();
     pool.dispose();
   });
 

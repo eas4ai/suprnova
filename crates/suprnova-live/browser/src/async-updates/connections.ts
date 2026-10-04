@@ -1,4 +1,5 @@
 import { inspectAsyncEnvelopeSubscription } from "./envelope.js";
+import { SERVER_DEFAULT_LIMITS } from "../limits.js";
 import {
   canonicalize,
   parseCanonicalJson,
@@ -138,6 +139,12 @@ export interface DocumentConnectionPoolOptions {
   readonly authorizationScheduler?: DocumentAuthorizationScheduler;
   readonly handshakeScheduler: OriginHandshakeScheduler;
   readonly handshakeTimeoutMs?: number;
+  /**
+   * Asynchronous events the document may hold before its islands apply them
+   * (`LIVE_ASYNC_MAX_QUEUED_EVENTS`). It also bounds the SSE records held
+   * while their memberships' controls are still settling.
+   */
+  readonly maxQueuedEvents?: number;
   readonly randomness: AsyncRandomness;
   readonly reauthorizationConcurrency?: number;
   readonly reauthorizationTimeoutMs?: number;
@@ -1099,6 +1106,14 @@ interface ReauthorizationCompletion {
 
 interface MembershipAttachmentCompletion {
   settle: ((acknowledgment: unknown) => void) | null;
+  /** The physical generation the control was sent on. */
+  readonly transportGeneration: number;
+  /**
+   * SSE records for this membership that arrived before its control
+   * settled, in arrival order. They stay inert until the acknowledgment
+   * authenticates the membership, and are dropped if it never does.
+   */
+  readonly overtaking: string[];
 }
 
 function completeMembershipAttachment(
@@ -1218,6 +1233,7 @@ export class DocumentConnectionPool {
   readonly #authorizationScheduler: DocumentAuthorizationScheduler | null;
   readonly #handshakes: OriginHandshakeScheduler;
   readonly #handshakeTimeoutMs: number;
+  readonly #maxQueuedEvents: number;
   readonly #randomness: AsyncRandomness;
   readonly #reauthorizationConcurrency: number;
   readonly #reauthorizationTimeoutMs: number;
@@ -1234,6 +1250,7 @@ export class DocumentConnectionPool {
     const concurrency = options.reauthorizationConcurrency ?? 8;
     const timeout = options.reauthorizationTimeoutMs ?? 5_000;
     const handshakeTimeout = options.handshakeTimeoutMs ?? 5_000;
+    const maxQueuedEvents = options.maxQueuedEvents ?? SERVER_DEFAULT_LIMITS.asyncMaxQueuedEvents;
     if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 8) {
       throw new RangeError("async_reauthorization_concurrency_invalid");
     }
@@ -1247,9 +1264,13 @@ export class DocumentConnectionPool {
     ) {
       throw new RangeError("async_handshake_timeout_invalid");
     }
+    if (!Number.isSafeInteger(maxQueuedEvents) || maxQueuedEvents < 1) {
+      throw new RangeError("async_queued_events_invalid");
+    }
     this.#authorizationScheduler = options.authorizationScheduler ?? null;
     this.#handshakes = options.handshakeScheduler;
     this.#handshakeTimeoutMs = handshakeTimeout;
+    this.#maxQueuedEvents = maxQueuedEvents;
     this.#randomness = options.randomness;
     this.#reauthorizationConcurrency = concurrency;
     this.#reauthorizationTimeoutMs = timeout;
@@ -1572,6 +1593,7 @@ export class DocumentConnectionPool {
       ) {
         return;
       }
+      if (this.#holdOvertakingRecord(group, membership, generation, encoded)) return;
       this.#failed(group, generation, "authorization_lost");
       return;
     }
@@ -1580,6 +1602,43 @@ export class DocumentConnectionPool {
     } catch {
       this.#safeState(membership, "degraded");
     }
+  }
+
+  /**
+   * Holds an SSE record that overtook its membership's acknowledgment.
+   *
+   * SSE membership controls are HTTP requests beside the event stream, so a
+   * host that commits a membership and then delivers its first record, a
+   * heartbeat or an event published meanwhile, can have that record reach the
+   * browser before the control's response does. The record is not authority:
+   * it stays inert until the exact acknowledgment for this membership and
+   * generation settles. Failing it as lost authorization would retire the
+   * whole document transport, every sibling island with it, with no
+   * reconnect. A WebSocket acknowledgment travels in order on the socket
+   * ahead of the membership's data, so a WebSocket record that precedes it
+   * is still a protocol violation and fails closed.
+   */
+  #holdOvertakingRecord(
+    group: PhysicalGroup,
+    membership: LogicalMembership,
+    generation: number,
+    encoded: string,
+  ): boolean {
+    const attachment = membership.attachmentCompletion;
+    if (
+      group.key.transport !== "sse" ||
+      attachment?.transportGeneration !== generation ||
+      attachment.settle === null
+    ) {
+      return false;
+    }
+    let held = 0;
+    for (const candidate of this.#memberships.values()) {
+      held += candidate.attachmentCompletion?.overtaking.length ?? 0;
+    }
+    if (held >= this.#maxQueuedEvents) return false;
+    attachment.overtaking.push(encoded);
+    return true;
   }
 
   #failed(group: PhysicalGroup, generation: number, reason: DocumentTransportFailure): void {
@@ -2108,7 +2167,11 @@ export class DocumentConnectionPool {
       this.#failed(group, transportGeneration, "authorization_lost");
       return;
     }
-    const completion: MembershipAttachmentCompletion = { settle: null };
+    const completion: MembershipAttachmentCompletion = {
+      overtaking: [],
+      settle: null,
+      transportGeneration,
+    };
     completion.settle = (acknowledgment) => {
       this.#settleMembershipAttachment(
         completion,
@@ -2148,6 +2211,31 @@ export class DocumentConnectionPool {
   }
 
   #settleMembershipAttachment(
+    completion: MembershipAttachmentCompletion,
+    group: PhysicalGroup,
+    membership: LogicalMembership,
+    transportGeneration: number,
+    membershipGeneration: number,
+    acknowledgment: unknown,
+  ): void {
+    if (completion.settle === null) return;
+    const overtaking = completion.overtaking.splice(0);
+    this.#authenticateMembershipAttachment(
+      completion,
+      group,
+      membership,
+      transportGeneration,
+      membershipGeneration,
+      acknowledgment,
+    );
+    if (membership.authenticatedTransportGeneration !== transportGeneration) return;
+    // Applied exactly as if each had arrived now: the same routing rechecks
+    // the generation and membership for every record, in arrival order, and
+    // ahead of any record the stream delivers after this acknowledgment.
+    for (const encoded of overtaking) this.#message(group, transportGeneration, encoded);
+  }
+
+  #authenticateMembershipAttachment(
     completion: MembershipAttachmentCompletion,
     group: PhysicalGroup,
     membership: LogicalMembership,
@@ -2223,7 +2311,10 @@ export class DocumentConnectionPool {
   #cancelMembershipAttachment(membership: LogicalMembership): void {
     const completion = membership.attachmentCompletion;
     membership.attachmentCompletion = null;
-    if (completion !== null) completion.settle = null;
+    if (completion !== null) {
+      completion.settle = null;
+      completion.overtaking.length = 0;
+    }
   }
 
   #discardPendingAuthorization(membership: LogicalMembership): void {

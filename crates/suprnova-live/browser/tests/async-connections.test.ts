@@ -83,6 +83,87 @@ class FakeEventSource implements EventSourcePort {
   }
 }
 
+/**
+ * An SSE port whose membership acknowledgments travel separately from its
+ * event stream, as they do over HTTP: the test decides when each subscribe
+ * control settles and when each stream record arrives.
+ */
+class DeferredAcknowledgmentEventSource implements EventSourcePort {
+  readonly close = vi.fn();
+  readonly #pending = new Map<string, (outcome: unknown) => void>();
+
+  constructor(readonly request: DocumentTransportConnectRequest) {}
+
+  open(): void {
+    this.request.opened();
+  }
+
+  emit(encoded: string): void {
+    this.request.message(encoded);
+  }
+
+  subscribe(subscription: AuthorizedLogicalSubscription) {
+    return new Promise<never>((resolve) => {
+      this.#pending.set(subscription.subscriptionId, (outcome) => {
+        resolve(outcome as never);
+      });
+    });
+  }
+
+  acknowledge(subscription: AuthorizedLogicalSubscription): void {
+    this.#settle(subscription.subscriptionId, {
+      descriptorBinding: subscription.descriptorBinding,
+      kind: "authenticated",
+      stream: subscription.stream,
+      subscriptionId: subscription.subscriptionId,
+      transportGeneration: this.request.transportGeneration,
+    });
+  }
+
+  reject(subscription: AuthorizedLogicalSubscription): void {
+    this.#settle(subscription.subscriptionId, { kind: "rejected", reason: "authorization_lost" });
+  }
+
+  unsubscribe(subscriptionId: string): void {
+    this.#pending.delete(subscriptionId);
+  }
+
+  #settle(subscriptionId: string, outcome: unknown): void {
+    const settle = this.#pending.get(subscriptionId);
+    if (settle === undefined) throw new Error("membership_control_missing");
+    this.#pending.delete(subscriptionId);
+    settle(Object.freeze(outcome));
+  }
+}
+
+function deferredAcknowledgmentHarness(maxQueuedEvents?: number) {
+  const sources: DeferredAcknowledgmentEventSource[] = [];
+  const timers = new FakeTimers();
+  const port = (request: DocumentTransportConnectRequest) => {
+    const source = new DeferredAcknowledgmentEventSource(request);
+    sources.push(source);
+    return source;
+  };
+  const pool = new DocumentConnectionPool({
+    handshakeScheduler: new OriginHandshakeScheduler(8),
+    ...(maxQueuedEvents === undefined ? {} : { maxQueuedEvents }),
+    randomness: { number: () => 0.5 },
+    timers: timers.port,
+    transports: { eventSource: port, webSocket: port },
+  });
+  return { pool, sources, timers };
+}
+
+function heartbeat(index: number, sequence: number): string {
+  return canonicalize({
+    payload: { kind: "heartbeat" },
+    position: { epoch: "1", sequence: String(sequence) },
+    protocol_version: 1,
+    stream: `stream-${String(index)}`,
+    subscription: `subscription-${String(index).padStart(3, "0")}`,
+  });
+}
+
 class FakeTimers {
   readonly pending = new Map<number, VoidFunction>();
   #next = 0;
@@ -334,6 +415,93 @@ describe("multiplexed document transports", () => {
     sources[0]?.emit("late-data");
     expect(envelope).not.toHaveBeenCalled();
     expect(sources).toHaveLength(1);
+  });
+
+  it("holds a record that overtakes its SSE membership acknowledgment for that membership", async () => {
+    const { pool, sources } = deferredAcknowledgmentHarness();
+    const first = authorized(1);
+    const second = authorized(2);
+    const firstEnvelopes = vi.fn();
+    const secondEnvelopes = vi.fn();
+    const firstStates = vi.fn();
+    const secondStates = vi.fn();
+    pool.subscribe(first, logicalSink(firstEnvelopes, firstStates));
+    pool.subscribe(second, logicalSink(secondEnvelopes, secondStates));
+    const source = sources[0];
+    if (source === undefined) throw new Error("source_missing");
+    source.open();
+    source.acknowledge(first);
+    await eventLoopBarrier();
+
+    // The host committed the second membership and its stream record arrived
+    // before the control response that acknowledges it.
+    source.emit(heartbeat(2, 1));
+    expect(source.close).not.toHaveBeenCalled();
+    expect(secondEnvelopes).not.toHaveBeenCalled();
+    source.emit(heartbeat(1, 1));
+    expect(firstEnvelopes).toHaveBeenCalledWith(heartbeat(1, 1));
+
+    source.acknowledge(second);
+    await eventLoopBarrier();
+    expect(secondEnvelopes).toHaveBeenCalledWith(heartbeat(2, 1));
+    source.emit(heartbeat(2, 2));
+    expect(secondEnvelopes.mock.calls).toEqual([[heartbeat(2, 1)], [heartbeat(2, 2)]]);
+    expect(source.close).not.toHaveBeenCalled();
+    expect(firstStates).not.toHaveBeenCalledWith("degraded");
+    expect(secondStates).not.toHaveBeenCalledWith("degraded");
+  });
+
+  it("fails closed once held records reach the document's queued-event limit", async () => {
+    const { pool, sources } = deferredAcknowledgmentHarness(2);
+    const subscription = authorized(1);
+    const envelopes = vi.fn();
+    pool.subscribe(subscription, logicalSink(envelopes));
+    const source = sources[0];
+    if (source === undefined) throw new Error("source_missing");
+    source.open();
+    source.emit(heartbeat(1, 1));
+    source.emit(heartbeat(1, 2));
+    expect(source.close).not.toHaveBeenCalled();
+    source.emit(heartbeat(1, 3));
+    expect(source.close).toHaveBeenCalledOnce();
+    source.acknowledge(subscription);
+    await eventLoopBarrier();
+    expect(envelopes).not.toHaveBeenCalled();
+  });
+
+  it("still fails closed on a WebSocket record ahead of its in-order acknowledgment", () => {
+    const { pool, sources } = deferredAcknowledgmentHarness();
+    const subscription = Object.freeze({
+      ...authorized(1),
+      document: Object.freeze({ ...authorized(1).document, transport: "websocket" as const }),
+    });
+    const envelopes = vi.fn();
+    pool.subscribe(subscription, logicalSink(envelopes));
+    const source = sources[0];
+    if (source === undefined) throw new Error("source_missing");
+    source.open();
+    expect(source.close).not.toHaveBeenCalled();
+    source.emit(heartbeat(1, 1));
+    expect(source.close).toHaveBeenCalledOnce();
+    expect(envelopes).not.toHaveBeenCalled();
+  });
+
+  it("drops a held record when its SSE membership control is rejected", async () => {
+    const { pool, sources } = deferredAcknowledgmentHarness();
+    const subscription = authorized(1);
+    const envelopes = vi.fn();
+    const states = vi.fn();
+    pool.subscribe(subscription, logicalSink(envelopes, states));
+    const source = sources[0];
+    if (source === undefined) throw new Error("source_missing");
+    source.open();
+    source.emit(heartbeat(1, 1));
+    source.reject(subscription);
+    await eventLoopBarrier();
+
+    expect(envelopes).not.toHaveBeenCalled();
+    expect(source.close).toHaveBeenCalledOnce();
+    expect(states).toHaveBeenCalledWith("degraded");
   });
 
   it("keeps an authenticated replay pending until its real presentation completes", () => {
