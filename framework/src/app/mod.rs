@@ -824,9 +824,14 @@ where
     /// Register a bootstrap function
     ///
     /// This async function is called to register services, middleware,
-    /// and other application components. It is process-wide: every
-    /// subcommand runs it, not only the server. Register HTTP-only
-    /// components - global middleware, `Inertia::install` - with
+    /// and other application components. It is process-wide: the server,
+    /// the workers, the queue, schedule and maintenance commands, and the
+    /// console binary all run it. The migration commands (`migrate`,
+    /// `migrate:*`, `schema:dump`) do not: a fresh database has to be
+    /// migratable even when this hook reads a table the migrations create,
+    /// as `bootstrap_database_cached` reads `features`. `serve` runs its
+    /// own migrations before this hook for the same reason. Register
+    /// HTTP-only components - global middleware, `Inertia::install` - with
     /// [`http_bootstrap`](Self::http_bootstrap) instead, which only the
     /// server path runs.
     ///
@@ -864,7 +869,7 @@ where
     /// Register global middleware and the Inertia layer here; keep
     /// process-wide work - `DB::init`, container bindings, event listeners,
     /// job registration - in [`bootstrap`](Self::bootstrap), which every
-    /// subcommand runs.
+    /// subcommand but the migration commands runs.
     ///
     /// # Example
     ///
@@ -2015,9 +2020,10 @@ where
     /// Boot a non-server process: the application's `bootstrap` hook, then
     /// what `boot` names (see [`process_boot::boot_after_hook`]).
     ///
-    /// Every subcommand but `serve` boots here, with the [`ProcessBoot`]
-    /// that [`Commands::boot`] gives it, so a worker, a queue command and
-    /// `down` cannot each assemble a different subset of the boot again.
+    /// Every subcommand but `serve` and the migration commands boots here,
+    /// with the [`ProcessBoot`] that [`Commands::boot`] gives it, so a
+    /// worker, a queue command and `down` cannot each assemble a different
+    /// subset of the boot again.
     /// The hook runs first: `QUEUE_DRIVER=database` resolves its connection
     /// out of the `DB` the hook initialized, and a log channel the hook
     /// defines can be `LOG_CHANNEL`. A bootstrap that installs a driver by
@@ -2070,8 +2076,9 @@ where
     /// `down`: record the maintenance payload via the configured driver.
     ///
     /// Runs the application's `bootstrap` hook first, as every subcommand
-    /// does: a storage path or a cache store the hook installs is the one
-    /// the serving process reads, so `down` must write to it too.
+    /// but the migration commands does: a storage path or a cache store the
+    /// hook installs is the one the serving process reads, so `down` must
+    /// write to it too.
     #[allow(clippy::too_many_arguments)]
     async fn run_down(
         boot: ProcessBoot,

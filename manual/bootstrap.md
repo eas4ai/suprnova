@@ -549,6 +549,16 @@ crate's root and a one-line call from the app's `bootstrap`. The
 ergonomic cost is one line; the readability gain is everything in
 one place.
 
+Laravel's `php artisan migrate` registers and boots every provider
+before it migrates, as every `artisan` command does. Suprnova's
+migration commands run no `bootstrap_fn`. A Laravel provider rarely
+reads a table at boot, because its services resolve lazily; a
+Suprnova bootstrap does real work when it runs, and the documented
+feature-flag setup, `bootstrap_database_cached`, reads the `features`
+table there. Booting first would make `migrate` fail on the fresh
+database it exists to create. A migration that needs data access uses
+the connection its `SchemaManager` hands it.
+
 ## Next
 
 - [Lifecycle](lifecycle.md) - full boot order and where `bootstrap_fn` fires
