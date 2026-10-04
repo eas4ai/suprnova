@@ -12,6 +12,8 @@
 
 use sea_orm_migration::prelude::*;
 
+use crate::database::migration_guard::create_index_if_missing;
+
 /// Migration that creates `two_factor_attempts`.
 pub struct Migration;
 
@@ -65,16 +67,17 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_two_factor_attempts_user_id")
-                    .table(TwoFactorAttempts::Table)
-                    .col(TwoFactorAttempts::UserId)
-                    .to_owned(),
-            )
-            .await
+        // MySQL has no `CREATE INDEX IF NOT EXISTS`; ask the catalogue
+        // first, so `up` over an existing table works on every backend.
+        create_index_if_missing(
+            manager,
+            "two_factor_attempts",
+            Index::create()
+                .name("idx_two_factor_attempts_user_id")
+                .col(TwoFactorAttempts::UserId)
+                .to_owned(),
+        )
+        .await
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {

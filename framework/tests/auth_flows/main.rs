@@ -22,3 +22,4 @@ pub mod two_factor;
 pub mod two_factor_brute_force_integration;
 pub mod two_factor_challenge_flow;
 pub mod two_factor_challenge_middleware;
+pub mod two_factor_engines;
