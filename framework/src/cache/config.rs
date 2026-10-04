@@ -2,6 +2,7 @@
 
 use crate::config::{env, env_optional};
 use crate::error::FrameworkError;
+use crate::render_cache::providers::redis::REDACTED_URL;
 
 /// Which cache backend to bootstrap.
 ///
@@ -67,11 +68,13 @@ impl CacheDriver {
 ///     .build());
 /// # Ok(()) }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CacheConfig {
     /// Which backend to bootstrap. Defaults to in-memory.
     pub driver: CacheDriver,
-    /// Redis connection URL (consulted only when `driver == Redis`)
+    /// Redis connection URL (consulted only when `driver == Redis`). It
+    /// can carry a password, so it is never printed: see this type's
+    /// `Debug` implementation.
     pub url: String,
     /// Key prefix for all cache entries
     pub prefix: String,
@@ -85,6 +88,34 @@ pub struct CacheConfig {
     /// key that expires and is never read again stays in memory until a
     /// sweep removes it. Redis expires keys itself and ignores this.
     pub sweep_interval: u64,
+}
+
+impl std::fmt::Debug for CacheConfig {
+    /// Prints everything but the Redis URL, which routinely carries a
+    /// password and reaches logs through whatever prints the configuration.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CacheConfig")
+            .field("driver", &self.driver)
+            .field("url", &REDACTED_URL)
+            .field("prefix", &self.prefix)
+            .field("default_ttl", &self.default_ttl)
+            .field("sweep_interval", &self.sweep_interval)
+            .finish()
+    }
+}
+
+/// Where the Redis URL `url` connects - `host:port`, or a socket path -
+/// without its credentials, for messages that have to say where.
+///
+/// The URL is parsed the way the Redis client parses it, so the endpoint
+/// named is the one a connection was attempted against. A URL the client
+/// cannot parse is named as such rather than repeated: it may still hold a
+/// password.
+pub(crate) fn redis_endpoint(url: &str) -> String {
+    match redis::IntoConnectionInfo::into_connection_info(url) {
+        Ok(info) => info.addr().to_string(),
+        Err(_) => "a REDIS_URL the Redis client cannot parse".to_string(),
+    }
 }
 
 impl CacheConfig {
@@ -131,13 +162,27 @@ impl Default for CacheConfig {
 }
 
 /// Builder for CacheConfig
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct CacheConfigBuilder {
     driver: Option<CacheDriver>,
     url: Option<String>,
     prefix: Option<String>,
     default_ttl: Option<u64>,
     sweep_interval: Option<u64>,
+}
+
+impl std::fmt::Debug for CacheConfigBuilder {
+    /// Prints everything but the Redis URL, for the reason
+    /// [`CacheConfig`]'s `Debug` gives.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CacheConfigBuilder")
+            .field("driver", &self.driver)
+            .field("url", &self.url.as_ref().map(|_| REDACTED_URL))
+            .field("prefix", &self.prefix)
+            .field("default_ttl", &self.default_ttl)
+            .field("sweep_interval", &self.sweep_interval)
+            .finish()
+    }
 }
 
 impl CacheConfigBuilder {
@@ -183,6 +228,33 @@ impl CacheConfigBuilder {
             prefix: self.prefix.unwrap_or(defaults.prefix),
             default_ttl: self.default_ttl.unwrap_or(defaults.default_ttl),
             sweep_interval: self.sweep_interval.unwrap_or(defaults.sweep_interval),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Debug` output of the cache configuration never carries the
+    /// credentials in its Redis URL, in the userinfo or in the `pass` query
+    /// parameter a socket URL takes. It used to print the URL whole, so any
+    /// log line that formatted the configuration leaked the password.
+    #[test]
+    fn debug_output_never_carries_redis_credentials() {
+        for url in [
+            "redis://cache-user:s3cret-pw@cache.internal:6380/2",
+            "redis+unix:///run/redis.sock?user=cache-user&pass=s3cret-pw",
+        ] {
+            let built = CacheConfig::builder().driver(CacheDriver::Redis).url(url);
+            let builder_debug = format!("{built:?}");
+            let config_debug = format!("{:?}", built.build());
+            for rendered in [config_debug, builder_debug] {
+                assert!(
+                    !rendered.contains("s3cret-pw") && !rendered.contains("cache-user"),
+                    "Debug leaks REDIS_URL credentials: {rendered}"
+                );
+            }
         }
     }
 }
