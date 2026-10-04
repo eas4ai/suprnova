@@ -61,6 +61,9 @@ use crate::error::FrameworkError;
 /// out of serialization would never be written. Writing only the changed
 /// columns keeps a concurrent write to another column of the row intact.
 ///
+/// A column whose cast stores a new value on every write, such as an
+/// encrypted one, counts as changed only when its decoded value did.
+///
 /// The model lifecycle runs as for [`Model::save`]: `Updating` and
 /// `Saving` before the write, either of which can cancel it, then
 /// `Updated` and `Saved`. The `Updating`/`Saving` payload lists the
@@ -81,14 +84,22 @@ where
 {
     use sea_orm::{ActiveModelTrait, ActiveValue, IdenStatic};
 
-    let stored = previous.clone().try_into_storage()?.into_active_model();
+    let stored_row = previous.clone().try_into_storage()?;
+    let changed_row = changed.clone().try_into_storage()?;
+    let stored = stored_row.clone().into_active_model();
     let mut am = changed.into_active_model_for_update()?;
     let mut written = Attrs::new();
     for column in <M::Entity as EntityTrait>::Column::iter() {
         let ActiveValue::Set(new) = am.get(column) else {
             continue;
         };
-        if stored.get(column).into_value().as_ref() == Some(&new) {
+        // A cast that stores a new value on every write, such as an
+        // encrypted column, differs in storage even when its value did not
+        // change; compare such a column by its decoded value. Writing it
+        // back would revert a concurrent change to it.
+        let unchanged = stored.get(column).into_value().as_ref() == Some(&new)
+            || M::__decoded_values_equal(column.as_str(), &stored_row, &changed_row)?;
+        if unchanged {
             am.not_set(column);
         } else {
             written.insert(column.as_str(), sea_value_to_json_loose(&new));

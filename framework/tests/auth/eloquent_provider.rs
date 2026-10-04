@@ -571,3 +571,145 @@ async fn a_password_reset_writes_a_column_the_model_never_serializes() {
     assert_eq!(stored.password, "new-hash");
     assert!(stored.email_verified_at.is_some());
 }
+
+// ---- An encrypted column changed while a password reset ran -----------------
+
+#[model(
+    table = "encrypted_users",
+    timestamps = false,
+    fillable = ["email"],
+    casts = { phone = suprnova::AsEncrypted }
+)]
+pub struct EncryptedUser {
+    pub id: i64,
+    pub email: String,
+    pub password: String,
+    pub phone: String,
+    pub email_verified_at: Option<DateTime<Utc>>,
+}
+
+impl MustVerifyEmail for EncryptedUser {
+    fn email(&self) -> &str {
+        &self.email
+    }
+    fn email_verified_at(&self) -> Option<DateTime<Utc>> {
+        self.email_verified_at
+    }
+    fn set_email_verified_at(&mut self, v: Option<DateTime<Utc>>) {
+        self.email_verified_at = v;
+    }
+}
+
+impl Authenticatable for EncryptedUser {
+    fn get_auth_identifier(&self) -> String {
+        self.id.to_string()
+    }
+    fn get_auth_password(&self) -> Option<&str> {
+        Some(&self.password)
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn into_arc_any(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn Any + Send + Sync> {
+        self
+    }
+}
+
+impl CanResetPassword for EncryptedUser {
+    fn email_for_reset(&self) -> &str {
+        &self.email
+    }
+    fn set_password_hash(&mut self, hash: &str) {
+        self.password = hash.to_string();
+    }
+}
+
+/// SQL the next `Updating` of an `EncryptedUser` runs before its UPDATE.
+static ENCRYPTED_CONCURRENT_WRITE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static ENCRYPTED_LISTENER: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+struct EncryptedConcurrentFlow;
+
+#[async_trait::async_trait]
+impl suprnova::eloquent::events::CancellableListener<encrypted_user::events::Updating>
+    for EncryptedConcurrentFlow
+{
+    async fn handle(
+        &self,
+        _event: &encrypted_user::events::Updating,
+    ) -> suprnova::eloquent::events::EventResult {
+        let sql = ENCRYPTED_CONCURRENT_WRITE.lock().unwrap().take();
+        if let Some(sql) = sql {
+            use suprnova::sea_orm::ConnectionTrait;
+            suprnova::DB::connection()
+                .expect("test connection")
+                .inner()
+                .execute_unprepared(&sql)
+                .await
+                .expect("concurrent flow write");
+        }
+        suprnova::eloquent::events::EventResult::Ok
+    }
+}
+
+fn encrypt_cast_value(plain: &str) -> String {
+    <suprnova::AsEncrypted as suprnova::Cast>::to_storage(&plain.to_owned()).unwrap()
+}
+
+// An encrypted column stores a new ciphertext on every write, so comparing
+// stored values counts it as changed even when its value is not. A password
+// reset that loaded the user before a concurrent change to that column must
+// write only the password, not the stale encrypted value back over it.
+#[tokio::test]
+async fn a_password_reset_keeps_an_encrypted_column_changed_while_it_ran() {
+    if !suprnova::Crypt::is_initialized() {
+        suprnova::Crypt::init(suprnova::EncryptionKey::generate());
+    }
+    ENCRYPTED_LISTENER
+        .get_or_init(|| async {
+            suprnova::eloquent::events::listen_cancellable::<encrypted_user::events::Updating, _>(
+                std::sync::Arc::new(EncryptedConcurrentFlow),
+            )
+            .await;
+        })
+        .await;
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE encrypted_users (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            email TEXT NOT NULL, \
+            password TEXT NOT NULL, \
+            phone TEXT NOT NULL, \
+            email_verified_at TEXT\
+         )",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(&format!(
+        "INSERT INTO encrypted_users (email, password, phone) VALUES ('enc@b.com', 'old-hash', '{}')",
+        encrypt_cast_value("555-0100")
+    ))
+    .await
+    .unwrap();
+    let p = EloquentUserProvider::<EncryptedUser>::new();
+
+    *ENCRYPTED_CONCURRENT_WRITE.lock().unwrap() = Some(format!(
+        "UPDATE encrypted_users SET phone = '{}' WHERE id = 1",
+        encrypt_cast_value("555-0199")
+    ));
+    p.set_password("1", "reset-hash").await.unwrap();
+    assert!(
+        ENCRYPTED_CONCURRENT_WRITE.lock().unwrap().is_none(),
+        "the concurrent flow ran between the read and the write"
+    );
+
+    let stored = <EncryptedUser as suprnova::Model>::find(1_i64)
+        .await
+        .unwrap()
+        .expect("user 1");
+    assert_eq!(stored.password, "reset-hash", "the reset landed");
+    assert_eq!(
+        stored.phone, "555-0199",
+        "the newer encrypted value survives"
+    );
+}
