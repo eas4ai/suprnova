@@ -83,7 +83,6 @@ struct XUsersMeEnvelope {
 struct XUsersMeData {
     id: Option<String>,
     name: Option<String>,
-    profile_image_url: Option<String>,
 }
 
 /// The X `OAuthProvider` plugin.
@@ -192,11 +191,7 @@ impl OAuthProvider for XOAuthProvider {
         let ProviderResponse::UserInfo { body } = response else {
             return None;
         };
-        let envelope: XUsersMeEnvelope = serde_json::from_str(body).ok()?;
-        envelope
-            .data?
-            .profile_image_url
-            .filter(|url| !url.trim().is_empty())
+        super::oauth_profile_picture(body, "/data/profile_image_url")
     }
 
     async fn revoke(&self, token: &str, hint: TokenHint) -> OAuthResult<()> {

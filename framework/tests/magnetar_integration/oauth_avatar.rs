@@ -435,6 +435,17 @@ async fn google_empty_picture_signs_in_with_none() {
     .await;
 }
 
+#[tokio::test]
+async fn google_picture_of_an_unexpected_shape_signs_in_with_none() {
+    callback(
+        google(),
+        "g-1",
+        &format!(r#"{{"sub":"g-1","name":"Ada","picture":{{"url":"{GOOGLE_PICTURE}"}}}}"#),
+        None,
+    )
+    .await;
+}
+
 // --- TikTok --------------------------------------------------------------
 
 const TIKTOK_PICTURE: &str = "https://p16-sign.tiktokcdn.com/ada.jpeg";
@@ -474,6 +485,17 @@ async fn tiktok_empty_picture_signs_in_with_none() {
     .await;
 }
 
+#[tokio::test]
+async fn tiktok_picture_of_an_unexpected_shape_signs_in_with_none() {
+    callback(
+        tiktok(),
+        "t-1",
+        r#"{"data":{"user":{"open_id":"t-1","display_name":"Ada","avatar_url":42}},"error":{"code":"ok","message":""}}"#,
+        None,
+    )
+    .await;
+}
+
 // --- Facebook ------------------------------------------------------------
 
 const FACEBOOK_PICTURE: &str = "https://platform-lookaside.fbsbx.com/ada.jpg";
@@ -502,6 +524,18 @@ async fn facebook_empty_picture_signs_in_with_none() {
         facebook(),
         "f-1",
         r#"{"id":"f-1","name":"Ada","picture":{"data":{"url":""}}}"#,
+        None,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn facebook_picture_of_an_unexpected_shape_signs_in_with_none() {
+    // The URL itself where Graph's `{"data":{"url":...}}` belongs.
+    callback(
+        facebook(),
+        "f-1",
+        &format!(r#"{{"id":"f-1","name":"Ada","picture":"{FACEBOOK_PICTURE}"}}"#),
         None,
     )
     .await;
@@ -567,6 +601,19 @@ async fn x_empty_picture_signs_in_with_none() {
         x(),
         "x-1",
         r#"{"data":{"id":"x-1","name":"Ada","username":"ada","profile_image_url":""}}"#,
+        None,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn x_picture_of_an_unexpected_shape_signs_in_with_none() {
+    callback(
+        x(),
+        "x-1",
+        &format!(
+            r#"{{"data":{{"id":"x-1","name":"Ada","username":"ada","profile_image_url":["{X_PICTURE}"]}}}}"#
+        ),
         None,
     )
     .await;

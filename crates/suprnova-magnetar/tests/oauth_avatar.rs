@@ -50,6 +50,22 @@ fn requested_fields(url: &str, parameter: &str) -> Vec<String> {
         .collect()
 }
 
+/// JSON values that are present but are not the string a picture URL
+/// should be. The picture is optional profile data, so each must report no
+/// picture and leave sign-in as it was.
+#[cfg(any(
+    feature = "oauth-google",
+    feature = "oauth-x",
+    feature = "oauth-tiktok"
+))]
+const UNEXPECTED_STRING_SHAPES: [&str; 5] = [
+    "42",
+    "true",
+    r#"["https://cdn.example.test/ada.jpg"]"#,
+    r#"{"url":"https://cdn.example.test/ada.jpg"}"#,
+    r#"{"data":{"url":"https://cdn.example.test/ada.jpg"}}"#,
+];
+
 #[cfg(any(
     feature = "oauth-apple",
     feature = "oauth-google",
@@ -237,6 +253,20 @@ mod google {
         assert_eq!(identity.subject, "g-1");
         assert_eq!(avatar_url, None);
     }
+
+    #[tokio::test]
+    async fn a_picture_of_an_unexpected_shape_reports_none_and_signs_in() {
+        for picture in super::UNEXPECTED_STRING_SHAPES {
+            let (identity, avatar_url) = sign_in(
+                &provider(),
+                &format!(r#"{{"sub":"g-1","name":"Ada","picture":{picture}}}"#),
+            )
+            .await;
+            assert_eq!(identity.subject, "g-1", "picture {picture}");
+            assert_eq!(identity.display_name.as_deref(), Some("Ada"));
+            assert_eq!(avatar_url, None, "picture {picture}");
+        }
+    }
 }
 
 // --- TikTok: `data.user.avatar_url` --------------------------------------
@@ -298,6 +328,22 @@ mod tiktok {
         .await;
         assert_eq!(identity.subject, "t-1");
         assert_eq!(avatar_url, None);
+    }
+
+    #[tokio::test]
+    async fn a_picture_of_an_unexpected_shape_reports_none_and_signs_in() {
+        for picture in super::UNEXPECTED_STRING_SHAPES {
+            let (identity, avatar_url) = sign_in(
+                &provider(),
+                &format!(
+                    r#"{{"data":{{"user":{{"open_id":"t-1","display_name":"Ada","avatar_url":{picture}}}}},"error":{{"code":"ok","message":""}}}}"#
+                ),
+            )
+            .await;
+            assert_eq!(identity.subject, "t-1", "picture {picture}");
+            assert_eq!(identity.display_name.as_deref(), Some("Ada"));
+            assert_eq!(avatar_url, None, "picture {picture}");
+        }
     }
 
     #[test]
@@ -368,6 +414,32 @@ mod facebook {
         .await;
         assert_eq!(identity.subject, "f-1");
         assert_eq!(avatar_url, None);
+    }
+
+    #[tokio::test]
+    async fn a_picture_of_an_unexpected_shape_reports_none_and_signs_in() {
+        for picture in [
+            // The URL itself where Graph's `{"data":{"url":...}}` belongs.
+            r#""https://platform-lookaside.fbsbx.com/ada.jpg""#,
+            "42",
+            "true",
+            r#"["https://platform-lookaside.fbsbx.com/ada.jpg"]"#,
+            r#"{"data":"https://platform-lookaside.fbsbx.com/ada.jpg"}"#,
+            r#"{"data":[{"url":"https://platform-lookaside.fbsbx.com/ada.jpg"}]}"#,
+            r#"{"data":{"url":42}}"#,
+            r#"{"data":{"url":{"href":"https://platform-lookaside.fbsbx.com/ada.jpg"}}}"#,
+        ] {
+            let (identity, avatar_url) = sign_in(
+                &provider(),
+                &format!(
+                    r#"{{"id":"f-1","name":"Ada","email":"ada@example.test","picture":{picture}}}"#
+                ),
+            )
+            .await;
+            assert_eq!(identity.subject, "f-1", "picture {picture}");
+            assert_eq!(identity.email.as_deref(), Some("ada@example.test"));
+            assert_eq!(avatar_url, None, "picture {picture}");
+        }
     }
 
     #[test]
@@ -448,6 +520,22 @@ mod x {
         .await;
         assert_eq!(identity.subject, "x-1");
         assert_eq!(avatar_url, None);
+    }
+
+    #[tokio::test]
+    async fn a_picture_of_an_unexpected_shape_reports_none_and_signs_in() {
+        for picture in super::UNEXPECTED_STRING_SHAPES {
+            let (identity, avatar_url) = sign_in(
+                &provider(),
+                &format!(
+                    r#"{{"data":{{"id":"x-1","name":"Ada","username":"ada","profile_image_url":{picture}}}}}"#
+                ),
+            )
+            .await;
+            assert_eq!(identity.subject, "x-1", "picture {picture}");
+            assert_eq!(identity.display_name.as_deref(), Some("Ada"));
+            assert_eq!(avatar_url, None, "picture {picture}");
+        }
     }
 
     #[test]

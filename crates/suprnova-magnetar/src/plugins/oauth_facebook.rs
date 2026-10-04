@@ -120,25 +120,15 @@ impl Default for FacebookProviderConfig {
     }
 }
 
-/// The raw shape of Facebook's Graph API
-/// `/me?fields=id,name,email,picture` response.
+/// The identity fields of Facebook's Graph API
+/// `/me?fields=id,name,email,picture` response. The `picture` field, which
+/// wraps the URL in `data`, is read apart by
+/// [`OAuthProvider::avatar_url`].
 #[derive(Deserialize)]
 struct FacebookUser {
     id: Option<String>,
     name: Option<String>,
     email: Option<String>,
-    picture: Option<FacebookPicture>,
-}
-
-/// The Graph API `picture` field, which wraps the picture in `data`.
-#[derive(Deserialize)]
-struct FacebookPicture {
-    data: Option<FacebookPictureData>,
-}
-
-#[derive(Deserialize)]
-struct FacebookPictureData {
-    url: Option<String>,
 }
 
 /// The Facebook `OAuthProvider` plugin.
@@ -207,8 +197,7 @@ impl OAuthProvider for FacebookOAuthProvider {
         let ProviderResponse::UserInfo { body } = response else {
             return None;
         };
-        let user: FacebookUser = serde_json::from_str(body).ok()?;
-        user.picture?.data?.url.filter(|url| !url.trim().is_empty())
+        super::oauth_profile_picture(body, "/picture/data/url")
     }
 
     async fn revoke(&self, token: &str, hint: TokenHint) -> OAuthResult<()> {
