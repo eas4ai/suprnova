@@ -310,8 +310,14 @@ impl SessionData {
             .collect();
         let had_new = !new_keys.is_empty();
         for key in new_keys {
+            // Swap the leading namespace only. The caller's own key may
+            // contain `_flash.new.` text, and a replace over the whole key
+            // would rewrite it into a key `get_flash` never asks for.
+            let Some(name) = key.strip_prefix("_flash.new.") else {
+                continue;
+            };
+            let old_key = format!("_flash.old.{name}");
             if let Some(value) = self.data.remove(&key) {
-                let old_key = key.replace("_flash.new.", "_flash.old.");
                 self.data.insert(old_key, value);
             }
         }
@@ -540,8 +546,12 @@ impl SessionData {
             .collect();
         let had = !olds.is_empty();
         for old in olds {
+            // The leading namespace only, as in `age_flash_data`.
+            let Some(name) = old.strip_prefix("_flash.old.") else {
+                continue;
+            };
+            let new = format!("_flash.new.{name}");
             if let Some(v) = self.data.remove(&old) {
-                let new = old.replace("_flash.old.", "_flash.new.");
                 self.data.insert(new, v);
             }
         }

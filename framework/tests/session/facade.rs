@@ -194,6 +194,33 @@ async fn reflash_moves_old_into_new() {
     assert_eq!(s.get_flash::<String>("again").as_deref(), Some("yes"));
 }
 
+/// Aging moves only the leading namespace. A caller key that happens to
+/// contain `_flash.new.` used to have that text rewritten too, so the
+/// value landed under a key `get_flash` never asks for.
+#[tokio::test]
+async fn a_flash_key_containing_the_internal_prefix_survives_aging() {
+    let mut s = data();
+    s.flash("part._flash.new.name", "kept");
+    s.age_flash_data();
+    assert_eq!(
+        s.get_flash::<String>("part._flash.new.name").as_deref(),
+        Some("kept")
+    );
+}
+
+/// The same rule for `reflash`, which moves `_flash.old.` back to
+/// `_flash.new.`. The key carries both internal prefixes so neither move
+/// can rewrite text that belongs to the caller.
+#[tokio::test]
+async fn reflash_keeps_a_key_containing_the_internal_prefixes() {
+    let mut s = data();
+    let key = "x._flash.old.y._flash.new.z";
+    s.now(key, "kept");
+    s.reflash();
+    s.age_flash_data();
+    assert_eq!(s.get_flash::<String>(key).as_deref(), Some("kept"));
+}
+
 #[tokio::test]
 async fn keep_promotes_named_keys_back_to_new() {
     let mut s = data();
