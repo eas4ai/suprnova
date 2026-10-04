@@ -4,9 +4,14 @@
 //! of the matching JSON kind. The macro picks the right helper based on the
 //! field's `syn::Type` at compile time, so no runtime type guessing is needed.
 
+use std::fmt;
+use std::marker::PhantomData;
+
+use serde::de::{DeserializeSeed, Deserializer, Error as DeError, Visitor};
 use serde_json::{Number, Value};
 
 use crate::FrameworkError;
+use crate::data::Field;
 
 fn bad(name: &str, raw: &str, ty: &str) -> FrameworkError {
     FrameworkError::bad_request(format!(
@@ -45,8 +50,9 @@ pub fn parse_u32(name: &str, raw: &str) -> Result<Value, FrameworkError> {
 
 /// Coerce a route param to `i128`.
 ///
-/// JSON numbers have limited precision, so `i128` values outside `i64` range
-/// are returned as JSON strings to avoid silent truncation.
+/// A JSON number carries at most 64 bits, so the validated value is
+/// returned as its decimal text rather than truncated. The `Data` derive
+/// reads it back into the field through [`WideInteger`].
 pub fn parse_i128(name: &str, raw: &str) -> Result<Value, FrameworkError> {
     let _ = raw.parse::<i128>().map_err(|_| bad(name, raw, "i128"))?;
     Ok(Value::String(raw.to_string()))
@@ -54,10 +60,167 @@ pub fn parse_i128(name: &str, raw: &str) -> Result<Value, FrameworkError> {
 
 /// Coerce a route param to `u128`.
 ///
-/// Like `i128`, returned as a JSON string to avoid precision loss.
+/// Like `i128`, returned as its decimal text and read back through
+/// [`WideInteger`].
 pub fn parse_u128(name: &str, raw: &str) -> Result<Value, FrameworkError> {
     let _ = raw.parse::<u128>().map_err(|_| bad(name, raw, "u128"))?;
     Ok(Value::String(raw.to_string()))
+}
+
+/// A field type a 128-bit route parameter can fill: `i128`, `u128`, or an
+/// `Option` of either.
+///
+/// Implemented here only; it exists so [`WideInteger`] can read each of
+/// those shapes.
+#[doc(hidden)]
+pub trait WideIntegerField: Sized {
+    /// Read the field from a JSON number or from its decimal text.
+    fn deserialize_wide<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error>;
+}
+
+/// The seed the `Data` derive reads a `#[data(from_route_param)]` field of
+/// a 128-bit integer type with.
+///
+/// [`parse_i128`] and [`parse_u128`] hand the value over as decimal text
+/// because a JSON number cannot hold it. A plain `i128` field rejects text,
+/// so without this seed every such route parameter, small ones included,
+/// failed extraction with a 422.
+#[doc(hidden)]
+pub struct WideInteger<T>(PhantomData<fn() -> T>);
+
+impl<T> WideInteger<T> {
+    /// A seed for one field.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T> Default for WideInteger<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'de, T: WideIntegerField> DeserializeSeed<'de> for WideInteger<T> {
+    type Value = T;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<T, D::Error> {
+        T::deserialize_wide(deserializer)
+    }
+}
+
+/// Reads one 128-bit integer from any integer the format offers or from
+/// decimal text.
+struct WideIntegerVisitor<T>(PhantomData<fn() -> T>);
+
+impl<'de> Visitor<'de> for WideIntegerVisitor<i128> {
+    type Value = i128;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an i128 or its decimal text")
+    }
+
+    fn visit_i64<E: DeError>(self, value: i64) -> Result<i128, E> {
+        Ok(i128::from(value))
+    }
+
+    fn visit_u64<E: DeError>(self, value: u64) -> Result<i128, E> {
+        Ok(i128::from(value))
+    }
+
+    fn visit_i128<E: DeError>(self, value: i128) -> Result<i128, E> {
+        Ok(value)
+    }
+
+    fn visit_u128<E: DeError>(self, value: u128) -> Result<i128, E> {
+        i128::try_from(value).map_err(|_| E::custom("out of range for i128"))
+    }
+
+    fn visit_str<E: DeError>(self, value: &str) -> Result<i128, E> {
+        value.parse().map_err(|_| E::custom("not a valid i128"))
+    }
+}
+
+impl<'de> Visitor<'de> for WideIntegerVisitor<u128> {
+    type Value = u128;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a u128 or its decimal text")
+    }
+
+    fn visit_i64<E: DeError>(self, value: i64) -> Result<u128, E> {
+        u128::try_from(value).map_err(|_| E::custom("out of range for u128"))
+    }
+
+    fn visit_u64<E: DeError>(self, value: u64) -> Result<u128, E> {
+        Ok(u128::from(value))
+    }
+
+    fn visit_i128<E: DeError>(self, value: i128) -> Result<u128, E> {
+        u128::try_from(value).map_err(|_| E::custom("out of range for u128"))
+    }
+
+    fn visit_u128<E: DeError>(self, value: u128) -> Result<u128, E> {
+        Ok(value)
+    }
+
+    fn visit_str<E: DeError>(self, value: &str) -> Result<u128, E> {
+        value.parse().map_err(|_| E::custom("not a valid u128"))
+    }
+}
+
+impl WideIntegerField for i128 {
+    fn deserialize_wide<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(WideIntegerVisitor::<i128>(PhantomData))
+    }
+}
+
+impl WideIntegerField for u128 {
+    fn deserialize_wide<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(WideIntegerVisitor::<u128>(PhantomData))
+    }
+}
+
+/// Reads `null` as `None` and anything else as the inner integer.
+struct OptionalWideIntegerVisitor<T>(PhantomData<fn() -> T>);
+
+impl<'de, T: WideIntegerField> Visitor<'de> for OptionalWideIntegerVisitor<T> {
+    type Value = Option<T>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("null, an integer, or its decimal text")
+    }
+
+    fn visit_none<E: DeError>(self) -> Result<Option<T>, E> {
+        Ok(None)
+    }
+
+    fn visit_unit<E: DeError>(self) -> Result<Option<T>, E> {
+        Ok(None)
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Option<T>, D::Error> {
+        T::deserialize_wide(deserializer).map(Some)
+    }
+}
+
+impl<T: WideIntegerField> WideIntegerField for Option<T> {
+    fn deserialize_wide<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_option(OptionalWideIntegerVisitor::<T>(PhantomData))
+    }
+}
+
+/// `Field` reads like `Option`: `null` is [`Field::Null`], a value is
+/// [`Field::Value`]. An absent key never reaches the seed and stays
+/// [`Field::Absent`].
+impl<T: WideIntegerField> WideIntegerField for Field<T> {
+    fn deserialize_wide<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Option::<T>::deserialize_wide(deserializer).map(|value| match value {
+            Some(value) => Field::Value(value),
+            None => Field::Null,
+        })
+    }
 }
 
 /// Coerce a route param to `f64` (JSON number). Rejects non-finite values.

@@ -1441,6 +1441,32 @@ fn build_deserialize(
             (ident, slot, o.names.deserialize.clone(), &f.ty)
         })
         .collect();
+    // How the visitor reads each input field's value. A route parameter of
+    // a 128-bit integer type arrives as its decimal text, because a JSON
+    // number carries at most 64 bits; it is read through a seed that takes
+    // the text as well as a number. Every other field reads its own type.
+    let wide_route_params: Vec<&Ident> = parsed
+        .iter()
+        .filter(|(f, o)| {
+            o.from_route_param.is_some()
+                && matches!(
+                    classify_route_param_type(&f.ty),
+                    RouteParamKind::I128 | RouteParamKind::U128
+                )
+        })
+        .map(|(f, _)| f.ident.as_ref().unwrap())
+        .collect();
+    let read_value = |ident: &Ident, ty: &syn::Type| {
+        if wide_route_params.contains(&ident) {
+            quote! {
+                map.next_value_seed(
+                    ::suprnova::data::route_params::WideInteger::<#ty>::new(),
+                )?
+            }
+        } else {
+            quote!(map.next_value()?)
+        }
+    };
 
     // Required fields - missing key is an error (non-Option, non-Field).
     // Note: reference-typed fields never appear here because build_deserialize
@@ -1456,6 +1482,10 @@ fn build_deserialize(
         .map(|(_, _, name, _)| name.as_str())
         .collect();
     let req_types: Vec<&syn::Type> = required.iter().map(|(_, _, _, ty)| *ty).collect();
+    let req_reads: Vec<TokenStream2> = required
+        .iter()
+        .map(|(ident, _, _, ty)| read_value(ident, ty))
+        .collect();
 
     // Defaultable fields - missing key yields Default::default().
     let defaultable: Vec<&(&Ident, Ident, String, &syn::Type)> = input_fields
@@ -1469,6 +1499,10 @@ fn build_deserialize(
         .map(|(_, _, name, _)| name.as_str())
         .collect();
     let def_types: Vec<&syn::Type> = defaultable.iter().map(|(_, _, _, ty)| *ty).collect();
+    let def_reads: Vec<TokenStream2> = defaultable
+        .iter()
+        .map(|(ident, _, _, ty)| read_value(ident, ty))
+        .collect();
 
     let output_only_idents: Vec<&Ident> = parsed
         .iter()
@@ -1563,12 +1597,12 @@ fn build_deserialize(
                                 )*
                                 #(
                                     #req_names => {
-                                        #req_slots = Some(map.next_value()?);
+                                        #req_slots = Some(#req_reads);
                                     }
                                 )*
                                 #(
                                     #def_names => {
-                                        #def_slots = Some(map.next_value()?);
+                                        #def_slots = Some(#def_reads);
                                     }
                                 )*
                                 #unknown_field_arm
