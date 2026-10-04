@@ -4,9 +4,14 @@ import { connect } from "node:net";
 import { expect, test, type APIResponse, type Page } from "@playwright/test";
 
 import { forgeCanonicalGrantSignature } from "./support/grant-mutation.js";
+import { resetReferenceUploadsBetweenTests } from "./support/reference-host.js";
 
 const REFERENCE_ORIGIN = "http://127.0.0.1:4175";
 const AUTHORIZATION = "Bearer task1-reference-session";
+
+test.beforeEach(async ({ request }) => {
+  await resetReferenceUploadsBetweenTests(request);
+});
 
 interface Snapshot {
   readonly authorizations: readonly unknown[];

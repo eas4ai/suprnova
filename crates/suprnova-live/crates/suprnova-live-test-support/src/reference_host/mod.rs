@@ -104,6 +104,8 @@ const ITERATION_004_RESUME_UPLOAD: &str = "/__test/iteration-004/control/upload/
 const ITERATION_004_REJECT_UPLOAD: &str = "/__test/iteration-004/control/upload/reject-chunk";
 const ITERATION_004_RESET_UPLOAD_WINDOW: &str =
     "/__test/iteration-004/control/upload/reset-creation-window";
+const ITERATION_004_RESET_UPLOADS_BETWEEN_TESTS: &str =
+    "/__test/iteration-004/control/upload/reset-between-tests";
 const ITERATION_004_RESUME_FRESH_RENDER: &str = "/__test/iteration-004/control/fresh-render/resume";
 const ITERATION_004_RESET_SEQUENCE_GAP: &str =
     "/__test/iteration-004/control/async/reset-sequence-gap";
@@ -717,6 +719,10 @@ fn router(state: Arc<HostState>) -> Router {
         .route(
             ITERATION_004_RESET_UPLOAD_WINDOW,
             post(iteration_004_reset_upload_window),
+        )
+        .route(
+            ITERATION_004_RESET_UPLOADS_BETWEEN_TESTS,
+            post(iteration_004_reset_uploads_between_tests),
         )
         .route(
             ITERATION_004_RESUME_FRESH_RENDER,
@@ -1535,6 +1541,19 @@ async fn iteration_004_reject_upload(
 
 async fn iteration_004_reset_upload_window(State(state): State<Arc<HostState>>) -> StatusCode {
     if state.uploads.reset_creation_window().await.is_ok() {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CONFLICT
+    }
+}
+
+/// The browser suite's reset between tests. Unlike the strict reset a test
+/// runs on its own uploads, it cancels the uploads a finished test left
+/// unfinished first, so one stalled request fails only its own test.
+async fn iteration_004_reset_uploads_between_tests(
+    State(state): State<Arc<HostState>>,
+) -> StatusCode {
+    if state.uploads.reset_between_tests().await.is_ok() {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::CONFLICT

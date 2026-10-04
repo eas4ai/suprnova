@@ -1,6 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { resetReferenceUploadsBetweenTests } from "./support/reference-host.js";
+
 test.use({ trace: "off" });
+
+test.beforeEach(async ({ request }) => {
+  await resetReferenceUploadsBetweenTests(request);
+});
 
 const SCENARIO =
   "http://127.0.0.1:4175/scenario/iteration004?features=async&format=esm&transport=sse&lifecycle=true&hybrid=true";
