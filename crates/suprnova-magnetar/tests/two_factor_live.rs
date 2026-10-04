@@ -111,9 +111,8 @@ async fn live_world(url: &str, max_failed_attempts: u32) -> LiveWorld {
             ..LockoutConfig::default()
         },
     ));
-    let second_factor_lockout = Arc::new(LockoutService::new(
+    let second_factor_lockout = Arc::new(LockoutService::without_user_lock(
         Arc::new(SeaOrmStorage::<DefaultSecondFactorSchema>::new(db.clone())),
-        storage.clone(),
         LockoutConfig {
             max_failed_attempts,
             ..LockoutConfig::default()
@@ -540,6 +539,18 @@ impl TwoFactorStore for ReplacedAfterRead {
             .await
     }
 
+    async fn confirm_rotation(
+        &self,
+        actor: &CredentialActor,
+        expected_pending_secret: &[u8],
+        matched_step: i64,
+        at: chrono::DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .confirm_rotation(actor, expected_pending_secret, matched_step, at)
+            .await
+    }
+
     async fn claim_timestep(&self, user_id: &str, matched_step: i64) -> magnetar::Result<bool> {
         self.inner.claim_timestep(user_id, matched_step).await
     }
@@ -583,9 +594,9 @@ impl TwoFactorStore for ReplacedAfterRead {
     }
 }
 
-/// A confirmation whose enrollment another request replaces between the
-/// code check and the stamp: a restarted enrollment of a pending secret,
-/// and a re-enrollment of a confirmed one. Neither replacement was proven,
+/// A confirmation whose secret another request replaces between the code
+/// check and the stamp: a restarted enrollment of a pending secret, and a
+/// second rotation of a pending rotation. Neither replacement was proven,
 /// so neither is confirmed.
 async fn a_confirmation_racing_a_replacement_confirms_neither_secret(url: &str) {
     let world = live_world(url, THRESHOLD).await;
@@ -593,29 +604,47 @@ async fn a_confirmation_racing_a_replacement_confirms_neither_secret(url: &str) 
     for re_enrollment in [false, true] {
         let user = signed_in_user(&world, "race").await;
         let enrollment = if re_enrollment {
-            confirmed_enrollment(&world, &user).await
+            let confirmed = confirmed_enrollment(&world, &user).await;
+            let proof = totp_code_at(&confirmed.otpauth_url, Utc::now().timestamp() + 30);
+            world
+                .two_factor
+                .re_enroll(&user.actor, &proof)
+                .await
+                .unwrap()
         } else {
             world.two_factor.enroll(&user.actor).await.unwrap()
         };
         let replacement_secret = AeadEncryptor::new([21; 32])
             .encrypt(CryptoPurpose::TwoFactorSecret, b"JBSWY3DPEHPK3PXP")
             .unwrap();
+        // Written by the same session, so only the secret tells the two
+        // enrollments apart.
+        let snapshot = two_factor::ActiveModel {
+            user_id: Set(user.user_id.clone()),
+            enrollment_auth_epoch: Set(i64::try_from(user.actor.issuance_epoch()).unwrap()),
+            enrollment_session_id: Set(user.actor.opaque_session_id().map(str::to_owned)),
+            enrollment_expires_at: Set(user.actor.expires_at()),
+            ..Default::default()
+        };
+        let replacement = if re_enrollment {
+            two_factor::ActiveModel {
+                pending_secret: Set(Some(replacement_secret.clone())),
+                rotation_pending: Set(true),
+                ..snapshot
+            }
+        } else {
+            two_factor::ActiveModel {
+                secret: Set(replacement_secret.clone()),
+                confirmed_at: Set(None),
+                rotation_pending: Set(false),
+                last_used_timestep: Set(None),
+                ..snapshot
+            }
+        };
         let store = ReplacedAfterRead {
             inner: SqlTwoFactorStore(world.db.clone()),
             db: world.db.clone(),
-            // Written by the same session, so only the secret tells the two
-            // enrollments apart.
-            replacement: Mutex::new(Some(two_factor::ActiveModel {
-                user_id: Set(user.user_id.clone()),
-                secret: Set(replacement_secret),
-                enrollment_auth_epoch: Set(i64::try_from(user.actor.issuance_epoch()).unwrap()),
-                enrollment_session_id: Set(user.actor.opaque_session_id().map(str::to_owned)),
-                enrollment_expires_at: Set(user.actor.expires_at()),
-                confirmed_at: Set(None),
-                rotation_pending: Set(re_enrollment),
-                last_used_timestep: Set(None),
-                ..Default::default()
-            })),
+            replacement: Mutex::new(Some(replacement)),
         };
         let service = TwoFactorService::new(
             Arc::new(store),
@@ -634,10 +663,15 @@ async fn a_confirmation_racing_a_replacement_confirms_neither_secret(url: &str) 
             .await
             .unwrap()
             .expect("the replacement row exists");
-        if outcome.is_ok() || row.confirmed_at.is_some() {
+        let replacement_promoted = if re_enrollment {
+            row.secret == replacement_secret
+                || row.pending_secret.as_deref() != Some(replacement_secret.as_slice())
+        } else {
+            row.confirmed_at.is_some()
+        };
+        if outcome.is_ok() || replacement_promoted {
             problems.push(format!(
-                "re-enrollment {re_enrollment}: {outcome:?}, the unproven replacement confirmed at {:?}",
-                row.confirmed_at
+                "re-enrollment {re_enrollment}: {outcome:?}, the unproven replacement was confirmed"
             ));
         }
     }

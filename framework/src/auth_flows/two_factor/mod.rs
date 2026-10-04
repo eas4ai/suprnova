@@ -154,6 +154,11 @@ impl TwoFactor {
     /// prior enrollment never became authoritative. The check is part of
     /// the write itself, so a confirmation that lands while `enroll` runs
     /// also gets the `409`.
+    ///
+    /// Also `409` while the account has a second factor in the installed
+    /// Magnetar engine, confirmed or waiting for its confirmation: each
+    /// factor system refuses the sign-ins that do not verify it, so an
+    /// account with both could sign in by no path.
     pub async fn enroll<U: TwoFactorUser>(user: &U) -> Result<EnrollmentResponse, FrameworkError> {
         // The attempt and rotation tables key the user id in 255
         // characters on every engine. Refuse a longer id here rather than
@@ -164,6 +169,7 @@ impl TwoFactor {
                 422,
             ));
         }
+        refuse_magnetar_second_factor(user.user_id()).await?;
         // No separate "already enabled?" read: the write refuses a
         // confirmed row in the same statement that replaces a pending one,
         // so a confirmation cannot land between a check and the write.
@@ -292,13 +298,16 @@ impl TwoFactor {
     ///   user, or if the supplied code does not match.
     /// - `FrameworkError::domain(.., 409)` if the enrollment was replaced
     ///   or removed while the code was being checked, or is already
-    ///   confirmed.
+    ///   confirmed, and, before the code is read, while the account has a
+    ///   second factor in the installed Magnetar engine: of two enrollments
+    ///   racing each other, the second to confirm loses.
     /// - `FrameworkError::domain(.., 429)` while wrong codes have locked
     ///   the second factor (see [`Self::verify`]), and `.., 503` when the
     ///   attempt store fails before the confirmation commits. A failure to
     ///   settle the attempt after it commits is logged, not returned: the
     ///   second factor is live, and [`TwoFactorEnrolled`] fires.
     pub async fn confirm<U: TwoFactorUser>(user: &U, code: &str) -> Result<(), FrameworkError> {
+        refuse_magnetar_second_factor(user.user_id()).await?;
         let enrollment = load_secret(user.user_id())
             .await?
             .ok_or_else(|| FrameworkError::domain("no pending 2FA enrollment", 401))?;
@@ -570,6 +579,29 @@ impl TwoFactor {
             .await
         {
             Ok(row) => Ok(row.is_some_and(|row| row.confirmed_at.is_some())),
+            Err(error) if names_missing_credentials_table(&error.to_string()) => Ok(false),
+            Err(error) => Err(FrameworkError::internal(format!(
+                "two_factor find: {error}"
+            ))),
+        }
+    }
+
+    /// Whether `user_id` has the framework's TOTP, confirmed or waiting for
+    /// its confirmation. A Magnetar `TwoFactorService` refuses to enroll
+    /// beside it; see `magnetar_integration::engine::FrameworkTotpEnrollment`.
+    ///
+    /// An application without a default database connection, or without the
+    /// two-factor tables, has no framework TOTP, so the answer there is
+    /// `false`; any other failure is returned.
+    pub(crate) async fn enrolled_or_pending(user_id: &str) -> Result<bool, FrameworkError> {
+        let Ok(db) = DB::connection() else {
+            return Ok(false);
+        };
+        match entity::Entity::find_by_id(user_id.to_string())
+            .one(db.inner())
+            .await
+        {
+            Ok(row) => Ok(row.is_some()),
             Err(error) if names_missing_credentials_table(&error.to_string()) => Ok(false),
             Err(error) => Err(FrameworkError::internal(format!(
                 "two_factor find: {error}"
@@ -1141,6 +1173,21 @@ impl TwoFactor {
 }
 
 /// Whether a database error reports `two_factor_credentials` as missing.
+/// Refuse a framework TOTP enrollment or confirmation for an account with a
+/// second factor in the installed Magnetar engine: each factor system
+/// refuses the sign-ins that do not verify it, so an account with both could
+/// sign in by no path.
+async fn refuse_magnetar_second_factor(user_id: &str) -> Result<(), FrameworkError> {
+    if crate::magnetar_integration::magnetar_second_factor(user_id).await? {
+        return Err(FrameworkError::domain(
+            "this account has a second factor in the sign-in engine; an account holds one, \
+             so disable that one first",
+            409,
+        ));
+    }
+    Ok(())
+}
+
 fn names_missing_credentials_table(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     message.contains("two_factor_credentials")
@@ -1553,7 +1600,7 @@ mod tests {
         // Request A runs in the last second of step S, request B in the
         // first second of step S+1. Both submit the code of step S, which
         // the skew window accepts at either time.
-        let step = Utc::now().timestamp() / 30;
+        let step = crate::clock::now().timestamp() / 30;
         let a_time = step * 30 + 29;
         let b_time = (step + 1) * 30;
         // Enroll and confirm two steps earlier: a confirmation uses its

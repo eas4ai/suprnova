@@ -1,9 +1,10 @@
 //! Source-shape-aware authentication migration primitives.
 //!
 //! This module plans and executes the source-owned part of an upgrade while an
-//! application supplies the narrow [`MigrationBindings`] seam for its own
-//! users, external identities, and passkey storage. Magnetar never assumes an
-//! application's table names or public identifier format.
+//! application supplies the narrow
+//! [`MigrationBindings`](crate::migration::MigrationBindings) seam for its
+//! own users, external identities, and passkey storage. Magnetar never
+//! assumes an application's table names or public identifier format.
 
 pub mod fingerprint;
 mod identity_map;

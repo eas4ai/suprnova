@@ -23,6 +23,17 @@ use super::EntityBinding;
 /// [`LockoutFields::user_id_column`] so serialized admission and status reads
 /// do not require a table scan.
 pub trait LockoutFields: EntityBinding {
+    /// Whether this table's identities are user email addresses.
+    ///
+    /// When they are, a lock transition stamps `locked_at` on the user row
+    /// with that address, and a reset clears it, in the same transaction as
+    /// the attempt rows. Password sign-in's table keys on addresses and keeps
+    /// the default. A table keyed on anything else, such as the second
+    /// factor's [`crate::two_factor::lockout_identity`], sets this to
+    /// `false`: its identities are not addresses, and an account whose
+    /// address happens to equal one is someone else's account, which its
+    /// failures must never lock and its resets must never unlock.
+    const IDENTITY_IS_EMAIL: bool = true;
     /// Read the lockout row identifier.
     fn read_lockout_id(model: &Self::Model) -> String;
     /// Set the lockout row identifier on a new row.

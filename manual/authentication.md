@@ -212,8 +212,11 @@ framework's word for who signed in, and no Magnetar plugin can reach it.
   session or challenge exists. That account signs in through the
   application's login and `TwoFactor::complete_challenge`. A remembered
   sign-in still passes, because a remember-me credential is issued only
-  after a full sign-in. An account with both a Magnetar factor and framework
-  TOTP is refused by every path until one of them is disabled.
+  after a full sign-in. Enrolling either factor returns `409` while the
+  account has the other, confirmed or pending, so an account holds one. An
+  account that has both anyway, from before that check or from an import, is
+  refused by every path until an administrator disables one of them; see
+  [One second factor per account](auth-flows.md#one-second-factor-per-account).
 - **Auth epochs.** `Auth::attempt` issues the session at the auth epoch read
   with the password, and carries that epoch into `TwoFactor::start_challenge`
   rather than reading it again. A password reset or "sign out everywhere"
