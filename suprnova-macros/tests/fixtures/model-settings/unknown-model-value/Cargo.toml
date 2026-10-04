@@ -1,0 +1,14 @@
+[package]
+name = "model-settings-unknown-model-value"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata.suprnova.model]
+datetime_cast = "zoned"
+
+[dependencies]
+suprnova.workspace = true
+sea-orm.workspace = true
+serde.workspace = true
+tokio.workspace = true

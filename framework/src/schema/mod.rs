@@ -93,6 +93,12 @@
 //! | `ulid(name)` | `CHAR(26)` |
 //! | `binary(name)` | `bytea` on Postgres, `BLOB` elsewhere |
 //!
+//! After [`Schema::use_unsigned_ids`], `id()` and `foreign_id()` create
+//! what `unsigned_id()` and `unsigned_foreign_id()` create, in every
+//! migration the program runs. A binary built with `#[suprnova::main]`
+//! turns it on with `unsigned_ids = true` under
+//! `[package.metadata.suprnova.schema]` in its `Cargo.toml`.
+//!
 //! Where the databases differ the builder does what Laravel does instead of
 //! refusing: `unsigned` and `.after(column)` apply on MySQL only, and the
 //! types above take the nearest type elsewhere.
@@ -163,6 +169,8 @@ mod column;
 mod foreign;
 mod plan;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use sea_orm::sea_query::{Alias, Table};
 use sea_orm::{ConnectionTrait, DbBackend, DbErr};
 use sea_orm_migration::SchemaManager;
@@ -210,11 +218,40 @@ async fn run(manager: &SchemaManager<'_>, steps: Vec<Step>) -> Result<(), DbErr>
     Ok(())
 }
 
-/// The entry points of the schema builder. It has no state: every function
-/// takes the `SchemaManager` of the migration that calls it.
+/// Whether `id()` and `foreign_id()` create what `unsigned_id()` and
+/// `unsigned_foreign_id()` create. One setting for the whole process, so
+/// every migration a binary runs, its own and a library's, makes the same
+/// columns; [`Schema::use_unsigned_ids`] sets it.
+static UNSIGNED_IDS: AtomicBool = AtomicBool::new(false);
+
+/// Whether [`Schema::use_unsigned_ids`] has run in this process.
+pub(crate) fn unsigned_ids() -> bool {
+    UNSIGNED_IDS.load(Ordering::Relaxed)
+}
+
+/// The entry points of the schema builder. Every function takes the
+/// `SchemaManager` of the migration that calls it. The one setting it keeps
+/// is [`Schema::use_unsigned_ids`], for the whole process.
 pub struct Schema;
 
 impl Schema {
+    /// Makes every later `id()` create what `unsigned_id()` creates, and
+    /// every later `foreign_id(name)` what `unsigned_foreign_id(name)`
+    /// creates: `BIGINT UNSIGNED` on MySQL, and the same signed `BIGINT` as
+    /// before on Postgres and SQLite, which have no unsigned integers. These
+    /// are the columns Laravel's `id()` and `foreignId()` create on MySQL,
+    /// and a model reads them into `u64` fields.
+    ///
+    /// The setting holds for the whole process and cannot be undone, so every
+    /// migration the program runs makes the same columns. `#[suprnova::main]`
+    /// calls this before anything else runs when the binary's `Cargo.toml`
+    /// sets `unsigned_ids = true` in `[package.metadata.suprnova.schema]`. A
+    /// program that runs migrations without `#[suprnova::main]` calls it
+    /// itself, before its first migration.
+    pub fn use_unsigned_ids() {
+        UNSIGNED_IDS.store(true, Ordering::Relaxed);
+    }
+
     /// Creates `table` with the columns, indexes and foreign keys `define`
     /// records: the table first (foreign keys inline), then one statement
     /// per index.

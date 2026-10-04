@@ -14,7 +14,7 @@ use serial_test::serial;
 
 use super::{cases, laravel_cases};
 
-async fn connect_mysql() -> DatabaseConnection {
+pub(super) async fn connect_mysql() -> DatabaseConnection {
     let url = std::env::var("MYSQL_TEST_URL")
         .expect("set MYSQL_TEST_URL to a disposable MariaDB/MySQL database");
     let mut options = ConnectOptions::new(url);

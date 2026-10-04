@@ -30,7 +30,19 @@ mod serialization;
 use parse::ModelInput;
 
 pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
-    let mut input = ModelInput::parse(attr, item)?;
+    // `[package.metadata.suprnova.model]` of the package declaring the
+    // model. A malformed table fails this model's build, naming the key.
+    let package = match crate::package_settings::crate_dir() {
+        Some(dir) => crate::package_settings::model_settings(&dir)
+            .map_err(|problem| syn::Error::new(proc_macro2::Span::call_site(), problem))?,
+        None => crate::package_settings::Read {
+            settings: Default::default(),
+            manifest: None,
+        },
+    };
+    let mut input = ModelInput::parse_with(attr, item, &package.settings)?;
+    let manifest_tracking = track_manifest(package.manifest.as_deref());
+    let key_type_check = emit_key_type_check(&input);
 
     // Inject derives on the user's struct itself. Without these, the
     // user-facing API breaks:
@@ -102,6 +114,8 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
 
     Ok(quote! {
         #struct_def
+        #manifest_tracking
+        #key_type_check
 
         #[allow(non_snake_case, non_camel_case_types, missing_docs)]
         pub mod #module_name {
@@ -128,6 +142,34 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         #observers_attestation
         #observe_shim
     })
+}
+
+/// Names the package manifest in an `include_bytes!`, so its path reaches
+/// the crate's dep-info and cargo re-expands the model when the settings
+/// change: cargo does not fingerprint `[package.metadata]`. The constant is
+/// unnamed and unused, so nothing reaches the binary.
+fn track_manifest(manifest: Option<&std::path::Path>) -> TokenStream {
+    match manifest.and_then(std::path::Path::to_str) {
+        Some(path) => quote! { const _: &[u8] = ::core::include_bytes!(#path); },
+        None => TokenStream::new(),
+    }
+}
+
+/// Asserts that a `key_type` spelled differently from the primary-key
+/// field names the same type. Only the compiler can tell `Uuid` from
+/// `uuid::Uuid`, so the assertion is a trait bound; it fails with the
+/// message of `KeyTypeMatches`, which names both types, at the attribute.
+fn emit_key_type_check(input: &ModelInput) -> TokenStream {
+    let Some((declared, span)) = &input.key_type_check else {
+        return TokenStream::new();
+    };
+    let field = &input.key_type;
+    quote::quote_spanned! {*span=>
+        const _: fn() = || {
+            fn __suprnova_key_type<F: ::suprnova::eloquent::KeyTypeMatches<K>, K>() {}
+            __suprnova_key_type::<#field, #declared>();
+        };
+    }
 }
 
 /// Append `__eager: EagerLoadCache` and

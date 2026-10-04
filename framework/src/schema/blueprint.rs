@@ -231,23 +231,33 @@ impl Blueprint {
         ColumnBuilder::new(self, index)
     }
 
-    /// Adds `id`: `BIGINT`, auto-increment, primary key.
+    /// Adds `id`: `BIGINT`, auto-increment, primary key. After
+    /// [`Schema::use_unsigned_ids`](super::Schema::use_unsigned_ids) it is
+    /// [`unsigned_id`](Blueprint::unsigned_id).
     pub fn id(&mut self) -> ColumnBuilder<'_> {
+        if super::unsigned_ids() {
+            return self.unsigned_id();
+        }
         self.column("id", ColumnKind::Id)
     }
 
     /// Adds `id` as Laravel's `id()` creates it: `BIGINT UNSIGNED`,
     /// auto-increment, primary key on MySQL. Postgres and SQLite have no
     /// unsigned integers, so there it is [`id`](Blueprint::id). A model reads
-    /// the MySQL column into a `u64` key: `key_type = "u64"`.
+    /// the column into a `u64` key field on every database.
     pub fn unsigned_id(&mut self) -> ColumnBuilder<'_> {
         self.column("id", ColumnKind::Id).unsigned()
     }
 
     /// Adds a `BIGINT` column meant to hold a foreign key. It has the type of
-    /// [`id`](Blueprint::id). Call `.constrained(table)` on the result to
-    /// create the key.
+    /// [`id`](Blueprint::id), so after
+    /// [`Schema::use_unsigned_ids`](super::Schema::use_unsigned_ids) it is
+    /// [`unsigned_foreign_id`](Blueprint::unsigned_foreign_id). Call
+    /// `.constrained(table)` on the result to create the key.
     pub fn foreign_id(&mut self, name: &str) -> ForeignIdBuilder<'_> {
+        if super::unsigned_ids() {
+            return self.unsigned_foreign_id(name);
+        }
         let column = self.push_column(name, ColumnKind::ForeignId);
         self.push_foreign_id(name, column)
     }

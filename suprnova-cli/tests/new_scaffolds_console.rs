@@ -144,3 +144,53 @@ fn api_starter_scaffolds_console_binary_and_commands_dir() {
     let lib = read(project.join("src/lib.rs"));
     assert!(lib.contains("pub mod commands;"));
 }
+
+/// Asserts the two settings that match Laravel's MySQL schema are in the
+/// new project's `Cargo.toml`, commented out, with the column types each
+/// value needs and the per-field override beside them. The comment is all a
+/// developer porting a Laravel application has to go on, so its parts are
+/// pinned one by one; the manifest must still parse to no settings at all.
+fn assert_laravel_settings_commented_out(cargo: &str) {
+    for line in [
+        "# [package.metadata.suprnova.model]",
+        "# datetime_cast = \"native\"",
+        "# [package.metadata.suprnova.schema]",
+        "# unsigned_ids = true",
+    ] {
+        assert!(
+            cargo.lines().any(|l| l.trim() == line),
+            "Cargo.toml carries `{line}`: {cargo}"
+        );
+    }
+    for words in [
+        "Laravel's MySQL schema",
+        "\"naive\"",
+        "timestamp with time zone",
+        "TIMESTAMP",
+        "BIGINT UNSIGNED",
+        "casts = {",
+    ] {
+        assert!(
+            cargo.contains(words),
+            "the comment mentions `{words}`: {cargo}"
+        );
+    }
+    let manifest: toml::Table = cargo.parse().expect("the scaffolded Cargo.toml parses");
+    let metadata = manifest
+        .get("package")
+        .and_then(|package| package.get("metadata"))
+        .and_then(|metadata| metadata.get("suprnova"));
+    assert!(
+        metadata.is_none(),
+        "the settings stay commented out, so nothing changes until a developer opts in"
+    );
+}
+
+#[test]
+fn new_scaffolds_carry_the_laravel_settings_commented_out() {
+    let tmp = TempDir::new().unwrap();
+    run_new(tmp.path(), "smoke-laravel", &["--frontend", "svelte"]);
+    assert_laravel_settings_commented_out(&read(tmp.path().join("smoke-laravel/Cargo.toml")));
+    run_new(tmp.path(), "smoke-laravel-api", &["--api"]);
+    assert_laravel_settings_commented_out(&read(tmp.path().join("smoke-laravel-api/Cargo.toml")));
+}
