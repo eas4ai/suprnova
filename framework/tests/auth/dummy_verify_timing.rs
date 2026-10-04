@@ -16,9 +16,11 @@
 //!    otherwise under `HASH_DRIVER=argon2id` the dummy (bcrypt) and the real
 //!    (argon2) verify cost diverge and enumeration is re-enabled.
 //!
-//! This file is its own test binary, so the spy driver it installs into the
-//! process-wide `DEFAULT_DRIVER` cell never collides with other test files.
-//! The spy is installed before any code path resolves the default driver.
+//! Every test here runs in its own process under plain `cargo test`
+//! (`own_process_async::delegate`), so the spy driver it installs into the
+//! process-wide `DEFAULT_DRIVER` cell is installed before any code path
+//! resolves the default driver and never collides with the other tests of
+//! the binary.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -179,6 +181,14 @@ async fn setup() -> TestDatabase {
 // through the configured (spy) driver and bumps the counter.
 #[tokio::test]
 async fn passwordless_login_runs_dummy_verify_like_unknown_user() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "passwordless_login_runs_dummy_verify_like_unknown_user",
+    )
+    .await
+    {
+        return;
+    }
     let _serial = TEST_LOCK.lock().await;
     let (_hashes, verifies) = install_spy();
     let _db = setup().await;
@@ -215,6 +225,14 @@ async fn passwordless_login_runs_dummy_verify_like_unknown_user() {
 // hash op on, e.g., a remember-me-only credential set).
 #[tokio::test]
 async fn passwordless_with_no_password_does_no_dummy_work() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "passwordless_with_no_password_does_no_dummy_work",
+    )
+    .await
+    {
+        return;
+    }
     let _serial = TEST_LOCK.lock().await;
     let (_hashes, verifies) = install_spy();
     let _db = setup().await;
@@ -251,6 +269,14 @@ async fn passwordless_with_no_password_does_no_dummy_work() {
 // spy counters staying at zero would prove the regression.
 #[tokio::test]
 async fn dummy_verify_uses_configured_hasher_under_non_bcrypt_driver() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "dummy_verify_uses_configured_hasher_under_non_bcrypt_driver",
+    )
+    .await
+    {
+        return;
+    }
     let _serial = TEST_LOCK.lock().await;
     let (hashes, verifies) = install_spy();
     let _db = setup().await;
