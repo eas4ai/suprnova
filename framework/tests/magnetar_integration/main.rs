@@ -13,6 +13,7 @@ pub mod factor_completion;
 pub mod host_engine;
 pub mod integration;
 pub mod missing_engine_diagnostics;
+pub mod oauth_avatar;
 pub mod oauth_factor_install;
 pub mod oauth_only;
 pub mod oauth_reqwest_transport;

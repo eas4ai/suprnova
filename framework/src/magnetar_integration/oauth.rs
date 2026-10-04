@@ -27,6 +27,13 @@ pub struct OAuthIdentity {
     pub email: Option<String>,
     /// Provider display name, when supplied.
     pub name: Option<String>,
+    /// URL of the account's picture as the provider reported it, or `None`
+    /// when the profile has no picture or an empty one.
+    ///
+    /// Untrusted profile data: the provider account's owner controls it.
+    /// Check its scheme (`https`) and length before you render, fetch or
+    /// store it.
+    pub avatar_url: Option<String>,
 }
 
 /// Verified Apple identity returned by [`OAuthAuth::verify_apple_identity`].
@@ -94,12 +101,13 @@ impl OAuthAuth {
         code: &str,
         state: &str,
     ) -> Result<OAuthIdentity, FrameworkError> {
-        let identity = self.verify_identity(code, state, None).await?;
+        let (identity, avatar_url) = self.verify_identity(code, state, None).await?;
         Ok(OAuthIdentity {
             provider: identity.provider,
             subject: identity.subject,
             email: identity.email,
             name: identity.display_name,
+            avatar_url,
         })
     }
 
@@ -114,7 +122,7 @@ impl OAuthAuth {
         state: &str,
         form_post_user: Option<String>,
     ) -> Result<AppleIdentity, FrameworkError> {
-        let identity = self.verify_identity(code, state, form_post_user).await?;
+        let (identity, _) = self.verify_identity(code, state, form_post_user).await?;
         if identity.provider != "apple" {
             return Err(FrameworkError::Domain {
                 message: "configured provider is not Apple".to_owned(),
@@ -204,15 +212,23 @@ impl OAuthAuth {
         self.complete_callback_outcome(code, state, None).await
     }
 
+    /// The verified identity and the account picture URL the provider
+    /// reported with it.
     async fn verify_identity(
         &self,
         code: &str,
         state: &str,
         form_post_user: Option<String>,
-    ) -> Result<magnetar::oauth::identity::VerifiedProviderIdentity, FrameworkError> {
+    ) -> Result<
+        (
+            magnetar::oauth::identity::VerifiedProviderIdentity,
+            Option<String>,
+        ),
+        FrameworkError,
+    > {
         let engine = oauth_engine(&self.provider)?;
         engine
-            .oauth_verify_identity(super::engine::MagnetarOAuthCallback {
+            .oauth_verify_identity_with_avatar(super::engine::MagnetarOAuthCallback {
                 provider: self.provider.clone(),
                 state: state.to_owned(),
                 code: SecretString::from(code.to_owned()),

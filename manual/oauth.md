@@ -142,6 +142,51 @@ completion ceremony, or point `userinfo_endpoint` at a host adapter that
 combines `/user` with the verified primary email. Do not treat an unverified or
 merely public address as account ownership.
 
+### Report the account picture
+
+Each first-party provider reads the account picture from the profile response
+it already parses:
+
+- Google reads the userinfo `picture` claim.
+- TikTok reads `avatar_url`.
+- Facebook reads `picture.data.url`. Its profile request names
+  `fields=id,name,email,picture`, because the Graph API returns only `id` and
+  `name` for a request that names no fields.
+- X reads `profile_image_url`, which its profile request names in
+  `user.fields`.
+- Apple reports no picture.
+
+A custom provider reports a picture by adding `OAuthProvider::avatar_url`. The
+method receives the same `ProviderResponse` that `resolve_identity` parses, and
+it performs no I/O. Its default returns `None`, so a provider written without
+it compiles unchanged and reports no picture.
+
+```rust,ignore
+use suprnova::{OAuthProvider, ProviderResponse};
+
+#[derive(serde::Deserialize)]
+struct AcmeProfile {
+    avatar_url: Option<String>,
+}
+
+#[suprnova::async_trait]
+impl OAuthProvider for AcmeProvider {
+    // name, resolve_identity, and the other required methods as before.
+
+    fn avatar_url(&self, response: &ProviderResponse) -> Option<String> {
+        let ProviderResponse::UserInfo { body } = response else {
+            return None;
+        };
+        let profile: AcmeProfile = serde_json::from_str(body).ok()?;
+        profile.avatar_url.filter(|url| !url.is_empty())
+    }
+}
+```
+
+Return `None` for a missing or empty picture rather than an error: a profile
+without a picture still signs in. If the provider's API omits fields that the
+request doesn't name, add the picture field to `userinfo_endpoint`.
+
 
 ## Session binding
 
@@ -180,7 +225,7 @@ The callback has two entry points:
 
 | Method | Result | Side effects |
 |---|---|---|
-| `verify_oauth_identity(code, state)` | `OAuthIdentity` | Verifies the provider proof and returns the provider, subject, verified email, and display name without creating an application session. |
+| `verify_oauth_identity(code, state)` | `OAuthIdentity` | Verifies the provider proof and returns the provider, subject, verified email, display name, and picture URL without creating an application session. |
 | `complete(code, state)` | `(User, Session)` | Resolves the identity through the installed host engine, applies account-link policy and the factor gate, rotates the framework session, and returns the framework-owned user and Magnetar session values. |
 
 ```rust,ignore
@@ -196,6 +241,18 @@ let (user, session) = Auth::oauth("google")
 `OAuthIdentity.email` is present only when the provider supplied a verified
 email. Persist the provider and subject as the stable external identity. Email
 is not a stable provider identifier.
+
+`OAuthIdentity.avatar_url` holds the account picture URL when the provider
+reports one. It's `None` when the profile has no picture or an empty one, and
+a missing picture never fails the callback. The owner of the provider account
+controls this value, so treat it as untrusted profile data. Before you render,
+fetch, or store it, check its scheme and length:
+
+```rust,ignore
+let avatar_url = identity
+    .avatar_url
+    .filter(|url| url.starts_with("https://") && url.len() <= 2048);
+```
 
 ## Account-link policy
 
