@@ -217,3 +217,124 @@ fn successful_2fa_verify_resets_failed_attempts() {
         );
     });
 }
+
+/// Five wrong codes through the direct `verify` primitive lock the account,
+/// and the lock then holds against the right code: `verify` refuses with 429
+/// instead of evaluating it, and the refusal does not reset the counter. The
+/// manual gates login on `verify`, so without this the TOTP space is
+/// guessable at request rate by anyone who knows the password.
+#[test]
+#[serial]
+fn verify_refuses_a_valid_code_once_the_account_is_locked() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let user = FakeUser {
+            id: "locked-verify-uid".into(),
+            email: "locked-verify@example.com".into(),
+        };
+        let resp = TwoFactor::enroll(&user).await.expect("enroll");
+        TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+            .await
+            .expect("confirm");
+        BruteForce::reset_attempts(user.email()).await.unwrap();
+
+        for _ in 0..5 {
+            assert!(!TwoFactor::verify(&user, "000000").await.unwrap());
+        }
+        assert!(BruteForce::is_locked(user.email()).await.unwrap());
+
+        let live = totp_code_for(&resp.otpauth_url);
+        let error = TwoFactor::verify(&user, &live)
+            .await
+            .expect_err("a locked account must not accept even the right code");
+        assert_eq!(error.status_code(), 429);
+        assert!(
+            BruteForce::is_locked(user.email()).await.unwrap(),
+            "the refused attempt must leave the lock in place"
+        );
+
+        // After an unlock the same code still verifies: the locked attempt
+        // never claimed its timestep.
+        BruteForce::unlock_account(user.email()).await.unwrap();
+        assert!(TwoFactor::verify(&user, &live).await.unwrap());
+    });
+}
+
+/// The recovery-code primitive shares the lock: once wrong recovery codes
+/// lock the account, a valid code is refused with 429 and stays unconsumed.
+#[test]
+#[serial]
+fn consume_recovery_code_refuses_a_valid_code_once_the_account_is_locked() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let user = FakeUser {
+            id: "locked-recovery-uid".into(),
+            email: "locked-recovery@example.com".into(),
+        };
+        let resp = TwoFactor::enroll(&user).await.expect("enroll");
+        TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+            .await
+            .expect("confirm");
+        BruteForce::reset_attempts(user.email()).await.unwrap();
+
+        for _ in 0..5 {
+            assert!(
+                !TwoFactor::consume_recovery_code(&user, "000000-000000")
+                    .await
+                    .unwrap()
+            );
+        }
+        assert!(BruteForce::is_locked(user.email()).await.unwrap());
+
+        let valid = resp.recovery_codes[0].clone();
+        let error = TwoFactor::consume_recovery_code(&user, &valid)
+            .await
+            .expect_err("a locked account must not accept even a valid recovery code");
+        assert_eq!(error.status_code(), 429);
+        assert!(BruteForce::is_locked(user.email()).await.unwrap());
+
+        BruteForce::unlock_account(user.email()).await.unwrap();
+        assert!(
+            TwoFactor::consume_recovery_code(&user, &valid)
+                .await
+                .unwrap(),
+            "the refused attempt must not have consumed the code"
+        );
+    });
+}
+
+/// A wrong code at the threshold is refused before evaluation as well, so
+/// the counter cannot be pushed past the lock by parallel guesses that each
+/// read "unlocked": every attempt is reserved before its code is read.
+#[test]
+#[serial]
+fn verify_admits_no_more_guesses_than_the_threshold() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let user = FakeUser {
+            id: "threshold-verify-uid".into(),
+            email: "threshold-verify@example.com".into(),
+        };
+        let resp = TwoFactor::enroll(&user).await.expect("enroll");
+        TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+            .await
+            .expect("confirm");
+        BruteForce::reset_attempts(user.email()).await.unwrap();
+
+        let guesses = (0..8).map(|_| TwoFactor::verify(&user, "000000"));
+        let outcomes = futures::future::join_all(guesses).await;
+        let evaluated = outcomes.iter().filter(|o| matches!(o, Ok(false))).count();
+        let refused = outcomes
+            .iter()
+            .filter(|o| matches!(o, Err(e) if e.status_code() == 429))
+            .count();
+        assert_eq!(
+            evaluated, 5,
+            "exactly the threshold of guesses is evaluated"
+        );
+        assert_eq!(refused, 3, "every guess past the threshold is refused");
+    });
+}

@@ -354,27 +354,43 @@ impl TwoFactor {
     ///
     /// # Brute-force throttling
     ///
-    /// Failed verifies are recorded against the user's email via
-    /// `crate::auth_flows::BruteForce::record_failed_attempt`.
-    /// Crossing the configured threshold locks the account from
-    /// **both** 2FA and password login until an admin unlocks it or
-    /// the lockout window expires - defense in depth against online
-    /// brute-force of the TOTP search space. Successful verifies
-    /// reset the failed-attempt counter via
-    /// `crate::auth_flows::BruteForce::reset_attempts`.
+    /// Each call reserves one attempt against the user's email before the
+    /// code is read - the same lockout admission
+    /// [`Self::complete_challenge`] uses. A wrong code, a replay or a lost
+    /// claim race turns the reservation into a failed attempt; crossing the
+    /// configured threshold locks the account from **both** 2FA and
+    /// password login until an admin unlocks it or the lockout window
+    /// expires. A locked account is refused before any code is evaluated,
+    /// so the right code cannot open it either, and parallel guesses cannot
+    /// all pass one status read. A successful verify resets the counter.
+    ///
+    /// The lockout lives in the installed Magnetar engine. Without one
+    /// there is nothing to count against, and `verify` checks codes with no
+    /// lockout - the same posture as the other gates in this module.
+    ///
+    /// # Errors
+    ///
+    /// - [`FrameworkError::domain`] with status `429` when the account is
+    ///   locked by brute-force throttling.
+    /// - [`FrameworkError::domain`] with status `503` when the lockout store
+    ///   cannot reserve or record the attempt.
+    /// - Storage and decryption failures.
     pub async fn verify<U: TwoFactorUser>(user: &U, code: &str) -> Result<bool, FrameworkError> {
         if !Self::is_enabled(user).await? {
             return Ok(false);
         }
-        // Replays, mismatches and lost claim races all count as failed
-        // attempts - replays from an observer should trip the lockout.
-        let accepted = Self::verify_internal(user, code).await?;
-        if accepted {
-            reset_2fa_failures(user.email()).await;
-        } else {
-            record_2fa_failure(user.email()).await;
+        let attempt = DirectProofAttempt::admit(user.email(), "two-factor verify").await?;
+        match Self::verify_internal(user, code).await {
+            Ok(true) => {
+                attempt.accepted().await?;
+                Ok(true)
+            }
+            Ok(false) => {
+                attempt.rejected().await?;
+                Ok(false)
+            }
+            Err(error) => Err(attempt.abandon(error).await),
         }
-        Ok(accepted)
     }
 
     /// Try to consume one recovery code. Returns `true` if a code
@@ -388,6 +404,16 @@ impl TwoFactor {
     /// victim account (or any flow that creates the row without
     /// confirming) could authenticate using only a fresh recovery
     /// code, bypassing TOTP entirely.
+    ///
+    /// Brute-force throttling is the same as [`Self::verify`]'s: the
+    /// attempt is reserved before the code is read, a wrong code counts
+    /// as a failed attempt, and a locked account is refused before any
+    /// code is consumed.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::verify`]: `429` while the account is locked,
+    /// `503` when the lockout store fails, and storage failures.
     pub async fn consume_recovery_code<U: TwoFactorUser>(
         user: &U,
         code: &str,
@@ -395,16 +421,18 @@ impl TwoFactor {
         if !Self::is_enabled(user).await? {
             return Ok(false);
         }
-        let consumed = recovery::consume(user.user_id(), code).await?;
-        // Same brute-force throttling as TwoFactor::verify - a wrong
-        // recovery code counts as a failed attempt against the user's
-        // email, so an attacker can't grind the 40-bit code space.
-        if consumed {
-            reset_2fa_failures(user.email()).await;
-        } else {
-            record_2fa_failure(user.email()).await;
+        let attempt = DirectProofAttempt::admit(user.email(), "two-factor recovery code").await?;
+        match recovery::consume(user.user_id(), code).await {
+            Ok(true) => {
+                attempt.accepted().await?;
+                Ok(true)
+            }
+            Ok(false) => {
+                attempt.rejected().await?;
+                Ok(false)
+            }
+            Err(error) => Err(attempt.abandon(error).await),
         }
-        Ok(consumed)
     }
 
     /// Internal silent variant of [`Self::verify`]: runs the full
@@ -1216,6 +1244,125 @@ async fn reset_admitted_2fa_failure(
     admission: &crate::magnetar_integration::engine::LockoutAdmission,
 ) -> Result<(), FrameworkError> {
     crate::auth_flows::BruteForce::reset_admitted_attempt(email, admission).await
+}
+
+/// One brute-force attempt reserved for a direct proof call:
+/// [`TwoFactor::verify`] or [`TwoFactor::consume_recovery_code`].
+///
+/// The attempt is reserved before the code is read, through the same
+/// admission [`TwoFactor::complete_challenge`] uses, so a locked account is
+/// refused before evaluation and parallel guesses cannot all pass one status
+/// read. Without an installed password engine there is no lockout store to
+/// reserve against, and the attempt does nothing.
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
+struct DirectProofAttempt<'a> {
+    email: &'a str,
+    admission: Option<crate::magnetar_integration::engine::LockoutAdmission>,
+}
+
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
+impl<'a> DirectProofAttempt<'a> {
+    /// Reserve the attempt, or refuse with `429` while the account is
+    /// locked.
+    async fn admit(email: &'a str, context: &str) -> Result<Self, FrameworkError> {
+        if crate::magnetar_integration::optional_password_engine().is_none() {
+            return Ok(Self {
+                email,
+                admission: None,
+            });
+        }
+        let admission = crate::auth_flows::BruteForce::admit_attempt(email, Some(context)).await?;
+        if !admission.admitted {
+            return Err(FrameworkError::domain(
+                "account is locked due to too many failed attempts",
+                429,
+            ));
+        }
+        Ok(Self {
+            email,
+            admission: Some(admission),
+        })
+    }
+
+    /// The proof was accepted: clear the counter with the reservation.
+    async fn accepted(self) -> Result<(), FrameworkError> {
+        match &self.admission {
+            Some(admission) => reset_admitted_2fa_failure(self.email, admission).await,
+            None => Ok(()),
+        }
+    }
+
+    /// The proof was rejected: record the reservation as a failed attempt.
+    async fn rejected(self) -> Result<(), FrameworkError> {
+        match &self.admission {
+            Some(admission) => {
+                crate::auth_flows::BruteForce::finish_admitted_failure(self.email, admission)
+                    .await
+                    .map(|_| ())
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// The proof could not be evaluated: release the reservation, and
+    /// return the error the caller reports. A failed release wins, because
+    /// the counter's state is then unknown.
+    async fn abandon(self, proof_error: FrameworkError) -> FrameworkError {
+        let Some(admission) = &self.admission else {
+            return proof_error;
+        };
+        match crate::auth_flows::BruteForce::cancel_admitted_attempt(self.email, admission).await {
+            Ok(()) => proof_error,
+            Err(cancel_error) => {
+                tracing::error!(
+                    original_error = %proof_error,
+                    cancellation_error = %cancel_error,
+                    "two-factor proof failed and attempt cancellation left state uncertain"
+                );
+                cancel_error
+            }
+        }
+    }
+}
+
+/// Without a database driver there is no lockout store: the attempt does
+/// nothing.
+#[cfg(not(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+)))]
+struct DirectProofAttempt;
+
+#[cfg(not(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+)))]
+impl DirectProofAttempt {
+    async fn admit(_email: &str, _context: &str) -> Result<Self, FrameworkError> {
+        Ok(Self)
+    }
+
+    async fn accepted(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
+    async fn rejected(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
+    async fn abandon(self, proof_error: FrameworkError) -> FrameworkError {
+        proof_error
+    }
 }
 
 /// Best-effort lockout check. Returns `false` (= not locked) if Magnetar

@@ -653,6 +653,14 @@ if !ok {
 }
 ```
 
+`verify` reserves one brute-force attempt against the user's email
+before it reads the code, and a wrong code turns the reservation into a
+failed attempt. Once the account is locked, `verify` returns `429 Too Many
+Requests` without evaluating the code, so the right code cannot open a
+locked account either. `consume_recovery_code` shares the same gate. The
+lockout lives in the installed Magnetar engine; without one, both methods
+check codes with no lockout.
+
 `enroll` returns plaintext recovery codes **exactly once**. There is
 no API to retrieve them later - the encrypted column is one-way from
 this point on. Show them on the enrollment success page, encourage the
@@ -849,24 +857,22 @@ lost their authenticator can still get in. Each recovery code is
 single-use.
 
 **Brute-force linkage.** Failed challenge codes feed the per-account
-brute-force counter through `BruteForce::record_failed_attempt`, the
-same way bare `TwoFactor::verify` does. An attacker grinding the
+brute-force counter, the same way bare `TwoFactor::verify` does. An
+attacker grinding the
 challenge form will trip `AccountLocked` after the configured
 threshold. A single bad submission counts as **one** failed attempt
 even though `complete_challenge` tries both the TOTP and recovery-code
 paths internally - the silent-validation cores skip the brute-force
 counter so the outer layer records the canonical attempt exactly once.
 
-**Lockout gate.** `complete_challenge` checks `BruteForce::is_locked`
-up front and returns `429 Too Many Requests` if the account is
-already locked - even when the submitted code is correct. Without
-this in-method gate an attacker who tripped the lockout could still
-get in by submitting the right code on the next request: the
-brute-force counter is keyed on the user's email but `verify` itself
-doesn't consult it. The password path's `LoginThrottleMiddleware`
-enforces the same constraint at the route layer; composing it in
-front of the challenge POST route is fine - both gates are
-idempotent.
+**Lockout gate.** `complete_challenge` reserves its attempt up front
+and returns `429 Too Many Requests` if the account is already locked -
+even when the submitted code is correct. Without this in-method gate an
+attacker who tripped the lockout could still get in by submitting the
+right code on the next request. `verify` and `consume_recovery_code`
+apply the same gate. The password path's `LoginThrottleMiddleware`
+enforces the same constraint at the route layer; composing it in front
+of the challenge POST route is fine - both gates are idempotent.
 
 **Failure event.** `complete_challenge` dispatches
 `TwoFactorChallengeFailed { user_id }` on a bad code (or a locked
