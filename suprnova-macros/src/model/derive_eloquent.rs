@@ -891,6 +891,25 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         quote! {}
     };
 
+    // Trait-level `delete` override for soft-delete models, for the same
+    // reason as `find` above: generic code (`Model::destroy`,
+    // `delete_quietly`, a `M::delete` in app code) dispatches through
+    // the trait, where the default is a hard DELETE that removes the
+    // row for good. The override hands the call to the inherent
+    // tombstone `delete` below; a path call on the concrete type names
+    // the inherent method, which takes precedence over the trait's.
+    let delete_trait_override = if soft_deletes_enabled {
+        quote! {
+            async fn delete(
+                self,
+            ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
+                #struct_ident::delete(self).await
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     // Seed builder for the static entry points below. It folds the
     // soft-delete filter and the registered global scopes in when the
     // query runs, honouring whatever opt-out the entry point set.
@@ -1322,6 +1341,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             #query_override
 
             #find_trait_override
+
+            #delete_trait_override
 
             #field_value_method
 

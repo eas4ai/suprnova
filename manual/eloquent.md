@@ -4465,6 +4465,11 @@ let user = user.update_or_fail(attrs).await?;   // not_found if row deleted mid-
 user.delete_or_fail().await?;
 ```
 
+On a model declared with `soft_deletes`, `delete_or_fail`, `delete_quietly`,
+`destroy`, and a `delete` called through the `Model` trait all tombstone
+the row, as `delete()` does. `delete_or_fail` answers not-found for a row
+that is already trashed.
+
 ### Filtered serialisation - `to_array_except` / `to_array_only`
 
 Suprnova's Rust-native replacement for Laravel's per-instance

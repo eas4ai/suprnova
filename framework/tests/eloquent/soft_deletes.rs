@@ -237,6 +237,86 @@ async fn trashed_returns_bool() {
     assert!(t.trashed());
 }
 
+/// Whether a row with `id` is still stored, trashed or not, and its
+/// `deleted_at` when it is.
+async fn stored_deleted_at(id: i64) -> Option<Option<DateTime<Utc>>> {
+    T10User::with_trashed()
+        .filter("id", id)
+        .first()
+        .await
+        .unwrap()
+        .map(|row| row.deleted_at)
+}
+
+/// `destroy`, `delete_quietly` and a `delete` reached through the
+/// `Model` trait tombstone a soft-delete model's rows, as the concrete
+/// `delete()` does. They used to dispatch to the trait default, a hard
+/// `DELETE`, which removed the row for good.
+#[tokio::test]
+async fn generic_delete_paths_tombstone_a_soft_delete_model() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate_users(&db).await;
+    let a = T10User::create(attrs! { name: "A", email: "a@x.com" })
+        .await
+        .unwrap();
+    let b = T10User::create(attrs! { name: "B", email: "b@x.com" })
+        .await
+        .unwrap();
+    let c = T10User::create(attrs! { name: "C", email: "c@x.com" })
+        .await
+        .unwrap();
+    let d = T10User::create(attrs! { name: "D", email: "d@x.com" })
+        .await
+        .unwrap();
+
+    assert_eq!(T10User::destroy([a.id, b.id]).await.unwrap(), 2);
+    let (c_id, d_id) = (c.id, d.id);
+    c.delete_quietly().await.unwrap();
+    // Through the `Model` trait, the way generic framework and app code
+    // reaches a model it does not name.
+    <T10User as Model>::delete(d).await.unwrap();
+
+    for id in [a.id, b.id, c_id, d_id] {
+        let stored = stored_deleted_at(id).await;
+        assert!(
+            matches!(stored, Some(Some(_))),
+            "row {id} is kept with deleted_at set, got {stored:?}"
+        );
+        assert!(T10User::find(id).await.unwrap().is_none());
+    }
+
+    // `destroy` of a trashed row finds nothing to delete, like any other
+    // read of the model.
+    assert_eq!(T10User::destroy([a.id]).await.unwrap(), 0);
+    assert!(matches!(stored_deleted_at(a.id).await, Some(Some(_))));
+}
+
+/// `delete_or_fail` tombstones a soft-delete model's row, and answers
+/// not-found for a row that is already trashed, as the scoped read does.
+#[tokio::test]
+async fn delete_or_fail_tombstones_a_soft_delete_model() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate_users(&db).await;
+    let u = T10User::create(attrs! { name: "A", email: "a@x.com" })
+        .await
+        .unwrap();
+    let id = u.id;
+    let stale = u.clone();
+
+    u.delete_or_fail().await.unwrap();
+    assert!(
+        matches!(stored_deleted_at(id).await, Some(Some(_))),
+        "the row is kept with deleted_at set"
+    );
+
+    let err = stale.delete_or_fail().await.unwrap_err();
+    assert!(
+        matches!(err, suprnova::FrameworkError::ModelNotFound { .. }),
+        "a trashed row is not found: {err:?}"
+    );
+    assert!(matches!(stored_deleted_at(id).await, Some(Some(_))));
+}
+
 // ---- Prunable -----------------------------------------------------------
 
 #[model(table = "t10_sessions", fillable = ["token", "expires_at"], timestamps = false)]
