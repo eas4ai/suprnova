@@ -315,3 +315,40 @@ async fn a_zero_timeout_is_no_timeout_and_a_huge_one_does_not_panic() {
         .expect("a timeout past what the clock holds is none");
     assert!(huge.successful());
 }
+
+/// DRIVERS-049: a program was reaped while a process that left its group
+/// still held its output, and the group was signalled afterwards on the
+/// strength of the open pipe. Reaping frees the program's id, and with it
+/// the group id, which an unrelated group may then take. The program has to
+/// stay unreaped, its id pinned, for as long as its group may be signalled.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[serial]
+async fn the_program_stays_unreaped_while_an_escaped_process_holds_its_output() {
+    let mut process = Process::command(sh("setsid sleep 3 & exit 0"))
+        .start()
+        .expect("sh starts");
+    let pid = process.id().expect("a real process has an id");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while process.running() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the shell exits at once");
+
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"));
+    let state = stat
+        .as_deref()
+        .ok()
+        .and_then(|stat| stat.rsplit_once(") "))
+        .and_then(|(_, rest)| rest.chars().next());
+    assert_eq!(
+        state,
+        Some('Z'),
+        "the shell was reaped while the escaped sleep still held its output, so \
+         its id and its group id were free for reuse"
+    );
+    drop(process);
+}
