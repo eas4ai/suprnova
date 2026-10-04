@@ -27,6 +27,7 @@ use suprnova::rate_limit::ThrottleRequestsMiddleware;
 use suprnova::{
     FrameworkError, Middleware, MiddlewareRegistry, Next, Request, Response, Router, handle_request,
 };
+use suprnova::{get, group};
 
 /// What ran for the request of the test that is running, in order.
 static RAN: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -273,6 +274,84 @@ async fn a_throttle_in_a_shared_group_counts_one_hit_per_request() {
     );
 
     RAN.lock().unwrap().clear();
+    let (status, _) = run_status(router(), "/reports").await;
+    assert_eq!(
+        status, 429,
+        "the one throttle still counts the request it saw"
+    );
+}
+
+/// A route keeps each named middleware once, at its first occurrence,
+/// across the groups and the aliases it names, as Laravel's
+/// `uniqueMiddleware` does across group and route middleware. An alias
+/// is identified with its arguments as they are parsed, so `role: admin`
+/// is `role:admin` and `role:auditor` is another middleware.
+#[tokio::test]
+#[serial]
+async fn a_route_runs_each_named_middleware_once() {
+    let _names = Names::none();
+    register_the_usual_names();
+
+    let router = Router::new()
+        .get("/reports", |_req: Request| async { text("ok") })
+        .middleware_named("members")
+        .middleware_named("auth")
+        .middleware_named("verified")
+        .middleware_named("role:admin")
+        .middleware_named("role: admin")
+        .middleware_named("role:auditor");
+
+    assert_eq!(
+        run(router, "/reports").await,
+        ["auth", "verified", "role:admin", "role:auditor"]
+    );
+}
+
+/// The same holds for a group of routes, and for a route of the
+/// `routes!` macros that names an alias its group already brings.
+#[tokio::test]
+#[serial]
+async fn a_group_of_routes_runs_each_named_middleware_once() {
+    let _names = Names::none();
+    register_the_usual_names();
+
+    let router = Router::new()
+        .group("/admin", |routes| {
+            routes.get("/users", |_req: Request| async { text("ok") })
+        })
+        .middleware_named("members")
+        .middleware_named("auth");
+    assert_eq!(run(router, "/admin/users").await, ["auth", "verified"]);
+
+    RAN.lock().unwrap().clear();
+    let router = group!("/staff", {
+        get!("/users", |_req: Request| async { text("ok") }).middleware_named("verified"),
+    })
+    .middleware_named("members")
+    .register(Router::new());
+    assert_eq!(run(router, "/staff/users").await, ["auth", "verified"]);
+}
+
+/// A throttle a route names both itself and through a group counts one
+/// hit per request: a limit of one admits the first request.
+#[tokio::test]
+#[serial]
+async fn a_throttle_a_route_names_twice_counts_one_hit_per_request() {
+    let _names = Names::none();
+    let _cache = TestContainer::fake();
+    TestContainer::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+    register_middleware_alias_with_args("throttle", ThrottleRequestsMiddleware::from_alias_args);
+    register_middleware_group("limited", ["throttle:1,1".to_string()]);
+
+    let router = || {
+        Router::new()
+            .get("/reports", |_req: Request| async { text("ok") })
+            .middleware_named("limited")
+            .middleware_named("throttle:1, 1")
+    };
+
+    let (status, _) = run_status(router(), "/reports").await;
+    assert_eq!(status, 200, "a limit of one admits the first request");
     let (status, _) = run_status(router(), "/reports").await;
     assert_eq!(
         status, 429,
