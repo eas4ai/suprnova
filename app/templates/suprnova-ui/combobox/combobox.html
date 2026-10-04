@@ -1,11 +1,20 @@
 {#
   suprnova.combobox - the accessible combobox pattern over a native input
-  and list (FORM-008). The input carries the model and, before the script
-  loads, a datalist gives the same options natively, so the control works
-  with the helper absent. sn-combobox (combobox.js) takes over the listbox:
-  it sets aria-expanded, moves aria-activedescendant with the arrow keys,
-  selects on Enter or click, and closes on Escape. The input renders the
-  island's query as its value (FORM-009).
+  and list (FORM-008). Before the script loads, a datalist gives the same
+  options natively, so the control works with the helper absent.
+  sn-combobox (combobox.js) takes over the listbox: it sets aria-expanded,
+  moves aria-activedescendant with the arrow keys, selects on Enter or
+  click, and closes on Escape.
+
+  Two fields carry the state. The field `name` is the selected option's
+  value: a hidden input bound to it, which a selection fills with the
+  option's first element and editing the text clears. The text input is
+  bound to `<name>_query`, what the user typed, the query a remote listbox
+  answers; a selection writes the option's label there. Both render the
+  island's current values (FORM-009): `value` fills the hidden input, whose
+  option the script marks selected when it connects (the listbox is hidden
+  until then), and `query` fills the text. Without the script the datalist offers the labels
+  as text, so the query field carries the choice and the value stays empty.
 
   By default the options are the server's answer to the query (remote): the
   listbox carries data-sn-remote and data-sn-query, the query the server
@@ -21,10 +30,11 @@
   survives a morph; the script re-applies its input changes after a
   re-render. Classification: varies with the island.
 #}
-{% macro combobox(name, label, options, query, placeholder, remote=true) %}
+{% macro combobox(name, label, options, query, placeholder, remote=true, value="") %}
 <sn-combobox class="sn-combobox" live:key="{{ name }}-combobox" live:preserve.self>
 <label class="sn-combobox-label" for="{{ name }}">{{ label }}</label>
-<input class="sn-input sn-combobox-input" id="{{ name }}" name="{{ name }}" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="{{ name }}-listbox" autocomplete="off" list="{{ name }}-datalist" placeholder="{{ placeholder }}" value="{{ query }}" live:model="{{ name }}">
+<input type="hidden" id="{{ name }}-value" name="{{ name }}" value="{{ value }}" live:model="{{ name }}" data-sn-combobox-value>
+<input class="sn-input sn-combobox-input" id="{{ name }}" name="{{ name }}_query" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="{{ name }}-listbox" autocomplete="off" list="{{ name }}-datalist" placeholder="{{ placeholder }}" value="{{ query }}" live:model="{{ name }}_query">
 <datalist id="{{ name }}-datalist">{% for option in options %}<option value="{{ option.1 }}"></option>{% endfor %}</datalist>
 <ul class="sn-combobox-listbox" id="{{ name }}-listbox" role="listbox" aria-label="{{ label }} suggestions"{% if remote %} data-sn-remote data-sn-query="{{ query }}"{% endif %} live:key="{{ name }}-listbox" hidden>{% for option in options %}<li class="sn-combobox-option" id="{{ name }}-option-{{ loop.index }}" role="option" aria-selected="false" data-sn-value="{{ option.0 }}" live:key="{{ option.0|live_key }}">{{ option.1 }}</li>{% endfor %}</ul>
 </sn-combobox>

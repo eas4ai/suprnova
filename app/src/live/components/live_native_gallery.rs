@@ -76,9 +76,12 @@ pub struct LiveNativeGallery {
     /// The renewal date, bound with the date picker.
     #[model]
     when: String,
-    /// The country query, bound with the combobox.
-    #[model(debounce = 250)]
+    /// The chosen country's code, the combobox's value.
+    #[model]
     country: String,
+    /// What the user typed into the combobox, the query its options answer.
+    #[model(debounce = 250)]
+    country_query: String,
     /// Attachments saved so far through the finalizer.
     #[public]
     saved: u32,
@@ -119,7 +122,7 @@ const COUNTRIES: [(&str, &str); 6] = [
 
 impl LiveNativeGallery {
     fn filter_countries(&mut self) {
-        let needle = self.country.trim().to_lowercase();
+        let needle = self.country_query.trim().to_lowercase();
         self.countries = COUNTRIES
             .iter()
             .filter(|(_, label)| needle.is_empty() || label.to_lowercase().contains(&needle))
@@ -139,6 +142,7 @@ impl LiveNativeGallery {
             code: String::new(),
             when: String::new(),
             country: String::new(),
+            country_query: String::new(),
             saved: 0,
             verified: 0,
             unread: 0,

@@ -344,6 +344,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **The combobox submits the chosen option's value.** A selection used to
+  write the option's label into the one bound field, so the value each
+  option carries never reached the server. `suprnova.combobox` now binds
+  two fields: `name` is the chosen option's value, held by a hidden input
+  that a selection fills and an edit of the text clears, and
+  `<name>_query` is the typed text, which a remote listbox answers. The
+  macro takes the island's value as `value`, and the script marks that
+  option selected. Bind the query field where you bound `name` before, and
+  read the choice from `name`.
 - **Less memory for the same work.** Model events are built only when a
   listener, a fake or a deferral will see them, so a query no longer
   copies every row it reads for a `Retrieved` event nobody hears. Eager
