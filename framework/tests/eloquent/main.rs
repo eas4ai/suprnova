@@ -45,6 +45,10 @@ pub mod model;
 pub mod model_changes;
 pub mod observers;
 pub mod pagination;
+// Its tests move the framework clock with `TestClock`, which exists with
+// the `testing` feature only.
+#[cfg(feature = "testing")]
+pub mod pivot_timestamps_engines;
 pub mod prunable_relations;
 pub mod query_helpers_model;
 pub mod read_instrumentation;
