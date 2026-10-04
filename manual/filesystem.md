@@ -664,10 +664,15 @@ fetch to the requested range when nothing is promoted, and streams the
 promotion instead of buffering it.
 
 A delete or a move of a path that overlaps a promotion of the same path is not
-undone by it. Within one process, the promotion publishes only if no delete or
-move of its path ran after it started fetching; otherwise it discards its
-staged copy. Processes do not coordinate this, so a delete on one node can
-still race a promotion on another.
+undone by it, on one node or across several. Within one process, the promotion
+publishes only if no delete or move of its path ran after it started fetching;
+otherwise it discards its staged copy. Across processes nothing is shared, so
+the storage decides: a delete and a move remove the fallback copy before the
+primary copy, and a promotion checks the fallback again after it publishes.
+When the object is gone or has changed, the promotion removes the copy it
+published, unless a writer has replaced it since. Two limits remain. Between
+that publish and that check, a reader on another node can see the object for a
+moment. A process that stops between the two leaves its copy on the primary.
 
 A versioned or conditional read reaches the fallback even when the primary
 cannot express the version or condition. The primary's refusal applies only
