@@ -54,10 +54,14 @@ Stimulus controllers, or effect execution.
 
 Ordinary Askama interpolation uses HTML escaping. The checker rejects raw
 output, classified from the parsed expression: Askama `safe`, including
-qualified and chained forms, and `escape` or `e` with a text escaper such as
-`none`. A raw value is followed through bindings, nested-block assignments,
-macro arguments, caller content, and loop and pattern variables, and reported
-where it is written. Deliberately
+qualified and chained forms, `escape` or `e` with a text escaper such as
+`none`, and a raw wrapper or filter function called directly. A raw value is
+followed through bindings, nested-block assignments, macro arguments, caller
+content, inherited blocks, and loop and pattern variables, and reported where
+it is written. Markup reached through a macro called as an expression, caller
+content, or `super()` is checked where Askama writes it. An application filter,
+a Rust macro, and a dynamic value where HTML escaping does not hold (an unquoted
+or `on*` attribute value, `script` or `style` text) are unproved. Deliberately
 unescaped HTML must be a bounded `TrustedHtml` created from compile-time
 framework markup or output from a `RegisteredSanitizer`. Both paths require an
 explicit bounded `TrustedMarkupReason`; sanitizer output also carries a stable
