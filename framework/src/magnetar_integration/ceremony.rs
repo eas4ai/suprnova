@@ -27,10 +27,8 @@ use crate::error::FrameworkError;
 
 /// The columns [`consume`] reads from a ceremony row.
 ///
-/// The time columns are left out on purpose: the lookup filters on
-/// `expires_at` in SQL, and a table created with `.timestamp()` has
-/// `TIMESTAMP` columns on MySQL and MariaDB, which the public
-/// [`entity::Model`]'s `NaiveDateTime` cannot decode there.
+/// The time columns are left out: the lookup filters on `expires_at` in
+/// SQL and never needs its value.
 #[derive(FromQueryResult)]
 struct CeremonyRow {
     id: i64,
@@ -72,8 +70,8 @@ pub async fn issue<P: Serialize>(
         selector: Set(selector.to_string()),
         kind: Set(kind.to_string()),
         payload: Set(payload_json),
-        expires_at: Set(storable_expiry(backend, expires_at.naive_utc())),
-        created_at: Set(now.naive_utc()),
+        expires_at: Set(storable_expiry(backend, expires_at.naive_utc()).into()),
+        created_at: Set(now.into()),
         ..Default::default()
     };
     entity::Entity::insert(model)
@@ -170,10 +168,10 @@ pub mod kind {
 /// SeaORM entity for the `auth_ceremony_tokens` table.
 ///
 /// `expires_at` and `created_at` may be `TIMESTAMP` or `DATETIME`
-/// (`timestamp` or `timestamptz` on Postgres): the functions above work
-/// with each. `Model`'s `NaiveDateTime` fields decode only from `DATETIME`
-/// on MySQL and `timestamp` on Postgres, so reading whole rows through
-/// this entity fails on the other types.
+/// (`timestamp` or `timestamptz` on Postgres). The fields are
+/// [`StoredDateTime`](crate::database::StoredDateTime), which reads each of
+/// those and SQLite text, so a whole-row read through this entity works on
+/// every one.
 pub mod entity {
     use sea_orm::entity::prelude::*;
 
@@ -193,9 +191,9 @@ pub mod entity {
         #[sea_orm(column_type = "Text")]
         pub payload: String,
         /// TTL boundary; the row is rejected once `now > expires_at`.
-        pub expires_at: chrono::NaiveDateTime,
+        pub expires_at: crate::database::StoredDateTime,
         /// Wall-clock time the ceremony was started.
-        pub created_at: chrono::NaiveDateTime,
+        pub created_at: crate::database::StoredDateTime,
     }
 
     /// SeaORM relation enum - `auth_ceremony_tokens` is a leaf table with no

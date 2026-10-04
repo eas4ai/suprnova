@@ -26,7 +26,7 @@
 mod scaffold_auth_flow_tokens;
 
 use sea_orm::sea_query::{ColumnDef, Table, TableCreateStatement};
-use sea_orm::{ConnectionTrait, DatabaseBackend, DbErr, DeriveIden, Statement};
+use sea_orm::{ConnectionTrait, DatabaseBackend, DbErr, DeriveIden, EntityTrait, Statement};
 use sea_orm_migration::{MigrationTrait, SchemaManager};
 
 use suprnova::auth_flows::token_store::{TokenPurpose, TokenStore};
@@ -175,6 +175,18 @@ async fn issue_check_consume_and_prune(url: &str, shape: Shape) {
         TokenStore::check(&long_lived, verification)
             .await
             .expect("check the long-lived token")
+    );
+
+    // Whole rows read through the public entity, whatever type the
+    // migration gave the time columns.
+    let rows = suprnova::auth_flows::token_store::entity::Entity::find()
+        .all(database.inner())
+        .await
+        .map(|rows| rows.len());
+    assert_eq!(
+        format!("{rows:?}"),
+        "Ok(3)",
+        "{shape:?}: whole rows through token_store::entity::Entity"
     );
 
     // An already-expired token is pruned; the live ones stay.

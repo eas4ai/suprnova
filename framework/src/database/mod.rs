@@ -70,9 +70,10 @@ pub mod monitor;
 // Internal: hand-written SQL in the queue / notification stores renders its
 // placeholders through here so Postgres gets `$1` instead of `?`.
 pub(crate) mod placeholder;
-// Internal: the stores whose time columns differ by engine read and write
-// them through here, so a `TIMESTAMP` or `timestamptz` column reads like a
-// `DATETIME` or `timestamp` one.
+// The stores whose time columns differ by engine read and write them
+// through here, so a `TIMESTAMP` or `timestamptz` column reads like a
+// `DATETIME` or `timestamp` one. Only `StoredDateTime` is public, the field
+// type of the framework's own entities for those tables.
 pub(crate) mod stored_datetime;
 
 /// Implementation details used by Suprnova's generated model code.
@@ -118,6 +119,7 @@ pub use monitor::ConnectionCount;
 pub use query_builder::QueryBuilder;
 pub use route_binding::{AutoRouteBinding, RouteBinding, RouteParam};
 pub use schema_dump::{PrunedMigration, SchemaDump};
+pub use stored_datetime::StoredDateTime;
 pub use testing::TestDatabase;
 pub use transaction::{Transaction, TxHandle};
 

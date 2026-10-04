@@ -15,7 +15,7 @@
 #[path = "../../../app/src/migrations/m20251209_000000_create_auth_ceremony_tokens_table.rs"]
 mod ceremony_migration;
 
-use sea_orm::ConnectionTrait;
+use sea_orm::{ConnectionTrait, EntityTrait};
 use sea_orm_migration::{MigrationTrait, SchemaManager};
 
 use suprnova::database::{DatabaseConfig, DbConnection};
@@ -78,6 +78,18 @@ async fn issue_consume_and_prune(url: &str) {
     ceremony::issue("ceremony-3", ceremony::kind::OAUTH, &payload, -5)
         .await
         .expect("issue an expired ceremony");
+    // Whole rows read through the public entity, whatever type the
+    // migration gave the time columns.
+    let rows = ceremony::entity::Entity::find()
+        .all(database.inner())
+        .await
+        .map(|rows| rows.len());
+    assert_eq!(
+        format!("{rows:?}"),
+        "Ok(1)",
+        "whole rows through ceremony::entity::Entity"
+    );
+
     // A lifetime too large for a date is an error, not a panic.
     assert!(
         ceremony::issue("ceremony-4", ceremony::kind::OAUTH, &payload, i64::MAX)

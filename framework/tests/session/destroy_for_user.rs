@@ -439,6 +439,19 @@ async fn live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(
     let session = SessionData::new("live-gc-session".into(), "csrf".into());
     huge.write(&session).await.unwrap();
     assert!(huge.read(&session.id).await.unwrap().is_some());
+    // A whole row reads through the public entity on this column type too.
+    let rows = {
+        use sea_orm::EntityTrait;
+        suprnova::session::driver::database::sessions::Entity::find()
+            .all(database.inner())
+            .await
+            .map(|rows| rows.len())
+    };
+    assert_eq!(
+        format!("{rows:?}"),
+        "Ok(1)",
+        "{column_type}: whole rows through sessions::Entity"
+    );
     assert_eq!(
         huge.gc()
             .await

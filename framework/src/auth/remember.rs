@@ -114,10 +114,8 @@ pub const COOKIE_NAME: &str = "remember_me";
 
 /// The columns verification and revocation read from a token row.
 ///
-/// The time columns are left out on purpose. The queries filter on
-/// `expires_at` in SQL, and older scaffolds created it with `.timestamp()`:
-/// `TIMESTAMP` on MySQL and MariaDB, which the public [`entity::Model`]'s
-/// `NaiveDateTime` cannot decode there.
+/// The time columns are left out: the queries filter on `expires_at` in
+/// SQL and never need its value.
 #[derive(FromQueryResult)]
 struct TokenRow {
     id: i64,
@@ -225,8 +223,8 @@ pub async fn issue(user_id: &str, ttl_minutes: i64) -> Result<String, FrameworkE
         user_id: Set(user_id.to_string()),
         selector: Set(selector.clone()),
         token_hash: Set(verifier_hash),
-        expires_at: Set(storable_expiry(backend, expires_at.naive_utc())),
-        created_at: Set(now.naive_utc()),
+        expires_at: Set(storable_expiry(backend, expires_at.naive_utc()).into()),
+        created_at: Set(now.into()),
         last_used_at: Set(None),
         ..Default::default()
     };
@@ -454,11 +452,11 @@ pub async fn prune_expired() -> Result<u64, FrameworkError> {
 /// - `created_at`   DATETIME not null
 /// - `last_used_at` DATETIME null - currently informational (rotation deletes the row before update)
 ///
-/// The time columns may be `TIMESTAMP` or `DATETIME` (`timestamp` or
-/// `timestamptz` on Postgres). The functions above work with each, but
-/// `Model`'s `NaiveDateTime` fields decode only from `DATETIME` on MySQL
-/// and `timestamp` on Postgres, so reading whole rows through this entity
-/// fails on the other types.
+/// Older scaffolds created the time columns as `TIMESTAMP` on MySQL and
+/// MariaDB, and a table may have `timestamptz` on Postgres. The fields are
+/// [`StoredDateTime`](crate::database::StoredDateTime), which reads each of
+/// those as well as `DATETIME`, `timestamp` and SQLite text, so a
+/// whole-row read through this entity works on every one.
 pub mod entity {
     use sea_orm::entity::prelude::*;
 
@@ -477,11 +475,11 @@ pub mod entity {
         /// Bcrypt hash of the verifier - the private half of the token.
         pub token_hash: String,
         /// TTL boundary; the cookie is rejected once `now > expires_at`.
-        pub expires_at: chrono::NaiveDateTime,
+        pub expires_at: crate::database::StoredDateTime,
         /// Wall-clock time the token row was created.
-        pub created_at: chrono::NaiveDateTime,
+        pub created_at: crate::database::StoredDateTime,
         /// Informational; current rotation strategy deletes the row instead of updating this.
-        pub last_used_at: Option<chrono::NaiveDateTime>,
+        pub last_used_at: Option<crate::database::StoredDateTime>,
     }
 
     /// SeaORM relation enum - `remember_tokens` is a leaf table with no
