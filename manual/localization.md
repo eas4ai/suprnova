@@ -997,7 +997,10 @@ fraction-digit control inside the message. `DATETIME()` is Suprnova's:
 `dateStyle` / `timeStyle` take the same names as the Rust enums, lower
 case. A value it cannot parse passes through verbatim with a `warn!` -
 a Fluent function cannot return an error, and a rendered page with one
-odd-looking date beats a 500.
+odd-looking date beats a 500. Both functions format in the locale of the
+catalog the message came from, so a message is never half one language:
+a `Translator::translate` call that names `es` gets Spanish dates whatever
+`Lang::locale()` is.
 
 When you want ICU4X's full formatting rather than what a Fluent function
 exposes, format in Rust and pass the finished string in:

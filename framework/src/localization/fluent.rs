@@ -448,7 +448,7 @@ fn build_locale_catalog(
     })?;
     // `add_builtins()` covers `NUMBER()`; `DATETIME()` is the framework's
     // own ICU4X-backed addition (see `functions.rs`).
-    functions::register(&mut bundle)?;
+    functions::register(&mut bundle, locale)?;
 
     let serialized = super::merge::serialize(ast);
     // Computed from `&serialized` before it's moved into
