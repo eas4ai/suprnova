@@ -481,6 +481,10 @@ name = "live_dogfood_server"
 path = "tests/live/dogfood_server.rs"
 
 [[test]]
+name = "live_session_fields"
+path = "tests/live/session_fields.rs"
+
+[[test]]
 name = "live_assets"
 path = "tests/live/assets.rs"
 

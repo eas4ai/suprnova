@@ -72,6 +72,12 @@ impl Counter {
 - `#[action]` methods are the only entry points the browser can invoke. They
   receive validated arguments and may return typed outcomes such as a
   redirect or a flash.
+- `#[session]` fields live in the visitor's session, not in the snapshot.
+  Each request that runs the component for one visitor reads them from the
+  session, and a request whose outcome is accepted writes them back; a
+  failed action leaves the session as it was. A public seed, which every
+  visitor shares, renders them with their defaults. They need
+  `SessionMiddleware` on the page and on the Live routes.
 
 Every field type must implement `Default`; a fresh island starts from those
 defaults unless a mount hook says otherwise.

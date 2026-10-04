@@ -283,6 +283,53 @@ fn expand_definition(
                 }
             }
         });
+    // Session-only fields never enter the snapshot. They are read from the
+    // host session whenever the component is mounted or reconstructed for
+    // one viewer, and handed back to it before dehydration.
+    let session_fields: Vec<&RuntimeField> = runtime_fields
+        .iter()
+        .filter(|field| field.kind == FieldKind::Session)
+        .collect();
+    let session_runtime = if session_fields.is_empty() {
+        quote! {}
+    } else {
+        let loads = session_fields.iter().map(|field| {
+            let ident = &field.ident;
+            let field_name = &field.name;
+            let ty = &field.ty;
+            quote! {
+                if let ::std::option::Option::Some(value) =
+                    ::suprnova::live::__private::session::load::<#ty>(#name, #field_name)
+                {
+                    self.#ident = value;
+                }
+            }
+        });
+        let stores = session_fields.iter().map(|field| {
+            let ident = &field.ident;
+            let field_name = &field.name;
+            quote! {
+                ::suprnova::live::__private::session::stage(#name, #field_name, &self.#ident)?;
+            }
+        });
+        quote! {
+            fn load_session_state(
+                &mut self,
+            ) -> ::std::result::Result<(), ::suprnova::live::__private::component::ComponentError>
+            {
+                #(#loads)*
+                ::std::result::Result::Ok(())
+            }
+
+            fn store_session_state(
+                &self,
+            ) -> ::std::result::Result<(), ::suprnova::live::__private::component::ComponentError>
+            {
+                #(#stores)*
+                ::std::result::Result::Ok(())
+            }
+        }
+    };
     let public_dehydration = runtime_fields
         .iter()
         .filter(|field| field.kind == FieldKind::Public)
@@ -444,6 +491,8 @@ fn expand_definition(
                     ::suprnova::live::__private::canonical::CanonicalValue::Object(fields),
                 )
             }
+
+            #session_runtime
         }
     };
     enforce_runtime_path_contract(&tokens)?;
