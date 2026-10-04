@@ -6,7 +6,9 @@
 //! ciphertext under their distinct purposes, every code-checking path is
 //! gated on 05's lockout accounting in a lockout store of its own, keyed by
 //! [`lockout_identity`](crate::two_factor::lockout_identity), and rotation
-//! paths demand proof of possession. The one FLAGGED deviation is
+//! paths demand proof of possession. A rotated secret waits beside the
+//! confirmed one, which keeps gating sign-in until a code from the new
+//! secret confirms it. The one FLAGGED deviation is
 //! replay protection: the verifier records the timestep that actually
 //! matched and rejects `matched_step <= last_used_timestep`, closing the
 //! forward-edge replay the deployed `current + skew` stamp permitted. 2FA
@@ -212,6 +214,14 @@ impl TwoFactorService {
     /// Rotate the secret of a confirmed enrollment. Requires a current
     /// TOTP code or an unused recovery code as proof of possession, and is
     /// refused while the account is locked out.
+    ///
+    /// The new secret and recovery codes wait as a pending rotation until
+    /// [`Self::confirm`] proves a code from the new secret. Until then the
+    /// confirmed secret and its recovery codes keep gating sign-in, so a
+    /// rotation nobody finishes never leaves the account without a second
+    /// factor, and [`Self::enroll`], which takes no proof, cannot replace
+    /// the pending secret. A second `re_enroll` replaces the pending
+    /// rotation, and [`Self::disable`] discards it.
     pub async fn re_enroll(
         &self,
         actor: &CredentialActor,
@@ -247,40 +257,50 @@ impl TwoFactorService {
         .await
     }
 
-    /// Confirm a pending enrollment with a live code; 2FA is inactive
-    /// until this succeeds.
+    /// Confirm a pending enrollment, or a pending rotation of a confirmed
+    /// one, with a live code; 2FA is inactive until an enrollment is
+    /// confirmed, and a rotation's secret replaces the confirmed one only
+    /// when this succeeds.
     ///
     /// The confirmation stamps exactly the secret the code was checked
-    /// against, once, and uses the code up. When a concurrent enrollment
-    /// replaces the secret between the check and the stamp, nothing is
-    /// confirmed and the caller gets a conflict: the code proved possession
-    /// of the old secret, not of the new one.
+    /// against, once, and uses the code up. When a concurrent enrollment or
+    /// rotation replaces the secret between the check and the stamp,
+    /// nothing is confirmed and the caller gets a conflict: the code proved
+    /// possession of the old secret, not of the new one.
     pub async fn confirm(&self, actor: &CredentialActor, code: &str) -> Result<()> {
         let user_id = actor.user_id();
         self.with_reserved_attempt(user_id, "two-factor confirm", async {
-            let Some(row) = self
-                .store
-                .find_enrollment(user_id)
-                .await?
-                .filter(|row| row.confirmed_at.is_none())
-            else {
+            let row = self.store.find_enrollment(user_id).await?;
+            // An unconfirmed row is an initial enrollment; a confirmed one
+            // has something to confirm only while a rotation waits in it.
+            let pending = row.and_then(|row| match (row.confirmed_at, row.pending_secret) {
+                (None, _) => Some((row.secret, false)),
+                (Some(_), Some(pending_secret)) => Some((pending_secret, true)),
+                (Some(_), None) => None,
+            });
+            let Some((checked_secret, rotation)) = pending else {
                 return Err(Error::InvalidInput {
                     field: "enrollment".to_owned(),
                     message: "no pending 2FA enrollment".to_owned(),
                 });
             };
-            let secret = self.decrypt_secret(&row)?;
+            let secret = self.decrypt_secret_bytes(&checked_secret)?;
             let Some(matched_step) = totp::matched_step(&secret, code, Utc::now())? else {
                 return Ok(Evaluated::Rejected(Error::InvalidInput {
                     field: "code".to_owned(),
                     message: "invalid 2FA code".to_owned(),
                 }));
             };
-            if !self
-                .store
-                .set_confirmed(actor, &row.secret, matched_step, Utc::now())
-                .await?
-            {
+            let stamped = if rotation {
+                self.store
+                    .confirm_rotation(actor, &checked_secret, matched_step, Utc::now())
+                    .await?
+            } else {
+                self.store
+                    .set_confirmed(actor, &checked_secret, matched_step, Utc::now())
+                    .await?
+            };
+            if !stamped {
                 return Ok(Evaluated::Superseded(Error::Conflict {
                     resource: "two-factor enrollment".to_owned(),
                     message: "the 2FA enrollment changed or was confirmed while its code was \
@@ -550,9 +570,13 @@ impl TwoFactorService {
     }
 
     fn decrypt_secret(&self, row: &TwoFactorRow) -> Result<SecretString> {
+        self.decrypt_secret_bytes(&row.secret)
+    }
+
+    fn decrypt_secret_bytes(&self, ciphertext: &[u8]) -> Result<SecretString> {
         let plaintext = self
             .encryptor
-            .decrypt(CryptoPurpose::TwoFactorSecret, &row.secret)?;
+            .decrypt(CryptoPurpose::TwoFactorSecret, ciphertext)?;
         String::from_utf8(plaintext)
             .map(SecretString::from)
             .map_err(|_| Error::Internal {

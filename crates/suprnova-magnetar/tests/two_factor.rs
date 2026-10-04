@@ -291,6 +291,18 @@ impl TwoFactorStore for ClaimFailingTwoFactorStore {
             .await
     }
 
+    async fn confirm_rotation(
+        &self,
+        actor: &CredentialActor,
+        expected_pending_secret: &[u8],
+        matched_step: i64,
+        at: DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .confirm_rotation(actor, expected_pending_secret, matched_step, at)
+            .await
+    }
+
     async fn claim_timestep(&self, _user_id: &str, _matched_step: i64) -> magnetar::Result<bool> {
         Err(magnetar::Error::Internal {
             message: "forced two-factor claim failure".to_owned(),
@@ -1374,7 +1386,12 @@ async fn re_enroll_returns_artifacts_after_lockout_reset_failure() {
         .unwrap();
     assert!(row.rotation_pending);
     let secret = AeadEncryptor::new([21; 32])
-        .decrypt(CryptoPurpose::TwoFactorSecret, &row.secret)
+        .decrypt(
+            CryptoPurpose::TwoFactorSecret,
+            row.pending_secret
+                .as_deref()
+                .expect("the rotation is pending"),
+        )
         .unwrap();
     assert!(
         totp::matched_step(
@@ -1386,7 +1403,7 @@ async fn re_enroll_returns_artifacts_after_lockout_reset_failure() {
         .is_some()
     );
     assert_eq!(
-        decrypt_recovery_codes(row.recovery_codes.as_deref().unwrap()),
+        decrypt_recovery_codes(row.pending_recovery_codes.as_deref().unwrap()),
         rotated.recovery_codes
     );
 }
@@ -1551,7 +1568,7 @@ async fn plain_enroll_preserves_a_pending_proof_gated_rotation() {
         .await
         .unwrap()
         .expect("pending rotated enrollment exists");
-    assert!(pending.confirmed_at.is_none());
+    assert!(pending.confirmed_at.is_some() && pending.pending_secret.is_some());
 
     let error = world.two_factor.enroll(&actor).await.unwrap_err();
 
@@ -1567,6 +1584,8 @@ async fn plain_enroll_preserves_a_pending_proof_gated_rotation() {
         .expect("pending rotated enrollment remains");
     assert_eq!(after.secret, pending.secret);
     assert_eq!(after.recovery_codes, pending.recovery_codes);
+    assert_eq!(after.pending_secret, pending.pending_secret);
+    assert_eq!(after.pending_recovery_codes, pending.pending_recovery_codes);
 }
 #[tokio::test]
 async fn enrollment_is_inactive_until_confirmed() {
@@ -1766,8 +1785,8 @@ async fn rotation_paths_demand_proof_of_possession() {
         .await
         .unwrap();
     assert!(
-        !world.two_factor.is_enabled(&user_id).await.unwrap(),
-        "re-enrollment is pending until confirmed against the new secret"
+        world.two_factor.is_enabled(&user_id).await.unwrap(),
+        "the confirmed secret keeps gating until the new one is confirmed"
     );
     world
         .two_factor
@@ -1779,6 +1798,104 @@ async fn rotation_paths_demand_proof_of_possession() {
     // Disable reports the transition exactly once.
     assert!(world.two_factor.disable(&actor).await.unwrap());
     assert!(!world.two_factor.disable(&actor).await.unwrap());
+}
+
+/// A rotation proves the confirmed secret and mints a new one. Until a code
+/// from the new secret confirms it, the confirmed secret keeps gating
+/// sign-in: a rotation nobody finishes must not leave the account without a
+/// second factor.
+#[tokio::test]
+async fn a_rotation_keeps_the_confirmed_secret_gating_until_it_is_confirmed() {
+    let world = factor_world().await;
+    let user_id = registered_user(&world).await;
+    let enrollment = confirmed_enrollment(&world, &user_id).await;
+    let actor = credential_actor(&world, &user_id).await;
+
+    let rotated = world
+        .two_factor
+        .re_enroll(&actor, &next_step_code(&enrollment.otpauth_url))
+        .await
+        .unwrap();
+
+    assert!(
+        world.two_factor.is_enabled(&user_id).await.unwrap(),
+        "the confirmed secret still counts as enabled"
+    );
+    let login = send(&world, login_request(EMAIL, PASSWORD)).await;
+    assert_eq!(login.status, 200);
+    assert!(
+        login.grant.is_none(),
+        "a pending rotation still demands the second factor"
+    );
+    assert!(
+        world
+            .two_factor
+            .consume_recovery_code(&user_id, &enrollment.recovery_codes[0])
+            .await
+            .unwrap(),
+        "the confirmed recovery codes still work"
+    );
+    assert!(
+        !world
+            .two_factor
+            .consume_recovery_code(&user_id, &rotated.recovery_codes[0])
+            .await
+            .unwrap(),
+        "nothing from the unconfirmed rotation works yet"
+    );
+
+    world
+        .two_factor
+        .confirm(&actor, &totp_code_now(&rotated.otpauth_url))
+        .await
+        .unwrap();
+
+    assert!(world.two_factor.is_enabled(&user_id).await.unwrap());
+    assert!(
+        !world
+            .two_factor
+            .consume_recovery_code(&user_id, &enrollment.recovery_codes[1])
+            .await
+            .unwrap(),
+        "the old recovery codes go with the old secret"
+    );
+    assert!(
+        world
+            .two_factor
+            .consume_recovery_code(&user_id, &rotated.recovery_codes[0])
+            .await
+            .unwrap(),
+        "the confirmed rotation's recovery codes work"
+    );
+}
+
+/// Disabling the second factor discards a rotation waiting for
+/// confirmation along with the confirmed secret.
+#[tokio::test]
+async fn disable_discards_a_pending_rotation() {
+    let world = factor_world().await;
+    let user_id = registered_user(&world).await;
+    let enrollment = confirmed_enrollment(&world, &user_id).await;
+    let actor = credential_actor(&world, &user_id).await;
+    let rotated = world
+        .two_factor
+        .re_enroll(&actor, &next_step_code(&enrollment.otpauth_url))
+        .await
+        .unwrap();
+
+    assert!(world.two_factor.disable(&actor).await.unwrap());
+
+    assert!(!world.two_factor.is_enabled(&user_id).await.unwrap());
+    assert!(
+        world
+            .two_factor
+            .confirm(&actor, &totp_code_now(&rotated.otpauth_url))
+            .await
+            .is_err(),
+        "the discarded rotation cannot be confirmed"
+    );
+    let login = send(&world, login_request(EMAIL, PASSWORD)).await;
+    assert!(login.grant.is_some(), "no second factor remains");
 }
 
 #[tokio::test]
@@ -2084,6 +2201,18 @@ impl TwoFactorStore for ClaimLostTwoFactorStore {
             .await
     }
 
+    async fn confirm_rotation(
+        &self,
+        actor: &CredentialActor,
+        expected_pending_secret: &[u8],
+        matched_step: i64,
+        at: DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .confirm_rotation(actor, expected_pending_secret, matched_step, at)
+            .await
+    }
+
     async fn claim_timestep(&self, user_id: &str, matched_step: i64) -> magnetar::Result<bool> {
         self.inner.claim_timestep(user_id, matched_step).await
     }
@@ -2254,6 +2383,18 @@ impl TwoFactorStore for ReplacedAfterRead {
             .await
     }
 
+    async fn confirm_rotation(
+        &self,
+        actor: &CredentialActor,
+        expected_pending_secret: &[u8],
+        matched_step: i64,
+        at: DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .confirm_rotation(actor, expected_pending_secret, matched_step, at)
+            .await
+    }
+
     async fn claim_timestep(&self, user_id: &str, matched_step: i64) -> magnetar::Result<bool> {
         self.inner.claim_timestep(user_id, matched_step).await
     }
@@ -2297,37 +2438,51 @@ impl TwoFactorStore for ReplacedAfterRead {
     }
 }
 
-/// Run `confirm` with a code for the enrollment as it was read, while
-/// `replace` turns the row into a new pending secret right after the read.
-/// Returns the outcome and the row afterwards.
+/// Run `confirm` with a code for the enrollment as it was read, while a
+/// concurrent request replaces the secret right after the read: a restarted
+/// enrollment replaces a pending secret, and a second rotation replaces a
+/// pending rotation. Returns the outcome, the row afterwards and the
+/// replacement secret.
 async fn confirm_racing_a_replacement(
     world: &FactorWorld,
     user_id: &str,
     actor: &CredentialActor,
     code: &str,
-    rotation_pending: bool,
-) -> (magnetar::Result<()>, TwoFactorRow) {
+    rotation: bool,
+) -> (magnetar::Result<()>, TwoFactorRow, Vec<u8>) {
     let replacement_secret = AeadEncryptor::new([21; 32])
         .encrypt(CryptoPurpose::TwoFactorSecret, b"JBSWY3DPEHPK3PXP")
         .unwrap();
+    // Written by the same session, so only the secret tells the two
+    // enrollments apart.
+    let snapshot = storage_schema::two_factor::ActiveModel {
+        user_id: Set(user_id.to_owned()),
+        enrollment_auth_epoch: Set(i64::try_from(actor.issuance_epoch()).unwrap()),
+        enrollment_session_id: Set(actor.opaque_session_id().map(str::to_owned)),
+        enrollment_expires_at: Set(actor.expires_at()),
+        ..Default::default()
+    };
+    let replacement = if rotation {
+        storage_schema::two_factor::ActiveModel {
+            pending_secret: Set(Some(replacement_secret.clone())),
+            rotation_pending: Set(true),
+            ..snapshot
+        }
+    } else {
+        storage_schema::two_factor::ActiveModel {
+            secret: Set(replacement_secret.clone()),
+            confirmed_at: Set(None),
+            rotation_pending: Set(false),
+            last_used_timestep: Set(None),
+            ..snapshot
+        }
+    };
     let store = ReplacedAfterRead {
         inner: Arc::new(storage_schema::sql_two_factor::SqlTwoFactorStore(
             world.db.clone(),
         )),
         db: world.db.clone(),
-        // Written by the same session, so only the secret tells the two
-        // enrollments apart.
-        replacement: Mutex::new(Some(storage_schema::two_factor::ActiveModel {
-            user_id: Set(user_id.to_owned()),
-            secret: Set(replacement_secret),
-            enrollment_auth_epoch: Set(i64::try_from(actor.issuance_epoch()).unwrap()),
-            enrollment_session_id: Set(actor.opaque_session_id().map(str::to_owned)),
-            enrollment_expires_at: Set(actor.expires_at()),
-            confirmed_at: Set(None),
-            rotation_pending: Set(rotation_pending),
-            last_used_timestep: Set(None),
-            ..Default::default()
-        })),
+        replacement: Mutex::new(Some(replacement)),
     };
     let service = TwoFactorService::new(
         Arc::new(store),
@@ -2344,7 +2499,7 @@ async fn confirm_racing_a_replacement(
         .await
         .unwrap()
         .unwrap();
-    (outcome, row)
+    (outcome, row, replacement_secret)
 }
 
 #[tokio::test]
@@ -2356,7 +2511,7 @@ async fn a_confirmation_racing_an_enrollment_restart_confirms_neither_secret() {
 
     // The code is for the enrollment the confirmation read; a restarted
     // enrollment replaced it before the stamp.
-    let (outcome, row) = confirm_racing_a_replacement(
+    let (outcome, row, _) = confirm_racing_a_replacement(
         &world,
         &user_id,
         &actor,
@@ -2378,23 +2533,28 @@ async fn a_confirmation_racing_a_re_enrollment_confirms_neither_secret() {
     let user_id = registered_user(&world).await;
     let enrollment = confirmed_enrollment(&world, &user_id).await;
     let actor = credential_actor(&world, &user_id).await;
+    let rotated = world
+        .two_factor
+        .re_enroll(&actor, &next_step_code(&enrollment.otpauth_url))
+        .await
+        .unwrap();
 
-    // A second confirmation of the active secret reads it; a re-enrollment
-    // replaces it with a pending rotation before the stamp.
-    let (outcome, row) = confirm_racing_a_replacement(
+    // The confirmation reads the pending rotation; a second re-enrollment
+    // replaces it before the stamp.
+    let (outcome, row, replacement) = confirm_racing_a_replacement(
         &world,
         &user_id,
         &actor,
-        &totp_code_now(&enrollment.otpauth_url),
+        &totp_code_now(&rotated.otpauth_url),
         true,
     )
     .await;
 
     assert!(outcome.is_err(), "nothing is confirmed: {outcome:?}");
     assert!(
-        row.confirmed_at.is_none() && row.rotation_pending,
-        "the rotation was never proven and stays pending: confirmed_at {:?}, rotation_pending {}",
-        row.confirmed_at,
-        row.rotation_pending
+        row.confirmed_at.is_some()
+            && row.secret != replacement
+            && row.pending_secret.as_deref() == Some(replacement.as_slice()),
+        "the replacement rotation was never proven and stays pending beside the confirmed secret"
     );
 }

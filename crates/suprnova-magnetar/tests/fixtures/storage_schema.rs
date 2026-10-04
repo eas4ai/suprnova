@@ -102,6 +102,8 @@ entity_common!(two_factor, "storage_two_factor", {
     pub enrollment_session_id: Option<String>,
     pub enrollment_expires_at: Option<ChronoDateTime<ChronoUtc>>,
     pub rotation_pending: bool,
+    pub pending_secret: Option<Vec<u8>>,
+    pub pending_recovery_codes: Option<Vec<u8>>,
     pub confirmed_at: Option<ChronoDateTime<ChronoUtc>>,
     pub last_used_timestep: Option<i64>,
 });
@@ -1174,7 +1176,6 @@ pub mod sql_two_factor {
         enrollment_auth_epoch: i64,
         enrollment_session_id: Option<&str>,
         enrollment_expires_at: Option<DateTime<Utc>>,
-        rotation_pending: bool,
     ) -> two_factor::ActiveModel {
         two_factor::ActiveModel {
             user_id: Set(user_id.to_owned()),
@@ -1183,7 +1184,9 @@ pub mod sql_two_factor {
             enrollment_auth_epoch: Set(enrollment_auth_epoch),
             enrollment_session_id: Set(enrollment_session_id.map(str::to_owned)),
             enrollment_expires_at: Set(enrollment_expires_at),
-            rotation_pending: Set(rotation_pending),
+            rotation_pending: Set(false),
+            pending_secret: Set(None),
+            pending_recovery_codes: Set(None),
             confirmed_at: Set(None),
             last_used_timestep: Set(None),
         }
@@ -1215,7 +1218,6 @@ pub mod sql_two_factor {
             enrollment_auth_epoch,
             enrollment_session_id,
             enrollment_expires_at,
-            false,
         );
         if existing.is_some() {
             two_factor::Entity::update(model)
@@ -1323,19 +1325,87 @@ pub mod sql_two_factor {
         if !claim_proof_in(transaction, user_id, claim).await? {
             return Ok(false);
         }
-        two_factor::Entity::update(enrollment_model(
-            user_id,
-            secret,
-            recovery_codes,
-            snapshot.auth_epoch,
-            snapshot.session_id.as_deref(),
-            snapshot.expires_at,
-            true,
-        ))
-        .exec(transaction.connection())
-        .await
-        .map_err(db_error)?;
-        Ok(true)
+        let update = two_factor::Entity::update_many()
+            .col_expr(
+                two_factor::Column::PendingSecret,
+                Expr::value(Some(secret.to_vec())),
+            )
+            .col_expr(
+                two_factor::Column::PendingRecoveryCodes,
+                Expr::value(recovery_codes.map(<[u8]>::to_vec)),
+            )
+            .col_expr(two_factor::Column::RotationPending, Expr::value(true))
+            .col_expr(
+                two_factor::Column::EnrollmentAuthEpoch,
+                Expr::value(snapshot.auth_epoch),
+            )
+            .col_expr(
+                two_factor::Column::EnrollmentSessionId,
+                Expr::value(snapshot.session_id.clone()),
+            )
+            .col_expr(
+                two_factor::Column::EnrollmentExpiresAt,
+                Expr::value(snapshot.expires_at),
+            )
+            .filter(two_factor::Column::UserId.eq(user_id.to_owned()))
+            .filter(two_factor::Column::ConfirmedAt.is_not_null())
+            .exec(transaction.connection())
+            .await
+            .map_err(db_error)?;
+        Ok(update.rows_affected == 1)
+    }
+
+    async fn confirm_rotation_in(
+        transaction: &mut AuthTransaction<'_>,
+        user_id: &str,
+        snapshot: &EnrollmentActorSnapshot,
+        expected_pending_secret: &[u8],
+        matched_step: i64,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let Some(enrollment) = two_factor::Entity::find_by_id(user_id.to_owned())
+            .one(transaction.connection())
+            .await
+            .map_err(db_error)?
+        else {
+            return Ok(false);
+        };
+        if enrollment.enrollment_auth_epoch != snapshot.auth_epoch
+            || enrollment.enrollment_session_id != snapshot.session_id
+            || enrollment.enrollment_expires_at != snapshot.expires_at
+        {
+            return Err(stale_actor());
+        }
+        let update = two_factor::Entity::update_many()
+            .col_expr(
+                two_factor::Column::Secret,
+                Expr::col(two_factor::Column::PendingSecret),
+            )
+            .col_expr(
+                two_factor::Column::RecoveryCodes,
+                Expr::col(two_factor::Column::PendingRecoveryCodes),
+            )
+            .col_expr(
+                two_factor::Column::PendingSecret,
+                Expr::value(None::<Vec<u8>>),
+            )
+            .col_expr(
+                two_factor::Column::PendingRecoveryCodes,
+                Expr::value(None::<Vec<u8>>),
+            )
+            .col_expr(two_factor::Column::RotationPending, Expr::value(false))
+            .col_expr(two_factor::Column::ConfirmedAt, Expr::value(at))
+            .col_expr(
+                two_factor::Column::LastUsedTimestep,
+                Expr::value(matched_step),
+            )
+            .filter(two_factor::Column::UserId.eq(user_id.to_owned()))
+            .filter(two_factor::Column::ConfirmedAt.is_not_null())
+            .filter(two_factor::Column::PendingSecret.eq(expected_pending_secret.to_vec()))
+            .exec(transaction.connection())
+            .await
+            .map_err(db_error)?;
+        Ok(update.rows_affected == 1)
     }
 
     async fn regenerate_recovery_codes_in(
@@ -1419,6 +1489,8 @@ pub mod sql_two_factor {
                 enrollment_session_id: row.enrollment_session_id,
                 enrollment_expires_at: row.enrollment_expires_at,
                 rotation_pending: row.rotation_pending,
+                pending_secret: row.pending_secret,
+                pending_recovery_codes: row.pending_recovery_codes,
                 confirmed_at: row.confirmed_at,
                 last_used_timestep: row.last_used_timestep,
             }))
@@ -1472,6 +1544,33 @@ pub mod sql_two_factor {
                         &user_id,
                         &snapshot,
                         &expected_secret,
+                        matched_step,
+                        at,
+                    )
+                    .await
+                })
+            })
+            .await
+        }
+
+        async fn confirm_rotation(
+            &self,
+            actor: &CredentialActor,
+            expected_pending_secret: &[u8],
+            matched_step: i64,
+            at: DateTime<Utc>,
+        ) -> Result<bool> {
+            let user_id = actor.user_id().to_owned();
+            let snapshot = enrollment_actor_snapshot(actor)?;
+            let expected_pending_secret = expected_pending_secret.to_vec();
+            let storage = SeaOrmStorage::<StorageSchema>::new(self.0.clone());
+            fenced_credential_write(&storage, actor, move |transaction| {
+                Box::pin(async move {
+                    confirm_rotation_in(
+                        transaction,
+                        &user_id,
+                        &snapshot,
+                        &expected_pending_secret,
                         matched_step,
                         at,
                     )
