@@ -728,6 +728,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **A refused cookieless request stores no session.** `CsrfMiddleware`
+  marks a new session for storage only when the response succeeds or
+  redirects. An anonymous request that an auth gate refuses with 401, or
+  any other 4xx or 5xx, gets no `XSRF-TOKEN` and writes no session row, so
+  it no longer turns into a 500 when the session store is unavailable. A
+  cookieless JSON or `HEAD` bootstrap that succeeds still gets its token
+  with its session. This landed after the `v3.1.0` tag.
 - **Live uploads, private responses and tooling.** Finalized uploads free
   their pending slots when finalization commits, so a session no longer
   runs out of upload capacity until restart, and are reclaimed when they
