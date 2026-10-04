@@ -572,7 +572,9 @@ fn text_parser(ty: &Type) -> proc_macro2::TokenStream {
 
 /// The `FieldFailure` a text part that does not parse as `ty` reports,
 /// chosen by the type's name as Laravel's rules split them: integer types,
-/// float types, `bool`, and everything else as a format error.
+/// float types, `bool`, `String`, and everything else as a format error.
+/// A `String` reads any UTF-8 text, so it fails only on a part that is not
+/// UTF-8, which is not a string (`validation-string`).
 fn parse_failure(ty: &Type) -> proc_macro2::TokenStream {
     let failure = match outer_segment_ident(ty).as_deref() {
         Some(
@@ -583,6 +585,7 @@ fn parse_failure(ty: &Type) -> proc_macro2::TokenStream {
         ) => quote! { Integer },
         Some("f32" | "f64") => quote! { Numeric },
         Some("bool") => quote! { Boolean },
+        Some("String") => quote! { String },
         _ => quote! { Format },
     };
     quote! { ::suprnova::http::upload::FieldFailure::#failure }
@@ -761,7 +764,8 @@ mod tests {
         assert!(failure(parse_quote!(f64)).ends_with("Numeric"));
         assert!(failure(parse_quote!(bool)).ends_with("Boolean"));
         assert!(failure(parse_quote!(std::net::IpAddr)).ends_with("Format"));
-        assert!(failure(parse_quote!(String)).ends_with("Format"));
+        assert!(failure(parse_quote!(String)).ends_with("String"));
+        assert!(failure(parse_quote!(std::string::String)).ends_with("String"));
     }
 
     #[test]

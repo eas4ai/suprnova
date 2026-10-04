@@ -319,8 +319,13 @@ fn part_head(name: &str, file: Option<(&str, &str)>) -> Vec<u8> {
 }
 
 fn text_part(name: &str, value: &str) -> Vec<u8> {
+    text_part_bytes(name, value.as_bytes())
+}
+
+/// A text part carrying `value` as sent, which need not be UTF-8.
+fn text_part_bytes(name: &str, value: &[u8]) -> Vec<u8> {
     let mut part = part_head(name, None);
-    part.extend_from_slice(value.as_bytes());
+    part.extend_from_slice(value);
     part.extend_from_slice(b"\r\n");
     part
 }
@@ -1741,4 +1746,145 @@ async fn an_empty_part_for_a_required_typed_field_is_missing() {
         first_message(&reply, "ratio"),
         "The ratio field is required."
     );
+}
+
+// ── PAR-043: a text part whose bytes are not UTF-8 ──
+
+/// One field for each key a part that is not UTF-8 can report.
+#[derive(MultipartRequest)]
+struct Encoded {
+    #[field("title")]
+    title: String,
+    #[field("count")]
+    count: u32,
+    #[field("tags[]")]
+    tags: Vec<String>,
+    #[field("ratio")]
+    ratio: Option<f64>,
+    #[field("active")]
+    active: Option<bool>,
+    #[field("address")]
+    address: Option<std::net::IpAddr>,
+    #[field("attachment")]
+    attachment: Option<UploadedFile>,
+}
+
+async fn encoded(req: Request) -> Response {
+    let form = Encoded::from_request(req).await?;
+    Ok(HttpResponse::json(json!({
+        "title": form.title,
+        "count": form.count,
+        "tags": form.tags,
+        "ratio": form.ratio,
+        "active": form.active,
+        "address": form.address.map(|a| a.to_string()),
+        "attachment": form.attachment.map(|a| a.size),
+    })))
+}
+
+/// `café` in Latin-1, as a page served in a legacy encoding sends it.
+const LATIN1_CAFE: &[u8] = b"caf\xe9";
+
+fn encoded_body() -> Vec<u8> {
+    form(&[
+        text_part_bytes("title", LATIN1_CAFE),
+        text_part_bytes("count", b"\xff7"),
+        text_part("tags[]", "fine"),
+        text_part_bytes("tags[]", LATIN1_CAFE),
+    ])
+}
+
+#[tokio::test]
+async fn a_text_part_that_is_not_utf8_answers_422_under_its_name() {
+    let app = App::new(Router::new().post("/encoded", encoded));
+
+    let reply = TestContainer::scope(async {
+        let _catalog = bind_catalog("");
+        send(&app, Outgoing::post("/encoded", encoded_body())).await
+    })
+    .await;
+
+    assert_eq!(
+        reply.status,
+        422,
+        "a part that is not UTF-8 is invalid input: {}",
+        reply.text()
+    );
+    assert_eq!(
+        first_message(&reply, "title"),
+        "The title field must be a string."
+    );
+    assert_eq!(
+        first_message(&reply, "count"),
+        "The count field must be an integer."
+    );
+    assert_eq!(
+        first_message(&reply, "tags.1"),
+        "The tags.1 field must be a string."
+    );
+    assert_eq!(
+        errors(&reply).len(),
+        3,
+        "only the three parts that are not UTF-8 failed: {}",
+        reply.text()
+    );
+}
+
+#[tokio::test]
+async fn a_part_that_is_not_utf8_reports_the_key_of_its_fields_type() {
+    let body = form(&[
+        text_part_bytes("title", LATIN1_CAFE),
+        text_part_bytes("count", b"\xff7"),
+        text_part("tags[]", "fine"),
+        text_part_bytes("tags[]", LATIN1_CAFE),
+        text_part_bytes("ratio", b"0.5\xff"),
+        text_part_bytes("active", b"\xc0"),
+        text_part_bytes("address", b"127.0.0.\xb1"),
+        text_part_bytes("attachment", LATIN1_CAFE),
+    ]);
+    let req = crate::common::request_from_multipart(BOUNDARY, body.into()).await;
+    let errors = match Encoded::from_request(req).await {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {:?}", other.err()),
+    };
+
+    assert_eq!(key(&errors, "title"), "validation-string");
+    assert_eq!(key(&errors, "count"), "validation-integer");
+    assert_eq!(key(&errors, "tags.1"), "validation-string");
+    assert_eq!(key(&errors, "ratio"), "validation-numeric");
+    assert_eq!(key(&errors, "active"), "validation-boolean");
+    assert_eq!(key(&errors, "address"), "validation-format");
+    assert_eq!(
+        key(&errors, "attachment"),
+        "validation-file",
+        "text where a file belongs"
+    );
+    assert_eq!(errors.errors.len(), 7, "{errors}");
+}
+
+#[tokio::test]
+async fn an_inertia_form_gets_a_part_that_is_not_utf8_back_in_props_errors() {
+    let slot = suprnova::session::new_session_slot_for_test();
+    let app = App::with(
+        Router::new()
+            .post("/encoded", encoded)
+            .get("/encoded", |req: Request| async move {
+                InertiaResponse::new("Profile/Edit")
+                    .resolve(&req)
+                    .await
+                    .map_err(HttpResponse::from)
+            }),
+        MiddlewareRegistry::new()
+            .append(SeededSessionScope(slot.clone()))
+            .append(InertiaValidationRedirectMiddleware::new()),
+    );
+
+    let errors = inertia_round_trip(&app, &slot, "/encoded", encoded_body()).await;
+
+    for field in ["title", "count", "tags.1"] {
+        assert!(
+            errors[field].is_string(),
+            "props.errors carries `{field}`: {errors}"
+        );
+    }
 }

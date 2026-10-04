@@ -464,6 +464,12 @@ pub enum MultipartValue {
     },
     /// Text part - a non-file field carrying its UTF-8 value.
     Text(String),
+    /// Text part whose bytes are not UTF-8, as sent. Kept apart from
+    /// `Text` rather than refused, because the parser cannot tell which key
+    /// the failure belongs under: the extractor reports it under the
+    /// field's input name with its type's key, as it does text that does
+    /// not parse.
+    NonUtf8Text(Vec<u8>),
 }
 
 /// Internal: the parser's per-part output before classification into
@@ -673,6 +679,10 @@ where
 /// The total-body cap is enforced BEFORE `per_field_validator` runs,
 /// so it fires even when no validator has been configured for the
 /// field (e.g. `UploadedFile<()>` or plain `Option<String>` fields).
+///
+/// A text part whose bytes are not UTF-8 is not an error here: it arrives
+/// as [`MultipartValue::NonUtf8Text`], so the caller, which knows the
+/// field's type, decides how to report it.
 ///
 /// # Errors
 ///
@@ -918,10 +928,10 @@ where
                     });
                 }
             };
-            MultipartValue::Text(String::from_utf8(buf).map_err(|_| FrameworkError::Domain {
-                message: format!("text field '{name}' is not valid UTF-8"),
-                status_code: 400,
-            })?)
+            match String::from_utf8(buf) {
+                Ok(text) => MultipartValue::Text(text),
+                Err(not_utf8) => MultipartValue::NonUtf8Text(not_utf8.into_bytes()),
+            }
         };
 
         payload.fields.push((name, value));
@@ -1123,7 +1133,8 @@ pub enum FieldFailure {
     Format,
     /// A text part where a file belongs (`validation-file`).
     File,
-    /// A file part where text belongs (`validation-string`).
+    /// A file part where text belongs, or a part that is not UTF-8 for a
+    /// `String` field, which reads any other text (`validation-string`).
     String,
 }
 
@@ -1195,9 +1206,9 @@ pub enum Taken<T> {
 /// An empty text part (Inertia's `null` file) and a file part with no file
 /// name and no bytes (an empty file input) are how clients leave a file
 /// out, so they are [`Taken::Absent`], never an empty file a validator
-/// would refuse. Other text is a failure, as is a file `validator` refuses
-/// with [`FrameworkError::invalid_upload`]; both are filed under the
-/// part's key. Any other validator error is returned.
+/// would refuse. Other text, UTF-8 or not, is a failure, as is a file
+/// `validator` refuses with [`FrameworkError::invalid_upload`]; both are
+/// filed under the part's key. Any other validator error is returned.
 #[doc(hidden)]
 pub fn take_file<V: UploadValidator>(
     validator: &V,
@@ -1208,7 +1219,7 @@ pub fn take_file<V: UploadValidator>(
 ) -> Result<Taken<UploadedFile<V>>, FrameworkError> {
     match value {
         MultipartValue::Text(text) if text.is_empty() => Ok(Taken::Absent),
-        MultipartValue::Text(_) => {
+        MultipartValue::Text(_) | MultipartValue::NonUtf8Text(_) => {
             add_field_failure(errors, name, Some(index), FieldFailure::File);
             Ok(Taken::Invalid)
         }
@@ -1247,8 +1258,9 @@ pub fn take_file<V: UploadValidator>(
 /// required one is missing, as Laravel's `ConvertEmptyStringsToNull` makes
 /// them. A type that can hold empty text, such as `String`, keeps it, as a
 /// `FormRequest` does for a JSON `""` or a urlencoded `name=`. Other text
-/// that does not parse files `failure`, the key for `T`'s kind; a file
-/// part files [`FieldFailure::String`].
+/// that does not parse files `failure`, the key for `T`'s kind, and so does
+/// a part that is not UTF-8, which parses as no type; a file part files
+/// [`FieldFailure::String`].
 #[doc(hidden)]
 pub fn take_text<T>(
     value: MultipartValue,
@@ -1267,6 +1279,10 @@ pub fn take_text<T>(
                 Taken::Invalid
             }
         },
+        MultipartValue::NonUtf8Text(_) => {
+            add_field_failure(errors, name, Some(index), failure);
+            Taken::Invalid
+        }
         MultipartValue::File { .. } => {
             add_field_failure(errors, name, Some(index), FieldFailure::String);
             Taken::Invalid

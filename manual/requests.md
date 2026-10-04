@@ -569,11 +569,17 @@ validation catalog by its key:
 | A required field is missing | `validation-required` |
 | Text that doesn't parse as an integer, a float or a `bool` field | `validation-integer`, `validation-numeric`, `validation-boolean` |
 | Text that doesn't parse as any other type | `validation-format` |
+| Bytes that aren't UTF-8 for a `String` field | `validation-string` |
 | A text part where a file belongs | `validation-file` |
 | A file part where text belongs | `validation-string` |
 | A file over `MaxSize<N>`, the limit in kilobytes as Laravel words it | `validation-max-file` |
 | A file `ImageFile` refuses | `validation-image` |
 | A file `MimeType<L>` refuses, with the allowed types | `validation-mimetypes` |
+
+A text part whose bytes aren't UTF-8, as a page served in a legacy
+encoding can send, doesn't parse as any type: a `String` field reports
+`validation-string`, and any other field the key its type reports for text
+that doesn't parse.
 
 To change a message, define its key in your own catalog:
 
