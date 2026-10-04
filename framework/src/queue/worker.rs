@@ -97,10 +97,10 @@ static REGISTRY: LazyLock<RwLock<HashMap<String, Registration>>> =
 /// `Mail::queue` and `Mail::later` push [`SendMailJob`](crate::mail::SendMailJob)
 /// and `Notify::queue` pushes
 /// [`SendNotificationJob`](crate::notifications::notify_job::SendNotificationJob).
-/// An application never writes either type and the manuals never asked it
-/// to register them, so without these entries a worker dead-lettered every
+/// An application never writes either type, so it cannot be expected to
+/// register them. Without these entries a worker would dead-letter every
 /// queued mail and notification as `unknown job`, and the `sync` driver
-/// failed the push itself.
+/// would fail the push itself.
 fn framework_jobs() -> HashMap<String, Registration> {
     use crate::mail::SendMailJob;
     use crate::notifications::notify_job::SendNotificationJob;
