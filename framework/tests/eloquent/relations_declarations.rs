@@ -1153,3 +1153,128 @@ async fn a_pivot_models_scopes_do_not_filter_the_relation() {
     assert_eq!(pivots(&club.people().get().await.unwrap()), expected);
     assert_eq!(club.people().count().await.unwrap(), 2);
 }
+
+// ---- A BelongsTo owner key defaults to the owner's primary key ----------
+
+#[model(table = "rd_brands", primary_key = "uid")]
+pub struct RdBrand {
+    pub uid: i64,
+    pub name: String,
+    pub rating: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[model(table = "rd_products", touches = ["brand"], relations = {
+    brand: BelongsTo<RdBrand> { fk = "brand_uid" },
+})]
+pub struct RdProduct {
+    pub id: i64,
+    pub brand_uid: i64,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Brand 7 has a product; product 2 points at a brand that does not
+/// exist. The brands table has no `id` column, so a read that named one
+/// fails outright.
+async fn brand_fixture() -> TestDatabase {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for sql in [
+        "CREATE TABLE rd_brands (uid INTEGER PRIMARY KEY, name TEXT NOT NULL, \
+            rating INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        "CREATE TABLE rd_products (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            brand_uid INTEGER NOT NULL, name TEXT NOT NULL, \
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        "INSERT INTO rd_brands (uid, name, rating, created_at, updated_at) VALUES \
+            (7, 'acme', 4, '2001-01-01T00:00:00+00:00', '2001-01-01T00:00:00+00:00')",
+        "INSERT INTO rd_products (id, brand_uid, name, created_at, updated_at) VALUES \
+            (1, 7, 'anvil', '2001-01-01T00:00:00+00:00', '2001-01-01T00:00:00+00:00'), \
+            (2, 99, 'orphan', '2001-01-01T00:00:00+00:00', '2001-01-01T00:00:00+00:00')",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+    db
+}
+
+/// `product.brand()` reads the owner by its primary key, `uid`.
+#[tokio::test]
+async fn belongs_to_reads_the_owner_by_its_primary_key() {
+    let _db = brand_fixture().await;
+    let product = RdProduct::find(1).await.unwrap().unwrap();
+    let brand = product.brand().first().await.unwrap();
+    assert_eq!(brand.map(|b| b.name), Some("acme".to_string()));
+}
+
+/// The eager load, `with_count` and `with_sum` of a `BelongsTo` match the
+/// owner on its primary key.
+#[tokio::test]
+async fn eager_belongs_to_matches_the_owner_by_its_primary_key() {
+    let _db = brand_fixture().await;
+    let products = RdProduct::query()
+        .with(["brand"])
+        .with_count(["brand"])
+        .with_sum(("brand", "rating"))
+        .order_by("id", suprnova::Direction::Asc)
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(
+        products[0].brand_loaded().map(|b| b.name.as_str()),
+        Some("acme")
+    );
+    assert!(products[1].brand_loaded().is_none());
+    assert_eq!(products[0].brand_count(), 1);
+    assert_eq!(products[1].brand_count(), 0);
+    assert_eq!(products[0].brand_sum_of("rating"), Some(4.0));
+}
+
+/// `has("brand")` correlates the owner on its primary key.
+#[tokio::test]
+async fn has_on_a_belongs_to_correlates_on_the_owners_primary_key() {
+    let _db = brand_fixture().await;
+    let owned = RdProduct::query().has("brand").get().await.unwrap();
+    assert_eq!(labels(owned.iter().map(|p| &p.name)), vec!["anvil"]);
+}
+
+/// Saving a product touches its brand, found by the brand's primary key.
+#[tokio::test]
+async fn touches_find_a_belongs_to_owner_by_its_primary_key() {
+    let _db = brand_fixture().await;
+    let product = RdProduct::find(1).await.unwrap().unwrap();
+    product.update(attrs! { name: "anvil 2" }).await.unwrap();
+    let brand = RdBrand::find(7).await.unwrap().unwrap();
+    assert_ne!(
+        brand.updated_at.to_rfc3339(),
+        "2001-01-01T00:00:00+00:00",
+        "the owner's updated_at is touched"
+    );
+}
+
+// ---- has on a MorphedByMany reads its pivot foreign key -----------------
+
+/// `tag.groups()` is a `MorphedByMany` whose pivot column for the tag is
+/// its `pivot_foreign_key` default, `rd_tag_id`. `has("groups")`
+/// correlates the tag on that column, as the relation's reads do.
+#[tokio::test]
+async fn has_on_a_morphed_by_many_correlates_on_its_pivot_foreign_key() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for sql in [
+        "CREATE TABLE rd_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE rd_tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE rd_tagged_actual (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            rd_tag_id INTEGER NOT NULL, tagged_id INTEGER NOT NULL, \
+            tagged_type TEXT NOT NULL, level INTEGER NOT NULL)",
+        "INSERT INTO rd_groups (id, name) VALUES (1, 'group')",
+        "INSERT INTO rd_tags (id, name) VALUES (1, 'used'), (2, 'unused')",
+        "INSERT INTO rd_tagged_actual (rd_tag_id, tagged_id, tagged_type, level) \
+            VALUES (1, 1, 'group', 1)",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+    let used = RdTag::query().has("groups").get().await.unwrap();
+    assert_eq!(labels(used.iter().map(|t| &t.name)), vec!["used"]);
+    let tagged = RdGroup::query().has("tags").get().await.unwrap();
+    assert_eq!(labels(tagged.iter().map(|g| &g.name)), vec!["group"]);
+}
