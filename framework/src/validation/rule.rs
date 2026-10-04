@@ -1542,11 +1542,10 @@ pub mod rules {
                         sa == sb
                     }
                 }
+                // By value, exactly: through `f64`, 2^53 and 2^53 + 1
+                // would be one value.
                 (Value::Number(na), Value::Number(nb)) if !self.strict => {
-                    match (na.as_f64(), nb.as_f64()) {
-                        (Some(fa), Some(fb)) => fa == fb,
-                        _ => na == nb,
-                    }
+                    crate::json_number::compare(na, nb).is_eq()
                 }
                 _ => a == b,
             }

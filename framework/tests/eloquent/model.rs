@@ -442,6 +442,29 @@ async fn decrement_atomic_update() {
     assert_eq!(reread.hits, 6);
 }
 
+/// DATA-008: `Collection::sort_by` orders integers exactly. Above 2^53
+/// two integers can share one `f64`, and the comparison used to call
+/// them equal and leave them unsorted.
+#[tokio::test]
+#[serial]
+async fn sort_by_orders_integers_above_two_to_the_53_exactly() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    db.execute_unprepared(
+        "CREATE TABLE t4_counters (id INTEGER PRIMARY KEY AUTOINCREMENT, hits INTEGER NOT NULL DEFAULT 0)",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "INSERT INTO t4_counters (id, hits) VALUES (1, 9007199254740993), (2, 9007199254740992)",
+    )
+    .await
+    .unwrap();
+
+    let rows = T4Counter::query().order_by_asc("id").get().await.unwrap();
+    let ids: Vec<i64> = rows.sort_by("hits").iter().map(|c| c.id).collect();
+    assert_eq!(ids, vec![2, 1]);
+}
+
 #[tokio::test]
 #[serial]
 async fn force_delete_alias_calls_hard_delete() {
