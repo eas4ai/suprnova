@@ -2692,6 +2692,10 @@ not of the kind of its column, ends the walk with the same error. The
 check runs on each batch before the closure sees it, so the closure never
 processes a batch that holds such a row.
 
+A `u64` key walks its whole range. On MySQL, whose unsigned keys reach
+`u64::MAX`, that includes keys above `i64::MAX`; on Postgres and SQLite no
+key passes `i64::MAX`.
+
 For a key that `chunk_by_id` refuses, use `chunk()`. It paginates by
 OFFSET, so it needs no cursor, and it has the concurrency limits above.
 

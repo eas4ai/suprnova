@@ -5647,8 +5647,8 @@ where
             | ColumnType::BigInteger
             | ColumnType::TinyUnsigned
             | ColumnType::SmallUnsigned
-            | ColumnType::Unsigned
-            | ColumnType::BigUnsigned => Ok(KeysetKind::Integer),
+            | ColumnType::Unsigned => Ok(KeysetKind::Integer),
+            ColumnType::BigUnsigned => Ok(KeysetKind::Unsigned),
             ColumnType::Char(_) | ColumnType::String(_) | ColumnType::Text => Ok(KeysetKind::Text),
             _ => Err(Self::keyset_refusal(
                 method,
@@ -5679,7 +5679,8 @@ where
     }
 
     /// One row's primary key as a keyset cursor. A null, an array, an
-    /// object or a number outside the `i64` range has no place in the
+    /// object, or a number outside its column's range (`i64` for a
+    /// signed column, `u64` for an unsigned one) has no place in the
     /// key's order that `pk > cursor` would respect, so it is refused.
     /// So is a value of another kind than its column: a key type that
     /// writes an integer column as a string would bind as text, and the
@@ -5696,7 +5697,8 @@ where
                 method,
                 pk,
                 "a row's key is not of the kind of its column: an integer in the i64 range \
-                 for an integer column, a string for a text column",
+                 for an integer column, in the u64 range for an unsigned one, a string for \
+                 a text column",
             )),
         }
     }
@@ -6395,6 +6397,11 @@ fn current_cursor_from_request() -> Option<String> {
 enum KeysetKind {
     /// An integer column. The key is a number in the `i64` range.
     Integer,
+    /// A `BIGINT UNSIGNED` column, a `u64` field's. The key is a number in
+    /// the `u64` range, which MySQL's unsigned keys fill and the field's
+    /// cast binds as an unsigned number. On Postgres and SQLite the column
+    /// is signed and no key passes `i64::MAX`.
+    Unsigned,
     /// A text column. The key is a string.
     Text,
 }
@@ -6404,6 +6411,7 @@ impl KeysetKind {
     fn fits(self, key: &Value) -> bool {
         match self {
             Self::Integer => key.is_i64(),
+            Self::Unsigned => key.is_u64(),
             Self::Text => key.is_string(),
         }
     }
@@ -6418,19 +6426,27 @@ mod tests {
         let number = serde_json::json!(42);
         let text = serde_json::json!("42");
         assert!(KeysetKind::Integer.fits(&number));
+        assert!(KeysetKind::Unsigned.fits(&number));
         assert!(KeysetKind::Text.fits(&text));
         // A key type that writes an integer column as a string binds as
         // text, which the database does not compare with the column.
         assert!(!KeysetKind::Integer.fits(&text));
+        assert!(!KeysetKind::Unsigned.fits(&text));
         assert!(!KeysetKind::Text.fits(&number));
+        // An unsigned column's keys fill the u64 range; a signed column's
+        // stop at i64::MAX.
+        let top = serde_json::json!(u64::MAX);
+        assert!(KeysetKind::Unsigned.fits(&top));
+        assert!(!KeysetKind::Integer.fits(&top));
+        assert!(!KeysetKind::Unsigned.fits(&serde_json::json!(-1)));
         for other in [
             serde_json::json!(null),
             serde_json::json!(1.5),
-            serde_json::json!(u64::MAX),
             serde_json::json!([1]),
             serde_json::json!({"id": 1}),
         ] {
             assert!(!KeysetKind::Integer.fits(&other), "{other}");
+            assert!(!KeysetKind::Unsigned.fits(&other), "{other}");
             assert!(!KeysetKind::Text.fits(&other), "{other}");
         }
     }
