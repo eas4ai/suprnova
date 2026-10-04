@@ -1542,6 +1542,7 @@ it when the query runs.
 | `Model::without_global_scopes()` | No |
 | `Model::query().without_global_scope::<S>()` | Yes, minus `S`, wherever it is chained |
 | `Model::with_trashed()` / `Model::only_trashed()` | Yes - only the soft-delete filter is lifted |
+| `RouteParam<Model>` route binding | Yes - the bound row is read through `Model::query()` |
 | `Model::find(id)` | No - PK lookup goes through SeaORM directly |
 | `Model::find_many([...])` | No - same reason |
 | `Model::all()` | No - same reason |
