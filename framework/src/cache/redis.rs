@@ -349,6 +349,11 @@ impl CacheStore for RedisCache {
         self.default_ttl
     }
 
+    fn locks_are_shared(&self) -> bool {
+        // The lock key lives in Redis, which every process shares.
+        true
+    }
+
     async fn add_raw(
         &self,
         key: &str,

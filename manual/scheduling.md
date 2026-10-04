@@ -558,13 +558,19 @@ They compose. A long-running task that must also be single-server takes
 both.
 
 **Requires a shared cache.** The election is a [`Cache`](cache.md) lock, so
-"one server" means "one process among those sharing a cache backend". Under
-`CACHE_DRIVER=memory` the lock lives in a single process's heap, every
+"one server" means "one process among those sharing a cache backend". With an
+in-memory cache store the lock lives in a single process's heap, every
 replica wins its own election, and the guarantee is silently absent.
 
-In production that is a **boot failure**, not a warning:
+The check asks the cache store the scheduler actually locks through, not
+`CACHE_DRIVER`: an in-memory store your bootstrap binds, or a typed
+`CacheConfig` that selects memory, counts as per-process even when
+`CACHE_DRIVER=redis`. A custom `CacheStore` whose locks are shared across
+processes says so by returning `true` from `CacheStore::locks_are_shared`.
 
-> `refusing to boot in production: 1 task(s) request single-server execution (billing:nightly) but CACHE_DRIVER is memory or unset, so the election lock lives in this process's heap. Every replica would win its own election and run the task, which is what on_one_server() exists to prevent. Set CACHE_DRIVER=redis with REDIS_URL, or set SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true to acknowledge per-process locking - which is only accurate if you run exactly one scheduler.`
+In production a per-process lock is a **boot failure**, not a warning:
+
+> `refusing to boot in production: 1 task(s) request single-server execution (billing:nightly) but the bound cache store keeps its locks in this process (CACHE_DRIVER is memory or unset, or the application bound an in-memory store), so the election lock lives in this process's heap. Every replica would win its own election and run the task, which is what on_one_server() exists to prevent. Set CACHE_DRIVER=redis with REDIS_URL, or set SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true to acknowledge per-process locking - which is only accurate if you run exactly one scheduler.`
 
 Set `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true` if your deployment
 really does run a single scheduler. Outside production the memory driver

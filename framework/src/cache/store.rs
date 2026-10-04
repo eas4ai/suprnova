@@ -146,4 +146,17 @@ pub trait CacheStore: Send + Sync {
     /// Returns `true` if the key existed (and wasn't expired) and was
     /// refreshed; `false` otherwise.
     async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, FrameworkError>;
+
+    /// Whether a lock taken through this store excludes holders in other
+    /// processes.
+    ///
+    /// The scheduler's production guard asks the bound store this before it
+    /// lets `on_one_server` tasks run: a lock that lives in one process's
+    /// memory lets every replica win its own election and run the task. The
+    /// default is `false`, so a store has to claim shared locking to pass the
+    /// guard; a store backed by a shared service overrides it to return
+    /// `true`.
+    fn locks_are_shared(&self) -> bool {
+        false
+    }
 }
