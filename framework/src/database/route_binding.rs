@@ -217,6 +217,20 @@ pub trait AutoRouteBinding: Sized + Send {
     async fn from_route_param(value: &str) -> Result<Self, FrameworkError>;
 }
 
+/// The key type a route segment failed to parse as, as the 400 names it:
+/// the type the model declares. A `u64` key is stored as
+/// [`StoredU64`](crate::eloquent::casts::StoredU64), whose module path
+/// means nothing to a client, so the answer names `u64`, as it names `i64`
+/// for an `i64` key.
+fn key_type_name<K>() -> &'static str {
+    let name = std::any::type_name::<K>();
+    if name == std::any::type_name::<crate::eloquent::casts::StoredU64>() {
+        "u64"
+    } else {
+        name
+    }
+}
+
 /// Blanket implementation of AutoRouteBinding for all SeaORM models
 ///
 /// This automatically implements route model binding for any SeaORM Model type
@@ -234,7 +248,7 @@ where
         let id: <E::PrimaryKey as PrimaryKeyTrait>::ValueType = value.parse().map_err(|_| {
             FrameworkError::param_parse(
                 value,
-                std::any::type_name::<<E::PrimaryKey as PrimaryKeyTrait>::ValueType>(),
+                key_type_name::<<E::PrimaryKey as PrimaryKeyTrait>::ValueType>(),
             )
         })?;
 
@@ -337,7 +351,7 @@ where
             as PrimaryKeyTrait>::ValueType = value.parse().map_err(|_| {
             FrameworkError::param_parse(
                 value,
-                std::any::type_name::<
+                key_type_name::<
                     <<<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::PrimaryKey
                         as PrimaryKeyTrait>::ValueType,
                 >(),

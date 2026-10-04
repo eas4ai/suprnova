@@ -141,7 +141,7 @@ pub use temporal::{
     AsDate, AsDateTime, AsImmutableDate, AsImmutableDateTime, AsNaiveDateTime, AsNativeDateTime,
     AsOptionalDateTime, AsOptionalNaiveDateTime, AsOptionalNativeDateTime, AsTimestamp,
 };
-pub use unsigned::{AsOptionalU64, AsU64, StoredU64};
+pub use unsigned::{__bind_integer, AsOptionalU64, AsU64, StoredU64};
 
 /// Construct a `HashMap<&'static str, Arc<dyn DynCast>>` for use with
 /// `Builder::with_casts(...)`. Each entry is `field_name = CastType`;

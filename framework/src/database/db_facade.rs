@@ -122,23 +122,43 @@ fn is_select_statement(sql: &str) -> bool {
         .is_some_and(|head| head.eq_ignore_ascii_case("SELECT"))
 }
 
+/// Bind `value`, written to `table.column`, and return its placeholder.
+///
+/// A JSON `u64` above `i64::MAX` binds as an unsigned number, which a
+/// MySQL unsigned column stores exactly. Postgres and SQLite have no
+/// integer column that holds it - as text, Postgres refused the statement
+/// and SQLite stored a rounded real - so there the write is refused before
+/// anything is sent, as a model's write is: a database error that names
+/// the column, which a client sees as the generic 500 body.
 fn write_value_expression(
     backend: DbBackend,
+    (table, column): (&str, &str),
     value: &serde_json::Value,
     values: &mut Vec<SeaValue>,
     position: &mut usize,
-) -> String {
+) -> Result<String, FrameworkError> {
     if value.is_null() {
-        return "NULL".to_owned();
+        return Ok("NULL".to_owned());
     }
 
+    let bound = match value.as_u64() {
+        Some(n) if n > i64::MAX as u64 => {
+            let bound = SeaValue::BigUnsigned(Some(n));
+            crate::eloquent::casts::unsigned::refuse_unsigned_overflow(
+                backend, table, column, &bound,
+            )
+            .map_err(FrameworkError::database)?;
+            bound
+        }
+        _ => crate::eloquent::model::json_value_to_sea_value(value),
+    };
     *position += 1;
-    values.push(crate::eloquent::model::json_value_to_sea_value(value));
-    if backend == DbBackend::Postgres {
+    values.push(bound);
+    Ok(if backend == DbBackend::Postgres {
         format!("${position}")
     } else {
         "?".to_owned()
-    }
+    })
 }
 
 /// One entry in a [`DbTableBuilder`]'s select list.
@@ -1108,9 +1128,9 @@ impl DbTableBuilder {
                 let v = attrs
                     .get(c)
                     .expect("key present in iter must be present in get");
-                write_value_expression(backend, v, &mut values, &mut position)
+                write_value_expression(backend, (&self.table, c), v, &mut values, &mut position)
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         let base = format!(
             "INSERT INTO {} ({}) VALUES ({})",
@@ -1420,10 +1440,16 @@ impl DbTableBuilder {
                 let v = attrs
                     .get(col)
                     .expect("key present in iter must be present in get");
-                let expression = write_value_expression(backend, v, &mut values, &mut counter);
-                format!("{} = {expression}", quote_identifier(backend, col))
+                let expression = write_value_expression(
+                    backend,
+                    (&self.table, col),
+                    v,
+                    &mut values,
+                    &mut counter,
+                )?;
+                Ok(format!("{} = {expression}", quote_identifier(backend, col)))
             })
-            .collect();
+            .collect::<Result<_, FrameworkError>>()?;
         sql.push_str(&sets.join(", "));
 
         sql.push_str(&self.render_where_clauses(backend, &mut values, &mut counter)?);

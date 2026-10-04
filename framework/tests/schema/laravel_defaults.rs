@@ -345,10 +345,10 @@ pub async fn u64_fields_round_trip(conn: &DatabaseConnection) {
 /// `i64::MAX` is refused with an error naming the column, through create,
 /// update, save and a mass update, before anything is sent: the row count
 /// and the stored value stay as they were and the query log stays empty.
-/// A stored negative value fails the read, naming the column. It fails when
-/// the driver's binder panics on the conversion (sea-query-sqlx unwraps
-/// it), when a value is truncated or wrapped, or when `-1` reads as a
-/// `u64`.
+/// A `find` by such a key finds nothing. A stored negative value fails the
+/// read, naming the column. It fails when the driver's binder panics on
+/// the conversion (sea-query-sqlx unwraps it), when a value is truncated or
+/// wrapped, or when `-1` reads as a `u64`.
 pub async fn u64_above_i64_max_is_refused(conn: &DatabaseConnection) {
     let too_big = i64::MAX as u64 + 1;
     create_tables(conn, WIDE_TABLES).await;
@@ -424,8 +424,11 @@ pub async fn u64_above_i64_max_is_refused(conn: &DatabaseConnection) {
     DB::disable_query_log().expect("disable the query log");
 
     assert!(
-        LdWideOrder::find(too_big).await.is_err(),
-        "a key above i64::MAX is an error, not a panic in the binder"
+        LdWideOrder::find(too_big)
+            .await
+            .expect("a key above i64::MAX is not a panic in the binder")
+            .is_none(),
+        "no row holds a key above i64::MAX"
     );
     assert_eq!(count(conn, "ld_wide_orders").await, rows);
     assert_eq!(
@@ -603,10 +606,10 @@ pub async fn u64_full_range_on_mysql(conn: &DatabaseConnection) {
 /// `pluck_keyed`, `value`, `value_or_fail`, `sole_value`, `min`, `max` and
 /// the raw `DB::scalar`. On MySQL the values span the whole `u64` range.
 /// On Postgres and SQLite a stored negative value fails the read, naming
-/// the column, where `pluck` and `value` used to drop it; and a filter
-/// above `i64::MAX` is refused, naming the column, with nothing sent,
-/// where it was bound as text, and a raw parameter that large is an error
-/// rather than a panic in sea-query-sqlx's binder. It fails while these
+/// the column, where `pluck` and `value` used to drop it; a filter above
+/// `i64::MAX` answers what is true of every row, since none holds such a
+/// value; and a raw parameter that large is an error rather than a panic
+/// in sea-query-sqlx's binder. It fails while these
 /// terminals decode through SeaORM's `TryGetable`, which reads a `u64` on
 /// MySQL only.
 pub async fn u64_query_terminals(conn: &DatabaseConnection) {
@@ -744,45 +747,40 @@ pub async fn u64_query_terminals(conn: &DatabaseConnection) {
     }
 
     let too_big = i64::MAX as u64 + 1;
-    DB::enable_query_log().expect("enable the query log");
-    let refusals = [
-        (
-            "filter",
-            LdCounter::query()
-                .filter("hits", too_big)
-                .count()
-                .await
-                .map(|_| ()),
-        ),
-        (
-            "where_in",
-            LdCounter::query()
-                .where_in("hits", vec![too_big])
-                .get()
-                .await
-                .map(|_| ()),
-        ),
-        (
-            "filter_op",
-            LdCounter::query()
-                .filter_op("hits", ">", too_big)
-                .first()
-                .await
-                .map(|_| ()),
-        ),
-    ];
-    for (operation, result) in refusals {
-        let error = result.expect_err(operation).to_string();
-        assert!(
-            error.contains("hits") && error.contains(&too_big.to_string()),
-            "{operation}: the error names the column and the value: {error}"
-        );
-    }
-    assert!(
-        DB::get_query_log().expect("query log").is_empty(),
-        "no refused filter reached the database"
+    assert_eq!(
+        LdCounter::query()
+            .filter("hits", too_big)
+            .count()
+            .await
+            .expect("filter"),
+        0,
+        "no row holds a value above i64::MAX"
     );
-    DB::disable_query_log().expect("disable the query log");
+    assert!(
+        LdCounter::query()
+            .where_in("hits", vec![too_big])
+            .get()
+            .await
+            .expect("where_in")
+            .is_empty()
+    );
+    assert!(
+        LdCounter::query()
+            .filter_op("hits", ">", too_big)
+            .first()
+            .await
+            .expect("filter_op")
+            .is_none()
+    );
+    assert_eq!(
+        LdCounter::query()
+            .filter_op("hits", "<", too_big)
+            .count()
+            .await
+            .expect("filter_op"),
+        2,
+        "every row holds a smaller value"
+    );
     let placeholder = if backend == DbBackend::Postgres {
         "$1"
     } else {

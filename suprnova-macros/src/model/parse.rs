@@ -789,6 +789,45 @@ fn classify_unsigned(ty: &Type) -> UnsignedShape {
     }
 }
 
+/// Whether `ty` is a primitive integer narrower than `u64`, or an `Option`
+/// of one. Its column is an integer column that holds no `u64` above
+/// `i64::MAX` on any database, so the query builder has to see such a value
+/// as the unsigned number it is to compare it truthfully or refuse to
+/// write it; bound as text, Postgres refuses the comparison and SQLite
+/// stores a rounded real.
+pub(crate) fn is_integer_below_u64(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    if path.qself.is_some() {
+        return false;
+    }
+    let Some(last) = path.path.segments.last() else {
+        return false;
+    };
+    let name = last.ident.to_string();
+    let primitive = matches!(
+        name.as_str(),
+        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32"
+    );
+    if primitive {
+        return matches!(last.arguments, syn::PathArguments::None);
+    }
+    if name != "Option" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return false;
+    };
+    match (args.args.len(), args.args.first()) {
+        (1, Some(syn::GenericArgument::Type(inner))) => {
+            !matches!(inner, Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Option"))
+                && is_integer_below_u64(inner)
+        }
+        _ => false,
+    }
+}
+
 /// Helper - convert `CamelCase` → `snake_case`.
 pub fn to_snake(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
@@ -2072,6 +2111,27 @@ mod tests {
         ] {
             let ty: Type = syn::parse_str(source).unwrap();
             assert_eq!(classify_unsigned(&ty), shape, "{source}");
+        }
+    }
+
+    #[test]
+    fn integer_fields_below_u64_are_recognised() {
+        for (source, expected) in [
+            ("i64", true),
+            ("i32", true),
+            ("u32", true),
+            ("core::primitive::i64", true),
+            ("Option<i64>", true),
+            ("std::option::Option<i16>", true),
+            ("u64", false),
+            ("Option<u64>", false),
+            ("Option<Option<i64>>", false),
+            ("String", false),
+            ("f64", false),
+            ("Vec<i64>", false),
+        ] {
+            let ty: Type = syn::parse_str(source).unwrap();
+            assert_eq!(is_integer_below_u64(&ty), expected, "{source}");
         }
     }
 

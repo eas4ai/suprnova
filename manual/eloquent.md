@@ -931,21 +931,34 @@ let emails: Vec<String> = User::query().distinct().pluck("email").await?;
 let count   = User::count().await?;
 let count   = User::filter("active", true).count().await?;
 let sum     = User::sum::<f64>("balance").await?;
+let visits  = Page::sum::<u64>("views").await?;
 let avg     = Order::avg::<f64>("total").await?;
+let exact   = Order::avg::<Decimal>("total").await?;
 let min     = Order::min::<DateTime<Utc>>("created_at").await?;
 let max     = Order::max::<DateTime<Utc>>("created_at").await?;
 let exists  = User::filter("email", &email).exists().await?;
 let missing = User::filter("email", &email).doesnt_exist().await?;
 ```
 
-Aggregates are generic over the return type because SeaORM needs to
-know what to coerce the DB scalar to. Type defaults:
-`count -> i64`; `sum`/`avg` carry an explicit type parameter.
-Suprnova aliases generated aggregate expressions internally so the same
-typed result is decoded on PostgreSQL, MySQL, and SQLite. `sum` and `avg`
-return zero for an empty match set, while `min` and `max` return `None`.
-An incompatible requested Rust type or missing result column is a database
-error; it is never converted into a plausible zero or `None`.
+`count` returns an `i64`. `sum`, `avg`, `min` and `max` take the type to
+read as a type parameter; for `avg` it is `f64` or `rust_decimal::Decimal`
+(the `AvgValue` trait). Suprnova aliases generated
+aggregate expressions internally so the same typed result is decoded on
+PostgreSQL, MySQL, and SQLite. `sum` and `avg` return zero for an empty
+match set, while `min` and `max` return `None`. An incompatible requested
+Rust type or missing result column is a database error; it is never
+converted into a plausible zero or `None`.
+
+The database chooses the type of a sum or an average: PostgreSQL answers
+`numeric` for the sum of a `bigint` column and for any average of
+integers, MySQL answers `DECIMAL`, and SQLite answers an integer or a
+real. `sum` and `avg` read whichever arrives. An integer type such as
+`i64` or `u64` takes a sum exactly, and a sum with a fraction, or outside
+the type's range, is an error rather than a truncated value. `Decimal`
+takes a sum or an average exactly, so the average of a `DECIMAL` money
+column keeps every digit, and a value it can't hold is an error. `f64`
+takes the nearest value. SQLite has no exact decimal type: it stores a
+`DECIMAL` column as a real, and `Decimal` reads that real.
 
 ### Terminals
 
@@ -965,9 +978,17 @@ and `pluck` leaves the row out. A value that doesn't read as the type you
 name is an error that names the column, rather than a missing row. These
 terminals, the aggregates and `DB::scalar` read `u64` and `Option<u64>` on
 every database, as a model's `u64` field does: on Postgres and SQLite a
-negative value fails the read. On those two databases, a filter that
-compares a `u64` column with a value above `i64::MAX` fails before anything
-is sent, because no row there can hold one.
+negative value fails the read. No row on those two databases can hold a
+`u64` above `i64::MAX`, so a read by one gets its answer without sending
+the value: `find` returns `None` and `find_many` skips it. In a filter,
+`=`, `>`, `>=` and `IN` match no row, and `!=`, `<`, `<=` and `NOT IN`
+match every row whose column is not NULL. MySQL gives the same answer for
+rows that all hold smaller values.
+
+The same holds on every database for a column of a narrower integer field
+such as `i64` or `i32`, which can't hold a `u64` above `i64::MAX` either. A
+mass update that writes such a value to one is refused on Postgres and
+SQLite before anything is sent.
 
 `to_sql` returns the parameterised SQL the next terminal would emit -
 useful for debugging or building views. The bindings are
@@ -2688,6 +2709,10 @@ A third case is found while the walk runs. A row whose key is null, or is
 not of the kind of its column, ends the walk with the same error. The
 check runs on each batch before the closure sees it, so the closure never
 processes a batch that holds such a row.
+
+A `u64` key walks its whole range. On MySQL, whose unsigned keys reach
+`u64::MAX`, that includes keys above `i64::MAX`; on Postgres and SQLite no
+key passes `i64::MAX`.
 
 For a key that `chunk_by_id` refuses, use `chunk()`. It paginates by
 OFFSET, so it needs no cursor, and it has the concurrency limits above.
