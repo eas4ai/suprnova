@@ -158,7 +158,7 @@ where
         return Ok(false);
     }
     let removed = <S::Passkey as EntityBinding>::Entity::delete_many()
-        .filter(S::Passkey::passkey_id_column().eq(passkey_id.to_owned()))
+        .filter(S::Passkey::passkey_id_column().eq(S::Passkey::passkey_id_value(passkey_id)))
         .filter(S::Passkey::user_id_column().eq(S::Passkey::user_id_value(user_id)))
         .exec(transaction.connection())
         .await
@@ -235,7 +235,10 @@ where
         return Ok(false);
     }
     let removed = <S::LinkedAccount as EntityBinding>::Entity::delete_many()
-        .filter(S::LinkedAccount::account_id_column().eq(account_id.to_owned()))
+        .filter(
+            S::LinkedAccount::account_id_column()
+                .eq(S::LinkedAccount::account_id_value(account_id)),
+        )
         .filter(S::LinkedAccount::user_id_column().eq(S::LinkedAccount::user_id_value(user_id)))
         .exec(transaction.connection())
         .await

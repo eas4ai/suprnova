@@ -343,6 +343,13 @@ impl LinkedAccountFields for accounts::Entity {
     fn account_id_column() -> Self::Column {
         accounts::Column::Id
     }
+    fn account_id_value(value: &str) -> sea_orm::Value {
+        // Ids come from the store, so they parse. Text that does not names
+        // no row; it is bound as text and the database refuses it.
+        value
+            .parse::<i64>()
+            .map_or_else(|_| value.to_owned().into(), Into::into)
+    }
     fn write_account_id(m: &mut Self::ActiveModel, v: &str) {
         m.id = Set(v.parse().expect("fixture account ids are i64"));
     }
@@ -395,6 +402,13 @@ impl PasskeyFields for methods::Entity {
     }
     fn passkey_id_column() -> Self::Column {
         methods::Column::Id
+    }
+    fn passkey_id_value(value: &str) -> sea_orm::Value {
+        // Ids come from the store, so they parse. Text that does not names
+        // no row; it is bound as text and the database refuses it.
+        value
+            .parse::<i64>()
+            .map_or_else(|_| value.to_owned().into(), Into::into)
     }
     fn write_passkey_id(m: &mut Self::ActiveModel, v: &str) {
         m.id = Set(v.parse().expect("fixture passkey ids are i64"));

@@ -35,6 +35,12 @@ if [[ "${1-}" == "--live" ]]; then
     run_live_test test default_schema_backends mysql_default_schema_is_replay_safe
     run_live_test test foundation_gate postgres_backend_is_reachable
     run_live_test test foundation_gate mysql_backend_is_reachable
+    run_live_test test method_ids_live postgres_a_registered_passkey_is_read_back_by_its_id
+    run_live_test test method_ids_live postgres_a_passkey_is_removed_by_its_id
+    run_live_test test method_ids_live postgres_a_linked_account_is_unlinked_by_its_id
+    run_live_test test method_ids_live mysql_a_registered_passkey_is_read_back_by_its_id
+    run_live_test test method_ids_live mysql_a_passkey_is_removed_by_its_id
+    run_live_test test method_ids_live mysql_a_linked_account_is_unlinked_by_its_id
     run_live_test test seaorm_upgrade_compat postgres_upgrade_from_seaorm_1_1_is_replay_safe
     run_live_test test seaorm_upgrade_compat mysql_upgrade_from_seaorm_1_1_is_replay_safe
     run_live_test test storage_tokens configured_postgres_target_is_required

@@ -103,7 +103,7 @@ where
         .await
         .map_err(db_error)?;
     let rows = <S::Passkey as EntityBinding>::Entity::find()
-        .filter(S::Passkey::passkey_id_column().eq(passkey_id))
+        .filter(S::Passkey::passkey_id_column().eq(S::Passkey::passkey_id_value(&passkey_id)))
         .all(transaction.connection())
         .await
         .map_err(db_error)?;

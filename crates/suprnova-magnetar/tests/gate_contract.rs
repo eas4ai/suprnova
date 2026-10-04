@@ -245,12 +245,18 @@ fn assert_executable(relative: &str) {
 #[cfg(not(unix))]
 fn assert_executable(_relative: &str) {}
 
-const LIVE_TEST_INVOCATIONS: [&str; 20] = [
+const LIVE_TEST_INVOCATIONS: [&str; 26] = [
     "run_live_test test default_schema_backends postgres_default_schema_is_replay_safe",
     "run_live_test test default_schema_backends postgres_api_import_advances_the_default_user_sequence",
     "run_live_test test default_schema_backends mysql_default_schema_is_replay_safe",
     "run_live_test test foundation_gate postgres_backend_is_reachable",
     "run_live_test test foundation_gate mysql_backend_is_reachable",
+    "run_live_test test method_ids_live postgres_a_registered_passkey_is_read_back_by_its_id",
+    "run_live_test test method_ids_live postgres_a_passkey_is_removed_by_its_id",
+    "run_live_test test method_ids_live postgres_a_linked_account_is_unlinked_by_its_id",
+    "run_live_test test method_ids_live mysql_a_registered_passkey_is_read_back_by_its_id",
+    "run_live_test test method_ids_live mysql_a_passkey_is_removed_by_its_id",
+    "run_live_test test method_ids_live mysql_a_linked_account_is_unlinked_by_its_id",
     "run_live_test test seaorm_upgrade_compat postgres_upgrade_from_seaorm_1_1_is_replay_safe",
     "run_live_test test seaorm_upgrade_compat mysql_upgrade_from_seaorm_1_1_is_replay_safe",
     "run_live_test test storage_tokens configured_postgres_target_is_required",
@@ -268,12 +274,18 @@ const LIVE_TEST_INVOCATIONS: [&str; 20] = [
     "run_live_test lib _ migration::seaorm_upgrade_tests::mysql_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1",
 ];
 
-const LIVE_TEST_LIVE_COMMANDS: [&str; 20] = [
+const LIVE_TEST_LIVE_COMMANDS: [&str; 26] = [
     "cargo test --test default_schema_backends --all-features postgres_default_schema_is_replay_safe -- --ignored --exact",
     "cargo test --test default_schema_backends --all-features postgres_api_import_advances_the_default_user_sequence -- --ignored --exact",
     "cargo test --test default_schema_backends --all-features mysql_default_schema_is_replay_safe -- --ignored --exact",
     "cargo test --test foundation_gate --all-features postgres_backend_is_reachable -- --ignored --exact",
     "cargo test --test foundation_gate --all-features mysql_backend_is_reachable -- --ignored --exact",
+    "cargo test --test method_ids_live --all-features postgres_a_registered_passkey_is_read_back_by_its_id -- --ignored --exact",
+    "cargo test --test method_ids_live --all-features postgres_a_passkey_is_removed_by_its_id -- --ignored --exact",
+    "cargo test --test method_ids_live --all-features postgres_a_linked_account_is_unlinked_by_its_id -- --ignored --exact",
+    "cargo test --test method_ids_live --all-features mysql_a_registered_passkey_is_read_back_by_its_id -- --ignored --exact",
+    "cargo test --test method_ids_live --all-features mysql_a_passkey_is_removed_by_its_id -- --ignored --exact",
+    "cargo test --test method_ids_live --all-features mysql_a_linked_account_is_unlinked_by_its_id -- --ignored --exact",
     "cargo test --test seaorm_upgrade_compat --all-features postgres_upgrade_from_seaorm_1_1_is_replay_safe -- --ignored --exact",
     "cargo test --test seaorm_upgrade_compat --all-features mysql_upgrade_from_seaorm_1_1_is_replay_safe -- --ignored --exact",
     "cargo test --test storage_tokens --all-features configured_postgres_target_is_required -- --ignored --exact",
@@ -291,7 +303,7 @@ const LIVE_TEST_LIVE_COMMANDS: [&str; 20] = [
     "cargo test --lib --all-features migration::seaorm_upgrade_tests::mysql_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1 -- --ignored --exact",
 ];
 
-const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 20] = [
+const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 26] = [
     (
         "tests/default_schema_backends.rs",
         "postgres_default_schema_is_replay_safe",
@@ -306,6 +318,30 @@ const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 20] = [
     ),
     ("tests/foundation_gate.rs", "postgres_backend_is_reachable"),
     ("tests/foundation_gate.rs", "mysql_backend_is_reachable"),
+    (
+        "tests/method_ids_live.rs",
+        "postgres_a_registered_passkey_is_read_back_by_its_id",
+    ),
+    (
+        "tests/method_ids_live.rs",
+        "postgres_a_passkey_is_removed_by_its_id",
+    ),
+    (
+        "tests/method_ids_live.rs",
+        "postgres_a_linked_account_is_unlinked_by_its_id",
+    ),
+    (
+        "tests/method_ids_live.rs",
+        "mysql_a_registered_passkey_is_read_back_by_its_id",
+    ),
+    (
+        "tests/method_ids_live.rs",
+        "mysql_a_passkey_is_removed_by_its_id",
+    ),
+    (
+        "tests/method_ids_live.rs",
+        "mysql_a_linked_account_is_unlinked_by_its_id",
+    ),
     (
         "tests/seaorm_upgrade_compat.rs",
         "postgres_upgrade_from_seaorm_1_1_is_replay_safe",
@@ -499,7 +535,7 @@ fn every_live_database_test_is_ignored_and_registered() {
         .collect::<Vec<_>>();
     assert_eq!(
         inventory, expected,
-        "source-discovered live database test inventory must remain the expected twenty"
+        "source-discovered live database test inventory must remain the expected twenty-six"
     );
 
     let (output, invocations, directory) = run_live_gate_with_metadata(
