@@ -319,3 +319,60 @@ async fn allow_origin_patterns_match_dynamic_subdomain() {
         "non-matching origin must NOT be echoed back"
     );
 }
+
+/// A pattern with top-level alternation must match each alternative as a
+/// whole origin. Anchored as `^a|b$`, the first alternative is open on the
+/// right, so an attacker who owns `app.example.evil.test` matched
+/// `https://app\.example` and received a credentialed allow, on the
+/// preflight and on the actual request alike.
+#[tokio::test]
+async fn allow_origin_patterns_anchor_every_alternative() {
+    let registry = MiddlewareRegistry::new().append(CorsMiddleware::new(
+        CorsConfig::allow_origins(Vec::<String>::new())
+            .allow_origin_patterns([r"https://app\.example|https://admin\.example"])
+            .allow_credentials(true),
+    ));
+    let addr = spawn_server(router(), registry, 5).await;
+
+    for origin in ["https://app.example", "https://admin.example"] {
+        let (status, headers, _body) =
+            request(addr, "GET", "/api/data", &[("Origin", origin)]).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            headers
+                .get("access-control-allow-origin")
+                .map(String::as_str),
+            Some(origin),
+            "each listed alternative must still be allowed"
+        );
+    }
+
+    let attacker = "https://app.example.evil.test";
+    let (status, headers, _body) = request(addr, "GET", "/api/data", &[("Origin", attacker)]).await;
+    assert_eq!(status, 200);
+    assert!(
+        !headers.contains_key("access-control-allow-origin"),
+        "a prefix extension of an alternative must NOT be allowed; got {:?}",
+        headers.get("access-control-allow-origin")
+    );
+    assert!(
+        !headers.contains_key("access-control-allow-credentials"),
+        "the attacker origin must not be told credentials are allowed"
+    );
+
+    let (_status, headers, _body) = request(
+        addr,
+        "OPTIONS",
+        "/api/data",
+        &[
+            ("Origin", attacker),
+            ("Access-Control-Request-Method", "POST"),
+        ],
+    )
+    .await;
+    assert!(
+        !headers.contains_key("access-control-allow-origin"),
+        "the preflight must refuse the attacker origin too; got {:?}",
+        headers.get("access-control-allow-origin")
+    );
+}
