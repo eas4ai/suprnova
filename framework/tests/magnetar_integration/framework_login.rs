@@ -727,6 +727,28 @@ async fn enroll_magnetar_factor(account: &Account) {
     .await;
 }
 
+/// Give the account a Magnetar second factor that waits for its
+/// confirmation.
+async fn enroll_pending_magnetar_factor(account: &Account) {
+    magnetar_sql(&format!(
+        "INSERT INTO auth_two_factor \
+         (user_id, secret, enrollment_auth_epoch, rotation_pending) \
+         VALUES ('{}', X'00', 0, 0)",
+        account.id
+    ))
+    .await;
+}
+
+/// Remove the account's Magnetar second factor, as a host that holds its
+/// `TwoFactorService` does with `disable`.
+async fn remove_magnetar_factor(account: &Account) {
+    magnetar_sql(&format!(
+        "DELETE FROM auth_two_factor WHERE user_id = '{}'",
+        account.id
+    ))
+    .await;
+}
+
 async fn session_count(account: &Account) -> usize {
     suprnova::magnetar_integration::list_sessions(&account.id)
         .await
@@ -1200,4 +1222,153 @@ async fn framework_totp_refuses_a_magnetar_passkey_sign_in() {
         outcome.map(|(user, _)| user.id)
     );
     assert_eq!(session_count(&account).await, 0);
+}
+
+/// An account has one second-factor system, not both: each refuses the
+/// sign-ins that do not verify it, so an account with both could sign in by
+/// no path. Enrolling the framework's TOTP is refused while the account has
+/// a Magnetar factor, confirmed or waiting for its confirmation.
+#[tokio::test]
+async fn framework_totp_enrollment_is_refused_while_a_magnetar_factor_exists() {
+    for confirmed in [true, false] {
+        let account = setup().await;
+        if confirmed {
+            enroll_magnetar_factor(&account).await;
+        } else {
+            enroll_pending_magnetar_factor(&account).await;
+        }
+
+        let outcome = TwoFactor::enroll(&account).await;
+
+        assert!(
+            matches!(&outcome, Err(error) if error.status_code() == 409),
+            "confirmed Magnetar factor {confirmed}: {outcome:?}"
+        );
+    }
+}
+
+/// A Magnetar factor that appears between the framework enrollment and its
+/// confirmation stops the confirmation, so two enrollments racing each other
+/// cannot both end confirmed.
+#[tokio::test]
+async fn framework_totp_confirmation_is_refused_once_a_magnetar_factor_exists() {
+    let account = setup().await;
+    let enrollment = TwoFactor::enroll(&account).await.expect("enroll");
+    enroll_pending_magnetar_factor(&account).await;
+
+    let outcome = TwoFactor::confirm(&account, &current_code(&enrollment.otpauth_url)).await;
+
+    assert!(
+        matches!(&outcome, Err(error) if error.status_code() == 409),
+        "{outcome:?}"
+    );
+    assert!(
+        !TwoFactor::is_enabled(&account)
+            .await
+            .expect("read the enrollment"),
+        "the framework TOTP stays unconfirmed"
+    );
+}
+
+/// An account that already has both factors, from before enrollment refused
+/// the second one or from an import, is refused by every sign-in path.
+/// Disabling the framework TOTP opens Magnetar's own sign-in again, which
+/// then asks for the Magnetar factor.
+#[tokio::test]
+async fn an_account_with_both_factors_signs_in_once_its_framework_totp_is_disabled() {
+    let account = setup().await;
+    enable_framework_totp(&account).await;
+    enroll_magnetar_factor(&account).await;
+    let refused = Auth::password()
+        .authenticate_outcome(&account.email, PASSWORD, None, None)
+        .await;
+    assert!(
+        matches!(&refused, Err(error) if error.status_code() == 409),
+        "{:?}",
+        refused.map(|_| ())
+    );
+    let mut browser = Browser::open().await;
+    let (status, body) = browser
+        .get(
+            "/login",
+            &[("x-email", &account.email), ("x-password", PASSWORD)],
+        )
+        .await;
+    assert_eq!(status, 409, "{body}");
+
+    TwoFactor::disable(&account).await.expect("disable");
+
+    let outcome = Auth::password()
+        .authenticate_outcome(&account.email, PASSWORD, None, None)
+        .await
+        .expect("Magnetar's sign-in is open again");
+    assert!(
+        matches!(
+            outcome,
+            suprnova::magnetar_integration::SignInOutcome::FactorRequired { .. }
+        ),
+        "the sign-in asks for the Magnetar factor"
+    );
+}
+
+/// The same account signs in through the application's login and the
+/// framework TOTP challenge once its Magnetar factor is disabled instead.
+#[tokio::test]
+async fn an_account_with_both_factors_signs_in_once_its_magnetar_factor_is_disabled() {
+    let account = setup().await;
+    let enrollment = TwoFactor::enroll(&account).await.expect("enroll");
+    confirm_earlier(&account, &enrollment.otpauth_url).await;
+    enroll_magnetar_factor(&account).await;
+    let mut browser = Browser::open().await;
+    let (status, body) = browser
+        .get(
+            "/login",
+            &[("x-email", &account.email), ("x-password", PASSWORD)],
+        )
+        .await;
+    assert_eq!(status, 409, "{body}");
+
+    remove_magnetar_factor(&account).await;
+
+    let (status, body) = browser
+        .get(
+            "/login",
+            &[("x-email", &account.email), ("x-password", PASSWORD)],
+        )
+        .await;
+    assert_eq!((status, body.as_str()), (200, "two-factor challenge"));
+    let (status, body) = browser
+        .get(
+            "/two-factor-challenge",
+            &[("x-code", &current_code(&enrollment.otpauth_url))],
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(browser.whoami().await, account.id);
+}
+
+/// The check `init_magnetar` gives Magnetar's own `TwoFactorService`, which
+/// then refuses to enroll beside the framework's TOTP, sees that TOTP while
+/// it waits for its confirmation and once it is confirmed, and stops seeing
+/// it once it is disabled.
+#[tokio::test]
+async fn magnetar_sees_the_framework_totp_as_another_second_factor() {
+    use magnetar::two_factor::OtherSecondFactor;
+    let account = setup().await;
+    let framework_totp = suprnova::magnetar_integration::engine::FrameworkTotpEnrollment;
+    let present = || async {
+        framework_totp
+            .enrolled_or_pending(&account.id)
+            .await
+            .expect("read the framework TOTP")
+    };
+    assert!(!present().await);
+
+    let enrollment = TwoFactor::enroll(&account).await.expect("enroll");
+    assert!(present().await, "a pending enrollment counts");
+    confirm_earlier(&account, &enrollment.otpauth_url).await;
+    assert!(present().await, "a confirmed enrollment counts");
+
+    TwoFactor::disable(&account).await.expect("disable");
+    assert!(!present().await);
 }
