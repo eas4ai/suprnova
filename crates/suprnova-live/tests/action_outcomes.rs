@@ -151,3 +151,45 @@ fn redirects_are_real_routes_and_conflicting_or_unregistered_output_is_rejected(
         .expect_err("matching browser metadata cannot substitute another Rust payload type");
     assert_eq!(forged.kind(), OutcomeErrorKind::UnregisteredEmission);
 }
+
+/// An action may dispatch more than 128 events, effects and flash messages:
+/// the fixed 128 is gone, and the configured response item limit
+/// (`LIVE_MAX_RESPONSE_ITEMS` in the framework) bounds them when the response
+/// is sealed.
+#[test]
+fn an_action_dispatches_more_than_128_events_effects_and_flash_messages() {
+    let descriptor = descriptor();
+    let limits = InputLimits::default();
+    let event = RegisteredEmission::event(
+        &descriptor,
+        &SavedEvent {
+            private_note: "note".to_owned(),
+        },
+        &limits,
+    )
+    .expect("registered event");
+    let effect = RegisteredEmission::effect(
+        &descriptor,
+        &FocusEffect {
+            target: "name".to_owned(),
+        },
+        &limits,
+    )
+    .expect("registered effect");
+    let flash = FlashIntent::new(
+        BrowserOperationName::parse("profile.saved").expect("flash key"),
+        CanonicalValue::String("saved".to_owned()),
+        &limits,
+    )
+    .expect("bounded flash");
+    let metadata = OutcomeMetadata::new(
+        vec![flash; 1_000],
+        vec![event; 1_000],
+        vec![effect; 1_000],
+        None,
+    )
+    .expect("1,000 of each is inside the engine ceiling");
+    assert_eq!(metadata.events().len(), 1_000);
+    ActionResult::new(ActionOutcome::Render, metadata, &descriptor)
+        .expect("a render result carrying 1,000 events");
+}

@@ -514,6 +514,11 @@ unbounded framework memory, queues, connections, or diagnostic retention.
   `{% let y = x|safe %}{{ y }}`, `x|safe|lower`, and `escape("none")`. A
   `set` block's name holds escaped text, as Askama 0.16 stores the rendered
   block as a string and escapes it on output.
+- 2026-10-04 -- Tooling protocol 2 is backward compatible: the helper
+  answers protocol 1 in protocol 1, with the three limits that version
+  reported, and the CLI asks for protocol 2, then asks again in protocol 1
+  when an older helper answers in it. A protocol neither side speaks fails
+  with the side to upgrade named.
 - 2026-10-04 -- `live:inspect` reports every configured Live limit by the
   `.env` key that sets it, with its value and unit, instead of three named
   byte and lifetime fields. The CLI and the application helper moved to

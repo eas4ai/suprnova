@@ -7,18 +7,20 @@ use std::io::Cursor;
 use std::process::Command;
 
 use live_support::{
-    BIN, IDENTITY, begin, check_stream, combined, diagnostic, end_failed, end_ok, envelope,
-    envelope_with, inspect_stream, run_cli, summary,
+    BIN, IDENTITY, asset_stream, begin, check_stream, combined, diagnostic, end_failed, end_ok,
+    envelope, envelope_with, in_protocol_one, inspect_stream, inspect_stream_protocol_one,
+    refusal_protocol_one, run_cli, run_cli_by_protocol, summary,
 };
 use suprnova_cli::commands::live_tool::{
-    MAX_DIAGNOSTICS, MAX_LINE_BYTES, Operation, Outcome, ToolFailure, consume,
+    ConfigReport, MAX_DIAGNOSTICS, MAX_LINE_BYTES, Operation, Outcome, PROTOCOL_VERSION,
+    ToolFailure, consume_protocol,
 };
 
 fn consume_text(
     text: &str,
     operation: Operation,
 ) -> Result<suprnova_cli::commands::live_tool::Session, ToolFailure> {
-    consume(Cursor::new(text.as_bytes()), operation)
+    consume_protocol(Cursor::new(text.as_bytes()), operation, PROTOCOL_VERSION)
 }
 
 #[test]
@@ -99,6 +101,55 @@ fn a_failed_end_marker_is_reported_as_the_helper_failure() {
     );
 }
 
+/// An application on a framework from before tooling protocol 2: the CLI
+/// asks for 2, reads the helper's protocol 1 refusal, and asks again in 1.
+/// Check and inspect both work; inspect shows the three limits protocol 1
+/// carries.
+#[test]
+fn the_cli_falls_back_to_protocol_one_for_an_older_helper() {
+    let inspect = run_cli_by_protocol(
+        &["live:inspect"],
+        &[
+            (2, &refusal_protocol_one("inspect")),
+            (1, &inspect_stream_protocol_one()),
+        ],
+    );
+    let text = combined(&inspect);
+    assert_eq!(inspect.status.code(), Some(0), "{text}");
+    assert!(text.contains("Max request bytes"), "{text}");
+    assert!(text.contains("1048576"), "{text}");
+    assert!(text.contains("demo.counter"), "{text}");
+
+    let check = run_cli_by_protocol(
+        &["live:check"],
+        &[
+            (2, &refusal_protocol_one("check")),
+            (1, &in_protocol_one(&check_stream(&[], 1))),
+        ],
+    );
+    let text = combined(&check);
+    assert_eq!(check.status.code(), Some(0), "{text}");
+
+    let assets = consume_protocol(
+        Cursor::new(in_protocol_one(&asset_stream()).as_bytes()),
+        Operation::Assets,
+        1,
+    )
+    .expect("a protocol 1 asset stream");
+    assert_eq!(assets.outcome, Outcome::Ok);
+}
+
+/// A helper newer than this CLI says so, and names the side to upgrade.
+#[test]
+fn a_newer_helper_names_the_cli_as_the_side_to_upgrade() {
+    let newer = check_stream(&[], 1).replace("\"protocol\":2", "\"protocol\":3");
+    let output = run_cli_by_protocol(&["live:check"], &[(2, &newer), (1, &newer)]);
+    let text = combined(&output);
+    assert_eq!(output.status.code(), Some(1), "{text}");
+    assert!(text.contains("protocol 3"), "{text}");
+    assert!(text.contains("upgrade the suprnova CLI"), "{text}");
+}
+
 #[test]
 fn a_limit_that_is_not_a_live_key_fails_closed() {
     let stream = inspect_stream().replace("\"LIVE_MORPH_MAX_KEYS\"", "\"APP_KEY\"");
@@ -112,8 +163,11 @@ fn a_limit_that_is_not_a_live_key_fails_closed() {
     );
     let session = consume_text(&inspect_stream(), Operation::Inspect).expect("a valid report");
     let runtime = session.runtime.expect("one runtime report");
-    assert_eq!(runtime.config.limits.len(), 3);
-    assert_eq!(runtime.config.limits[1].unit, "keyed elements");
+    let ConfigReport::Limits { limits } = runtime.config else {
+        panic!("a protocol 2 report carries every limit");
+    };
+    assert_eq!(limits.len(), 3);
+    assert_eq!(limits[1].unit, "keyed elements");
 }
 
 #[test]

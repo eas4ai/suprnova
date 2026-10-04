@@ -273,6 +273,15 @@ blob store merely to replay bytes.
 
 ## Decisions and revisions
 
+- 2026-10-04 -- A successor render's island root is bounded by the
+  configured island HTML size, the bound a mount's root already had, instead
+  of a fixed 1 MiB; the root carries the encoded snapshot, so a state of
+  about 750 KiB failed on every action. A root over the bound names
+  `LIVE_MAX_HTML_BYTES` with both sizes. An action's flash messages, events
+  and effects are no longer capped at 128 when the outcome is built; the
+  configured `LIVE_MAX_RESPONSE_ITEMS` bounds them when the response is
+  sealed. The framework no longer copies a buffered request body before it
+  inspects it.
 - 2026-10-04 -- A redirect or reflected URL is bounded by
   `LIVE_MAX_REDIRECT_BYTES` (64 KiB by default, at most the response limit and
   at most 2 MiB, the longest URL a browser follows) instead of a fixed 2,048

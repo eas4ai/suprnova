@@ -327,3 +327,23 @@ async fn unregistered_mount_selection_is_concealed_before_snapshot_or_component_
     assert_eq!(headers.get("content-length").expect("Content-Length"), "0");
     assert!(body.is_empty());
 }
+
+/// `LIVE_MAX_JSON_ENTRIES` below 1,024 passed configuration but failed
+/// runtime assembly with a generic error, because the snapshot's generation
+/// and extension bounds were a fixed 1,024. The smallest legal value now
+/// assembles.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_small_json_entry_limit_assembles_the_runtime() {
+    ensure_crypt();
+    let _container = suprnova::container::testing::TestContainer::fake();
+    suprnova::App::init();
+    suprnova::App::singleton(
+        suprnova::live::LiveConfig::builder()
+            .max_json_entries(16)
+            .build()
+            .expect("a 16-entry limit is legal"),
+    );
+    suprnova::live::testing::prepare_live_router_for_test(&Router::new())
+        .expect("a 16-entry limit assembles the runtime");
+}

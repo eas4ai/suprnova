@@ -101,6 +101,16 @@ impl ViewError {
         }
     }
 
+    /// An island root whose attributes, the encoded snapshot among them,
+    /// went over the configured island size.
+    pub(crate) fn metadata_too_large(size: SizeBreach) -> Self {
+        Self {
+            kind: ViewErrorKind::InvalidMountMetadata,
+            view: None,
+            size: Some(size),
+        }
+    }
+
     /// Returns the closed failure class.
     #[must_use]
     pub const fn kind(&self) -> ViewErrorKind {

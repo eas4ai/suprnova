@@ -291,6 +291,17 @@ owner lineage records the newly applied parent revision.
 
 ## Decisions and revisions
 
+- 2026-10-04 -- The instance ledger's limits are settings:
+  `LIVE_LEDGER_MAX_INSTANCES` (100,000), `LIVE_LEDGER_INSTANCE_LIFETIME_MS`
+  (seven days, which also bounds the snapshot, mount and promotion
+  lifetimes), `LIVE_LEDGER_CLAIM_LEASE_MS` (30 seconds) and
+  `LIVE_LEDGER_MAX_ACCEPTED_OUTCOMES` (64), each under the engine's ceiling.
+  Nothing retires an instance when its page closes: an instance lives its
+  whole lifetime, so the ledger holds the instance limit's worth of page
+  views per lifetime, about 14,000 private-island views a day at the
+  defaults. A snapshot's generation and extension bounds (1,024) follow
+  `LIVE_MAX_JSON_ENTRIES` down when it is smaller, instead of failing
+  assembly.
 - 2026-10-04 -- Removed the composition lineage's arbitrary 256-child and
   64 KiB caps. A list of row components records every child; the lineage is
   bounded by the snapshot's configured byte and entry limits, which every

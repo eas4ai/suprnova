@@ -367,7 +367,7 @@ impl RuntimeProviderCandidates {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let random: Arc<dyn InstanceIdGenerator> = Arc::new(SystemInstanceIdGenerator);
         let key_ring = Arc::new(build_key_ring()?);
-        let ledger_limits = production_ledger_limits()?;
+        let ledger_limits = config.engine_ledger_limits()?;
         // The limits above are the same in every driver: what
         // `LIVE_LEDGER_DRIVER` chooses is where the records live, never what
         // the state machine over them permits. Building the store reaches no
@@ -1806,6 +1806,10 @@ pub(crate) const PUBLIC_SEED_MAX_AGE_MS: u64 = 86_400_000;
 /// for its body, the response item limit for its assets, mounts and children,
 /// and the request limit for the snapshots it embeds, which come back in
 /// requests.
+/// Generations and extensions one snapshot may carry, unless
+/// `LIVE_MAX_JSON_ENTRIES` is smaller.
+const SNAPSHOT_COLLECTION_ENTRIES: usize = 1_024;
+
 fn island_render_limits(config: LiveConfig) -> Result<RenderLimits, FrameworkError> {
     RenderLimits::new(
         config.max_html_bytes(),
@@ -1841,13 +1845,17 @@ fn assemble_runtime(
         config.max_request_bytes(),
     )
     .map_err(|_| live_boot_error())?;
+    // A snapshot's generations and extensions are entries of the snapshot's
+    // own JSON, so neither bound may pass `LIVE_MAX_JSON_ENTRIES`: a small
+    // entry limit lowers them instead of failing assembly.
+    let snapshot_entries = SNAPSHOT_COLLECTION_ENTRIES.min(config.max_json_entries());
     let snapshot_limits = SnapshotLimits::new(
         input,
         5_000,
         PUBLIC_SEED_MAX_AGE_MS,
-        604_800_000,
-        1_024,
-        1_024,
+        config.server().ledger_instance_lifetime_ms(),
+        snapshot_entries,
+        snapshot_entries,
     )
     .map_err(|_| live_boot_error())?;
     let protocol_limits = ProtocolLimits::new(ProtocolLimitConfig {
@@ -1886,7 +1894,7 @@ fn assemble_runtime(
         max_outstanding_per_route_component: 512,
         promotion_lease_ms: 30_000,
         abandoned_retention_ms: 300_000,
-        instance_lifetime_ms: 604_800_000,
+        instance_lifetime_ms: config.server().ledger_instance_lifetime_ms(),
         max_reservations: 100_000,
         max_rate_buckets: 100_000,
     })
@@ -1927,8 +1935,13 @@ fn assemble_runtime(
             ),
             snapshot_limits.clone(),
             renderer,
-            MountLimits::new(604_800_000, 8, config.max_html_bytes(), 64)
-                .map_err(|_| live_boot_error())?,
+            MountLimits::new(
+                config.server().ledger_instance_lifetime_ms(),
+                8,
+                config.max_html_bytes(),
+                64,
+            )
+            .map_err(|_| live_boot_error())?,
         )
         .map_err(|_| live_boot_error())?
         .with_island_stream_directive(),
@@ -2033,25 +2046,25 @@ pub async fn verify_ledger_driver_for_test(driver: &LedgerDriver) -> Result<(), 
     verify_ledger_driver(driver).await
 }
 
-/// The instance-ledger limits every production runtime builds, whichever
-/// driver `LIVE_LEDGER_DRIVER` chose: a 30 second claim lease, a seven day
-/// instance lifetime, 64 retained accepted outcomes, and 100,000 live
-/// instances.
+/// The instance-ledger limits every Live runtime runs under, whichever
+/// driver `LIVE_LEDGER_DRIVER` chose, from the resolved configuration's
+/// `LIVE_LEDGER_*` settings: by default a 30 second claim lease, a seven day
+/// instance lifetime, 64 retained accepted outcomes, and 100,000 instances.
 ///
 /// One function rather than one literal per assembly point, so a test that
 /// stands a second node's ledger beside a running runtime's gets the
 /// runtime's own numbers rather than a copy of them that can drift.
 ///
-/// `#[doc(hidden)]`: the numbers are the runtime's business, not an
-/// application's, and they are not part of the public contract.
+/// `#[doc(hidden)]`: the limits are configuration, read through
+/// `LiveConfig`, and this helper is not part of the public contract.
 ///
 /// # Errors
 ///
-/// Returns [`FrameworkError`] if these numbers ever stop satisfying
-/// [`LedgerLimits`]'s own bounds, which is a Live boot failure.
+/// Returns [`FrameworkError`] when the configuration cannot be resolved or
+/// its ledger settings do not satisfy [`LedgerLimits`]'s own bounds.
 #[doc(hidden)]
 pub fn production_ledger_limits() -> Result<LedgerLimits, FrameworkError> {
-    LedgerLimits::new(30_000, 604_800_000, 64, 100_000).map_err(|_| live_boot_error())
+    LiveConfig::resolve()?.engine_ledger_limits()
 }
 
 /// The probe itself, over an explicit driver.
@@ -2101,7 +2114,7 @@ pub(super) fn assemble_for_harness_with_clock(
     clock: Arc<dyn Clock>,
 ) -> Result<LiveRuntime, FrameworkError> {
     let mut candidates = RuntimeProviderCandidates::production(&registry, config)?;
-    let ledger_limits = production_ledger_limits()?;
+    let ledger_limits = config.engine_ledger_limits()?;
     candidates.clock = Some(Arc::clone(&clock));
     candidates.ledger = Some(Arc::new(MemoryInstanceLedger::new(clock, ledger_limits)));
     assemble_runtime(config, registry, candidates)
@@ -2121,7 +2134,7 @@ pub(super) fn assemble_with_clock_override(
     clock: Arc<dyn Clock>,
 ) -> Result<LiveRuntime, FrameworkError> {
     let mut candidates = RuntimeProviderCandidates::from_graph(&runtime.graph);
-    let ledger_limits = production_ledger_limits()?;
+    let ledger_limits = runtime.graph.config.engine_ledger_limits()?;
     candidates.clock = Some(Arc::clone(&clock));
     candidates.ledger = Some(Arc::new(MemoryInstanceLedger::new(clock, ledger_limits)));
     assemble_runtime(

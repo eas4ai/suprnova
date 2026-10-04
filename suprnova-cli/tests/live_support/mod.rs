@@ -93,12 +93,15 @@ pub fn summary(
     )
 }
 
+/// The limits the protocol 2 runtime report carries.
+pub const LIMITS_JSON: &str = "[{\"setting\":\"LIVE_MAX_REQUEST_BYTES\",\"value\":16777216,\"unit\":\"bytes\"},{\"setting\":\"LIVE_MORPH_MAX_KEYS\",\"value\":1000000,\"unit\":\"keyed elements\"},{\"setting\":\"LIVE_UPLOAD_MAX_FILE_BYTES\",\"value\":1073741824,\"unit\":\"bytes\"}]";
+
 pub fn runtime(sequence: u32) -> String {
     envelope(
         sequence,
         "inspect",
         &format!(
-            "{{\"kind\":\"runtime\",\"payload\":{{\"registry_bound\":true,\"components\":1,\"config\":{{\"limits\":[{{\"setting\":\"LIVE_MAX_REQUEST_BYTES\",\"value\":16777216,\"unit\":\"bytes\"}},{{\"setting\":\"LIVE_MORPH_MAX_KEYS\",\"value\":1000000,\"unit\":\"keyed elements\"}},{{\"setting\":\"LIVE_UPLOAD_MAX_FILE_BYTES\",\"value\":1073741824,\"unit\":\"bytes\"}}]}},\"upload_host\":{{\"installed\":false,\"finalizer\":false,\"direct_provider\":false,\"scanner\":false,\"application_validator\":false}},\"runtime_bound\":true,\"readiness\":{{\"clock\":true,\"random\":true,\"key_ring\":true,\"ledger\":true,\"promotion\":true,\"execution\":true,\"context_validator\":true,\"host_ports\":true,\"upload_ports\":true,\"upload_services\":true,\"mount_catalog\":true,\"response_and_cancellation\":true,\"subscription_ports\":true,\"async_state\":true}},\"asset_identity\":\"{IDENTITY}\",\"browser_runtime_version\":\"0.1.0\",\"runtime_contract_version\":1,\"protocol_versions\":[1,2]}}}}"
+            "{{\"kind\":\"runtime\",\"payload\":{{\"registry_bound\":true,\"components\":1,\"config\":{{\"limits\":{LIMITS_JSON}}},\"upload_host\":{{\"installed\":false,\"finalizer\":false,\"direct_provider\":false,\"scanner\":false,\"application_validator\":false}},\"runtime_bound\":true,\"readiness\":{{\"clock\":true,\"random\":true,\"key_ring\":true,\"ledger\":true,\"promotion\":true,\"execution\":true,\"context_validator\":true,\"host_ports\":true,\"upload_ports\":true,\"upload_services\":true,\"mount_catalog\":true,\"response_and_cancellation\":true,\"subscription_ports\":true,\"async_state\":true}},\"asset_identity\":\"{IDENTITY}\",\"browser_runtime_version\":\"0.1.0\",\"runtime_contract_version\":1,\"protocol_versions\":[1,2]}}}}"
         ),
     )
 }
@@ -208,7 +211,17 @@ fn main() {
         eprintln!("error: unrecognized subcommand");
         std::process::exit(1);
     }
-    let output = std::env::var("FAKE_LIVE_TOOL_OUTPUT").expect("FAKE_LIVE_TOOL_OUTPUT");
+    // A script per protocol, when the test gives one, answers the protocol
+    // the CLI asked for, the way a helper of one framework version would.
+    let protocol = args
+        .iter()
+        .position(|arg| arg == "--protocol")
+        .and_then(|index| args.get(index + 1))
+        .cloned()
+        .unwrap_or_default();
+    let output = std::env::var(format!("FAKE_LIVE_TOOL_OUTPUT_PROTOCOL_{protocol}"))
+        .or_else(|_| std::env::var("FAKE_LIVE_TOOL_OUTPUT"))
+        .expect("FAKE_LIVE_TOOL_OUTPUT");
     let text = std::fs::read(output).expect("scripted output");
     use std::io::Write as _;
     std::io::stdout().write_all(&text).expect("stdout");
@@ -269,6 +282,58 @@ pub fn run_cli(args: &[&str], script: &str, exit: i32) -> Output {
         .expect("suprnova binary spawnable");
     let _ = fs::remove_file(&script_path);
     output
+}
+
+/// Runs the CLI with one scripted helper stream per protocol it may ask for,
+/// so a test plays a helper from another framework version.
+pub fn run_cli_by_protocol(args: &[&str], scripts: &[(u16, &str)]) -> Output {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let project = fake_project();
+    let index = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let mut command = Command::new(BIN);
+    command
+        .args(args)
+        .current_dir(project)
+        .env("FAKE_LIVE_TOOL_EXIT", "0")
+        .env_remove("FAKE_LIVE_TOOL_OUTPUT")
+        .env_remove("CARGO_TARGET_DIR");
+    let mut paths = Vec::new();
+    for (protocol, script) in scripts {
+        let path = project.join(format!(
+            ".fake-script-{}-v{index}-p{protocol}.jsonl",
+            std::process::id()
+        ));
+        fs::write(&path, script).expect("script");
+        command.env(format!("FAKE_LIVE_TOOL_OUTPUT_PROTOCOL_{protocol}"), &path);
+        paths.push(path);
+    }
+    let output = command.output().expect("suprnova binary spawnable");
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+    output
+}
+
+/// A whole stream in protocol 1, as a helper from before protocol 2 writes it.
+pub fn in_protocol_one(stream: &str) -> String {
+    stream.replace("\"protocol\":2", "\"protocol\":1")
+}
+
+/// The inspect stream a protocol 1 helper writes: three named limits.
+pub fn inspect_stream_protocol_one() -> String {
+    in_protocol_one(&inspect_stream()).replace(
+        &format!("\"config\":{{\"limits\":{}}}", LIMITS_JSON),
+        "\"config\":{\"max_request_bytes\":1048576,\"max_response_bytes\":1048576,\"max_context_lifetime_ms\":30000}",
+    )
+}
+
+/// What a protocol 1 helper answers when asked for protocol 2.
+pub fn refusal_protocol_one(operation: &str) -> String {
+    in_protocol_one(&format!(
+        "{}{}",
+        begin(operation),
+        end_failed(1, operation, "live_tooling_unsupported_protocol")
+    ))
 }
 
 pub fn combined(output: &Output) -> String {

@@ -630,6 +630,21 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-04 -- Replay memory is bounded per subscription and per process:
+  `LIVE_ASYNC_MAX_REPLAY_BYTES` (4 MiB) bounds one subscription's log, which
+  shared the 16 MiB per-document queue limit before, and
+  `LIVE_ASYNC_REPLAY_BUDGET_BYTES` (256 MiB) bounds every log together, the
+  oldest entries in any log evicted first. A log charges each entry its
+  envelope's heap (the payload tree, counted node by node) and its
+  bookkeeping, and keeps no encoded copy: a replay encodes its entries when
+  asked. A published payload is measured once, against the first
+  subscriber's envelope, and one over the limit stops the publish before any
+  further copy; each subscriber's envelope still holds its own payload tree,
+  because the envelope binds the payload to that subscriber's subscription
+  and position. Transports are settings too:
+  `LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION` (64, was 8) and
+  `LIVE_ASYNC_MAX_TRANSPORTS` (16,384, was 4,096), each refusal naming its
+  key.
 - 2026-10-04 -- The queue depth and the replay count are configuration too:
   `LIVE_ASYNC_MAX_QUEUED_EVENTS` (4,096) replaces the 64-event document queue
   on the server and in the browser, and `LIVE_ASYNC_MAX_REPLAY_EVENTS` (4,096,

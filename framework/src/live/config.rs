@@ -140,6 +140,80 @@ pub struct LiveConfig {
     async_max_replay_events: usize,
     max_redirect_bytes: usize,
     upload: LiveUploadLimits,
+    server: LiveServerLimits,
+}
+
+/// Server-only limits: replay memory, open transports and the instance
+/// ledger. None of them reaches the page; each bounds a resource the server
+/// holds for visitors it cannot see.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LiveServerLimits {
+    async_max_replay_bytes: usize,
+    async_replay_budget_bytes: usize,
+    async_max_transports_per_session: usize,
+    async_max_transports: usize,
+    ledger_max_instances: usize,
+    ledger_instance_lifetime_ms: u64,
+    ledger_claim_lease_ms: u64,
+    ledger_max_accepted_outcomes: usize,
+}
+
+impl LiveServerLimits {
+    /// Memory one subscription's replay log may hold
+    /// (`LIVE_ASYNC_MAX_REPLAY_BYTES`).
+    #[must_use]
+    pub const fn async_max_replay_bytes(self) -> usize {
+        self.async_max_replay_bytes
+    }
+
+    /// Memory every replay log in the process may hold together
+    /// (`LIVE_ASYNC_REPLAY_BUDGET_BYTES`); the oldest entries go first.
+    #[must_use]
+    pub const fn async_replay_budget_bytes(self) -> usize {
+        self.async_replay_budget_bytes
+    }
+
+    /// Asynchronous transports (open tabs) one session may hold
+    /// (`LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION`).
+    #[must_use]
+    pub const fn async_max_transports_per_session(self) -> usize {
+        self.async_max_transports_per_session
+    }
+
+    /// Asynchronous transports the process may hold
+    /// (`LIVE_ASYNC_MAX_TRANSPORTS`).
+    #[must_use]
+    pub const fn async_max_transports(self) -> usize {
+        self.async_max_transports
+    }
+
+    /// Component instances the ledger may hold (`LIVE_LEDGER_MAX_INSTANCES`).
+    #[must_use]
+    pub const fn ledger_max_instances(self) -> usize {
+        self.ledger_max_instances
+    }
+
+    /// How long a mounted instance lives (`LIVE_LEDGER_INSTANCE_LIFETIME_MS`).
+    /// Nothing retires an instance earlier, so this and the instance limit
+    /// together decide how many page views the ledger holds.
+    #[must_use]
+    pub const fn ledger_instance_lifetime_ms(self) -> u64 {
+        self.ledger_instance_lifetime_ms
+    }
+
+    /// How long one action holds its claim on an instance
+    /// (`LIVE_LEDGER_CLAIM_LEASE_MS`).
+    #[must_use]
+    pub const fn ledger_claim_lease_ms(self) -> u64 {
+        self.ledger_claim_lease_ms
+    }
+
+    /// Accepted outcomes kept per instance for retries
+    /// (`LIVE_LEDGER_MAX_ACCEPTED_OUTCOMES`).
+    #[must_use]
+    pub const fn ledger_max_accepted_outcomes(self) -> usize {
+        self.ledger_max_accepted_outcomes
+    }
 }
 
 /// The limits on file uploads, which the server enforces and the browser
@@ -322,6 +396,39 @@ const HARD_MAX_ASYNC_EVENTS: usize = suprnova_live::async_updates::MAX_ASYNC_BUF
 /// One redirect or history URL a Live response carries. Browsers refuse a
 /// URL past 2 MiB, so a longer one could never be followed.
 const DEFAULT_MAX_REDIRECT_BYTES: usize = 64 * 1024;
+/// Replay memory. A replay log keeps a subscription's recent events so a
+/// reconnecting browser catches up without a fresh render; it is server
+/// memory per subscription, and a session may hold hundreds of
+/// subscriptions. 4 MiB per subscription covers four maximum-size payloads or
+/// thousands of small events, and the process-wide 256 MiB budget keeps the
+/// total fixed however many sessions connect: past it, the oldest entries in
+/// any log are evicted first, and a browser that needed one re-renders fresh.
+const DEFAULT_ASYNC_MAX_REPLAY_BYTES: usize = 4 * MIB;
+const DEFAULT_ASYNC_REPLAY_BUDGET_BYTES: usize = 256 * MIB;
+const HARD_MAX_ASYNC_REPLAY_BUDGET_BYTES: usize = 64 * 1024 * MIB;
+/// Open asynchronous transports. Each is one long-lived connection (a file
+/// descriptor and a task) with its own delivery queue. 64 per session covers
+/// a visitor with many tabs; 16,384 per process sits under common
+/// file-descriptor limits.
+const DEFAULT_ASYNC_MAX_TRANSPORTS_PER_SESSION: usize = 64;
+const HARD_MAX_ASYNC_TRANSPORTS_PER_SESSION: usize = 4_096;
+const DEFAULT_ASYNC_MAX_TRANSPORTS: usize = 16_384;
+const HARD_MAX_ASYNC_TRANSPORTS: usize = 1_048_576;
+/// The instance ledger. An instance lives its whole lifetime: nothing
+/// retires it when its page closes, so the instance limit divided by the
+/// lifetime is the private-island page views per unit of time it can hold
+/// (100,000 over seven days is about 14,000 a day). The engine's ceilings are
+/// 1,000,000 instances, seven days, a 300-second claim lease and 64 retained
+/// outcomes.
+const DEFAULT_LEDGER_MAX_INSTANCES: usize = 100_000;
+const HARD_MAX_LEDGER_INSTANCES: usize = 1_000_000;
+const DEFAULT_LEDGER_INSTANCE_LIFETIME_MS: u64 = 604_800_000;
+const MIN_LEDGER_INSTANCE_LIFETIME_MS: u64 = 60_000;
+const HARD_MAX_LEDGER_INSTANCE_LIFETIME_MS: u64 = 604_800_000;
+const DEFAULT_LEDGER_CLAIM_LEASE_MS: u64 = 30_000;
+const HARD_MAX_LEDGER_CLAIM_LEASE_MS: u64 = 300_000;
+const DEFAULT_LEDGER_MAX_ACCEPTED_OUTCOMES: usize = 64;
+const HARD_MAX_LEDGER_ACCEPTED_OUTCOMES: usize = 64;
 const HARD_MAX_REDIRECT_BYTES: usize = 2 * MIB;
 /// Upload limits. A file is stored in chunks, each held in server memory
 /// while it is checked, so the chunk size and the transfers running at once
@@ -428,6 +535,34 @@ impl LiveLimitExceeded {
             "redirect URL size",
             "LIVE_MAX_REDIRECT_BYTES",
             "bytes",
+            measured,
+            configured,
+            false,
+        )
+    }
+
+    /// One more asynchronous transport than one session may open
+    /// (`LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION`).
+    #[must_use]
+    pub const fn async_transports_per_session(measured: u64, configured: u64) -> Self {
+        Self::new(
+            "async transports per session",
+            "LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION",
+            "transports",
+            measured,
+            configured,
+            false,
+        )
+    }
+
+    /// One more asynchronous transport than the process may hold
+    /// (`LIVE_ASYNC_MAX_TRANSPORTS`).
+    #[must_use]
+    pub const fn async_transports(measured: u64, configured: u64) -> Self {
+        Self::new(
+            "async transport count",
+            "LIVE_ASYNC_MAX_TRANSPORTS",
+            "transports",
             measured,
             configured,
             false,
@@ -643,6 +778,26 @@ pub(crate) const LIVE_LIMIT_KEYS: &[LiveLimitKey] = &[
         value: |config| config.async_max_replay_events as u64,
     },
     LiveLimitKey {
+        key: "LIVE_ASYNC_MAX_REPLAY_BYTES",
+        unit: "bytes",
+        value: |config| config.server.async_max_replay_bytes as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_ASYNC_REPLAY_BUDGET_BYTES",
+        unit: "bytes",
+        value: |config| config.server.async_replay_budget_bytes as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION",
+        unit: "transports",
+        value: |config| config.server.async_max_transports_per_session as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_ASYNC_MAX_TRANSPORTS",
+        unit: "transports",
+        value: |config| config.server.async_max_transports as u64,
+    },
+    LiveLimitKey {
         key: "LIVE_MAX_REDIRECT_BYTES",
         unit: "bytes",
         value: |config| config.max_redirect_bytes as u64,
@@ -676,6 +831,26 @@ pub(crate) const LIVE_LIMIT_KEYS: &[LiveLimitKey] = &[
         key: "LIVE_UPLOAD_MAX_STORAGE_BYTES",
         unit: "bytes",
         value: |config| config.upload.max_storage_bytes,
+    },
+    LiveLimitKey {
+        key: "LIVE_LEDGER_MAX_INSTANCES",
+        unit: "instances",
+        value: |config| config.server.ledger_max_instances as u64,
+    },
+    LiveLimitKey {
+        key: "LIVE_LEDGER_INSTANCE_LIFETIME_MS",
+        unit: "ms",
+        value: |config| config.server.ledger_instance_lifetime_ms,
+    },
+    LiveLimitKey {
+        key: "LIVE_LEDGER_CLAIM_LEASE_MS",
+        unit: "ms",
+        value: |config| config.server.ledger_claim_lease_ms,
+    },
+    LiveLimitKey {
+        key: "LIVE_LEDGER_MAX_ACCEPTED_OUTCOMES",
+        unit: "outcomes",
+        value: |config| config.server.ledger_max_accepted_outcomes as u64,
     },
 ];
 
@@ -721,6 +896,16 @@ impl LiveConfig {
                 max_pending_files: DEFAULT_UPLOAD_MAX_PENDING_FILES,
                 max_pending_bytes: DEFAULT_UPLOAD_MAX_PENDING_BYTES,
                 max_storage_bytes: DEFAULT_UPLOAD_MAX_STORAGE_BYTES,
+            },
+            server: LiveServerLimits {
+                async_max_replay_bytes: DEFAULT_ASYNC_MAX_REPLAY_BYTES,
+                async_replay_budget_bytes: DEFAULT_ASYNC_REPLAY_BUDGET_BYTES,
+                async_max_transports_per_session: DEFAULT_ASYNC_MAX_TRANSPORTS_PER_SESSION,
+                async_max_transports: DEFAULT_ASYNC_MAX_TRANSPORTS,
+                ledger_max_instances: DEFAULT_LEDGER_MAX_INSTANCES,
+                ledger_instance_lifetime_ms: DEFAULT_LEDGER_INSTANCE_LIFETIME_MS,
+                ledger_claim_lease_ms: DEFAULT_LEDGER_CLAIM_LEASE_MS,
+                ledger_max_accepted_outcomes: DEFAULT_LEDGER_MAX_ACCEPTED_OUTCOMES,
             },
         }
     }
@@ -882,6 +1067,25 @@ impl LiveConfig {
         self.upload
     }
 
+    /// The server-only replay, transport and ledger limits.
+    #[must_use]
+    pub const fn server(self) -> LiveServerLimits {
+        self.server
+    }
+
+    /// The engine's instance-ledger limits under these settings.
+    pub(crate) fn engine_ledger_limits(
+        self,
+    ) -> Result<suprnova_live::ledger::LedgerLimits, FrameworkError> {
+        suprnova_live::ledger::LedgerLimits::new(
+            self.server.ledger_claim_lease_ms,
+            self.server.ledger_instance_lifetime_ms,
+            self.server.ledger_max_accepted_outcomes,
+            self.server.ledger_max_instances,
+        )
+        .map_err(|_| FrameworkError::internal("Live ledger limits were rejected"))
+    }
+
     /// Every configured limit as its `.env` key, unit and value, in the order
     /// the manual lists them; `live:inspect` reports exactly these.
     pub(crate) fn limit_values(self) -> Vec<(&'static str, &'static str, u64)> {
@@ -972,6 +1176,14 @@ pub struct LiveConfigBuilder {
     upload_max_pending_files: Option<usize>,
     upload_max_pending_bytes: Option<u64>,
     upload_max_storage_bytes: Option<u64>,
+    async_max_replay_bytes: Option<usize>,
+    async_replay_budget_bytes: Option<usize>,
+    async_max_transports_per_session: usize,
+    async_max_transports: usize,
+    ledger_max_instances: usize,
+    ledger_instance_lifetime_ms: u64,
+    ledger_claim_lease_ms: u64,
+    ledger_max_accepted_outcomes: usize,
 }
 
 impl LiveConfigBuilder {
@@ -1007,6 +1219,14 @@ impl LiveConfigBuilder {
             upload_max_pending_files: None,
             upload_max_pending_bytes: None,
             upload_max_storage_bytes: None,
+            async_max_replay_bytes: None,
+            async_replay_budget_bytes: None,
+            async_max_transports_per_session: DEFAULT_ASYNC_MAX_TRANSPORTS_PER_SESSION,
+            async_max_transports: DEFAULT_ASYNC_MAX_TRANSPORTS,
+            ledger_max_instances: DEFAULT_LEDGER_MAX_INSTANCES,
+            ledger_instance_lifetime_ms: DEFAULT_LEDGER_INSTANCE_LIFETIME_MS,
+            ledger_claim_lease_ms: DEFAULT_LEDGER_CLAIM_LEASE_MS,
+            ledger_max_accepted_outcomes: DEFAULT_LEDGER_MAX_ACCEPTED_OUTCOMES,
         }
     }
 
@@ -1128,6 +1348,30 @@ impl LiveConfigBuilder {
         }
         if let Some(value) = number("LIVE_UPLOAD_MAX_STORAGE_BYTES")? {
             builder.upload_max_storage_bytes = Some(value);
+        }
+        if let Some(value) = number("LIVE_ASYNC_MAX_REPLAY_BYTES")? {
+            builder.async_max_replay_bytes = Some(bytes(value));
+        }
+        if let Some(value) = number("LIVE_ASYNC_REPLAY_BUDGET_BYTES")? {
+            builder.async_replay_budget_bytes = Some(bytes(value));
+        }
+        if let Some(value) = number("LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION")? {
+            builder.async_max_transports_per_session = bytes(value);
+        }
+        if let Some(value) = number("LIVE_ASYNC_MAX_TRANSPORTS")? {
+            builder.async_max_transports = bytes(value);
+        }
+        if let Some(value) = number("LIVE_LEDGER_MAX_INSTANCES")? {
+            builder.ledger_max_instances = bytes(value);
+        }
+        if let Some(value) = number("LIVE_LEDGER_INSTANCE_LIFETIME_MS")? {
+            builder.ledger_instance_lifetime_ms = value;
+        }
+        if let Some(value) = number("LIVE_LEDGER_CLAIM_LEASE_MS")? {
+            builder.ledger_claim_lease_ms = value;
+        }
+        if let Some(value) = number("LIVE_LEDGER_MAX_ACCEPTED_OUTCOMES")? {
+            builder.ledger_max_accepted_outcomes = bytes(value);
         }
         Ok(builder)
     }
@@ -1337,6 +1581,65 @@ impl LiveConfigBuilder {
         self
     }
 
+    /// Sets one subscription's replay memory (`LIVE_ASYNC_MAX_REPLAY_BYTES`).
+    #[must_use]
+    pub const fn async_max_replay_bytes(mut self, max: usize) -> Self {
+        self.async_max_replay_bytes = Some(max);
+        self
+    }
+
+    /// Sets the replay memory of every log together
+    /// (`LIVE_ASYNC_REPLAY_BUDGET_BYTES`).
+    #[must_use]
+    pub const fn async_replay_budget_bytes(mut self, max: usize) -> Self {
+        self.async_replay_budget_bytes = Some(max);
+        self
+    }
+
+    /// Sets the transports one session may open
+    /// (`LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION`).
+    #[must_use]
+    pub const fn async_max_transports_per_session(mut self, max: usize) -> Self {
+        self.async_max_transports_per_session = max;
+        self
+    }
+
+    /// Sets the transports the process may open (`LIVE_ASYNC_MAX_TRANSPORTS`).
+    #[must_use]
+    pub const fn async_max_transports(mut self, max: usize) -> Self {
+        self.async_max_transports = max;
+        self
+    }
+
+    /// Sets the instances the ledger holds (`LIVE_LEDGER_MAX_INSTANCES`).
+    #[must_use]
+    pub const fn ledger_max_instances(mut self, max: usize) -> Self {
+        self.ledger_max_instances = max;
+        self
+    }
+
+    /// Sets an instance's lifetime (`LIVE_LEDGER_INSTANCE_LIFETIME_MS`).
+    #[must_use]
+    pub const fn ledger_instance_lifetime_ms(mut self, lifetime: u64) -> Self {
+        self.ledger_instance_lifetime_ms = lifetime;
+        self
+    }
+
+    /// Sets an action's claim lease (`LIVE_LEDGER_CLAIM_LEASE_MS`).
+    #[must_use]
+    pub const fn ledger_claim_lease_ms(mut self, lease: u64) -> Self {
+        self.ledger_claim_lease_ms = lease;
+        self
+    }
+
+    /// Sets the accepted outcomes kept per instance
+    /// (`LIVE_LEDGER_MAX_ACCEPTED_OUTCOMES`).
+    #[must_use]
+    pub const fn ledger_max_accepted_outcomes(mut self, max: usize) -> Self {
+        self.ledger_max_accepted_outcomes = max;
+        self
+    }
+
     /// Validates every limit and creates the immutable configuration.
     ///
     /// # Errors
@@ -1504,6 +1807,7 @@ impl LiveConfigBuilder {
              most LIVE_MAX_RESPONSE_BYTES: the URL travels inside the response",
         )?;
         let upload = self.build_upload()?;
+        let server = self.build_server(payload)?;
         Ok(LiveConfig {
             max_request_bytes: request,
             max_response_bytes: response,
@@ -1530,6 +1834,83 @@ impl LiveConfigBuilder {
             async_max_replay_events: replay,
             max_redirect_bytes: redirect,
             upload,
+            server,
+        })
+    }
+
+    /// Validates the server-only limits. An unset replay limit follows up to
+    /// the payload limit, because a log must hold at least one payload, and
+    /// an unset budget follows up to the per-subscription replay limit.
+    fn build_server(self, payload: usize) -> Result<LiveServerLimits, LiveConfigError> {
+        use LiveConfigErrorKind as Kind;
+        let replay = self
+            .async_max_replay_bytes
+            .unwrap_or(DEFAULT_ASYNC_MAX_REPLAY_BYTES.max(payload));
+        check(
+            replay >= payload && replay <= HARD_MAX_ASYNC_REPLAY_BUDGET_BYTES,
+            Kind::InvalidAsyncLimits,
+            "LIVE_ASYNC_MAX_REPLAY_BYTES",
+            "must be from LIVE_ASYNC_MAX_PAYLOAD_BYTES to 68719476736 bytes: a log holds at \
+             least one payload",
+        )?;
+        let budget = self
+            .async_replay_budget_bytes
+            .unwrap_or(DEFAULT_ASYNC_REPLAY_BUDGET_BYTES.max(replay));
+        check(
+            budget >= replay && budget <= HARD_MAX_ASYNC_REPLAY_BUDGET_BYTES,
+            Kind::InvalidAsyncLimits,
+            "LIVE_ASYNC_REPLAY_BUDGET_BYTES",
+            "must be from LIVE_ASYNC_MAX_REPLAY_BYTES to 68719476736 bytes: every log fits \
+             inside it",
+        )?;
+        check(
+            (1..=HARD_MAX_ASYNC_TRANSPORTS_PER_SESSION)
+                .contains(&self.async_max_transports_per_session),
+            Kind::InvalidAsyncLimits,
+            "LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION",
+            "must be from 1 to 4096 transports",
+        )?;
+        check(
+            (1..=HARD_MAX_ASYNC_TRANSPORTS).contains(&self.async_max_transports)
+                && self.async_max_transports >= self.async_max_transports_per_session,
+            Kind::InvalidAsyncLimits,
+            "LIVE_ASYNC_MAX_TRANSPORTS",
+            "must be from LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION to 1048576 transports",
+        )?;
+        check(
+            (1..=HARD_MAX_LEDGER_INSTANCES).contains(&self.ledger_max_instances),
+            Kind::InvalidLedgerLimits,
+            "LIVE_LEDGER_MAX_INSTANCES",
+            "must be from 1 to 1000000 instances, the engine's ceiling",
+        )?;
+        check(
+            (MIN_LEDGER_INSTANCE_LIFETIME_MS..=HARD_MAX_LEDGER_INSTANCE_LIFETIME_MS)
+                .contains(&self.ledger_instance_lifetime_ms),
+            Kind::InvalidLedgerLimits,
+            "LIVE_LEDGER_INSTANCE_LIFETIME_MS",
+            "must be from 60000 ms to 604800000 ms (seven days), the engine's ceiling",
+        )?;
+        check(
+            (1..=HARD_MAX_LEDGER_CLAIM_LEASE_MS).contains(&self.ledger_claim_lease_ms),
+            Kind::InvalidLedgerLimits,
+            "LIVE_LEDGER_CLAIM_LEASE_MS",
+            "must be from 1 to 300000 ms, the engine's ceiling",
+        )?;
+        check(
+            (1..=HARD_MAX_LEDGER_ACCEPTED_OUTCOMES).contains(&self.ledger_max_accepted_outcomes),
+            Kind::InvalidLedgerLimits,
+            "LIVE_LEDGER_MAX_ACCEPTED_OUTCOMES",
+            "must be from 1 to 64 outcomes, the engine's ceiling",
+        )?;
+        Ok(LiveServerLimits {
+            async_max_replay_bytes: replay,
+            async_replay_budget_bytes: budget,
+            async_max_transports_per_session: self.async_max_transports_per_session,
+            async_max_transports: self.async_max_transports,
+            ledger_max_instances: self.ledger_max_instances,
+            ledger_instance_lifetime_ms: self.ledger_instance_lifetime_ms,
+            ledger_claim_lease_ms: self.ledger_claim_lease_ms,
+            ledger_max_accepted_outcomes: self.ledger_max_accepted_outcomes,
         })
     }
 
@@ -1651,6 +2032,8 @@ pub enum LiveConfigErrorKind {
     /// An upload chunk, transfer, file, pending or store limit was out of
     /// range.
     InvalidUploadLimits,
+    /// An instance-ledger limit was out of range.
+    InvalidLedgerLimits,
 }
 
 impl LiveConfigErrorKind {
@@ -1667,6 +2050,7 @@ impl LiveConfigErrorKind {
             Self::InvalidMorphLimits => "invalid_live_morph_limits",
             Self::InvalidAsyncLimits => "invalid_live_async_limits",
             Self::InvalidUploadLimits => "invalid_live_upload_limits",
+            Self::InvalidLedgerLimits => "invalid_live_ledger_limits",
         }
     }
 }
@@ -1772,6 +2156,15 @@ mod limit_tests {
         assert_eq!(upload.max_pending_files(), 1_024);
         assert_eq!(upload.max_pending_bytes(), 4 * 1024 * 1024 * 1024);
         assert_eq!(upload.max_storage_bytes(), 16 * 1024 * 1024 * 1024);
+        let server = config.server();
+        assert_eq!(server.async_max_replay_bytes(), 4 * MIB);
+        assert_eq!(server.async_replay_budget_bytes(), 256 * MIB);
+        assert_eq!(server.async_max_transports_per_session(), 64);
+        assert_eq!(server.async_max_transports(), 16_384);
+        assert_eq!(server.ledger_max_instances(), 100_000);
+        assert_eq!(server.ledger_instance_lifetime_ms(), 604_800_000);
+        assert_eq!(server.ledger_claim_lease_ms(), 30_000);
+        assert_eq!(server.ledger_max_accepted_outcomes(), 64);
         assert_eq!(LiveConfig::builder().build(), Ok(config));
         assert_eq!(
             parsed(&[]).expect("an empty environment is the defaults"),
@@ -1810,6 +2203,14 @@ mod limit_tests {
             ("LIVE_UPLOAD_MAX_PENDING_FILES", "100000"),
             ("LIVE_UPLOAD_MAX_PENDING_BYTES", "4398046511104"),
             ("LIVE_UPLOAD_MAX_STORAGE_BYTES", "8796093022208"),
+            ("LIVE_ASYNC_MAX_REPLAY_BYTES", "33554432"),
+            ("LIVE_ASYNC_REPLAY_BUDGET_BYTES", "4294967296"),
+            ("LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION", "256"),
+            ("LIVE_ASYNC_MAX_TRANSPORTS", "100000"),
+            ("LIVE_LEDGER_MAX_INSTANCES", "1000000"),
+            ("LIVE_LEDGER_INSTANCE_LIFETIME_MS", "86400000"),
+            ("LIVE_LEDGER_CLAIM_LEASE_MS", "60000"),
+            ("LIVE_LEDGER_MAX_ACCEPTED_OUTCOMES", "16"),
         ])
         .expect("every value is in range");
         assert_eq!(config.max_request_bytes(), 1024 * MIB);
@@ -1848,6 +2249,18 @@ mod limit_tests {
         assert_eq!(engine.max_file_bytes(), 1 << 40);
         assert_eq!(engine.max_concurrent_transfers(), 32);
         assert_eq!(engine.max_files_per_field(), 100_000);
+        let server = config.server();
+        assert_eq!(server.async_max_replay_bytes(), 32 * MIB);
+        assert_eq!(server.async_replay_budget_bytes(), 4096 * MIB);
+        assert_eq!(server.async_max_transports_per_session(), 256);
+        assert_eq!(server.async_max_transports(), 100_000);
+        assert_eq!(server.ledger_max_instances(), 1_000_000);
+        assert_eq!(server.ledger_instance_lifetime_ms(), 86_400_000);
+        assert_eq!(server.ledger_claim_lease_ms(), 60_000);
+        assert_eq!(server.ledger_max_accepted_outcomes(), 16);
+        config
+            .engine_ledger_limits()
+            .expect("the engine accepts the ledger limits");
     }
 
     #[test]
@@ -1937,6 +2350,14 @@ mod limit_tests {
             ("LIVE_UPLOAD_MAX_PENDING_FILES", "4"),
             ("LIVE_UPLOAD_MAX_PENDING_BYTES", "1024"),
             ("LIVE_UPLOAD_MAX_STORAGE_BYTES", "1024"),
+            ("LIVE_ASYNC_MAX_REPLAY_BYTES", "1024"),
+            ("LIVE_ASYNC_REPLAY_BUDGET_BYTES", "1048576"),
+            ("LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION", "0"),
+            ("LIVE_ASYNC_MAX_TRANSPORTS", "8"),
+            ("LIVE_LEDGER_MAX_INSTANCES", "1000001"),
+            ("LIVE_LEDGER_INSTANCE_LIFETIME_MS", "604800001"),
+            ("LIVE_LEDGER_CLAIM_LEASE_MS", "300001"),
+            ("LIVE_LEDGER_MAX_ACCEPTED_OUTCOMES", "65"),
         ] {
             let message = parsed(&[(key, value)])
                 .expect_err("out of range")
