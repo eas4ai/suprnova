@@ -591,7 +591,10 @@ validation-image = Choose a picture for { $field }.
 A file input left empty arrives as a file part with no file name and no
 bytes, and Inertia sends a `null` file as an empty text part. Both count as
 a missing file: an optional field is `None`, and a required one reports
-`validation-required`.
+`validation-required`. A field that holds one file takes the first part of
+its name that isn't one of these, and ignores every later part of that name
+without checking it. Text where a file belongs is never checked as a file:
+it reports `validation-file`, however long it is.
 
 A file that fails while the body streams, as one over `MaxSize<N>` does,
 stops the read after the chunk that crossed the limit. The hooks and the

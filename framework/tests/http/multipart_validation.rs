@@ -1888,3 +1888,135 @@ async fn an_inertia_form_gets_a_part_that_is_not_utf8_back_in_props_errors() {
         );
     }
 }
+
+// ── PAR-043: the streaming check reads only the parts a field takes ──
+
+/// Sized well under every spill threshold a concurrent test may set, so a
+/// text part longer than the limit stays a text part.
+const SCAN_MAX: usize = 64;
+
+#[derive(MultipartRequest)]
+struct Scans {
+    #[field("scan")]
+    scan: UploadedFile<MaxSize<SCAN_MAX>>,
+    #[field("extra")]
+    extra: Option<UploadedFile<MaxSize<SCAN_MAX>>>,
+    #[field("pages[]")]
+    pages: Vec<UploadedFile<MaxSize<SCAN_MAX>>>,
+}
+
+async fn scans(req: Request) -> Response {
+    let form = Scans::from_request(req).await?;
+    Ok(HttpResponse::json(json!({
+        "scan": form.scan.size,
+        "extra": form.extra.map(|file| file.size),
+        "pages": form.pages.iter().map(|file| file.size).collect::<Vec<_>>(),
+    })))
+}
+
+async fn scans_errors(body: Vec<u8>) -> ValidationErrors {
+    let req = crate::common::request_from_multipart(BOUNDARY, body.into()).await;
+    match Scans::from_request(req).await {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {:?}", other.err()),
+    }
+}
+
+/// A file part of `len` bytes.
+fn sized_file(name: &str, len: usize) -> Vec<u8> {
+    file_part(
+        name,
+        "scan.bin",
+        "application/octet-stream",
+        &vec![7u8; len],
+    )
+}
+
+#[tokio::test]
+async fn a_text_part_longer_than_a_sized_file_is_not_a_file() {
+    let long = "x".repeat(SCAN_MAX * 2);
+    let errors = scans_errors(form(&[
+        text_part("scan", &long),
+        text_part("extra", &long),
+        text_part("pages[]", &long),
+    ]))
+    .await;
+
+    assert_eq!(key(&errors, "scan"), "validation-file");
+    assert_eq!(key(&errors, "extra"), "validation-file");
+    assert_eq!(key(&errors, "pages.0"), "validation-file");
+    assert_eq!(errors.errors.len(), 3, "{errors}");
+}
+
+#[tokio::test]
+async fn a_later_part_for_a_field_that_holds_one_file_is_ignored_unvalidated() {
+    let app = App::new(Router::new().post("/scans", scans));
+
+    // The field takes the first file; the oversized second one is ignored.
+    let reply = send(
+        &app,
+        Outgoing::post(
+            "/scans",
+            form(&[
+                sized_file("scan", SCAN_MAX / 2),
+                sized_file("scan", SCAN_MAX * 2),
+                sized_file("extra", SCAN_MAX / 2),
+                sized_file("extra", SCAN_MAX * 2),
+            ]),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json()["scan"], SCAN_MAX / 2);
+    assert_eq!(reply.json()["extra"], SCAN_MAX / 2);
+
+    // An empty file that has a name is still the file the field takes.
+    let reply = send(
+        &app,
+        Outgoing::post(
+            "/scans",
+            form(&[
+                file_part("scan", "empty.bin", "application/octet-stream", b""),
+                sized_file("scan", SCAN_MAX * 2),
+            ]),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json()["scan"], 0);
+
+    // Text where the file belongs is the part the field takes: the error is
+    // that it is not a file, never the size of the ignored file after it.
+    let errors = scans_errors(form(&[
+        text_part("scan", "not a file"),
+        sized_file("scan", SCAN_MAX * 2),
+    ]))
+    .await;
+    assert_eq!(key(&errors, "scan"), "validation-file");
+    assert_eq!(errors.errors.len(), 1, "{errors}");
+    assert_eq!(errors.errors["scan"].len(), 1, "{errors}");
+}
+
+/// The control for the test above: a part the field does take is checked
+/// while it streams, whatever came before it.
+#[tokio::test]
+async fn a_part_the_field_takes_after_a_left_out_one_is_still_checked() {
+    for left_out in [
+        // Inertia's `null` file.
+        text_part("scan", ""),
+        // A file input left empty.
+        file_part("scan", "", "application/octet-stream", b""),
+    ] {
+        let errors = scans_errors(form(&[left_out, sized_file("scan", SCAN_MAX * 2)])).await;
+        assert_eq!(key(&errors, "scan"), "validation-max-file");
+    }
+
+    // Every part of a list is taken, so every part is checked.
+    let errors = scans_errors(form(&[
+        sized_file("scan", SCAN_MAX / 2),
+        sized_file("pages[]", SCAN_MAX / 2),
+        sized_file("pages[]", SCAN_MAX * 2),
+    ]))
+    .await;
+    assert_eq!(key(&errors, "pages.1"), "validation-max-file");
+}

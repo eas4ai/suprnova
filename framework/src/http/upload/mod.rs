@@ -545,6 +545,7 @@ async fn collect_part<F>(
     spill_threshold: usize,
     budget: &mut BodyBudget<'_>,
     is_text: bool,
+    check_chunks: bool,
 ) -> Result<CollectedPart, FrameworkError>
 where
     F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
@@ -632,8 +633,11 @@ where
         // size (MaxSize) consult size. Fires AFTER the body cap so a
         // 413 from the cap takes precedence when one chunk crosses both.
         // Returning here reads no further chunk, and drops the spill file
-        // this part was writing.
-        per_field_validator(name, &sniff, size)?;
+        // this part was writing. Only for a part the caller checks: see
+        // [`Checked`].
+        if check_chunks {
+            per_field_validator(name, &sniff, size)?;
+        }
     }
 
     let inferred_extension = if sniff.is_empty() {
@@ -703,6 +707,61 @@ where
 pub async fn parse_multipart_streaming_with_limits<F>(
     req: crate::http::Request,
     limits: MultipartLimits<'_>,
+    per_field_validator: F,
+) -> Result<MultipartPayload, FrameworkError>
+where
+    F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
+{
+    parse_parts(req, limits, Checked::EveryPart, per_field_validator).await
+}
+
+/// The parse `#[derive(MultipartRequest)]` runs: as
+/// [`parse_multipart_streaming_with_limits`], except that
+/// `per_file_validator` sees only the parts the extractor takes as files,
+/// so the check of a field's file can fail the request only for a file
+/// that field would hold.
+///
+/// A text part is never checked as a file: the extractor reports it where
+/// a file belongs (`validation-file`). A field that holds one file, named
+/// in `single_files`, takes the first part of its name that does not leave
+/// the file out; every later part of that name is skipped, neither checked
+/// nor kept, so it never reaches memory or a temp file.
+#[doc(hidden)]
+pub async fn parse_multipart_for_extractor<F>(
+    req: crate::http::Request,
+    limits: MultipartLimits<'_>,
+    single_files: &[&str],
+    per_file_validator: F,
+) -> Result<MultipartPayload, FrameworkError>
+where
+    F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
+{
+    parse_parts(
+        req,
+        limits,
+        Checked::TakenFiles { single_files },
+        per_file_validator,
+    )
+    .await
+}
+
+/// Which parts the chunk validator is called for.
+enum Checked<'a> {
+    /// Every part, text or file: the contract of the public parsers, whose
+    /// caller sees the wire name alone.
+    EveryPart,
+    /// The file parts the extractor takes (see
+    /// [`parse_multipart_for_extractor`]).
+    TakenFiles {
+        /// The wire names of the fields that hold one file.
+        single_files: &'a [&'a str],
+    },
+}
+
+async fn parse_parts<F>(
+    req: crate::http::Request,
+    limits: MultipartLimits<'_>,
+    checked: Checked<'_>,
     mut per_field_validator: F,
 ) -> Result<MultipartPayload, FrameworkError>
 where
@@ -825,6 +884,12 @@ where
         per_field_max_counts.iter().copied().collect();
     let mut seen_for: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut part_count: usize = 0;
+    // Under `Checked::TakenFiles`, whether each field that holds one file
+    // has taken its part, by its position in `single_files`.
+    let mut file_taken = match &checked {
+        Checked::EveryPart => Vec::new(),
+        Checked::TakenFiles { single_files } => vec![false; single_files.len()],
+    };
 
     while let Some(mut field) = multipart
         .next_field()
@@ -873,6 +938,20 @@ where
             });
         }
 
+        // Which chunks the validator sees, and, for a field that holds one
+        // file, skip a part once the field has taken one: multer passes over
+        // the part's bytes, which still count toward the raw byte cap.
+        let (check_chunks, single_file) = match &checked {
+            Checked::EveryPart => (true, None),
+            Checked::TakenFiles { single_files } => {
+                let single_file = single_files.iter().position(|single| *single == name);
+                if single_file.is_some_and(|at| file_taken.get(at).copied().unwrap_or(false)) {
+                    continue;
+                }
+                (file_name.is_some(), single_file)
+            }
+        };
+
         let collected = collect_part(
             &mut field,
             &name,
@@ -884,6 +963,7 @@ where
                 raw_cap_tripped: &raw_cap_tripped,
             },
             file_name.is_none(),
+            check_chunks,
         )
         .await
         .map_err(|err| match err {
@@ -933,6 +1013,15 @@ where
                 Err(not_utf8) => MultipartValue::NonUtf8Text(not_utf8.into_bytes()),
             }
         };
+
+        // The field takes the first part that does not leave its file out,
+        // as `take_file` reads it.
+        if let Some(at) = single_file
+            && !leaves_file_out(&value)
+            && let Some(taken) = file_taken.get_mut(at)
+        {
+            *taken = true;
+        }
 
         payload.fields.push((name, value));
     }
@@ -1201,6 +1290,21 @@ pub enum Taken<T> {
     Invalid,
 }
 
+/// Whether `value` is how a client leaves a file out: an empty text part
+/// (Inertia's `null` file) or a file part with no file name and no bytes
+/// (an empty file input). One rule for both the extractor and the parser,
+/// so the part the parser checks for a field that holds one file is the
+/// part the extractor takes.
+fn leaves_file_out(value: &MultipartValue) -> bool {
+    match value {
+        MultipartValue::Text(text) => text.is_empty(),
+        MultipartValue::NonUtf8Text(_) => false,
+        MultipartValue::File {
+            size, file_name, ..
+        } => *size == 0 && file_name.as_deref().is_none_or(str::is_empty),
+    }
+}
+
 /// Turn one part into a file field's value.
 ///
 /// An empty text part (Inertia's `null` file) and a file part with no file
@@ -1217,15 +1321,14 @@ pub fn take_file<V: UploadValidator>(
     index: usize,
     errors: &mut ValidationErrors,
 ) -> Result<Taken<UploadedFile<V>>, FrameworkError> {
+    if leaves_file_out(&value) {
+        return Ok(Taken::Absent);
+    }
     match value {
-        MultipartValue::Text(text) if text.is_empty() => Ok(Taken::Absent),
         MultipartValue::Text(_) | MultipartValue::NonUtf8Text(_) => {
             add_field_failure(errors, name, Some(index), FieldFailure::File);
             Ok(Taken::Invalid)
         }
-        MultipartValue::File {
-            size: 0, file_name, ..
-        } if file_name.as_deref().is_none_or(str::is_empty) => Ok(Taken::Absent),
         MultipartValue::File {
             backing,
             size,

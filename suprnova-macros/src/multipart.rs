@@ -2,7 +2,7 @@
 //!
 //! Emits two impls per struct:
 //! 1. `impl FromRequest` - runs the stages in order: `authorize`, the
-//!    body parsed once via `parse_multipart_streaming_with_limits` with each
+//!    body parsed once via `parse_multipart_for_extractor` with each
 //!    `(name, value)` dispatched to its field, `after_validation`,
 //!    `after_validation_async`. Each runs only after the one before it
 //!    succeeded.
@@ -100,6 +100,10 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
     // `MultipartLimits::per_field_max_counts` so the ceiling is enforced
     // during streaming, before the offending part allocates.
     let mut max_count_entries: Vec<proc_macro2::TokenStream> = Vec::new();
+    // Wire names of the fields that hold one file. The parser checks only
+    // the part such a field takes and skips every later part of its name,
+    // so a part the extractor ignores can never fail the request.
+    let mut single_file_names: Vec<String> = Vec::new();
 
     for field in &fields.named {
         let ident = field.ident.clone().unwrap();
@@ -228,6 +232,7 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                     validator_wiring(&validator, &v_ident, &field_name_str);
                 validator_decls.push(validator_decl);
                 validator_arms.push(validator_arm);
+                single_file_names.push(field_name_str.clone());
                 let on_invalid = if required {
                     quote! { #invalid_ident = true; }
                 } else {
@@ -236,8 +241,9 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 field_arms.push(quote! {
                     #field_name_str => {
                         #next_index
-                        // First write wins; a later part of the name is
-                        // neither validated nor kept.
+                        // First write wins: the parser keeps no part of the
+                        // name after the one the field takes, so a later
+                        // part is neither validated nor kept.
                         if #ident.is_none() {
                             match ::suprnova::http::upload::take_file(
                                 &#v_ident, __value, #field_name_str, __index, &mut __errors,
@@ -394,7 +400,8 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
 
                 // Stage 2: extraction. A request-wide limit answers 413 and a
                 // file refused while the body streams answers 422, both
-                // without reading further.
+                // without reading further. The chunk check sees only the
+                // file parts the fields below take.
                 let __max_body_bytes: usize = #max_body_bytes_expr;
                 let __spill_threshold: usize = ::suprnova::http::upload::global_upload_spill_threshold();
                 let __limits = ::suprnova::http::upload::MultipartLimits {
@@ -403,9 +410,10 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                     spill_threshold: __spill_threshold,
                     per_field_max_counts: &[ #(#max_count_entries),* ],
                 };
-                let __payload = ::suprnova::http::upload::parse_multipart_streaming_with_limits(
+                let __payload = ::suprnova::http::upload::parse_multipart_for_extractor(
                     req,
                     __limits,
+                    &[ #(#single_file_names),* ],
                     |__name: &str, __sniff: &[u8], __size: u64| -> ::core::result::Result<(), ::suprnova::FrameworkError> {
                         match __name {
                             #(#validator_arms)*
@@ -774,6 +782,31 @@ mod tests {
         assert!(parser(parse_quote!(bool)).ends_with("parse_form_bool"));
         assert!(parser(parse_quote!(u32)).contains("parse_from_str"));
         assert!(parser(parse_quote!(String)).contains("parse_from_str"));
+    }
+
+    #[test]
+    fn fields_that_hold_one_file_are_named_to_the_parser() {
+        let input: DeriveInput = parse_quote! {
+            struct Scans {
+                #[field("scan")]
+                scan: UploadedFile<MaxSize<64>>,
+                #[field("extra")]
+                extra: Option<UploadedFile>,
+                #[field("pages[]")]
+                pages: Vec<UploadedFile>,
+                #[field("title")]
+                title: String,
+            }
+        };
+        let rendered = render(input);
+        assert!(
+            rendered.contains("parse_multipart_for_extractor"),
+            "the extractor parses with its own checks; got: {rendered}"
+        );
+        assert!(
+            rendered.contains(r#"["scan" , "extra"]"#),
+            "exactly the scalar and optional file fields are named; got: {rendered}"
+        );
     }
 
     #[test]
