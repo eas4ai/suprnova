@@ -726,7 +726,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   and `skip` or `offset` without `limit` works on SQLite and MySQL.
   `chunk_by_id`, `lazy_by_id`, `cursor_paginate` and `Pagination::cursor`
   visit every row once whatever the query was ordered by, and apply an
-  offset once. `filter_json_contains` works on Postgres and MySQL with
+  offset once. `chunk`, `chunk_map`, `each`, `chunk_by_id` and `lazy_by_id`
+  honour the query's `limit` as a cap on the whole walk and its `offset` as
+  a one-time skip, so `.limit(5).chunk_by_id(2, ..)` visits 5 rows instead
+  of the whole table. `cursor_paginate` on a union pages the whole union.
+  `count`, `sum` and `avg` return 0, and `min` and `max` return `None`,
+  when an offset skips the aggregate's row or a grouped query has no rows,
+  instead of failing with "aggregate query returned no row". `filter_json_contains` works on Postgres and MySQL with
   strings, objects and arrays. `create_or_first` inside a Postgres
   transaction returns the existing row, and a lost race creating a Live
   record no longer aborts the host's Postgres transaction. `Unique` and
