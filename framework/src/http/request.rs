@@ -1,5 +1,8 @@
 use super::ParamError;
-use super::body::{collect_body_with_cap, global_max_request_body_bytes, parse_form, parse_json};
+use super::body::{
+    collect_body_with_cap, global_max_request_body_bytes, is_form_urlencoded, parse_form,
+    parse_json,
+};
 use super::cookie::parse_cookies;
 use super::trusted_proxies::TrustedProxiesConfig;
 use crate::error::FrameworkError;
@@ -1501,7 +1504,7 @@ impl Request {
     pub fn cached_form_field(&self, name: &str) -> Option<String> {
         let bytes = self.cached_body()?;
         let content_type = self.header("content-type").unwrap_or_default();
-        if !content_type.starts_with("application/x-www-form-urlencoded") {
+        if !is_form_urlencoded(content_type) {
             return None;
         }
         let mut found = None;
@@ -1570,7 +1573,7 @@ impl Request {
         let (parts, bytes) = self.body_bytes().await?;
 
         match parts.content_type.as_deref() {
-            Some(ct) if ct.starts_with("application/x-www-form-urlencoded") => parse_form(&bytes),
+            Some(ct) if is_form_urlencoded(ct) => parse_form(&bytes),
             _ => parse_json(&bytes),
         }
     }

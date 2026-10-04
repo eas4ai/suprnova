@@ -621,6 +621,8 @@ impl Middleware for ActingAs {
 
 enum Body {
     Form(Vec<(&'static str, &'static str)>),
+    /// A form body sent under an explicit `Content-Type` spelling.
+    TypedForm(&'static str, Vec<(&'static str, &'static str)>),
     Json(Value),
 }
 
@@ -675,6 +677,15 @@ async fn call(
             .header("Connection", "close");
         let request = match body {
             Body::Form(fields) => request.form(&fields),
+            Body::TypedForm(content_type, fields) => {
+                let mut encoded = url::form_urlencoded::Serializer::new(String::new());
+                for (name, value) in fields {
+                    encoded.append_pair(name, value);
+                }
+                request
+                    .header("Content-Type", content_type)
+                    .body(encoded.finish())
+            }
             Body::Json(value) => request.json(&value),
         };
         let response = request.send().await.unwrap();
@@ -711,6 +722,34 @@ async fn pusher_channel_auth_signs_an_authorized_private_channel() {
     assert_eq!(
         body,
         json!({ "auth": format!("{KEY}:{}", hmac_hex("1234.1234:private-orders.42")) })
+    );
+}
+
+/// Media types are case-insensitive (RFC 9110 8.3.1): a form sent as
+/// `Application/X-WWW-Form-Urlencoded` carries the same fields, so the
+/// endpoint must read them rather than refuse the request for missing
+/// `socket_id` and `channel_name`.
+#[tokio::test]
+async fn pusher_channel_auth_reads_a_form_whatever_the_media_type_case() {
+    let hub = hub_with_master_key();
+    let (status, body) = call(
+        Some(hub.auth()),
+        None,
+        "/broadcasting/auth",
+        Body::TypedForm(
+            "Application/X-WWW-Form-Urlencoded; charset=UTF-8",
+            vec![
+                ("socket_id", SOCKET_ID),
+                ("channel_name", "private-tokened"),
+                ("token", "valid"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body,
+        json!({ "auth": format!("{KEY}:{}", hmac_hex("1234.1234:private-tokened")) })
     );
 }
 

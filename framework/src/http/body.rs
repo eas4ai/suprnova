@@ -165,6 +165,24 @@ pub fn parse_json<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, FrameworkErro
         .map_err(|e| FrameworkError::domain(format!("Failed to parse JSON body: {}", e), 422))
 }
 
+/// Whether a `Content-Type` value names `application/x-www-form-urlencoded`.
+///
+/// Media types are case-insensitive and may carry parameters (RFC 9110
+/// 8.3.1), so `Application/X-WWW-Form-Urlencoded; charset=UTF-8` is a form
+/// body. `FormRequest` always parsed it as one; every other place that
+/// decides whether to read a body as a form goes through here, so the
+/// middleware that reads a field (CSRF's `_token`, a rate-limit identity,
+/// Pusher's `socket_id`) and the handler that parses the body cannot
+/// disagree about what the body is.
+pub(crate) fn is_form_urlencoded(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+}
+
 /// Parse bytes as form-urlencoded into the target type
 ///
 /// Deserialization errors map to 422 Unprocessable Entity - the client

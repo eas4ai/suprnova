@@ -671,8 +671,7 @@ impl Middleware for CsrfMiddleware {
         // downstream handler can still read its form data.
         let is_form_body = request
             .content_type()
-            .map(|ct| ct.starts_with("application/x-www-form-urlencoded"))
-            .unwrap_or(false);
+            .is_some_and(crate::http::body::is_form_urlencoded);
 
         if !is_form_body {
             return reject_with_419();
@@ -1111,6 +1110,45 @@ mod tests {
             "the _token field stays in the form bag for the handler - \
              CSRF doesn't strip it"
         );
+    }
+
+    /// Media types are case-insensitive (RFC 9110 8.3.1). A form whose
+    /// `Content-Type` is spelled `Application/X-WWW-Form-Urlencoded` is the
+    /// same form, and its correct `_token` must pass rather than 419.
+    #[tokio::test]
+    async fn form_post_with_a_mixed_case_media_type_reads_the_body_token() {
+        let token = "matching-token-fixture-1234567890";
+        let builder = hyper::Request::builder()
+            .method("POST")
+            .uri("http://localhost/login")
+            .header(
+                "content-type",
+                "Application/X-WWW-Form-Urlencoded; charset=UTF-8",
+            );
+        let driven = drive_request(
+            Arc::new(CsrfMiddleware::new()),
+            token,
+            builder,
+            Some(format!("_token={token}&username=alice")),
+        )
+        .await;
+        assert_eq!(
+            driven.status, 200,
+            "a correct body token in a mixed-case form must pass CSRF"
+        );
+
+        let builder = hyper::Request::builder()
+            .method("POST")
+            .uri("http://localhost/login")
+            .header("content-type", "APPLICATION/X-WWW-FORM-URLENCODED");
+        let driven = drive_request(
+            Arc::new(CsrfMiddleware::new()),
+            token,
+            builder,
+            Some("_token=wrong-attacker-token".to_string()),
+        )
+        .await;
+        assert_eq!(driven.status, 419, "a wrong body token still fails");
     }
 
     #[tokio::test]

@@ -947,6 +947,25 @@ async fn a_wildcard_does_not_readmit_a_type_refused_by_name() {
     assert!(req.accepts(&["application/xml"]));
 }
 
+/// Media types are case-insensitive (RFC 9110 8.3.1). `FormRequest`
+/// already parses `Application/X-WWW-Form-Urlencoded` as a form;
+/// `Request::input` must agree rather than try JSON and fail.
+#[tokio::test]
+async fn input_reads_a_form_body_whatever_the_media_type_case() {
+    let req = build_request(
+        hyper::Request::builder().method("POST").uri("/").header(
+            "Content-Type",
+            "Application/X-WWW-Form-Urlencoded; charset=UTF-8",
+        ),
+        "email=ann%40example.com&name=Ann",
+    )
+    .await;
+    let fields: std::collections::HashMap<String, String> =
+        req.input().await.expect("a form body parses as a form");
+    assert_eq!(fields["email"], "ann@example.com");
+    assert_eq!(fields["name"], "Ann");
+}
+
 #[tokio::test]
 async fn user_agent_returns_header_value() {
     let req = build_request(

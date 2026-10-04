@@ -122,10 +122,12 @@ impl AuthBody {
     }
 }
 
-/// Whether the request carries a form-urlencoded body.
+/// Whether the request carries a form-urlencoded body, by the same
+/// case-insensitive rule `Request::cached_form_field` applies to
+/// `socket_id` and `channel_name`.
 fn is_form(req: &Request) -> bool {
     req.header("content-type")
-        .is_some_and(|v| v.starts_with("application/x-www-form-urlencoded"))
+        .is_some_and(crate::http::body::is_form_urlencoded)
 }
 
 /// Resolve the bound [`PusherAuth`], or a 500 that says how to bind it.

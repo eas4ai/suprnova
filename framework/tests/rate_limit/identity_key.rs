@@ -557,3 +557,29 @@ async fn the_same_address_in_query_and_body_is_one_identity() {
         "both requests name one address, so they share its bucket"
     );
 }
+
+/// Media types are case-insensitive (RFC 9110 8.3.1), and the handler's
+/// `FormRequest` parses `Application/X-WWW-Form-Urlencoded` as a form. The
+/// limiter must read the same body, or `only_when(names_identity)` skips
+/// the per-address quota while the handler acts on the address.
+#[tokio::test]
+async fn a_mixed_case_form_media_type_is_still_read_for_the_identity() {
+    let mw = RateLimitMiddleware::new(limiter(), one_per_window(), |req| {
+        identity_key(req, "email", "issuance")
+    })
+    .key_reads_body(4096)
+    .only_when(|req| suprnova::rate_limit::names_identity(req, "email"));
+
+    let addr = spawn_server(echo_router(mw), 6).await;
+
+    let content_type = "Application/X-WWW-Form-Urlencoded; charset=UTF-8";
+    let (first, _) = post_with_type(addr, "/issue", "email=victim@example.com", content_type).await;
+    let (second, _) =
+        post_with_type(addr, "/issue", "email=victim@example.com", content_type).await;
+
+    assert_eq!(first, 200);
+    assert_eq!(
+        second, 429,
+        "the address in a mixed-case form body must be keyed, not skipped"
+    );
+}
