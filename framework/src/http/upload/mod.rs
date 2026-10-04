@@ -1240,21 +1240,29 @@ pub fn take_file<V: UploadValidator>(
     }
 }
 
-/// Turn one part into a text field's value: the text parsed as `T`. Text
-/// that does not parse files `failure`, the key for `T`'s kind; a file part
-/// files [`FieldFailure::String`].
+/// Turn one part into a text field's value: the text read by `parse`.
+///
+/// Empty text that `parse` cannot read is [`Taken::Absent`]: it is how
+/// Inertia sends `null`, so an optional number or `bool` is `None` and a
+/// required one is missing, as Laravel's `ConvertEmptyStringsToNull` makes
+/// them. A type that can hold empty text, such as `String`, keeps it, as a
+/// `FormRequest` does for a JSON `""` or a urlencoded `name=`. Other text
+/// that does not parse files `failure`, the key for `T`'s kind; a file
+/// part files [`FieldFailure::String`].
 #[doc(hidden)]
-pub fn take_text<T: std::str::FromStr>(
+pub fn take_text<T>(
     value: MultipartValue,
     name: &str,
     index: usize,
     failure: FieldFailure,
+    parse: fn(&str) -> Option<T>,
     errors: &mut ValidationErrors,
 ) -> Taken<T> {
     match value {
-        MultipartValue::Text(text) => match text.parse() {
-            Ok(parsed) => Taken::Value(parsed),
-            Err(_) => {
+        MultipartValue::Text(text) => match parse(&text) {
+            Some(parsed) => Taken::Value(parsed),
+            None if text.is_empty() => Taken::Absent,
+            None => {
                 add_field_failure(errors, name, Some(index), failure);
                 Taken::Invalid
             }
@@ -1263,6 +1271,29 @@ pub fn take_text<T: std::str::FromStr>(
             add_field_failure(errors, name, Some(index), FieldFailure::String);
             Taken::Invalid
         }
+    }
+}
+
+/// Read a text field through its type's `FromStr`.
+#[doc(hidden)]
+pub fn parse_from_str<T: std::str::FromStr>(text: &str) -> Option<T> {
+    text.parse().ok()
+}
+
+/// Read a `bool` field the way forms send one. `bool::from_str` takes only
+/// `true` and `false`, but Inertia sends `1` and `0` and a checked HTML
+/// checkbox sends `on`. This takes what Laravel's `boolean` rule takes
+/// (`1`, `0`, `true`, `false`) plus `on` and `off`, the words in any case.
+#[doc(hidden)]
+pub fn parse_form_bool(text: &str) -> Option<bool> {
+    match text {
+        "1" => Some(true),
+        "0" => Some(false),
+        word if word.eq_ignore_ascii_case("true") || word.eq_ignore_ascii_case("on") => Some(true),
+        word if word.eq_ignore_ascii_case("false") || word.eq_ignore_ascii_case("off") => {
+            Some(false)
+        }
+        _ => None,
     }
 }
 
@@ -1276,6 +1307,45 @@ mod key_tests {
         assert_eq!(field_error_key("files[]", None), "files");
         assert_eq!(field_error_key("avatar", Some(3)), "avatar");
         assert_eq!(field_error_key("avatar", None), "avatar");
+    }
+
+    #[test]
+    fn a_form_bool_takes_laravels_values_and_checkbox_words() {
+        for (text, value) in [
+            ("1", true),
+            ("0", false),
+            ("true", true),
+            ("FALSE", false),
+            ("On", true),
+            ("off", false),
+        ] {
+            assert_eq!(parse_form_bool(text), Some(value), "{text}");
+        }
+        for text in ["", "yes", "no", "2", " 1", "truee"] {
+            assert_eq!(parse_form_bool(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn empty_text_is_absent_only_for_a_type_that_cannot_hold_it() {
+        let mut errors = ValidationErrors::new();
+        let empty = || MultipartValue::Text(String::new());
+        assert!(matches!(
+            take_text(
+                empty(),
+                "n",
+                0,
+                FieldFailure::Integer,
+                parse_from_str::<u32>,
+                &mut errors
+            ),
+            Taken::Absent
+        ));
+        assert!(matches!(
+            take_text(empty(), "s", 0, FieldFailure::Format, parse_from_str::<String>, &mut errors),
+            Taken::Value(text) if text.is_empty()
+        ));
+        assert!(errors.is_empty(), "{errors}");
     }
 
     #[test]
