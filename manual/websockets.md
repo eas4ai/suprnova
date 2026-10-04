@@ -238,7 +238,7 @@ PHP frameworks bolt WebSocket support on as a separate process (ratchet, soketi,
 
 ## Path parameters
 
-WebSocket routes support the same `{param}` capture syntax as HTTP routes. Captured values are available on the `Request` passed to the handler.
+WebSocket routes support the same `{param}` capture syntax as HTTP routes. Captured values are available on the `Request` passed to the handler, percent-decoded the same way as HTTP route parameters: `/ws/rooms/a%20b` gives `"a b"`.
 
 ```rust
 // In routes!:

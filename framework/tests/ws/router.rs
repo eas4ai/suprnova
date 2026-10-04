@@ -50,3 +50,27 @@ fn ws_routes_chain_directly_without_into() {
     assert!(router.match_ws("/ws/a").is_some());
     assert!(router.match_ws("/ws/b").is_some());
 }
+
+/// ROOT-20: a WebSocket path capture is percent-decoded the way an HTTP
+/// capture is. The router still matches the raw path, so an encoded
+/// slash stays inside one segment; only the value the handler reads is
+/// decoded.
+#[test]
+fn ws_route_params_are_percent_decoded_like_http_params() {
+    let router = Router::new().ws("/ws/rooms/{id}", NoopHandler);
+
+    let m = router
+        .match_ws("/ws/rooms/a%20b")
+        .expect("matches the raw path");
+    assert_eq!(m.params().get("id").map(String::as_str), Some("a b"));
+
+    let m = router
+        .match_ws("/ws/rooms/caf%C3%A9")
+        .expect("matches a UTF-8 escape");
+    assert_eq!(m.params().get("id").map(String::as_str), Some("café"));
+
+    let m = router
+        .match_ws("/ws/rooms/a%2Fb")
+        .expect("an encoded slash stays inside one segment");
+    assert_eq!(m.params().get("id").map(String::as_str), Some("a/b"));
+}

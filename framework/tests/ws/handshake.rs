@@ -30,6 +30,18 @@ impl WebSocketHandler for EchoHandler {
     }
 }
 
+/// Sends the `id` path parameter the handler received, then ends.
+struct ParamHandler;
+
+#[async_trait]
+impl WebSocketHandler for ParamHandler {
+    async fn handle(&self, mut socket: WsSocket, req: Request) -> Result<(), FrameworkError> {
+        let id = req.param("id").unwrap_or("<missing>").to_string();
+        socket.send_text(id).await?;
+        Ok(())
+    }
+}
+
 /// The client in these tests sends no `Origin`, so every route opts out of
 /// the default same-origin policy; origin checks are not under test here.
 fn open_config() -> WsConfig {
@@ -120,4 +132,27 @@ async fn subprotocol_echo_uses_the_client_spelling() {
         .expect("a frame")
         .expect("a valid frame");
     assert_eq!(reply, Message::text("echo: ping"));
+}
+
+/// ROOT-20: the handler of a WebSocket route reads a percent-decoded path
+/// parameter, the same value an HTTP route on the same path would read.
+#[tokio::test]
+async fn ws_handler_reads_percent_decoded_path_params() {
+    let port = spawn_server(Router::new().ws_with_config(
+        "/ws/handshake/rooms/{id}",
+        ParamHandler,
+        open_config(),
+    ))
+    .await;
+
+    let url = format!("ws://127.0.0.1:{port}/ws/handshake/rooms/a%20b%2Fc");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("upgrade");
+    let frame = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("frame in time")
+        .expect("a frame")
+        .expect("a valid frame");
+    assert_eq!(frame, Message::text("a b/c"));
 }
