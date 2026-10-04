@@ -2181,3 +2181,138 @@ async fn where_has_observes_the_related_table_and_a_write_to_it_invalidates() {
         );
     }
 }
+
+// ---- DATA-039: a canceled write never splits its row from its advance ----
+
+/// A soft-delete model on its own table, so the advancement seam below can
+/// be armed for exactly this suite's writes.
+#[suprnova::model(
+    table = "d039_rows",
+    timestamps = false,
+    soft_deletes,
+    fillable = ["title", "counter"]
+)]
+pub struct D039Row {
+    pub id: i64,
+    pub title: String,
+    pub counter: i64,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn d039_table() {
+    DB::unprepared(
+        "CREATE TABLE IF NOT EXISTS d039_rows (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            title TEXT NOT NULL, \
+            counter INTEGER NOT NULL DEFAULT 0, \
+            deleted_at TEXT\
+         )",
+    )
+    .await
+    .expect("create d039_rows");
+}
+
+async fn d039_generation() -> u64 {
+    let table = DependencyIdentity::table("d039_rows");
+    SqlGenerationLedger::new()
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table)
+        .unwrap_or(0)
+}
+
+async fn d039_row(id: i64) -> Option<D039Row> {
+    D039Row::with_trashed()
+        .filter("id", id)
+        .first()
+        .await
+        .expect("read the row back")
+}
+
+/// Runs `write` until its generation advance starts, then drops it there,
+/// the way a client disconnect, a timeout or a `select!` drops a request.
+async fn cancel_at_the_advance<F>(write: F)
+where
+    F: std::future::Future,
+{
+    let before = suprnova::render_cache::RenderCache::hold_next_advance_for_test("d039_rows");
+    tokio::select! {
+        biased;
+        _ = write => panic!("the advance was parked, so the write cannot have finished"),
+        () = suprnova::render_cache::RenderCache::wait_until_advance_held_for_test(before) => {}
+    }
+}
+
+/// DATA-039: a write canceled between its row write and its generation
+/// advance leaves the two agreeing. Bulk builder writes, `increment`, and
+/// the generated soft delete, restore and force delete used to commit the
+/// row on their own and then advance in a second transaction, so a drop in
+/// between left the row durable and every entry that read the table on its
+/// old generation. Each case passes when the row is unchanged (the write
+/// rolled back with its advance) or the generation moved.
+#[tokio::test]
+async fn a_write_canceled_at_its_advance_never_leaves_the_row_ahead_of_its_generation() {
+    boot().await;
+    d039_table().await;
+
+    let row = D039Row::create(attrs! { title: "before", counter: 0_i64 })
+        .await
+        .expect("seed");
+    let generation = d039_generation().await;
+    cancel_at_the_advance(
+        D039Row::query()
+            .filter("id", row.id)
+            .update_all(attrs! { title: "changed" }),
+    )
+    .await;
+    let after = d039_row(row.id).await.expect("present");
+    assert!(
+        after.title == "before" || d039_generation().await > generation,
+        "update_all: the row changed to {:?} while the generation stayed at {generation}",
+        after.title
+    );
+
+    let generation = d039_generation().await;
+    cancel_at_the_advance(after.increment("counter", 1)).await;
+    let after = d039_row(row.id).await.expect("present");
+    assert!(
+        after.counter == 0 || d039_generation().await > generation,
+        "increment: the counter moved to {} while the generation stayed at {generation}",
+        after.counter
+    );
+
+    let generation = d039_generation().await;
+    cancel_at_the_advance(after.clone().delete()).await;
+    let after = d039_row(row.id).await.expect("present");
+    assert!(
+        after.deleted_at.is_none() || d039_generation().await > generation,
+        "soft delete: the row was tombstoned while the generation stayed at {generation}"
+    );
+
+    let generation = d039_generation().await;
+    cancel_at_the_advance(D039Row::query().filter("id", row.id).delete_all()).await;
+    let after = d039_row(row.id).await.expect("present");
+    assert!(
+        after.deleted_at.is_none() || d039_generation().await > generation,
+        "delete_all: the row was tombstoned while the generation stayed at {generation}"
+    );
+
+    // Tombstone it for real, then cancel a restore.
+    after.clone().delete().await.expect("soft delete");
+    let trashed = d039_row(row.id).await.expect("present");
+    let generation = d039_generation().await;
+    cancel_at_the_advance(trashed.clone().restore()).await;
+    let after = d039_row(row.id).await.expect("present");
+    assert!(
+        after.deleted_at.is_some() || d039_generation().await > generation,
+        "restore: the row came back while the generation stayed at {generation}"
+    );
+
+    let generation = d039_generation().await;
+    cancel_at_the_advance(after.clone().force_delete()).await;
+    assert!(
+        d039_row(row.id).await.is_some() || d039_generation().await > generation,
+        "force delete: the row is gone while the generation stayed at {generation}"
+    );
+}

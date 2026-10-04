@@ -1177,6 +1177,27 @@ impl RenderCache {
         hints::deliver_for_test(&runtime.leases, runtime.clock.as_ref(), body);
     }
 
+    /// Test-only: parks the next generation advancement that names
+    /// `table`, forever, so a test can cancel the write that started it
+    /// between its row write and its advance. Returns the count of
+    /// advancements parked so far, for
+    /// [`Self::wait_until_advance_held_for_test`].
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn hold_next_advance_for_test(table: &str) -> u64 {
+        orm::seams::hold_next(table);
+        orm::seams::held()
+    }
+
+    /// Test-only: waits until an advancement armed by
+    /// [`Self::hold_next_advance_for_test`] has parked; `before` is the
+    /// count that call returned.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn wait_until_advance_held_for_test(before: u64) {
+        orm::seams::wait_until_held_past(before).await;
+    }
+
     /// Test-only: renders `digests` as a hint message body. Handing it more
     /// than [`hints::MAX_HINT_DIGESTS`] digests is how a test builds a
     /// deliberately over-bound message.

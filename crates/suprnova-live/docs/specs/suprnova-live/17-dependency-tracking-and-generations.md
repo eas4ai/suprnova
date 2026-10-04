@@ -241,6 +241,15 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-04 -- A dedicated advancement that fails or is dropped before it
+  lands records its identities as unresolved, and serving stays suspended
+  until a later advancement carries every one of them; an unrelated success
+  no longer resumes serving over them (audit DATA-029). Mass builder writes
+  (`update_all`, `delete_all`, `force_delete_all`, `increment_each`,
+  `upsert`), `Model::increment`, and the generated soft delete, restore and
+  force delete now run their row write and advancement as one atomic unit on
+  the primary, as model saves already did, and the payments mirror advances
+  every touched table in one advancement (audit DATA-039).
 - 2026-09-13 -- Made the data write and its generation advancement one
   transaction on the autocommit path. Every framework write terminal (the
   raw statement facade, the query builder, the SeaORM entity helpers, the

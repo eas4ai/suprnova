@@ -1760,31 +1760,38 @@ where
         let table = Self::TABLE;
         let pk_name = Self::primary_key_name();
         let pk_value = self.primary_key_value_json();
-        // T11/T12: route through resolve_write.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            None,
-            None,
-            Self::default_connection_name(),
-        )
-        .await?;
-        let backend = exec.backend();
-        // Rendered after the executor resolves, because only it knows the
-        // backend - and Postgres rejects `?`, so a hard-coded placeholder
-        // made increment/decrement (and every counter built on them) fail
-        // outright there.
-        let by_ph = crate::database::placeholder::placeholder(backend, 1)?;
-        let pk_ph = crate::database::placeholder::placeholder(backend, 2)?;
-        let sql =
-            format!("UPDATE {table} SET {column} = {column} + {by_ph} WHERE {pk_name} = {pk_ph}");
-        exec.run(sea_orm::Statement::from_sql_and_values(
-            backend,
-            &sql,
-            vec![by.into(), json_value_to_sea_value(&pk_value)],
-        ))
+        // CACHE-009 / DATA-039: the UPDATE and its generation advance share
+        // one transaction, so a future dropped between them rolls the
+        // counter back instead of leaving it committed ahead of the
+        // generations every cached page that read it depends on.
+        crate::render_cache::orm::atomic(Self::default_connection_name(), || async move {
+            // T11/T12: route through resolve_write.
+            let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                None,
+                None,
+                Self::default_connection_name(),
+            )
+            .await?;
+            let backend = exec.backend();
+            // Rendered after the executor resolves, because only it knows
+            // the backend - and Postgres rejects `?`, so a hard-coded
+            // placeholder made increment/decrement (and every counter built
+            // on them) fail outright there.
+            let by_ph = crate::database::placeholder::placeholder(backend, 1)?;
+            let pk_ph = crate::database::placeholder::placeholder(backend, 2)?;
+            let sql = format!(
+                "UPDATE {table} SET {column} = {column} + {by_ph} WHERE {pk_name} = {pk_ph}"
+            );
+            exec.run(sea_orm::Statement::from_sql_and_values(
+                backend,
+                &sql,
+                vec![by.into(), json_value_to_sea_value(&pk_value)],
+            ))
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+            crate::render_cache::orm::after_model_write(self).await
+        })
         .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
-        crate::render_cache::orm::after_model_write(self).await?;
-        Ok(())
     }
 
     /// Atomic `UPDATE table SET col = col - by WHERE pk = ?`. Sugar
