@@ -617,6 +617,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Each middleware of a group runs once.** A middleware group included by
+  two sibling groups, or an alias listed twice, ran twice per request, so a
+  throttle there counted each request twice. A resolved group now keeps
+  each middleware once, identified by its alias and parsed arguments, as
+  Laravel's `uniqueMiddleware` does. This landed after the `v3.1.0` tag.
 - **Gates, OAuth starts, CSRF bootstraps and registrations.** A gate
   callback that calls `Gate::define` no longer deadlocks the request. An
   OAuth start that is the browser's first request (JSON or POST) sets the
@@ -995,6 +1000,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **A JSON login is rate limited by its address.** `identity_key` and
+  `names_identity` ignored JSON bodies, so a JSON login was keyed on the
+  caller's IP and a `?email=` decoy opened a fresh per-address bucket on
+  each request. A top-level string field of a JSON object body now names
+  the identity under the same query-versus-body rule as a form field. This
+  landed after the `v3.1.0` tag.
+- **An SVG allowlist accepts only SVG.** A `MimeType` allowlist naming
+  `image/svg+xml` accepted any non-markup text declared as SVG, script
+  included, and refused real SVG files. A part now passes only when its
+  root element is `<svg>`; anything else declared as SVG fails as the
+  wrong type. This landed after the `v3.1.0` tag.
 - **A route uses the guard that authenticated it.** Behind a guard other
   than the default, the email-verified gate, the role and permission
   middleware, the Live principal and render-cache identity reads all used
