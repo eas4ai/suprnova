@@ -367,7 +367,12 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                     > {
                         ::std::boxed::Box::pin(async move {
                             let selection = request.selection().clone();
-                            let mut issues = ::std::vec::Vec::new();
+                            // Named, not inferred: with argument hooks only,
+                            // the first use of `issues` is a method call
+                            // (`retain`) that cannot infer the element type.
+                            let mut issues: ::std::vec::Vec<
+                                ::suprnova::live::__private::validation::ValidationIssue,
+                            > = ::std::vec::Vec::new();
                             let validate_component = ::std::matches!(
                                 selection,
                                 ::suprnova::live::__private::validation::ValidationSelection::Selected(_)
