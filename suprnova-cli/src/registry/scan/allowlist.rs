@@ -314,7 +314,7 @@ pub const STD_ALLOWED: &[&str] = &[
     "std::boxed",
     "std::rc",
     "std::sync::Arc",
-    "std::time::Duration",
+    "std::time::Duration", "std::fs",
 ];
 
 /// The allowlist embedded in this binary, for the framework version this
