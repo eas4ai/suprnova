@@ -49,6 +49,27 @@ enum LiveRegistryCommand {
     Check,
     /// Check every component, then sign each one, all or nothing
     Sign,
+    /// Hand the library to a new signing key and re-sign every component
+    ///
+    /// Reads the current private key as `sign` does (SUPRNOVA_LIBRARY_KEY or
+    /// the configuration directory), makes a new key pair, writes the new
+    /// private key to <config>/suprnova/library-keys/<fingerprint hex>.key,
+    /// names it as publicKey in library.json, advances the version one patch,
+    /// and re-signs every component, all or nothing. A handover is one hop,
+    /// so previousKeys is rewritten as one statement per former key, each
+    /// naming the new key: the current key signs one, and so does every
+    /// former key whose private key file is in the configuration directory
+    /// under its fingerprint. A former key whose file is missing is refused
+    /// by fingerprint unless --drop-key names it; an application still pinned
+    /// to a dropped key must pin the new key by hand. Refused when
+    /// library.json's source is still the one `new` wrote, or when any
+    /// component fails a check.
+    RotateKey {
+        /// Drop the statement of this former key, whose private key file is
+        /// lost (repeatable, one flag per key)
+        #[arg(long = "drop-key", value_name = "FINGERPRINT")]
+        drop_key: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -614,6 +635,9 @@ fn main() {
                 }
                 LiveRegistryCommand::Check => registry_commands::check(std::path::Path::new(".")),
                 LiveRegistryCommand::Sign => registry_commands::sign(std::path::Path::new(".")),
+                LiveRegistryCommand::RotateKey { drop_key } => {
+                    registry_commands::rotate_key(std::path::Path::new("."), &drop_key)
+                }
             };
             if let Err(error) = outcome {
                 ui::error(&error.to_string());

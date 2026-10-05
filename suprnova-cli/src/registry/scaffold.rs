@@ -41,8 +41,8 @@ pub fn example_component(namespace: &str) -> Vec<(&'static str, String)> {
     .collect()
 }
 
-/// `library.json`: the keys of REG-025 in the order the specification lists
-/// them, each value a JSON string.
+/// `library.json` as `live:registry new` writes it: the keys of REG-025 in
+/// the order the specification lists them, with a title and description.
 pub fn library_json(
     namespace: &str,
     source: &str,
@@ -50,18 +50,87 @@ pub fn library_json(
     framework: &str,
     public_key: &str,
 ) -> String {
+    library_json_text(&LibraryText {
+        namespace,
+        source,
+        version,
+        framework,
+        public_key,
+        previous_keys: &[],
+        title: Some(namespace),
+        description: Some("Suprnova Live components."),
+    })
+}
+
+/// One `previousKeys` entry (REG-033): the former key, the fingerprint of
+/// the key it hands over to, and its signature over the handover statement.
+pub struct PreviousKeyText<'a> {
+    /// `publicKey`: the former key, `ed25519:<base64>`.
+    pub public_key: &'a str,
+    /// `next`: the new key's fingerprint.
+    pub next: &'a str,
+    /// `signature`: base64 of the former key's signature.
+    pub signature: &'a str,
+}
+
+/// Every value a `library.json` holds, as text.
+pub struct LibraryText<'a> {
+    /// `namespace`.
+    pub namespace: &'a str,
+    /// `source`.
+    pub source: &'a str,
+    /// `version`.
+    pub version: &'a str,
+    /// `framework`.
+    pub framework: &'a str,
+    /// `publicKey`.
+    pub public_key: &'a str,
+    /// `previousKeys`, written only when not empty.
+    pub previous_keys: &'a [PreviousKeyText<'a>],
+    /// `title`, when given.
+    pub title: Option<&'a str>,
+    /// `description`, when given.
+    pub description: Option<&'a str>,
+}
+
+/// Writes `library.json` with its keys in the order REG-025 and REG-033
+/// list them, two-space indented, each value a JSON string, so every
+/// library's file reads the same way.
+pub fn library_json_text(library: &LibraryText<'_>) -> String {
     let quoted =
         |value: &str| serde_json::to_string(value).unwrap_or_else(|_| String::from("\"\""));
-    format!(
-        "{{\n  \"namespace\": {},\n  \"source\": {},\n  \"version\": {},\n  \"framework\": {},\n  \"publicKey\": {},\n  \"title\": {},\n  \"description\": {}\n}}\n",
-        quoted(namespace),
-        quoted(source),
-        quoted(version),
-        quoted(framework),
-        quoted(public_key),
-        quoted(namespace),
-        quoted("Suprnova Live components."),
-    )
+    let mut lines = vec![
+        format!("  \"namespace\": {}", quoted(library.namespace)),
+        format!("  \"source\": {}", quoted(library.source)),
+        format!("  \"version\": {}", quoted(library.version)),
+        format!("  \"framework\": {}", quoted(library.framework)),
+        format!("  \"publicKey\": {}", quoted(library.public_key)),
+    ];
+    if !library.previous_keys.is_empty() {
+        let entries: Vec<String> = library
+            .previous_keys
+            .iter()
+            .map(|entry| {
+                format!(
+                    "    {{\n      \"publicKey\": {},\n      \"next\": {},\n      \"signature\": {}\n    }}",
+                    quoted(entry.public_key),
+                    quoted(entry.next),
+                    quoted(entry.signature)
+                )
+            })
+            .collect();
+        lines.push(format!(
+            "  \"previousKeys\": [\n{}\n  ]",
+            entries.join(",\n")
+        ));
+    }
+    if let Some(title) = library.title {
+        lines.push(format!("  \"title\": {}", quoted(title)));
+    }
+    if let Some(description) = library.description {
+        lines.push(format!("  \"description\": {}", quoted(description)));
+    }
+    format!("{{\n{}\n}}\n", lines.join(",\n"))
 }
 
 /// The preview's `src/live/mod.rs`: the registry builder in the scaffold's

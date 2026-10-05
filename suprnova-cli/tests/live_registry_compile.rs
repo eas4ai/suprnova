@@ -15,6 +15,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+use suprnova_cli::registry::RegistryError;
+use suprnova_cli::registry::fetch::SourceFetcher;
+use suprnova_cli::registry::plan::{self, Options, Prompter};
+use suprnova_cli::registry::project::{ProjectFile, ProjectLock};
+use suprnova_cli::registry::{address, install};
+
 const BIN: &str = env!("CARGO_BIN_EXE_suprnova");
 
 /// The markers `scaffold_snapshot.rs` refuses in scaffolder output.
@@ -368,6 +374,48 @@ fn reg_018_the_preview_passes_its_own_test_and_live_check() {
     assert!(text.contains("1 component"), "{text}");
 }
 
+/// `suprnova new <name>` repointed at the in-tree framework, with the
+/// `Cargo.lock` the framework check reads (REG-007).
+fn scaffold_app(author: &Author, cwd: &Path, name: &str) -> PathBuf {
+    author.succeed(
+        cwd,
+        &[
+            "new",
+            name,
+            "--no-interaction",
+            "--no-git",
+            "--frontend",
+            "svelte",
+        ],
+    );
+    let app = cwd.join(name);
+    patch_local_suprnova(&app);
+    cargo_succeeds(&app, &["generate-lockfile"]);
+    app
+}
+
+/// The library's current `publicKey`.
+fn public_key(library: &Path) -> String {
+    let json: serde_json::Value =
+        serde_json::from_str(&read(library.join("library.json"))).expect("library.json");
+    json["publicKey"].as_str().expect("publicKey").to_owned()
+}
+
+/// Trust on first use needs a terminal; a developer may pin the key by
+/// hand beforehand (REG-024), which is what a non-interactive run does.
+fn pin_by_hand(app: &Path, library: &Path) {
+    let library_address = std::fs::canonicalize(library).expect("library root");
+    std::fs::write(
+        app.join("suprnova.toml"),
+        format!(
+            "# Pinned by hand before the first install.\n[live.libraries.\"{}\"]\nkey = \"{}\"\n",
+            library_address.display(),
+            public_key(library)
+        ),
+    )
+    .expect("suprnova.toml");
+}
+
 /// The page the consumer adds to render the installed counter: one public
 /// seed island, the namespace's asset route, and its stylesheet and script.
 const COUNTER_PAGE: &str = r#"//! The installed counter, rendered by its own island.
@@ -494,35 +542,8 @@ fn reg_005_reg_021_a_signed_library_installs_compiles_and_renders_in_a_scaffolde
     author.succeed(&library, &["live:registry", "sign"]);
     let allowed = capabilities(&check, "counter");
 
-    author.succeed(
-        tmp.path(),
-        &[
-            "new",
-            "shop",
-            "--no-interaction",
-            "--no-git",
-            "--frontend",
-            "svelte",
-        ],
-    );
-    let app = tmp.path().join("shop");
-    patch_local_suprnova(&app);
-    cargo_succeeds(&app, &["generate-lockfile"]);
-
-    // Trust on first use needs a terminal; a developer may pin the key by
-    // hand beforehand (REG-024), which is what a non-interactive run does.
-    let library_json: serde_json::Value =
-        serde_json::from_str(&read(library.join("library.json"))).expect("library.json");
-    let public_key = library_json["publicKey"].as_str().expect("publicKey");
-    let library_address = std::fs::canonicalize(&library).expect("library root");
-    std::fs::write(
-        app.join("suprnova.toml"),
-        format!(
-            "# Pinned by hand before the first install.\n[live.libraries.\"{}\"]\nkey = \"{public_key}\"\n",
-            library_address.display()
-        ),
-    )
-    .expect("suprnova.toml");
+    let app = scaffold_app(&author, tmp.path(), "shop");
+    pin_by_hand(&app, &library);
 
     let mut add = vec!["live:add", "../acme/components/counter", "--yes"];
     for capability in &allowed {
@@ -579,5 +600,162 @@ fn reg_005_reg_021_a_signed_library_installs_compiles_and_renders_in_a_scaffolde
             .matches("pub mod counter;")
             .count(),
         1
+    );
+}
+
+/// A developer at a terminal who answers yes, recording each question:
+/// the Prompter seam `live:add` asks through.
+struct Terminal {
+    asked: Vec<String>,
+}
+
+impl Prompter for Terminal {
+    fn is_terminal(&self) -> bool {
+        true
+    }
+
+    fn confirm(&mut self, question: &str) -> Result<bool, RegistryError> {
+        self.asked.push(question.to_owned());
+        Ok(true)
+    }
+}
+
+/// `live:add <source> --yes` as a terminal session runs it: lock, load,
+/// resolve, confirm through `prompter`, apply.
+fn add_at_a_terminal(app: &Path, source: &Path, prompter: &mut Terminal) {
+    let lock = ProjectLock::acquire(app).expect("the project lock");
+    let mut project = ProjectFile::load(app).expect("suprnova.toml");
+    let source = address::parse(source.to_str().expect("UTF-8 path")).expect("a path source");
+    let options = Options {
+        yes: true,
+        ..Options::default()
+    };
+    let plan = plan::resolve(&source, &options, &SourceFetcher::default(), &project)
+        .expect("the plan resolves");
+    let decisions =
+        plan::confirm(&plan, &options, &project, prompter).expect("the developer confirms");
+    install::apply_with(
+        &plan,
+        &mut project,
+        &lock,
+        &options,
+        &decisions,
+        &install::registration_edits,
+    )
+    .expect("installs");
+    lock.release().expect("releases the lock");
+}
+
+/// REG-033 through the commands: an application pins the library's first
+/// key and installs two components; the author rotates the key; `--yes`
+/// alone does not re-pin; at a terminal the vouched change installs and
+/// re-pins; and `live:check` still verifies the component recorded under
+/// the former key beside the one installed under the new key.
+#[test]
+#[ignore = "scaffolds and compiles an application; the gate runs it with -- --ignored"]
+fn reg_033_a_rotated_key_installs_after_a_terminal_re_pin_and_former_records_still_verify() {
+    let tmp = scratch();
+    let author = Author::new(tmp.path());
+    let library = author.new_library(tmp.path());
+
+    // Name where the library is published, add a second component, sign.
+    let library_json = read(library.join("library.json"));
+    std::fs::write(
+        library.join("library.json"),
+        library_json.replacen(
+            "\"github.com/acme/acme\"",
+            "\"github.com/acme-test/acme-ui\"",
+            1,
+        ),
+    )
+    .expect("library.json");
+    let badge = library.join("components/badge");
+    std::fs::create_dir_all(&badge).expect("badge");
+    std::fs::write(
+        badge.join("manifest.json"),
+        "{\n  \"name\": \"acme.badge\",\n  \"root\": \"acme-ui/badge\",\n  \"files\": [\n    \"badge.html\"\n  ]\n}\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        badge.join("badge.html"),
+        "<span class=\"acme-badge\">New</span>\n",
+    )
+    .expect("view");
+    author.succeed(&library, &["live:registry", "sign"]);
+    author.succeed(&library, &["live:registry", "check"]);
+    let first_key = public_key(&library);
+
+    let app = scaffold_app(&author, tmp.path(), "rotated");
+    pin_by_hand(&app, &library);
+    let library_root = std::fs::canonicalize(&library).expect("library root");
+    let counter = library_root.join("components/counter");
+    for component in ["counter", "badge"] {
+        let source = library_root.join("components").join(component);
+        author.succeed(
+            &app,
+            &["live:add", source.to_str().expect("UTF-8"), "--yes"],
+        );
+    }
+
+    let rotated = author.succeed(&library, &["live:registry", "rotate-key"]);
+    let new_key = public_key(&library);
+    assert_ne!(new_key, first_key);
+    for needle in ["library-keys", "0.1.1"] {
+        assert!(rotated.contains(needle), "{needle}:\n{rotated}");
+    }
+    author.succeed(&library, &["live:registry", "check"]);
+
+    // --yes confirms a plan; it never re-pins a key (REG-033).
+    let pins = read(app.join("suprnova.toml"));
+    let refused = author.suprnova(
+        &app,
+        &["live:add", counter.to_str().expect("UTF-8"), "--yes"],
+    );
+    assert!(!refused.status.success(), "{}", combined(&refused));
+    assert!(
+        combined(&refused).contains("terminal"),
+        "{}",
+        combined(&refused)
+    );
+    assert_eq!(
+        read(app.join("suprnova.toml")),
+        pins,
+        "a refusal writes nothing"
+    );
+
+    let mut terminal = Terminal { asked: Vec::new() };
+    add_at_a_terminal(&app, &counter, &mut terminal);
+    assert!(
+        terminal
+            .asked
+            .iter()
+            .any(|question| question.contains("Re-pin")),
+        "the re-pin was asked: {:?}",
+        terminal.asked
+    );
+    let pins = read(app.join("suprnova.toml"));
+    assert!(pins.contains(&format!("key = \"{new_key}\"")), "{pins}");
+    assert!(pins.contains("previous_keys"), "{pins}");
+    assert!(pins.contains(&first_key), "the former key is kept: {pins}");
+    let live = read(app.join("src/live/mod.rs"));
+    assert_eq!(live.matches(REGISTRATION).count(), 1, "{live}");
+
+    let database = format!(
+        "sqlite://{}?mode=rwc",
+        tmp.path().join("rotated-check.sqlite").display()
+    );
+    let output = Command::new(BIN)
+        .args(["live:check", "--timeout-secs", "2400"])
+        .current_dir(&app)
+        .env("DATABASE_URL", &database)
+        .env("APP_ENV", "testing")
+        .env("CARGO_TARGET_DIR", shared_target())
+        .output()
+        .expect("run live:check");
+    let text = combined(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.contains("Verified 2 recorded third-party component(s)"),
+        "the badge, recorded under the former key, and the counter, under the new one:\n{text}"
     );
 }

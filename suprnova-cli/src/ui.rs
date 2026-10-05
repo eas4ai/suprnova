@@ -208,8 +208,8 @@ pub(crate) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("live:make <name>", "Scaffold a Live component and view"),
             ("live:check", "Check Live views with the integrated checker"),
             (
-                "live:registry new|check|sign",
-                "Author a signed Live component library",
+                "live:registry <verb>",
+                "Author a library: new, check, sign, rotate-key",
             ),
             (
                 "live:add <component>",
