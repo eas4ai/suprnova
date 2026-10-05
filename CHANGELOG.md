@@ -1009,6 +1009,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `check_channels`. A process timeout's kill can no longer reach a process
   or group id that the owner reaped in the meantime. This landed after the
   `v3.1.0` tag.
+- **Docs reading order, memory fanout streams and the image budget
+  docs.** A docs chapter listed twice in the table of contents keeps one
+  place in the previous and next chain, its first listing, and every
+  catalog entry for it matches its JSON file. A `memory://` fanout stream
+  is freed when its last hub drops instead of staying registered until the
+  process exits. The `ImageConfig` docs give the real 1 GiB default for
+  `IMAGE_MAX_ALLOC_BYTES`. This landed after the `v3.1.0` tag.
 - **Sessions and remember-me tokens restore on MySQL and MariaDB.** A
   scaffolded application's session, remember-me and auth-flow token time
   columns are `TIMESTAMP` there, and the framework read them as a type the
@@ -1056,10 +1063,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   cached feature-flag evaluator sees an admin change made during a
   concurrent miss and holds at most 4096 entries. Read-through promotions
   stream into the primary instead of holding the object in memory,
-  unpromoted reads fetch only their range, a delete or move during a
-  promotion is not undone, on the same node or another one (a promotion
-  re-checks the fallback after publishing and withdraws its own copy),
-  versioned and conditional reads reach the fallback, and a refused move
+  unpromoted reads fetch only their range, and a delete or move during a
+  promotion is not undone, on the same node or another one: a promotion
+  asks the fallback again just before it publishes and after, a cancelled
+  read still finishes that check, and a withdrawal deletes only the exact
+  version the promotion wrote, never a writer's newer object. On a primary
+  without versioned deletes (local, memory, and unversioned S3, Azure Blob
+  and GCS) the promotion keeps its copy and logs a warning instead, so a
+  delete on another node that lands between the last check and the publish
+  can leave that copy behind. Versioned and conditional reads reach the
+  fallback, and a refused move
   keeps the fallback copy. Ranged reads stop at the requested range: a
   server that ignores `Range` can no longer make a small read buffer the
   whole object, and S3, Azure Blob and GCS refuse a response that is not
@@ -1595,7 +1608,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   tables were unbounded, a JPEG could be measured at one frame header and
   decoded at another, and path and disk sources were read into memory
   before the size check. Each is now counted against the budget before the
-  memory is taken.
+  memory is taken. A JPEG whose Extended XMP segments would make the
+  decoder's reassembly read more than `IMAGE_MAX_ALLOC_BYTES` is refused
+  before decoding; 100,000 stalled segments used to hold a core for
+  minutes.
 - **The mock payment provider refuses unsigned webhooks outside
   development.** It accepted them when the application registered a
   production or staging `AppConfig` in code with `APP_ENV` unset; it now
