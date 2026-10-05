@@ -951,10 +951,7 @@ impl Resolver<'_> {
         let in_plan: BTreeSet<ComponentAddress> =
             order.iter().map(|loaded| loaded.address.clone()).collect();
         let shipped_views = shipped_views();
-        let mut modules_of: BTreeMap<
-            ComponentAddress,
-            (String, Vec<String>, Vec<String>, Vec<String>),
-        > = BTreeMap::new();
+        let mut modules_of: BTreeMap<ComponentAddress, Reachable> = BTreeMap::new();
         // Each planned component's view sources by view path, for the view
         // checks of the components that depend on it.
         let mut view_sources_of: BTreeMap<ComponentAddress, Vec<(String, String)>> =
@@ -1081,11 +1078,15 @@ impl Resolver<'_> {
                 let mut importable_scripts = Vec::new();
                 let mut dependency_views = Vec::new();
                 for dependency in &loaded.dependencies {
-                    if let Some((module, rust, views, scripts)) = modules_of.get(dependency) {
-                        dependency_modules
-                            .extend(rust.iter().map(|name| format!("{module}::{name}")));
-                        importable_views.extend(views.iter().cloned());
-                        importable_scripts.extend(scripts.iter().cloned());
+                    if let Some(reachable) = modules_of.get(dependency) {
+                        dependency_modules.extend(
+                            reachable
+                                .rust
+                                .iter()
+                                .map(|name| format!("{}::{name}", reachable.module)),
+                        );
+                        importable_views.extend(reachable.views.iter().cloned());
+                        importable_scripts.extend(reachable.scripts.iter().cloned());
                     }
                     if let Some(sources) = view_sources_of.get(dependency) {
                         dependency_views.extend(sources.iter().cloned());
@@ -1197,7 +1198,12 @@ impl Resolver<'_> {
                 .collect();
             modules_of.insert(
                 address.clone(),
-                (ns_module.clone(), modules.clone(), views, scripts),
+                Reachable {
+                    module: ns_module.clone(),
+                    rust: modules.clone(),
+                    views,
+                    scripts,
+                },
             );
             let sources: Vec<(String, String)> = loaded
                 .files
@@ -1442,6 +1448,17 @@ fn check_register(
 }
 
 /// Every shipped view, as a view of another component may name it.
+/// What a planned component offers the components that depend on it: its
+/// namespace module and Rust file stems, which their Rust may name, and its
+/// views and scripts, which their views may include and their scripts may
+/// import (REG-030, REG-031, REG-032).
+struct Reachable {
+    module: String,
+    rust: Vec<String>,
+    views: Vec<String>,
+    scripts: Vec<String>,
+}
+
 fn shipped_views() -> Vec<String> {
     super::fetch::COMPONENTS
         .iter()
