@@ -80,7 +80,7 @@
 use super::streaming::WriterGuard;
 use futures::TryStreamExt;
 use opendal::options::{DeleteOptions, ReaderOptions, WriteOptions};
-use opendal::raw::oio::{Copy as _, Read as _, ReadStream as _};
+use opendal::raw::oio::{Copy as _, Read as _, ReadStream as _, ReadStreamDyn as _};
 use opendal::raw::{
     Layer, OpCopier, OpCopy, OpCreateDir, OpDelete, OpList, OpPresign, OpRead, OpRename, OpStat,
     OpWrite, PresignOperation, RpCreateDir, RpPresign, RpRead, RpRename, RpStat, Service,
@@ -89,6 +89,7 @@ use opendal::raw::{
 use opendal::{
     Buffer, BytesRange, Capability, Error, ErrorKind, Metadata, OperationContext, Operator, Result,
 };
+use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -707,21 +708,86 @@ enum Promotion {
 }
 
 /// Whether `now` describes the same fallback object as `fetched`, by the
-/// strongest identity both carry: an ETag, a version, a modification time
-/// with the length, or the length alone.
-fn same_source(fetched: &Metadata, now: &Metadata) -> bool {
+/// strongest validator both carry: an ETag, a version, or a modification
+/// time with the length. `None` when they share none.
+///
+/// A length alone is not one. A same-size overwrite keeps it, so taking it
+/// as proof published the old bytes over the new.
+fn same_source(fetched: &Metadata, now: &Metadata) -> Option<bool> {
     if let (Some(a), Some(b)) = (fetched.etag(), now.etag()) {
-        return a == b;
+        return Some(a == b);
     }
     if let (Some(a), Some(b)) = (fetched.version(), now.version()) {
-        return a == b;
-    }
-    if fetched.content_length() != now.content_length() {
-        return false;
+        return Some(a == b);
     }
     match (fetched.last_modified(), now.last_modified()) {
-        (Some(a), Some(b)) => a == b,
-        _ => true,
+        (Some(a), Some(b)) => Some(a == b && fetched.content_length() == now.content_length()),
+        _ => None,
+    }
+}
+
+/// Whether `metadata` carries anything [`same_source`] can compare.
+fn has_validator(metadata: &Metadata) -> bool {
+    metadata.etag().is_some() || metadata.version().is_some() || metadata.last_modified().is_some()
+}
+
+/// The SHA-256 of an object's bytes.
+type Digest = [u8; 32];
+
+/// What a promotion knows about the fallback object it fetched, kept to
+/// tell later whether the fallback still holds that object.
+#[derive(Clone)]
+struct Fetched {
+    /// The fallback's metadata from before the fetch.
+    metadata: Metadata,
+    /// The digest of the bytes the promotion streamed. Kept only when the
+    /// metadata carries no validator, since then the bytes are the only
+    /// identity there is.
+    digest: Option<Digest>,
+}
+
+/// Whether `fallback` still holds the object `fetched` describes at `path`.
+///
+/// The fallback's validators decide when it has any. A fallback without
+/// them - the in-memory disk reports only a length - is read again and its
+/// bytes compared by digest, which is the one check a length cannot fool.
+async fn fallback_holds(fallback: &Operator, path: &str, fetched: &Fetched) -> Result<bool> {
+    let now = match fallback.stat(path).await {
+        Ok(now) => now,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if let Some(same) = same_source(&fetched.metadata, &now) {
+        return Ok(same);
+    }
+    // Validators the fetch saw and this answer lacks prove nothing either
+    // way, and nothing was hashed to fall back on.
+    let Some(digest) = fetched.digest else {
+        return Ok(false);
+    };
+    if now.content_length() != fetched.metadata.content_length() {
+        return Ok(false);
+    }
+    match content_digest(fallback, path).await {
+        Ok(now) => Ok(now == digest),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Hash the whole object at `path`, one chunk at a time, without holding it.
+async fn content_digest(disk: &Operator, path: &str) -> Result<Digest> {
+    let reader = disk.service().read(disk.context(), path, OpRead::new())?;
+    let (_, mut stream) = reader.open(BytesRange::default()).await?;
+    let mut hasher = Sha256::new();
+    loop {
+        let chunk = stream.read_dyn().await?;
+        if chunk.is_empty() {
+            return Ok(hasher.finalize().into());
+        }
+        for bytes in chunk {
+            hasher.update(&bytes);
+        }
     }
 }
 
@@ -735,8 +801,8 @@ struct Confirmation {
     primary: Operator,
     fallback: Operator,
     path: String,
-    /// The fallback object's metadata from before the fetch.
-    fetched: Metadata,
+    /// What the promotion fetched.
+    fetched: Fetched,
     /// The version that names the published copy, when the primary reports
     /// one and can delete a single version. `None` means the copy cannot be
     /// withdrawn without risking a writer's newer object.
@@ -753,11 +819,7 @@ impl Confirmation {
     /// copy is kept and served, since the fallback held the same object just
     /// before the publish.
     async fn run(self) -> Result<Promotion> {
-        let still_cold = match self.fallback.stat(&self.path).await {
-            Ok(now) => Ok(same_source(&self.fetched, &now)),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e),
-        };
+        let still_cold = fallback_holds(&self.fallback, &self.path, &self.fetched).await;
         match (still_cold, self.version) {
             (Ok(true), _) => Ok(Promotion::OnPrimary),
             (_, Some(version)) => {
@@ -971,6 +1033,15 @@ impl ReadThroughReader {
         // Recorded before the first byte is fetched: a delete that removes the
         // fallback copy after this point advances it.
         let recorded = self.publications.generations(&claim).await;
+        // Without a validator, the checks below compare the bytes themselves.
+        let by_content = !has_validator(metadata);
+        if by_content {
+            tracing::debug!(
+                path = %self.path,
+                "read-through fallback reports no ETag, version or modification time; \
+                 the promotion is checked against the fallback by content"
+            );
+        }
 
         if !self.promote_atomically {
             let options = self.promotion_options(metadata, self.promote_conditionally);
@@ -984,10 +1055,11 @@ impl ReadThroughReader {
                 writer,
             )
             .preserve_destination();
-            if let Err(e) = self.stream_into(guard.writer()).await {
-                return guard.settle(Err(e)).await;
-            }
-            match self.still_holds(metadata).await {
+            let fetched = match self.stream_into(guard.writer(), metadata, by_content).await {
+                Ok(fetched) => fetched,
+                Err(e) => return guard.settle(Err(e)).await,
+            };
+            match self.still_holds(&fetched).await {
                 Ok(true) => {}
                 Ok(false) => {
                     guard.cleanup().await;
@@ -1010,7 +1082,7 @@ impl ReadThroughReader {
                         .version()
                         .filter(|_| self.withdraw_by_version)
                         .map(str::to_owned);
-                    self.confirm_or_withdraw(metadata, version).await
+                    self.confirm_or_withdraw(fetched, version).await
                 }
                 Ok(None) => {
                     guard.cleanup().await;
@@ -1037,15 +1109,19 @@ impl ReadThroughReader {
             &staged,
             writer,
         );
-        let staged_result: Result<Metadata> = async {
-            self.stream_into(guard.writer()).await?;
-            guard.writer().close().await
+        let staged_result: Result<Fetched> = async {
+            let fetched = self
+                .stream_into(guard.writer(), metadata, by_content)
+                .await?;
+            guard.writer().close().await?;
+            Ok(fetched)
         }
         .await;
-        if let Err(e) = staged_result {
-            return guard.settle(Err(e)).await;
-        }
-        match self.still_holds(metadata).await {
+        let fetched = match staged_result {
+            Ok(fetched) => fetched,
+            Err(e) => return guard.settle(Err(e)).await,
+        };
+        match self.still_holds(&fetched).await {
             Ok(true) => {}
             Ok(false) => {
                 guard.cleanup().await;
@@ -1072,7 +1148,7 @@ impl ReadThroughReader {
                 // A version the staged write reported names the staged
                 // object, not what the rename published, so it proves
                 // nothing about the copy at the path.
-                self.confirm_or_withdraw(metadata, None).await
+                self.confirm_or_withdraw(fetched, None).await
             }
             Ok(Some(false)) => {
                 guard.cleanup().await;
@@ -1087,30 +1163,39 @@ impl ReadThroughReader {
     }
 
     /// Copy the whole fallback object into `writer`, one fallback chunk at a
-    /// time, without closing it. Returns the bytes written.
-    async fn stream_into(&self, writer: &mut opendal::Writer) -> Result<u64> {
+    /// time, without closing it. Returns what was fetched, hashing the bytes
+    /// on the way when `by_content` says the metadata cannot identify them.
+    async fn stream_into(
+        &self,
+        writer: &mut opendal::Writer,
+        metadata: &Metadata,
+        by_content: bool,
+    ) -> Result<Fetched> {
         let (_, mut stream) = self.open_fallback(BytesRange::default()).await?;
-        let mut written = 0u64;
+        let mut hasher = by_content.then(Sha256::new);
         loop {
             let chunk = stream.read().await?;
             if chunk.is_empty() {
-                return Ok(written);
+                return Ok(Fetched {
+                    metadata: metadata.clone(),
+                    digest: hasher.map(|hasher| hasher.finalize().into()),
+                });
             }
-            written += chunk.len() as u64;
+            if let Some(hasher) = hasher.as_mut() {
+                for bytes in chunk.clone() {
+                    hasher.update(&bytes);
+                }
+            }
             writer.write(chunk).await?;
         }
     }
 
     /// Whether the fallback still holds the object this promotion fetched.
-    /// Asked just before the promotion publishes, so a delete or a move on
-    /// another node that removed the fallback copy while the bytes streamed
-    /// is seen before anything reaches the path.
-    async fn still_holds(&self, fetched: &Metadata) -> Result<bool> {
-        match self.fallback.stat(&self.path).await {
-            Ok(now) => Ok(same_source(fetched, &now)),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e),
-        }
+    /// Asked just before the promotion publishes, so a delete, a move or an
+    /// overwrite on another node while the bytes streamed is seen before
+    /// anything reaches the path.
+    async fn still_holds(&self, fetched: &Fetched) -> Result<bool> {
+        fallback_holds(&self.fallback, &self.path, fetched).await
     }
 
     /// After this promotion published, check that the fallback still holds
@@ -1130,14 +1215,14 @@ impl ReadThroughReader {
     /// copy of a deleted object on the primary.
     async fn confirm_or_withdraw(
         &self,
-        fetched: &Metadata,
+        fetched: Fetched,
         version: Option<String>,
     ) -> Result<Promotion> {
         let confirmation = Confirmation {
             primary: self.primary.clone(),
             fallback: self.fallback.clone(),
             path: self.path.clone(),
-            fetched: fetched.clone(),
+            fetched,
             version,
         };
         match tokio::runtime::Handle::try_current() {
@@ -1597,6 +1682,18 @@ mod tests {
         /// Keep a version for every write, report it, and delete a single
         /// version on request, the way a versioned object store does.
         versions: bool,
+        /// Report no ETag for an object, only its length, the way the
+        /// in-memory disk does. By default the stub reports an ETag derived
+        /// from the object's bytes, as an object store does.
+        reports_no_validators: bool,
+    }
+
+    /// An ETag that changes whenever the bytes do.
+    fn content_etag(contents: &Buffer) -> String {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        contents.to_vec().hash(&mut hasher);
+        format!("\"{:016x}\"", hasher.finish())
     }
 
     /// A disk that answers from a fixed body and records what it is asked for.
@@ -1915,6 +2012,9 @@ mod tests {
                         Metadata::new(EntryMode::FILE).with_content_length(contents.len() as u64);
                     if let Some(content_type) = self.spec.content_type {
                         metadata.set_content_type(content_type);
+                    }
+                    if !self.spec.reports_no_validators {
+                        metadata.set_etag(&content_etag(contents));
                     }
                     if let Some(version) = locked(&self.journal.versions).get(path) {
                         metadata.set_version(version);
@@ -3110,6 +3210,113 @@ mod tests {
             versions: true,
             ..Default::default()
         })
+    }
+
+    /// A length alone identifies nothing; an ETag, a version, or a
+    /// modification time with the length does.
+    #[test]
+    fn a_length_alone_is_not_an_identity() {
+        let sized = |len: u64| Metadata::new(EntryMode::FILE).with_content_length(len);
+        assert_eq!(same_source(&sized(10), &sized(10)), None);
+        assert!(!has_validator(&sized(10)));
+
+        let tagged = |etag: &str| sized(10).with_etag(etag.to_owned());
+        assert_eq!(same_source(&tagged("a"), &tagged("a")), Some(true));
+        assert_eq!(same_source(&tagged("a"), &tagged("b")), Some(false));
+
+        let at = Timestamp::from_second(1_700_000_000).expect("a valid time");
+        let stamped = |len: u64| sized(len).with_last_modified(at);
+        assert_eq!(same_source(&stamped(10), &stamped(10)), Some(true));
+        assert_eq!(same_source(&stamped(10), &stamped(11)), Some(false));
+        // A validator only one side reports proves nothing.
+        assert_eq!(same_source(&tagged("a"), &sized(10)), None);
+    }
+
+    /// A fallback that reports only lengths holds `cold bytes` under
+    /// `cold.txt`.
+    fn cold_fallback_without_validators() -> (Operator, Arc<Journal>) {
+        StubDisk::operator(StubSpec {
+            contents: Some("cold bytes"),
+            reports_no_validators: true,
+            ..Default::default()
+        })
+    }
+
+    /// Overwrite `cold.txt` on a stub fallback with bytes of the same length.
+    fn overwrite_with_same_size(fallback: &Journal) {
+        locked(&fallback.stored).insert("cold.txt".to_owned(), Buffer::from("COLD BYTES"));
+    }
+
+    /// Sol review follow-up: a fallback that reports no ETag, version or
+    /// modification time cannot vouch for an object by its length. A
+    /// same-size overwrite while the promotion streamed used to pass the
+    /// check before the publish, and the old bytes landed on the primary.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_same_size_overwrite_during_a_promotion_is_not_published() {
+        let primary = memory();
+        let (fallback, fallback_journal) = cold_fallback_without_validators();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *locked(&fallback_journal.read_gate) = Some(ReadGate {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        let assets = primary.clone().layer(ReadThroughLayer::new(
+            primary.clone(),
+            fallback,
+            true,
+            false,
+        ));
+
+        let reader = tokio::spawn({
+            let assets = assets.clone();
+            async move { assets.read("cold.txt").await }
+        });
+        entered_rx
+            .await
+            .expect("the promotion fetched the old bytes");
+        overwrite_with_same_size(&fallback_journal);
+        release_tx.send(()).expect("release the promotion");
+        reader
+            .await
+            .expect("the read task")
+            .expect("the read is still served");
+
+        assert!(
+            !primary.exists("cold.txt").await.expect("exists answers"),
+            "the promotion published bytes the fallback no longer holds"
+        );
+    }
+
+    /// Sol review follow-up: the check after the publish does not take a
+    /// length as proof either. A same-size overwrite between the publish and
+    /// that check used to keep the old bytes on the primary.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_same_size_overwrite_after_the_publish_is_withdrawn() {
+        let (primary, _primary_journal) = versioned_primary();
+        let (fallback, fallback_journal) = cold_fallback_without_validators();
+        let mut held = hold_stats(&fallback_journal);
+        let assets = primary.clone().layer(ReadThroughLayer::new(
+            primary.clone(),
+            fallback,
+            true,
+            false,
+        ));
+
+        let reader = tokio::spawn({
+            let assets = assets.clone();
+            async move { assets.read("cold.txt").await }
+        });
+        let confirmation =
+            hold_the_confirmation(&mut held, &fallback_journal, &primary, "cold.txt").await;
+        overwrite_with_same_size(&fallback_journal);
+        let _ = confirmation.send(());
+        let _ = reader.await.expect("the read task");
+
+        assert!(
+            !primary.exists("cold.txt").await.expect("exists answers"),
+            "the promotion kept bytes the fallback no longer holds"
+        );
     }
 
     /// Sol review: a withdrawal never removes what a writer put on the
