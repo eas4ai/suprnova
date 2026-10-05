@@ -975,6 +975,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   write a whole file. `test_database!()` with no argument compiles and uses
   the crate's own `migrations::Migrator`. This landed after the `v3.1.0`
   tag.
+- **Typed counts, union walks and decimal relation minimums.** Typed
+  `QueryBuilder::count` keeps the whole count under a limit and returns 0
+  past an offset, `exists` asks about the rows the limit and offset leave,
+  and a `Pagination::length_aware` total counts every match, as Laravel
+  does. `chunk_by_id`, `lazy_by_id`, `lazy` and `cursor` over a union visit
+  each row once and finish; the cursor bounded only the first query, so the
+  batches repeated forever. `<rel>_min_as::<Decimal>()` and
+  `<rel>_max_as::<Decimal>()` read a `NUMERIC` or `DECIMAL` minimum or
+  maximum exactly on Postgres and MySQL, and `::<String>()` reads its
+  decimal text. This landed after the `v3.1.0` tag.
 - **Sessions and remember-me tokens restore on MySQL and MariaDB.** A
   scaffolded application's session, remember-me and auth-flow token time
   columns are `TIMESTAMP` there, and the framework read them as a type the
