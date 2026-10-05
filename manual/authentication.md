@@ -712,7 +712,10 @@ id above `i64::MAX` binds as a `u64`, so a user whose key is Laravel's
 SQLite hold no integer key that large, so there such an id finds no user.
 A text identifier column that holds the id's digits finds the user on
 every database: `DatabaseUserProvider` reads the column's type for such
-an id and compares the digits as text.
+an id and compares the digits as text. The type comes from the table the
+lookup reads: on Postgres the first schema of the search path that holds
+it, or the schema the table name names, so a table of the same name in
+another schema never decides the bind.
 
 To plug in a custom source (LDAP, an external API), implement
 `UserProvider` directly. `retrieve_by_id` takes the identifier as
