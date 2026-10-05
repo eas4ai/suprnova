@@ -57,10 +57,12 @@ pub use middleware::{
     set_auth_user, set_two_factor_pending, set_two_factor_pending_remember,
     two_factor_pending_remember, two_factor_pending_user_id,
 };
-pub use store::{SessionData, SessionMigrationError, SessionStore, is_valid_session_id};
+pub use store::{
+    DestroyedSessions, SessionData, SessionMigrationError, SessionStore, is_valid_session_id,
+};
 
-/// Destroy every session belonging to `user_id`. Returns the number of
-/// session rows deleted.
+/// Destroy every session in which the default guard is signed in as
+/// `user_id`. Returns the number of sessions destroyed.
 ///
 /// Called after security-state transitions where a credential rotation
 /// must not leave stale sessions valid:
@@ -68,6 +70,13 @@ pub use store::{SessionData, SessionMigrationError, SessionStore, is_valid_sessi
 ///   stolen sessions revoked.
 /// - Future hooks for 2FA disable, account recovery, admin-forced
 ///   logout.
+///
+/// The default guard's form of [`destroy_all_for_guard_user`], which says
+/// what is destroyed and which Live memberships end. A session in which only
+/// another guard is signed in under the same id belongs to another user,
+/// admin 7 and not web user 7, and stays. This is the scope of Laravel's
+/// `AuthenticateSession`, which ends the sessions whose default-guard user
+/// changed its password.
 ///
 /// # Security - SEC-02(b)
 ///
@@ -87,24 +96,54 @@ pub use store::{SessionData, SessionMigrationError, SessionStore, is_valid_sessi
 /// the table `SESSION_TABLE` names, the one `SessionMiddleware` would
 /// have used.
 pub async fn destroy_all_for_user(user_id: &str) -> Result<u64, crate::error::FrameworkError> {
+    destroy_all_for_guard_user(&crate::auth::Auth::default_guard_name(), user_id).await
+}
+
+/// Destroy every session in which the guard `guard` is signed in as
+/// `user_id`, and end on this node every Live membership those sessions
+/// opened. Returns the number of sessions destroyed.
+///
+/// Each session goes whole, with every guard's sign-in in it, the way
+/// Laravel's `AuthenticateSession` flushes the session it logs out. So
+/// every Live membership issued under a destroyed session ends, whichever
+/// guard's user it was issued to: a session holding web user 7 and admin 9
+/// takes admin 9's memberships with it (LIVE-019). The memberships of the
+/// destroyed user end everywhere on this node too.
+///
+/// Uses the store [`destroy_all_for_user`] resolves. A custom store that
+/// does not implement [`SessionStore::destroy_guard_sessions`] can destroy
+/// the default guard's sessions only, and names none of them, so only the
+/// destroyed user's own memberships end.
+///
+/// # Errors
+///
+/// The store's error, and the store's refusal of a guard other than the
+/// default when it cannot tell one guard's sessions from another's.
+pub async fn destroy_all_for_guard_user(
+    guard: &str,
+    user_id: &str,
+) -> Result<u64, crate::error::FrameworkError> {
     let destroyed = match crate::container::App::make::<dyn SessionStore>() {
-        Some(store) => store.destroy_for_user(user_id).await?,
+        Some(store) => store.destroy_guard_sessions(guard, user_id).await?,
         None => {
             let driver = driver::DatabaseSessionDriver::with_configured_table(
                 std::time::Duration::from_secs(0),
                 SessionConfig::from_env().table_name,
             );
-            driver.destroy_for_user(user_id).await?
+            driver.destroy_guard_sessions(guard, user_id).await?
         }
     };
-    // Every Live membership the user's sessions opened ends with them on
-    // this node (LIVE-019). `user_id` is a default-guard id, and those
-    // memberships were issued to its bare principal.
-    crate::live::revocation::principal_sessions_destroyed(&crate::auth::Auth::bare_principal(
-        user_id,
+    // Every Live membership the destroyed sessions opened ends with them on
+    // this node (LIVE-019), and so does every membership of the destroyed
+    // user, issued to its principal.
+    for id in &destroyed.ids {
+        crate::live::revocation::session_destroyed(id.as_bytes()).await;
+    }
+    crate::live::revocation::principal_sessions_destroyed(&crate::auth::Auth::guard_principal(
+        guard, user_id,
     ))
     .await;
-    Ok(destroyed)
+    Ok(destroyed.count)
 }
 
 // Test helpers - these mirror the per-request session scope that

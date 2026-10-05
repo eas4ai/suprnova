@@ -144,7 +144,7 @@ async fn destroy_for_user_and_gc_act_on_the_named_table() {
     alice.user_id = Some("alice-uid".into());
     driver.write(&alice).await.unwrap();
     // A named-guard-only session carries the principal in its payload, so
-    // the second revocation phase has to scan the named table too.
+    // that guard's revocation has to scan the named table too.
     let mut alice_admin = SessionData::new("alice-admin-sess".into(), "csrf2".into());
     alice_admin.data.insert(
         "_auth_guards".to_string(),
@@ -155,8 +155,17 @@ async fn destroy_for_user_and_gc_act_on_the_named_table() {
     bob.user_id = Some("bob-uid".into());
     driver.write(&bob).await.unwrap();
 
-    assert_eq!(driver.destroy_for_user("alice-uid").await.unwrap(), 2);
+    assert_eq!(driver.destroy_for_user("alice-uid").await.unwrap(), 1);
     assert!(driver.read("alice-sess").await.unwrap().is_none());
+    assert!(
+        driver.read("alice-admin-sess").await.unwrap().is_some(),
+        "the default guard's destroy leaves the admin guard's user"
+    );
+    let destroyed = driver
+        .destroy_guard_sessions("admin", "alice-uid")
+        .await
+        .unwrap();
+    assert_eq!(destroyed.count, 1);
     assert!(driver.read("alice-admin-sess").await.unwrap().is_none());
     assert!(driver.read("bob-sess").await.unwrap().is_some());
 

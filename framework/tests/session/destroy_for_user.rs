@@ -269,12 +269,67 @@ async fn destroy_for_user_removes_only_that_users_rows() {
     );
 }
 
-/// P4-02: a user signed in only through a non-default guard has a row
-/// with `user_id = NULL`. User-wide revocation must still find the row
-/// through the payload's guard identities and delete it, so the same
-/// cookie cannot restore the named identity on replay.
+/// A destroy names its guard. `destroy_for_user` is the default guard's
+/// form: it removes the sessions in which the default guard is signed in as
+/// the id. A session in which only the `admin` guard is signed in under the
+/// same id belongs to another user, admin 7 and not web user 7, and stays.
+/// This is the scope of Laravel's `AuthenticateSession`, which ends the
+/// sessions whose default-guard user changed its password, and no others.
 #[tokio::test]
-async fn destroy_for_user_revokes_named_only_guard_session() {
+async fn a_default_guard_destroy_leaves_another_guards_user_of_the_same_id_signed_in() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
+
+    let mut web = SessionData::new("web-seven-sess".into(), "csrf1".into());
+    web.user_id = Some("7".into());
+    driver.write(&web).await.unwrap();
+    let mut admin = SessionData::new("admin-seven-sess".into(), "csrf2".into());
+    admin.data.insert(
+        "_auth_guards".to_string(),
+        serde_json::json!({ "admin": { "id": "7" } }),
+    );
+    driver.write(&admin).await.unwrap();
+
+    let deleted = driver.destroy_for_user("7").await.unwrap();
+
+    assert!(
+        driver.read("web-seven-sess").await.unwrap().is_none(),
+        "web user 7's session must be revoked"
+    );
+    assert!(
+        driver.read("admin-seven-sess").await.unwrap().is_some(),
+        "admin 7 is another user; the default guard's destroy must leave its session"
+    );
+    assert_eq!(deleted, 1);
+
+    // The guard-aware form names what it removed, for the indexed column and
+    // for a default-guard entry in the payload alike, so Live can end what
+    // those sessions opened.
+    let mut by_column = SessionData::new("web-eight-column".into(), "csrf3".into());
+    by_column.user_id = Some("8".into());
+    driver.write(&by_column).await.unwrap();
+    let mut by_entry = SessionData::new("web-eight-entry".into(), "csrf4".into());
+    by_entry.data.insert(
+        "_auth_guards".to_string(),
+        serde_json::json!({ "web": { "id": "8" } }),
+    );
+    driver.write(&by_entry).await.unwrap();
+    let mut destroyed = driver.destroy_guard_sessions("web", "8").await.unwrap();
+    destroyed.ids.sort();
+    assert_eq!(destroyed.count, 2);
+    assert_eq!(
+        destroyed.ids,
+        vec!["web-eight-column".to_owned(), "web-eight-entry".to_owned()]
+    );
+}
+
+/// P4-02: a user signed in only through a non-default guard has a row
+/// with `user_id = NULL`. That guard's revocation must still find the row
+/// through the payload's entry for the guard and delete it, so the same
+/// cookie cannot restore the named identity on replay, and it names the
+/// row so Live can end what it opened.
+#[tokio::test]
+async fn destroy_guard_sessions_revokes_named_only_guard_session() {
     let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
     let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
 
@@ -290,8 +345,15 @@ async fn destroy_for_user_revokes_named_only_guard_session() {
         "precondition: the named-only session must exist"
     );
 
-    let deleted = driver.destroy_for_user("admin-uid").await.unwrap();
-    assert_eq!(deleted, 1, "revocation must reach the named-only row");
+    let destroyed = driver
+        .destroy_guard_sessions("admin", "admin-uid")
+        .await
+        .unwrap();
+    assert_eq!(
+        destroyed.count, 1,
+        "revocation must reach the named-only row"
+    );
+    assert_eq!(destroyed.ids, vec!["named-only-sess".to_owned()]);
 
     assert!(
         driver.read("named-only-sess").await.unwrap().is_none(),
@@ -303,7 +365,7 @@ async fn destroy_for_user_revokes_named_only_guard_session() {
 /// must die when any one of them is revoked - the surviving row would
 /// otherwise keep authenticating the revoked principal.
 #[tokio::test]
-async fn destroy_for_user_revokes_multi_principal_session_for_any_principal() {
+async fn destroy_guard_sessions_revokes_multi_principal_session_for_any_principal() {
     let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
     let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
 
@@ -315,8 +377,12 @@ async fn destroy_for_user_revokes_multi_principal_session_for_any_principal() {
     );
     driver.write(&sess).await.unwrap();
 
-    let deleted = driver.destroy_for_user("admin-uid").await.unwrap();
-    assert_eq!(deleted, 1);
+    let destroyed = driver
+        .destroy_guard_sessions("admin", "admin-uid")
+        .await
+        .unwrap();
+    assert_eq!(destroyed.count, 1);
+    assert_eq!(destroyed.ids, vec!["multi-principal-sess".to_owned()]);
     assert!(
         driver.read("multi-principal-sess").await.unwrap().is_none(),
         "revoking any principal must remove the whole session row"
@@ -330,7 +396,7 @@ async fn destroy_for_user_revokes_multi_principal_session_for_any_principal() {
 /// P4-02 negative: revoking one user must not touch sessions whose guard
 /// identities belong to someone else.
 #[tokio::test]
-async fn destroy_for_user_leaves_other_guard_identities_alone() {
+async fn destroy_guard_sessions_leaves_other_guard_identities_alone() {
     let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
     let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
 
@@ -341,8 +407,11 @@ async fn destroy_for_user_leaves_other_guard_identities_alone() {
     );
     driver.write(&sess).await.unwrap();
 
-    let deleted = driver.destroy_for_user("admin-uid").await.unwrap();
-    assert_eq!(deleted, 0);
+    let destroyed = driver
+        .destroy_guard_sessions("admin", "admin-uid")
+        .await
+        .unwrap();
+    assert_eq!(destroyed.count, 0);
     assert!(
         driver.read("other-admin-sess").await.unwrap().is_some(),
         "another user's named-guard session must survive"
@@ -867,4 +936,66 @@ async fn concurrent_atomic_migrations_from_one_pending_row_elect_one_winner() {
     drop(guard);
     database.inner().clone().close().await.unwrap();
     std::fs::remove_file(database_path).expect("remove isolated SQLite test database");
+}
+
+/// The guard-scoped destroy on a real engine: the default guard's destroy
+/// removes web user 7's session and leaves admin 7's, and the guard-aware
+/// form removes admin 7's and names it.
+async fn live_guard_destroy_removes_only_that_guards_user(env: &str) {
+    let url = std::env::var(env).expect("explicit disposable database URL required");
+    let guard = TestContainer::fake();
+    let config = DatabaseConfig::builder()
+        .url(url)
+        .max_connections(1)
+        .min_connections(1)
+        .logging(false)
+        .build();
+    let database = DbConnection::connect(&config)
+        .await
+        .expect("connect test database");
+    // A connection-local table, as above; every driver call uses it.
+    database
+        .inner()
+        .execute_unprepared(
+            "CREATE TEMPORARY TABLE sessions (id VARCHAR(255) PRIMARY KEY, \
+             user_id VARCHAR(255), payload TEXT NOT NULL, csrf_token VARCHAR(255) NOT NULL, \
+             last_activity TIMESTAMP NOT NULL)",
+        )
+        .await
+        .expect("create isolated temporary sessions table");
+    TestContainer::singleton(database.clone());
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
+
+    let mut web = SessionData::new("web-seven-sess".into(), "csrf1".into());
+    web.user_id = Some("7".into());
+    driver.write(&web).await.unwrap();
+    let mut admin = SessionData::new("admin-seven-sess".into(), "csrf2".into());
+    admin.data.insert(
+        "_auth_guards".to_string(),
+        serde_json::json!({ "admin": { "id": "7" } }),
+    );
+    driver.write(&admin).await.unwrap();
+
+    assert_eq!(driver.destroy_for_user("7").await.unwrap(), 1);
+    assert!(driver.read("web-seven-sess").await.unwrap().is_none());
+    assert!(driver.read("admin-seven-sess").await.unwrap().is_some());
+
+    let destroyed = driver.destroy_guard_sessions("admin", "7").await.unwrap();
+    assert_eq!(destroyed.count, 1);
+    assert_eq!(destroyed.ids, vec!["admin-seven-sess".to_owned()]);
+    assert!(driver.read("admin-seven-sess").await.unwrap().is_none());
+    drop(guard);
+    database.inner().clone().close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_a_guard_destroy_removes_only_that_guards_user() {
+    live_guard_destroy_removes_only_that_guards_user("MYSQL_TEST_URL").await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
+async fn postgres_a_guard_destroy_removes_only_that_guards_user() {
+    live_guard_destroy_removes_only_that_guards_user("PG_TEST_URL").await;
 }
