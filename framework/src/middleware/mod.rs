@@ -48,6 +48,7 @@ pub use terminable::{
     Terminable, TerminationSnapshot, dispatch_termination, has_terminable, register_terminable,
     registered_terminables, terminable_count,
 };
+pub(crate) use terminable::{drain_terminations, spawn_termination};
 
 #[doc(hidden)]
 pub use aliases::{
@@ -108,7 +109,7 @@ pub trait Middleware: Send + Sync {
     async fn handle(&self, request: Request, next: Next) -> Response;
 }
 
-pub(crate) use identity::boxed_as;
+pub(crate) use identity::{alias_of, boxed_as, name_as};
 
 /// Convert a Middleware trait object into a BoxedMiddleware
 ///

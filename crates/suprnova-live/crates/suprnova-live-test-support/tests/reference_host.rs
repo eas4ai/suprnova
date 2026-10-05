@@ -53,6 +53,7 @@ const FINALIZER_SCOPE_PORT: u16 = 4_206;
 const REAUTH_REJECTION_PORT: u16 = 4_207;
 const POLICY_CLOSE_PORT: u16 = 4_208;
 const POLICY_CLOSE_DEADLINE_PORT: u16 = 4_209;
+const BETWEEN_TESTS_TRANSPORT_PORT: u16 = 4_210;
 const WRONG_ISLAND_FRESH_RENDER_REQUEST: &str = r#"{"base_revision":"7","child_parameters":null,"component":"catalog.search","correlation_id":"EBESExQVFhcYGRobHB0eHw","extensions":{"x_suprnova_live_document_key_v1":"primary"},"idempotency_key":"MDEyMzQ1Njc4OTo7PD0-Pw","model_proposals":{},"operations":[{"kind":"fresh_render"}],"protocol_version":2,"runtime_contract_version":2,"snapshot":{"envelope":{"body":{},"signature":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"kind":"instance"},"snapshot_schema_version":1}"#;
 
 struct TestRoot(PathBuf);
@@ -3131,4 +3132,56 @@ async fn write_websocket_close(stream: &mut TcpStream, code: u16) {
             .map(|(index, byte)| byte ^ mask[index % mask.len()]),
     );
     stream.write_all(&frame).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_between_tests_reset_retires_a_transport_no_page_connected_to() {
+    let root = TestRoot::new("between-tests-transport");
+    let host = start_host(
+        BETWEEN_TESTS_TRANSPORT_PORT,
+        &root,
+        ReferenceFaultSchedule::None,
+    )
+    .await;
+    // A page reauthorized at its second generation and closed before it
+    // opened the socket.
+    let (status, _, abandoned) = json_request(
+        &host,
+        Method::POST,
+        "/__live/async/transports",
+        json!({"kind": "websocket", "subscription": "orders", "transport_generation": 2}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{abandoned}");
+    let (status, _, refused) = json_request(
+        &host,
+        Method::POST,
+        "/__live/async/transports",
+        json!({"kind": "websocket", "subscription": "orders", "transport_generation": 1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["error"], "transport_generation_invalid");
+
+    let (status, _, _) = request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/reset-between-tests",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, next) = json_request(
+        &host,
+        Method::POST,
+        "/__live/async/transports",
+        json!({"kind": "websocket", "subscription": "orders", "transport_generation": 1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{next}");
+    assert_ne!(next["transport"], abandoned["transport"]);
+    host.shutdown()
+        .await
+        .expect("clean between-tests transport shutdown");
 }

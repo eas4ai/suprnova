@@ -196,3 +196,10 @@ async fn mysql_action_shorthands() {
 async fn mysql_unsigned_keys_everywhere() {
     laravel_cases::unsigned_keys_everywhere(&connect_mysql().await).await;
 }
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_quoted_index_and_key_names() {
+    cases::quoted_index_and_key_names(&connect_mysql().await).await;
+}

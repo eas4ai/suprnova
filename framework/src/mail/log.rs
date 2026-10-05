@@ -48,6 +48,9 @@ impl LogMailTransport {
 #[async_trait]
 impl MailTransport for LogMailTransport {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
+        // The same check every delivering transport runs, so a message that
+        // works in development on this driver does not fail in production.
+        crate::mail::wire::check_message("log", msg)?;
         let to: Vec<String> = msg.to.iter().map(|a| a.email.clone()).collect();
         // `MAIL_LOG_CHANNEL` names the channel, as Laravel's `log` mailer's
         // `channel` does; without it the line goes to the default channel.

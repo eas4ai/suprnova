@@ -246,6 +246,14 @@ impl InMemoryBroadcastHub {
     pub(crate) fn channel_count(&self) -> usize {
         self.channels.read().map(|m| m.len()).unwrap_or(0)
     }
+
+    /// Number of channels the presence member map holds. Exposed for tests
+    /// of the empty-channel removal; `list_members` cannot distinguish "no
+    /// entry" from "an empty entry".
+    #[cfg(test)]
+    pub(crate) async fn presence_channel_count(&self) -> usize {
+        self.members.read().await.len()
+    }
 }
 
 impl Default for InMemoryBroadcastHub {
@@ -297,6 +305,14 @@ impl BroadcastHub for InMemoryBroadcastHub {
         let mut map = self.members.write().await;
         if let Some(ch_members) = map.get_mut(channel) {
             ch_members.remove(member_id);
+            // Forget a channel whose last member left. A parameterized
+            // presence channel (`presence.room.{id}`) churns through
+            // distinct names, and an empty map kept per name would grow
+            // with history instead of with the live members. The Pusher
+            // and fanout hubs keep their members here too.
+            if ch_members.is_empty() {
+                map.remove(channel);
+            }
         }
         Ok(())
     }
@@ -358,6 +374,45 @@ mod tests {
 
         // Three live (1, 2, 4); user.3 evicted.
         assert_eq!(hub.channel_count(), 3);
+    }
+
+    /// IDENTITY-016: a presence channel whose last member leaves must be
+    /// forgotten. A parameterized presence channel (`presence.room.{id}`)
+    /// churns through distinct names; keeping an empty member map per name
+    /// grows memory with history, not with the live working set.
+    #[tokio::test]
+    async fn untracking_the_last_member_forgets_the_presence_channel() {
+        let hub = InMemoryBroadcastHub::new();
+        for i in 0..50 {
+            let channel = format!("presence.room.{i}");
+            hub.track_member(&channel, "member", json!({ "id": i }))
+                .await
+                .unwrap();
+            hub.untrack_member(&channel, "member").await.unwrap();
+        }
+        assert_eq!(
+            hub.presence_channel_count().await,
+            0,
+            "every channel lost its only member, so none may stay resident"
+        );
+
+        // A channel that still has a member is kept, with that member.
+        hub.track_member("presence.keep", "a", json!({ "id": "a" }))
+            .await
+            .unwrap();
+        hub.track_member("presence.keep", "b", json!({ "id": "b" }))
+            .await
+            .unwrap();
+        hub.untrack_member("presence.keep", "a").await.unwrap();
+        assert_eq!(hub.presence_channel_count().await, 1);
+        assert_eq!(
+            hub.list_members("presence.keep").await,
+            vec![json!({ "id": "b" })]
+        );
+
+        // Untracking from a channel that was never tracked creates nothing.
+        hub.untrack_member("presence.never", "x").await.unwrap();
+        assert_eq!(hub.presence_channel_count().await, 1);
     }
 
     #[tokio::test]

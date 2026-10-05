@@ -49,9 +49,11 @@ CorsConfig::allow_origins(["https://app.example"])
     .allow_origin_patterns([r"^https://[a-z0-9-]+\.staging\.example$"])
 ```
 
-Patterns are anchored automatically - `^` and `$` are prepended / appended
-if missing, so a partial match against a redirect URL like
-`https://evil.com/?u=https://app.example` cannot leak through.
+Patterns are anchored automatically - each one is wrapped as
+`^(?:pattern)$`, so it must match the whole origin. A partial match against
+a redirect URL like `https://evil.com/?u=https://app.example` cannot leak
+through, and every alternative of `https://app\.example|https://admin\.example`
+is anchored on both sides, so `https://app.example.evil.test` is refused.
 
 Invalid regex panics at config time (boot), not at request time - surface
 the config bug loud rather than fail-open silently.

@@ -166,6 +166,7 @@ struct ControlledFinalizer {
     fail_commit: AtomicBool,
     fail_compensation: AtomicBool,
     fail_ledger_after_commit: AtomicBool,
+    cannot_finalize: AtomicBool,
     prepare_calls: AtomicUsize,
     commit_calls: AtomicUsize,
     compensation_calls: AtomicUsize,
@@ -180,6 +181,7 @@ impl ControlledFinalizer {
             fail_commit: AtomicBool::new(false),
             fail_compensation: AtomicBool::new(false),
             fail_ledger_after_commit: AtomicBool::new(false),
+            cannot_finalize: AtomicBool::new(false),
             prepare_calls: AtomicUsize::new(0),
             commit_calls: AtomicUsize::new(0),
             compensation_calls: AtomicUsize::new(0),
@@ -255,6 +257,10 @@ impl UploadFinalizer for ControlledFinalizer {
                 .filter(|durable| durable.handle() == request.evidence().handle())
                 .cloned())
         })
+    }
+
+    fn can_finalize(&self) -> bool {
+        !self.cannot_finalize.load(Ordering::SeqCst)
     }
 }
 
@@ -510,6 +516,39 @@ async fn failed_commit_is_compensated_and_same_logical_request_can_retry() {
         .expect("retry");
     assert_eq!(fixture.finalizer.prepare_calls.load(Ordering::SeqCst), 2);
     assert_eq!(fixture.finalizer.commit_calls.load(Ordering::SeqCst), 2);
+}
+
+/// ROOT-16: a finalizer that can make nothing durable, such as the
+/// framework's placeholder, refuses before the upload enters `Finalizing`. The
+/// upload stays `Ready` and expires like any unfinalized upload.
+#[tokio::test]
+async fn a_finalizer_that_cannot_finalize_refuses_before_the_upload_enters_finalizing() {
+    let fixture = fixture();
+    fixture
+        .finalizer
+        .cannot_finalize
+        .store(true, Ordering::SeqCst);
+
+    let error = fixture
+        .service
+        .finalize(
+            &fixture.context,
+            request(&fixture).await,
+            UnixMillis::new(1_002),
+        )
+        .await
+        .expect_err("a placeholder finalizer refuses");
+
+    assert_eq!(error.kind(), UploadErrorKind::FinalizationFailed);
+    assert_eq!(fixture.finalizer.prepare_calls.load(Ordering::SeqCst), 0);
+    let record = fixture
+        .ledger
+        .load(&handle())
+        .await
+        .expect("load")
+        .expect("record");
+    assert_eq!(record.state(), UploadState::Ready);
+    assert_eq!(record.revision(), UploadRevision::new(8));
 }
 
 #[tokio::test]

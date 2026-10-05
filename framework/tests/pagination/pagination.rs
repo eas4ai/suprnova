@@ -291,6 +291,281 @@ async fn pagination_cursor_last_page_no_next() {
     panic!("walked too many pages; last page: {last_page_rows:?}");
 }
 
+/// DATA-019: an ordering already on the query does not reorder the keyset
+/// walk. Ordered by id descending, the first page used to be 5 and 4, the
+/// next `id > 4` gave 5 again, and 1 to 3 were never shown.
+#[tokio::test]
+async fn pagination_cursor_replaces_an_existing_order_and_walks_every_row_once() {
+    use sea_orm::QueryOrder;
+    ensure_crypt();
+    let _guard = TestContainer::fake();
+    install_db(make_db_with_n_rows(5).await);
+
+    let mut seen: Vec<i32> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..10 {
+        let page = Pagination::cursor::<toy::Entity, toy::Column>(
+            toy::Entity::find().order_by_desc(toy::Column::Id),
+            cursor.as_deref(),
+            2,
+            toy::Column::Id,
+        )
+        .await
+        .unwrap();
+        seen.extend(page.data.iter().map(|r| r.id));
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen, vec![1, 2, 3, 4, 5]);
+}
+
+/// DATA-019: an offset on the query positions the first page only. Kept
+/// on every page, it skipped two rows after each cursor.
+#[tokio::test]
+async fn pagination_cursor_applies_an_offset_to_the_first_page_only() {
+    use sea_orm::QuerySelect;
+    ensure_crypt();
+    let _guard = TestContainer::fake();
+    install_db(make_db_with_n_rows(8).await);
+
+    let mut seen: Vec<i32> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..10 {
+        let page = Pagination::cursor::<toy::Entity, toy::Column>(
+            toy::Entity::find().offset(2),
+            cursor.as_deref(),
+            2,
+            toy::Column::Id,
+        )
+        .await
+        .unwrap();
+        seen.extend(page.data.iter().map(|r| r.id));
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen, vec![3, 4, 5, 6, 7, 8]);
+}
+
+// The typed counts get a table of their own, so the live tests below never
+// drop the `items` table another live test is reading.
+mod counted {
+    use sea_orm::DeriveEntityModel;
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "typed_counts")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: i32,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Six rows in `typed_counts`, in a table made fresh for the run.
+async fn seed_counted(conn: &sea_orm::DatabaseConnection) {
+    let backend = conn.get_database_backend();
+    conn.execute_raw(Statement::from_string(
+        backend,
+        "DROP TABLE IF EXISTS typed_counts".to_string(),
+    ))
+    .await
+    .unwrap();
+    conn.execute(&Schema::new(backend).create_table_from_entity(counted::Entity))
+        .await
+        .unwrap();
+    for id in 1..=6 {
+        counted::ActiveModel { id: Set(id) }
+            .insert(conn)
+            .await
+            .unwrap();
+    }
+}
+
+/// A typed count and a length-aware total answer as Laravel's do when the
+/// query carries a limit or an offset.
+///
+/// Laravel's `count()` keeps the limit and offset on the aggregate
+/// statement, `select count(*) as aggregate from t limit 1 offset 1`. They
+/// bound the one row the aggregate returns, not the rows it counts: a limit
+/// of one or more keeps the whole count, an offset of one or more skips it,
+/// and the count is then 0. Its `exists()` asks about the bounded rows, so
+/// the second row exists. Its `getCountForPagination()` drops the limit and
+/// the offset, so a page's total is every matching row. Both typed paths
+/// used to count the bounded subset instead: 2 for `limit(2)`, 1 for
+/// `limit(1).offset(1)`, and a total of 2 under `limit(2)`. A bare offset
+/// failed outright on SQLite and MySQL.
+async fn typed_counts_follow_laravel(conn: sea_orm::DatabaseConnection) {
+    use suprnova::database::QueryBuilder;
+    seed_counted(&conn).await;
+    let _guard = TestContainer::fake();
+    install_db(conn.clone());
+    let typed = QueryBuilder::<counted::Entity>::new;
+    let count = |query: QueryBuilder<counted::Entity>, case: &'static str| async move {
+        query
+            .count()
+            .await
+            .unwrap_or_else(|e| panic!("count {case}: {e}"))
+    };
+
+    assert_eq!(count(typed(), "unbounded").await, 6);
+    assert_eq!(
+        count(typed().limit(2), "limit(2)").await,
+        6,
+        "a limit keeps the aggregate's row"
+    );
+    assert_eq!(
+        count(typed().limit(1).offset(1), "limit(1).offset(1)").await,
+        0,
+        "an offset skips the aggregate's row"
+    );
+    assert_eq!(
+        count(typed().offset(10), "offset(10)").await,
+        0,
+        "a bare offset skips it on every engine"
+    );
+    assert_eq!(count(typed().offset(0), "offset(0)").await, 6);
+    assert_eq!(count(typed().limit(0), "limit(0)").await, 0);
+
+    let exists = |query: QueryBuilder<counted::Entity>, case: &'static str| async move {
+        query
+            .exists()
+            .await
+            .unwrap_or_else(|e| panic!("exists {case}: {e}"))
+    };
+    assert!(
+        exists(typed().limit(1).offset(1), "limit(1).offset(1)").await,
+        "the second row exists"
+    );
+    assert!(
+        exists(typed().offset(5), "offset(5)").await,
+        "the sixth row exists"
+    );
+    assert!(
+        !exists(typed().offset(6), "offset(6)").await,
+        "no row lies past the sixth"
+    );
+    assert!(!exists(typed().limit(0), "limit(0)").await);
+
+    use sea_orm::QuerySelect;
+    let page = Pagination::length_aware::<counted::Entity>(
+        counted::Entity::find().limit(2).offset(1),
+        4,
+        2,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("a page of a bounded query: {e}"));
+    assert_eq!(
+        page.total, 6,
+        "the total ignores the query's limit and offset"
+    );
+    assert_eq!(page.last_page, 2);
+    assert_eq!(
+        page.data.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![5, 6],
+        "the page replaces the query's limit and offset"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_typed_counts_follow_laravel() {
+    typed_counts_follow_laravel(Database::connect("sqlite::memory:").await.unwrap()).await;
+}
+
+/// A typed read with an offset and no limit runs on every engine, as
+/// Laravel's `skip(4)->get()` does. SQLite and MySQL accept `OFFSET` only
+/// after a `LIMIT`, and the typed builder used to write the offset alone,
+/// so `all()` failed there with a syntax error. `first()` and the
+/// `DB::table` builder take the same offset.
+async fn typed_reads_take_an_offset_with_no_limit(conn: sea_orm::DatabaseConnection) {
+    use suprnova::DB;
+    use suprnova::database::QueryBuilder;
+    seed_counted(&conn).await;
+    let _guard = TestContainer::fake();
+    install_db(conn.clone());
+    let ordered = || QueryBuilder::<counted::Entity>::new().order_by_asc(counted::Column::Id);
+    let ids = |rows: Vec<counted::Model>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+
+    let rest = ordered()
+        .offset(4)
+        .all()
+        .await
+        .unwrap_or_else(|e| panic!("all() past an offset: {e}"));
+    assert_eq!(ids(rest), vec![5, 6]);
+    let bounded = ordered()
+        .offset(4)
+        .limit(1)
+        .all()
+        .await
+        .unwrap_or_else(|e| panic!("all() with an offset and a limit: {e}"));
+    assert_eq!(ids(bounded), vec![5]);
+    let first = ordered()
+        .offset(4)
+        .first()
+        .await
+        .unwrap_or_else(|e| panic!("first() past an offset: {e}"));
+    assert_eq!(first.map(|row| row.id), Some(5));
+    let none = ordered()
+        .offset(6)
+        .first()
+        .await
+        .unwrap_or_else(|e| panic!("first() past every row: {e}"));
+    assert_eq!(none, None);
+
+    let rows = DB::table("typed_counts")
+        .order_by_asc("id")
+        .offset(4)
+        .get()
+        .await
+        .unwrap_or_else(|e| panic!("DB::table get() past an offset: {e}"))
+        .into_vec();
+    let facade: Vec<i64> = rows
+        .iter()
+        .map(|row| row.get_int("id").expect("an integer id"))
+        .collect();
+    assert_eq!(facade, vec![5, 6]);
+}
+
+#[tokio::test]
+async fn sqlite_typed_reads_take_an_offset_with_no_limit() {
+    typed_reads_take_an_offset_with_no_limit(Database::connect("sqlite::memory:").await.unwrap())
+        .await;
+}
+
+/// DATA-020: the Inertia scroll metadata names the query parameter the
+/// paginator reads, so infinite scroll asks for `posts_page=2`, not
+/// `page=2`.
+#[test]
+fn inertia_scroll_metadata_uses_the_paginators_page_name() {
+    let (meta, _) = LengthAwarePaginator::new(vec![1, 2], 10, 2, 1)
+        .with_page_name("posts_page")
+        .into_inertia_scroll();
+    assert_eq!(meta.page_name, "posts_page");
+
+    let (meta, _) = LengthAwarePaginator::new(vec![1, 2], 10, 2, 1).into_inertia_scroll();
+    assert_eq!(meta.page_name, "page", "the default name stays `page`");
+}
+
+/// DATA-020: the cursor paginator's metadata names its cursor parameter.
+#[test]
+fn inertia_scroll_metadata_uses_the_paginators_cursor_name() {
+    let (meta, _) = CursorPaginator::new(vec![1, 2], 2, Some("next".to_string()), None)
+        .with_cursor_name("after")
+        .into_inertia_scroll();
+    assert_eq!(meta.page_name, "after");
+
+    let (meta, _) =
+        CursorPaginator::new(vec![1, 2], 2, Some("next".to_string()), None).into_inertia_scroll();
+    assert_eq!(meta.page_name, "cursor", "the default name stays `cursor`");
+}
+
 // --- Live-DB tests (gated by #[ignore]) ---
 //
 // These exercise `Pagination::cursor` against real Postgres / MySQL,
@@ -435,6 +710,51 @@ async fn live_mysql_cursor_walks_with_typed_int_boundary() {
     assert_eq!(visited.len(), 25);
     assert_eq!(visited.first(), Some(&1));
     assert_eq!(visited.last(), Some(&25));
+}
+
+#[tokio::test]
+#[ignore = "requires live Postgres; run with --ignored postgres"]
+async fn live_postgres_typed_counts_follow_laravel() {
+    // Required, not defaulted: `seed_counted` drops and recreates its table.
+    let url = std::env::var("PG_TEST_URL")
+        .expect("set PG_TEST_URL to a disposable Postgres - this test DROPs and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("Postgres test DB not reachable - check PG_TEST_URL");
+    typed_counts_follow_laravel(conn).await;
+}
+
+#[tokio::test]
+#[ignore = "requires live MySQL; run with --ignored mysql"]
+async fn live_mysql_typed_counts_follow_laravel() {
+    let url = std::env::var("MYSQL_TEST_URL")
+        .expect("set MYSQL_TEST_URL to a disposable MySQL - this test DROPs and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("MySQL test DB not reachable - check MYSQL_TEST_URL");
+    typed_counts_follow_laravel(conn).await;
+}
+
+#[tokio::test]
+#[ignore = "requires live Postgres; run with --ignored postgres"]
+async fn live_postgres_typed_reads_take_an_offset_with_no_limit() {
+    let url = std::env::var("PG_TEST_URL")
+        .expect("set PG_TEST_URL to a disposable Postgres - this test DROPs and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("Postgres test DB not reachable - check PG_TEST_URL");
+    typed_reads_take_an_offset_with_no_limit(conn).await;
+}
+
+#[tokio::test]
+#[ignore = "requires live MySQL; run with --ignored mysql"]
+async fn live_mysql_typed_reads_take_an_offset_with_no_limit() {
+    let url = std::env::var("MYSQL_TEST_URL")
+        .expect("set MYSQL_TEST_URL to a disposable MySQL - this test DROPs and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("MySQL test DB not reachable - check MYSQL_TEST_URL");
+    typed_reads_take_an_offset_with_no_limit(conn).await;
 }
 
 // --- IntoInertiaScroll wiring ---

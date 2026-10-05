@@ -17,12 +17,24 @@
 //! bail.
 
 use chrono::Duration;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Set};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::database::DB;
+use crate::database::stored_datetime::storable_expiry;
 use crate::error::FrameworkError;
+
+/// The columns [`consume`] reads from a ceremony row.
+///
+/// The time columns are left out: the lookup filters on `expires_at` in
+/// SQL and never needs its value.
+#[derive(FromQueryResult)]
+struct CeremonyRow {
+    id: i64,
+    selector: String,
+    payload: String,
+}
 
 /// Issue a ceremony token. `selector` MUST be globally unique
 /// (UUID v4 is the canonical choice). `payload` is serialised to
@@ -34,7 +46,8 @@ use crate::error::FrameworkError;
 ///
 /// Returns `Ok(())` on success. A UNIQUE constraint conflict on
 /// `selector` propagates as a database error rather than being
-/// swallowed.
+/// swallowed. A `ttl_minutes` whose expiry falls outside the dates the
+/// clock can hold is an error too.
 pub async fn issue<P: Serialize>(
     selector: &str,
     kind: &str,
@@ -44,14 +57,21 @@ pub async fn issue<P: Serialize>(
     let payload_json = serde_json::to_string(payload)
         .map_err(|e| FrameworkError::internal(format!("ceremony: serialize payload: {e}")))?;
     let now = crate::clock::now();
-    let expires_at = now + Duration::minutes(ttl_minutes);
+    let expires_at = Duration::try_minutes(ttl_minutes)
+        .and_then(|lifetime| now.checked_add_signed(lifetime))
+        .ok_or_else(|| {
+            FrameworkError::internal(format!(
+                "ceremony lifetime of {ttl_minutes} minutes runs past the dates the clock can hold"
+            ))
+        })?;
     let conn = DB::connection()?;
+    let backend = conn.inner().get_database_backend();
     let model = entity::ActiveModel {
         selector: Set(selector.to_string()),
         kind: Set(kind.to_string()),
         payload: Set(payload_json),
-        expires_at: Set(expires_at.naive_utc()),
-        created_at: Set(now.naive_utc()),
+        expires_at: Set(storable_expiry(backend, expires_at.naive_utc()).into()),
+        created_at: Set(now.into()),
         ..Default::default()
     };
     entity::Entity::insert(model)
@@ -81,6 +101,13 @@ pub async fn consume<P: DeserializeOwned>(
         .filter(entity::Column::Selector.eq(selector))
         .filter(entity::Column::Kind.eq(kind))
         .filter(entity::Column::ExpiresAt.gt(now))
+        .select_only()
+        .columns([
+            entity::Column::Id,
+            entity::Column::Selector,
+            entity::Column::Payload,
+        ])
+        .into_model::<CeremonyRow>()
         .one(conn.inner())
         .await
         .map_err(|e| FrameworkError::database(format!("ceremony lookup: {e}")))?;
@@ -139,6 +166,12 @@ pub mod kind {
 }
 
 /// SeaORM entity for the `auth_ceremony_tokens` table.
+///
+/// `expires_at` and `created_at` may be `TIMESTAMP` or `DATETIME`
+/// (`timestamp` or `timestamptz` on Postgres). The fields are
+/// [`StoredDateTime`](crate::database::StoredDateTime), which reads each of
+/// those and SQLite text, so a whole-row read through this entity works on
+/// every one.
 pub mod entity {
     use sea_orm::entity::prelude::*;
 
@@ -158,9 +191,9 @@ pub mod entity {
         #[sea_orm(column_type = "Text")]
         pub payload: String,
         /// TTL boundary; the row is rejected once `now > expires_at`.
-        pub expires_at: chrono::NaiveDateTime,
+        pub expires_at: crate::database::StoredDateTime,
         /// Wall-clock time the ceremony was started.
-        pub created_at: chrono::NaiveDateTime,
+        pub created_at: crate::database::StoredDateTime,
     }
 
     /// SeaORM relation enum - `auth_ceremony_tokens` is a leaf table with no
@@ -169,4 +202,34 @@ pub mod entity {
     pub enum Relation {}
 
     impl ActiveModelBehavior for ActiveModel {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lifetime no date can hold is an error, not a panic: `i64::MAX`
+    /// minutes overflows the duration, and a smaller one that fits the
+    /// duration still runs past the last date chrono represents.
+    #[tokio::test]
+    async fn issue_refuses_a_lifetime_no_date_can_hold() {
+        for ttl_minutes in [i64::MAX, i64::MIN, 100_000_000_000_000] {
+            let outcome = tokio::spawn(async move {
+                issue(
+                    "overflow-ceremony",
+                    kind::OAUTH,
+                    &serde_json::json!({}),
+                    ttl_minutes,
+                )
+                .await
+            })
+            .await;
+            // The error names the lifetime: no database is registered here,
+            // so any other error would come from a later step.
+            assert!(
+                matches!(&outcome, Ok(Err(error)) if error.to_string().contains("lifetime")),
+                "ttl_minutes {ttl_minutes} must return an error, got {outcome:?}"
+            );
+        }
+    }
 }

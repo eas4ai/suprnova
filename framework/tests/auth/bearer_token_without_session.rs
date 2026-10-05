@@ -20,9 +20,12 @@
 use crate::http_wire::request;
 use crate::magnetar_auth;
 
+use std::any::Any;
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -31,8 +34,10 @@ use tokio::runtime::Runtime;
 
 use suprnova::http::text;
 use suprnova::magnetar_integration::middleware::BearerTokenMiddleware;
+use suprnova::testing::TestContainer;
 use suprnova::{
-    Auth, AuthMiddleware, BasicAuthMiddleware, MiddlewareRegistry, Router, handle_request,
+    Auth, AuthConfig, AuthManager, AuthMiddleware, Authenticatable, BasicAuthMiddleware,
+    FrameworkError, GuardConfig, MiddlewareRegistry, Router, UserProvider, handle_request,
 };
 
 /// One tokio runtime shared across every test in this file.
@@ -111,15 +116,31 @@ fn token_only_registry() -> MiddlewareRegistry {
 /// published the id through `set_auth_user`, which is a silent no-op
 /// without a `SessionMiddleware`-installed session scope, so
 /// `AuthMiddleware::new()` always saw a guest and returned 401.
+///
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, and the session-guard and remember-me tests of
+/// this binary run without one.
 #[test]
 fn valid_bearer_token_reaches_handler_without_session_middleware() {
+    crate::own_process::run_alone(
+        "bearer_token_without_session::valid_bearer_token_reaches_handler_without_session_middleware_child",
+    );
+}
+
+#[test]
+fn valid_bearer_token_reaches_handler_without_session_middleware_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     LazyLock::force(&SETUP);
 
     RT.block_on(async {
         Auth::password()
             .register("bearer-no-session@example.com", "Bearer1!")
             .await
-            .unwrap();
+            .unwrap()
+            .created()
+            .expect("registration creates a new account");
 
         let (_user, magnetar_session) = Auth::password()
             .authenticate("bearer-no-session@example.com", "Bearer1!", None, None)
@@ -158,15 +179,30 @@ fn valid_bearer_token_reaches_handler_without_session_middleware() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, and the session-guard and remember-me tests of
+/// this binary run without one.
 #[test]
 fn valid_bearer_does_not_satisfy_stateful_basic() {
+    crate::own_process::run_alone(
+        "bearer_token_without_session::valid_bearer_does_not_satisfy_stateful_basic_child",
+    );
+}
+
+#[test]
+fn valid_bearer_does_not_satisfy_stateful_basic_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     LazyLock::force(&SETUP);
 
     RT.block_on(async {
         Auth::password()
             .register("bearer-before-basic@example.com", "BearerBasic1!")
             .await
-            .unwrap();
+            .unwrap()
+            .created()
+            .expect("registration creates a new account");
 
         let (_user, magnetar_session) = Auth::password()
             .authenticate(
@@ -217,8 +253,22 @@ fn valid_bearer_does_not_satisfy_stateful_basic() {
 /// Assertion 2: the same stack with NO `Authorization` header returns 401.
 /// Passes before and after the fix - proves the fix did not simply disable
 /// the gate.
+///
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, and the session-guard and remember-me tests of
+/// this binary run without one.
 #[test]
 fn missing_authorization_header_returns_401_without_session_middleware() {
+    crate::own_process::run_alone(
+        "bearer_token_without_session::missing_authorization_header_returns_401_without_session_middleware_child",
+    );
+}
+
+#[test]
+fn missing_authorization_header_returns_401_without_session_middleware_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     LazyLock::force(&SETUP);
 
     RT.block_on(async {
@@ -230,11 +280,181 @@ fn missing_authorization_header_returns_401_without_session_middleware() {
     });
 }
 
+/// A user known only by its identifier.
+struct Known(String);
+
+impl Authenticatable for Known {
+    fn get_auth_identifier(&self) -> String {
+        self.0.clone()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+}
+
+/// The provider of the `api` token guard: it knows every user the Magnetar
+/// engine authenticates.
+struct EveryUser;
+
+#[async_trait]
+impl UserProvider for EveryUser {
+    async fn retrieve_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        Ok(Some(Arc::new(Known(id.to_owned()))))
+    }
+}
+
+/// The provider of the `admin_api` token guard: it knows nobody.
+struct NoAdmins;
+
+#[async_trait]
+impl UserProvider for NoAdmins {
+    async fn retrieve_by_id(
+        &self,
+        _id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        Ok(None)
+    }
+}
+
+/// Installs a container-scoped manager with two token guards over two
+/// providers: `api` over `users`, and `admin_api` over `admins`.
+fn install_two_token_guards() {
+    let config = AuthConfig::new("web")
+        .guard("api", GuardConfig::token("users"))
+        .guard("admin_api", GuardConfig::token("admins"));
+    TestContainer::singleton(AuthManager::new(config));
+    Auth::register_provider("users", Arc::new(EveryUser)).unwrap();
+    Auth::register_provider("admins", Arc::new(NoAdmins)).unwrap();
+}
+
+/// Serves one request to `/protected` through `registry` and returns its
+/// status. The server task inherits the caller's container scope, so the
+/// middleware resolves the guards the test installed.
+async fn serve_scoped(registry: MiddlewareRegistry, headers: &[(&str, &str)]) -> u16 {
+    let router: Router = Router::new()
+        .get("/protected", |_req| async { text("reached") })
+        .into();
+    let router = Arc::new(router);
+    let middleware = Arc::new(registry);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral listener");
+    let addr = listener.local_addr().expect("local_addr");
+    let server = TestContainer::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let svc = service_fn(move |req: hyper::Request<Incoming>| {
+            let router = router.clone();
+            let middleware = middleware.clone();
+            async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), svc)
+            .await;
+    });
+    let (status, _headers, _body) = request(addr, "GET", "/protected", headers).await;
+    server.await.expect("server task");
+    status
+}
+
+/// IDENTITY-001: every token guard reads its user through its own provider.
+///
+/// The `api` guard resolves the bearer user first, as a global optional
+/// check would. The route then checks `admin_api`, whose provider knows
+/// nobody. A request-wide bearer cache shared by every token guard answered
+/// `admin_api` with the `api` guard's user, so the route let the token in as
+/// an admin.
+///
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, and the session-guard and remember-me tests of
+/// this binary run without one.
+#[test]
+fn a_second_token_guard_never_answers_with_the_first_guards_user() {
+    crate::own_process::run_alone(
+        "bearer_token_without_session::a_second_token_guard_never_answers_with_the_first_guards_user_child",
+    );
+}
+
+#[test]
+fn a_second_token_guard_never_answers_with_the_first_guards_user_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    LazyLock::force(&SETUP);
+
+    RT.block_on(TestContainer::scope(async {
+        install_two_token_guards();
+        let registration = Auth::password()
+            .register("two-token-guards@example.com", "TwoGuards1!")
+            .await
+            .unwrap();
+        assert!(
+            matches!(registration, suprnova::Registration::Created(_)),
+            "a fresh address registers a new account"
+        );
+        let (_user, magnetar_session) = Auth::password()
+            .authenticate("two-token-guards@example.com", "TwoGuards1!", None, None)
+            .await
+            .unwrap();
+        let token = magnetar_session
+            .token
+            .as_ref()
+            .expect("freshly authenticated session must carry plaintext token")
+            .expose_secret()
+            .to_string();
+        let bearer = format!("Bearer {token}");
+        let headers = [("Authorization", bearer.as_str())];
+
+        // Control: the `api` guard's provider knows the token's user.
+        let api_only = MiddlewareRegistry::new()
+            .append(BearerTokenMiddleware)
+            .append(AuthMiddleware::new().for_guard("api"));
+        assert_eq!(serve_scoped(api_only, &headers).await, 200);
+
+        let api_then_admin = MiddlewareRegistry::new()
+            .append(BearerTokenMiddleware)
+            .append(AuthMiddleware::optional().for_guard("api"))
+            .append(AuthMiddleware::new().for_guard("admin_api"));
+        assert_eq!(
+            serve_scoped(api_then_admin, &headers).await,
+            401,
+            "the admin_api guard's provider knows no such user, so the route must refuse \
+             the token even after the api guard resolved it"
+        );
+
+        let admin_only = MiddlewareRegistry::new()
+            .append(BearerTokenMiddleware)
+            .append(AuthMiddleware::new().for_guard("admin_api"));
+        assert_eq!(serve_scoped(admin_only, &headers).await, 401);
+    }));
+}
+
 /// Assertion 3: the same stack with a syntactically valid but unknown
 /// bearer token returns 401. Passes before and after the fix - proves the
 /// fix did not simply disable the gate.
+///
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, and the session-guard and remember-me tests of
+/// this binary run without one.
 #[test]
 fn unknown_bearer_token_returns_401_without_session_middleware() {
+    crate::own_process::run_alone(
+        "bearer_token_without_session::unknown_bearer_token_returns_401_without_session_middleware_child",
+    );
+}
+
+#[test]
+fn unknown_bearer_token_returns_401_without_session_middleware_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     LazyLock::force(&SETUP);
 
     RT.block_on(async {

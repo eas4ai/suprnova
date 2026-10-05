@@ -19,6 +19,11 @@
 //! provenance. **Register `BearerTokenMiddleware` on token-guarded routes**,
 //! or `TokenGuard` will always report a guest. The guard then resolves
 //! the full user via its [`UserProvider`].
+//!
+//! The bearer id is one per request, but each token guard resolves it
+//! through its own provider and keeps the user it resolved under its own
+//! name. Two token guards over two providers never answer with each other's
+//! user.
 
 use std::sync::Arc;
 
@@ -26,6 +31,7 @@ use async_trait::async_trait;
 
 use super::authenticatable::Authenticatable;
 use super::contract::{Credentials, Guard};
+use super::guard::Auth;
 use super::provider::UserProvider;
 use super::request_state;
 use crate::error::FrameworkError;
@@ -36,41 +42,69 @@ use crate::error::FrameworkError;
 /// dependency. Resolves the current user from the request-scoped id and
 /// the guard's [`UserProvider`].
 pub struct TokenGuard {
+    /// The guard's name, which keys the user it resolved in the request.
+    /// `None` uses the default guard's name.
+    name: Option<String>,
     /// The user provider this guard resolves and validates against.
     provider: Arc<dyn UserProvider>,
 }
 
 impl TokenGuard {
-    /// Create a token guard with the given provider. Guards are named
-    /// at the dispatcher level (see [`crate::auth::AuthManager`]), so
-    /// the guard itself doesn't carry its own name.
+    /// Create a token guard with the given provider, under the default
+    /// guard's name.
+    ///
+    /// The [`AuthManager`](crate::auth::AuthManager) builds each configured
+    /// token guard with [`named`](Self::named) instead.
     pub fn new(provider: Arc<dyn UserProvider>) -> Self {
-        Self { provider }
+        Self {
+            name: None,
+            provider,
+        }
+    }
+
+    /// Create a token guard with an explicit name.
+    ///
+    /// The name keys the user this guard resolved in the request, so a
+    /// second token guard over another provider never answers with this
+    /// guard's user. Only the configured default guard mirrors that user
+    /// into the generic [`Auth`] view.
+    pub fn named(name: impl Into<String>, provider: Arc<dyn UserProvider>) -> Self {
+        Self {
+            name: Some(name.into()),
+            provider,
+        }
+    }
+
+    /// The name that keys this guard's request-scoped user.
+    fn name(&self) -> String {
+        self.name.clone().unwrap_or_else(Auth::default_guard_name)
     }
 }
 
 #[async_trait]
 impl Guard for TokenGuard {
     async fn user(&self) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
-        // Per-request cache (a prior resolution, or a `set_user`).
-        if let Some(user) = request_state::bearer_user() {
+        let name = self.name();
+        // This guard's per-request cache (a prior resolution, or a
+        // `set_user`). Another token guard's user never answers here.
+        if let Some(user) = request_state::bearer_user(&name) {
             return Ok(Some(user));
         }
 
-        let id = match request_state::bearer_user_id() {
+        let id = match request_state::bearer_user_id(&name) {
             Some(id) => id,
             None => return Ok(None),
         };
 
         let user = self.provider.retrieve_by_id(&id).await?;
         if let Some(user) = &user {
-            request_state::set_bearer_user(user.clone());
+            request_state::set_bearer_user(&name, user.clone());
         }
         Ok(user)
     }
 
     async fn id(&self) -> Result<Option<String>, FrameworkError> {
-        Ok(request_state::bearer_user_id())
+        Ok(request_state::bearer_user_id(&self.name()))
     }
 
     async fn validate(&self, credentials: &Credentials) -> Result<bool, FrameworkError> {
@@ -82,11 +116,11 @@ impl Guard for TokenGuard {
     }
 
     async fn set_user(&self, user: Arc<dyn Authenticatable>) {
-        request_state::set_bearer_user(user);
+        request_state::set_bearer_user(&self.name(), user);
     }
 
     async fn has_user(&self) -> bool {
-        request_state::has_bearer_user()
+        request_state::has_bearer_user(&self.name())
     }
 }
 
@@ -247,6 +281,44 @@ mod tests {
             assert_eq!(g.id().await.unwrap(), Some("9".to_string()));
             assert!(!g.has_user().await);
             assert!(g.user().await.unwrap().is_none());
+        })
+        .await;
+    }
+
+    /// Knows no user at all.
+    struct NoUsers;
+
+    #[async_trait]
+    impl UserProvider for NoUsers {
+        async fn retrieve_by_id(
+            &self,
+            _id: &str,
+        ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+            Ok(None)
+        }
+    }
+
+    // Two token guards share the bearer id but not the user: each resolves
+    // it through its own provider, and neither answers from the other's
+    // request cache.
+    #[tokio::test]
+    async fn token_guards_never_share_a_resolved_user() {
+        with_scopes(async {
+            request_state::set_bearer_user_id("7");
+            let users = TokenGuard::named("api", Arc::new(FakeProvider));
+            let admins = TokenGuard::named("admin_api", Arc::new(NoUsers));
+
+            let user = users
+                .user()
+                .await
+                .unwrap()
+                .expect("the api provider knows 7");
+            assert_eq!(user.get_auth_identifier(), "7");
+            assert!(users.has_user().await);
+
+            assert!(admins.user().await.unwrap().is_none());
+            assert!(!admins.has_user().await);
+            assert_eq!(admins.id().await.unwrap().as_deref(), Some("7"));
         })
         .await;
     }

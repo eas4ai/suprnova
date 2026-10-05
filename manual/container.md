@@ -286,6 +286,11 @@ App::singleton(MyCustomMailDriver::new());  // wins because it ran later
 return `bool` - `true` if they actually inserted, `false` if there
 was already a binding.
 
+Boot registers every `#[injectable]` this way, so an instance you bind
+by hand in `bootstrap.rs` is kept. Boot doesn't run the generated
+constructor of a type that is already bound, either: a dependency that
+only that constructor reads doesn't have to be registered.
+
 ## Resolving a value
 
 Two read methods, plus their `Result`-returning siblings:
@@ -349,11 +354,15 @@ The function name `register` matches the scaffold default (`src/bootstrap.rs::re
 
 The framework also calls into the container itself during boot:
 
-- `App::init()` runs first, initialising the registry
-- `App::boot_services()` resolves boot-time dependencies (drivers,
-  encryption keys, etc.) - your services see a fully-booted framework
-- Your `bootstrap_fn` runs after that, so it can rely on the framework's
-  services being available
+- Your `bootstrap_fn` runs first, so a binding you install by hand is
+  in place before the inventory boots
+- `App::init()` then initialises the registry, and
+  `App::boot_services()` registers the `#[injectable]` and `#[service]`
+  inventory around your bindings
+- The runtime drivers come up last
+
+The server, the workers, the `queue:*` commands, `down` and `up`, and
+the console binary all boot in this order.
 
 See [Application Bootstrap](bootstrap.md) for the full boot order.
 

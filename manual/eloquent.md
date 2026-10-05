@@ -322,13 +322,27 @@ let user = User::update_or_create(
 
 let user = User::first_or_new(
     attrs! { email: "alice@example.com" },
-).await?;   // returns an unsaved User; caller saves explicitly
+).await?;   // returns an unsaved User; caller inserts it explicitly
+let user = user.persist().await?;   // `use suprnova::Persistable;`
 ```
 
 Lookup keys go in the first map; extra fields applied on the
 create-path go in the second map. Returning an unsaved model via
-`first_or_new` lets the caller mutate it further before
-`save().await?`.
+`first_or_new` lets the caller mutate it further before inserting it
+with `persist().await?`, which fires `creating` and `created` and
+returns the saved model with the key the database assigned. When
+`first_or_new` finds a row, the model it returns is loaded, and `save`
+updates it.
+
+### Why Suprnova diverges
+
+Laravel's `save` inserts a model that does not exist yet and writes the
+new key into it. Suprnova's `save` borrows the model, so it cannot hand
+the new key back. A model built in the process whose key still holds its
+reset value - a new model from `first_or_new` or `find_or_new`, or a
+replica - has no row to update, so `save` refuses it with an error that
+names `persist`. `persist` consumes the model and returns the inserted
+one, key included.
 
 ## Creating and updating
 
@@ -459,7 +473,10 @@ The rules follow Laravel's `save`:
   `replicate` builds a new model without one.
 - A model you build in memory and save without reading it first has no
   loaded values to compare with: every column counts as changed, and
-  `get_original` returns `None` until that save returns.
+  `get_original` returns `None` until that save returns. Such a model
+  needs a key a row already holds: while its key holds the reset value,
+  as a replica's and a new `first_or_new` model's do, `save` refuses it
+  and `persist` inserts it.
 
 ### Why Suprnova diverges
 
@@ -527,7 +544,9 @@ row they already hold a reference to. `replicate` builds an
 in-memory clone with the PK and the timestamps reset
 (`Default::default()` for each type). Insert it with
 `replica.persist().await?` (the `Persistable` trait), which stamps
-`created_at` and `updated_at` the way `create` does.
+`created_at` and `updated_at` the way `create` does. `replica.save()`
+refuses it: the replica has no row yet, and its reset key would name
+another row.
 
 `refresh` and `refresh_for_update` both return an error when the row no
 longer exists, rather than leaving the model holding stale values.
@@ -579,8 +598,9 @@ or vice-versa.
 `replicate_into<T>` does NOT fire `Replicating` (the event carries
 `Arc<Mutex<Self>>`, so a listener on the source type couldn't mutate
 the cross-type replica anyway). Callers wanting per-T setup should
-run it on the returned `T` before calling `T::save` - the normal
-`Saving` / `Created` chain still fires inside `save`.
+run it on the returned `T` before calling `persist` - the normal
+`Creating` / `Saving` / `Created` / `Saved` chain still fires inside
+`persist`.
 
 ## Deleting and soft deletes
 
@@ -602,7 +622,7 @@ pub struct User {
 ### Lifecycle
 
 ```rust
-user.delete().await?;             // UPDATE: sets deleted_at = NOW()
+user.delete().await?;             // UPDATE: sets deleted_at (and updated_at) = NOW()
 user.trashed();                   // -> true
 let trashed = User::with_trashed().find(user.id).await?.unwrap();
 trashed.restore().await?;         // UPDATE: sets deleted_at = NULL
@@ -613,9 +633,10 @@ let all_including_dead = User::with_trashed().get().await?;
 user.force_delete().await?;       // actual DELETE
 ```
 
-The mass form follows the row form. `delete_all()` on a builder soft-deletes
-every row the query matches with one `UPDATE`, and it sets `updated_at` when
-the model manages timestamps. `force_delete_all()` removes the rows for good.
+`delete()` sets `updated_at` along with `deleted_at` when the model manages
+timestamps, as Laravel's soft delete does. The mass form follows the row
+form. `delete_all()` on a builder soft-deletes every row the query matches
+with one `UPDATE`, and it sets `updated_at` too. `force_delete_all()` removes the rows for good.
 Neither fires per-row events. See
 [Mass mutation](#mass-mutation---update_all--delete_all--upsert--_each).
 
@@ -945,7 +966,11 @@ read as a type parameter; for `avg` it is `f64` or `rust_decimal::Decimal`
 (the `AvgValue` trait). Suprnova aliases generated
 aggregate expressions internally so the same typed result is decoded on
 PostgreSQL, MySQL, and SQLite. `sum` and `avg` return zero for an empty
-match set, while `min` and `max` return `None`. An incompatible requested
+match set, while `min` and `max` return `None`. The same holds when no row
+comes back at all - an offset skips the aggregate's one row, as
+`skip(10).count()` does, or a grouped query has no group: `count`, `sum`
+and `avg` return zero and `min` and `max` return `None`, as Laravel's
+`count`, `sum`, `min` and `max` do. An incompatible requested
 Rust type or missing result column is a database error; it is never
 converted into a plausible zero or `None`.
 
@@ -978,17 +1003,26 @@ and `pluck` leaves the row out. A value that doesn't read as the type you
 name is an error that names the column, rather than a missing row. These
 terminals, the aggregates and `DB::scalar` read `u64` and `Option<u64>` on
 every database, as a model's `u64` field does: on Postgres and SQLite a
-negative value fails the read. No row on those two databases can hold a
-`u64` above `i64::MAX`, so a read by one gets its answer without sending
-the value: `find` returns `None` and `find_many` skips it. In a filter,
-`=`, `>`, `>=` and `IN` match no row, and `!=`, `<`, `<=` and `NOT IN`
-match every row whose column is not NULL. MySQL gives the same answer for
-rows that all hold smaller values.
+negative value fails the read. A read by a `u64` above `i64::MAX` answers
+what the database holds. On Postgres a signed integer column holds only
+integers, so no row matches and the query gets its answer without
+sending the value: `find` returns `None`, `find_many` skips it, and in a
+filter `=`, `>`, `>=` and `IN` match no row, while `!=`, `<`, `<=` and
+`NOT IN` match every row whose column is not NULL. SQLite compares the
+value's digits, as it does a literal, because an INTEGER column there can
+hold a REAL above `i64::MAX` that raw SQL or an older write left. MySQL
+compares the unsigned number.
 
-The same holds on every database for a column of a narrower integer field
-such as `i64` or `i32`, which can't hold a `u64` above `i64::MAX` either. A
-mass update that writes such a value to one is refused on Postgres and
-SQLite before anything is sent.
+The same holds for a column of a narrower integer field such as `i64` or
+`i32`, which can't hold such a value on any database, and a mass update
+that writes one to it is refused on Postgres and SQLite before anything is
+sent. A column the model doesn't know, such as a joined table's column,
+compares as the number on every database, as with `DB::table`. A mass
+write (`update_all`, `upsert`) to a field that is neither an integer nor
+text, such as a decimal, also takes the value as `DB::table` does: a
+numeric column on Postgres or MySQL stores it exactly, and SQLite refuses
+it for a column of INTEGER or NUMERIC affinity, which would store a
+rounded REAL.
 
 `to_sql` returns the parameterised SQL the next terminal would emit -
 useful for debugging or building views. The bindings are
@@ -1048,6 +1082,30 @@ let second = User::filter("role", "admin");
 let users  = first.union(second).get().await?;
 let users  = first.union_all(second).get().await?;
 ```
+
+As in Laravel, an ordering, a limit, or an offset belongs to the whole
+union when you add it after `union`, and to the first query alone when
+you add it before. `paginate`, `simple_paginate`, `cursor_paginate`,
+`first`, and `count` all come after `union`, so they page, take, and
+count the rows of the union; a cursor bounds the rows of every arm:
+
+```rust
+let page = User::filter("active", true)
+    .union(User::filter("role", "admin"))
+    .order_by_desc("id")      // orders the union
+    .paginate(20)             // pages the union; `total` counts its rows
+    .await?;
+
+let latest_active = User::filter("active", true)
+    .order_by_desc("created_at")
+    .limit(10)                // the ten newest active users only
+    .union(User::filter("role", "admin"));
+```
+
+The union is wrapped as a subquery for these clauses, so order it by the
+bare names of its columns (`id`, not `users.id`). A `UNION` keeps one
+copy of a row both queries return, and `total` counts it once;
+`union_all` keeps both.
 
 ## Row locking
 
@@ -1384,7 +1442,10 @@ tx.
 Three-way precedence for routing an operation through a connection:
 
 1. **Builder-level override** - `Builder::with_tx(&tx)` or any
-   `Model::*_with_tx(&tx, ...)` shim. Explicit beats ambient.
+   `Model::*_with_tx(&tx, ...)` shim. Explicit beats ambient. The
+   eager loads of such a query read through the same transaction, and
+   those of an `on(name)` query read from that connection, unless the
+   related model declares a connection of its own.
 2. **The ambient transaction** - installed by `DB::transaction` /
    `DB::transaction_with_attempts` for the closure's task scope.
    A read that names another connection, through `on(name)` or a
@@ -1542,6 +1603,7 @@ it when the query runs.
 | `Model::without_global_scopes()` | No |
 | `Model::query().without_global_scope::<S>()` | Yes, minus `S`, wherever it is chained |
 | `Model::with_trashed()` / `Model::only_trashed()` | Yes - only the soft-delete filter is lifted |
+| `RouteParam<Model>` route binding | Yes - the bound row is read through `Model::query()` |
 | `Model::find(id)` | No - PK lookup goes through SeaORM directly |
 | `Model::find_many([...])` | No - same reason |
 | `Model::all()` | No - same reason |
@@ -1630,8 +1692,8 @@ Common options:
 | Option                     | Relation kinds                | Purpose |
 |----------------------------|-------------------------------|---------|
 | `fk = "..."`               | every kind with a child FK    | Column on the CHILD pointing at the parent. Default = `<snake(parent_struct)>_id`. |
-| `lk = "..."`               | one/many kinds                | Column on the PARENT used as the join key. Default = `"id"`. |
-| `related_key = "..."`      | `BelongsToMany`, `MorphToMany` | The related-side PK COLUMN name. Default = `"id"`. Required when the related model uses a non-`id` PK. |
+| `lk = "..."`               | one/many kinds                | Column on the PARENT used as the join key. Default = the parent model's primary key. |
+| `related_key = "..."`      | `BelongsToMany`, `MorphToMany` | The related-side COLUMN the pivot's related key holds. Default = the related model's primary key. |
 | `with_pivot = ["...", ...]` | `BelongsToMany`, `MorphToMany` | Extra columns on the pivot to surface in the join. |
 | `with_timestamps`          | `BelongsToMany`, `MorphToMany` | Stamp `created_at` / `updated_at` on attach/sync. |
 | `with_default = \|\| { ... }` | `BelongsTo`                 | Closure producing a default when the FK is null OR the parent is missing. |
@@ -1640,6 +1702,31 @@ Common options:
 | `targets = [T1, T2, ...]`  | `MorphTo`                     | The list of concrete morph targets. The macro emits a `<Name>Morph` enum at the declaration site with one variant per target plus `Unknown(String, serde_json::Value)`. |
 | `target_morph_type = "..."` | `MorphedByMany`              | The morph-type string identifying the target family on the pivot. |
 | `pivot_table`, `pivot_foreign_key`, `pivot_related_key` | `BelongsToMany`, `MorphToMany` | Pivot-side column / table overrides when the defaults don't fit. |
+
+### Why Suprnova diverges: default foreign key names
+
+A default foreign key column always ends in `_id`. Laravel ends it in
+the parent model's primary key name instead (`getForeignKey()` is the
+snake-cased class name, `_`, and `getKeyName()`), so the two agree for
+the usual `id` key and differ for any other. `BelongsTo` differs in the
+name as well: Laravel takes it from the relation, Suprnova from the
+target model.
+
+| Relation | Suprnova default | Laravel default |
+|----------|------------------|-----------------|
+| `HasOne`, `HasMany` on a parent keyed by `uuid` | `user_id` | `user_uuid` |
+| `BelongsTo` declared as `author: BelongsTo<User>` | `user_id` (the target model) | `author_id` (the relation name) |
+| `BelongsToMany` pivot keys | `<snake(model)>_id` | `<snake(model)>_<primary key>` |
+| Through `first_key` / `second_key` | `<snake(model)>_id` | `<snake(model)>_<primary key>` |
+
+Most schemas name the column `<model>_id` whatever the parent's key is
+called, as Laravel's own `$table->foreignUuid('user_id')` does, so the
+default matches the column you would write. The join column on
+the other side already follows the model: `lk`, `related_key` and the
+owner key default to the model's primary key. When you mirror a
+Laravel schema whose columns follow Laravel's rule, name them with
+`fk = "..."`, `pivot_foreign_key`, `pivot_related_key`, `first_key` or
+`second_key`.
 
 ### `HasOne<R>` and `BelongsTo<R>`
 
@@ -1787,6 +1874,14 @@ for r in &roles {
 - `.sync_without_detaching([ids...])` - attach what's new and leave every
   existing pivot row untouched, extra columns and timestamps included.
   Wrapped in a transaction. Laravel's `syncWithoutDetaching`.
+
+Each id and extra column binds by the type its column has: the pivot
+model's field, or else the key the column holds. On Postgres and SQLite,
+a `u64` above `i64::MAX` written to the pivot fails with an error that
+names the column, and nothing is sent. `detach` of such an id deletes
+nothing on Postgres, and on SQLite it compares the id's digits, as it does
+a literal. On MySQL an unsigned pivot column holds the whole `u64` range,
+and `sync` and `.get()` read its ids back.
 
 `.get()` returns `Vec<R>` with the pivot stamped on each row's
 internal `__pivot` field. The `.pivot::<P>()` accessor downcasts the
@@ -2166,7 +2261,10 @@ let users = User::query()
 
 The per-row `__eager` cache cells are keyed by:
 
-- `<rel>` (relation NAME alone) for `with` and `with_count`.
+- `<rel>` (relation NAME alone) for `with` and `with_count`. The rows
+  and the count are kept in separate cells, so `with(["posts"])` and
+  `with_count(["posts"])` on one query keep both, and a count alone
+  does not count as loaded rows for `load_missing`.
 - `<rel>_<kind>_<col>` (e.g. `posts_sum_views`) for the four
   aggregate kinds - `with_sum` / `with_avg` / `with_min` / `with_max`.
   This wide key lets multiple aggregates on the same relation coexist
@@ -2193,8 +2291,17 @@ The macro emits matching accessors on each model:
   (`None` if the matching `with_sum` / `with_avg` was not called).
 - `<rel>_min_of(col)` / `<rel>_max_of(col)` - return
   `Option<Option<f64>>`: outer `Option` is "was `with_min` /
-  `with_max` called?", inner `Option` is "did SQL return NULL because
-  the group was empty?".
+  `with_max` called?", inner `Option` is "is there a numeric
+  minimum?". It is `None` when the group was empty or the minimum is
+  not a number, such as a date.
+- `<rel>_min_as::<T>(col)` / `<rel>_max_as::<T>(col)` - return
+  `Option<T>`: the minimum or maximum read as `T`, whatever the column's
+  type, as Laravel's `withMax('posts', 'created_at')` attribute holds
+  it. A date or a time reads from its ISO 8601 text, so `T` can be the
+  chrono type of the column. A `numeric` / `DECIMAL` minimum on Postgres
+  or MySQL reads exactly as `rust_decimal::Decimal`, as the nearest value
+  as `f64`, and as its decimal text as `String`. `None` when the call was
+  not made, the group was empty, or the value doesn't read as `T`.
 
 The accessors are the ergonomic surface - read through them rather
 than reaching into `__eager.get_aggregate::<T>(...)` directly. They
@@ -2227,15 +2334,21 @@ match u.posts_min_of("id") {
 
 // Accessor returns `None` when the matching `with_*` was skipped:
 assert!(u.posts_avg_of("score").is_none()); // never called with col="score"
+
+// The latest post's date, as Laravel's withMax('posts', 'created_at'):
+let users = User::with_max(("posts", "created_at")).get().await?;
+let latest: Option<DateTime<Utc>> = users[0].posts_max_as("created_at");
 ```
 
 ### Aggregates and INTEGER columns
 
-SUM over an INTEGER column lands in the cache as `f64`. The
-dispatcher arms try `try_get::<Option<f64>>` first, then fall back to
-`try_get::<Option<i64>>().map(|n| n as f64)` so SQLite's INTEGER-
-preserving COUNT/SUM types don't silently coerce to `0.0`. Read via
-the macro-emitted accessors regardless of the source column type.
+SUM over an INTEGER column lands in the cache as `f64`. The database
+chooses the type of an aggregate: an integer of the column's width, a
+real, or `numeric` / `DECIMAL` (Postgres and MySQL sum and average
+integers that way). The dispatcher reads whichever arrives, and a value
+that is not a number, such as the maximum of a date column, is kept for
+`<rel>_max_as` rather than failing the query. Read via the
+macro-emitted accessors regardless of the source column type.
 
 ### `with_where` predicate routing
 
@@ -2660,6 +2773,10 @@ User::query().chunk(100, |batch: Collection<User>| async move {
 The closure receives a `Collection<M>` per batch - slice-shape access
 (`.iter()`, indexing) works directly via `Deref`.
 
+`chunk`, `chunk_map`, and `each` keep the query's own `OFFSET` and
+`LIMIT`, as Laravel's `chunk` does: the offset skips rows once, at the
+start of the walk, and the limit caps the rows the whole walk visits.
+
 `chunk` is OFFSET-paginated and **not safe under concurrent inserts**:
 rows inserted before the next batch's offset get skipped; rows deleted
 before the offset get processed twice (whatever shifted into their
@@ -2681,6 +2798,14 @@ Each batch filters on `WHERE id > last_id ORDER BY id ASC LIMIT n`,
 so rows inserted mid-iteration with PKs above the cursor land in a
 later batch (or are picked up by a subsequent run) - they never cause
 an original row to skip or duplicate.
+
+The walk sets its own order. An `ORDER BY` already on the query is
+dropped, because any other order would make the cursor skip some rows
+and repeat others. An `OFFSET` on the query skips that many rows once,
+before the first batch; every later batch starts at the cursor. A
+`LIMIT` on the query caps the rows the whole walk visits, as in
+Laravel's `chunkById`: `.limit(10).chunk_by_id(3, ..)` hands over 3, 3,
+3 and 1 rows.
 
 The cursor is the value of the primary key, in the order of the key.
 These keys work:
@@ -2766,7 +2891,8 @@ Override the batch size with `lazy_by_id(500)`. `cursor()` is the
 Laravel name and is a zero-cost alias for `lazy()`.
 
 `lazy()`, `lazy_by_id()` and `cursor()` use the same keyset cursor as
-`chunk_by_id`, so the same keys work and the same keys are refused. The
+`chunk_by_id`, so the same keys work, the same keys are refused, and an
+`ORDER BY` or `OFFSET` on the query is treated the same way. The
 error is the first item of the stream. Refusal by column type happens
 before the first query. A row with a null or mismatched key is refused
 when its batch arrives, before the stream yields any row of that batch.
@@ -3676,7 +3802,9 @@ impl Prunable for ExpiredSession {
 
 For high-volume tables (audit logs, request logs, expired cache
 entries) `MassPrunable` skips per-row events and runs a single
-`DELETE WHERE …` statement:
+`DELETE WHERE …` statement. It runs where the `prunable()` query routes,
+the same place the `--pretend` count reads: the model's declared
+connection, or the query's own `on(name)` or `with_tx`:
 
 ```rust
 use suprnova::eloquent::MassPrunable;
@@ -4464,6 +4592,11 @@ let user = user.update_or_fail(attrs).await?;   // not_found if row deleted mid-
 user.delete_or_fail().await?;
 ```
 
+On a model declared with `soft_deletes`, `delete_or_fail`, `delete_quietly`,
+`destroy`, and a `delete` called through the `Model` trait all tombstone
+the row, as `delete()` does. `delete_or_fail` answers not-found for a row
+that is already trashed.
+
 ### Filtered serialisation - `to_array_except` / `to_array_only`
 
 Suprnova's Rust-native replacement for Laravel's per-instance
@@ -4533,7 +4666,8 @@ let user = User::find_or(id, || async {
 
 // Look up by PK; build an unsaved instance from defaults if not found.
 let user = User::find_or_new(id, attrs! { name: "draft" }).await?;
-// user.id == 0 here - the instance is in-memory only.
+// user.id == 0 here - the instance is in-memory only; insert it with
+// `user.persist().await?`.
 
 // Race-safe insert: try create, fall back to fetch on conflict.
 let user = User::create_or_first(

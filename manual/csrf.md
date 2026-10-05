@@ -39,8 +39,10 @@ flowchart TD
     excluded{"excluded path?<br/>.except / .except_method"}
     origin{"origin policy passes?<br/>Sec-Fetch-Site"}
     session{"session has a token?"}
-    header{"X-CSRF-TOKEN or<br/>X-XSRF-TOKEN header?"}
-    form{"form body with _token?"}
+    form{"form body with a _token value?"}
+    header{"X-CSRF-TOKEN value?"}
+    xsrf{"X-XSRF-TOKEN value?"}
+    check{"token matches the session's?"}
     fast["fast path: run handler,<br/>attach XSRF-TOKEN cookie"]
     run["run handler"]
     deny403["403"]
@@ -54,12 +56,15 @@ flowchart TD
     origin -- "fails · OriginOnly mode" --> deny403
     origin -- "fall through · other modes" --> session
     session -- "no" --> deny419
-    session -- "yes" --> header
-    header -- "match" --> run
-    header -- "wrong" --> deny419
-    header -- "no header" --> form
-    form -- "match" --> run
-    form -- "wrong / missing" --> deny419
+    session -- "yes" --> form
+    form -- "yes" --> check
+    form -- "no" --> header
+    header -- "yes" --> check
+    header -- "no" --> xsrf
+    xsrf -- "yes" --> check
+    xsrf -- "no" --> deny419
+    check -- "yes" --> run
+    check -- "no" --> deny419
 ```
 
 GET, HEAD, and OPTIONS are never token-checked, but they still hit the
@@ -68,25 +73,40 @@ response. That's how SPA clients first acquire the cookie.
 
 ## Token sources, in priority order
 
-The middleware reads the token from one of three places, in this order
-(matching Laravel):
+The middleware takes the token from the first of three places that has a
+value, in Laravel's order (`getTokenFromRequest`):
 
-1. **`X-CSRF-TOKEN` header** - what a hand-written request sends after
+1. **`_token` form field** - for `application/x-www-form-urlencoded`
+   posts from a traditional HTML form. A field sent twice counts by its
+   last value.
+2. **`X-CSRF-TOKEN` header** - what a hand-written request sends after
    reading the `<meta name="csrf-token">` tag.
-2. **`X-XSRF-TOKEN` header** - Laravel / Axios / Angular convention:
+3. **`X-XSRF-TOKEN` header** - Laravel / Axios / Angular convention:
    JavaScript reads the `XSRF-TOKEN` cookie and echoes its value here.
    This is the one the scaffolded SPA entry points use.
-3. **`_token` form field** - for `application/x-www-form-urlencoded`
-   posts from a traditional HTML form.
 
-If a header is present but wrong, the middleware rejects immediately
-without parsing the body. A correct client picks one location for the
-token; combining sources would be a token-splitting footgun.
+The first source with a value is the token, and the others aren't read: a
+form whose `_token` is wrong fails even beside a right header, and a
+right `_token` passes whatever header came with it. A source counts as
+having no value as PHP's `?:` reads one: absent, empty, or `0`.
 
-For form-body validation, the middleware buffers the request body up to
-64 KiB before reading `_token`. The downstream handler still sees the
-full form bag - the buffering is transparent, so `_token` stays in the
-parsed form for any handler that wants to look at it.
+To read `_token`, the middleware buffers a form-urlencoded body up to the
+server's request body limit (8 MiB unless you set another with
+`set_global_max_request_body_bytes`), the size the handler reads it to. A
+larger body answers `413`, as Laravel's `ValidatePostSize` answers one
+before the token check. The downstream handler still sees the full form
+bag - the buffering is transparent, so `_token` stays in the parsed form
+for any handler that wants to look at it.
+
+### Why Suprnova diverges
+
+Laravel reads `_token` from all request input: the query string and a
+JSON or multipart body as well as a form body. Suprnova reads it from a
+form-urlencoded body only. A token in the query string leaks into server
+logs, browser history and `Referer` headers. A JSON or multipart body
+would have to be read whole before the handler, and a multipart body
+streams its files to the handler as they arrive. Those clients send the
+token in a header.
 
 ## The frontend side
 
@@ -140,10 +160,26 @@ await fetch('/api/data', {
 ## The `XSRF-TOKEN` cookie
 
 On every response - read or write - `CsrfMiddleware` attaches an
-`XSRF-TOKEN` cookie containing the current session's token. This is
+`XSRF-TOKEN` cookie containing the current session's token, with one
+exception described below. This is
 the Laravel-Axios convention: the SPA library reads the cookie via
 JavaScript and echoes it as `X-XSRF-TOKEN` on the next state-changing
 request, completing the round-trip without ever touching a meta tag.
+
+The token belongs to the session, so a response that hands it out also
+keeps the session: when the request started a new session and the response
+is a success (2xx) or a redirect (3xx), `CsrfMiddleware` marks the session
+for storage, and `SessionMiddleware` sends its cookie with the response. A
+cookieless SPA that calls a JSON or `HEAD` endpoint first gets a token its
+next unsafe request can use.
+
+The exception is a refused or failed response to a request that started a
+new session and changed nothing in it: a 401 from an auth gate, a 403, a
+404, or a 500. That response carries no `XSRF-TOKEN` and stores no session.
+The caller was turned away, a token without its stored session would only
+earn a 419, and an anonymous probe of a route that refuses it costs no
+session write and does not fail when the session store is unavailable. A
+request that arrived with a stored session always gets its token.
 
 The cookie is **not** `HttpOnly` - it has to be readable from JS. The
 value is therefore stored as plaintext (no encryption round-trip),
@@ -429,6 +465,9 @@ reference shape for higher-level integration tests.
 | `$except = ['stripe/*']` | `.except(["stripe/*"])` |
 | Glob `*` (mid / leading / trailing) | Same - full `Str::is` semantics |
 | `XSRF-TOKEN` cookie + `X-XSRF-TOKEN` header round-trip | Same convention |
+| `getTokenFromRequest`: `_token`, then `X-CSRF-TOKEN`, then `X-XSRF-TOKEN` | Same order, the first with a value decides |
+| `_token` read from any input: query string, JSON, multipart, form | **Diverged:** form-urlencoded body only |
+| `XSRF-TOKEN` on every response, the session always saved | **Diverged:** a refused or failed response (4xx/5xx) to a request without a stored session gets no token and stores no session |
 | `$addHttpCookie = false` | `.without_xsrf_cookie()` |
 | `PreventRequestForgery::allowSameSite(true)` | `.allow_same_site()` |
 | `PreventRequestForgery::useOriginOnly(true)` | `.origin_only()` |

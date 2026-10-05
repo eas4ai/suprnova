@@ -133,7 +133,8 @@ pub fn route_intent(
 /// Stable failure classes for authored registered-route intents.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RouteIntentErrorKind {
-    /// The named route was absent or its opaque identity was not unique.
+    /// The named route was absent, or two different route patterns shared
+    /// its opaque identity. Several names on one pattern are one route.
     RouteUnavailable,
     /// Parameters were not a bounded scalar object satisfying route placeholders.
     InvalidParameters,
@@ -252,7 +253,10 @@ pub(crate) async fn handle(request: Request) -> Response {
         Err(error) => return failure_response(error.kind(), &error),
     };
     let (service, completion) = runtime.endpoint_service(upload_context);
-    let (response, failure) = service.handle_reported(endpoint_request).await;
+    // Session-only fields the request's components staged reach the
+    // session only once the outcome is accepted, below.
+    let ((response, failure), staged_session) =
+        super::session_state::scope(service.handle_reported(endpoint_request)).await;
     let completed = response.status.is_success();
     let projected = project_response(response);
     if let Some(breach) = failure.and_then(|error| size_breach(&error)) {
@@ -268,6 +272,7 @@ pub(crate) async fn handle(request: Request) -> Response {
     if let Err(error) = completion.commit() {
         return failure_response(EndpointErrorKind::KernelUnavailable, &error);
     }
+    super::session_state::commit(staged_session);
     projected
 }
 
@@ -345,6 +350,7 @@ pub(crate) struct SuprnovaEndpointKernel {
     clock: Arc<dyn Clock>,
     upload_finalization: Arc<UploadFinalizationService>,
     upload_operation_locks: Arc<super::upload::UploadOperationLocks>,
+    upload_provider: Arc<super::ports::upload_provider::SuprnovaUploadProviderRouter>,
     upload_context: Option<suprnova_live::host::TrustedLiveRequestContext>,
 }
 
@@ -397,6 +403,7 @@ impl SuprnovaEndpointKernel {
             clock,
             upload_finalization,
             upload_operation_locks: Arc::clone(&ports.uploads.operation_locks),
+            upload_provider: Arc::clone(&ports.uploads.provider_adapter),
             upload_context,
         }
     }
@@ -908,7 +915,23 @@ impl SuprnovaEndpointKernel {
                     )
                     .await;
                 match result {
-                    Ok(_) => break,
+                    Ok(_) => {
+                        // The upload is durable, so the slots it held go back
+                        // now rather than when cleanup reclaims the record
+                        // (ROOT-16). The action already committed; a failure
+                        // here leaves the slots to that cleanup.
+                        if let Err(error) = self
+                            .upload_provider
+                            .release_after_finalization(upload.proposal.handle())
+                            .await
+                        {
+                            tracing::warn!(
+                                kind = error.kind().as_str(),
+                                "a finalized Live upload kept its slots until cleanup"
+                            );
+                        }
+                        break;
+                    }
                     Err(error)
                         if attempt == 0
                             && matches!(

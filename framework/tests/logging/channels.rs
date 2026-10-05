@@ -54,6 +54,15 @@ fn at(text: &str) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::parse_from_rfc3339(text).unwrap().to_utc()
 }
 
+/// The subscriber the server installs, for the test's thread. Building it
+/// chooses no default channel, and an earlier test's choice stands in this
+/// process, so `check_channels` makes `LOG_CHANNEL` the default first, as
+/// the boot does.
+fn default_subscriber() -> impl tracing::Subscriber + Send + Sync + 'static {
+    suprnova::logging::check_channels().expect("LOG_CHANNEL names a channel");
+    build_subscriber(LogConfig::from_env()).expect("the subscriber builds")
+}
+
 /// A sink that keeps what it is given, for `Log::extend`.
 #[derive(Default)]
 struct MemorySink {
@@ -182,7 +191,7 @@ fn a_defined_channel_receives_the_default_events() {
     Log::define(&name, LogChannel::single(dir.path().join("audit.log")));
     set_env("LOG_CHANNEL", Some(&name));
 
-    let subscriber = build_subscriber(LogConfig::from_env()).expect("a defined channel");
+    let subscriber = default_subscriber();
     tracing::subscriber::with_default(subscriber, || tracing::info!("defined-event"));
     Log::flush();
     assert!(read(&dir.path().join("audit.log")).contains("defined-event"));
@@ -203,7 +212,7 @@ fn an_extended_driver_receives_the_records_of_a_channel_on_it() {
     Log::define(&name, LogChannel::driver(&driver));
     set_env("LOG_CHANNEL", Some(&name));
 
-    let subscriber = build_subscriber(LogConfig::from_env()).unwrap();
+    let subscriber = default_subscriber();
     tracing::subscriber::with_default(subscriber, || tracing::warn!(user = 7, "extended-event"));
     let records = sink.records.lock().unwrap();
     assert_eq!(records.len(), 1);
@@ -378,7 +387,7 @@ fn a_stack_default_channel_writes_each_event_to_every_channel() {
     set_env("LOG_CHANNEL", Some("stack"));
     set_env("LOG_STACK", Some(&format!("{one},{two}")));
 
-    let subscriber = build_subscriber(LogConfig::from_env()).unwrap();
+    let subscriber = default_subscriber();
     tracing::subscriber::with_default(subscriber, || tracing::error!("both-files"));
     assert!(read(&dir.path().join("one.log")).contains("both-files"));
     assert!(read(&dir.path().join("two.log")).contains("both-files"));
@@ -395,7 +404,7 @@ fn log_channel_writes_to_that_channel_only() {
     Log::define(&other, LogChannel::single(dir.path().join("other.log")));
     set_env("LOG_CHANNEL", Some(&default));
 
-    let subscriber = build_subscriber(LogConfig::from_env()).unwrap();
+    let subscriber = default_subscriber();
     tracing::subscriber::with_default(subscriber, || {
         Log::channel(&other).unwrap().info("only-other");
     });
@@ -481,7 +490,7 @@ fn the_channels_in_use_and_the_default_are_reported_and_changed() {
     Log::define(&second, LogChannel::single(dir.path().join("second.log")));
     set_env("LOG_CHANNEL", Some(&first));
 
-    let subscriber = build_subscriber(LogConfig::from_env()).unwrap();
+    let subscriber = default_subscriber();
     assert_eq!(Log::default_channel(), first);
     tracing::subscriber::with_default(subscriber, || {
         tracing::error!("before-switch");
@@ -777,7 +786,7 @@ fn a_file_line_carries_the_fields_of_its_spans() {
     Log::define(&name, LogChannel::single(dir.path().join("spans.log")));
     set_env("LOG_CHANNEL", Some(&name));
 
-    let subscriber = build_subscriber(LogConfig::from_env()).unwrap();
+    let subscriber = default_subscriber();
     tracing::subscriber::with_default(subscriber, || {
         let request = tracing::info_span!(
             "request",
@@ -808,7 +817,7 @@ fn redefining_or_forgetting_the_default_channel_moves_its_events() {
     let name = unique("moving");
     Log::define(&name, LogChannel::single(dir.path().join("first.log")));
     set_env("LOG_CHANNEL", Some(&name));
-    let subscriber = build_subscriber(LogConfig::from_env()).unwrap();
+    let subscriber = default_subscriber();
 
     tracing::subscriber::with_default(subscriber, || {
         tracing::error!("to-first");
@@ -897,4 +906,397 @@ fn a_console_command_flushes_its_records_before_the_process_exits() {
         &[("SUPRNOVA_LOG_FILE", file.to_str().unwrap())],
     );
     assert!(read(&file).contains("console-marker"));
+}
+
+// Audit fixes (DRIVERS-028 to DRIVERS-033).
+
+/// A driver sink whose writes fail with `marker`.
+struct FailingWrites(&'static str);
+
+impl LogSink for FailingWrites {
+    fn write(&self, _record: &LogRecord) -> std::io::Result<()> {
+        Err(std::io::Error::other(self.0))
+    }
+}
+
+/// A driver sink that takes every record and then fails to flush them.
+struct FailingFlushes(&'static str);
+
+impl LogSink for FailingFlushes {
+    fn write(&self, _record: &LogRecord) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn flush(&self) -> std::io::Result<()> {
+        Err(std::io::Error::other(self.0))
+    }
+}
+
+/// In a child: write through a driver whose writes fail, a driver whose
+/// flushes fail, and (on Linux) a file on a full device, twice each.
+#[test]
+fn child_writes_through_sinks_that_fail() {
+    if !is_child() {
+        return;
+    }
+    Log::extend("failing-writes", |_| {
+        Ok(Arc::new(FailingWrites("write-refused-marker")) as Arc<dyn LogSink>)
+    });
+    Log::extend("failing-flushes", |_| {
+        Ok(Arc::new(FailingFlushes("flush-refused-marker")) as Arc<dyn LogSink>)
+    });
+    let writes = Log::build(LogChannel::driver("failing-writes")).unwrap();
+    let flushes = Log::build(LogChannel::driver("failing-flushes")).unwrap();
+    #[cfg(target_os = "linux")]
+    let full = Log::build(LogChannel::single("/dev/full")).unwrap();
+    for _ in 0..2 {
+        writes.info("lost");
+        flushes.info("buffered");
+        #[cfg(target_os = "linux")]
+        full.info("buffered");
+        Log::flush();
+    }
+}
+
+/// DRIVERS-028: the `LogSink` contract says the caller reports a write that
+/// fails, once, on stderr. A driver's failed write, a driver's failed flush
+/// and a buffered file's failed flush were all dropped without a word.
+#[test]
+fn a_sink_that_cannot_write_or_flush_is_reported_once_on_stderr() {
+    let output = run_child("channels::child_writes_through_sinks_that_fail", &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("write-refused-marker").count(),
+        1,
+        "a driver's failed write, once: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("flush-refused-marker").count(),
+        1,
+        "a driver's failed flush, once: {stderr}"
+    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        stderr.matches("/dev/full").count(),
+        1,
+        "a file whose buffered records cannot be flushed, once: {stderr}"
+    );
+}
+
+/// DRIVERS-029: a stack's own `.level(...)` applies to every channel it
+/// lists, on top of each channel's own level.
+#[test]
+#[serial]
+fn a_stack_level_drops_the_records_below_it_in_every_channel_it_lists() {
+    let _env = lock_env();
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    let dir = tempfile::tempdir().unwrap();
+    let (open, strict, stacked) = (unique("open"), unique("strict"), unique("stacked"));
+    Log::define(&open, LogChannel::single(dir.path().join("open.log")));
+    Log::define(
+        &strict,
+        LogChannel::single(dir.path().join("strict.log")).level(LogLevel::Error),
+    );
+    let stack = || LogChannel::stack([open.as_str(), strict.as_str()]).level(LogLevel::Warning);
+
+    let logger = Log::build(stack()).unwrap();
+    logger.info("built-info");
+    logger.warning("built-warning");
+    logger.error("built-error");
+
+    Log::define(&stacked, stack());
+    set_env("LOG_CHANNEL", Some(&stacked));
+    let subscriber = default_subscriber();
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!("default-info");
+        tracing::warn!("default-warning");
+    });
+    Log::flush();
+
+    let open_text = read(&dir.path().join("open.log"));
+    let strict_text = read(&dir.path().join("strict.log"));
+    assert!(
+        !open_text.contains("built-info") && !open_text.contains("default-info"),
+        "the stack's Warning drops info in a channel that keeps every level: {open_text}"
+    );
+    assert!(open_text.contains("built-warning") && open_text.contains("default-warning"));
+    assert!(
+        !strict_text.contains("built-warning") && strict_text.contains("built-error"),
+        "a channel's own stricter level still applies: {strict_text}"
+    );
+}
+
+/// In a child: initialize logging as JSON, move the default channel, then
+/// initialize it again as pretty, which is refused, and write one event
+/// after each.
+#[test]
+fn child_initializes_logging_twice() {
+    if !is_child() {
+        return;
+    }
+    let dir = std::path::PathBuf::from(std::env::var("SUPRNOVA_LOG_DIR").unwrap());
+    Log::define("first-default", LogChannel::single(dir.join("first.log")));
+    suprnova::init_subscriber(LogConfig {
+        level: "info".into(),
+        format: suprnova::LogFormat::Json,
+    });
+    tracing::error!("before-second-init");
+    Log::define("second-default", LogChannel::single(dir.join("second.log")));
+    Log::set_default_channel("second-default").unwrap();
+    suprnova::init_subscriber(LogConfig {
+        level: "info".into(),
+        format: suprnova::LogFormat::Pretty,
+    });
+    tracing::error!("after-second-init");
+    Log::flush();
+}
+
+/// DRIVERS-030: a second `init_subscriber` is refused and promises the
+/// first configuration stays. It used to switch the file lines to its own
+/// format and move the default channel back to `LOG_CHANNEL`.
+#[test]
+fn a_refused_second_init_keeps_the_format_and_the_default_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    run_child(
+        "channels::child_initializes_logging_twice",
+        &[
+            ("LOG_CHANNEL", "first-default"),
+            ("SUPRNOVA_LOG_DIR", dir.path().to_str().unwrap()),
+        ],
+    );
+    let first = read(&dir.path().join("first.log"));
+    let second = read(&dir.path().join("second.log"));
+    assert!(first.contains("before-second-init"), "{first}");
+    assert!(
+        !first.contains("after-second-init"),
+        "the refused init did not move the default back: {first}"
+    );
+    let line = second
+        .lines()
+        .find(|line| line.contains("after-second-init"))
+        .unwrap_or_else(|| panic!("the event went to the default it was moved to: {second}"));
+    assert!(
+        serde_json::from_str::<serde_json::Value>(line).is_ok(),
+        "the line is still JSON: {line}"
+    );
+}
+
+/// DRIVERS-031: forgetting a channel reopens its file for every stack that
+/// lists it, the default channel's included, not only for the channel
+/// itself.
+#[test]
+#[serial]
+fn forgetting_a_channel_reopens_its_file_in_the_stacks_that_list_it() {
+    let _env = lock_env();
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    let dir = tempfile::tempdir().unwrap();
+    let (live, rotated) = (dir.path().join("app.log"), dir.path().join("app.log.1"));
+    let (child, parent) = (unique("rotating"), unique("parent"));
+    Log::define(&child, LogChannel::single(&live));
+    Log::define(&parent, LogChannel::stack([child.as_str()]));
+    set_env("LOG_CHANNEL", Some(&parent));
+
+    let subscriber = default_subscriber();
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::error!("default-before");
+        Log::channel(&parent).unwrap().error("named-before");
+        std::fs::rename(&live, &rotated).unwrap();
+        Log::forget_channel(&child);
+        tracing::error!("default-after");
+        Log::channel(&parent).unwrap().error("named-after");
+    });
+
+    let old = read(&rotated);
+    let new = read(&live);
+    assert!(
+        old.contains("default-before") && old.contains("named-before"),
+        "{old}"
+    );
+    assert!(
+        new.contains("default-after") && new.contains("named-after"),
+        "the stacks write to the reopened file: {new}"
+    );
+    assert!(
+        !old.contains("default-after") && !old.contains("named-after"),
+        "{old}"
+    );
+}
+
+/// In a child: the default channel is a stack of two stdout channels, the
+/// first keeping warnings and above, the second every level.
+#[test]
+fn child_writes_info_through_two_stdout_channels() {
+    if !is_child() {
+        return;
+    }
+    let marker = std::env::var("SUPRNOVA_LOG_MARKER").unwrap();
+    Log::define(
+        "strict-stdout",
+        LogChannel::stdout().level(LogLevel::Warning),
+    );
+    Log::define("open-stdout", LogChannel::stdout());
+    Log::define(
+        "both-stdout",
+        LogChannel::stack(["strict-stdout", "open-stdout"]),
+    );
+    let guard = suprnova::telemetry::init_telemetry(
+        LogConfig {
+            level: "info".into(),
+            format: suprnova::LogFormat::Json,
+        },
+        suprnova::telemetry::OtelConfig::disabled(),
+    );
+    tracing::info!("{marker}");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(guard.shutdown());
+}
+
+/// DRIVERS-032: an event goes to stdout when any stdout channel in the
+/// default stack keeps its level, whichever comes first in the stack.
+#[test]
+fn the_default_stack_writes_to_stdout_when_any_stdout_channel_keeps_the_level() {
+    let marker = unique("two-stdout-marker");
+    let output = run_child(
+        "channels::child_writes_info_through_two_stdout_channels",
+        &[
+            ("SUPRNOVA_LOG_MARKER", &marker),
+            ("LOG_CHANNEL", "both-stdout"),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(&marker), "{stdout}");
+}
+
+/// DRIVERS-033: an inner span's field overrides an outer span's field of
+/// the same name in the message's placeholders and in the context alike.
+#[test]
+#[serial]
+fn an_inner_span_field_wins_in_the_message_and_in_the_context() {
+    let _env = lock_env();
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    let sink = Arc::new(MemorySink::default());
+    let driver = unique("span-memory");
+    let shared = Arc::clone(&sink);
+    Log::extend(&driver, move |_| Ok(shared.clone() as Arc<dyn LogSink>));
+    let name = unique("span-default");
+    Log::define(&name, LogChannel::driver(&driver));
+    set_env("LOG_CHANNEL", Some(&name));
+
+    let subscriber = default_subscriber();
+    tracing::subscriber::with_default(subscriber, || {
+        let outer = tracing::info_span!("outer", user_id = 1);
+        let _outer = outer.enter();
+        let inner = tracing::info_span!("inner", user_id = 2);
+        let _inner = inner.enter();
+        tracing::warn!("actor {{user_id}}");
+    });
+
+    let records = sink.records.lock().unwrap();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].message, "actor 2");
+    let user_ids: Vec<&str> = records[0]
+        .context
+        .iter()
+        .filter(|(key, _)| key == "user_id")
+        .map(|(_, value)| value.as_str())
+        .collect();
+    assert_eq!(user_ids, ["2"], "one user_id, the inner span's");
+}
+
+/// In a child: install logging as JSON, build a pretty subscriber without
+/// installing it, and write one event through the installed one.
+#[test]
+fn child_builds_a_pretty_subscriber_it_never_installs() {
+    if !is_child() {
+        return;
+    }
+    let dir = std::path::PathBuf::from(std::env::var("SUPRNOVA_LOG_DIR").unwrap());
+    Log::define("built-json", LogChannel::single(dir.join("json.log")));
+    suprnova::init_subscriber(LogConfig {
+        level: "info".into(),
+        format: suprnova::LogFormat::Json,
+    });
+    let unused = build_subscriber(LogConfig {
+        level: "info".into(),
+        format: suprnova::LogFormat::Pretty,
+    })
+    .unwrap();
+    drop(unused);
+    tracing::error!("after-building-pretty");
+    Log::flush();
+}
+
+/// Sol review of DRIVERS-030: building a subscriber, without installing it,
+/// switched the file lines of the installed one to the built one's format.
+#[test]
+fn building_a_subscriber_keeps_the_live_format() {
+    let dir = tempfile::tempdir().unwrap();
+    run_child(
+        "channels::child_builds_a_pretty_subscriber_it_never_installs",
+        &[
+            ("LOG_CHANNEL", "built-json"),
+            ("SUPRNOVA_LOG_DIR", dir.path().to_str().unwrap()),
+        ],
+    );
+    let text = read(&dir.path().join("json.log"));
+    let line = text
+        .lines()
+        .find(|line| line.contains("after-building-pretty"))
+        .unwrap_or_else(|| panic!("the event reached the default channel: {text}"));
+    assert!(
+        serde_json::from_str::<serde_json::Value>(line).is_ok(),
+        "building a pretty subscriber switched the live lines to pretty: {line}"
+    );
+}
+
+/// In a child: install logging, move the default channel, build a
+/// subscriber without installing it, and write one event.
+#[test]
+fn child_builds_a_subscriber_after_moving_the_default() {
+    if !is_child() {
+        return;
+    }
+    let dir = std::path::PathBuf::from(std::env::var("SUPRNOVA_LOG_DIR").unwrap());
+    Log::define("built-first", LogChannel::single(dir.join("first.log")));
+    suprnova::init_subscriber(LogConfig {
+        level: "info".into(),
+        format: suprnova::LogFormat::Json,
+    });
+    Log::define("built-moved", LogChannel::single(dir.join("moved.log")));
+    Log::set_default_channel("built-moved").unwrap();
+    let unused = build_subscriber(LogConfig {
+        level: "info".into(),
+        format: suprnova::LogFormat::Json,
+    })
+    .unwrap();
+    drop(unused);
+    tracing::error!("after-building");
+    Log::flush();
+}
+
+/// Sol review of DRIVERS-030, the default-channel half: building a
+/// subscriber moved the live default channel back to `LOG_CHANNEL`.
+#[test]
+fn building_a_subscriber_keeps_the_live_default_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    run_child(
+        "channels::child_builds_a_subscriber_after_moving_the_default",
+        &[
+            ("LOG_CHANNEL", "built-first"),
+            ("SUPRNOVA_LOG_DIR", dir.path().to_str().unwrap()),
+        ],
+    );
+    let first = read(&dir.path().join("first.log"));
+    let moved = read(&dir.path().join("moved.log"));
+    assert!(
+        !first.contains("after-building"),
+        "building a subscriber moved the default back to LOG_CHANNEL: {first}"
+    );
+    assert!(
+        moved.contains("after-building"),
+        "the event went to the default it was moved to: {moved}"
+    );
 }

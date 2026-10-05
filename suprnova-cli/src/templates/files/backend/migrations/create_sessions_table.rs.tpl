@@ -20,7 +20,9 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Sessions::UserId).string().null())
                     .col(ColumnDef::new(Sessions::Payload).text().not_null())
                     .col(ColumnDef::new(Sessions::CsrfToken).string().not_null())
-                    .col(ColumnDef::new(Sessions::LastActivity).timestamp().not_null())
+                    // `.date_time()`: DATETIME on MySQL, which holds dates past
+                    // 2038-01-19 where TIMESTAMP stops. The framework writes UTC.
+                    .col(ColumnDef::new(Sessions::LastActivity).date_time().not_null())
                     .to_owned(),
             )
             .await?;

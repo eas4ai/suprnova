@@ -9,11 +9,19 @@ use chrono::{DateTime, Utc};
 /// Mirror row for one price line within a subscription. `unit_amount_minor`
 /// is the smallest currency unit at the time the item was synced; `None`
 /// means the provider returned no per-unit price (e.g. usage-billed items).
+///
+/// Every timestamp is cast native: the payments migration creates native
+/// `timestamp with time zone` columns, which the default text cast cannot
+/// write on Postgres or read on any engine but SQLite.
 #[suprnova::model(
     table = "payments_subscription_items",
     timestamps,
     relations = {
         subscription: BelongsTo<crate::payments::entities::subscription::Subscription>,
+    },
+    casts = {
+        created_at = suprnova::AsNativeDateTime,
+        updated_at = suprnova::AsNativeDateTime,
     },
 )]
 pub struct SubscriptionItem {

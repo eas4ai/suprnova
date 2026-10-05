@@ -18,11 +18,21 @@ async fn setup() {
 #[tokio::test]
 #[serial]
 async fn password_register_and_authenticate_round_trip() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "password_register_and_authenticate_round_trip",
+    )
+    .await
+    {
+        return;
+    }
     setup().await;
     let user = Auth::password()
         .register("parity@example.test", "correct-password")
         .await
-        .expect("register through Magnetar");
+        .expect("register through Magnetar")
+        .created()
+        .expect("registration creates a new account");
     let slot = suprnova::session::new_session_slot_for_test();
     let (authenticated, session) = suprnova::session::session_bind_scopes_for_test(slot, async {
         Auth::password()
@@ -43,11 +53,18 @@ async fn password_register_and_authenticate_round_trip() {
 #[tokio::test]
 #[serial]
 async fn wrong_password_fails_authentication() {
+    if crate::own_process_async::delegate(module_path!(), "wrong_password_fails_authentication")
+        .await
+    {
+        return;
+    }
     setup().await;
     Auth::password()
         .register("wrong-password@example.test", "correct-password")
         .await
-        .expect("register user");
+        .expect("register user")
+        .created()
+        .expect("registration creates a new account");
     let error = Auth::password()
         .authenticate(
             "wrong-password@example.test",
@@ -63,6 +80,14 @@ async fn wrong_password_fails_authentication() {
 #[tokio::test]
 #[serial]
 async fn magic_link_is_single_use_and_issues_a_session() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "magic_link_is_single_use_and_issues_a_session",
+    )
+    .await
+    {
+        return;
+    }
     setup().await;
     let token = Auth::magic_link()
         .send(
@@ -85,11 +110,21 @@ async fn magic_link_is_single_use_and_issues_a_session() {
 #[tokio::test]
 #[serial]
 async fn direct_user_lookup_uses_the_installed_engine() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "direct_user_lookup_uses_the_installed_engine",
+    )
+    .await
+    {
+        return;
+    }
     setup().await;
     let user = Auth::password()
         .register("lookup@example.test", "lookup-password")
         .await
-        .expect("register user");
+        .expect("register user")
+        .created()
+        .expect("registration creates a new account");
     let found = suprnova::magnetar_integration::find_user_by_id(user.id.as_str())
         .await
         .expect("lookup succeeds")

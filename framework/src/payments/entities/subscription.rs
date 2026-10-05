@@ -11,11 +11,22 @@ use chrono::{DateTime, Utc};
 /// provider's lifecycle term (`active`, `trialing`, `past_due`, etc.).
 /// `cancel_at_period_end` reflects a scheduled cancellation; `canceled_at`
 /// is set once the cancellation actually takes effect.
+///
+/// Every timestamp is cast native: the payments migration creates native
+/// `timestamp with time zone` columns, which the default text cast cannot
+/// write on Postgres or read on any engine but SQLite.
 #[suprnova::model(
     table = "payments_subscriptions",
     timestamps,
     relations = {
         items: HasMany<crate::payments::entities::subscription_item::SubscriptionItem>,
+    },
+    casts = {
+        current_period_start = suprnova::AsNativeDateTime,
+        current_period_end = suprnova::AsNativeDateTime,
+        canceled_at = suprnova::AsOptionalNativeDateTime,
+        created_at = suprnova::AsNativeDateTime,
+        updated_at = suprnova::AsNativeDateTime,
     },
 )]
 pub struct Subscription {

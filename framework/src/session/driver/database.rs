@@ -10,9 +10,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::database::DB;
+use crate::database::stored_datetime::StoredDateTime;
 use crate::error::FrameworkError;
 use crate::session::store::{
-    SessionData, SessionMigrationError, SessionStore, guard_principal_ids_in,
+    DestroyedSessions, SessionData, SessionMigrationError, SessionStore, guard_identity_in,
 };
 
 /// The table [`DatabaseSessionDriver::new`] reads and writes.
@@ -57,7 +58,8 @@ pub(crate) fn valid_session_table(name: &str) -> bool {
 /// - user_id: VARCHAR (nullable) - authenticated user ID (string, supports both numeric and opaque IDs)
 /// - payload: TEXT - JSON serialized session data
 /// - csrf_token: VARCHAR - CSRF protection token
-/// - last_activity: TIMESTAMP - last access time
+/// - last_activity: TIMESTAMP or DATETIME (`timestamp` or `timestamptz` on
+///   Postgres) - last access time, in UTC
 ///
 /// The queries are sea-query statements over the table name held at run
 /// time. A SeaORM entity fixes its table at compile time, which is why
@@ -79,13 +81,17 @@ enum SessionColumn {
 }
 
 /// One stored session row, decoded by column name.
+///
+/// `last_activity` is a [`StoredDateTime`]: older scaffolds created it
+/// with `.timestamp()`, which is `TIMESTAMP` on MySQL and MariaDB, and a
+/// plain `NaiveDateTime` decodes only from `DATETIME` there.
 #[derive(FromQueryResult)]
 struct SessionRow {
     id: String,
     user_id: Option<String>,
     payload: String,
     csrf_token: String,
-    last_activity: chrono::NaiveDateTime,
+    last_activity: StoredDateTime,
 }
 
 fn database_error(error: DbErr) -> FrameworkError {
@@ -225,6 +231,7 @@ impl SessionStore for DatabaseSessionDriver {
             let now = crate::clock::now().naive_utc();
             let expiry = session
                 .last_activity
+                .0
                 .checked_add_signed(chrono::Duration::seconds(self.lifetime_secs_capped()))
                 .unwrap_or(chrono::NaiveDateTime::MAX);
 
@@ -424,27 +431,57 @@ impl SessionStore for DatabaseSessionDriver {
     }
 
     async fn destroy_for_user(&self, user_id: &str) -> Result<u64, FrameworkError> {
+        let guard = crate::auth::Auth::default_guard_name();
+        Ok(self.destroy_guard_sessions(&guard, user_id).await?.count)
+    }
+
+    async fn destroy_guard_sessions(
+        &self,
+        guard: &str,
+        user_id: &str,
+    ) -> Result<DestroyedSessions, FrameworkError> {
         let db = DB::connection()?;
+        let mut destroyed = DestroyedSessions::default();
 
-        // Indexed path: sessions whose default-guard principal is `user_id`.
-        let by_user_column = Query::delete()
-            .from_table(self.table())
-            .and_where(Expr::col(SessionColumn::UserId).eq(user_id))
-            .to_owned();
-        let mut deleted = db
-            .inner()
-            .execute(&by_user_column)
-            .await
-            .map_err(database_error)?
-            .rows_affected();
+        // Indexed path: the `user_id` column holds the default guard's user,
+        // and no other guard's. The ids are read first so Live can end what
+        // these sessions opened; the delete itself stays one statement, so a
+        // row rotated in between is still removed.
+        if guard == crate::auth::Auth::default_guard_name() {
+            let by_user_column = Query::select()
+                .column(SessionColumn::Id)
+                .from(self.table())
+                .and_where(Expr::col(SessionColumn::UserId).eq(user_id))
+                .to_owned();
+            for row in db
+                .inner()
+                .query_all(&by_user_column)
+                .await
+                .map_err(database_error)?
+            {
+                destroyed
+                    .ids
+                    .push(row.try_get("", "id").map_err(database_error)?);
+            }
+            let delete = Query::delete()
+                .from_table(self.table())
+                .and_where(Expr::col(SessionColumn::UserId).eq(user_id))
+                .to_owned();
+            destroyed.count += db
+                .inner()
+                .execute(&delete)
+                .await
+                .map_err(database_error)?
+                .rows_affected();
+        }
 
-        // Named-guard principals live only inside the payload
-        // (`_auth_guards`), so the indexed column cannot see them: a
-        // named-only session has `user_id = NULL`, and a multi-principal
-        // session carries a different top-level id. Compare the surviving
-        // rows' guard identities exactly in Rust. Revocation is rare, so
-        // correctness outranks index use here; the in-Rust comparison
-        // also keeps backend JSON-dialect differences out of the query.
+        // The guard's own entry lives only inside the payload
+        // (`_auth_guards`), so the indexed column cannot see it: a
+        // named-only session has `user_id = NULL`. Compare the surviving
+        // rows' entry for this guard exactly in Rust, and no other guard's:
+        // admin 7 is not web user 7. Revocation is rare, so correctness
+        // outranks index use here; the in-Rust comparison also keeps
+        // backend JSON-dialect differences out of the query.
         let surviving = Query::select()
             .columns([SessionColumn::Id, SessionColumn::Payload])
             .from(self.table())
@@ -459,20 +496,21 @@ impl SessionStore for DatabaseSessionDriver {
             let payload: String = row.try_get("", "payload").map_err(database_error)?;
             let data: HashMap<String, serde_json::Value> =
                 serde_json::from_str(&payload).unwrap_or_default();
-            if guard_principal_ids_in(&data)
-                .iter()
-                .any(|principal| principal == user_id)
-            {
-                deleted += db
+            if guard_identity_in(&data, guard) == Some(user_id) {
+                let removed = db
                     .inner()
                     .execute(&self.delete_by_id(&id))
                     .await
                     .map_err(database_error)?
                     .rows_affected();
+                if removed > 0 {
+                    destroyed.count += removed;
+                    destroyed.ids.push(id);
+                }
             }
         }
 
-        Ok(deleted)
+        Ok(destroyed)
     }
 
     async fn gc(&self) -> Result<u64, FrameworkError> {
@@ -528,8 +566,12 @@ pub mod sessions {
         pub payload: String,
         /// Per-session CSRF token rotated when the session id rotates.
         pub csrf_token: String,
-        /// Wall-clock time of the last activity on this session, used for sliding TTL.
-        pub last_activity: chrono::NaiveDateTime,
+        /// UTC time of the last activity on this session, used for sliding
+        /// TTL. A [`StoredDateTime`](crate::database::StoredDateTime) reads
+        /// `DATETIME` and the `TIMESTAMP` older scaffolds created on MySQL
+        /// and MariaDB, `timestamp` and `timestamptz` on Postgres, and SQLite
+        /// text, so a whole-row read works on every one.
+        pub last_activity: crate::database::StoredDateTime,
     }
 
     /// SeaORM relation enum - `sessions` is a leaf table with no declared

@@ -181,3 +181,62 @@ fn prefixed_forget_targets_the_wire_name() {
     assert!(header.starts_with("__Host-remember_me="), "{header}");
     assert!(header.contains("Max-Age=0"), "{header}");
 }
+
+/// IDENTITY-013: a cookie whose wire name only decodes to the protected
+/// `__Host-` name is not the session cookie. A browser applies the prefix
+/// rules to the literal stored name, so `%5F%5FHost-suprnova_session` can be
+/// planted from a sibling subdomain. Decoding it into the protected name let
+/// such a cookie carry the planter's own valid session into the victim's
+/// browser.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_encoded_alias_of_a_prefixed_session_cookie_is_not_the_session() {
+    ensure_crypt();
+    let store = Arc::new(MemoryStore::default());
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    config.cookie_prefix = CookiePrefix::Host;
+    let middleware = SessionMiddleware::with_store(config, store);
+
+    let first_next: suprnova::middleware::Next = Arc::new(|_request| {
+        Box::pin(async {
+            suprnova::session::session_mut(|session| session.put("marker", true));
+            Ok(suprnova::HttpResponse::text("stored"))
+        })
+    });
+    let first = match middleware
+        .handle(post_request(None).await, first_next)
+        .await
+    {
+        Ok(response) | Err(response) => response.into_hyper(),
+    };
+    let (wire_name, wire_value) = set_cookie_parts(&first);
+    assert_eq!(wire_name, "__Host-suprnova_session");
+
+    let observed = Arc::new(Mutex::new(None));
+    let observed_for_handler = observed.clone();
+    let second_next: suprnova::middleware::Next = Arc::new(move |_request| {
+        let observed = observed_for_handler.clone();
+        Box::pin(async move {
+            *observed.lock().unwrap() =
+                suprnova::session::session().and_then(|session| session.get::<bool>("marker"));
+            Ok(suprnova::HttpResponse::text("read"))
+        })
+    });
+    let encoded_alias = "%5F%5FHost-suprnova_session";
+    match middleware
+        .handle(
+            post_request(Some((encoded_alias, &wire_value))).await,
+            second_next,
+        )
+        .await
+    {
+        Ok(_) => {}
+        Err(_) => panic!("second request failed"),
+    }
+    assert_eq!(
+        *observed.lock().unwrap(),
+        None,
+        "a cookie planted under an encoded alias of the protected name must start a \
+         fresh session, never resume the planter's session"
+    );
+}

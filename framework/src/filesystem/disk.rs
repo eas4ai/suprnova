@@ -38,8 +38,75 @@ use chrono::{DateTime, Utc};
 use opendal::{EntryMode, Operator};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::SystemTime;
+
+/// A presigned upload: the URL plus the request a client has to send to it.
+///
+/// A presigned URL alone does not describe the upload on every backend. The
+/// signature can cover headers the uploader must send exactly as signed:
+/// Azure Blob requires `x-ms-blob-type`, and an S3 bucket set up for
+/// server-side encryption requires its encryption headers. A client that
+/// sends only the URL is refused. Laravel's `temporaryUploadUrl` returns the
+/// URL and its headers together for the same reason.
+///
+/// It serializes to `{ "url": .., "method": .., "headers": { .. } }`, so a
+/// handler can return it to a browser as JSON. `Debug` leaves out the URL's
+/// query and the header values, because both carry the signature or keys.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+pub struct TemporaryUploadUrl {
+    /// The presigned URL to send the upload to.
+    pub url: String,
+    /// The HTTP method the signature covers, usually `PUT`.
+    pub method: String,
+    /// Every header the upload must carry, by lowercase name, with the value
+    /// the signature covers. Empty when the backend needs none.
+    pub headers: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for TemporaryUploadUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let without_query = self.url.split('?').next().unwrap_or_default();
+        f.debug_struct("TemporaryUploadUrl")
+            .field("url", &format_args!("{without_query}?<signed>"))
+            .field("method", &self.method)
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl TemporaryUploadUrl {
+    /// Build from opendal's presigned request, keeping every header.
+    ///
+    /// A header value that is not visible ASCII is refused rather than
+    /// converted lossily: a changed value no longer matches the signature.
+    fn from_presigned(
+        path: &str,
+        presigned: opendal::raw::PresignedRequest,
+    ) -> Result<Self, FrameworkError> {
+        let mut headers: BTreeMap<String, String> = BTreeMap::new();
+        for (name, value) in presigned.header() {
+            let value = value.to_str().map_err(|_| {
+                FrameworkError::internal(format!(
+                    "storage presign_write({path}): header '{name}' is not text"
+                ))
+            })?;
+            headers
+                .entry(name.as_str().to_string())
+                .and_modify(|joined| {
+                    joined.push_str(", ");
+                    joined.push_str(value);
+                })
+                .or_insert_with(|| value.to_string());
+        }
+        Ok(Self {
+            url: presigned.uri().to_string(),
+            method: presigned.method().as_str().to_string(),
+            headers,
+        })
+    }
+}
 
 /// Algorithms supported by [`DiskExt::checksum`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,16 +336,19 @@ pub trait DiskExt {
         expire: std::time::Duration,
     ) -> impl Future<Output = Result<String, FrameworkError>> + Send;
 
-    /// Generate a pre-signed URL granting temporary write access to `path`,
-    /// for direct browser-to-cloud uploads.
+    /// Generate a pre-signed upload granting temporary write access to
+    /// `path`, for direct browser-to-cloud uploads.
     ///
-    /// Backed by [`Operator::presign_write`]; errors on backends that do not
-    /// implement presigning.
+    /// Returns the URL with the method and the headers the signature covers;
+    /// the client must send the upload with exactly that method and those
+    /// headers. See [`TemporaryUploadUrl`] for why the URL alone is not
+    /// enough. Backed by [`Operator::presign_write`]; errors on backends that
+    /// do not implement presigning.
     fn temporary_upload_url(
         &self,
         path: &str,
         expire: std::time::Duration,
-    ) -> impl Future<Output = Result<String, FrameworkError>> + Send;
+    ) -> impl Future<Output = Result<TemporaryUploadUrl, FrameworkError>> + Send;
 }
 
 impl DiskExt for Operator {
@@ -606,12 +676,12 @@ impl DiskExt for Operator {
         &self,
         path: &str,
         expire: std::time::Duration,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<TemporaryUploadUrl, FrameworkError> {
         let presigned = self
             .presign_write(path, expire)
             .await
             .map_err(|e| FrameworkError::internal(format!("storage presign_write({path}): {e}")))?;
-        Ok(presigned.uri().to_string())
+        TemporaryUploadUrl::from_presigned(path, presigned)
     }
 }
 
@@ -941,6 +1011,63 @@ mod tests {
         assert!(
             err.to_string().contains("presign_write"),
             "error should name the operation, got: {err}"
+        );
+    }
+
+    /// An S3 disk whose uploads must carry a server-side encryption header.
+    /// Presigning only signs, so this runs with no network and no bucket.
+    fn sse_s3_disk() -> Operator {
+        Operator::new(
+            opendal::services::S3::default()
+                .bucket("uploads")
+                .region("us-east-1")
+                .endpoint("http://127.0.0.1:9")
+                .access_key_id("AKIDEXAMPLE")
+                .secret_access_key("example-secret")
+                .server_side_encryption("aws:kms"),
+        )
+        .expect("build an offline S3 operator")
+    }
+
+    /// DRIVERS-022: the upload URL comes with the method and the headers the
+    /// signature covers. It used to be the bare URL, so a browser could not
+    /// learn the headers a backend requires (Azure's `x-ms-blob-type`, an S3
+    /// bucket's encryption header) and its upload was refused.
+    #[tokio::test]
+    async fn temporary_upload_url_carries_the_headers_the_signature_requires() {
+        let disk = sse_s3_disk();
+        let expire = std::time::Duration::from_secs(900);
+        let presigned = disk
+            .presign_write("docs/new.pdf", expire)
+            .await
+            .expect("presign_write");
+        assert!(
+            presigned
+                .header()
+                .contains_key("x-amz-server-side-encryption"),
+            "precondition: this backend signs a header the uploader must send"
+        );
+
+        let upload = disk
+            .temporary_upload_url("docs/new.pdf", expire)
+            .await
+            .expect("temporary_upload_url");
+        assert_eq!(
+            upload
+                .headers
+                .get("x-amz-server-side-encryption")
+                .map(String::as_str),
+            Some("aws:kms"),
+            "the upload drops the `x-amz-server-side-encryption: aws:kms` header the \
+             signature requires: {:?}",
+            upload.headers.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(upload.method, "PUT");
+        assert_eq!(upload.url, presigned.uri().to_string());
+        let debug = format!("{upload:?}");
+        assert!(
+            !debug.contains("aws:kms") && !debug.contains("X-Amz-Signature"),
+            "Debug must not print header values or the signature: {debug}"
         );
     }
 

@@ -38,6 +38,12 @@ pub struct SessionData {
     /// persisted under the current id (`false` - a brand-new session,
     /// or one whose id was just rotated by [`Self::rotate_id`]).
     ///
+    /// [`crate::session::SessionMiddleware`] sets it on every session that
+    /// [`SessionStore::read`] returns, so a store does not have to: a store
+    /// that builds what it reads with [`Self::new`] would otherwise report
+    /// each stored session as new, and the CSRF middleware would mark it for
+    /// storage on every successful request.
+    ///
     /// # Security - SEC-02(c)
     ///
     /// [`crate::session::driver::DatabaseSessionDriver::write`] uses
@@ -45,9 +51,8 @@ pub struct SessionData {
     /// existing row could conflict) or must be update-only (`true` - a
     /// missing row means someone deleted it, most likely a concurrent
     /// [`crate::session::destroy_all_for_user`] revocation, and the
-    /// write must not resurrect it). A custom [`SessionStore`]
-    /// implementation is free to ignore this field; it is purely
-    /// optional metadata a store may use to prevent the same class of
+    /// write must not resurrect it). A custom [`SessionStore`] may ignore
+    /// it in `write`, or use it there to prevent the same class of
     /// resurrection race in its own backend.
     pub loaded_from_store: bool,
 }
@@ -120,6 +125,21 @@ impl SessionData {
         self.dirty = true;
     }
 
+    /// Whether the guard `guard` is signed in as `user_id` in this session.
+    ///
+    /// The default guard's user is [`Self::user_id`], or its own guard
+    /// entry; any other guard's user is that guard's entry alone. User 7 of
+    /// the `admin` guard is not the default guard's user 7, so a session in
+    /// which only `admin` holds 7 is not web user 7's session. A
+    /// [`SessionStore`] uses this to implement
+    /// [`SessionStore::destroy_guard_sessions`].
+    pub fn is_signed_in_as(&self, guard: &str, user_id: &str) -> bool {
+        let own_entry = self.auth_guard_id(guard).as_deref() == Some(user_id);
+        own_entry
+            || (guard == crate::auth::Auth::default_guard_name()
+                && self.user_id.as_deref() == Some(user_id))
+    }
+
     pub(crate) fn auth_guard_id(&self, guard: &str) -> Option<String> {
         self.auth_guard_field(guard, AUTH_GUARD_ID_KEY)
             .and_then(serde_json::Value::as_str)
@@ -170,6 +190,25 @@ impl SessionData {
                 "token_digest": binding.token_digest,
             }),
         );
+    }
+
+    /// Signs the guard `guard` in on this session as `user_id`, with the
+    /// Magnetar binding a real sign-in records when one is given. Tests that
+    /// seed a session store directly use it to stand for a sign-in that
+    /// happened on an earlier request; applications sign guards in through
+    /// [`crate::Auth`] and [`crate::StatefulGuard`].
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn set_auth_guard_for_test(
+        &mut self,
+        guard: &str,
+        user_id: &str,
+        binding: Option<magnetar::sessions::WebSessionBinding>,
+    ) {
+        self.set_auth_guard_id(guard, user_id);
+        if let Some(binding) = binding {
+            self.set_auth_guard_magnetar_binding(guard, binding);
+        }
     }
 
     pub(crate) fn auth_guard_names(&self) -> Vec<String> {
@@ -310,8 +349,14 @@ impl SessionData {
             .collect();
         let had_new = !new_keys.is_empty();
         for key in new_keys {
+            // Swap the leading namespace only. The caller's own key may
+            // contain `_flash.new.` text, and a replace over the whole key
+            // would rewrite it into a key `get_flash` never asks for.
+            let Some(name) = key.strip_prefix("_flash.new.") else {
+                continue;
+            };
+            let old_key = format!("_flash.old.{name}");
             if let Some(value) = self.data.remove(&key) {
-                let old_key = key.replace("_flash.new.", "_flash.old.");
                 self.data.insert(old_key, value);
             }
         }
@@ -407,10 +452,18 @@ impl SessionData {
         next
     }
 
-    /// Decrement a numeric session value. Mirrors Laravel's
-    /// `Store::decrement` (`Store.php:459-462`).
+    /// Decrement a numeric session value, saturating at the `i64` bounds
+    /// like [`Self::increment`]. Mirrors Laravel's `Store::decrement`
+    /// (`Store.php:459-462`).
+    ///
+    /// Subtracts directly rather than incrementing by `-amount`:
+    /// `i64::MIN` has no negation, so that form panics with overflow
+    /// checks on and subtracts the wrong way without them.
     pub fn decrement(&mut self, key: &str, amount: i64) -> i64 {
-        self.increment(key, -amount)
+        let cur: i64 = self.get(key).unwrap_or(0);
+        let next = cur.saturating_sub(amount);
+        self.put(key, next);
+        next
     }
 
     /// Get-or-compute-and-put. Mirrors Laravel's `Store::remember`
@@ -540,8 +593,12 @@ impl SessionData {
             .collect();
         let had = !olds.is_empty();
         for old in olds {
+            // The leading namespace only, as in `age_flash_data`.
+            let Some(name) = old.strip_prefix("_flash.old.") else {
+                continue;
+            };
+            let new = format!("_flash.new.{name}");
             if let Some(v) = self.data.remove(&old) {
-                let new = old.replace("_flash.old.", "_flash.new.");
                 self.data.insert(new, v);
             }
         }
@@ -719,22 +776,36 @@ impl SessionData {
     }
 }
 
-/// Every guard principal in a deserialized session `data` map.
+/// The id the guard `guard` is signed in as in a deserialized session
+/// `data` map: that guard's own entry, and nothing another guard holds.
 ///
 /// Operates on the map (rather than [`SessionData`]) so the database
-/// driver can apply it to stored payloads during user-wide revocation
+/// driver can apply it to stored payloads during a guard's revocation
 /// without reconstructing a full session value.
-pub(crate) fn guard_principal_ids_in(
-    data: &std::collections::HashMap<String, serde_json::Value>,
-) -> Vec<String> {
+pub(crate) fn guard_identity_in<'a>(
+    data: &'a std::collections::HashMap<String, serde_json::Value>,
+    guard: &str,
+) -> Option<&'a str> {
     data.get(AUTH_GUARDS_KEY)
         .and_then(serde_json::Value::as_object)
-        .into_iter()
-        .flat_map(|guards| guards.values())
-        .filter_map(|state| state.get(AUTH_GUARD_ID_KEY))
-        .filter_map(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
-        .collect()
+        .and_then(|guards| guards.get(guard))
+        .and_then(|state| state.get(AUTH_GUARD_ID_KEY))
+        .and_then(serde_json::Value::as_str)
+}
+
+/// The sessions [`SessionStore::destroy_guard_sessions`] destroyed.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DestroyedSessions {
+    /// How many sessions were destroyed.
+    pub count: u64,
+    /// The ids of the destroyed sessions, when the store can name them.
+    ///
+    /// [`crate::session::destroy_all_for_guard_user`] ends every Live
+    /// membership each one opened, whichever guard's user it was issued
+    /// to: the session is gone, so nothing issued under it may outlive it.
+    /// Empty when the store cannot name them; only the destroyed user's own
+    /// memberships then end.
+    pub ids: Vec<String>,
 }
 
 /// Returns true when `id` matches the shape minted by
@@ -782,7 +853,10 @@ impl std::error::Error for SessionMigrationError {}
 pub trait SessionStore: Send + Sync {
     /// Read a session by its ID
     ///
-    /// Returns None if the session doesn't exist or has expired.
+    /// Returns None if the session doesn't exist or has expired. The
+    /// session middleware marks a returned session as
+    /// [`SessionData::loaded_from_store`] itself, so an implementation
+    /// need not set that flag.
     async fn read(&self, id: &str) -> Result<Option<SessionData>, FrameworkError>;
 
     /// Write a session to storage
@@ -819,13 +893,43 @@ pub trait SessionStore: Send + Sync {
     /// Destroy a session by its ID
     async fn destroy(&self, id: &str) -> Result<(), FrameworkError>;
 
-    /// Destroy every session belonging to a given `user_id`.
+    /// Destroy every session in which the default guard is signed in as
+    /// `user_id`, whole, and return how many.
     ///
     /// Called after security-state transitions (password reset, 2FA
     /// change, account compromise recovery) to ensure stolen sessions
-    /// cannot outlive the credential change. Returns the number of
-    /// rows deleted.
+    /// cannot outlive the credential change. A session in which only
+    /// another guard is signed in under the same id belongs to another user
+    /// and stays: see [`SessionData::is_signed_in_as`].
     async fn destroy_for_user(&self, user_id: &str) -> Result<u64, FrameworkError>;
+
+    /// Destroy every session in which the guard `guard` is signed in as
+    /// `user_id`, whole, and name them.
+    ///
+    /// A destroyed session takes every guard's sign-in with it, as
+    /// Laravel's `AuthenticateSession` flushes the whole session, so the
+    /// Live memberships issued under it end too, for whichever guard's user
+    /// they were issued to; that is why the ids come back.
+    ///
+    /// Default: for the default guard, [`Self::destroy_for_user`], naming no
+    /// session; for any other guard, an error, because a store that does
+    /// not implement this cannot tell one guard's sessions from another's.
+    async fn destroy_guard_sessions(
+        &self,
+        guard: &str,
+        user_id: &str,
+    ) -> Result<DestroyedSessions, FrameworkError> {
+        if guard == crate::auth::Auth::default_guard_name() {
+            return Ok(DestroyedSessions {
+                count: self.destroy_for_user(user_id).await?,
+                ids: Vec::new(),
+            });
+        }
+        Err(FrameworkError::internal(
+            "this session store cannot destroy the sessions of one guard; implement \
+             SessionStore::destroy_guard_sessions",
+        ))
+    }
 
     /// Garbage collect expired sessions
     ///

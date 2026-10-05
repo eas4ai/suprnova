@@ -1,5 +1,6 @@
 use std::sync::Once;
 
+use suprnova::Router;
 use suprnova::crypto::{Crypt, EncryptionKey};
 use suprnova::live::testing::{
     LiveTestRuntimeProvider, inspect_runtime, prepare_live_router_for_test,
@@ -7,7 +8,7 @@ use suprnova::live::testing::{
     validate_runtime_provider_omission_for_test,
 };
 use suprnova::live::{LiveComponent, LiveRegistry, live};
-use suprnova::{App, Router};
+use suprnova::testing::{TestContainer, TestContainerGuard};
 
 #[derive(LiveComponent)]
 #[live(
@@ -21,22 +22,32 @@ pub struct UploadProviderComponent {
 #[live]
 impl UploadProviderComponent {}
 
-fn init_crypto() {
+/// Prepares crypto (once) and this test's own `LiveRegistry` binding.
+///
+/// The registry is bound in a thread-local test container, not the process
+/// container: other tests of this binary bind registries of their own there,
+/// and `prepare_live_router_for_test` checks the test container first. A
+/// registry this file left in the process container replaced theirs between
+/// their binding and their runtime assembly. The caller holds the guard until
+/// its runtime is assembled.
+fn init_runtime_dependencies() -> TestContainerGuard {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         Crypt::init(EncryptionKey::generate());
-        App::singleton(
-            LiveRegistry::builder()
-                .register::<UploadProviderComponent>()
-                .expect("register upload provider component")
-                .build(),
-        );
     });
+    let guard = TestContainer::fake();
+    TestContainer::singleton(
+        LiveRegistry::builder()
+            .register::<UploadProviderComponent>()
+            .expect("register upload provider component")
+            .build(),
+    );
+    guard
 }
 
 #[test]
 fn default_runtime_seals_every_distinct_upload_host_port() {
-    init_crypto();
+    let _guard = init_runtime_dependencies();
     let mut router = Router::new();
     register_live_mount_for_test::<UploadProviderComponent>(&mut router, "/uploads", "root")
         .expect("register upload provider mount");

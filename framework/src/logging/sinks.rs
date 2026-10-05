@@ -17,9 +17,18 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// The format of the lines the sinks write: `LOG_FORMAT`, set when the
-/// subscriber is built and read from the environment before that.
+/// The format of the lines the sinks write for [`Log`](super::Log):
+/// `LOG_FORMAT`, set when the framework installs its subscriber and read
+/// from the environment before that.
 static FORMAT: RwLock<Option<LogFormat>> = RwLock::new(None);
+
+thread_local! {
+    /// The format of the subscriber whose event this thread is writing, so
+    /// its lines match its own standard-stream lines. Each subscriber
+    /// carries its format rather than setting `FORMAT`, so building one
+    /// changes nothing for the subscriber already installed.
+    static WRITING_FOR: std::cell::Cell<Option<LogFormat>> = const { std::cell::Cell::new(None) };
+}
 
 pub(crate) fn set_format(format: LogFormat) {
     *FORMAT
@@ -27,7 +36,24 @@ pub(crate) fn set_format(format: LogFormat) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(format);
 }
 
+/// Run `write` with the lines it writes in `format`, the format of the
+/// subscriber the event came through.
+pub(crate) fn write_in<R>(format: LogFormat, write: impl FnOnce() -> R) -> R {
+    /// Puts back the format of an outer write, however `write` ends.
+    struct Restore(Option<LogFormat>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            WRITING_FOR.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(WRITING_FOR.with(|cell| cell.replace(Some(format))));
+    write()
+}
+
 fn format() -> LogFormat {
+    if let Some(format) = WRITING_FOR.with(std::cell::Cell::get) {
+        return format;
+    }
     FORMAT
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -121,6 +147,50 @@ pub(crate) fn line(record: &LogRecord) -> String {
 fn report_once(reported: &AtomicBool, what: &str, error: &std::io::Error) {
     if !reported.swap(true, Ordering::Relaxed) {
         eprintln!("suprnova: a log channel cannot write {what}: {error}");
+    }
+}
+
+/// A sink an application's driver built, with its failures reported.
+///
+/// [`LogSink`] leaves reporting a failed write to its caller, so a driver
+/// is not expected to report its own. Every write and flush of a driver's
+/// sink goes through this, the logger and the flusher alike, and the
+/// first failure is reported once on stderr, as the built-in sinks report
+/// theirs.
+pub(crate) struct ReportedSink {
+    inner: Arc<dyn LogSink>,
+    driver: String,
+    reported: AtomicBool,
+}
+
+impl ReportedSink {
+    pub(crate) fn new(inner: Arc<dyn LogSink>, driver: &str) -> Self {
+        Self {
+            inner,
+            driver: driver.to_owned(),
+            reported: AtomicBool::new(false),
+        }
+    }
+
+    fn reported(&self, outcome: std::io::Result<()>) -> std::io::Result<()> {
+        if let Err(error) = &outcome {
+            report_once(
+                &self.reported,
+                &format!("through the '{}' driver", self.driver),
+                error,
+            );
+        }
+        outcome
+    }
+}
+
+impl LogSink for ReportedSink {
+    fn write(&self, record: &LogRecord) -> std::io::Result<()> {
+        self.reported(self.inner.write(record))
+    }
+
+    fn flush(&self) -> std::io::Result<()> {
+        self.reported(self.inner.flush())
     }
 }
 
@@ -292,8 +362,11 @@ impl FileSink {
         path: PathBuf,
     ) -> std::io::Result<&'a mut BufWriter<File>> {
         if state.path.as_deref() != Some(path.as_path()) || state.writer.is_none() {
-            if let Some(mut old) = state.writer.take() {
-                let _ = old.flush();
+            if let Some(mut old) = state.writer.take()
+                && let Err(error) = old.flush()
+            {
+                // The records still buffered for the previous file are lost.
+                report_once(&self.reported, &self.base.display().to_string(), &error);
             }
             if let Some(dir) = path.parent()
                 && !dir.as_os_str().is_empty()
@@ -329,11 +402,18 @@ impl LogSink for FileSink {
         written
     }
 
+    /// Reports a failure itself, as `write` does: the flusher thread and
+    /// `Log::flush` have no caller to tell, and the records left in the
+    /// buffer are the ones a failed flush loses.
     fn flush(&self) -> std::io::Result<()> {
-        match lock(&self.state).writer.as_mut() {
+        let flushed = match lock(&self.state).writer.as_mut() {
             Some(writer) => writer.flush(),
             None => Ok(()),
+        };
+        if let Err(error) = &flushed {
+            report_once(&self.reported, &self.base.display().to_string(), error);
         }
+        flushed
     }
 }
 
@@ -354,15 +434,24 @@ impl StreamSink {
     }
 }
 
+/// Set once a record written through `Log` could not reach standard
+/// output, so the failure is reported once.
+static STDOUT_REPORTED: AtomicBool = AtomicBool::new(false);
+
 impl LogSink for StreamSink {
+    /// A failure on standard output is reported once on standard error. One
+    /// on standard error has nowhere left to be reported.
     fn write(&self, record: &LogRecord) -> std::io::Result<()> {
         let text = line(record);
         if self.stderr {
             std::io::stderr().lock().write_all(text.as_bytes())
         } else {
             let mut out = std::io::stdout().lock();
-            out.write_all(text.as_bytes())?;
-            out.flush()
+            let written = out.write_all(text.as_bytes()).and_then(|()| out.flush());
+            if let Err(error) = &written {
+                report_once(&STDOUT_REPORTED, "to standard output", error);
+            }
+            written
         }
     }
 }

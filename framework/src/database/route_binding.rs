@@ -75,8 +75,9 @@ use sea_orm::{EntityTrait, ModelTrait as SeaModelTrait, PrimaryKeyTrait};
 use std::ops::{Deref, DerefMut};
 
 /// Newtype wrapper that opts a route-bound model into Eloquent's
-/// SCOPED `find` path - global scopes, soft-delete filter, and
-/// per-model `#[model(connection = "...")]` routing all apply.
+/// SCOPED lookup - the row is read through `Model::query()`, so global
+/// scopes, the soft-delete filter, and per-model
+/// `#[model(connection = "...")]` routing all apply, on every model.
 ///
 /// Wrap your Eloquent model struct in `RouteParam<M>` in the
 /// `#[handler]` signature:
@@ -326,25 +327,33 @@ macro_rules! route_binding {
 
 /// Scoped route-model binding for Eloquent user structs.
 ///
-/// Routes through `M::find(id)` (the Eloquent CRUD entrypoint) so the
-/// hydrated row applies the model's global scopes, soft-delete
-/// filter, and per-model connection - see [`RouteParam`] for the full
-/// rationale. The bounds mirror the [`crate::eloquent::Model`] trait
-/// surface so any `#[suprnova::model]`-generated struct fits.
+/// Looks the row up through [`Model::query`](crate::eloquent::Model::query),
+/// the builder every scoped read starts from, so the hydrated row
+/// applies the model's global scopes, soft-delete filter, and per-model
+/// connection - see [`RouteParam`] for the full rationale. It does not
+/// call `Model::find`: that is an unscoped primary-key lookup on every
+/// model without `soft_deletes`, so a tenant scope would not apply and a
+/// guessed id of another tenant's row would bind. The bounds mirror the
+/// [`crate::eloquent::Model`] trait surface so any
+/// `#[suprnova::model]`-generated struct fits.
 #[async_trait]
 impl<M> AutoRouteBinding for RouteParam<M>
 where
     M: crate::eloquent::Model + Send + Sync,
-    M: From<<<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::Model>,
+    M: From<<<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
     <<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::Model: From<M>
         + sea_orm::IntoActiveModel<
             <<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::ActiveModel,
-        > + serde::Serialize
+        > + sea_orm::FromQueryResult
+        + serde::Serialize
         + Send
         + Sync,
     <<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::ActiveModel: Send,
     <<<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
-        std::str::FromStr + Send + Into<sea_orm::Value>,
+        std::str::FromStr + Send + Into<sea_orm::Value> + serde::Serialize,
 {
     async fn from_route_param(value: &str) -> Result<Self, FrameworkError> {
         let id: <<<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::PrimaryKey
@@ -357,13 +366,30 @@ where
                 >(),
             )
         })?;
-        let row = M::find(id).await?.ok_or_else(|| {
-            let full = std::any::type_name::<M>();
-            // Strip leading module path so the error reads `User`
-            // rather than `app::models::user::User`.
-            let model_name = full.rsplit("::").next().unwrap_or(full);
-            FrameworkError::model_not_found(model_name)
+        // The builder binds through the model's own column binder, the
+        // way every `filter` does, so the key is handed over as JSON. A
+        // key no row can hold (a `u64` beyond a signed column) matches
+        // nothing there, as a missing row does.
+        let key = serde_json::to_value(&id).map_err(|_| {
+            FrameworkError::param_parse(
+                value,
+                key_type_name::<
+                    <<<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::PrimaryKey
+                        as PrimaryKeyTrait>::ValueType,
+                >(),
+            )
         })?;
+        let row = M::query()
+            .filter(M::primary_key_name(), key)
+            .first()
+            .await?
+            .ok_or_else(|| {
+                let full = std::any::type_name::<M>();
+                // Strip leading module path so the error reads `User`
+                // rather than `app::models::user::User`.
+                let model_name = full.rsplit("::").next().unwrap_or(full);
+                FrameworkError::model_not_found(model_name)
+            })?;
         Ok(RouteParam(row))
     }
 }

@@ -26,6 +26,30 @@ pub(crate) mod upload_provider;
 pub(crate) mod upload_validation;
 pub(crate) mod validation;
 
+/// The principal a Live Gate is asked about: the user of the route's guard,
+/// by the rule of `Auth::route_principal`. The bare id for the default
+/// guard, so the string an application's Live gates receive there is the
+/// one they always received; `<guard>:<id>` behind any other guard. A
+/// default-guard id that holds a `:` gets a leading `:` (see
+/// `Auth::bare_principal`), so it never reads as another guard's user.
+///
+/// `None` when the route's guard has no user, and when it cannot be
+/// resolved (a misconfigured guard, which the route's `AuthMiddleware`
+/// would already have refused). The caller then refuses the operation
+/// without asking a Gate; another guard's user never stands in.
+pub(crate) async fn route_principal() -> Option<String> {
+    match crate::auth::Auth::route_principal().await {
+        Ok(principal) => principal,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "the route guard's user could not be resolved; refusing the Live operation"
+            );
+            None
+        }
+    }
+}
+
 pub(crate) struct HostPorts {
     pub(crate) authorization: Arc<dyn ActionAuthorizationPort>,
     pub(crate) transaction: Arc<dyn TransactionPort>,

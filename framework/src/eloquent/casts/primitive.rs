@@ -9,9 +9,11 @@
 //! ## Boolean storage convention
 //!
 //! `AsBool` round-trips through `i64` because SQLite has no native
-//! BOOLEAN - it stores booleans as integers 0/1. Postgres / MySQL
-//! `BOOLEAN` columns accept the same i64 over the wire, so a single
-//! storage shape covers every backend without driver branching.
+//! BOOLEAN - it stores booleans as integers 0/1. The column has to be an
+//! integer one on every backend, `BIGINT` on Postgres, which pins
+//! `INTEGER` to 32 bits and will not hand that back as an `i64`. A native
+//! `BOOLEAN` column takes no cast: Postgres refuses the integer for it,
+//! and a plain `bool` field reads and writes it natively.
 //!
 //! ## Decimal storage convention
 //!
@@ -28,8 +30,10 @@ use crate::error::FrameworkError;
 
 // ---- AsBool ---------------------------------------------------------------
 
-/// Cast `bool` ↔ `INTEGER` (0/1). The single-backend-compatible storage
-/// shape for booleans - every SQL backend round-trips i64 cleanly.
+/// Cast `bool` ↔ an integer column holding 0/1, read and written as
+/// `i64`: `BIGINT` on Postgres, any integer column on SQLite, MySQL and
+/// MariaDB. For a native `BOOLEAN` column, declare a plain `bool` field
+/// instead.
 pub struct AsBool;
 
 impl Cast for AsBool {

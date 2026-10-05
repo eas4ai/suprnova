@@ -1,11 +1,12 @@
 //! `db:seed` - runs every registered seeder via
 //! [`crate::seed::run_all`].
 //!
-//! On an empty seeder registry this emits a single
+//! A bare `db:seed` on an empty seeder registry emits a single
 //! `tracing::warn!` and returns `Ok(())` - that's the correct product
 //! behavior for "user ran the command before registering anything"
 //! and it makes the command safe to invoke from test suites that
-//! haven't seeded anything specific.
+//! haven't seeded anything specific. A targeted run on an empty
+//! registry is not found, like any other unknown class.
 //!
 //! # Targeted runs (`--class=<Name>`)
 //!
@@ -40,7 +41,13 @@ use suprnova_macros::command;
 async fn db_seed(args: Vec<String>) -> Result<(), FrameworkError> {
     let class = parse_class_arg(&args)?;
 
-    if seed::count() == 0 {
+    // Only a bare run has "nothing to run". A named class goes to
+    // `run_one`, which owns the not-found error: an empty registry has no
+    // seeder of that name either, and reporting success for work that was
+    // never found is the wrong exit. The count is read fallibly, so a
+    // registry that cannot be read fails the command instead of looking
+    // empty.
+    if class.is_none() && seed::try_count()? == 0 {
         // Two channels by design: the standard error so the user
         // actually sees feedback in the absence of a configured tracing
         // subscriber; tracing::warn so observability tools still

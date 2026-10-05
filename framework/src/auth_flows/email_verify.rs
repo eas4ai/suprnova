@@ -28,6 +28,16 @@
 //! listener failures via its own tracing instrumentation) but return the
 //! user id regardless - a side-effect on a notification path must never roll
 //! back a successful verification.
+//!
+//! # A link proves one mailbox
+//!
+//! A verification token carries a digest of the address it was mailed to,
+//! after its random part: `<random>.<mailbox>`. `verify` recomputes it from
+//! the account's current verification address and refuses the token when
+//! they differ. An account that changed its address after the link was sent
+//! cannot use that link to mark the new, unproven address verified.
+//! Laravel's `VerifyEmailController` binds the link to the address the same
+//! way, with `sha1($user->getEmailForVerification())`.
 
 use crate::auth::active_user_provider;
 use crate::auth::must_verify_email::MustVerifyEmail;
@@ -130,10 +140,11 @@ impl EmailVerification {
         // misconfigured sender fails fast without leaving an orphan token row.
         let from_address = crate::auth_flows::require_mail_from()?;
 
-        let token = TokenStore::issue(
+        let token = TokenStore::issue_bound(
             id,
             TokenPurpose::EmailVerification,
             TokenPurpose::EmailVerification.default_ttl(),
+            |random| mailbox_binding(random, email),
         )
         .await?;
         let url = crate::auth_flows::append_token_query(base_url, &token);
@@ -190,9 +201,25 @@ impl EmailVerification {
     /// active [`UserProvider`](crate::auth::UserProvider), and return the
     /// user's id.
     ///
+    /// The token must belong to the user of the route's guard - the guard
+    /// the last `AuthMiddleware` checked, or the default guard - and is
+    /// checked and stamped through that guard's provider.
+    ///
     /// Single-use: a second `verify` on the same token returns an error (the
     /// [`TokenStore`] stamps `used_at` atomically). An invalid or expired
     /// token also errors.
+    ///
+    /// The token proves the mailbox it was mailed to and no other: when the
+    /// account's verification address (the provider's
+    /// [`verification_email`](crate::auth::UserProvider::verification_email))
+    /// is no longer that mailbox, `verify` refuses the token and leaves it
+    /// unused. A token issued before tokens carried their mailbox is refused
+    /// the same way; the user asks for a new link. The stamp itself goes
+    /// through
+    /// [`mark_email_verified_for`](crate::auth::UserProvider::mark_email_verified_for),
+    /// which writes only while the address is still that mailbox, so an
+    /// address change that lands while `verify` runs is refused too, with
+    /// the token already spent.
     ///
     /// Fires [`crate::auth_flows::events::EmailVerified`] on success. The
     /// event dispatch is best-effort: a listener panic or transient dispatcher
@@ -207,13 +234,16 @@ impl EmailVerification {
     /// # Errors
     ///
     /// - [`crate::FrameworkError::bad_request`] (400) when the token is
-    ///   invalid, already consumed, or expired.
-    /// - Whatever the provider returns from `mark_email_verified` when the
-    ///   storage layer fails.
+    ///   invalid, already consumed, or expired, or was mailed to an address
+    ///   the account no longer has.
+    /// - Whatever the provider returns from `mark_email_verified_for` when
+    ///   the storage layer fails.
     /// - The "no provider configured" error from the active-user-provider
     ///   resolver when no `UserProvider` is registered.
     pub async fn verify(token: &str) -> Result<String, FrameworkError> {
-        let actor_user_id = crate::Auth::id().ok_or_else(|| {
+        // The route's user: behind `AuthMiddleware::for_guard(name)`, that
+        // guard's user, never the default guard's user in the same session.
+        let actor_user_id = crate::Auth::route_user_id().await?.ok_or_else(|| {
             FrameworkError::bad_request("authenticated email verification is required")
         })?;
         let owner = TokenStore::owner(token, TokenPurpose::EmailVerification).await?;
@@ -222,6 +252,16 @@ impl EmailVerification {
                 "invalid or expired verification token",
             ));
         }
+        let provider = crate::Auth::route_user_provider()?;
+        let Some(mailbox) = provider
+            .verification_email(&actor_user_id)
+            .await?
+            .filter(|email| bound_to_mailbox(token, email))
+        else {
+            return Err(FrameworkError::bad_request(
+                "invalid or expired verification token",
+            ));
+        };
         let user_id = TokenStore::consume(token, TokenPurpose::EmailVerification)
             .await?
             .ok_or_else(|| FrameworkError::bad_request("invalid or expired verification token"))?;
@@ -230,9 +270,14 @@ impl EmailVerification {
                 "invalid or expired verification token",
             ));
         }
-        active_user_provider()?
-            .mark_email_verified(&user_id)
-            .await?;
+        // The address can change after the read above. The provider stamps
+        // the verification only while it is still the mailbox the link was
+        // mailed to.
+        if !provider.mark_email_verified_for(&user_id, &mailbox).await? {
+            return Err(FrameworkError::bad_request(
+                "invalid or expired verification token",
+            ));
+        }
         // Intentionally discard the dispatch error - verification has already
         // committed; a downstream listener failure must not surface as a
         // verification failure to the caller. The dispatcher itself logs
@@ -244,6 +289,40 @@ impl EmailVerification {
 
         Ok(user_id)
     }
+}
+
+/// The mailbox part of a verification token: a digest of the token's random
+/// part and the normalized address the link is mailed to.
+///
+/// The random part makes the digest differ for every token, so a link shows
+/// no stable digest of the address. The stored token hash covers this part
+/// too, so it cannot be swapped for another address's.
+fn mailbox_binding(random: &str, email: &str) -> String {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use sha2::{Digest, Sha256};
+
+    let email = email.trim().to_ascii_lowercase();
+    let mut input = Vec::with_capacity(48 + random.len() + email.len());
+    input.extend_from_slice(b"suprnova.email-verification.mailbox\0");
+    input.extend_from_slice(random.as_bytes());
+    input.push(0);
+    input.extend_from_slice(email.as_bytes());
+    let digest: [u8; 32] = Sha256::digest(&input).into();
+    URL_SAFE_NO_PAD.encode(digest)
+}
+
+/// Whether `token` was mailed to `email`. A token without a mailbox part
+/// binds no address, so it proves none.
+fn bound_to_mailbox(token: &str, email: &str) -> bool {
+    use subtle::ConstantTimeEq;
+
+    let Some((random, binding)) = token.rsplit_once('.') else {
+        return false;
+    };
+    mailbox_binding(random, email)
+        .as_bytes()
+        .ct_eq(binding.as_bytes())
+        .into()
 }
 
 #[cfg(test)]

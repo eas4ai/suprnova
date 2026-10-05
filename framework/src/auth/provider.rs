@@ -175,11 +175,60 @@ pub trait UserProvider: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// The address a user's email verification is for, looked up by id.
+    ///
+    /// [`crate::auth_flows::EmailVerification::verify`] compares it with
+    /// the address a link was sent to, so a link never verifies an address
+    /// it was not sent to. Default: the email of
+    /// [`flow_user_by_id`](Self::flow_user_by_id). Override it when the
+    /// verification address is not that one.
+    async fn verification_email(&self, id: &str) -> Result<Option<String>, FrameworkError> {
+        Ok(self.flow_user_by_id(id).await?.map(|user| user.email))
+    }
+
     /// Mark a user's email verified. Default: unsupported.
     async fn mark_email_verified(&self, _id: &str) -> Result<(), FrameworkError> {
         Err(FrameworkError::internal(
             "this user provider does not support email verification",
         ))
+    }
+
+    /// Mark a user's email verified only while `email` is still its
+    /// verification address, and report whether it did.
+    ///
+    /// [`crate::auth_flows::EmailVerification::verify`] reads the address
+    /// through [`verification_email`](Self::verification_email), checks that
+    /// the link was mailed to it, and then calls this. The address can
+    /// change in between, and a write that ignored it would verify a mailbox
+    /// the link never reached. So the check and the write belong in one
+    /// storage operation: `EloquentUserProvider` rereads the user under a
+    /// row lock inside a transaction.
+    ///
+    /// # The default leaves a window
+    ///
+    /// The default reads the address with
+    /// [`verification_email`](Self::verification_email), compares it with
+    /// `email`, and then calls
+    /// [`mark_email_verified`](Self::mark_email_verified). Those are two
+    /// separate storage operations. An address change that commits between
+    /// them is marked verified without proof of the new mailbox: the
+    /// comparison saw the old address, and `mark_email_verified` stamps the
+    /// row whatever address it holds by then.
+    ///
+    /// A custom provider closes the window by overriding this method, not
+    /// `mark_email_verified`, so that the check and the write are one storage
+    /// operation. Two shapes do it: a conditional write, such as
+    /// `UPDATE users SET email_verified_at = ? WHERE id = ? AND email = ?`,
+    /// that reports whether it matched a row; or a reread of the user under
+    /// a row lock (`SELECT ... FOR UPDATE`) in the same transaction as the
+    /// write. Return `Ok(false)`, and write nothing, when the address is no
+    /// longer `email`.
+    async fn mark_email_verified_for(&self, id: &str, email: &str) -> Result<bool, FrameworkError> {
+        if self.verification_email(id).await?.as_deref() != Some(email) {
+            return Ok(false);
+        }
+        self.mark_email_verified(id).await?;
+        Ok(true)
     }
 
     /// Set a user's password hash. Default: unsupported.

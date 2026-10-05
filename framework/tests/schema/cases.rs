@@ -700,13 +700,18 @@ pub async fn native_timestamps_round_trip(conn: &DatabaseConnection) {
         .await
         .expect("with_trashed naive")
         .expect("the soft deleted naive post");
-    assert_eq!(trashed.deleted_at, Some(at(15)));
+    // The soft delete stamps `updated_at` with `deleted_at`, as Laravel's
+    // does.
+    assert_eq!(
+        (trashed.deleted_at, trashed.updated_at),
+        (Some(at(15)), at(15))
+    );
     trashed.restore().await.expect("restore naive");
     assert_eq!(
         NaivePost::query()
             .where_between(
                 "updated_at",
-                "2031-03-14T13:30:00Z"..="2031-03-14T14:30:00Z"
+                "2031-03-14T14:30:00Z"..="2031-03-14T15:30:00Z"
             )
             .count()
             .await
@@ -1031,6 +1036,80 @@ pub async fn alter_indexes(conn: &DatabaseConnection) {
     .expect("the duplicate is accepted once the unique index is gone");
 
     drop_tables(conn, &["schema_articles"]).await;
+}
+
+/// DATA-036: index and foreign key names that hold a backend's quote
+/// character - a backtick on MySQL, a double quote elsewhere - are written
+/// escaped, the way table and column names already are. A default index
+/// name takes the column's name, so a column `a`b` used to produce
+/// malformed MySQL DDL, and a column `c"d` malformed Postgres and SQLite
+/// DDL.
+pub async fn quoted_index_and_key_names(conn: &DatabaseConnection) {
+    let manager = SchemaManager::new(conn);
+    let backend = conn.get_database_backend();
+    drop_tables(conn, &["schema_quote_children", "schema_quote_marks"]).await;
+    Schema::create(&manager, "schema_quote_marks", |t| {
+        t.id();
+        t.string("a`b");
+        t.string("c\"d");
+        t.index(&["a`b"]);
+    })
+    .await
+    .expect("create with an index on a backtick column");
+    Schema::table(&manager, "schema_quote_marks", |t| {
+        t.unique(&["c\"d"]);
+    })
+    .await
+    .expect("add a unique index on a double-quote column");
+    for index in [
+        "schema_quote_marks_a`b_index",
+        "schema_quote_marks_c\"d_unique",
+    ] {
+        assert!(
+            manager
+                .has_index("schema_quote_marks", index)
+                .await
+                .expect("has_index"),
+            "index {index} must exist under its exact name"
+        );
+    }
+    Schema::table(&manager, "schema_quote_marks", |t| {
+        t.drop_index("schema_quote_marks_a`b_index");
+        t.drop_index("schema_quote_marks_c\"d_unique");
+    })
+    .await
+    .expect("drop both indexes by name");
+    for index in [
+        "schema_quote_marks_a`b_index",
+        "schema_quote_marks_c\"d_unique",
+    ] {
+        assert!(
+            !manager
+                .has_index("schema_quote_marks", index)
+                .await
+                .expect("has_index"),
+            "index {index} must be gone"
+        );
+    }
+
+    Schema::create(&manager, "schema_quote_children", |t| {
+        t.id();
+        t.big_integer("mark_id");
+        t.foreign("mark_id")
+            .references("schema_quote_marks", "id")
+            .name("fk`quote\"name");
+    })
+    .await
+    .expect("create with a quoted foreign key name");
+    if backend != DbBackend::Sqlite {
+        Schema::table(&manager, "schema_quote_children", |t| {
+            t.drop_foreign("fk`quote\"name");
+        })
+        .await
+        .expect("drop the quoted foreign key by name");
+    }
+
+    drop_tables(conn, &["schema_quote_children", "schema_quote_marks"]).await;
 }
 
 // ---- altering columns ------------------------------------------------------

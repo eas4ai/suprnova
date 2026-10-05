@@ -13,6 +13,11 @@ mod env_lock;
 mod live_async_support;
 #[path = "../support/live_dogfood_support/mod.rs"]
 mod live_dogfood_support;
+#[cfg(feature = "testing")]
+#[path = "../support/magnetar_auth.rs"]
+mod magnetar_auth;
+#[path = "../support/own_process.rs"]
+mod own_process;
 
 pub mod async_routes;
 pub mod async_security;

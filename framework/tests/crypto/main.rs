@@ -6,3 +6,5 @@ pub mod boot_validation_always_runs;
 pub mod encryption;
 #[path = "../support/env_lock.rs"]
 mod env_lock;
+#[path = "../support/own_process.rs"]
+mod own_process;

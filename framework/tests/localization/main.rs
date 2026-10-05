@@ -2,6 +2,8 @@
 //! one former top-level test file per submodule (folded 2026-09-05).
 
 pub mod catalog_route;
+#[cfg(feature = "localization")]
+mod config_guard;
 pub mod fallback_chain;
 pub mod format;
 pub mod middleware;

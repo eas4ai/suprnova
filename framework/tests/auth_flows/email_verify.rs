@@ -313,3 +313,271 @@ async fn verify_rejects_garbage_token() {
         "an unknown token must be rejected"
     );
 }
+
+/// Reload user 1 by id: the tests below change its address, so a lookup by
+/// email would miss it.
+async fn reload_user_one() -> TestUser {
+    let user = EloquentUserProvider::<TestUser>::new()
+        .retrieve_by_id("1")
+        .await
+        .expect("by id")
+        .expect("user 1 exists");
+    user.as_any()
+        .downcast_ref::<TestUser>()
+        .expect("TestUser")
+        .clone()
+}
+
+/// Verify `token` as signed-in user 1.
+async fn verify_as_user_one(token: &str) -> Result<String, suprnova::FrameworkError> {
+    let slot = suprnova::session::new_session_slot_for_test();
+    suprnova::session::session_scope_for_test(slot, async {
+        suprnova::session::set_auth_user("1");
+        EmailVerification::verify(token).await
+    })
+    .await
+}
+
+/// IDENTITY-023: a verification link proves ownership of the mailbox it was
+/// sent to, and of no other. The account's address changes to an unproven
+/// mailbox while the link is live; redeeming the link must not mark the new
+/// mailbox verified. Restoring the address shows the link itself is intact.
+#[tokio::test]
+#[serial]
+async fn a_link_sent_to_one_mailbox_never_verifies_another() {
+    use sea_orm::ConnectionTrait;
+
+    let _env = crate::env_lock::lock_env_async().await;
+    let h = setup().await;
+    let user = reload_user_one().await;
+
+    let fake = suprnova::mail::Mail::fake();
+    EmailVerification::send_link(&user, "https://app.test/verify")
+        .await
+        .expect("send_link");
+    fake.assert_sent_to("ada@x.com");
+    let captured = fake.captured();
+    let text = captured[0].text.as_deref().expect("text body");
+    let link = text
+        .lines()
+        .find(|l| l.contains("token="))
+        .expect("token link");
+    let token = link.rsplit("token=").next().expect("token").trim();
+
+    h._db
+        .conn()
+        .execute_unprepared("UPDATE users SET email = 'unproven@x.com' WHERE id = 1")
+        .await
+        .expect("change the address");
+    assert!(
+        verify_as_user_one(token).await.is_err(),
+        "a link sent to ada@x.com must not verify unproven@x.com"
+    );
+    assert!(!reload_user_one().await.is_email_verified());
+
+    h._db
+        .conn()
+        .execute_unprepared("UPDATE users SET email = 'ada@x.com' WHERE id = 1")
+        .await
+        .expect("restore the address");
+    verify_as_user_one(token)
+        .await
+        .expect("the link verifies the mailbox it was sent to");
+    assert!(reload_user_one().await.is_email_verified());
+}
+
+/// IDENTITY-023: the address can change after `verify` read the mailbox and
+/// before it stamps the verification. A trigger on the token's consumption
+/// lands that change exactly there. The link proved `grace@x.com` only, so
+/// the account, now at `unproven@x.com`, must stay unverified.
+///
+/// A user of its own, because `send_link` allows three mails an hour per
+/// address and the tests above spend ada's.
+#[tokio::test]
+#[serial]
+async fn an_address_changed_while_verify_runs_is_never_marked_verified() {
+    use sea_orm::ConnectionTrait;
+
+    let _env = crate::env_lock::lock_env_async().await;
+    let h = setup().await;
+    let hash = suprnova::hash("secret").expect("hash");
+    h._db
+        .conn()
+        .execute_unprepared(&format!(
+            "INSERT INTO users (id, email, password) VALUES (2, 'grace@x.com', '{hash}')"
+        ))
+        .await
+        .expect("seed grace");
+    let reload_grace = || async {
+        let user = EloquentUserProvider::<TestUser>::new()
+            .retrieve_by_id("2")
+            .await
+            .expect("by id")
+            .expect("grace exists");
+        user.as_any()
+            .downcast_ref::<TestUser>()
+            .expect("TestUser")
+            .clone()
+    };
+
+    let fake = suprnova::mail::Mail::fake();
+    EmailVerification::send_link(&reload_grace().await, "https://app.test/verify")
+        .await
+        .expect("send_link");
+    let captured = fake.captured();
+    let text = captured[0].text.as_deref().expect("text body");
+    let link = text
+        .lines()
+        .find(|l| l.contains("token="))
+        .expect("token link");
+    let token = link.rsplit("token=").next().expect("token").trim();
+
+    h._db
+        .conn()
+        .execute_unprepared(
+            "CREATE TRIGGER address_changes_mid_verify AFTER UPDATE ON auth_flow_tokens \
+             BEGIN UPDATE users SET email = 'unproven@x.com' WHERE id = 2; END",
+        )
+        .await
+        .expect("create the trigger");
+    let slot = suprnova::session::new_session_slot_for_test();
+    let outcome = suprnova::session::session_scope_for_test(slot, async {
+        suprnova::session::set_auth_user("2");
+        EmailVerification::verify(token).await
+    })
+    .await;
+
+    let grace = reload_grace().await;
+    assert_eq!(
+        grace.email, "unproven@x.com",
+        "the trigger changed the address while verify ran"
+    );
+    assert!(
+        !grace.is_email_verified(),
+        "a link sent to grace@x.com must not verify unproven@x.com, however the change \
+         interleaves - verify returned {outcome:?}"
+    );
+    assert!(
+        outcome.is_err(),
+        "verify must report that nothing was verified"
+    );
+}
+
+/// Verify `token` behind `AuthMiddleware::new().for_guard("admin")`, with
+/// `web` signed in on the default guard and `admin` on the `admin` guard.
+async fn verify_behind_admin_guard(
+    token: &str,
+    web: TestUser,
+    admin: TestUser,
+) -> Result<String, suprnova::FrameworkError> {
+    use std::sync::Mutex;
+    use suprnova::{AuthMiddleware, HttpResponse, Middleware, Next, Request};
+
+    let outcome = Arc::new(Mutex::new(None));
+    let seen = Arc::clone(&outcome);
+    let token = token.to_owned();
+    let next: Next = Arc::new(move |_request| {
+        let seen = Arc::clone(&seen);
+        let token = token.clone();
+        Box::pin(async move {
+            let result = EmailVerification::verify(&token).await;
+            *seen.lock().unwrap() = Some(result);
+            Ok(HttpResponse::text("done"))
+        })
+    });
+    let slot = suprnova::session::new_session_slot_for_test();
+    suprnova::session::session_scope_for_test(
+        slot,
+        suprnova::auth::request_state::request_state_scope_for_test(async move {
+            Auth::guard("web").unwrap().set_user(Arc::new(web)).await;
+            Auth::guard("admin")
+                .unwrap()
+                .set_user(Arc::new(admin))
+                .await;
+            let _ = AuthMiddleware::new()
+                .for_guard("admin")
+                .handle(Request::for_test("GET", "/verify"), next)
+                .await;
+        }),
+    )
+    .await;
+    let result = outcome.lock().unwrap().take();
+    result.expect("the admin route reached its handler")
+}
+
+/// Load the user whose address is `email`.
+async fn user_by_email(email: &str) -> TestUser {
+    let provider = EloquentUserProvider::<TestUser>::new();
+    let flow = provider
+        .retrieve_by_email(email)
+        .await
+        .expect("lookup")
+        .expect("user exists");
+    provider
+        .retrieve_by_id(&flow.id)
+        .await
+        .expect("by id")
+        .expect("user exists")
+        .as_any()
+        .downcast_ref::<TestUser>()
+        .expect("TestUser")
+        .clone()
+}
+
+/// `verify` checks the token against the user of the route's guard, through
+/// that guard's provider. Behind the `admin` guard, the default guard's user
+/// in the same session never stands in for the admin: a link for the owner
+/// does not verify while another user is the route's user, and it verifies
+/// when the owner is the route's user.
+#[tokio::test]
+#[serial]
+async fn verify_behind_a_second_guard_checks_that_guards_user() {
+    use sea_orm::ConnectionTrait;
+
+    let _env = crate::env_lock::lock_env_async().await;
+    let h = setup().await;
+    let hash = suprnova::hash("secret").expect("hash");
+    for email in ["route-owner@x.com", "route-other@x.com"] {
+        h._db
+            .conn()
+            .execute_unprepared(&format!(
+                "INSERT INTO users (email, password) VALUES ('{email}', '{hash}')"
+            ))
+            .await
+            .expect("seed user");
+    }
+    let config = AuthConfig::new("web").guard("admin", suprnova::GuardConfig::session("admins"));
+    TestContainer::singleton(AuthManager::new(config));
+    Auth::register_provider("users", Arc::new(EloquentUserProvider::<TestUser>::new()))
+        .expect("users provider");
+    Auth::register_provider("admins", Arc::new(EloquentUserProvider::<TestUser>::new()))
+        .expect("admins provider");
+    let owner = user_by_email("route-owner@x.com").await;
+    let other = user_by_email("route-other@x.com").await;
+
+    let fake = suprnova::mail::Mail::fake();
+    EmailVerification::send_link(&owner, "https://app.test/verify")
+        .await
+        .expect("send_link");
+    let captured = fake.captured();
+    let text = captured[0].text.as_deref().expect("text body");
+    let link = text
+        .lines()
+        .find(|l| l.contains("token="))
+        .expect("token link");
+    let token = link.rsplit("token=").next().expect("token").trim();
+
+    assert!(
+        verify_behind_admin_guard(token, owner.clone(), other.clone())
+            .await
+            .is_err(),
+        "the route's user is the other admin; the owner on the web guard must not verify \
+         through it"
+    );
+    assert!(!user_by_email("route-owner@x.com").await.is_email_verified());
+
+    verify_behind_admin_guard(token, other, owner)
+        .await
+        .expect("the route's user, the owner, verifies her own link");
+    assert!(user_by_email("route-owner@x.com").await.is_email_verified());
+}

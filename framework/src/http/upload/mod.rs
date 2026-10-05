@@ -569,7 +569,8 @@ where
     let mut mem: Vec<u8> = Vec::new();
     let mut spill: Option<(NamedTempFile, tokio::fs::File)> = None;
     let mut size: u64 = 0;
-    let mut sniff: Vec<u8> = Vec::with_capacity(SNIFF_BYTES.min(spill_threshold + 1));
+    // `saturating_add`: `usize::MAX` is the documented "never spill" value.
+    let mut sniff: Vec<u8> = Vec::with_capacity(SNIFF_BYTES.min(spill_threshold.saturating_add(1)));
 
     while let Some(chunk) = field
         .chunk()
@@ -1369,14 +1370,14 @@ pub fn take_file<V: UploadValidator>(
 
 /// Turn one part into a text field's value: the text read by `parse`.
 ///
-/// Empty text that `parse` cannot read is [`Taken::Absent`]: it is how
-/// Inertia sends `null`, so an optional number or `bool` is `None` and a
-/// required one is missing, as Laravel's `ConvertEmptyStringsToNull` makes
-/// them. A type that can hold empty text, such as `String`, keeps it, as a
-/// `FormRequest` does for a JSON `""` or a urlencoded `name=`. Other text
-/// that does not parse files `failure`, the key for `T`'s kind, and so does
-/// a part that is not UTF-8, which parses as no type; a file part files
-/// [`FieldFailure::String`].
+/// Empty text is [`Taken::Absent`] for every type, `String` included. A
+/// form cannot send `null`: an empty input and Inertia's `null` both arrive
+/// as empty text, and Laravel's `ConvertEmptyStringsToNull` reads it as
+/// `null` before any rule runs. So an optional field is `None` and a
+/// required one is missing, as a form-urlencoded `FormRequest` reads
+/// `name=`. Other text that does not parse files `failure`, the key for
+/// `T`'s kind, and so does a part that is not UTF-8, which parses as no
+/// type; a file part files [`FieldFailure::String`].
 #[doc(hidden)]
 pub fn take_text<T>(
     value: MultipartValue,
@@ -1387,9 +1388,9 @@ pub fn take_text<T>(
     errors: &mut ValidationErrors,
 ) -> Taken<T> {
     match value {
+        MultipartValue::Text(text) if text.is_empty() => Taken::Absent,
         MultipartValue::Text(text) => match parse(&text) {
             Some(parsed) => Taken::Value(parsed),
-            None if text.is_empty() => Taken::Absent,
             None => {
                 add_field_failure(errors, name, Some(index), failure);
                 Taken::Invalid
@@ -1459,7 +1460,7 @@ mod key_tests {
     }
 
     #[test]
-    fn empty_text_is_absent_only_for_a_type_that_cannot_hold_it() {
+    fn empty_text_is_absent_for_every_type() {
         let mut errors = ValidationErrors::new();
         let empty = || MultipartValue::Text(String::new());
         assert!(matches!(
@@ -1474,8 +1475,15 @@ mod key_tests {
             Taken::Absent
         ));
         assert!(matches!(
-            take_text(empty(), "s", 0, FieldFailure::Format, parse_from_str::<String>, &mut errors),
-            Taken::Value(text) if text.is_empty()
+            take_text(
+                empty(),
+                "s",
+                0,
+                FieldFailure::String,
+                parse_from_str::<String>,
+                &mut errors
+            ),
+            Taken::Absent
         ));
         assert!(errors.is_empty(), "{errors}");
     }

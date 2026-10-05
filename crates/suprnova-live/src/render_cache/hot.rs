@@ -601,7 +601,11 @@ mod tests {
             Some(45_000),
         )
         .expect("fits");
-        assert_eq!(private.to_str().expect("text"), "private, max-age=45");
+        assert_eq!(
+            private.to_str().expect("text"),
+            "private, no-cache",
+            "an identity-keyed response is revalidated on every reuse, seed or not"
+        );
     }
 
     #[test]

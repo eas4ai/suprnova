@@ -81,6 +81,8 @@ fn main() {
     let _ = suprnova::render_cache::telemetry::recorded_lookups_for_test;
     let _ = suprnova::render_cache::telemetry::reset_recorded_lookups_for_test;
     let _ = suprnova::render_cache::telemetry::decline_reason_labels_for_test;
+    let _ = suprnova::payments::webhook_route::hold_webhook_commit_for_test;
+    let _ = suprnova::payments::webhook_route::wait_until_webhook_commit_held_for_test;
 
     // --- A module gated as a whole (E0433 without `with-testing`) ---
     let _ = filesystem_testing_guard;
@@ -123,6 +125,7 @@ fn main() {
     let _ = suprnova::database::testing::StatementCounter::install;
     let _ = suprnova::database::testing::StatementCounter::count;
     let _ = suprnova::database::testing::StatementCounter::reset;
+    let _ = suprnova::payments::webhook_route::WebhookCommit::Receipt;
 
     // --- Associated functions/methods on a type that itself always exists
     // (E0599 without `with-testing` - see this file's header comment) ---
@@ -160,6 +163,8 @@ fn main() {
     let _ = RenderCache::hint_subscriptions_for_test;
     let _ = RenderCache::await_hint_subscriptions_for_test;
     let _ = RenderCache::fail_next_snapshot_begin_for_test;
+    let _ = RenderCache::hold_next_advance_for_test;
+    let _ = RenderCache::wait_until_advance_held_for_test;
     let _ = RenderCacheConfig::with_clock;
     let _ = RenderCacheConfig::with_coordinator_for_test;
     let _ = Storage::fake;

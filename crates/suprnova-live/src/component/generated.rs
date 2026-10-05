@@ -49,6 +49,21 @@ pub trait GeneratedComponentState: Send + Sized + 'static {
         &self,
         exposure: StateExposure,
     ) -> Result<CanonicalValue, ComponentError>;
+
+    /// Reads every session-only field from the host session, after the
+    /// component is mounted or reconstructed. A session field never enters
+    /// the snapshot, so this is the only way it reaches the component.
+    /// Generated for a component that declares one; the default has none.
+    fn load_session_state(&mut self) -> Result<(), ComponentError> {
+        Ok(())
+    }
+
+    /// Hands every session-only field to the host session before
+    /// dehydration. The host writes the values once the request's outcome
+    /// is accepted. Generated for a component that declares one.
+    fn store_session_state(&self) -> Result<(), ComponentError> {
+        Ok(())
+    }
 }
 
 /// Lifecycle operations generated from the component's `#[live]` implementation.
@@ -175,7 +190,8 @@ where
         context: &'a MountContext<'a>,
     ) -> LiveFuture<'a, Result<Box<dyn ComponentInstance>, ComponentError>> {
         Box::pin(async move {
-            let component = C::mount_generated(context).await?;
+            let mut component = C::mount_generated(context).await?;
+            load_session_state(&mut component, context.render())?;
             Ok(Box::new(GeneratedComponentInstance {
                 component,
                 metadata: Arc::clone(&self.metadata),
@@ -188,7 +204,8 @@ where
         context: &'a HydrationContext<'a>,
     ) -> LiveFuture<'a, Result<Box<dyn ComponentInstance>, ComponentError>> {
         Box::pin(async move {
-            let component = C::hydrate_state(context.state())?;
+            let mut component = C::hydrate_state(context.state())?;
+            load_session_state(&mut component, context.render())?;
             Ok(Box::new(GeneratedComponentInstance {
                 component,
                 metadata: Arc::clone(&self.metadata),
@@ -297,7 +314,15 @@ where
         &'a mut self,
         context: &'a RenderContext<'a>,
     ) -> LiveFuture<'a, Result<(), ComponentError>> {
-        self.component.dehydrating_generated(context)
+        Box::pin(async move {
+            // After the application's own hook, which may still change a
+            // session field.
+            self.component.dehydrating_generated(context).await?;
+            if serves_one_viewer(context) {
+                self.component.store_session_state()?;
+            }
+            Ok(())
+        })
     }
 
     fn dehydrate(&self, exposure: StateExposure) -> Result<CanonicalValue, ComponentError> {
@@ -311,6 +336,23 @@ where
     fn teardown<'a>(&'a mut self) -> LiveFuture<'a, Result<(), ComponentError>> {
         self.component.teardown_generated()
     }
+}
+
+/// Whether `context` renders for one viewer. A public seed has no instance
+/// and is shared between viewers, so it never reads or writes per-viewer
+/// session state.
+fn serves_one_viewer(context: &RenderContext<'_>) -> bool {
+    context.instance_id().is_some()
+}
+
+fn load_session_state<C: GeneratedComponentState>(
+    component: &mut C,
+    context: &RenderContext<'_>,
+) -> Result<(), ComponentError> {
+    if serves_one_viewer(context) {
+        component.load_session_state()?;
+    }
+    Ok(())
 }
 
 /// Builds descriptor-owned hooks for one generated concrete component type.

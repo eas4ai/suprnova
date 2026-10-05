@@ -13,6 +13,10 @@ mod http_wire;
 pub mod inertia;
 pub mod merge_paths;
 pub mod middleware;
+#[path = "../support/own_process.rs"]
+pub mod own_process;
+#[path = "../support/own_process_async.rs"]
+mod own_process_async;
 pub mod production_fail_closed;
 pub mod prop_composition;
 pub mod shared_ergonomics;

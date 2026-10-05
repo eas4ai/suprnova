@@ -302,14 +302,20 @@ impl Idempotency {
     /// The recommended shape:
     ///
     /// ```rust,ignore
-    /// // GOOD - endpoint + user namespace isolates the cache cell.
+    /// // GOOD - endpoint + authenticated user isolates the cache cell.
+    /// let user_id = Auth::id().ok_or_else(|| FrameworkError::unauthorized("sign in first"))?;
     /// let cache_key = format!(
-    ///     "{}:{}:{}",
+    ///     "{}:{}:{}:{}",
     ///     request.method(),
     ///     request.path(),
+    ///     user_id,
     ///     idempotency_key_from_client,
     /// );
     /// Idempotency::remember(&cache_key, ttl, body).await?
+    ///
+    /// // BAD - endpoint without the user: another user who sends the same
+    /// // client key on this endpoint receives this user's recorded result.
+    /// let cache_key = format!("{}:{}:{}", request.method(), request.path(), key);
     ///
     /// // BAD - bare client key leaks across endpoints.
     /// Idempotency::remember(idempotency_key_from_client, ttl, body).await?

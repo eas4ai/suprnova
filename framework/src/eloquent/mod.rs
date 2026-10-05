@@ -35,9 +35,10 @@ pub use casts::{
     AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal, AsEncrypted,
     AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat, AsHashed,
     AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsNaiveDateTime, AsNativeDateTime,
-    AsObject, AsOptionalArray, AsOptionalArrayObject, AsOptionalCollection, AsOptionalDateTime,
-    AsOptionalJson, AsOptionalNaiveDateTime, AsOptionalNativeDateTime, AsOptionalObject,
-    AsOptionalU64, AsString, AsTimestamp, AsU64, Cast, DynCast, IntoDynCast, StoredU64,
+    AsNativeJson, AsObject, AsOptionalArray, AsOptionalArrayObject, AsOptionalCollection,
+    AsOptionalDateTime, AsOptionalJson, AsOptionalNaiveDateTime, AsOptionalNativeDateTime,
+    AsOptionalNativeJson, AsOptionalObject, AsOptionalU64, AsString, AsTimestamp, AsU64, Cast,
+    DynCast, IntoDynCast, StoredU64,
 };
 pub use collection::Collection;
 pub use fillable::{
@@ -58,8 +59,8 @@ pub use relations::{
     AggregateKind, BelongsTo, BelongsToMany, EagerLoadCache, EagerLoadDispatch, HasMany,
     HasManyThrough, HasOne, HasOneThrough, MorphMany, MorphOne, MorphTo, MorphToMany,
     MorphTypeEntry, MorphedByMany, Relation, RelationEntry, RelationKind, aggregate_cache_key,
-    find_morph_type, find_morph_type_by_id, find_relation, morph_types, relations, relations_of,
-    touch_column,
+    aggregate_value_cache_key, find_morph_type, find_morph_type_by_id, find_relation, morph_types,
+    relations, relations_of, touch_column,
 };
 pub use scopes::{GlobalScope, ScopeRegistry};
 pub use soft_deletes::SoftDeletes;

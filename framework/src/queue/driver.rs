@@ -7,6 +7,32 @@ use async_trait::async_trait;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// The moment a job delayed by `delay` from now becomes available.
+///
+/// Every requeue and every delayed push resolves its delay through here, or
+/// through the same two checks against another base time.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] naming the delay when no date can hold it:
+/// the delay overflows a chrono duration, or `now + delay` runs past the
+/// dates the clock represents. The delay comes from a caller, a job's own
+/// declaration or its backoff, so a value that large is an error. It used
+/// to panic in the addition, or, past the range of a chrono duration, to
+/// become no delay at all.
+pub(crate) fn available_after(
+    delay: Duration,
+) -> Result<chrono::DateTime<chrono::Utc>, FrameworkError> {
+    chrono::Duration::from_std(delay)
+        .ok()
+        .and_then(|delay| crate::clock::now().checked_add_signed(delay))
+        .ok_or_else(|| {
+            FrameworkError::internal(format!(
+                "queue delay of {delay:?} runs past the dates the clock can hold"
+            ))
+        })
+}
+
 /// Opaque token identifying one reservation of a popped envelope.
 /// Workers MUST present this token to `ack` or `nack` the message.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -204,8 +230,7 @@ pub trait QueueDriver: Send + Sync {
     ) -> Result<(), FrameworkError> {
         let mut requeued = env.clone();
         requeued.attempts = requeued.attempts.saturating_sub(1);
-        requeued.available_at = crate::clock::now()
-            + chrono::Duration::from_std(delay).unwrap_or_else(|_| chrono::Duration::zero());
+        requeued.available_at = available_after(delay)?;
         self.push(requeued).await?;
         self.ack(token).await
     }
@@ -357,7 +382,7 @@ pub trait QueueDriver: Send + Sync {
 
     /// Push every envelope in one shot. Mirrors `Queue::bulk($jobs, ...)`.
     /// Default implementation pushes serially; backends with native bulk
-    /// push (sea-streamer pipeline, DB multi-row insert) may override.
+    /// push (SQS `SendMessageBatch`, DB multi-row insert) may override.
     async fn bulk_push(&self, envs: Vec<Envelope>) -> Result<(), FrameworkError> {
         for env in envs {
             self.push(env).await?;

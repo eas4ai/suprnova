@@ -173,11 +173,40 @@ let rows = destroy_all_for_user("user-42").await?;
 tracing::info!(revoked = rows, "all sessions destroyed");
 ```
 
-`destroy_all_for_user` resolves the `SessionStore` registered by
-`SessionMiddleware::new` or `with_store` and calls `destroy_for_user` on
-that configured store. It falls back to a fresh `DatabaseSessionDriver`
+`destroy_all_for_user` destroys the sessions in which the default guard is
+signed in as that id. A session in which only another guard holds the same
+id belongs to another user, admin `7` and not web user `7`, so it stays. For
+another guard's user, name the guard:
+
+```rust
+use suprnova::session::destroy_all_for_guard_user;
+
+let rows = destroy_all_for_guard_user("admin", "7").await?;
+```
+
+Each destroyed session goes whole, with every guard's sign-in in it. Every
+Live membership issued under it ends on this node too, whichever guard's
+user it was issued to, and so does every membership of the destroyed user.
+
+Both functions resolve the `SessionStore` registered by
+`SessionMiddleware::new` or `with_store` and call `destroy_guard_sessions` on
+that configured store. They fall back to a fresh `DatabaseSessionDriver`
 only when no session store was registered, such as in a test or embedder
-that never constructed the middleware.
+that never constructed the middleware. A custom store implements
+`destroy_guard_sessions`, using `SessionData::is_signed_in_as`, and returns
+the ids it destroyed so Live can end what they opened. Without it, the
+default guard's destroy falls back to the store's `destroy_for_user` and
+names no session, so only the destroyed user's own memberships end; another
+guard's destroy is an error.
+
+### Why Suprnova diverges
+
+Laravel has no call that destroys a user's sessions. A password change ends
+them lazily: `AuthenticateSession` compares the password hash it stored in
+each session with the default guard's user's current one, and flushes the
+session on a mismatch. `destroy_all_for_user` keeps that scope, the default
+guard's user and the whole session, but ends the sessions at once, so a
+stolen session does not survive until its next request.
 
 ## Authentication helpers
 
@@ -306,6 +335,14 @@ path to `/`; it drops a `Domain` on `__Host-` and logs a warning because that
 narrows the requested scope. The browser silently drops an invalid prefixed
 cookie, so check the boot diagnostic before deployment.
 
+The browser applies the prefix rules to the cookie name it stores, so a
+name such as `%5F%5FHost-suprnova_session` escapes them, and a sibling
+subdomain can set it. Suprnova ignores a cookie whose `__Host-` or
+`__Secure-` prefix appears only after percent-decoding its name, so it never
+answers for `__Host-suprnova_session` or `__Secure-suprnova_session`. A
+cookie sent under its literal name also wins over any encoded alias of that
+name.
+
 For local HTTP development, leave the prefix empty and set
 `SESSION_SECURE=false` only in the local environment. For production, deploy
 HTTPS, keep `SESSION_SECURE=true`, use `SESSION_COOKIE_PREFIX=__Host-`, keep
@@ -412,6 +449,13 @@ let store: Arc<dyn SessionStore> = Arc::new(MyRedisStore::new());
 let mw = SessionMiddleware::with_store(SessionConfig::from_env(), store);
 ```
 
+`read` can build the session it returns with `SessionData::new`.
+`SessionMiddleware` marks every session `read` returns as loaded from the
+store (`SessionData::loaded_from_store`), so a stored session that a request
+does not change is not written again. In `write`, the flag is `true` when the
+row existed at read time; a store can use it to refuse to recreate a row that
+was deleted in between, as the database driver does.
+
 ## Session blocking
 
 Two requests that carry one session cookie load the same row, and without
@@ -478,7 +522,7 @@ documents it):
 | `user_id` | VARCHAR NULL | authenticated user id (string, supports opaque ids) |
 | `payload` | TEXT | JSON-serialized session data map |
 | `csrf_token` | VARCHAR | per-session CSRF token |
-| `last_activity` | TIMESTAMP | last access; drives expiry + GC |
+| `last_activity` | DATETIME or TIMESTAMP (`timestamp` or `timestamptz` on Postgres) | last access, in UTC; drives expiry + GC |
 
 Two indexes ship alongside the table: `idx_sessions_user_id` (for
 `destroy_for_user`) and `idx_sessions_last_activity` (for `gc()`).

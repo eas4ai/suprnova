@@ -50,6 +50,7 @@ use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySel
 // `DB::connection()` is no longer called directly here - Phase 10C T11
 // routes through `ExecutorChoice::resolve()` so the same code path
 // honours an active `DB::transaction` scope without explicit threading.
+use crate::database::transaction::CountOf;
 use crate::error::FrameworkError;
 
 /// Fluent query builder wrapper
@@ -86,6 +87,13 @@ where
     E: EntityTrait,
 {
     select: Select<E>,
+    /// The limit and offset also set on `select`, kept here because a
+    /// SeaORM statement does not give them back. Every terminal writes
+    /// them itself: `all` and `first` through `render_limit_offset`, so an
+    /// offset with no limit runs on SQLite and MySQL, and `count` and
+    /// `exists` each in their own place (see `CountOf`).
+    limit: Option<u64>,
+    offset: Option<u64>,
 }
 
 impl<E> QueryBuilder<E>
@@ -95,7 +103,11 @@ where
 {
     /// Create a new query builder for the entity
     pub fn new() -> Self {
-        Self { select: E::find() }
+        Self {
+            select: E::find(),
+            limit: None,
+            offset: None,
+        }
     }
 
     /// Add a filter condition
@@ -242,10 +254,14 @@ where
     /// ```
     pub fn limit(mut self, limit: u64) -> Self {
         self.select = self.select.limit(limit);
+        self.limit = Some(limit);
         self
     }
 
     /// Skip a number of results (offset)
+    ///
+    /// With no limit, the query returns every row after the offset, on
+    /// every database.
     ///
     /// # Example
     ///
@@ -267,6 +283,7 @@ where
     /// ```
     pub fn offset(mut self, offset: u64) -> Self {
         self.select = self.select.offset(offset);
+        self.offset = Some(offset);
         self
     }
 
@@ -286,9 +303,10 @@ where
     /// # Ok(()) }
     /// ```
     pub async fn all(self) -> Result<Vec<E::Model>, FrameworkError> {
+        crate::database::model::observe_entity_read::<E>();
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
-        exec.select_all(self.select)
+        exec.select_all_bounded(self.select, self.limit, self.offset)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))
     }
@@ -320,11 +338,15 @@ where
     /// # Ok(()) }
     /// ```
     pub async fn first(self) -> Result<Option<E::Model>, FrameworkError> {
+        crate::database::model::observe_entity_read::<E>();
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
-        exec.select_one(self.select)
+        // One row past the offset, as Laravel's `first()` takes one.
+        let rows = exec
+            .select_all_bounded(self.select, Some(1), self.offset)
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        Ok(rows.into_iter().next())
     }
 
     /// Execute query and return first result or error
@@ -361,6 +383,11 @@ where
 
     /// Count matching records
     ///
+    /// A limit and an offset bound the count's one row, as in Laravel's
+    /// `count()`, not the rows it counts: `limit(10).count()` counts
+    /// every match, and an offset of one or more skips the count's row,
+    /// so the count is 0.
+    ///
     /// # Example
     ///
     /// ```rust,no_run
@@ -383,9 +410,14 @@ where
     /// # Ok(()) }
     /// ```
     pub async fn count(self) -> Result<u64, FrameworkError> {
+        crate::database::model::observe_entity_read::<E>();
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
-        exec.select_count(self.select)
+        let of = CountOf::Matches {
+            limit: self.limit,
+            offset: self.offset,
+        };
+        exec.select_count(self.select, of)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))
     }
@@ -414,7 +446,21 @@ where
     /// # Ok(()) }
     /// ```
     pub async fn exists(self) -> Result<bool, FrameworkError> {
-        Ok(self.count().await? > 0)
+        // The limit and offset bound the rows asked about, as in
+        // Laravel's `exists()`; `count` would treat them as bounds on its
+        // own one row.
+        crate::database::model::observe_entity_read::<E>();
+        let exec =
+            crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
+        let of = CountOf::Rows {
+            limit: self.limit,
+            offset: self.offset,
+        };
+        let rows = exec
+            .select_count(self.select, of)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        Ok(rows > 0)
     }
 
     /// Get access to the underlying SeaORM Select for advanced queries

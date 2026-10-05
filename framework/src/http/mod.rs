@@ -11,6 +11,7 @@ pub mod cookie;
 mod extract;
 pub(crate) mod file_response;
 mod form_request;
+mod input;
 mod request;
 mod response;
 mod trusted_proxies;

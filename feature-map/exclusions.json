@@ -1,14 +1,15 @@
 {
  "build_time_env": {
   "CARGO_MANIFEST_DIR": [
-   "suprnova-macros/src/inertia.rs:275",
+   "suprnova-macros/src/inertia.rs:411",
+   "suprnova-macros/src/package_settings.rs:79",
    "suprnova-macros/src/redirect.rs:59"
   ],
   "CARGO_PKG_NAME": [
-   "suprnova-macros/src/live/live_impl.rs:488"
+   "suprnova-macros/src/live/live_impl.rs:493"
   ],
   "CARGO_PKG_VERSION": [
-   "framework/src/render_cache/config.rs:661",
+   "framework/src/render_cache/config.rs:702",
    "framework/src/telemetry/init.rs:89"
   ],
   "OUT_DIR": [
@@ -60,16 +61,16 @@
    "framework/src/broadcasting/pusher/config.rs:253"
   ],
   "VEC_DISTANCE_COSINE": [
-   "framework/src/vector/mariadb.rs:152"
+   "framework/src/vector/mariadb.rs:159"
   ],
   "VEC_DISTANCE_EUCLIDEAN": [
-   "framework/src/vector/mariadb.rs:153"
+   "framework/src/vector/mariadb.rs:160"
   ],
   "VERIFY_CA": [
-   "framework/src/database/schema_dump.rs:973"
+   "framework/src/database/schema_dump.rs:1002"
   ],
   "VERIFY_IDENTITY": [
-   "framework/src/database/schema_dump.rs:973"
+   "framework/src/database/schema_dump.rs:1002"
   ]
  },
  "rust_items_not_extracted": [
@@ -78,5 +79,5 @@
   "demo application code (app/), test-support crates and fixtures"
  ],
  "sibling_reexports_folded_into_aliases": 299,
- "source_rev": "83b74978"
+ "source_rev": "0c6e75988"
 }

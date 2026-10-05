@@ -710,16 +710,25 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // unsigned number it is, so the builder settles a comparison with it
     // (no such column holds it) and refuses to write it, where as text
     // Postgres refused the comparison and SQLite stored a rounded real.
+    // A text field binds such a value as its digits, what its column holds;
+    // as the number it is, Postgres would refuse to compare it with text.
     cast_arms.extend(fields.iter().filter_map(|field| {
         let ident = field.ident.as_ref()?;
-        let has_cast = input.casts.iter().any(|(cast, _)| cast == ident);
-        if has_cast || !super::parse::is_integer_below_u64(&field.ty) {
+        if input.casts.iter().any(|(cast, _)| cast == ident) {
             return None;
         }
         let name = ident.to_string();
-        Some(quote! {
-            #name => ::suprnova::eloquent::casts::__bind_integer(value),
-        })
+        if super::parse::is_integer_below_u64(&field.ty) {
+            Some(quote! {
+                #name => ::suprnova::eloquent::casts::__bind_integer(value),
+            })
+        } else if super::parse::is_text(&field.ty) {
+            Some(quote! {
+                #name => ::suprnova::eloquent::casts::__bind_text(value),
+            })
+        } else {
+            None
+        }
     }));
     let bind_column_impl = if cast_arms.is_empty() {
         quote! {}
@@ -891,6 +900,25 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         quote! {}
     };
 
+    // Trait-level `delete` override for soft-delete models, for the same
+    // reason as `find` above: generic code (`Model::destroy`,
+    // `delete_quietly`, a `M::delete` in app code) dispatches through
+    // the trait, where the default is a hard DELETE that removes the
+    // row for good. The override hands the call to the inherent
+    // tombstone `delete` below; a path call on the concrete type names
+    // the inherent method, which takes precedence over the trait's.
+    let delete_trait_override = if soft_deletes_enabled {
+        quote! {
+            async fn delete(
+                self,
+            ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
+                #struct_ident::delete(self).await
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     // Seed builder for the static entry points below. It folds the
     // soft-delete filter and the registered global scopes in when the
     // query runs, honouring whatever opt-out the entry point set.
@@ -907,7 +935,9 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
             impl #struct_ident {
                 /// Soft-delete: `UPDATE table SET deleted_at = NOW()
-                /// WHERE pk = ?` instead of DELETE. Takes `self` by
+                /// WHERE pk = ?` instead of DELETE, which also sets
+                /// `updated_at` when the model manages timestamps, as
+                /// Laravel's soft delete does. Takes `self` by
                 /// value to override `Model::delete(self)` cleanly -
                 /// a `&self` inherent override would lose to the
                 /// trait default through auto-ref resolution.
@@ -930,9 +960,14 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                         &::suprnova::eloquent::Attrs::new(),
                     )?;
 
-                    let now = ::core::option::Option::Some(::suprnova::clock::now());
-                    let deleted_at =
-                        <#soft_delete_cast as ::suprnova::eloquent::casts::Cast>::to_storage(&now)?;
+                    // The tombstone, and "now" in `updated_at` when the
+                    // model manages timestamps - Laravel's
+                    // `runSoftDelete` - the same stamp `delete_all` and
+                    // `delete_or_fail` write.
+                    let stamp = <Self as ::suprnova::eloquent::EloquentModel>::__soft_delete_stamp()?
+                        .ok_or_else(|| ::suprnova::FrameworkError::internal(
+                            "a soft-delete model has no soft-delete stamp",
+                        ))?;
                     let table = <Self as ::suprnova::eloquent::EloquentModel>::TABLE;
                     let pk_name = <Self as ::suprnova::eloquent::Model>::primary_key_name();
                     // Route through `resolve_write` so the tombstone
@@ -941,36 +976,51 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     // `#[model(connection = ".")]` → primary - matching
                     // `restore()`. The bare `resolve()` only consults
                     // CURRENT_TX, silently ignoring per-model routing.
-                    let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
-                        ::core::option::Option::None,
-                        ::core::option::Option::None,
+                    // The tombstone UPDATE and its generation advance share one
+                    // transaction, so a future dropped between them rolls the
+                    // tombstone back instead of leaving it committed ahead of
+                    // the pages that read the row.
+                    ::suprnova::database::__macro_support::atomic_write(
                         <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
+                        || async {
+                            let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
+                                ::core::option::Option::None,
+                                ::core::option::Option::None,
+                                <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
+                            )
+                            .await?;
+                            let backend = exec.backend();
+                            let mut values: ::std::vec::Vec<::suprnova::sea_orm::Value> =
+                                ::std::vec![::core::clone::Clone::clone(&stamp.deleted_at)];
+                            let mut sql = ::std::format!(
+                                "UPDATE {table} SET {} = {}",
+                                #soft_delete_col,
+                                ::suprnova::database::__macro_support::placeholder(backend, values.len())?,
+                            );
+                            if let ::core::option::Option::Some(updated_at) = &stamp.updated_at {
+                                values.push(::core::clone::Clone::clone(updated_at));
+                                sql.push_str(&::std::format!(
+                                    ", {} = {}",
+                                    <Self as ::suprnova::eloquent::EloquentModel>::UPDATED_AT_COLUMN,
+                                    ::suprnova::database::__macro_support::placeholder(backend, values.len())?,
+                                ));
+                            }
+                            values.push(::suprnova::eloquent::model::json_value_to_sea_value(
+                                &<Self as ::suprnova::eloquent::Model>::primary_key_value_json(&self),
+                            ));
+                            sql.push_str(&::std::format!(
+                                " WHERE {pk_name} = {}",
+                                ::suprnova::database::__macro_support::placeholder(backend, values.len())?,
+                            ));
+                            exec.run(
+                                ::suprnova::sea_orm::Statement::from_sql_and_values(backend, &sql, values),
+                            )
+                            .await
+                            .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+                            ::suprnova::render_cache::orm::after_model_write(&self).await
+                        },
                     )
                     .await?;
-                    let backend = exec.backend();
-                    let deleted_at_placeholder =
-                        ::suprnova::database::__macro_support::placeholder(backend, 1)?;
-                    let pk_placeholder =
-                        ::suprnova::database::__macro_support::placeholder(backend, 2)?;
-                    let sql = ::std::format!(
-                        "UPDATE {table} SET {} = {deleted_at_placeholder} WHERE {pk_name} = {pk_placeholder}",
-                        #soft_delete_col,
-                    );
-                    exec.run(
-                        ::suprnova::sea_orm::Statement::from_sql_and_values(
-                            backend,
-                            &sql,
-                            ::std::vec![
-                                ::suprnova::sea_orm::Value::from(deleted_at),
-                                ::suprnova::eloquent::model::json_value_to_sea_value(
-                                    &<Self as ::suprnova::eloquent::Model>::primary_key_value_json(&self),
-                                ),
-                            ],
-                        ),
-                    )
-                    .await
-                    .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                    ::suprnova::render_cache::orm::after_model_write(&self).await?;
 
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_trashed(&self).await?;
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleted(&self, false).await?;
@@ -1002,33 +1052,41 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     // → primary. The bare `resolve()` would only consult
                     // CURRENT_TX and fall back to `DB::connection()`,
                     // silently ignoring per-model connection routing.
-                    let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
-                        ::core::option::Option::None,
-                        ::core::option::Option::None,
+                    // The UPDATE and its generation advance share one
+                    // transaction, as the soft delete's do.
+                    ::suprnova::database::__macro_support::atomic_write(
                         <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
+                        || async {
+                            let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
+                                ::core::option::Option::None,
+                                ::core::option::Option::None,
+                                <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
+                            )
+                            .await?;
+                            let backend = exec.backend();
+                            let pk_placeholder =
+                                ::suprnova::database::__macro_support::placeholder(backend, 1)?;
+                            let sql = ::std::format!(
+                                "UPDATE {table} SET {} = NULL WHERE {pk_name} = {pk_placeholder}",
+                                #soft_delete_col,
+                            );
+                            exec.run(
+                                ::suprnova::sea_orm::Statement::from_sql_and_values(
+                                    backend,
+                                    &sql,
+                                    ::std::vec![
+                                        ::suprnova::eloquent::model::json_value_to_sea_value(
+                                            &<Self as ::suprnova::eloquent::Model>::primary_key_value_json(&self),
+                                        ),
+                                    ],
+                                ),
+                            )
+                            .await
+                            .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+                            ::suprnova::render_cache::orm::after_model_write(&self).await
+                        },
                     )
                     .await?;
-                    let backend = exec.backend();
-                    let pk_placeholder =
-                        ::suprnova::database::__macro_support::placeholder(backend, 1)?;
-                    let sql = ::std::format!(
-                        "UPDATE {table} SET {} = NULL WHERE {pk_name} = {pk_placeholder}",
-                        #soft_delete_col,
-                    );
-                    exec.run(
-                        ::suprnova::sea_orm::Statement::from_sql_and_values(
-                            backend,
-                            &sql,
-                            ::std::vec![
-                                ::suprnova::eloquent::model::json_value_to_sea_value(
-                                    &<Self as ::suprnova::eloquent::Model>::primary_key_value_json(&self),
-                                ),
-                            ],
-                        ),
-                    )
-                    .await
-                    .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                    ::suprnova::render_cache::orm::after_model_write(&self).await?;
 
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_restored(&self).await?;
                     ::core::result::Result::Ok(())
@@ -1088,16 +1146,24 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     // `#[model(connection = ".")]` → primary - matching
                     // `restore()`. The bare `resolve()` only consults
                     // CURRENT_TX, silently ignoring per-model routing.
-                    let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
-                        ::core::option::Option::None,
-                        ::core::option::Option::None,
+                    // The DELETE and its generation advance share one
+                    // transaction, as the soft delete's do.
+                    ::suprnova::database::__macro_support::atomic_write(
                         <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
+                        || async {
+                            let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
+                                ::core::option::Option::None,
+                                ::core::option::Option::None,
+                                <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
+                            )
+                            .await?;
+                            exec.delete_active(am)
+                                .await
+                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+                            ::suprnova::render_cache::orm::after_model_write(&snapshot).await
+                        },
                     )
                     .await?;
-                    exec.delete_active(am)
-                        .await
-                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                    ::suprnova::render_cache::orm::after_model_write(&snapshot).await?;
 
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_force_deleted(&snapshot).await?;
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleted(&snapshot, true).await?;
@@ -1322,6 +1388,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             #query_override
 
             #find_trait_override
+
+            #delete_trait_override
 
             #field_value_method
 

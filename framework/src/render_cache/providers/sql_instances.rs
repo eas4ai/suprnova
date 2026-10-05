@@ -52,10 +52,16 @@
 //! costs correctness nothing - an elapsed record a rollback puts back is
 //! still elapsed, still invisible to every read, and still the next creating
 //! operation's to reclaim.
+//!
+//! A creation at the ledger's configured capacity adds one ordered read of
+//! the few rows that expire soonest, served by the index on `expires_at_ms`,
+//! and a delete by key and version for each row it evicts. That delete joins
+//! the host's transaction like every other write, so a rolled-back request
+//! puts the evicted row back along with removing the row it created.
 
 use async_trait::async_trait;
 use sea_orm::{DbBackend, DbErr, Value};
-use suprnova_live::identity::UnixMillis;
+use suprnova_live::identity::{InstanceId, ScopeFingerprint, UnixMillis};
 use suprnova_live::ledger::{
     CasOutcome, InstanceRecordKey, InstanceRecordStore, LedgerError, LedgerErrorKind,
     MAX_RECORD_BYTES, PromotionRecordKey, StoredRecord,
@@ -73,6 +79,10 @@ use crate::{DB, FrameworkError, PRIMARY_CONNECTION_NAME, Transaction};
 /// whose previous record elapsed starts here again.
 const FIRST_VERSION: u64 = 1;
 
+/// The savepoint a creating insert runs under on PostgreSQL, so a lost
+/// race on the unique key leaves the transaction usable.
+const INSERT_SAVEPOINT: &str = "suprnova_live_record_insert";
+
 /// Elapsed records one creating operation reclaims.
 ///
 /// Bounded for the reason the in-memory reference store bounds it: a store
@@ -89,12 +99,31 @@ pub(crate) const RECLAIM_BATCH: usize = 64;
 /// `Debug` prints the test offset only. There is no record state in this
 /// type, and if there were, it would not be printed: a record is instance
 /// authority, and this crate redacts that everywhere.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct SqlInstanceRecordStore {
     /// Milliseconds added to every store-time comparison, for tests alone.
     /// Per instance rather than process-wide: several stores share one test
     /// binary. See [`Self::set_time_offset_for_test`].
     time_offset_ms: std::sync::atomic::AtomicU64,
+    /// A test's pause between reclamation's read and its delete; always
+    /// `None` outside tests. See [`Self::set_reclaim_pause_for_test`].
+    reclaim_pause: std::sync::Mutex<Option<ReclaimPause>>,
+}
+
+/// The pause [`SqlInstanceRecordStore::set_reclaim_pause_for_test`]
+/// installs: a future reclamation awaits between choosing its victims and
+/// deleting them.
+#[doc(hidden)]
+pub type ReclaimPause = std::sync::Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+
+impl std::fmt::Debug for SqlInstanceRecordStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqlInstanceRecordStore")
+            .field("time_offset_ms", &self.time_offset_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SqlInstanceRecordStore {
@@ -120,6 +149,19 @@ impl SqlInstanceRecordStore {
             .store(offset_ms, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Pauses every later reclamation on this store between the read that
+    /// chooses its elapsed victims and the delete that removes them, by
+    /// awaiting `pause`; `None` removes it. How a test lands a peer's write
+    /// in that window (DATA-026). Never called by production code, and per
+    /// store for the reason [`Self::set_time_offset_for_test`] gives.
+    #[doc(hidden)]
+    pub fn set_reclaim_pause_for_test(&self, pause: Option<ReclaimPause>) {
+        *self
+            .reclaim_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = pause;
+    }
+
     fn offset(&self) -> i64 {
         as_i64(
             self.time_offset_ms
@@ -138,8 +180,16 @@ impl SqlInstanceRecordStore {
     /// its write, and a peer's record is the one that stands. On PostgreSQL,
     /// where the read locks nothing when the row is absent, the unique key
     /// is the only thing that can decide that race.
+    ///
+    /// On PostgreSQL that insert runs under a savepoint of `tx`. A lost
+    /// race is an expected outcome, and there a failed statement aborts
+    /// the whole transaction - the host's own when the store joined one -
+    /// so the loss is rolled back to the savepoint and the transaction
+    /// goes on, as the lease store rolls its own collision back. SQLite
+    /// and MySQL undo a failed statement alone.
     async fn create_through(
         &self,
+        tx: &Transaction,
         exec: &ExecutorChoice,
         table: RecordTable,
         key: RecordAddress,
@@ -178,6 +228,10 @@ impl SqlInstanceRecordStore {
         .await
         .map_err(|error| ledger_db_error(&error))?;
 
+        let guarded = backend == DbBackend::Postgres;
+        if guarded {
+            tx.savepoint(INSERT_SAVEPOINT).await.map_err(ledger_error)?;
+        }
         match exec
             .run(sea_orm::Statement::from_sql_and_values(
                 backend,
@@ -192,7 +246,14 @@ impl SqlInstanceRecordStore {
             .await
         {
             Ok(_) => Ok(true),
-            Err(error) if is_unique_violation(&error.to_string(), table.name()) => Ok(false),
+            Err(error) if is_unique_violation(&error.to_string(), table.name()) => {
+                if guarded {
+                    tx.rollback_to(INSERT_SAVEPOINT)
+                        .await
+                        .map_err(ledger_error)?;
+                }
+                Ok(false)
+            }
             Err(error) => Err(ledger_db_error(&error)),
         }
     }
@@ -201,10 +262,12 @@ impl SqlInstanceRecordStore {
     /// deadline first.
     ///
     /// The victims are chosen by an ordered read and then deleted by their
-    /// own primary keys rather than by re-running the expiry predicate as a
-    /// delete: that keeps the delete bounded to exactly the rows this
-    /// operation looked at, on every dialect, and needs no subquery over the
-    /// table a `DELETE` targets - which MySQL refuses outright (error 1093).
+    /// own primary keys, which keeps the delete bounded to exactly the rows
+    /// this operation looked at, on every dialect, and needs no subquery
+    /// over the table a `DELETE` targets - which MySQL refuses outright
+    /// (error 1093). The delete re-checks each key's deadline as well, so a
+    /// fresh record a peer created at a chosen key after the read is never
+    /// one of them (DATA-026).
     ///
     /// It runs in whatever transaction the operation runs in, so inside a
     /// host transaction this delete takes row locks that are held until the
@@ -229,7 +292,15 @@ impl SqlInstanceRecordStore {
         if rows.is_empty() {
             return Ok(());
         }
-        let mut victims: Vec<Value> = Vec::with_capacity(rows.len() * 2);
+        let pause = self
+            .reclaim_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(pause) = pause {
+            pause().await;
+        }
+        let mut victims: Vec<Value> = Vec::with_capacity(rows.len() * 2 + 1);
         for row in &rows {
             let scope: String = row
                 .try_get_by_index(0)
@@ -240,6 +311,7 @@ impl SqlInstanceRecordStore {
             victims.push(Value::from(scope));
             victims.push(Value::from(member));
         }
+        victims.push(Value::from(self.offset()));
         exec.run(sea_orm::Statement::from_sql_and_values(
             backend,
             delete_batch_sql(backend, table, rows.len()).map_err(ledger_error)?,
@@ -419,8 +491,15 @@ impl SqlInstanceRecordStore {
             // Dropped before the commit below: `Transaction::commit` unwraps
             // the shared handle and refuses while a clone is still alive.
             let exec = transaction.executor();
-            self.create_through(&exec, table, key, bytes, expires_at)
-                .await
+            self.create_through(
+                transaction.transaction(),
+                &exec,
+                table,
+                key,
+                bytes,
+                expires_at,
+            )
+            .await
         };
         transaction.finish(created).await
     }
@@ -508,8 +587,14 @@ impl OperationTransaction {
     }
 
     fn executor(&self) -> ExecutorChoice {
+        ExecutorChoice::from_tx(self.transaction())
+    }
+
+    /// The transaction itself, for a savepoint around a statement that may
+    /// fail as an expected outcome.
+    fn transaction(&self) -> &Transaction {
         match self {
-            Self::Ambient(tx) | Self::Owned(tx) => ExecutorChoice::from_tx(tx),
+            Self::Ambient(tx) | Self::Owned(tx) => tx,
         }
     }
 
@@ -693,6 +778,92 @@ impl InstanceRecordStore for SqlInstanceRecordStore {
             .map_err(|error| ledger_db_error(&error))?;
         Ok(usize::try_from(live).unwrap_or(usize::MAX))
     }
+
+    async fn soonest_expiring_instances(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(InstanceRecordKey, StoredRecord)>, LedgerError> {
+        let exec = read_executor().await?;
+        let backend = exec.backend();
+        let rows = exec
+            .query_all(sea_orm::Statement::from_sql_and_values(
+                backend,
+                select_soonest_sql(backend).map_err(ledger_error)?,
+                vec![
+                    Value::from(self.offset()),
+                    Value::from(i64::try_from(limit).unwrap_or(i64::MAX)),
+                ],
+            ))
+            .await
+            .map_err(|error| ledger_db_error(&error))?;
+        let mut records = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let scope: String = row
+                .try_get_by_index(0)
+                .map_err(|error| ledger_db_error(&error))?;
+            let member: String = row
+                .try_get_by_index(1)
+                .map_err(|error| ledger_db_error(&error))?;
+            let bytes: Vec<u8> = row
+                .try_get_by_index(2)
+                .map_err(|error| ledger_db_error(&error))?;
+            let expires_at_ms: i64 = row
+                .try_get_by_index(3)
+                .map_err(|error| ledger_db_error(&error))?;
+            let version: i64 = row
+                .try_get_by_index(4)
+                .map_err(|error| ledger_db_error(&error))?;
+            // Only this adapter writes these columns, from identities the
+            // engine validated, so a row they do not decode was written by
+            // something else. It is passed over rather than failing the read:
+            // failing would refuse every mount at capacity until that row
+            // expired, and a limit must never take mounting down.
+            let Some(key) = instance_key_from_address(&scope, &member) else {
+                tracing::warn!(
+                    target: "suprnova::render_cache",
+                    kind = "unreadable_instance_address",
+                    "live instance record store passed over a row it did not write",
+                );
+                continue;
+            };
+            records.push((
+                key,
+                StoredRecord {
+                    bytes,
+                    version: as_u64(version),
+                    expires_at: UnixMillis::new(as_u64(expires_at_ms)),
+                },
+            ));
+        }
+        Ok(records)
+    }
+
+    async fn compare_and_remove(
+        &self,
+        key: &InstanceRecordKey,
+        expected_version: u64,
+    ) -> Result<bool, LedgerError> {
+        let exec = write_executor().await?;
+        let backend = exec.backend();
+        let address = RecordAddress::instance(key);
+        let deleted = exec
+            .run(sea_orm::Statement::from_sql_and_values(
+                backend,
+                compare_and_remove_sql(backend).map_err(ledger_error)?,
+                vec![
+                    Value::from(address.scope),
+                    Value::from(address.member),
+                    Value::from(as_i64(expected_version)),
+                ],
+            ))
+            .await
+            .map_err(|error| ledger_db_error(&error))?;
+        // An affected-row count is safe to read here, unlike after the
+        // compare-and-store update: the driver flag that makes MySQL report
+        // matched rather than changed rows applies to `UPDATE` alone, and
+        // every dialect counts a `DELETE` as the rows it removed.
+        Ok(deleted.rows_affected() > 0)
+    }
 }
 
 /// `SELECT` for one live record's payload: the row exists and its deadline
@@ -844,18 +1015,28 @@ fn select_elapsed_sql(backend: DbBackend, table: RecordTable) -> Result<String, 
 }
 
 /// `DELETE` for exactly the `count` records a batch selected, addressed by
-/// their own primary keys.
+/// their own primary keys, and only while each is still elapsed by store
+/// time.
 ///
 /// One statement rather than `count` of them, and an explicit list of keys
 /// rather than a subquery over the table being deleted from: the first keeps
 /// reclamation to one round trip, and the second is what MySQL requires
 /// (error 1093 refuses to read the target table in a subquery). Every key is
 /// bound.
+///
+/// The expiry guard is not redundant with the read that chose the keys. That
+/// read locks nothing, so between it and this delete a peer can reclaim the
+/// same elapsed record and create a fresh one at the same key; deleting by
+/// key alone then deleted the peer's new record (DATA-026). Re-checking the
+/// deadline in the delete itself keeps reclamation to records that are gone
+/// by the port's own definition, so it can never change authority. The last
+/// bound value is the store-time offset.
 fn delete_batch_sql(
     backend: DbBackend,
     table: RecordTable,
     count: usize,
 ) -> Result<String, FrameworkError> {
+    let now = sql_now_ms(backend)?;
     let (name, member) = (table.name(), table.member_column());
     let mut clauses = Vec::with_capacity(count);
     for row in 0..count {
@@ -865,7 +1046,49 @@ fn delete_batch_sql(
             bind(backend, row * 2 + 2)?
         ));
     }
-    Ok(format!("DELETE FROM {name} WHERE {}", clauses.join(" OR ")))
+    Ok(format!(
+        "DELETE FROM {name} WHERE ({}) AND expires_at_ms <= ({now}) + {}",
+        clauses.join(" OR "),
+        bind(backend, count * 2 + 1)?
+    ))
+}
+
+/// `SELECT` for the live instance records whose deadlines come first, the
+/// candidates a full ledger evicts from.
+///
+/// Its predicate is [`count_live_sql`]'s, so it offers exactly the records
+/// the capacity counts. It orders by `expires_at_ms` alone so the migration's
+/// index on that column serves the order and the limit: a tiebreak on columns
+/// the index lacks would let a dialect sort every live row instead, and
+/// records with one deadline are equally old.
+fn select_soonest_sql(backend: DbBackend) -> Result<String, FrameworkError> {
+    let now = sql_now_ms(backend)?;
+    Ok(format!(
+        "SELECT scope, instance, record, expires_at_ms, version FROM suprnova_live_instances \
+         WHERE expires_at_ms > ({now}) + {} ORDER BY expires_at_ms LIMIT {}",
+        bind(backend, 1)?,
+        bind(backend, 2)?
+    ))
+}
+
+/// `DELETE` for one instance record only while it still carries the version
+/// the caller read, whatever its deadline.
+fn compare_and_remove_sql(backend: DbBackend) -> Result<String, FrameworkError> {
+    Ok(format!(
+        "DELETE FROM suprnova_live_instances WHERE scope = {} AND instance = {} AND version = {}",
+        bind(backend, 1)?,
+        bind(backend, 2)?,
+        bind(backend, 3)?
+    ))
+}
+
+/// The key a row's address columns name, or `None` when they are not the
+/// lowercase hex of valid identities.
+fn instance_key_from_address(scope: &str, member: &str) -> Option<InstanceRecordKey> {
+    Some(InstanceRecordKey {
+        scope: ScopeFingerprint::from_bytes(&hex::decode(scope).ok()?).ok()?,
+        instance_id: InstanceId::from_bytes(&hex::decode(member).ok()?).ok()?,
+    })
 }
 
 /// `SELECT` counting the instance records that are still there by store
@@ -942,7 +1165,74 @@ mod tests {
                     .expect("a dialect")
                     .contains(&format!("({now})"))
             );
+            assert!(
+                select_soonest_sql(backend)
+                    .expect("a dialect")
+                    .contains(&format!("({now})")),
+                "eviction offers only what the capacity counts"
+            );
         }
+    }
+
+    #[test]
+    fn eviction_reads_the_head_of_the_deadline_index_and_counts_what_it_counts() {
+        for backend in DIALECTS {
+            let soonest = select_soonest_sql(backend).expect("a dialect");
+            let counted = count_live_sql(backend).expect("a dialect");
+            let predicate = |sql: &str| {
+                sql.split(" WHERE ")
+                    .nth(1)
+                    .and_then(|tail| tail.split(" ORDER BY ").next())
+                    .map(str::to_owned)
+            };
+            assert_eq!(
+                predicate(&soonest),
+                predicate(&counted),
+                "the candidates are exactly the records the capacity counts"
+            );
+            assert!(
+                soonest.ends_with(&format!(
+                    "ORDER BY expires_at_ms LIMIT {}",
+                    bind(backend, 2).expect("a bind")
+                )),
+                "ordered by the indexed column alone and bounded, never a sort of every row: \
+                 {soonest}"
+            );
+        }
+    }
+
+    #[test]
+    fn eviction_removes_only_the_version_it_read_and_asks_no_clock() {
+        for backend in DIALECTS {
+            let sql = compare_and_remove_sql(backend).expect("a dialect");
+            assert!(
+                sql.starts_with("DELETE FROM suprnova_live_instances"),
+                "{sql}"
+            );
+            assert!(
+                sql.contains(&format!("version = {}", bind(backend, 3).expect("a bind"))),
+                "a claim that landed after the read keeps its record: {sql}"
+            );
+            assert!(
+                !sql.contains("expires_at_ms"),
+                "a record that elapsed since the read stops counting either way: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_address_decodes_to_the_key_that_wrote_it_and_nothing_else_does() {
+        let key = InstanceRecordKey {
+            scope: ScopeFingerprint::from_bytes(&[0x10; 32]).expect("scope"),
+            instance_id: InstanceId::from_bytes(&[0x20; 16]).expect("instance"),
+        };
+        let address = RecordAddress::instance(&key);
+        assert_eq!(
+            instance_key_from_address(&address.scope, &address.member),
+            Some(key)
+        );
+        assert_eq!(instance_key_from_address("zz", &address.member), None);
+        assert_eq!(instance_key_from_address(&address.scope, "00"), None);
     }
 
     #[test]
@@ -1021,8 +1311,9 @@ mod tests {
                 "MySQL refuses a subquery over the table a DELETE targets: {deleted}"
             );
             assert!(
-                !deleted.contains("expires_at_ms"),
-                "the batch is deleted by key, not by re-running the expiry predicate: {deleted}"
+                deleted.contains("expires_at_ms <= ("),
+                "the batch deletes only keys still elapsed by store time, so a peer's fresh \
+                 record at a chosen key survives: {deleted}"
             );
         }
     }

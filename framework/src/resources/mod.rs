@@ -123,9 +123,23 @@ pub trait PushIncluded {
     /// `sink`, recursively descending into `subtree` for nested
     /// resources. `sink` deduplicates by `(type, id)`.
     fn push_included(&self, subtree: &IncludeTree, sink: &mut IncludedSink) -> Result<(), IRE>;
+
+    /// Check `subtree` against the related resource type, without a value.
+    /// See [`IntoJsonResource::validate_include_tree`].
+    fn validate_included(subtree: &IncludeTree) -> Result<(), IRE>
+    where
+        Self: Sized,
+    {
+        let _ = subtree;
+        Ok(())
+    }
 }
 
 impl<T: IntoJsonResource> PushIncluded for T {
+    fn validate_included(subtree: &IncludeTree) -> Result<(), IRE> {
+        T::validate_include_tree(subtree)
+    }
+
     fn push_included(&self, subtree: &IncludeTree, sink: &mut IncludedSink) -> Result<(), IRE> {
         let fieldset = current_fieldset();
         sink.push(render_resource_object(self, &fieldset));
@@ -138,6 +152,10 @@ impl<T: IntoJsonResource> PushIncluded for T {
 }
 
 impl<T: IntoJsonResource> PushIncluded for Vec<T> {
+    fn validate_included(subtree: &IncludeTree) -> Result<(), IRE> {
+        T::validate_include_tree(subtree)
+    }
+
     fn push_included(&self, subtree: &IncludeTree, sink: &mut IncludedSink) -> Result<(), IRE> {
         let fieldset = current_fieldset();
         for t in self {
@@ -151,6 +169,10 @@ impl<T: IntoJsonResource> PushIncluded for Vec<T> {
 }
 
 impl<T: IntoJsonResource> PushIncluded for Option<T> {
+    fn validate_included(subtree: &IncludeTree) -> Result<(), IRE> {
+        T::validate_include_tree(subtree)
+    }
+
     fn push_included(&self, subtree: &IncludeTree, sink: &mut IncludedSink) -> Result<(), IRE> {
         if let Some(t) = self {
             let fieldset = current_fieldset();

@@ -14,15 +14,25 @@
 //! out, and on the encode side the packet an encoder emits *is* the complete
 //! file - which is precisely why those codecs never needed a muxer.
 //!
+//! Decoding takes the registry only for lossless JPEG. PNG, GIF, WebP and
+//! BMP have entry points of their own that return RGBA, and those skip the
+//! registry's two copies of the input (the packet, and the decoder's clone
+//! of it) and the conversion afterwards. Every other JPEG is decoded by
+//! zune-jpeg (see `decode_jpeg`): oxideav-mjpeg refuses any frame of more
+//! than 64 Mi samples, about 22 megapixels in colour, and decodes
+//! arithmetic-coded colour JPEGs to the wrong pixels. Every format's decode
+//! is costed before it runs; see the `peak` module.
+//!
 //! `oxideav-io` is therefore not a dependency at all: with decode and encode
-//! both on the registry, nothing was left for it to do.
+//! on the registry and the codecs' own entry points, nothing was left for it
+//! to do.
 //!
 //! ## The sandbox, one layer up
 //!
 //! `oxideav-io`'s `OpenOptions::allow_codecs` is the knob its docs recommend
 //! for untrusted input. Driving the registry directly gives up that knob and
-//! replaces it with a stronger property: this driver only ever *asks* for one
-//! of five codec ids, and which one is decided by
+//! replaces it with a stronger property: this driver only ever uses one of
+//! five codecs, and which one is decided by
 //! [`sniff::detect`](super::sniff::detect) from the input's own magic bytes.
 //! Input that is not one of those five never reaches a codec at all. Same
 //! guarantee, enforced before the registry rather than inside it.
@@ -39,11 +49,16 @@
 //! - **PNG** goes through `oxideav_png::decode_png_to_rgba`, the crate's own
 //!   entry point that resolves every colour type and bit depth (palette via
 //!   `PLTE`/`tRNS`, 16-bit, grey+alpha) to RGBA. No inference at all.
-//! - **WebP and GIF** decoders declare RGBA as their only output format, so
-//!   the layout is known; the driver still checks the stride and errors
-//!   rather than trusting it blindly.
-//! - **BMP and JPEG** have small, capability-bounded output sets, so the
-//!   remaining classification is exact rather than a guess.
+//! - **GIF** is decoded by the framework itself (see the `gif` module): the
+//!   first frame only, written straight onto the screen as RGBA, stopping
+//!   the moment the frame is complete.
+//! - **WebP** and **BMP** go through `decode_webp_image` and `decode_bmp`,
+//!   which return one packed RGBA buffer; `Canvas::packed` checks its length.
+//! - **JPEG** goes through zune-jpeg, which writes RGBA from YCbCr and grey
+//!   and RGB from RGB-coded files, into one buffer the driver allocates. A
+//!   lossless JPEG goes through oxideav-mjpeg, whose lossless output is one
+//!   packed grey or RGB plane, so the classification is exact rather than a
+//!   guess.
 //!
 //! Everything is normalised to packed RGBA before the first filter runs, so
 //! the transformation pipeline only ever deals with one layout.
@@ -64,7 +79,13 @@ use crate::error::FrameworkError;
 
 use super::ImageConfig;
 use super::driver::{ImageDriver, ImagePipeline, OutputFormat, Transformation};
-use super::sniff::{self, InputFormat};
+use super::sniff::{self, InputFormat, JpegColour, JpegLayout, ZuneJpeg};
+
+mod gif;
+mod peak;
+mod webp;
+
+use peak::{Layout, PngLayout};
 
 /// A decoded image in packed RGBA8888, tight stride.
 ///
@@ -184,7 +205,9 @@ impl Canvas {
 /// The pure-Rust image driver: OxideAV codecs, OxideAV filters, no native
 /// libraries and nothing to install.
 ///
-/// Holds one `RuntimeContext` with the five still-image codecs registered.
+/// Holds one `RuntimeContext` with the PNG, JPEG, WebP and BMP codecs
+/// registered; GIF is read by the framework and written by
+/// `oxideav_gif::encode_rgba8`, outside the registry.
 /// Building it is cheap but not free, and it is immutable once built, so the
 /// driver is constructed once and shared.
 pub struct OxideAvImageDriver {
@@ -192,7 +215,7 @@ pub struct OxideAvImageDriver {
 }
 
 impl OxideAvImageDriver {
-    /// Register the five supported codecs into a fresh runtime context.
+    /// Register the supported registry codecs into a fresh runtime context.
     ///
     /// Note `oxideav_bmp::register` takes the two sub-registries separately
     /// rather than the `RuntimeContext` its siblings take - an upstream
@@ -202,7 +225,6 @@ impl OxideAvImageDriver {
         oxideav_png::register(&mut context);
         oxideav_mjpeg::register(&mut context);
         oxideav_webp::register(&mut context);
-        oxideav_gif::register(&mut context);
         oxideav_bmp::register(&mut context.codecs, &mut context.containers);
         Self { context }
     }
@@ -226,27 +248,69 @@ impl OxideAvImageDriver {
             )
         })?;
         let (width, height) = sniff::header_dimensions(format, contents)?;
-        self.decode(contents, format, width, height)
+        // The header gate counted the output at four bytes a pixel; the
+        // decoders allocate more than that on the way. Refuse what the
+        // decode itself would take past the budget. See `peak`.
+        let layout = peak::layout(format, contents, width, height)?;
+        let needed = peak::estimate(&layout, contents.len() as u64, width, height)?;
+        if needed > config.max_alloc_bytes {
+            return Err(FrameworkError::param(format!(
+                "image exceeds configured decode limits: decoding this {width}x{height} {} \
+                 needs about {needed} bytes, over the IMAGE_MAX_ALLOC_BYTES limit of {}",
+                format.mime_type(),
+                config.max_alloc_bytes
+            )));
+        }
+        // zune-jpeg has no option to skip Extended XMP, and its reassembly
+        // costs time with the square of the segment count rather than memory
+        // with their bytes, so the estimate above cannot see it. The budget
+        // bounds the bytes those passes read instead.
+        if let Layout::Jpeg(JpegLayout::Zune(zune)) = &layout
+            && zune.xmp_reads > config.max_alloc_bytes
+        {
+            return Err(FrameworkError::param(format!(
+                "image exceeds configured decode limits: reassembling the Extended XMP \
+                 segments in this JPEG's headers reads about {} bytes, over the \
+                 IMAGE_MAX_ALLOC_BYTES limit of {}",
+                zune.xmp_reads, config.max_alloc_bytes
+            )));
+        }
+        self.decode(contents, &layout, width, height, config)
     }
 
     fn decode(
         &self,
         contents: &[u8],
-        format: InputFormat,
+        layout: &Layout,
         width: u32,
         height: u32,
+        config: &ImageConfig,
     ) -> Result<Canvas, FrameworkError> {
-        if format == InputFormat::Png {
-            // The crate's own all-colour-types entry point. See module docs
-            // for why PNG does not go through the registry.
-            let bitmap = oxideav_png::decode_png_to_rgba(contents)
-                .map_err(|e| FrameworkError::param(format!("image decode failed: png: {e}")))?;
-            return Canvas::packed(bitmap.width, bitmap.height, bitmap.data);
+        match layout {
+            Layout::Png(png) => {
+                // The crate's own all-colour-types entry point. See module
+                // docs for why PNG does not go through the registry.
+                check_png_inflate(contents, png)?;
+                let bitmap = oxideav_png::decode_png_to_rgba(contents).map_err(png_error)?;
+                Canvas::packed(bitmap.width, bitmap.height, bitmap.data)
+            }
+            Layout::Gif(first) => gif::decode_first_frame(contents, first, width, height),
+            Layout::WebP(_) => {
+                let image = oxideav_webp::decode_webp_image(contents).map_err(|e| {
+                    FrameworkError::param(format!("image decode failed: image/webp: {e}"))
+                })?;
+                Canvas::packed(image.width, image.height, image.rgba)
+            }
+            Layout::Bmp(_) => decode_bmp(contents),
+            Layout::Jpeg(JpegLayout::Zune(zune)) => {
+                decode_jpeg(contents, zune, config.max_dimension)
+            }
+            Layout::Jpeg(JpegLayout::Lossless(_)) => {
+                let frame = self.decode_via_registry(contents, InputFormat::Jpeg)?;
+                let source = jpeg_pixel_format(&frame, width)?;
+                to_rgba(frame, source, width, height)
+            }
         }
-
-        let frame = self.decode_via_registry(contents, format)?;
-        let source = source_pixel_format(&frame, format, width, height)?;
-        to_rgba(&frame, source, width, height)
     }
 
     fn decode_via_registry(
@@ -330,7 +394,7 @@ impl OxideAvImageDriver {
             OutputFormat::WebP | OutputFormat::WebPLossless => {
                 ("webp_vp8l", canvas.into_frame(), PixelFormat::Rgba)
             }
-            OutputFormat::Gif => ("gif", quantise_for_gif(canvas)?, PixelFormat::Rgba),
+            OutputFormat::Gif => return encode_gif(canvas),
             OutputFormat::Bmp => ("bmp", canvas.into_frame(), PixelFormat::Rgba),
         };
 
@@ -396,6 +460,137 @@ impl ImageDriver for OxideAvImageDriver {
 
 // ───────────────────────── decode helpers ─────────────────────────
 
+fn png_error(error: oxideav_png::PngError) -> FrameworkError {
+    FrameworkError::param(format!("image decode failed: png: {error}"))
+}
+
+/// Refuse PNG pixel data that inflates past the size its header declares.
+///
+/// The header gate measures the IHDR dimensions, and `oxideav-png` then
+/// inflates every IDAT byte with an inflater that has no output limit, and
+/// only afterwards compares the result with those dimensions. A few
+/// kilobytes of zlib can expand to gigabytes, so a file that declares one
+/// pixel could make the decoder allocate that much before refusing it.
+/// Inflating once here, capped at the exact length the header implies, stops
+/// at that bound instead. A valid file never reaches the cap: the decoder
+/// rejects any other length.
+///
+/// The chunk walk (`read_chunk`) and the inflater (`compcol`'s zlib) are the
+/// ones `oxideav-png` uses, so both passes see the same bytes. This pass
+/// keeps none of what it inflates, so it costs one scratch buffer rather
+/// than a second copy of the pixel data.
+fn check_png_inflate(contents: &[u8], png: &PngLayout) -> Result<(), FrameworkError> {
+    let ihdr = &png.ihdr;
+    let declared = png_inflated_len(ihdr).ok_or_else(|| {
+        FrameworkError::param(format!(
+            "image decode failed: png: colour type {} at bit depth {} with interlace method {} \
+             is not a PNG pixel format, or is too large to decode",
+            ihdr.colour_type, ihdr.bit_depth, ihdr.interlace
+        ))
+    })?;
+    let mut idat = Vec::with_capacity(usize::try_from(png.idat_len).unwrap_or(0));
+    peak::for_each_png_chunk(contents, |chunk| {
+        if chunk.is_type(b"IDAT") {
+            idat.extend_from_slice(chunk.data);
+        }
+        Ok(())
+    })?;
+    match inflate_within(&idat, declared) {
+        Ok(()) => Ok(()),
+        Err(compcol::Error::OutputLimitExceeded) => Err(FrameworkError::param(format!(
+            "image is malformed: its PNG pixel data inflates past the {declared} bytes its \
+             {}x{} header allows",
+            ihdr.width, ihdr.height
+        ))),
+        Err(e) => Err(FrameworkError::param(format!(
+            "image decode failed: png: the pixel data does not inflate: {e}"
+        ))),
+    }
+}
+
+/// Inflate a zlib stream without keeping its output, failing with
+/// `OutputLimitExceeded` once it produces more than `limit` bytes.
+///
+/// The loop is `compcol::vec::decompress_to_vec_capped`'s, including its
+/// guard against a decoder that stops making progress, with the output
+/// written into one scratch buffer and dropped.
+fn inflate_within(data: &[u8], limit: u64) -> Result<(), compcol::Error> {
+    use compcol::{Algorithm, Decoder, Status};
+
+    let mut decoder = compcol::limit::LimitedDecoder::new(compcol::zlib::Zlib::decoder(), limit);
+    let mut scratch = vec![0u8; 64 * 1024];
+    let mut consumed = 0;
+    while consumed < data.len() {
+        let (progress, status) = decoder.decode(&data[consumed..], &mut scratch)?;
+        consumed += progress.consumed;
+        match status {
+            Status::StreamEnd => return Ok(()),
+            Status::InputEmpty => break,
+            Status::OutputFull => {
+                if progress.consumed == 0 && progress.written == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    loop {
+        let (progress, status) = decoder.finish(&mut scratch)?;
+        if status == Status::StreamEnd {
+            return Ok(());
+        }
+        if progress.written == 0 {
+            return Err(compcol::Error::Corrupt);
+        }
+    }
+}
+
+/// Adam7's seven passes, as (first row, first column, row step, column step).
+const ADAM7_PASSES: [(u64, u64, u64, u64); 7] = [
+    (0, 0, 8, 8),
+    (0, 4, 8, 8),
+    (4, 0, 8, 4),
+    (0, 2, 4, 4),
+    (2, 0, 4, 2),
+    (0, 1, 2, 2),
+    (1, 0, 2, 1),
+];
+
+/// The exact length a PNG's pixel data inflates to, from its header alone.
+///
+/// Every scanline is one filter byte plus its packed samples, and an
+/// interlaced image is seven smaller images, one per Adam7 pass. `None` for
+/// a colour type, bit depth, or interlace method PNG does not define, which
+/// the decoder refuses as well, and for a length too large for a `u64`.
+fn png_inflated_len(ihdr: &oxideav_png::Ihdr) -> Option<u64> {
+    let channels: u64 = match (ihdr.colour_type, ihdr.bit_depth) {
+        (0, 1 | 2 | 4 | 8 | 16) | (3, 1 | 2 | 4 | 8) => 1,
+        (4, 8 | 16) => 2,
+        (2, 8 | 16) => 3,
+        (6, 8 | 16) => 4,
+        _ => return None,
+    };
+    let bits_per_pixel = channels * u64::from(ihdr.bit_depth);
+    let scanlines = |width: u64, height: u64| -> Option<u64> {
+        if width == 0 || height == 0 {
+            return Some(0);
+        }
+        let row = width.checked_mul(bits_per_pixel)?.div_ceil(8);
+        row.checked_add(1)?.checked_mul(height)
+    };
+    let (width, height) = (u64::from(ihdr.width), u64::from(ihdr.height));
+    match ihdr.interlace {
+        0 => scanlines(width, height),
+        1 => ADAM7_PASSES
+            .iter()
+            .try_fold(0u64, |total, &(row, column, row_step, column_step)| {
+                let pass_width = width.saturating_sub(column).div_ceil(column_step);
+                let pass_height = height.saturating_sub(row).div_ceil(row_step);
+                total.checked_add(scanlines(pass_width, pass_height)?)
+            }),
+        _ => None,
+    }
+}
+
 fn decoder_limits(config: &ImageConfig) -> DecoderLimits {
     let max_pixels =
         u64::from(config.max_dimension).saturating_mul(u64::from(config.max_dimension));
@@ -415,122 +610,69 @@ fn output_for_input(format: InputFormat) -> Option<OutputFormat> {
     })
 }
 
-/// Determine the layout a decoder handed back.
+/// Determine the layout oxideav-mjpeg handed back for a lossless JPEG.
 ///
-/// Exact for WebP and GIF (one declared output format each) and bounded for
-/// BMP and JPEG by their declared capabilities. PNG never reaches here.
-fn source_pixel_format(
-    frame: &VideoFrame,
-    format: InputFormat,
-    width: u32,
-    height: u32,
-) -> Result<PixelFormat, FrameworkError> {
-    let plane = frame
-        .planes
-        .first()
-        .ok_or_else(|| FrameworkError::param("image decode produced no planes"))?;
-    let width_px = width as usize;
-    let bytes_per_pixel = plane.stride.checked_div(width_px).unwrap_or(0);
-
+/// Its lossless decoder takes only unsubsampled frames and returns one
+/// packed plane, grey or RGB, so the classification is exact rather than a
+/// guess. JPEG is the one format decoded through the codec registry, and
+/// only when it is lossless; see `decode_jpeg` for the rest.
+fn jpeg_pixel_format(frame: &VideoFrame, width: u32) -> Result<PixelFormat, FrameworkError> {
     let unsupported = |detail: &str| {
         FrameworkError::param(format!(
             "image decode produced an unsupported pixel layout ({detail}); convert the source \
              to 8-bit RGB or RGBA and retry"
         ))
     };
-
-    match format {
-        InputFormat::Png => Ok(PixelFormat::Rgba),
-        InputFormat::WebP | InputFormat::Gif => {
-            if frame.planes.len() == 1 && bytes_per_pixel == 4 {
-                Ok(PixelFormat::Rgba)
-            } else {
-                Err(unsupported("expected packed RGBA"))
-            }
-        }
-        InputFormat::Bmp => match (frame.planes.len(), bytes_per_pixel) {
-            (1, 4) => Ok(PixelFormat::Rgba),
-            (1, 3) => Ok(PixelFormat::Rgb24),
-            _ => Err(unsupported("expected packed RGB or RGBA")),
-        },
-        InputFormat::Jpeg => match frame.planes.len() {
-            1 => match bytes_per_pixel {
-                1 => Ok(PixelFormat::Gray8),
-                3 => Ok(PixelFormat::Rgb24),
-                other => Err(unsupported(&format!("{other} bytes per pixel"))),
-            },
-            3 => yuv_layout(frame, width, height)
-                .ok_or_else(|| unsupported("planar chroma geometry matches no known subsampling")),
-            other => Err(unsupported(&format!("{other} planes"))),
-        },
+    let [plane] = frame.planes.as_slice() else {
+        return Err(unsupported(&format!("{} planes", frame.planes.len())));
+    };
+    match plane.stride.checked_div(width as usize).unwrap_or(0) {
+        1 => Ok(PixelFormat::Gray8),
+        3 => Ok(PixelFormat::Rgb24),
+        other => Err(unsupported(&format!("{other} bytes per pixel"))),
     }
 }
 
-/// Classify a three-plane frame by comparing the chroma planes' geometry to
-/// the luma dimensions. Unambiguous once we already know the frame is planar.
-fn yuv_layout(frame: &VideoFrame, width: u32, height: u32) -> Option<PixelFormat> {
-    let chroma = frame.planes.get(1)?;
-    if chroma.stride == 0 {
-        return None;
-    }
-    let chroma_width = chroma.stride;
-    let chroma_height = chroma.data.len() / chroma.stride;
-    let half_width = (width as usize).div_ceil(2);
-    let half_height = (height as usize).div_ceil(2);
-    let full_height = height as usize;
-
-    if chroma_width == half_width && chroma_height == half_height {
-        Some(PixelFormat::Yuv420P)
-    } else if chroma_width == half_width && chroma_height == full_height {
-        Some(PixelFormat::Yuv422P)
-    } else if chroma_width == width as usize && chroma_height == full_height {
-        Some(PixelFormat::Yuv444P)
-    } else {
-        None
-    }
-}
-
-/// Convert any decoded layout to packed RGBA with a tight stride.
+/// Convert a decoded layout to packed RGBA with a tight stride.
+///
+/// Takes the frame by value so its planes can move into the canvas: the
+/// source planes are dropped as soon as the conversion is done, and a plane
+/// that is already tight RGBA is never copied.
 fn to_rgba(
-    frame: &VideoFrame,
+    frame: VideoFrame,
     source: PixelFormat,
     width: u32,
     height: u32,
 ) -> Result<Canvas, FrameworkError> {
-    let tight = width as usize * 4;
-    if source == PixelFormat::Rgba {
-        let plane = frame
-            .planes
-            .first()
-            .ok_or_else(|| FrameworkError::param("image decode produced no planes"))?;
-        if plane.stride == tight {
-            // `Canvas::packed` is what rejects a plane shorter than the
-            // declared height rather than handing it to a filter that would
-            // index past the end of it.
-            return Canvas::packed(width, height, plane.data.clone());
-        }
-    }
-    let info = FrameInfo::new(source, width, height);
-    let converted = pix_convert(frame, info, PixelFormat::Rgba, &ConvertOptions::default())
-        .map_err(|e| FrameworkError::param(format!("image pixel conversion failed: {e}")))?;
-    let pixels = pack_tight(&converted, tight, height as usize)?;
+    let converted = if source == PixelFormat::Rgba {
+        frame
+    } else {
+        let info = FrameInfo::new(source, width, height);
+        pix_convert(&frame, info, PixelFormat::Rgba, &ConvertOptions::default())
+            .map_err(|e| FrameworkError::param(format!("image pixel conversion failed: {e}")))?
+    };
+    // `Canvas::packed` is what rejects a plane shorter than the declared
+    // height rather than handing it to a filter that would index past the
+    // end of it.
+    let pixels = pack_tight(converted, width as usize * 4, height as usize)?;
     Canvas::packed(width, height, pixels)
 }
 
-/// Strip any per-row padding a conversion left behind.
-fn pack_tight(frame: &VideoFrame, tight: usize, height: usize) -> Result<Vec<u8>, FrameworkError> {
+/// Strip any per-row padding a conversion left behind. A plane that is
+/// already tight moves out of the frame, trimmed to `height` rows; one that
+/// is short is returned as it is, for `Canvas::packed` to refuse.
+fn pack_tight(frame: VideoFrame, tight: usize, height: usize) -> Result<Vec<u8>, FrameworkError> {
     let plane = frame
         .planes
-        .first()
+        .into_iter()
+        .next()
         .ok_or_else(|| FrameworkError::internal("pixel conversion produced no plane"))?;
-    let short = || FrameworkError::internal("pixel conversion produced a short plane");
     if plane.stride == tight {
-        return plane
-            .data
-            .get(..tight * height)
-            .map(<[u8]>::to_vec)
-            .ok_or_else(short);
+        let mut data = plane.data;
+        data.truncate(tight.saturating_mul(height));
+        return Ok(data);
     }
+    let short = || FrameworkError::internal("pixel conversion produced a short plane");
     let mut out = Vec::with_capacity(tight * height);
     for row in 0..height {
         let start = row
@@ -539,6 +681,83 @@ fn pack_tight(frame: &VideoFrame, tight: usize, height: usize) -> Result<Vec<u8>
         out.extend_from_slice(plane.data.get(start..start + tight).ok_or_else(short)?);
     }
     Ok(out)
+}
+
+/// Decode a JPEG through zune-jpeg into one RGBA buffer.
+///
+/// zune-jpeg converts YCbCr and greyscale to RGBA itself. It has no RGB to
+/// RGBA mapping, so an RGB-coded JPEG decodes as RGB into the front of the
+/// same buffer and is spread to RGBA in place, back to front. The colour
+/// space comes from the header walk the estimate used, and the decoder must
+/// agree with it before anything is allocated. Its size limits are the
+/// framework's: the decode estimate decides what is admitted, not the
+/// crate's own defaults.
+fn decode_jpeg(
+    contents: &[u8],
+    zune: &ZuneJpeg,
+    max_dimension: u32,
+) -> Result<Canvas, FrameworkError> {
+    use zune_jpeg::zune_core::bytestream::ZCursor;
+    use zune_jpeg::zune_core::colorspace::ColorSpace;
+    use zune_jpeg::zune_core::options::DecoderOptions;
+
+    let failed = |e: &dyn std::fmt::Display| {
+        FrameworkError::param(format!("image decode failed: image/jpeg: {e}"))
+    };
+    let (input, output, channels) = match zune.colour {
+        JpegColour::Rgb => (ColorSpace::RGB, ColorSpace::RGB, 3),
+        JpegColour::YCbCr => (ColorSpace::YCbCr, ColorSpace::RGBA, 4),
+        JpegColour::Grey => (ColorSpace::Luma, ColorSpace::RGBA, 4),
+        JpegColour::Other => return Err(failed(&"the colour space is not supported")),
+    };
+    let limit = max_dimension as usize;
+    let options = DecoderOptions::default()
+        .set_max_width(limit)
+        .set_max_height(limit)
+        .jpeg_set_out_colorspace(output);
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(contents), options);
+    decoder.decode_headers().map_err(|e| failed(&e))?;
+    if decoder.input_colorspace() != Some(input) {
+        return Err(failed(&"the decoder read a different colour space"));
+    }
+    let dimensions = decoder.dimensions().map(|(w, h)| (w as u32, h as u32));
+    if dimensions != Some((zune.frame.width, zune.frame.height)) {
+        return Err(failed(&"the decoder read a different frame"));
+    }
+    let (width, height) = (zune.frame.width as usize, zune.frame.height as usize);
+    let pixels = width * height;
+    let mut rgba = vec![0u8; pixels * 4];
+    let decoded = rgba
+        .get_mut(..pixels * channels)
+        .ok_or_else(|| failed(&"the output buffer is short"))?;
+    decoder.decode_into(decoded).map_err(|e| failed(&e))?;
+    if channels == 3 {
+        for pixel in (0..pixels).rev() {
+            rgba.copy_within(pixel * 3..pixel * 3 + 3, pixel * 4);
+            rgba[pixel * 4 + 3] = u8::MAX;
+        }
+    }
+    Canvas::packed(zune.frame.width, zune.frame.height, rgba)
+}
+
+/// Decode a BMP through the crate's own entry point, which always returns
+/// one tight RGBA plane.
+fn decode_bmp(contents: &[u8]) -> Result<Canvas, FrameworkError> {
+    let image = oxideav_bmp::decode_bmp(contents)
+        .map_err(|e| FrameworkError::param(format!("image decode failed: image/bmp: {e}")))?;
+    let plane = image
+        .planes
+        .into_iter()
+        .next()
+        .ok_or_else(|| FrameworkError::param("image decode produced no planes"))?;
+    if image.pixel_format != oxideav_bmp::image::BmpPixelFormat::Rgba
+        || plane.stride != image.width as usize * 4
+    {
+        return Err(FrameworkError::param(
+            "image decode produced an unsupported pixel layout (expected packed RGBA)",
+        ));
+    }
+    Canvas::packed(image.width, image.height, plane.data)
 }
 
 // ───────────────────────── transformation helpers ─────────────────────────
@@ -886,15 +1105,32 @@ fn edge_extended_frame(
     })
 }
 
-/// Reduce a full-colour frame to at most 256 colours so the GIF encoder can
-/// take it.
+/// Write a canvas as a single-frame GIF.
 ///
-/// The GIF encoder builds its own palette but refuses input with more than
-/// 256 distinct colours rather than quantising, and `oxideav-pixfmt` will not
-/// convert to `Pal8` without a caller-supplied palette. So the palette is
-/// generated explicitly, the frame is mapped through it with Floyd-Steinberg
-/// dithering, and mapped straight back to RGBA - which now holds at most 256
-/// distinct colours and encodes cleanly.
+/// The canvas is reduced to at most 256 colours first, with Floyd-Steinberg
+/// dithering, so `oxideav_gif::encode_rgba8` takes its colours as they are;
+/// that encoder would otherwise quantise with a plain median cut. The
+/// reduction maps every pixel to an opaque palette colour, so the GIF has no
+/// transparent index.
+fn encode_gif(canvas: Canvas) -> Result<Vec<u8>, FrameworkError> {
+    let (width, height) = (canvas.width, canvas.height);
+    let frame = quantise_for_gif(canvas)?;
+    let rgba = frame
+        .planes
+        .into_iter()
+        .next()
+        .ok_or_else(|| FrameworkError::internal("gif quantisation produced no plane"))?
+        .data;
+    oxideav_gif::encode_rgba8(width, height, &rgba, &oxideav_gif::EncodeOptions::default())
+        .map_err(|e| FrameworkError::internal(format!("image encode failed: gif: {e}")))
+}
+
+/// Reduce a full-colour frame to at most 256 colours for the GIF encoder.
+///
+/// `oxideav-pixfmt` will not convert to `Pal8` without a caller-supplied
+/// palette, so the palette is generated explicitly, the frame is mapped
+/// through it with Floyd-Steinberg dithering, and mapped straight back to
+/// RGBA - which now holds at most 256 distinct colours.
 fn quantise_for_gif(canvas: Canvas) -> Result<VideoFrame, FrameworkError> {
     let (width, height) = (canvas.width, canvas.height);
     let frame = canvas.into_frame();
@@ -919,7 +1155,7 @@ fn quantise_for_gif(canvas: Canvas) -> Result<VideoFrame, FrameworkError> {
         .map_err(|e| FrameworkError::internal(format!("gif quantisation failed: {e}")))?;
 
     let tight = width as usize * 4;
-    let pixels = pack_tight(&reduced, tight, height as usize)?;
+    let pixels = pack_tight(reduced, tight, height as usize)?;
     Ok(VideoFrame {
         pts: Some(0),
         planes: vec![VideoPlane {
@@ -1027,6 +1263,116 @@ mod tests {
         }
     }
 
+    fn ihdr(
+        width: u32,
+        height: u32,
+        colour_type: u8,
+        bit_depth: u8,
+        interlace: u8,
+    ) -> oxideav_png::Ihdr {
+        oxideav_png::Ihdr {
+            width,
+            height,
+            bit_depth,
+            colour_type,
+            compression: 0,
+            filter: 0,
+            interlace,
+        }
+    }
+
+    /// A PNG with this header and `raw` as its inflated pixel data, and a
+    /// sixteen-entry palette when the header names colour type 3.
+    fn png_with_pixel_data(header: oxideav_png::Ihdr, raw: &[u8]) -> Vec<u8> {
+        let idat = compcol::vec::compress_to_vec::<compcol::zlib::Zlib>(raw).expect("zlib");
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        oxideav_png::chunk::write_chunk(&mut png, b"IHDR", &header.to_bytes());
+        if header.colour_type == 3 {
+            oxideav_png::chunk::write_chunk(&mut png, b"PLTE", &[0u8; 48]);
+        }
+        oxideav_png::chunk::write_chunk(&mut png, b"IDAT", &idat);
+        oxideav_png::chunk::write_chunk(&mut png, b"IEND", &[]);
+        png
+    }
+
+    /// The chunk layout of a PNG, as `load` reads it.
+    fn png_layout(png: &[u8]) -> PngLayout {
+        let (width, height) =
+            sniff::header_dimensions(InputFormat::Png, png).expect("PNG dimensions");
+        match peak::layout(InputFormat::Png, png, width, height).expect("a PNG layout") {
+            Layout::Png(layout) => layout,
+            _ => panic!("a PNG reads as a PNG layout"),
+        }
+    }
+
+    #[test]
+    fn png_inflated_length_follows_the_header() {
+        // 8-bit RGBA: one filter byte and four bytes a pixel, per row.
+        assert_eq!(png_inflated_len(&ihdr(1, 1, 6, 8, 0)), Some(5));
+        assert_eq!(png_inflated_len(&ihdr(10, 3, 6, 8, 0)), Some(3 * 41));
+        // 16-bit RGB: six bytes a pixel.
+        assert_eq!(png_inflated_len(&ihdr(2, 2, 2, 16, 0)), Some(2 * 13));
+        // 1-bit grey packs eight pixels a byte, rounded up per row.
+        assert_eq!(png_inflated_len(&ihdr(13, 5, 0, 1, 0)), Some(5 * 3));
+        // Adam7 on 3x3 at 1 bit: passes 2 and 3 are empty, pass 6 has two
+        // rows, and every other pass one row of one byte.
+        assert_eq!(png_inflated_len(&ihdr(3, 3, 0, 1, 1)), Some(12));
+        // Combinations PNG does not define.
+        assert_eq!(png_inflated_len(&ihdr(1, 1, 2, 4, 0)), None);
+        assert_eq!(png_inflated_len(&ihdr(1, 1, 3, 16, 0)), None);
+        assert_eq!(png_inflated_len(&ihdr(1, 1, 5, 8, 0)), None);
+        assert_eq!(png_inflated_len(&ihdr(1, 1, 6, 8, 2)), None);
+        // The largest header PNG can declare has no length a `u64` can hold:
+        // an answer of `None`, not an overflow.
+        assert_eq!(png_inflated_len(&ihdr(u32::MAX, u32::MAX, 6, 16, 0)), None);
+        assert_eq!(png_inflated_len(&ihdr(u32::MAX, u32::MAX, 6, 16, 1)), None);
+        assert!(png_inflated_len(&ihdr(u32::MAX, 1, 6, 16, 1)).is_some());
+    }
+
+    #[test]
+    fn png_pixel_data_of_exactly_the_declared_length_decodes() {
+        // The decoder agrees on the length the header implies: interlaced and
+        // sub-byte images, where a wrong pass or row size would show, decode
+        // at exactly that length.
+        let driver = OxideAvImageDriver::new();
+        for header in [
+            ihdr(3, 3, 0, 1, 1),
+            ihdr(13, 5, 3, 4, 0),
+            ihdr(9, 9, 3, 2, 1),
+        ] {
+            let len = png_inflated_len(&header).expect("a defined format") as usize;
+            let png = png_with_pixel_data(header, &vec![0u8; len]);
+            assert_eq!(
+                driver
+                    .dimensions(&png)
+                    .expect("pixel data of the declared length"),
+                (header.width, header.height)
+            );
+        }
+    }
+
+    #[test]
+    fn png_pixel_data_one_byte_past_the_declared_length_is_refused() {
+        let header = ihdr(3, 3, 0, 1, 1);
+        let len = png_inflated_len(&header).expect("a defined format") as usize;
+        let png = png_with_pixel_data(header, &vec![0u8; len + 1]);
+        let err = check_png_inflate(&png, &png_layout(&png)).expect_err("one byte too many");
+        assert!(
+            err.to_string().contains("inflates past the 12 bytes"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn png_pixel_data_that_is_not_zlib_is_refused_before_decoding() {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        oxideav_png::chunk::write_chunk(&mut png, b"IHDR", &ihdr(1, 1, 6, 8, 0).to_bytes());
+        oxideav_png::chunk::write_chunk(&mut png, b"IDAT", b"not a zlib stream");
+        oxideav_png::chunk::write_chunk(&mut png, b"IEND", &[]);
+        let err = check_png_inflate(&png, &png_layout(&png)).expect_err("not zlib");
+        assert!(err.to_string().contains("does not inflate"), "got: {err}");
+    }
+
     #[test]
     fn heic_input_gets_its_own_named_error() {
         let driver = OxideAvImageDriver::new();
@@ -1092,7 +1438,7 @@ mod tests {
                 data: vec![0u8; 4 * 4 * 2],
             }],
         };
-        let err = to_rgba(&short, PixelFormat::Rgba, 4, 4).expect_err("short plane");
+        let err = to_rgba(short, PixelFormat::Rgba, 4, 4).expect_err("short plane");
         assert!(err.to_string().contains("truncated"), "got: {err}");
 
         // The exact-length case is still accepted.
@@ -1103,7 +1449,7 @@ mod tests {
                 data: vec![0u8; 4 * 4 * 4],
             }],
         };
-        let canvas = to_rgba(&exact, PixelFormat::Rgba, 4, 4).expect("exact plane");
+        let canvas = to_rgba(exact, PixelFormat::Rgba, 4, 4).expect("exact plane");
         assert_eq!((canvas.width, canvas.height), (4, 4));
         assert_eq!(canvas.pixels.len(), 4 * 4 * 4);
     }
@@ -1117,7 +1463,7 @@ mod tests {
                 data: vec![7u8; 2 * 4 * 2 + 64],
             }],
         };
-        let canvas = to_rgba(&long, PixelFormat::Rgba, 2, 2).expect("long plane");
+        let canvas = to_rgba(long, PixelFormat::Rgba, 2, 2).expect("long plane");
         assert_eq!(
             canvas.pixels.len(),
             2 * 2 * 4,
@@ -1250,8 +1596,8 @@ mod tests {
 
     #[test]
     fn gif_encodes_an_image_with_more_than_256_colours() {
-        // Straight to the GIF encoder this would fail; the palette two-step
-        // is what makes a photographic source encodable.
+        // The palette two-step dithers a photographic source down to 256
+        // colours before the encoder sees it.
         let mut pixels = Vec::new();
         for i in 0..300u32 {
             pixels.extend_from_slice(&[
@@ -1271,6 +1617,28 @@ mod tests {
             .encode(source, OutputFormat::Gif, 70)
             .expect("quantised gif");
         assert!(out.starts_with(b"GIF"), "expected a GIF file");
+    }
+
+    #[test]
+    fn a_gif_round_trips_its_colours() {
+        // Under 256 colours, GIF keeps every one exactly.
+        let source = Canvas {
+            width: 3,
+            height: 1,
+            pixels: vec![200, 10, 10, 255, 10, 10, 200, 255, 30, 200, 30, 255],
+        };
+        let driver = OxideAvImageDriver::new();
+        let gif = driver
+            .encode(source, OutputFormat::Gif, 70)
+            .expect("an encodable canvas");
+        let decoded = driver
+            .load(&gif, &ImageConfig::default())
+            .expect("our own GIF decodes");
+        assert_eq!((decoded.width, decoded.height), (3, 1));
+        assert_eq!(
+            decoded.pixels,
+            [200, 10, 10, 255, 10, 10, 200, 255, 30, 200, 30, 255]
+        );
     }
 
     #[test]

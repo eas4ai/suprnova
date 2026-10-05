@@ -179,9 +179,8 @@ impl AggregateKind {
 /// single eager-load plan can stack multiple aggregates on the same
 /// relation without colliding on the cache cell.
 ///
-/// Count keys keep the unadorned `<rel>` form (separate
-/// `RelationCell::Count(u64)` variant; zero collision risk with the
-/// aggregate cell).
+/// Count keys keep the unadorned `<rel>` form; the cache keeps counts
+/// apart from loaded rows and aggregates, so they never collide.
 ///
 /// This helper is the single source of truth for the key format. The
 /// macro's aggregate arms call it on write; the per-relation
@@ -195,6 +194,140 @@ pub fn aggregate_cache_key(name: &str, kind: AggregateKind, column: &str) -> Str
     s.push('_');
     s.push_str(column);
     s
+}
+
+/// The cache key under which `with_min` / `with_max` keep the aggregate's
+/// value as JSON, beside the `f64` cell at `key` (an
+/// [`aggregate_cache_key`]). A date or text minimum has no `f64`, and this
+/// cell is what `<rel>_min_as` / `<rel>_max_as` read. A `:` cannot appear
+/// in a relation or column name, so the key never meets another cell's.
+pub fn aggregate_value_cache_key(key: &str) -> String {
+    format!("{key}:value")
+}
+
+/// The loaded rows of one relation, taken out of every parent's cache
+/// for a nested eager load, and put back when this value drops.
+///
+/// A nested load (`posts.comments`) moves each parent's cached `posts`
+/// into one owned list, loads `comments` across that list, and returns
+/// the posts to their parents. The return used to run only after a
+/// successful load, so a load that failed, or a caller that stopped
+/// awaiting it, left every parent with an empty relation still marked
+/// loaded: rows already in hand were lost, and `load_missing` would not
+/// load them again. Putting the rows back on drop returns them on every
+/// way out - success, error, and cancellation.
+///
+/// **Not part of the public API.** It is `pub` because the
+/// `#[suprnova::model]` macro's nested-load arms use it.
+#[doc(hidden)]
+pub struct __TakenRows<'a, 'b, P, C> {
+    parents: &'a mut [&'b mut P],
+    rows: Vec<C>,
+    takes: Vec<(usize, usize)>,
+    put_back: fn(&mut P, Vec<C>),
+}
+
+impl<'a, 'b, P, C> __TakenRows<'a, 'b, P, C> {
+    /// Take every parent's rows with `take`, recording how many came
+    /// from which parent, so that `put_back` returns each parent its
+    /// own rows in their order.
+    pub fn take(
+        parents: &'a mut [&'b mut P],
+        take: fn(&mut P) -> Option<Vec<C>>,
+        put_back: fn(&mut P, Vec<C>),
+    ) -> Self {
+        let mut rows = Vec::new();
+        let mut takes = Vec::new();
+        for (index, parent) in parents.iter_mut().enumerate() {
+            if let Some(mut taken) = take(parent) {
+                takes.push((index, taken.len()));
+                rows.append(&mut taken);
+            }
+        }
+        Self {
+            parents,
+            rows,
+            takes,
+            put_back,
+        }
+    }
+
+    /// The taken rows, for the nested load to work on.
+    pub fn rows(&mut self) -> &mut Vec<C> {
+        &mut self.rows
+    }
+}
+
+impl<P, C> Drop for __TakenRows<'_, '_, P, C> {
+    fn drop(&mut self) {
+        let mut rows = std::mem::take(&mut self.rows).into_iter();
+        for &(index, count) in &self.takes {
+            let own: Vec<C> = rows.by_ref().take(count).collect();
+            if let Some(parent) = self.parents.get_mut(index) {
+                (self.put_back)(parent, own);
+            }
+        }
+    }
+}
+
+/// The key column every one of `keys` names, or `""` when they differ.
+///
+/// A `MorphTo` relation's registry entry names its owner's key column.
+/// The owner model varies by row, so the macro passes every declared
+/// target's primary key: when they agree, that is the key; when they
+/// differ, no one column covers every row and the key is resolved per
+/// row through the morph registry ([`MorphTypeEntry::primary_key`]).
+/// `const` so the registry entry stays a constant initialiser.
+///
+/// **Not part of the public API.** It is `pub` because the macro
+/// expands into user crates.
+#[doc(hidden)]
+pub const fn __shared_key(keys: &[&'static str]) -> &'static str {
+    if keys.is_empty() {
+        return "";
+    }
+    let first = keys[0];
+    let mut index = 1;
+    while index < keys.len() {
+        if !same_str(keys[index], first) {
+            return "";
+        }
+        index += 1;
+    }
+    first
+}
+
+/// `a == b`, usable in a `const fn`.
+const fn same_str(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < a.len() {
+        if a[index] != b[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// ` AND <alias>.<column> IS NULL` when `M` declares soft deletes, and
+/// nothing otherwise: the filter a relation statement written by the
+/// `#[suprnova::model]` macro adds for an intermediate model it joins,
+/// so a row reached through a trashed intermediate is left out, as the
+/// lazy `HasManyThrough` read leaves it out.
+///
+/// **Not part of the public API.** It is `pub` because the macro
+/// expands into user crates.
+#[doc(hidden)]
+pub fn __soft_delete_guard<M: crate::eloquent::EloquentModel>(alias: &str) -> String {
+    if M::SOFT_DELETES_COLUMN.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {alias}.{} IS NULL", M::SOFT_DELETES_COLUMN)
+    }
 }
 
 /// Collapse a target model's [`EloquentModel::HAS_TIMESTAMPS`] and
@@ -234,9 +367,10 @@ pub trait Relation {
     type Target;
     /// Compile-time relation kind. Drives the dispatcher's branch.
     const KIND: RelationKind;
-    /// Column name on the parent table used as the join key.
-    /// Defaults to `"id"` in concrete impls; customisable per-relation
-    /// via the macro's `lk = "..."` option.
+    /// Column name on the parent table used as the join key: the
+    /// relation's `lk = "..."` when it declares one, else the parent
+    /// model's primary key. A `MorphTo` names the key of the model its
+    /// row points at, resolved through the morph registry.
     fn parent_key(&self) -> &str;
     /// Column name on the target table that points at the parent.
     ///
@@ -320,13 +454,14 @@ pub struct RelationEntry {
     /// macro expansion site (`MorphTo` - the value lives on the child
     /// row itself).
     pub morph_type_value: &'static str,
-    /// Primary-key column name on the related/target side. Used by the
-    /// existence engine to join pivot rows against the target table
-    /// (`pivot.related_key = target.target_primary_key`). The macro
-    /// emits the target model's `EloquentModel::PRIMARY_KEY` value;
-    /// defaults to `"id"` for backwards compatibility with the old
-    /// hardcoded behaviour. `""` for `MorphTo` where the target table
-    /// is variable.
+    /// Key column on the related/target side. Used by the existence
+    /// engine to join pivot rows against the target table
+    /// (`pivot.related_key = target.target_primary_key`). For a
+    /// many-to-many the macro emits the relation's declared
+    /// `related_key`, else the target model's
+    /// `EloquentModel::PRIMARY_KEY`, the column the relation's reads
+    /// join on; for every other kind, the target's primary key. `""` for
+    /// `MorphTo` where the target table is variable.
     pub target_primary_key: &'static str,
     /// `deleted_at` (or custom `soft_deletes_column`) on the related
     /// model when it opts into `#[model(soft_deletes)]`. `""` when the

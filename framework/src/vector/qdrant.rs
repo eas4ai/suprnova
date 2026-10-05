@@ -10,11 +10,21 @@
 //! trait accepts arbitrary `String`s. We bridge them with three rules
 //! applied in order via [`QdrantVectorDriver::resolve_point_id`]:
 //!
-//! 1. If the string parses as `u64`, use the `Num(u64)` variant.
-//! 2. If the string is a valid UUID, use the `Uuid(String)` variant
+//! 1. If the string is the canonical decimal spelling of a `u64` (no
+//!    sign, no leading zero), use the `Num(u64)` variant.
+//! 2. If the string is a UUID in its canonical spelling (lowercase,
+//!    hyphenated) and not of version 5, use the `Uuid(String)` variant
 //!    verbatim.
 //! 3. Otherwise, derive a deterministic v5 UUID from the framework's
 //!    namespace and the bytes of the original string.
+//!
+//! The id is a merge key, so two different strings must be two points.
+//! Rules 1 and 2 take only the canonical spelling because Rust parses
+//! `"01"` and `"+1"` as `1`, and Qdrant reads the uppercase, simple,
+//! braced and urn spellings of a UUID as one UUID; every other spelling
+//! falls to rule 3. Rule 2 also leaves out version 5, the version rule 3
+//! produces: a caller who passes the UUID derived from another id would
+//! otherwise name that id's point.
 //!
 //! In all three cases the original caller-side string is stashed in
 //! the point's payload under [`SUPRNOVA_ID_PAYLOAD_KEY`] so similarity
@@ -22,11 +32,7 @@
 //! the metadata returned by [`VectorDriver::similar`] - consumers
 //! never see it through the trait surface. It IS visible if you query
 //! Qdrant directly (see [`QdrantVectorDriver::client`]).
-//!
-//! Note that this mapping is asymmetric per-id: in one collection,
-//! "42" (Num) and "0e2c3d…" (Uuid) and "foo" (derived Uuid) occupy
-//! disjoint id buckets. That mirrors Qdrant's native model - we
-//! don't try to "fix" it.
+
 //!
 //! # Auto-create
 //!
@@ -213,11 +219,22 @@ impl QdrantVectorDriver {
     /// Compute the `PointId` the driver writes for a given caller-side
     /// id. Exposed so direct `qdrant_client::Qdrant` calls target the
     /// same points the framework writes.
+    ///
+    /// Only a canonical spelling maps to a native id: `"01"` and `"+1"`
+    /// parse as `1`, and Qdrant treats every spelling of a UUID as one,
+    /// so taking them as-is would let two different ids overwrite each
+    /// other. A version 5 UUID is derived too, because derived ids are
+    /// version 5: taken verbatim, a caller could name another id's point.
     pub fn resolve_point_id(id: &str) -> PointId {
-        if let Ok(n) = id.parse::<u64>() {
+        if let Ok(n) = id.parse::<u64>()
+            && n.to_string() == id
+        {
             return PointId::from(n);
         }
-        if Uuid::parse_str(id).is_ok() {
+        if let Ok(uuid) = Uuid::parse_str(id)
+            && uuid.hyphenated().to_string() == id
+            && uuid.get_version_num() != 5
+        {
             return PointId::from(id.to_string());
         }
         let derived = Uuid::new_v5(&SUPRNOVA_VECTOR_NAMESPACE, id.as_bytes());

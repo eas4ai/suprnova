@@ -2,12 +2,14 @@
 //! and the login → logout round trip.
 //!
 //! Event assertions use the process-global [`EventFacade::fake`], so the
-//! tests in this file serialize on `TEST_LOCK`. Each `tests/*.rs` is its
-//! own binary, which isolates this file's fake store from the fakes used
-//! by other test files.
+//! tests in this file serialize on `TEST_LOCK`. The fake records only the
+//! dispatches of the thread that installed it, so the tests of the other
+//! files of this binary do not reach it.
 //!
 //! DB-touching tests run on a shared [`Runtime`] (sqlx pools die with the
-//! runtime that created them), mirroring `tests/remember_me.rs`.
+//! runtime that created them), mirroring `remember_me.rs`. The database
+//! and the auth manager are bound in a container scope per test
+//! ([`in_container`]), never in the process container.
 
 use once_cell::sync::Lazy;
 use sea_orm_migration::MigratorTrait;
@@ -16,6 +18,9 @@ use std::any::Any;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
+
+use suprnova::database::DbConnection;
+use suprnova::testing::TestContainer;
 
 #[cfg(feature = "testing")]
 use suprnova::SessionMiddleware;
@@ -35,9 +40,19 @@ static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
 /// process-global.
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-/// One-shot: install Crypt, register a shared in-memory SQLite connection
-/// in the global container, and migrate `sessions` + `remember_tokens`.
-static SETUP: Lazy<()> = Lazy::new(|| {
+/// What every test of this file binds: a shared in-memory SQLite
+/// connection with `sessions` + `remember_tokens`, and the default-config
+/// [`AuthManager`] (web → session → "users") with the provider behind it,
+/// so the static `Auth::*` facade methods resolve the default guard.
+struct Bindings {
+    database: DbConnection,
+    auth: AuthManager,
+}
+
+/// One-shot: install Crypt, connect and migrate the database, and build
+/// the auth manager. The config + provider are identical for every test,
+/// so one of each serves them all.
+static BINDINGS: Lazy<Bindings> = Lazy::new(|| {
     #[cfg(feature = "testing")]
     {
         let key = suprnova::EncryptionKey::generate();
@@ -57,16 +72,34 @@ static SETUP: Lazy<()> = Lazy::new(|| {
         LocalMigrator::up(conn.inner(), None)
             .await
             .expect("run local migrator");
-        suprnova::App::singleton(conn);
-
-        // Register the default-config AuthManager (web → session → "users")
-        // and the provider behind it, so the static `Auth::*` facade methods
-        // resolve the default guard. The config + provider are identical for
-        // every test, so a single process-wide registration is correct.
-        suprnova::App::singleton(AuthManager::new(AuthConfig::default()));
-        Auth::register_provider("users", Arc::new(FakeProvider)).expect("register users provider");
-    });
+        let auth = AuthManager::new(AuthConfig::default());
+        auth.register_provider("users", Arc::new(FakeProvider));
+        Bindings {
+            database: conn,
+            auth,
+        }
+    })
 });
+
+/// Run `test` on [`RT`] in a container scope that binds [`BINDINGS`].
+///
+/// They are bound per test rather than in the process container. The other
+/// files of this binary bind a database and an auth manager of their own,
+/// and the process container keeps one of each: the file that bound last
+/// would own them, and a test here would read another file's tables and
+/// provider. The scope binds per task, not per thread, so the bindings
+/// follow the test's future wherever the runtime polls it. The test's future
+/// is boxed so the wrappers move a pointer rather than the whole future.
+fn in_container<F: std::future::Future>(test: F) -> F::Output {
+    let bindings = Lazy::force(&BINDINGS);
+    let (database, auth) = (bindings.database.clone(), bindings.auth.clone());
+    let test = Box::pin(test);
+    RT.block_on(TestContainer::scope(async move {
+        TestContainer::singleton(database);
+        TestContainer::singleton(auth);
+        test.await
+    }))
+}
 
 /// Local migrator: just the `sessions` and `remember_tokens` tables the
 /// session + remember-me code reads.
@@ -290,8 +323,7 @@ where
 
 #[test]
 fn attempt_with_valid_credentials_dispatches_attempting_login_authenticated() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -320,8 +352,7 @@ fn attempt_with_valid_credentials_dispatches_attempting_login_authenticated() {
 /// password, so it is what stamps the window.
 #[test]
 fn attempt_with_valid_credentials_stamps_password_confirmation() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -353,8 +384,7 @@ fn attempt_with_valid_credentials_stamps_password_confirmation() {
 
 #[test]
 fn named_attempt_does_not_stamp_default_password_confirmation() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -393,8 +423,7 @@ fn named_attempt_does_not_stamp_default_password_confirmation() {
 /// request would hand out the reauth window that gates passkey enrollment.
 #[test]
 fn attempt_with_wrong_password_does_not_stamp_password_confirmation() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -419,8 +448,7 @@ fn attempt_with_wrong_password_does_not_stamp_password_confirmation() {
 
 #[test]
 fn attempt_with_wrong_password_dispatches_failed_with_user_id() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -444,8 +472,7 @@ fn attempt_with_wrong_password_dispatches_failed_with_user_id() {
 
 #[test]
 fn attempt_with_unknown_user_dispatches_failed_without_user_id() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -468,8 +495,7 @@ fn attempt_with_unknown_user_dispatches_failed_without_user_id() {
 
 #[test]
 fn once_dispatches_attempting_and_authenticated_but_not_login() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -493,8 +519,7 @@ fn once_dispatches_attempting_and_authenticated_but_not_login() {
 
 #[test]
 fn login_then_logout_dispatches_login_and_logout_with_user_id() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -513,8 +538,7 @@ fn login_then_logout_dispatches_login_and_logout_with_user_id() {
 
 #[test]
 fn named_guard_logout_preserves_other_guard() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -550,14 +574,13 @@ fn named_guard_logout_preserves_other_guard() {
 //
 // The Laravel-shaped `Auth::attempt/login/once/login_using_id/logout` facade
 // methods must route through the *default* guard resolved from the container
-// `AuthManager` (registered in SETUP), producing the same events + request
+// `AuthManager` (bound by `in_container`), producing the same events + request
 // state as calling the guard directly. `Auth::id()` reads the request-scoped
 // user, so it doubles as a probe that the facade actually authenticated.
 
 #[test]
 fn facade_attempt_routes_through_default_guard() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -581,8 +604,7 @@ fn facade_attempt_routes_through_default_guard() {
 
 #[test]
 fn facade_attempt_wrong_password_routes_failed() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -601,8 +623,7 @@ fn facade_attempt_wrong_password_routes_failed() {
 
 #[test]
 fn facade_login_using_id_routes_through_default_guard() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -620,8 +641,7 @@ fn facade_login_using_id_routes_through_default_guard() {
 
 #[test]
 fn facade_once_authenticates_without_login_event() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -646,8 +666,7 @@ fn facade_once_authenticates_without_login_event() {
 // the request-state clear that the bare facade previously skipped.
 #[test]
 fn facade_login_then_logout_fires_events_and_clears_request_user() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -675,8 +694,7 @@ fn facade_login_then_logout_fires_events_and_clears_request_user() {
 // Mirrors Laravel's `session()->invalidate()` = `flush()` + `regenerate()`.
 #[test]
 fn facade_logout_and_invalidate_rotates_session_id() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -711,8 +729,7 @@ fn facade_logout_and_invalidate_rotates_session_id() {
 
 #[test]
 fn logout_and_invalidate_clears_named_guard_request_cache() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -867,8 +884,7 @@ async fn drive_middleware_with_session_cookie(
 #[cfg(feature = "testing")]
 #[test]
 fn logout_and_invalidate_destroys_old_session_row() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -937,8 +953,7 @@ fn logout_and_invalidate_destroys_old_session_row() {
 #[cfg(feature = "testing")]
 #[test]
 fn login_destroys_pre_auth_session_row() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
@@ -998,8 +1013,7 @@ fn login_destroys_pre_auth_session_row() {
 // next user's login on the same browser.
 #[test]
 fn facade_logout_clears_both_two_factor_pending_slots() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_container(async {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 

@@ -1,11 +1,12 @@
 //! Documentation catalog builder.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use super::headings::{Heading, slugify_heading};
-use super::markdown::{ContentResult, MarkdownRenderer};
+use super::markdown::{ContentError, ContentResult, MarkdownRenderer};
 
 /// Input and output paths for a documentation build.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,10 +79,25 @@ pub struct DocsSearchEntry {
     pub plain_text: String,
 }
 
+/// The slug of the catalog artifact [`build_docs`] writes beside the
+/// chapters; no chapter may take it.
+const CATALOG_SLUG: &str = "catalog";
+
 /// Build JSON documentation artifacts from a Markdown table of contents.
+///
+/// Each chapter is written to `<slug>.json`, its slug taken from its file
+/// name, so the table of contents is checked before anything is written:
+/// two different files that map to one slug, or a chapter whose slug is
+/// `catalog`, fail the build rather than overwrite each other. One file
+/// listed more than once is one chapter: the catalog keeps an entry per
+/// listing, all alike, and the chapter is rendered once. Its place in the
+/// previous and next chain is its first listing, so every entry for it
+/// agrees with its `<slug>.json` and the chain never leads back to a
+/// chapter it has passed.
 pub async fn build_docs(config: DocsBuildConfig) -> ContentResult<DocsCatalog> {
     let toc = tokio::fs::read_to_string(&config.toc_file).await?;
     let entries = parse_toc_entries(&toc);
+    check_chapter_slugs(&config.source_dir, &entries).await?;
     let renderer = MarkdownRenderer::default();
 
     tokio::fs::create_dir_all(&config.output_dir).await?;
@@ -90,15 +106,38 @@ pub async fn build_docs(config: DocsBuildConfig) -> ContentResult<DocsCatalog> {
     // the catalog and the search index, which are a chapter's summary, are
     // kept for the whole corpus; keeping every chapter's HTML too made the
     // build's peak grow with the manual.
-    let mut catalog_entries = Vec::with_capacity(entries.len());
-    let mut search_entries = Vec::with_capacity(entries.len());
+    let mut catalog_entries: Vec<DocsCatalogEntry> = Vec::with_capacity(entries.len());
+    let mut search_entries: Vec<DocsSearchEntry> = Vec::with_capacity(entries.len());
 
-    for (index, entry) in entries.iter().enumerate() {
-        let previous = index
+    // The reading order: each chapter once, where it is first listed.
+    // Chapters are built in that same order, so the one being built sits
+    // at the position counted by how many were built before it.
+    let mut listed = std::collections::HashSet::with_capacity(entries.len());
+    let reading_order: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry.slug.as_str())
+        .filter(|slug| listed.insert(*slug))
+        .collect();
+    // Where each chapter's catalog and search entries were first pushed.
+    let mut built: HashMap<&str, usize> = HashMap::with_capacity(reading_order.len());
+
+    for entry in &entries {
+        if let Some(&first) = built.get(entry.slug.as_str())
+            && let (Some(catalog), Some(search)) = (
+                catalog_entries.get(first).cloned(),
+                search_entries.get(first).cloned(),
+            )
+        {
+            catalog_entries.push(catalog);
+            search_entries.push(search);
+            continue;
+        }
+        let at = built.len();
+        let previous = at
             .checked_sub(1)
-            .and_then(|previous| entries.get(previous))
-            .map(|entry| entry.slug.clone());
-        let next = entries.get(index + 1).map(|entry| entry.slug.clone());
+            .and_then(|previous| reading_order.get(previous))
+            .map(|&previous| previous.to_owned());
+        let next = reading_order.get(at + 1).map(|&next| next.to_owned());
         let markdown_path = config.source_dir.join(&entry.path);
         let markdown = tokio::fs::read_to_string(markdown_path).await?;
         let rewritten = rewrite_markdown_links(&markdown);
@@ -140,6 +179,7 @@ pub async fn build_docs(config: DocsBuildConfig) -> ContentResult<DocsCatalog> {
             headings: chapter.headings.clone(),
             plain_text: rendered.plain_text,
         });
+        built.insert(entry.slug.as_str(), catalog_entries.len() - 1);
     }
 
     let catalog = DocsCatalog {
@@ -160,6 +200,37 @@ struct TocEntry {
     title: String,
     path: PathBuf,
     slug: String,
+}
+
+/// Refuse a table of contents whose chapters would overwrite each other's
+/// artifacts. Files are compared by their canonical path, so `setup.md`
+/// and `./setup.md` are the same chapter while `guide/setup.md` and
+/// `api/setup.md` are two.
+async fn check_chapter_slugs(source_dir: &Path, entries: &[TocEntry]) -> ContentResult<()> {
+    let mut owners: HashMap<&str, (PathBuf, &TocEntry)> = HashMap::new();
+    for entry in entries {
+        if entry.slug == CATALOG_SLUG {
+            return Err(ContentError::ReservedChapterSlug {
+                slug: entry.slug.clone(),
+                path: entry.path.display().to_string(),
+            });
+        }
+        let file = tokio::fs::canonicalize(source_dir.join(&entry.path)).await?;
+        match owners.get(entry.slug.as_str()) {
+            Some((owner, first)) if *owner != file => {
+                return Err(ContentError::DuplicateChapterSlug {
+                    slug: entry.slug.clone(),
+                    first: first.path.display().to_string(),
+                    second: entry.path.display().to_string(),
+                });
+            }
+            Some(_) => {}
+            None => {
+                owners.insert(entry.slug.as_str(), (file, entry));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_toc_entries(markdown: &str) -> Vec<TocEntry> {

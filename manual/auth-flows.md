@@ -18,8 +18,9 @@ Five surfaces ship under the namespace:
   the installed Magnetar engine.
 - `TwoFactor` is the framework-owned TOTP facade over
   `two_factor_credentials`. It provides enrollment, confirmation, verification,
-  recovery codes, secret rotation, challenge promotion, and timestep replay
-  protection.
+  recovery codes, secret rotation, challenge promotion, timestep replay
+  protection, and a second-factor brute-force counter of its own in
+  `two_factor_attempts`.
 - `remember_me` re-exports the legacy framework remember module for namespace
   compatibility. When Magnetar is installed, normal `Auth` and
   `SessionMiddleware` remember flows use Magnetar credentials instead.
@@ -156,6 +157,31 @@ an atomic first mailbox proof.
 lockout after five failed attempts for 15 minutes, retains audit rows for seven
 days, and fails closed when the lockout backend is unavailable.
 
+The same policy counts the failed codes of Magnetar's own second-factor
+challenge (`Auth::factor()`), but in a table of their own,
+`auth_second_factor_lockouts`, which `default_schema::migrate` creates beside
+`auth_lockouts`. Password sign-in counts against any string it's given as an
+address, and anyone can register any string as one, so a shared table would
+let an address reach a user's second-factor counter. A correct password
+therefore doesn't clear second-factor failures, a failed sign-in can't lock a
+second factor, and wrong codes don't lock password sign-in. The second factor's
+keys aren't addresses, so its locks and unlocks never touch an `app_users` row:
+an account registered under an address equal to a key is never locked or
+unlocked by it. A password reset proves the mailbox, not the second factor, so it
+leaves a second-factor lock in place until the window passes. Confirming an
+enrollment, rotating the secret, and regenerating recovery codes count their
+wrong codes in the same table. Each of these paths reserves its attempt before
+it reads the code, so parallel guesses never get past the limit, and a failure
+the lockout store can't record is returned as an error instead of a wrong code.
+A confirmation confirms only the secret its code was checked against, once, and
+uses the code up: if another request replaces the enrollment in between,
+nothing is confirmed and the caller gets a conflict. A rotation waits beside
+the confirmed secret in `auth_two_factor`'s pending columns, which
+`default_schema::migrate` adds to an existing table. The confirmed secret and
+its recovery codes keep gating sign-in until a code from the new secret
+confirms the rotation, a plain enrollment can't replace a waiting rotation,
+and disabling the factor discards it.
+
 Password reset normalizes an unknown or provider-backed unverified address to
 `Ok(())` only after the abuse-limiter, mail configuration, provider/engine, and
 storage checks succeed. Configuration and storage failures still surface.
@@ -165,7 +191,7 @@ remember-revocation results.
 
 ### Registering the 2FA migrations
 
-The framework ships the schema; your app opts in by listing both
+The framework ships the schema; your app opts in by listing all three
 migrations in its own migrator:
 
 ```rust
@@ -183,15 +209,25 @@ impl MigratorTrait for Migrator {
             Box::new(suprnova::auth_flows::two_factor::migration::Migration),
             // Adds `last_used_timestep` for TOTP replay protection.
             Box::new(suprnova::auth_flows::two_factor::migration_replay::Migration),
+            // Creates `two_factor_attempts`, the second-factor
+            // brute-force counter.
+            Box::new(suprnova::auth_flows::two_factor::migration_attempts::Migration),
+            // Creates `two_factor_rotations`, where a rotation waits for
+            // its new secret to be confirmed.
+            Box::new(suprnova::auth_flows::two_factor::migration_rotation::Migration),
         ]
     }
 }
 ```
 
-Both are idempotent against an already-applied database (the v1 uses
-`CREATE TABLE IF NOT EXISTS`; the v2 is a column add). Re-running
-`suprnova migrate` against a production database that already has the
-schema is a no-op.
+The migrations are idempotent against an already-applied database (the
+v1, the attempt table and the rotation table use `CREATE TABLE IF NOT
+EXISTS`; the v2 is a column add). Re-running `suprnova migrate` against a production database
+that already has the schema is a no-op.
+
+An application that upgrades from a release without the attempt counter
+must add the third migration. Until it runs, every `TwoFactor` proof path
+answers `503`: the attempt cannot be counted, so no code is evaluated.
 
 ### Environment
 
@@ -315,10 +351,44 @@ async fn verify_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
 }
 ```
 
-`verify` checks `Auth::id()` against the token owner before consumption. A
-token belonging to another account returns the same invalid-token response and
-remains unused. On success, the provider marks the authenticated owner verified
-and the facade fires `EmailVerified`.
+`verify` checks the route's user against the token owner before consumption.
+The route's user is the user of the guard the last `AuthMiddleware` checked,
+or of the default guard, and `verify` reads and stamps it through that guard's
+provider; behind `AuthMiddleware::for_guard("admin")` it is the admin user,
+never the default guard's user in the same session. A token belonging to
+another account returns the same invalid-token response and remains unused.
+On success, the provider marks the authenticated owner verified and the facade
+fires `EmailVerified`.
+
+A link proves the mailbox it was sent to, and no other. The token carries a
+digest of that address, and `verify` compares it with the account's current
+verification address, which the provider's `verification_email` reports.
+When the account changed its address after the link was sent, `verify`
+returns the same invalid-token response, leaves the token unused, and marks
+nothing verified. The provider stamps the verification through
+`mark_email_verified_for`, which writes only while the address is still the
+one the link was sent to, so a change that lands while `verify` runs is
+refused too; the token is spent by then, and the user asks for a new link. A
+link sent before an upgrade to this behavior carries no address and is
+refused the same way, so the user asks for a new one.
+
+`EloquentUserProvider` reports the `MustVerifyEmail` address, and rereads it
+under a row lock in the same transaction as the stamp. A custom provider
+reports the email of `flow_user_by_id` unless it implements
+`verification_email`.
+
+A custom provider that does not implement `mark_email_verified_for` leaves a
+window. The default reads the address with `verification_email`, compares it,
+and then calls `mark_email_verified`: two separate storage operations. An
+address change that commits between them is marked verified without proof of
+the new mailbox. To close the window, implement `mark_email_verified_for`
+itself, not `mark_email_verified`, so that the check and the write are one
+storage operation: a conditional write such as
+`UPDATE users SET email_verified_at = ? WHERE id = ? AND email = ?` that
+reports whether it matched a row, or a reread under a row lock
+(`SELECT ... FOR UPDATE`) in the same transaction as the write. It returns
+`Ok(false)`, and writes nothing, when the address is no longer the one it was
+given.
 
 ### Verified-only routes: `EnsureEmailVerifiedMiddleware`
 
@@ -326,6 +396,13 @@ and the facade fires `EmailVerified`.
 user's `email_verified_at`. Compose it after `AuthMiddleware` and the
 chain blocks any request whose user has not yet completed the verify
 step.
+
+The user it checks is the user of the route's guard: the guard the last
+`AuthMiddleware` to pass the request on checked, or the default guard when
+none names one. It asks that guard's provider. Behind
+`AuthMiddleware::new().for_guard("admin")`, the gate checks the admin user
+through the `admin` guard's provider, and a verified default-guard user
+signed in on the same session does not pass it.
 
 The choice between **403 JSON** and **302 HTML redirect** is made at
 route-registration time via the constructor - there is no
@@ -626,8 +703,13 @@ impl TwoFactorUser for AppUser2fa<'_> {
 2FA state lives in the framework-owned `two_factor_credentials` table.
 Secrets and recovery codes are encrypted at rest with
 `crate::crypto::Crypt::encrypt_string`, which requires a process-global
-`EncryptionKey`. Apps opt into the schema by listing both migrations
+`EncryptionKey`. Apps opt into the schema by listing the four migrations
 in their `Migrator::migrations()` - see [Bootstrapping](#bootstrapping).
+The table is keyed by `user_id`, a `TEXT` column on PostgreSQL and SQLite.
+MySQL and MariaDB can't index a `TEXT` key, so there the column is
+`VARCHAR(255)`. The attempt and rotation tables key the user id in 255
+characters on every engine, so `enroll` refuses a longer id with `422` on
+every engine.
 
 ### Enroll, confirm, verify
 
@@ -653,6 +735,49 @@ if !ok {
 }
 ```
 
+Every method that checks a code or a recovery code - `verify`,
+`consume_recovery_code`, `confirm`, `re_enroll`,
+`regenerate_recovery_codes` and `complete_challenge` - reserves one
+attempt in the second-factor counter before it reads the code. A wrong
+code turns the reservation into a failure. Five failures inside fifteen
+minutes (both configurable, see below) lock the second factor: every one
+of those methods then returns
+`429 Too Many Requests` without evaluating the code, so the right code
+cannot open a locked account either. A correct code clears the failures,
+and parallel guesses cannot all pass one status read. When the counter
+cannot record an attempt, the methods answer `503` rather than evaluate
+the code unthrottled.
+
+The counter is the framework's `two_factor_attempts` table, keyed by the
+user id. It is separate from the per-email password lockout that
+`BruteForce` and `LoginThrottleMiddleware` use: a successful password
+check does not clear second-factor failures, and the lock works with no
+Magnetar engine installed. `complete_challenge` is the exception that needs
+the engine: it resolves the pending user, and returns it, through Magnetar. A wrong code fires `AccountLocked` once, on
+the failure that sets the lock. `TwoFactor::unlock(&user)` clears the
+counter early and fires `AccountUnlocked` when a lock was in effect.
+
+Two settings shape the lock:
+
+| Var | Default | Meaning |
+|---|---|---|
+| `TWO_FACTOR_MAX_ATTEMPTS` | `5` | Failures inside the window that lock the second factor. |
+| `TWO_FACTOR_LOCKOUT_MINUTES` | `15` | How long each attempt counts. The window slides: a failure stops counting this long after it happened, so a lock lifts once the oldest failure still counted is this old. |
+
+Both must be whole numbers of at least 1, and the window at most 43200
+minutes (thirty days): a longer window reaches back past the timestamp
+range MySQL and MariaDB store. `Config::init` checks them at boot, so a
+zero, malformed or too-long value stops the app with the variable named.
+To set them in code instead, bind a `TwoFactorLockout`, which wins over the
+environment:
+
+```rust
+use suprnova::App;
+use suprnova::auth_flows::TwoFactorLockout;
+
+App::singleton(TwoFactorLockout::new(3, 30)?);
+```
+
 `enroll` returns plaintext recovery codes **exactly once**. There is
 no API to retrieve them later - the encrypted column is one-way from
 this point on. Show them on the enrollment success page, encourage the
@@ -662,6 +787,61 @@ user to save them, and don't store the plaintext anywhere else.
 `409` to push the caller toward `re_enroll`, which requires proof of
 possession. Re-enrolling on an unconfirmed (pending) row is allowed:
 the prior enrollment never became authoritative.
+
+Both writes are conditional on what was read, so concurrent requests on
+one account cannot cross. `confirm` stamps only the enrollment whose
+secret the code was checked against: if a second `enroll` replaced the
+secret in between, `confirm` returns `409` and the new secret stays
+unconfirmed. A confirmation stamps an enrollment once: a second
+confirmation racing it gets `409` and fires no second `TwoFactorEnrolled`.
+It also uses its code up the way a successful `verify` does, so the code
+that confirmed the enrollment is refused at the next sign-in; the user
+signs in with a later code.
+`enroll` checks that the row is still unconfirmed in the statement that
+writes it, so a confirmation that lands while it runs also gets the `409`.
+
+### One second factor per account
+
+With Magnetar installed, an account holds the framework's TOTP or a Magnetar
+second factor, never both. Each refuses the sign-ins that don't verify it: the
+framework's logins refuse an account with a Magnetar factor, and Magnetar's own
+sign-ins refuse an account with the framework's TOTP. An account with both
+could sign in by no path, so neither system lets the second one in.
+
+- `TwoFactor::enroll` and `TwoFactor::confirm` return `409` while the account
+  has a Magnetar factor, confirmed or waiting for its confirmation. `confirm`
+  checks before it reads the code, so of two enrollments racing each other the
+  second to confirm loses.
+- Magnetar's `TwoFactorService` returns a conflict on
+  `magnetar::two_factor::OTHER_SECOND_FACTOR` from `enroll` and `confirm` while
+  the account has the framework's TOTP, confirmed or pending. `init_magnetar`
+  gives its service that check; a host that builds its own service passes
+  `suprnova::magnetar_integration::engine::FrameworkTotpEnrollment` to
+  `TwoFactorService::with_other_second_factor`.
+- Two enrollments can race, one in each system, each checking before the
+  other writes. So each `enroll` asks again once its own enrollment is
+  stored, and withdraws it with the same `409` or conflict when the other
+  factor is there. Of two enrollments that both stored one, at least one
+  sees the other and withdraws, so the account keeps one, and at worst both
+  answer `409` and the user enrolls again. A Magnetar `TwoFactorStore`
+  withdraws through `withdraw_enrollment`; the default implementation
+  removes nothing, so a host's own store implements it to take part.
+
+An account can still hold both if it enrolled before these checks, or if a
+migration imported a Magnetar factor for an account that has the framework's
+TOTP. Every sign-in path refuses it with `409` until one factor is disabled,
+and disabling either one is the recovery. The user can't sign in to do it, so
+it's an administrator's action:
+
+```rust
+// Disable the framework TOTP. Auth::password() and Magnetar's other
+// sign-ins then ask for the Magnetar factor.
+TwoFactor::disable(&user_2fa).await?;
+```
+
+A host that holds its `TwoFactorService` can disable the Magnetar factor
+instead. The account then signs in through the application's login and
+`TwoFactor::complete_challenge`.
 
 ### Replay protection
 
@@ -674,13 +854,14 @@ window.
 The timestep claim is atomic. The stamp lands via a conditional
 `UPDATE … WHERE last_used_timestep IS NULL OR last_used_timestep <
 :current`, and the verify only succeeds when the statement affects
-exactly one row. Two concurrent verifies in the same timestep cannot
-both win: the first flips the column, the second's predicate no
-longer matches, and the second is treated as a replay. A plain
+exactly one row. Two concurrent verifies cannot both win, even when
+they straddle a 30-second boundary: the first flips the column, the
+second's predicate no longer matches, and the second is treated as a
+replay. A plain
 read-modify-write would be a TOCTOU race - both verifies read the
 pre-stamp row, both validate the same code, both stamp, both succeed.
 Concurrent racers are also counted as failed attempts so the
-brute-force counter records them.
+second-factor counter records them.
 
 ### Recovery codes
 
@@ -721,7 +902,7 @@ re-pairing. Errors:
 - `400` - no confirmed enrollment exists; call `enroll`/`confirm` first.
 - `401` - `proof` validates as neither a TOTP code nor an unused
   recovery code.
-- `429` - the account is locked by brute-force throttling.
+- `429` - wrong codes have locked the second factor.
 
 To rotate the **secret** (re-pair to a new device) without disabling
 2FA first:
@@ -730,10 +911,13 @@ To rotate the **secret** (re-pair to a new device) without disabling
 let response = TwoFactor::re_enroll(&user_2fa, &proof).await?;
 ```
 
-Same proof model as `regenerate_recovery_codes`. The row is rewritten
-with a fresh secret + 10 fresh recovery codes; `confirmed_at` resets to
-NULL so the user must `confirm` with a code from the new authenticator
-before 2FA is active again.
+Same proof model as `regenerate_recovery_codes`. A fresh secret + 10
+fresh recovery codes wait as a pending rotation in `two_factor_rotations`
+until the user calls `confirm` with a code from the new authenticator.
+Until then the confirmed secret and its recovery codes keep gating
+sign-in, so a rotation nobody finishes never turns 2FA off, and `enroll`,
+which takes no proof, can't replace the pending secret. Confirming the
+rotation swaps in the new secret and recovery codes in one transaction.
 
 ### Disable
 
@@ -814,7 +998,9 @@ they log in - after the rotation, the planted id is dead and only the
 freshly-generated id carries the authenticated state. The contract
 matches `Auth::login_id` / `Auth::login_using_id`, so 2FA logins are
 indistinguishable from no-2FA logins in terms of session state and
-listener observability.
+listener observability. With the Magnetar engine installed, the promoted
+login is backed by a Magnetar session like every other web login - see
+[Framework logins under the engine](authentication.md#framework-logins-under-the-engine).
 
 Gate every protected route group with `TwoFactorChallengeMiddleware`
 **before** `AuthMiddleware` so a pending session is bounced to the
@@ -847,25 +1033,22 @@ path first and falls back to consuming a recovery code, so a user who
 lost their authenticator can still get in. Each recovery code is
 single-use.
 
-**Brute-force linkage.** Failed challenge codes feed the per-account
-brute-force counter through `BruteForce::record_failed_attempt`, the
-same way bare `TwoFactor::verify` does. An attacker grinding the
-challenge form will trip `AccountLocked` after the configured
-threshold. A single bad submission counts as **one** failed attempt
-even though `complete_challenge` tries both the TOTP and recovery-code
-paths internally - the silent-validation cores skip the brute-force
-counter so the outer layer records the canonical attempt exactly once.
+**Brute-force linkage.** Failed challenge codes feed the second-factor
+counter, the same one bare `TwoFactor::verify` uses. An attacker
+grinding the challenge form trips `AccountLocked` after the configured
+number of failures (`TWO_FACTOR_MAX_ATTEMPTS`, default 5).
+A single bad submission counts as **one** failed attempt even though
+`complete_challenge` tries both the TOTP and recovery-code forms. Signing
+in with the password again does not clear the count.
 
-**Lockout gate.** `complete_challenge` checks `BruteForce::is_locked`
-up front and returns `429 Too Many Requests` if the account is
-already locked - even when the submitted code is correct. Without
-this in-method gate an attacker who tripped the lockout could still
-get in by submitting the right code on the next request: the
-brute-force counter is keyed on the user's email but `verify` itself
-doesn't consult it. The password path's `LoginThrottleMiddleware`
-enforces the same constraint at the route layer; composing it in
-front of the challenge POST route is fine - both gates are
-idempotent.
+**Lockout gate.** `complete_challenge` reserves its attempt up front
+and returns `429 Too Many Requests` if the account is already locked -
+even when the submitted code is correct. Without this in-method gate an
+attacker who tripped the lockout could still get in by submitting the
+right code on the next request. Every other code-checking method applies
+the same gate. `LoginThrottleMiddleware` guards the password path with
+the separate password lockout; composing it in front of the challenge
+POST route is fine.
 
 **Failure event.** `complete_challenge` dispatches
 `TwoFactorChallengeFailed { user_id }` on a bad code (or a locked

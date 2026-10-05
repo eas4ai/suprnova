@@ -20,11 +20,13 @@
 //!    don't re-query the provider - closing a divergence where the old
 //!    `Auth::user()` re-queried on every call). `current_user_id` feeds
 //!    `Auth::id()` so the static facade sees `once`/`set_user`.
-//! 2. **Bearer provenance** - the bearer-authenticated id and optional
-//!    resolved user. `BearerTokenMiddleware` sets the id after validating a
-//!    token; `TokenGuard` resolves and caches the full user lazily. Both
-//!    setters mirror into the generic slots so token-only `Auth::id()` and
-//!    `AuthMiddleware` behavior stays unchanged.
+//! 2. **Bearer provenance** - the bearer-authenticated id, and the user
+//!    each token guard resolved from it, keyed by guard name.
+//!    `BearerTokenMiddleware` sets the id after validating a token; each
+//!    `TokenGuard` resolves and caches its own user lazily, through its own
+//!    provider. The id mirrors into the generic slots so token-only
+//!    `Auth::id()` and `AuthMiddleware` behavior stays unchanged; a resolved
+//!    user mirrors only for the default guard.
 //! 3. **Via-remember flag** - whether the current user was
 //!    re-authenticated from a remember-me cookie *this request* (set by
 //!    `SessionMiddleware`'s hydration path) rather than from an active
@@ -36,6 +38,14 @@
 //! Session guard identities and remember provenance are keyed by the complete
 //! guard name. The generic slots remain the compatibility view used by
 //! [`crate::Auth`] and are mirrored only from the configured default guard.
+//!
+//! An identity read through a named guard is recorded for the render cache
+//! as that guard's principal (see `Auth::guard_principal`): the bare
+//! principal of the id for the default guard (see `Auth::bare_principal`),
+//! `<guard>:<id>` for any other. The render cache keys a page by the default
+//! guard's principal, so a page built from another guard's user never
+//! matches that key and is never stored under it. The default guard's own
+//! reads record its bare principal too, through `observe_default_identity`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -70,8 +80,9 @@ struct AuthRequestState {
     /// resolves and caches the full user lazily, so this slot exists to
     /// carry the id until something actually needs the user.
     current_user_id: Option<String>,
-    /// The user resolved specifically from bearer-token provenance.
-    bearer_user: Option<Arc<dyn Authenticatable>>,
+    /// Users the token guards resolved from the bearer id, keyed by
+    /// complete guard name. Each token guard reads only its own entry.
+    bearer_users: HashMap<String, Arc<dyn Authenticatable>>,
     /// The identifier validated by bearer-token middleware.
     bearer_user_id: Option<String>,
     /// Whether the current user came from a remember-me cookie this
@@ -156,13 +167,36 @@ pub(crate) fn set_current_user(user: Arc<dyn Authenticatable>) {
 pub(crate) fn current_user() -> Option<Arc<dyn Authenticatable>> {
     let user = read_state(|state| state.current_user.clone()).flatten();
     if let Some(user) = &user {
-        crate::render_cache::collector::observe_principal_value(&user.get_auth_identifier());
+        observe_default_identity(&user.get_auth_identifier());
     }
     user
 }
 
+/// Records `id`, the request's generic user, which belongs to the default
+/// guard, as that guard's principal: its bare principal, the value the
+/// render-cache key is built from. Costs nothing outside a render-cache
+/// collector scope.
+pub(crate) fn observe_default_identity(id: &str) {
+    if crate::render_cache::collector::is_active() {
+        crate::render_cache::collector::observe_principal_value(
+            &super::guard::Auth::bare_principal(id),
+        );
+    }
+}
+
 fn is_default_guard(guard: &str) -> bool {
     guard == super::guard::Auth::default_guard_name()
+}
+
+/// Records `id`, read through the guard `guard_name`, as that guard's
+/// principal: the bare id for the default guard, `<guard>:<id>` for any
+/// other. Costs nothing outside a render-cache collector scope.
+fn observe_guard_identity(guard_name: &str, id: &str) {
+    if crate::render_cache::collector::is_active() {
+        crate::render_cache::collector::observe_principal_value(
+            &super::guard::Auth::guard_principal(guard_name, id),
+        );
+    }
 }
 
 /// Cache a user for one named session guard.
@@ -188,7 +222,7 @@ pub(crate) fn set_guard_user(guard_name: &str, user: Arc<dyn Authenticatable>) {
 pub(crate) fn guard_user(guard_name: &str) -> Option<Arc<dyn Authenticatable>> {
     let user = read_state(|state| state.guard_users.get(guard_name).cloned()).flatten();
     if let Some(user) = &user {
-        crate::render_cache::collector::observe_principal_value(&user.get_auth_identifier());
+        observe_guard_identity(guard_name, &user.get_auth_identifier());
     }
     user
 }
@@ -233,7 +267,7 @@ pub(crate) fn guard_user_id(guard_name: &str) -> Option<String> {
     })
     .flatten();
     if let Some(id) = &id {
-        crate::render_cache::collector::observe_principal_value(id);
+        observe_guard_identity(guard_name, id);
     }
     id
 }
@@ -249,13 +283,14 @@ pub(crate) fn clear_guard_user(guard_name: &str) {
         state.guard_users.remove(guard_name);
         state.guard_user_ids.remove(guard_name);
         state.remembered_guards.remove(guard_name);
+        state.bearer_users.remove(guard_name);
         if let Some(user) = state.request_guard_users.get_mut(guard_name) {
             *user = None;
         }
         if clear_generic {
             state.current_user = None;
             state.current_user_id = None;
-            state.bearer_user = None;
+            state.bearer_users.clear();
             state.bearer_user_id = None;
             state.via_remember = false;
             forget_request_guard_users(&mut state);
@@ -298,7 +333,7 @@ pub(crate) fn request_guard_user(guard_name: &str) -> Option<Arc<dyn Authenticat
     let binding = read_state(|state| state.request_guard_users.get(guard_name).cloned());
     let user = binding.flatten().flatten();
     if let Some(user) = &user {
-        crate::render_cache::collector::observe_principal_value(&user.get_auth_identifier());
+        observe_guard_identity(guard_name, &user.get_auth_identifier());
     }
     user
 }
@@ -356,7 +391,7 @@ pub(crate) fn has_guard_user(guard_name: &str) -> bool {
     })
     .unwrap_or((false, None));
     if let Some(id) = &material {
-        crate::render_cache::collector::observe_principal_value(id);
+        observe_guard_identity(guard_name, id);
     }
     has
 }
@@ -393,7 +428,7 @@ pub(crate) fn guard_via_remember(guard_name: &str) -> bool {
     })
     .unwrap_or((false, None));
     if let Some(id) = &material {
-        crate::render_cache::collector::observe_principal_value(id);
+        observe_guard_identity(guard_name, id);
     }
     remembered
 }
@@ -453,7 +488,7 @@ pub(crate) fn verified_active_remember_carrier_for_guard(
     })
     .flatten();
     if let Some((owner, _)) = &result {
-        crate::render_cache::collector::observe_principal_value(owner);
+        observe_guard_identity(guard_name, owner);
     }
     result
 }
@@ -480,8 +515,8 @@ pub(crate) fn active_remember_carrier() -> Option<(String, String)> {
         (result, material)
     })
     .unwrap_or((None, None));
-    if let Some(id) = &material {
-        crate::render_cache::collector::observe_principal_value(id);
+    if let (Some((guard, _)), Some(id)) = (&result, &material) {
+        observe_guard_identity(guard, id);
     }
     result
 }
@@ -508,7 +543,7 @@ pub(crate) fn active_remember_selector_for_guard(guard_name: &str) -> Option<Str
     })
     .unwrap_or((None, None));
     if let Some(id) = &material {
-        crate::render_cache::collector::observe_principal_value(id);
+        observe_guard_identity(guard_name, id);
     }
     result
 }
@@ -545,7 +580,7 @@ pub(crate) fn take_active_remember_carrier(guard_name: &str, selector: &str) -> 
         })
         .unwrap_or((false, None));
     if let Some(id) = &material {
-        crate::render_cache::collector::observe_principal_value(id);
+        observe_guard_identity(guard_name, id);
     }
     matches
 }
@@ -597,68 +632,90 @@ pub(crate) fn set_bearer_user_id(id: impl Into<String>) {
     let _ = AUTH_STATE.try_with(|state| {
         let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
         if guard.bearer_user_id.as_deref() != Some(id.as_str()) {
-            let current_user_is_bearer = match (&guard.current_user, &guard.bearer_user) {
-                (Some(current_user), Some(bearer_user)) => Arc::ptr_eq(current_user, bearer_user),
-                _ => false,
-            };
-            if current_user_is_bearer {
-                guard.current_user = None;
-            }
-            guard.bearer_user = None;
+            forget_bearer_users(&mut guard);
         }
         guard.bearer_user_id = Some(id.clone());
         guard.current_user_id = Some(id);
     });
 }
 
-/// The identifier validated from a bearer token, if any.
-pub(crate) fn bearer_user_id() -> Option<String> {
+/// Forget every user the token guards resolved from the previous bearer id,
+/// and the generic user when it is one of them.
+fn forget_bearer_users(state: &mut AuthRequestState) {
+    let current_user_is_bearer = state.current_user.as_ref().is_some_and(|current_user| {
+        state
+            .bearer_users
+            .values()
+            .any(|bearer_user| Arc::ptr_eq(current_user, bearer_user))
+    });
+    if current_user_is_bearer {
+        state.current_user = None;
+    }
+    state.bearer_users.clear();
+}
+
+/// The identifier validated from a bearer token, as the token guard
+/// `guard_name` reads it.
+pub(crate) fn bearer_user_id(guard_name: &str) -> Option<String> {
     let id = read_state(|state| state.bearer_user_id.clone()).flatten();
     if let Some(id) = &id {
-        crate::render_cache::collector::observe_principal_value(id);
+        observe_guard_identity(guard_name, id);
     }
     id
 }
 
-/// Cache a user resolved specifically through bearer authentication.
+/// Cache a user that the token guard `guard_name` resolved.
 ///
-/// The generic mirrors preserve token-only [`crate::Auth`] facade behavior
-/// without allowing generic web identity to flow back into `TokenGuard`.
-pub(crate) fn set_bearer_user(user: Arc<dyn Authenticatable>) {
+/// The user's id becomes the bearer id; a different id first forgets every
+/// token guard's user, as [`set_bearer_user_id`] does. The id mirrors into
+/// the generic slot as the middleware's id does, and the user itself
+/// mirrors only for the configured default guard, as a session guard's
+/// user does. A generic web identity never flows back into a `TokenGuard`.
+pub(crate) fn set_bearer_user(guard_name: &str, user: Arc<dyn Authenticatable>) {
     let id = user.get_auth_identifier();
+    let mirror_generic = is_default_guard(guard_name);
     let _ = AUTH_STATE.try_with(|state| {
         let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
-        guard.current_user = Some(user.clone());
-        guard.current_user_id = Some(id.clone());
-        guard.bearer_user = Some(user);
-        guard.bearer_user_id = Some(id);
+        if guard.bearer_user_id.as_deref() != Some(id.as_str()) {
+            forget_bearer_users(&mut guard);
+        }
+        guard
+            .bearer_users
+            .insert(guard_name.to_owned(), user.clone());
+        guard.bearer_user_id = Some(id.clone());
+        guard.current_user_id = Some(id);
+        if mirror_generic {
+            guard.current_user = Some(user);
+        }
     });
 }
 
-/// The user resolved specifically through bearer authentication, if any.
-pub(crate) fn bearer_user() -> Option<Arc<dyn Authenticatable>> {
-    let user = read_state(|state| state.bearer_user.clone()).flatten();
+/// The user the token guard `guard_name` resolved, if any. Another token
+/// guard's user never answers for it.
+pub(crate) fn bearer_user(guard_name: &str) -> Option<Arc<dyn Authenticatable>> {
+    let user = read_state(|state| state.bearer_users.get(guard_name).cloned()).flatten();
     if let Some(user) = &user {
-        crate::render_cache::collector::observe_principal_value(&user.get_auth_identifier());
+        observe_guard_identity(guard_name, &user.get_auth_identifier());
     }
     user
 }
 
-/// Whether a bearer user has already been resolved for this request.
+/// Whether the token guard `guard_name` already resolved its user for this
+/// request.
 ///
 /// Fix round 6: also records the resolved id as principal material when
 /// one is present, the same reasoning as `has_guard_user`.
-pub(crate) fn has_bearer_user() -> bool {
+pub(crate) fn has_bearer_user(guard_name: &str) -> bool {
     let (has, material) = read_state(|state| {
         let id = state
-            .bearer_user
-            .as_ref()
+            .bearer_users
+            .get(guard_name)
             .map(|user| user.get_auth_identifier());
         (id.is_some(), id)
     })
     .unwrap_or((false, None));
     if let Some(id) = &material {
-        crate::render_cache::collector::observe_principal_value(id);
+        observe_guard_identity(guard_name, id);
     }
     has
 }
@@ -678,7 +735,7 @@ pub(crate) fn current_user_id() -> Option<String> {
     })
     .flatten();
     if let Some(id) = &id {
-        crate::render_cache::collector::observe_principal_value(id);
+        observe_default_identity(id);
     }
     id
 }
@@ -692,7 +749,7 @@ pub(crate) fn clear_current_user() {
         let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
         guard.current_user = None;
         guard.current_user_id = None;
-        guard.bearer_user = None;
+        guard.bearer_users.clear();
         guard.bearer_user_id = None;
         forget_request_guard_users(&mut guard);
     });
@@ -713,7 +770,7 @@ pub(crate) fn has_current_user() -> bool {
     })
     .unwrap_or((false, None));
     if let Some(id) = &material {
-        crate::render_cache::collector::observe_principal_value(id);
+        observe_default_identity(id);
     }
     has
 }
@@ -734,7 +791,7 @@ pub(crate) fn via_remember() -> bool {
     })
     .unwrap_or((false, None));
     if let Some(id) = &material {
-        crate::render_cache::collector::observe_principal_value(id);
+        observe_default_identity(id);
     }
     via
 }
@@ -815,11 +872,11 @@ mod tests {
     async fn set_bearer_user_id_mirrors_into_generic_identity() {
         request_state_scope_for_test(async {
             assert_eq!(current_user_id(), None);
-            assert_eq!(bearer_user_id(), None);
+            assert_eq!(bearer_user_id("web"), None);
 
             set_bearer_user_id("usr_only_id");
             assert_eq!(current_user_id(), Some("usr_only_id".to_string()));
-            assert_eq!(bearer_user_id(), Some("usr_only_id".to_string()));
+            assert_eq!(bearer_user_id("web"), Some("usr_only_id".to_string()));
         })
         .await;
     }
@@ -827,19 +884,38 @@ mod tests {
     #[tokio::test]
     async fn set_bearer_user_mirrors_user_and_identifier() {
         request_state_scope_for_test(async {
-            set_bearer_user(Arc::new(TestUser {
-                id: "bearer-7".into(),
-            }));
+            set_bearer_user(
+                "web",
+                Arc::new(TestUser {
+                    id: "bearer-7".into(),
+                }),
+            );
 
             assert_eq!(current_user_id(), Some("bearer-7".to_string()));
-            assert_eq!(bearer_user_id(), Some("bearer-7".to_string()));
+            assert_eq!(bearer_user_id("web"), Some("bearer-7".to_string()));
             assert_eq!(
-                bearer_user()
+                bearer_user("web")
                     .expect("bearer user is cached")
                     .get_auth_identifier(),
                 "bearer-7"
             );
-            assert!(has_bearer_user());
+            assert!(has_bearer_user("web"));
+            assert!(has_current_user());
+
+            // Another token guard shares the id, not the user, and a
+            // guard other than the default leaves the generic user alone.
+            assert!(bearer_user("admin_api").is_none());
+            clear_current_user();
+            set_bearer_user(
+                "admin_api",
+                Arc::new(TestUser {
+                    id: "bearer-7".into(),
+                }),
+            );
+            assert!(bearer_user("web").is_none());
+            assert!(bearer_user("admin_api").is_some());
+            assert!(!has_current_user());
+            assert_eq!(current_user_id(), Some("bearer-7".to_string()));
         })
         .await;
     }
@@ -866,21 +942,24 @@ mod tests {
     #[tokio::test]
     async fn clear_current_user_clears_bearer_provenance() {
         request_state_scope_for_test(async {
-            set_bearer_user(Arc::new(TestUser {
-                id: "usr_to_clear".into(),
-            }));
+            set_bearer_user(
+                "web",
+                Arc::new(TestUser {
+                    id: "usr_to_clear".into(),
+                }),
+            );
             assert_eq!(current_user_id(), Some("usr_to_clear".to_string()));
-            assert_eq!(bearer_user_id(), Some("usr_to_clear".to_string()));
-            assert!(has_bearer_user());
+            assert_eq!(bearer_user_id("web"), Some("usr_to_clear".to_string()));
+            assert!(has_bearer_user("web"));
 
             clear_current_user();
 
             // Logout must not leave either the generic mirrors or the
             // bearer-specific provenance authenticated.
             assert_eq!(current_user_id(), None);
-            assert_eq!(bearer_user_id(), None);
-            assert!(bearer_user().is_none());
-            assert!(!has_bearer_user());
+            assert_eq!(bearer_user_id("web"), None);
+            assert!(bearer_user("web").is_none());
+            assert!(!has_bearer_user("web"));
         })
         .await;
     }
@@ -949,17 +1028,17 @@ mod tests {
         // setters silently no-op rather than panic.
         assert!(current_user().is_none());
         assert_eq!(current_user_id(), None);
-        assert!(bearer_user().is_none());
-        assert_eq!(bearer_user_id(), None);
+        assert!(bearer_user("web").is_none());
+        assert_eq!(bearer_user_id("web"), None);
         assert!(!has_current_user());
-        assert!(!has_bearer_user());
+        assert!(!has_bearer_user("web"));
         assert!(!via_remember());
         set_current_user(Arc::new(TestUser { id: "1".into() }));
-        set_bearer_user(Arc::new(TestUser { id: "2".into() }));
+        set_bearer_user("web", Arc::new(TestUser { id: "2".into() }));
         set_bearer_user_id("3");
         set_guard_via_remember("web", true);
         assert!(current_user().is_none());
-        assert!(bearer_user().is_none());
+        assert!(bearer_user("web").is_none());
         assert!(!via_remember());
     }
 }

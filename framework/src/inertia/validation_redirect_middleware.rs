@@ -129,8 +129,9 @@ fn back_target(referer: Option<&str>, host: Option<&str>, current: &str) -> Stri
 /// a path already rooted at `/` and clear of any leading `//` or `/\` or
 /// ASCII control byte (see [`root_relative_or_none`] for what that
 /// guards against), and an absolute URL whose authority equals the
-/// request's `Host` and which itself carries no control byte. Everything
-/// else falls through.
+/// request's `Host`, which itself carries no control byte, and whose
+/// path and query pass the same root-relative guard. Everything else
+/// falls through.
 fn same_origin_path(referer: &str, host: Option<&str>) -> Option<String> {
     let referer = referer.trim();
     if referer.starts_with('/') {
@@ -144,13 +145,15 @@ fn same_origin_path(referer: &str, host: Option<&str>) -> Option<String> {
         return None;
     }
     let path = uri.path();
-    if !path.starts_with('/') {
-        return None;
-    }
-    Some(match uri.query() {
+    let target = match uri.query() {
         Some(q) if !q.is_empty() => format!("{path}?{q}"),
         _ => path.to_string(),
-    })
+    };
+    // The extracted path becomes the whole `Location`, without the
+    // authority that made it safe. `https://app.test//evil.test/x` is
+    // same-host, but its path `//evil.test/x` is a network-path reference
+    // a browser follows to `evil.test`.
+    root_relative_or_none(&target)
 }
 
 /// Pull a populated `errors` object out of a `422` body.
@@ -193,6 +196,30 @@ mod tests {
         // a browser normalizes this to `//evil.test` before navigating.
         assert_eq!(same_origin_path("/\\evil.test", Some("app.test")), None);
         assert_eq!(same_origin_path("   ", Some("app.test")), None);
+    }
+
+    /// The absolute-URL branch extracts the path, and that path lands in
+    /// `Location` on its own. A same-host Referer whose path starts with
+    /// `//` or `/\` became a network-path redirect to another host.
+    #[test]
+    fn an_absolute_same_host_referer_cannot_carry_a_network_path() {
+        assert_eq!(
+            same_origin_path("https://app.test//evil.test/x", Some("app.test")),
+            None
+        );
+        assert_eq!(
+            same_origin_path("https://app.test//evil.test/x?y=1", Some("app.test")),
+            None
+        );
+        assert_eq!(
+            same_origin_path("https://app.test/\\evil.test/x", Some("app.test")),
+            None
+        );
+        // An ordinary same-host path still survives.
+        assert_eq!(
+            same_origin_path("https://app.test/a//b", Some("app.test")),
+            Some("/a//b".to_string())
+        );
     }
 
     #[test]

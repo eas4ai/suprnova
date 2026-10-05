@@ -118,6 +118,7 @@ struct ControlledProvider {
     failures: Mutex<HashMap<UploadHandle, usize>>,
     removed: Mutex<HashSet<UploadHandle>>,
     calls: Mutex<Vec<UploadHandle>>,
+    retired: Mutex<Vec<UploadHandle>>,
     advance_clock: Mutex<HashMap<UploadHandle, (Arc<ControlledClock>, UnixMillis)>>,
     active: AtomicUsize,
     max_active: AtomicUsize,
@@ -135,6 +136,13 @@ impl ControlledProvider {
 
     fn calls_for(&self, upload: &UploadHandle) -> usize {
         lock(&self.calls)
+            .iter()
+            .filter(|candidate| *candidate == upload)
+            .count()
+    }
+
+    fn retired_for(&self, upload: &UploadHandle) -> usize {
+        lock(&self.retired)
             .iter()
             .filter(|candidate| *candidate == upload)
             .count()
@@ -208,6 +216,18 @@ impl UploadProvider for ControlledProvider {
                 clock.set(now);
             }
             self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+
+    /// Records the retirement and keeps the bytes, as a provider must when
+    /// finalization may have committed them as durable output.
+    fn retire_after_finalization<'a>(
+        &'a self,
+        upload: &'a UploadHandle,
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        Box::pin(async move {
+            lock(&self.retired).push(upload.clone());
             Ok(())
         })
     }
@@ -330,27 +350,109 @@ async fn expired_active_states_are_claimed_atomically_and_reclaimed_without_brow
     }
 }
 
+/// ROOT-16: a `Finalizing` record whose finalization failed or stalled, and a
+/// `Finalized` record, are kept until the upload expires. From then on no
+/// transition can be admitted for them, so cleanup reclaims both, and
+/// retires their provider bytes instead of deleting them.
 #[tokio::test]
-async fn cleanup_never_claims_finalizing_or_finalized_records() {
+async fn finalizing_and_finalized_records_are_retired_once_they_expire() {
     let fixture = fixture(policy(8, 64 * MIB, 3));
     fixture
         .ledger
-        .seed(record(0, UploadState::Finalizing, 8, 1_900))
+        .seed(record(0, UploadState::Finalizing, 8, 2_500))
         .expect("seed finalizing");
     fixture
         .ledger
-        .seed(record(1, UploadState::Finalized, 9, 1_900))
+        .seed(record(1, UploadState::Finalized, 9, 2_500))
         .expect("seed finalized");
+
+    let before = fixture
+        .service
+        .run_once(lease("before-expiry"))
+        .await
+        .expect("cleanup run before expiry");
+    assert_eq!(before.disposition(), CleanupDisposition::Idle);
+    for index in 0..2 {
+        assert!(
+            fixture
+                .ledger
+                .load(&handle(index))
+                .await
+                .expect("load")
+                .is_some(),
+            "a record inside its window is kept"
+        );
+    }
+
+    fixture.clock.set(UnixMillis::new(2_500));
+    let outcome = fixture
+        .service
+        .run_once(lease("at-expiry"))
+        .await
+        .expect("cleanup run at expiry");
+
+    assert_eq!(outcome.disposition(), CleanupDisposition::Complete);
+    assert_eq!(outcome.claimed(), 2);
+    assert_eq!(outcome.reclaimed(), 2);
+    for index in 0..2 {
+        let upload = handle(index);
+        assert!(fixture.ledger.load(&upload).await.expect("load").is_none());
+        assert!(fixture.evidence.removed(&upload));
+        assert_eq!(
+            fixture.provider.calls_for(&upload),
+            0,
+            "cleanup never deletes bytes finalization may have committed"
+        );
+        assert_eq!(fixture.provider.retired_for(&upload), 1);
+    }
+}
+
+/// ROOT-16: a record that failed after entering `Finalizing` keeps that
+/// history, so cleanup retires its bytes rather than deleting them.
+#[tokio::test]
+async fn a_record_that_failed_while_finalizing_is_retired_not_deleted() {
+    let fixture = fixture(policy(8, 64 * MIB, 3));
+    fixture
+        .ledger
+        .seed(record(0, UploadState::Ready, 7, 5_000))
+        .expect("seed ready");
+    for (revision, key, transition) in [
+        (7, "begin-finalize", UploadTransition::BeginFinalize),
+        (8, "fail-finalize", UploadTransition::Fail),
+    ] {
+        fixture
+            .ledger
+            .transition(ConditionalTransition::new(
+                authority(0),
+                UploadTransitionRequest::new(
+                    handle(0),
+                    UploadRevision::new(revision),
+                    UploadIdempotencyKey::parse(key).expect("idempotency"),
+                    transition,
+                ),
+                UnixMillis::new(2_000),
+            ))
+            .await
+            .expect("finalization transition");
+    }
 
     let outcome = fixture
         .service
-        .run_once(lease("skip-finalized"))
+        .run_once(lease("failed-finalize"))
         .await
         .expect("cleanup run");
 
-    assert_eq!(outcome.disposition(), CleanupDisposition::Idle);
+    assert_eq!(outcome.reclaimed(), 1);
+    assert!(
+        fixture
+            .ledger
+            .load(&handle(0))
+            .await
+            .expect("load")
+            .is_none()
+    );
     assert_eq!(fixture.provider.calls_for(&handle(0)), 0);
-    assert_eq!(fixture.provider.calls_for(&handle(1)), 0);
+    assert_eq!(fixture.provider.retired_for(&handle(0)), 1);
 }
 
 #[tokio::test]
@@ -378,10 +480,14 @@ async fn cleanup_cannot_delete_a_committed_finalize() {
     let stored = fixture.ledger.load(&handle(0)).await.expect("load");
 
     if finalized.is_ok() {
-        let stored = stored.expect("finalizing record remains authoritative");
-        assert_eq!(stored.state(), UploadState::Finalizing);
-        assert_eq!(cleaned.disposition(), CleanupDisposition::Idle);
+        // The upload expired with its finalization still open, so no commit
+        // can follow: cleanup reclaims the record and retires the bytes,
+        // never deleting what the finalizer may have committed.
+        assert!(stored.is_none());
+        assert_eq!(cleaned.disposition(), CleanupDisposition::Complete);
         assert!(!fixture.provider.removed(&handle(0)));
+        assert_eq!(fixture.provider.calls_for(&handle(0)), 0);
+        assert_eq!(fixture.provider.retired_for(&handle(0)), 1);
     } else {
         assert!(stored.is_none());
         assert_eq!(cleaned.disposition(), CleanupDisposition::Complete);

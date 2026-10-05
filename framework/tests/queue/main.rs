@@ -27,6 +27,7 @@ pub mod fake_parity;
 pub mod fault_injection;
 pub mod inspection_api;
 pub mod introspection;
+pub mod lifecycle;
 pub mod memory;
 pub mod middleware_pipeline;
 #[path = "../support/own_process.rs"]
@@ -35,6 +36,8 @@ pub mod panic_isolation;
 pub mod pause;
 pub mod reclaim_attempts;
 pub mod redis;
+#[path = "../support/redis_server.rs"]
+mod redis_server;
 pub mod restart;
 pub mod retry;
 pub mod routing;

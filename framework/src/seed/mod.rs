@@ -198,13 +198,18 @@ pub async fn run_one(name: &str) -> Result<(), FrameworkError> {
 /// matches the "treat poison as empty" pattern used by the
 /// registration path.
 pub fn count() -> usize {
-    match lock::read(&REGISTRY, "seeder registry") {
-        Ok(g) => g.as_ref().map(|m| m.len()).unwrap_or(0),
-        Err(_) => {
-            tracing::error!("Seeder registry lock poisoned; reporting count=0.");
-            0
-        }
-    }
+    try_count().unwrap_or_else(|_| {
+        tracing::error!("Seeder registry lock poisoned; reporting count=0.");
+        0
+    })
+}
+
+/// [`count`], with a poisoned registry as the error it is. `db:seed`
+/// decides on this whether there is anything to run, and a registry it
+/// cannot read is not an empty one.
+pub(crate) fn try_count() -> Result<usize, FrameworkError> {
+    let g = lock::read(&REGISTRY, "seeder registry")?;
+    Ok(g.as_ref().map(|m| m.len()).unwrap_or(0))
 }
 
 /// Whether a seeder with the given name is registered.
@@ -322,5 +327,41 @@ pub(crate) fn events_muted() -> bool {
 pub fn clear() {
     if let Ok(mut g) = lock::write(&REGISTRY, "seeder registry") {
         *g = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Clears the poison the test below puts on the registry, whether the
+    /// test passes or not, so the tests that run after it see a usable one.
+    struct ClearPoison;
+
+    impl Drop for ClearPoison {
+        fn drop(&mut self) {
+            REGISTRY.clear_poison();
+        }
+    }
+
+    /// A bare `db:seed` against a registry it cannot read fails. It used to
+    /// read the poisoned registry as empty and report "nothing to run".
+    #[tokio::test]
+    async fn db_seed_reports_a_poisoned_registry_instead_of_nothing_to_run() {
+        let _clear = ClearPoison;
+        let poisoner = std::thread::spawn(|| {
+            let _held = REGISTRY.write();
+            panic!("poison the seeder registry on purpose");
+        });
+        assert!(poisoner.join().is_err(), "the registry is poisoned");
+
+        let argv = vec!["console".to_string(), "db:seed".to_string()];
+        let err = crate::console::dispatch_argv(argv)
+            .await
+            .expect_err("a registry that cannot be read must fail the command");
+        assert!(
+            err.to_string().contains("seeder registry lock poisoned"),
+            "got: {err}"
+        );
     }
 }

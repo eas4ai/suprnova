@@ -392,7 +392,7 @@ impl MagnetarPasswordAuthEngine for PasswordEngine {
     async fn password_register(
         &self,
         _: magnetar::plugins::password::RegisterInput,
-    ) -> magnetar::Result<User> {
+    ) -> magnetar::Result<suprnova::Registration> {
         FactorEngine::unsupported()
     }
 
@@ -1256,6 +1256,14 @@ fn encrypted_remember_carrier(credential: &str) -> String {
 
 #[tokio::test]
 async fn every_sign_in_origin_completes_through_the_installed_factor_facade() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "every_sign_in_origin_completes_through_the_installed_factor_facade",
+    )
+    .await
+    {
+        return;
+    }
     suprnova::testing::install_test_encryption_key();
     let factors = Arc::new(FactorEngine::default());
     let password_binding_resolution_calls = Arc::new(AtomicUsize::new(0));

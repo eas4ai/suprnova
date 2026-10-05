@@ -873,6 +873,99 @@ async fn wants_json_top_preference() {
     assert!(!req.wants_json());
 }
 
+/// `q=0` means "not acceptable" (RFC 9110 12.4.2). A type the client
+/// refused must not be reported as accepted, preferred or wanted, alone
+/// or beside an acceptable type.
+#[tokio::test]
+async fn a_type_refused_with_q_zero_is_not_accepted() {
+    let req = build_request(
+        hyper::Request::builder()
+            .uri("/")
+            .header("Accept", "application/json;q=0")
+            .header("X-Requested-With", "XMLHttpRequest"),
+        "",
+    )
+    .await;
+    assert!(!req.accepts_json());
+    assert!(!req.accepts(&["application/json"]));
+    assert_eq!(req.prefers(&["application/json"]), None);
+    assert!(!req.wants_json());
+    assert!(req.acceptable_content_types().is_empty());
+    assert!(
+        !req.accepts_any_content_type(),
+        "a header that refuses JSON does not accept any content type"
+    );
+    assert!(!req.expects_json());
+
+    let req = build_request(
+        hyper::Request::builder()
+            .uri("/")
+            .header("Accept", "application/json;q=0, text/html"),
+        "",
+    )
+    .await;
+    assert!(!req.accepts_json());
+    assert!(req.accepts_html());
+    assert!(!req.wants_json());
+    assert_eq!(
+        req.prefers(&["application/json", "text/html"]).as_deref(),
+        Some("text/html")
+    );
+    assert_eq!(
+        req.acceptable_content_types(),
+        vec!["text/html".to_string()]
+    );
+}
+
+/// The most specific matching range decides a type's weight (RFC 9110
+/// 12.5.1), so a wildcard does not re-admit a type refused by name.
+#[tokio::test]
+async fn a_wildcard_does_not_readmit_a_type_refused_by_name() {
+    let req = build_request(
+        hyper::Request::builder()
+            .uri("/")
+            .header("Accept", "*/*, application/json;q=0"),
+        "",
+    )
+    .await;
+    assert!(!req.accepts_json());
+    assert!(req.accepts_html());
+    assert!(req.accepts(&["application/json", "text/html"]));
+    assert_eq!(
+        req.prefers(&["application/json", "text/html"]).as_deref(),
+        Some("text/html")
+    );
+
+    let req = build_request(
+        hyper::Request::builder()
+            .uri("/")
+            .header("Accept", "application/*, application/json;q=0"),
+        "",
+    )
+    .await;
+    assert!(!req.accepts_json());
+    assert!(req.accepts(&["application/xml"]));
+}
+
+/// Media types are case-insensitive (RFC 9110 8.3.1). `FormRequest`
+/// already parses `Application/X-WWW-Form-Urlencoded` as a form;
+/// `Request::input` must agree rather than try JSON and fail.
+#[tokio::test]
+async fn input_reads_a_form_body_whatever_the_media_type_case() {
+    let req = build_request(
+        hyper::Request::builder().method("POST").uri("/").header(
+            "Content-Type",
+            "Application/X-WWW-Form-Urlencoded; charset=UTF-8",
+        ),
+        "email=ann%40example.com&name=Ann",
+    )
+    .await;
+    let fields: std::collections::HashMap<String, String> =
+        req.input().await.expect("a form body parses as a form");
+    assert_eq!(fields["email"], "ann@example.com");
+    assert_eq!(fields["name"], "Ann");
+}
+
 #[tokio::test]
 async fn user_agent_returns_header_value() {
     let req = build_request(
@@ -919,4 +1012,121 @@ fn hyper_types_reachable_via_crate_root() {
     fn _alias_matches_escape_hatch(a: RequestBodyStream) -> hyper::body::Incoming {
         a
     }
+}
+
+// ── `query_into` reads the query as Laravel does ──
+
+#[derive(Debug, serde::Deserialize)]
+struct Search {
+    sort: String,
+    q: Option<String>,
+    page: Option<u32>,
+    #[serde(default)]
+    tags: Vec<String>,
+    exact: Option<bool>,
+}
+
+async fn search(query: &str) -> Result<Search, suprnova::FrameworkError> {
+    build_request(
+        hyper::Request::builder()
+            .method("GET")
+            .uri(format!("/search?{query}")),
+        "",
+    )
+    .await
+    .query_into::<Search>()
+}
+
+#[tokio::test]
+async fn query_into_reads_an_empty_value_as_null() {
+    let found = search("sort=name&q=&page=")
+        .await
+        .expect("an empty value is null");
+    assert_eq!(found.sort, "name");
+    assert_eq!(found.q, None);
+    assert_eq!(found.page, None);
+
+    // A required field left empty is missing.
+    assert!(search("sort=&q=rust").await.is_err());
+}
+
+#[tokio::test]
+async fn query_into_keeps_the_last_value_of_a_repeated_name() {
+    let found = search("sort=name&sort=date&page=1&page=2")
+        .await
+        .expect("a repeated name keeps its last value");
+    assert_eq!(found.sort, "date");
+    assert_eq!(found.page, Some(2));
+
+    // The last value decides even when it is empty.
+    assert!(search("sort=name&sort=").await.is_err());
+}
+
+#[tokio::test]
+async fn query_into_collects_a_list_name() {
+    let found = search("sort=name&tags[]=rust&tags%5B%5D=web")
+        .await
+        .expect("a name ending in [] is a list");
+    assert_eq!(found.tags, vec!["rust".to_string(), "web".to_string()]);
+
+    let found = search("sort=name").await.expect("no list at all");
+    assert!(found.tags.is_empty());
+}
+
+#[tokio::test]
+async fn query_into_reads_a_bool_as_forms_send_it() {
+    for (sent, read) in [
+        ("1", true),
+        ("0", false),
+        ("on", true),
+        ("off", false),
+        ("true", true),
+    ] {
+        let found = search(&format!("sort=name&exact={sent}"))
+            .await
+            .unwrap_or_else(|error| panic!("`{sent}`: {error}"));
+        assert_eq!(found.exact, Some(read), "`{sent}`");
+    }
+}
+
+#[tokio::test]
+async fn a_query_that_does_not_read_names_each_field_in_errors() {
+    match search("sort=&page=abc&exact=maybe").await {
+        Err(suprnova::FrameworkError::Validation(errors)) => {
+            let mut keys: Vec<(&str, &str)> = errors
+                .errors
+                .iter()
+                .map(|(field, messages)| (field.as_str(), messages[0].key.as_ref()))
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    ("exact", "validation-boolean"),
+                    ("page", "validation-integer"),
+                    ("sort", "validation-required"),
+                ]
+            );
+        }
+        other => panic!("expected validation errors, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn query_into_keeps_an_empty_value_as_a_null_key() {
+    let req = build_request(
+        hyper::Request::builder()
+            .method("GET")
+            .uri("/search?q=&page=2"),
+        "",
+    )
+    .await;
+    let query: std::collections::BTreeMap<String, Option<String>> =
+        req.query_into().expect("a map of the query");
+    assert_eq!(
+        query.get("q"),
+        Some(&None),
+        "a cleared value is a key holding null"
+    );
+    assert_eq!(query.get("page"), Some(&Some("2".to_string())));
 }

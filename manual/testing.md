@@ -269,6 +269,12 @@ async fn order_dispatches_email() {
 }
 ```
 
+The guard clears the container it installed, wherever it drops. A
+harness can share it with spawned tasks inside an `Arc`, so the last
+reference may drop on another thread: that thread's own container is
+left alone, and this one's is gone at its next lookup. Only
+`TestContainer::fake()` makes a guard.
+
 `TestDatabase::fresh` / `sqlite_memory` install their own
 `TestContainer::fake` guard internally - you don't stack them unless
 you're testing the registry itself.
@@ -555,7 +561,7 @@ consuming test suites get them for free:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.1.0" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.2.1" }
 
 [dev-dependencies]
 # `testing` is on transitively via the dependency above - nothing extra.
@@ -575,10 +581,10 @@ features off and enable only what you ship:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.1.0", default-features = false, features = ["..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.2.1", default-features = false, features = ["..."] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.1.0", features = ["testing", "..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.2.1", features = ["testing", "..."] }
 ```
 
 This is a tightening, not a fix - boot validation closes the actual

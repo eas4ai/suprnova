@@ -2,6 +2,7 @@
 //!
 //! Provides a fluent API for assertions with clear expected/received output.
 
+use std::cmp::Ordering;
 use std::fmt::Debug;
 
 std::thread_local! {
@@ -458,7 +459,10 @@ impl<T: Debug + PartialEq> Expect<Vec<T>> {
     }
 }
 
-// Numeric comparison matchers using PartialOrd
+// Numeric comparison matchers using PartialOrd. Each one passes only when
+// the comparison holds: values with no order between them, such as NaN,
+// fail every one of them, where testing the opposite relation would have
+// passed them all.
 impl<T: Debug + PartialOrd> Expect<T> {
     /// Assert that the value is greater than the expected value
     ///
@@ -468,7 +472,7 @@ impl<T: Debug + PartialOrd> Expect<T> {
     /// expect!(10).to_be_greater_than(5);
     /// ```
     pub fn to_be_greater_than(&self, expected: T) {
-        if self.value <= expected {
+        if !matches!(self.value.partial_cmp(&expected), Some(Ordering::Greater)) {
             panic!(
                 "{}\n  expect!(value).to_be_greater_than(expected)\n\n  Expected: > {:?}\n  Received: {:?}\n",
                 format_header(self.location),
@@ -486,7 +490,7 @@ impl<T: Debug + PartialOrd> Expect<T> {
     /// expect!(5).to_be_less_than(10);
     /// ```
     pub fn to_be_less_than(&self, expected: T) {
-        if self.value >= expected {
+        if !matches!(self.value.partial_cmp(&expected), Some(Ordering::Less)) {
             panic!(
                 "{}\n  expect!(value).to_be_less_than(expected)\n\n  Expected: < {:?}\n  Received: {:?}\n",
                 format_header(self.location),
@@ -504,7 +508,10 @@ impl<T: Debug + PartialOrd> Expect<T> {
     /// expect!(10).to_be_greater_than_or_equal(10);
     /// ```
     pub fn to_be_greater_than_or_equal(&self, expected: T) {
-        if self.value < expected {
+        if !matches!(
+            self.value.partial_cmp(&expected),
+            Some(Ordering::Greater | Ordering::Equal)
+        ) {
             panic!(
                 "{}\n  expect!(value).to_be_greater_than_or_equal(expected)\n\n  Expected: >= {:?}\n  Received: {:?}\n",
                 format_header(self.location),
@@ -522,7 +529,10 @@ impl<T: Debug + PartialOrd> Expect<T> {
     /// expect!(5).to_be_less_than_or_equal(5);
     /// ```
     pub fn to_be_less_than_or_equal(&self, expected: T) {
-        if self.value > expected {
+        if !matches!(
+            self.value.partial_cmp(&expected),
+            Some(Ordering::Less | Ordering::Equal)
+        ) {
             panic!(
                 "{}\n  expect!(value).to_be_less_than_or_equal(expected)\n\n  Expected: <= {:?}\n  Received: {:?}\n",
                 format_header(self.location),
@@ -530,5 +540,47 @@ impl<T: Debug + PartialOrd> Expect<T> {
                 self.value
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fails(check: impl FnOnce() + std::panic::UnwindSafe) -> bool {
+        std::panic::catch_unwind(check).is_err()
+    }
+
+    #[test]
+    fn numeric_matchers_fail_for_values_that_have_no_order() {
+        // NaN is neither greater, less nor equal to anything, so every
+        // ordering claim about it is false and must fail the assertion.
+        assert!(fails(
+            || Expect::new(f64::NAN, "nan").to_be_greater_than(1.0)
+        ));
+        assert!(fails(|| Expect::new(f64::NAN, "nan").to_be_less_than(1.0)));
+        assert!(fails(
+            || Expect::new(f64::NAN, "nan").to_be_greater_than_or_equal(1.0)
+        ));
+        assert!(fails(
+            || Expect::new(f64::NAN, "nan").to_be_less_than_or_equal(1.0)
+        ));
+        assert!(fails(
+            || Expect::new(1.0, "one").to_be_less_than_or_equal(f64::NAN)
+        ));
+    }
+
+    #[test]
+    fn numeric_matchers_still_pass_and_fail_for_ordered_values() {
+        Expect::new(2.0, "two").to_be_greater_than(1.0);
+        Expect::new(1.0, "one").to_be_less_than(2.0);
+        Expect::new(2.0, "two").to_be_greater_than_or_equal(2.0);
+        Expect::new(2.0, "two").to_be_less_than_or_equal(2.0);
+        assert!(fails(|| Expect::new(1, "one").to_be_greater_than(1)));
+        assert!(fails(|| Expect::new(1, "one").to_be_less_than(1)));
+        assert!(fails(
+            || Expect::new(1, "one").to_be_greater_than_or_equal(2)
+        ));
+        assert!(fails(|| Expect::new(2, "two").to_be_less_than_or_equal(1)));
     }
 }

@@ -603,6 +603,31 @@ async fn live_mysql_concurrent_advances_in_opposite_order_do_not_deadlock() {
     assert_concurrent_opposite_order_advances_do_not_deadlock().await;
 }
 
+/// The ledger stamps `updated_at` and `committed_at` with the server's
+/// current time. MySQL refuses to store a `TIMESTAMP` after 2038-01-19, so
+/// the migration creates `DATETIME`, which holds a time past it.
+#[tokio::test]
+#[ignore = "requires live MySQL; run with --ignored live_mysql"]
+async fn live_mysql_ledger_rows_hold_times_past_2038() {
+    use sea_orm::ConnectionTrait;
+    let url = std::env::var("MYSQL_TEST_URL")
+        .expect("set MYSQL_TEST_URL to a disposable MySQL - this test drops and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("MySQL test DB not reachable - check MYSQL_TEST_URL");
+    let _guard = reset_and_migrate(conn.clone()).await;
+    for sql in [
+        "INSERT INTO suprnova_render_generations (identity, generation, epoch, updated_at) \
+         VALUES ('after-2038', 1, 1, '2040-06-01 12:00:00')",
+        "INSERT INTO suprnova_render_generation_log (identity, generation, epoch, committed_at) \
+         VALUES ('after-2038', 1, 1, '2040-06-01 12:00:00')",
+    ] {
+        conn.execute_unprepared(sql)
+            .await
+            .unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires live MySQL; run with --ignored live_mysql"]
 async fn live_mysql_generation_ledger_advances_and_reads() {
@@ -782,6 +807,22 @@ async fn assert_a_write_committed_during_a_cached_render_is_never_published_as_c
         RenderCache::inspect(&key).await.expect("inspect").is_some(),
         "control: the un-raced render's entry exists"
     );
+}
+
+/// DATA-055 on PostgreSQL, where `DB::unprepared` runs its string through
+/// the simple-query protocol and so runs every statement in a batch. See
+/// `orm::assert_a_raw_batch_that_begins_with_select_still_advances_the_broad_authority`.
+#[tokio::test]
+#[ignore = "requires live Postgres; run with --ignored live_postgres"]
+async fn live_postgres_a_raw_batch_that_begins_with_select_still_advances_the_broad_authority() {
+    let url = std::env::var("PG_TEST_URL")
+        .expect("set PG_TEST_URL to a disposable Postgres - this test drops and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("Postgres test DB not reachable - check PG_TEST_URL");
+    let _guard = reset_and_migrate(conn).await;
+    crate::orm::assert_a_raw_batch_that_begins_with_select_still_advances_the_broad_authority()
+        .await;
 }
 
 #[tokio::test]

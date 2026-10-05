@@ -90,6 +90,9 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
     let mut validator_arms = Vec::new();
     let mut validator_decls = Vec::new();
     let mut required_checks = Vec::new();
+    // The parse of each text field that holds one value, run once every
+    // part is read, on the last part of its name.
+    let mut text_takes = Vec::new();
     let mut struct_init = Vec::new();
     // `(name a hook may use, input name)` pairs for renaming hook errors:
     // each field's Rust name, and its `#[field]` name when that carries
@@ -121,9 +124,9 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
         // with 413 before it is read, so the extra part never allocates.
         //
         // Honoured for `Vec<UploadedFile<V>>` (FileVec) and
-        // `Vec<T: FromStr>` (TextVec). On scalar/option fields the
-        // attribute is accepted but does nothing (those keep
-        // first-write-wins semantics already).
+        // `Vec<T: FromStr>` (TextVec). A scalar or option field holds one
+        // value whatever the count of parts, so the attribute is rejected
+        // there below.
         let mut field_name: Option<LitStr> = None;
         let mut max_count: Option<usize> = None;
         for attr in &field.attrs {
@@ -193,7 +196,7 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
             return syn::Error::new_spanned(
                 &ident,
                 "#[field(..., max_count = N)] is only valid on `Vec<...>` fields; \
-                 scalar and `Option<...>` fields already keep first-write-wins semantics",
+                 scalar and `Option<...>` fields already hold one value",
             )
             .to_compile_error();
         }
@@ -208,9 +211,10 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
         // Each part's zero-based index among the parts of this name, which
         // names its error when the input name ends in `[]`.
         let index_ident = quote::format_ident!("__index_{}", ident);
-        // Set when a part of a field that holds one value failed: that part
-        // decided the field, so a later part is not read, and a required
-        // field reported as invalid is not also reported as missing.
+        // Set when the part that decides a field that holds one value
+        // failed, so a required field reported as invalid is not also
+        // reported as missing. For a file field that part is the first one
+        // not left out, and a later part is not read.
         let invalid_ident = quote::format_ident!("__invalid_{}", ident);
         field_decls.push(quote! {
             let mut #index_ident: usize = 0;
@@ -301,29 +305,35 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 failure,
                 parse,
             } => {
+                let last_ident = quote::format_ident!("__last_{}", ident);
                 field_arms.push(quote! {
                     #field_name_str => {
                         #next_index
-                        // The first part that is not absent decides, valid
-                        // or not; a later part of the name is neither
-                        // parsed nor kept.
-                        if #ident.is_none() && !#invalid_ident {
-                            match ::suprnova::http::upload::take_text::<#inner_ty>(
-                                __value, #field_name_str, __index, #failure, #parse, &mut __errors,
-                            ) {
-                                ::suprnova::http::upload::Taken::Value(__parsed) => {
-                                    #ident = ::core::option::Option::Some(__parsed);
-                                }
-                                ::suprnova::http::upload::Taken::Absent => {}
-                                ::suprnova::http::upload::Taken::Invalid => {
-                                    #invalid_ident = true;
-                                }
-                            }
-                        }
+                        // The last part of the name decides, as PHP keeps a
+                        // name's last value: an earlier part is replaced
+                        // before it is parsed, so it can neither fill nor
+                        // fail the field.
+                        #last_ident = ::core::option::Option::Some((__index, __value));
                     }
                 });
                 field_decls.push(quote! {
+                    let mut #last_ident: ::core::option::Option<(usize, ::suprnova::http::upload::MultipartValue)> = ::core::option::Option::None;
                     let mut #ident: ::core::option::Option<#inner_ty> = ::core::option::Option::None;
+                });
+                text_takes.push(quote! {
+                    if let ::core::option::Option::Some((__index, __value)) = #last_ident {
+                        match ::suprnova::http::upload::take_text::<#inner_ty>(
+                            __value, #field_name_str, __index, #failure, #parse, &mut __errors,
+                        ) {
+                            ::suprnova::http::upload::Taken::Value(__parsed) => {
+                                #ident = ::core::option::Option::Some(__parsed);
+                            }
+                            ::suprnova::http::upload::Taken::Absent => {}
+                            ::suprnova::http::upload::Taken::Invalid => {
+                                #invalid_ident = true;
+                            }
+                        }
+                    }
                 });
                 push_required(
                     required,
@@ -339,21 +349,54 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 inner_ty,
                 failure,
                 parse,
+                nullable,
             } => {
+                // An empty part is `null`, and keeps its place in the list:
+                // `None` in a `Vec<Option<T>>`, and a missing element, under
+                // its own index, in a `Vec<T>`, which has no place for it.
+                let (element_ty, take) = if nullable {
+                    (
+                        quote! { ::core::option::Option<#inner_ty> },
+                        quote! {
+                            ::suprnova::http::upload::Taken::Value(__parsed) => {
+                                #ident.push(::core::option::Option::Some(__parsed));
+                            }
+                            ::suprnova::http::upload::Taken::Absent => {
+                                #ident.push(::core::option::Option::None);
+                            }
+                        },
+                    )
+                } else {
+                    (
+                        quote! { #inner_ty },
+                        quote! {
+                            ::suprnova::http::upload::Taken::Value(__parsed) => {
+                                #ident.push(__parsed);
+                            }
+                            ::suprnova::http::upload::Taken::Absent => {
+                                ::suprnova::http::upload::add_field_failure(
+                                    &mut __errors,
+                                    #field_name_str,
+                                    ::core::option::Option::Some(__index),
+                                    ::suprnova::http::upload::FieldFailure::Required,
+                                );
+                            }
+                        },
+                    )
+                };
                 field_arms.push(quote! {
                     #field_name_str => {
                         #next_index
-                        if let ::suprnova::http::upload::Taken::Value(__parsed) =
-                            ::suprnova::http::upload::take_text::<#inner_ty>(
-                                __value, #field_name_str, __index, #failure, #parse, &mut __errors,
-                            )
-                        {
-                            #ident.push(__parsed);
+                        match ::suprnova::http::upload::take_text::<#inner_ty>(
+                            __value, #field_name_str, __index, #failure, #parse, &mut __errors,
+                        ) {
+                            #take
+                            ::suprnova::http::upload::Taken::Invalid => {}
                         }
                     }
                 });
                 field_decls.push(quote! {
-                    let mut #ident: ::std::vec::Vec<#inner_ty> = ::std::vec::Vec::new();
+                    let mut #ident: ::std::vec::Vec<#element_ty> = ::std::vec::Vec::new();
                 });
                 struct_init.push(quote! { #ident, });
             }
@@ -428,6 +471,8 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                         _ => {}
                     }
                 }
+
+                #(#text_takes)*
 
                 #(#required_checks)*
 
@@ -557,10 +602,12 @@ enum FieldShape {
         failure: proc_macro2::TokenStream,
         parse: proc_macro2::TokenStream,
     },
+    /// `Vec<T>`, or `Vec<Option<T>>` when `nullable`: `inner_ty` is `T`.
     TextVec {
         inner_ty: proc_macro2::TokenStream,
         failure: proc_macro2::TokenStream,
         parse: proc_macro2::TokenStream,
+        nullable: bool,
     },
 }
 
@@ -604,11 +651,22 @@ fn classify(ty: &Type) -> FieldShape {
         (Some("Vec"), Some(inner)) => {
             if let Some(validator) = uploaded_file_validator(&inner) {
                 FieldShape::FileVec { validator }
+            } else if outer_segment_ident(&inner).as_deref() == Some("Option")
+                && let Some(element) = outer_segment_first_generic(&inner)
+                && uploaded_file_validator(&element).is_none()
+            {
+                FieldShape::TextVec {
+                    failure: parse_failure(&element),
+                    parse: text_parser(&element),
+                    inner_ty: quote! { #element },
+                    nullable: true,
+                }
             } else {
                 FieldShape::TextVec {
                     failure: parse_failure(&inner),
                     parse: text_parser(&inner),
                     inner_ty: quote! { #inner },
+                    nullable: false,
                 }
             }
         }

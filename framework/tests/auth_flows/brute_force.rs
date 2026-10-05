@@ -18,9 +18,20 @@ static SETUP: Lazy<()> = Lazy::new(|| {
     RT.block_on(magnetar_auth::install());
 });
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn record_and_lockout_lifecycle() {
+    crate::own_process::run_alone("brute_force::record_and_lockout_lifecycle_child");
+}
+
 #[test]
 #[serial]
-fn record_and_lockout_lifecycle() {
+fn record_and_lockout_lifecycle_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -30,7 +41,9 @@ fn record_and_lockout_lifecycle() {
         suprnova::Auth::password()
             .register("alice-bf@example.com", "longpassword123")
             .await
-            .unwrap();
+            .unwrap()
+            .created()
+            .expect("registration creates a new account");
 
         // Fresh account: not locked.
         assert!(
@@ -90,16 +103,29 @@ fn record_and_lockout_lifecycle() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn reset_attempts_clears_counter() {
+    crate::own_process::run_alone("brute_force::reset_attempts_clears_counter_child");
+}
+
 #[test]
 #[serial]
-fn reset_attempts_clears_counter() {
+fn reset_attempts_clears_counter_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
         suprnova::Auth::password()
             .register("bob-bf@example.com", "longpassword123")
             .await
-            .unwrap();
+            .unwrap()
+            .created()
+            .expect("registration creates a new account");
 
         BruteForce::record_failed_attempt("bob-bf@example.com", None)
             .await
@@ -139,9 +165,22 @@ fn reset_attempts_clears_counter() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn get_lockout_status_for_unknown_email_returns_unlocked() {
+    crate::own_process::run_alone(
+        "brute_force::get_lockout_status_for_unknown_email_returns_unlocked_child",
+    );
+}
+
 #[test]
 #[serial]
-fn get_lockout_status_for_unknown_email_returns_unlocked() {
+fn get_lockout_status_for_unknown_email_returns_unlocked_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -167,9 +206,22 @@ fn get_lockout_status_for_unknown_email_returns_unlocked() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn unlock_account_on_unknown_email_returns_false() {
+    crate::own_process::run_alone(
+        "brute_force::unlock_account_on_unknown_email_returns_false_child",
+    );
+}
+
 #[test]
 #[serial]
-fn unlock_account_on_unknown_email_returns_false() {
+fn unlock_account_on_unknown_email_returns_false_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -294,9 +346,22 @@ fn header_throttle() -> LoginThrottleMiddleware {
     })
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn middleware_passes_through_when_email_missing() {
+    crate::own_process::run_alone(
+        "brute_force::middleware_passes_through_when_email_missing_child",
+    );
+}
+
 #[test]
 #[serial]
-fn middleware_passes_through_when_email_missing() {
+fn middleware_passes_through_when_email_missing_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -314,16 +379,31 @@ fn middleware_passes_through_when_email_missing() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn middleware_passes_through_when_account_not_locked() {
+    crate::own_process::run_alone(
+        "brute_force::middleware_passes_through_when_account_not_locked_child",
+    );
+}
+
 #[test]
 #[serial]
-fn middleware_passes_through_when_account_not_locked() {
+fn middleware_passes_through_when_account_not_locked_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
         suprnova::Auth::password()
             .register("clara-bf@example.com", "longpassword123")
             .await
-            .unwrap();
+            .unwrap()
+            .created()
+            .expect("registration creates a new account");
 
         // Fresh user - no failed attempts → not locked.
         let router = Router::new()
@@ -340,16 +420,29 @@ fn middleware_passes_through_when_account_not_locked() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn middleware_429s_when_account_locked() {
+    crate::own_process::run_alone("brute_force::middleware_429s_when_account_locked_child");
+}
+
 #[test]
 #[serial]
-fn middleware_429s_when_account_locked() {
+fn middleware_429s_when_account_locked_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
         suprnova::Auth::password()
             .register("dora-bf@example.com", "longpassword123")
             .await
-            .unwrap();
+            .unwrap()
+        .created()
+        .expect("registration creates a new account");
 
         // Drive the account into the locked state.
         for _ in 0..5 {
@@ -388,9 +481,20 @@ fn middleware_429s_when_account_locked() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn account_locked_fires_once_on_transition() {
+    crate::own_process::run_alone("brute_force::account_locked_fires_once_on_transition_child");
+}
+
 #[test]
 #[serial]
-fn account_locked_fires_once_on_transition() {
+fn account_locked_fires_once_on_transition_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -401,7 +505,9 @@ fn account_locked_fires_once_on_transition() {
         suprnova::Auth::password()
             .register("eve-bf@example.com", "longpassword123")
             .await
-            .unwrap();
+            .unwrap()
+            .created()
+            .expect("registration creates a new account");
 
         let _guard = EventFacade::fake();
 
@@ -420,5 +526,99 @@ fn account_locked_fires_once_on_transition() {
             fires, 1,
             "AccountLocked must fire exactly once on the unlocked→locked transition, got {fires}"
         );
+    });
+}
+
+/// Magnetar's password check keys the lockout on the trimmed, lowercased
+/// email. A throttle that counted or checked another spelling would never
+/// see the lock the sign-in path set, so every facade call normalizes the
+/// key the same way.
+///
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn every_spelling_of_an_address_shares_one_lockout() {
+    crate::own_process::run_alone(
+        "brute_force::every_spelling_of_an_address_shares_one_lockout_child",
+    );
+}
+
+#[test]
+#[serial]
+fn every_spelling_of_an_address_shares_one_lockout_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        for _ in 0..5 {
+            BruteForce::record_failed_attempt("  Mixed-Case@Example.COM ", None)
+                .await
+                .unwrap();
+        }
+        assert!(
+            BruteForce::is_locked("mixed-case@example.com")
+                .await
+                .unwrap(),
+            "the normalized spelling must see the lock"
+        );
+        assert!(
+            BruteForce::is_locked("MIXED-CASE@example.com")
+                .await
+                .unwrap(),
+            "another spelling must see the same lock"
+        );
+        assert!(
+            BruteForce::unlock_account("Mixed-Case@Example.com")
+                .await
+                .unwrap(),
+            "unlock reaches the same counter"
+        );
+        assert!(
+            !BruteForce::is_locked("mixed-case@example.com")
+                .await
+                .unwrap()
+        );
+    });
+}
+
+/// A store failure while clearing an accepted attempt answers the
+/// documented 503, not a 500: the proof was right, but its outcome is not
+/// recorded.
+///
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn a_failed_attempt_reset_answers_503() {
+    crate::own_process::run_alone("brute_force::a_failed_attempt_reset_answers_503_child");
+}
+
+#[test]
+#[serial]
+fn a_failed_attempt_reset_answers_503_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        // An admission without a reservation is one the store cannot clear.
+        let admission = suprnova::magnetar_integration::engine::LockoutAdmission::new(
+            true,
+            suprnova::LockoutStatus {
+                email: "reset-failure@example.com".to_owned(),
+                failed_attempts: 0,
+                is_locked: false,
+                locked_until: None,
+            },
+            None,
+        );
+        let error = BruteForce::reset_admitted_attempt("reset-failure@example.com", &admission)
+            .await
+            .expect_err("the store refuses an unknown reservation");
+        assert_eq!(error.status_code(), 503);
     });
 }

@@ -9,10 +9,10 @@ use std::time::Duration;
 use suprnova::error::FrameworkError;
 use suprnova::events::dispatched;
 use suprnova::events::{EventFacade, Listener};
-use suprnova::queue::events::JobTimedOut;
+use suprnova::queue::events::{JobAttempted, JobFailed, JobTimedOut};
 use suprnova::queue::events::{JobProcessed, JobProcessing, JobQueued, WorkerStarting};
 use suprnova::queue::{
-    Job, MemoryQueueDriver, Queue,
+    Job, MemoryQueueDriver, Queue, QueueDriver,
     worker::{WorkerConfig, register_job, run_worker},
 };
 use tokio_util::sync::CancellationToken;
@@ -162,4 +162,257 @@ async fn job_timed_out_event_carries_the_jobs_timeout_budget() {
         "the event must report the budget the job declared, not a default"
     );
     assert_eq!(timed_out[0].job.job_name, "queue_events::SlowJob");
+    // Laravel 13.27 kills the worker in its timeout handler, before the
+    // `finally` that raises JobAttempted runs, so a timed-out attempt raises
+    // none; see `lifecycle::worker_timeout_that_fails_the_job`.
+    assert!(
+        dispatched::<JobAttempted>(|_| true).is_empty(),
+        "a timeout raises no JobAttempted"
+    );
+}
+
+// ---- JobAttempted fires for every terminal settlement (DRIVERS-054) -------
+
+#[derive(Serialize, Deserialize, Clone)]
+struct AlwaysFailsJob;
+
+#[async_trait]
+impl Job for AlwaysFailsJob {
+    fn job_name() -> &'static str {
+        "queue_events::AlwaysFailsJob"
+    }
+    fn max_tries() -> u32 {
+        1
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal("this job always fails"))
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn job_attempted_fires_when_a_job_fails_terminally() {
+    register_job::<AlwaysFailsJob>();
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let _events = EventFacade::fake();
+    Queue::push(AlwaysFailsJob).await.unwrap();
+
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(30),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(1),
+        queues: Vec::new(),
+    };
+    run_worker(driver, cfg, CancellationToken::new()).await;
+
+    assert_eq!(dispatched::<JobFailed>(|_| true).len(), 1, "dead-lettered");
+    let attempted = dispatched::<JobAttempted>(|_| true);
+    assert_eq!(
+        attempted.len(),
+        1,
+        "a terminal failure is a settled attempt and must fire JobAttempted"
+    );
+    assert_eq!(attempted[0].job.job_name, "queue_events::AlwaysFailsJob");
+}
+
+/// Settles every attempt as deleted, without running the handler.
+struct DropTheJob;
+
+#[async_trait]
+impl suprnova::queue::middleware::JobMiddleware for DropTheJob {
+    async fn handle(
+        &self,
+        _env: suprnova::queue::Envelope,
+        _next: suprnova::queue::middleware::Next,
+    ) -> Result<suprnova::queue::JobOutcome, FrameworkError> {
+        Ok(suprnova::queue::JobOutcome::Deleted)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct DeletedByMiddlewareJob;
+
+#[async_trait]
+impl Job for DeletedByMiddlewareJob {
+    fn job_name() -> &'static str {
+        "queue_events::DeletedByMiddlewareJob"
+    }
+    fn middleware() -> Vec<Arc<dyn suprnova::queue::middleware::JobMiddleware>> {
+        vec![Arc::new(DropTheJob)]
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+/// Sol review of DRIVERS-054: a job that middleware deletes is acknowledged
+/// and gone, a terminal settlement like any other, but the worker logged it
+/// without firing JobAttempted.
+#[tokio::test]
+#[serial]
+async fn job_attempted_fires_when_middleware_deletes_the_job() {
+    register_job::<DeletedByMiddlewareJob>();
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let _events = EventFacade::fake();
+    Queue::push(DeletedByMiddlewareJob).await.unwrap();
+
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(30),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(1),
+        queues: Vec::new(),
+    };
+    run_worker(driver.clone(), cfg, CancellationToken::new()).await;
+
+    assert_eq!(driver.size().await.unwrap(), 0, "the deleted job is gone");
+    let attempted = dispatched::<JobAttempted>(|_| true);
+    assert_eq!(
+        attempted.len(),
+        1,
+        "a deletion is a settled attempt and must fire JobAttempted"
+    );
+    assert_eq!(
+        attempted[0].job.job_name,
+        "queue_events::DeletedByMiddlewareJob"
+    );
+}
+
+/// Laravel fires JobProcessed whenever the job's pipeline returns without an
+/// exception, a deletion by middleware included. The worker fired it only
+/// for a job its handler completed.
+#[tokio::test]
+#[serial]
+async fn job_processed_fires_when_middleware_deletes_the_job() {
+    register_job::<DeletedByMiddlewareJob>();
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let _events = EventFacade::fake();
+    Queue::push(DeletedByMiddlewareJob).await.unwrap();
+
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(30),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(1),
+        queues: Vec::new(),
+    };
+    run_worker(driver.clone(), cfg, CancellationToken::new()).await;
+
+    let processed = dispatched::<JobProcessed>(|_| true);
+    assert_eq!(
+        processed.len(),
+        1,
+        "a job middleware deleted is processed, as in Laravel"
+    );
+    assert_eq!(
+        processed[0].job.job_name,
+        "queue_events::DeletedByMiddlewareJob"
+    );
+}
+
+/// Settles every attempt as released for a minute, without running the
+/// handler.
+struct ReleaseTheJob;
+
+#[async_trait]
+impl suprnova::queue::middleware::JobMiddleware for ReleaseTheJob {
+    async fn handle(
+        &self,
+        _env: suprnova::queue::Envelope,
+        _next: suprnova::queue::middleware::Next,
+    ) -> Result<suprnova::queue::JobOutcome, FrameworkError> {
+        Ok(suprnova::queue::JobOutcome::Released {
+            delay: Duration::from_secs(60),
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ReleasedByMiddlewareJob;
+
+#[async_trait]
+impl Job for ReleasedByMiddlewareJob {
+    fn job_name() -> &'static str {
+        "queue_events::ReleasedByMiddlewareJob"
+    }
+    fn middleware() -> Vec<Arc<dyn suprnova::queue::middleware::JobMiddleware>> {
+        vec![Arc::new(ReleaseTheJob)]
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+/// The lifecycle events of `ReleasedByMiddlewareJob`, in the order the
+/// worker fired them.
+static RELEASE_FIRED: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+
+struct RecordRelease;
+
+#[async_trait]
+impl Listener<JobProcessed> for RecordRelease {
+    async fn handle(&self, event: &JobProcessed) -> Result<(), FrameworkError> {
+        if event.job.job_name == "queue_events::ReleasedByMiddlewareJob" {
+            RELEASE_FIRED.lock().unwrap().push("processed");
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Listener<suprnova::queue::events::JobReleased> for RecordRelease {
+    async fn handle(
+        &self,
+        event: &suprnova::queue::events::JobReleased,
+    ) -> Result<(), FrameworkError> {
+        if event.job.job_name == "queue_events::ReleasedByMiddlewareJob" {
+            RELEASE_FIRED.lock().unwrap().push("released");
+        }
+        Ok(())
+    }
+}
+
+/// Laravel's worker raises JobProcessed for a job whose pipeline returned
+/// without throwing, then JobReleased when the job was released: a release
+/// by middleware fires both, in that order. The worker fired JobReleased
+/// alone.
+#[tokio::test]
+#[serial]
+async fn job_processed_fires_before_job_released_when_middleware_releases_the_job() {
+    register_job::<ReleasedByMiddlewareJob>();
+    RELEASE_FIRED.lock().unwrap().clear();
+    EventFacade::listen::<JobProcessed, _>(Arc::new(RecordRelease)).await;
+    EventFacade::listen::<suprnova::queue::events::JobReleased, _>(Arc::new(RecordRelease)).await;
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::push(ReleasedByMiddlewareJob).await.unwrap();
+
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(30),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(1),
+        queues: Vec::new(),
+    };
+    run_worker(driver.clone(), cfg, CancellationToken::new()).await;
+    EventFacade::forget::<JobProcessed>();
+    EventFacade::forget::<suprnova::queue::events::JobReleased>();
+
+    assert_eq!(
+        driver.size().await.unwrap(),
+        1,
+        "the released job is back on the queue"
+    );
+    assert_eq!(
+        RELEASE_FIRED.lock().unwrap().clone(),
+        ["processed", "released"],
+        "a release by middleware is processed, then released, as in Laravel"
+    );
 }

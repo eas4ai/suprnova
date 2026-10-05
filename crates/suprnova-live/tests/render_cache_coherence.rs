@@ -180,6 +180,70 @@ fn conditional_requests_match_only_the_exact_strong_validator() {
     );
 }
 
+/// DATA-042: a browser keys its own HTTP cache by method and URL, never by
+/// the principal or tenant the server keyed a `PrivateCached` entry by. A
+/// `max-age` on such a response lets the browser reuse one account's body
+/// for the next account on the same machine, without asking the server, so
+/// neither the auth guard nor the private key ever runs. `no-cache` keeps
+/// the right to store and makes every reuse a revalidation; the strong
+/// validator still lets the same principal's revalidation answer 304.
+#[test]
+fn a_private_cached_response_makes_the_browser_revalidate_before_every_reuse() {
+    let fresh = FreshnessPolicy::new(60_000, 30_000, 30_000).expect("policy");
+    for shared in [
+        SharedCachePolicy::Private,
+        SharedCachePolicy::SMaxAge { seconds: 300 },
+    ] {
+        for seed_remaining_ms in [None, Some(20_000)] {
+            let value = cache_control_value(
+                RepresentationClass::PrivateCached,
+                shared,
+                &fresh,
+                seed_remaining_ms,
+            );
+            assert_eq!(
+                value, "private, no-cache",
+                "an identity-keyed response must never be reusable by the browser without \
+                 revalidation ({shared:?}, {seed_remaining_ms:?})"
+            );
+        }
+    }
+}
+
+/// Every response that is not offered to shared caches is `private,
+/// no-cache`, whatever its class. A public page behind an auth gate, or a
+/// stitched shell with no islands, carries no per-account bytes, but a
+/// browser that reuses it without asking skips the route's guard for the
+/// whole freshness window, after a logout as much as before it. Only a
+/// route that opted into shared caching (`SMaxAge`) keeps an age.
+#[test]
+fn every_private_response_makes_the_browser_revalidate_before_reuse() {
+    let fresh = FreshnessPolicy::new(60_000, 30_000, 30_000).expect("policy");
+    for class in [
+        RepresentationClass::PublicShared,
+        RepresentationClass::PublicShellStitched,
+        RepresentationClass::PrivateCached,
+    ] {
+        for seed_remaining_ms in [None, Some(20_000)] {
+            assert_eq!(
+                cache_control_value(class, SharedCachePolicy::Private, &fresh, seed_remaining_ms),
+                "private, no-cache",
+                "{class:?} with {seed_remaining_ms:?}"
+            );
+        }
+    }
+    assert_eq!(
+        cache_control_value(
+            RepresentationClass::PublicShared,
+            SharedCachePolicy::SMaxAge { seconds: 300 },
+            &fresh,
+            None
+        ),
+        "public, max-age=60, s-maxage=300",
+        "a route that opted into shared caching keeps its bounded ages"
+    );
+}
+
 #[test]
 fn cache_control_and_vary_agree_with_class_variance_and_seed_deadline() {
     let fresh = FreshnessPolicy::new(60_000, 0, 0).expect("policy");
@@ -190,7 +254,7 @@ fn cache_control_and_vary_agree_with_class_variance_and_seed_deadline() {
             &fresh,
             None
         ),
-        "private, max-age=60"
+        "private, no-cache"
     );
     assert_eq!(
         cache_control_value(
@@ -208,8 +272,8 @@ fn cache_control_and_vary_agree_with_class_variance_and_seed_deadline() {
             &fresh,
             None
         ),
-        "private, max-age=60",
-        "private output is never publicly reusable"
+        "private, no-cache",
+        "private output is never publicly reusable, nor reused by the browser unasked"
     );
     assert_eq!(
         cache_control_value(

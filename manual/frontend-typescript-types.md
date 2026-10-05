@@ -324,7 +324,7 @@ export const controllers = {
   user: {
     index: (): RouteConfig => ({ url: '/users', method: 'get' }),
     show: (params: UserShowParams): RouteConfig =>
-      ({ url: `/users/${params.id}`, method: 'get' }),
+      ({ url: `/users/${encodeURIComponent(String(params.id))}`, method: 'get' }),
     store: (): RouteConfig => ({ url: '/users', method: 'post' }),
   },
 } as const;
@@ -353,6 +353,25 @@ router.visit(routes['users.show']({ id: '42' }))
 If a path has params (`/users/{id}`), the generated function requires the
 typed `Params` object - TypeScript catches missing or misspelled keys at
 compile time.
+
+The helpers build the same URLs the backend's `route()` helper builds:
+
+- Each parameter value is percent-encoded as one path segment. A slug of
+  `a/b` becomes `/posts/a%2Fb` and reaches the handler as `a/b`, and a `?`
+  or `#` in a value cannot start a query string or a fragment.
+- A catch-all parameter (`{*rest}`) is named `rest` and keeps its slashes.
+  Each segment is encoded on its own.
+- An optional parameter (`{year?}`) is an optional key. Without a value it
+  is left out with its segment, so `/archive/{year?}` with no year is
+  `/archive`. A helper whose parameters are all optional can be called with
+  no argument.
+- A route inside `group!` gets the group's path prefix and its `.name(...)`
+  prefix, nested groups included. A bare handler name inside
+  `group!(..., controller = ..., { ... })` resolves to that controller.
+- A request type's interface uses the keys serde reads, so `rename`,
+  `rename_all` and `skip_deserializing` apply.
+- When two routes share one handler, the second gets its own helper key, and
+  its entry in `routes` points at that helper.
 
 ## Message keys
 

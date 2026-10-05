@@ -25,8 +25,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 indexmap = { version = "2", features = ["serde"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
-suprnova-live = { path = "../crates/suprnova-live", version = "3.1.0" }
-suprnova-macros = { path = "../suprnova-macros", version = "3.1.0" }
+suprnova-live = { path = "../crates/suprnova-live", version = "3.2.1" }
+suprnova-macros = { path = "../suprnova-macros", version = "3.2.1" }
 dotenvy = "0.15"
 inventory = "0.3"
 sea-orm = { version = "2.0", features = ["runtime-tokio-rustls", "macros", "postgres-use-serial-pk", "with-rust_decimal", "with-bigdecimal"] }
@@ -57,7 +57,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json",
 uuid = { version = "1", features = ["v4", "v5", "v7", "fast-rng", "serde"] }
 dashmap = "6"
 webauthn-rs = { version = "0.5", features = ["resident-key-support", "danger-allow-state-serialisation"] }
-suprnova-magnetar = { path = "../crates/suprnova-magnetar", version = "3.1.0", default-features = false, features = ["password", "password-management", "magic-link", "passkey", "two-factor"] }
+suprnova-magnetar = { path = "../crates/suprnova-magnetar", version = "3.2.1", default-features = false, features = ["password", "password-management", "magic-link", "passkey", "two-factor"] }
 secrecy = "0.10"
 
 # Used by the `pagination` module to round-trip `sea_orm::Value::Decimal` /
@@ -125,7 +125,7 @@ multer = "3"
 reqsign-aws-v4 = { version = "3.0.0", git = "https://github.com/apache/opendal-reqsign.git", rev = "b49cd2996b9d2d9944e84481f8835ff55b188b97", optional = true, default-features = false }
 reqsign-core = { version = "3.0.1", git = "https://github.com/apache/opendal-reqsign.git", rev = "b49cd2996b9d2d9944e84481f8835ff55b188b97", optional = true, default-features = false }
 reqsign-file-read-tokio = { version = "3.0.1", git = "https://github.com/apache/opendal-reqsign.git", rev = "b49cd2996b9d2d9944e84481f8835ff55b188b97", optional = true, default-features = false }
-opendal = { version = "0.58.0", git = "https://github.com/eas4ai/opendal.git", rev = "88717391eb72c9839d3f8e79fccad9f22fc3a1b4", optional = true, default-features = false, features = [
+opendal = { version = "0.58.0", git = "https://github.com/eas4ai/opendal.git", rev = "83f5a495a11f40885af02c3306fec0e1fda06bc2", optional = true, default-features = false, features = [
     "services-fs",
     "services-s3",
     "services-memory",
@@ -170,12 +170,10 @@ tempfile = "3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "query", "multipart"] }
 getrandom = "0.4.2"
 tokio-util = { version = "0.7.18", features = ["time"] }
-sea-streamer = { version = "0.5.0", features = ["redis", "stdio", "runtime-tokio", "socket", "json"], default-features = false }
-sea-streamer-redis = { version = "0.5.2", features = ["runtime-tokio"] }
 lettre = { version = "0.11.22", default-features = false, features = ["smtp-transport", "pool", "rustls-tls", "hostname", "builder", "tokio1", "tokio1-rustls"] }
 tera = "1"
 aws-sigv4 = "1"
-suprnova-web-push = { version = "3.1.0", path = "../crates/suprnova-web-push", optional = true }
+suprnova-web-push = { version = "3.2.1", path = "../crates/suprnova-web-push", optional = true }
 aws-credential-types = "1.2.14"
 fake = { version = "5.1.0", features = ["chrono", "derive", "uuid"] }
 envy = "0.4.2"
@@ -205,10 +203,11 @@ zeroize = { version = "1.8.2", features = ["derive"] }
 comrak = { version = "0.52.0", default-features = false, features = ["syntect"] }
 ammonia = "4.1.4"
 
-# The image subsystem's backend: the pure-Rust OxideAV framework. Eight
-# crates rather than the `oxideav-meta` aggregator, because the framework
-# needs five still-image codecs, not a media framework (oxideav-meta's own
-# README says to skip it for subsets).
+# The image subsystem's backend: the pure-Rust OxideAV framework, and
+# zune-jpeg for decoding JPEG (see below). Eight OxideAV crates rather than
+# the `oxideav-meta` aggregator, because the framework needs five
+# still-image codecs, not a media framework (oxideav-meta's own README says
+# to skip it for subsets).
 #
 # Versions are pinned EXACTLY (`=0.x.y`, the `thiserror = "=2.0.18"`
 # precedent) because these are pre-1.0 crates from a fast-moving
@@ -218,6 +217,13 @@ ammonia = "4.1.4"
 # `oxideav-gif` is Apache-2.0; the other seven are MIT. Compatible, but it
 # is the one non-MIT crate in the set, so it is called out here rather
 # than discovered during a licence audit.
+#
+# `oxideav-gif` is 0.0.12 or later: 0.0.11 changed LZW code width one code
+# early on both sides, so it could not read GIFs other software writes and
+# other software could not read the GIFs it wrote. The driver uses it only
+# to write GIFs (its own `encode_rgba8`, hence no `registry` feature); it
+# decodes a GIF's first frame itself, so that decoding stops when the frame
+# is complete. See `media/oxideav/gif.rs`.
 #
 # `oxideav-io` is deliberately absent. Its open/save facade is the obvious
 # entry point and is unusable here: gif and webp register no demuxer or
@@ -230,8 +236,26 @@ oxideav-pixfmt = { version = "=0.1.7", optional = true }
 oxideav-mjpeg = { version = "=0.1.8", optional = true }
 oxideav-png = { version = "=0.1.8", optional = true }
 oxideav-webp = { version = "=0.2.3", optional = true }
-oxideav-gif = { version = "=0.0.11", optional = true }
+oxideav-gif = { version = "=0.0.12", optional = true, default-features = false }
 oxideav-bmp = { version = "=0.1.6", optional = true }
+# JPEG decoding, except lossless frames. oxideav-mjpeg (0.1.8 to 0.1.11)
+# refuses any frame of more than 64 Mi samples (width x height x
+# components), about 22 megapixels in colour, whatever the caller allows,
+# and decodes arithmetic-coded colour JPEGs to the wrong pixels. zune-jpeg
+# takes its size limits from the caller, so the framework's own limits
+# decide. The release candidate is pinned rather than 0.5.15 because 0.5.15
+# decodes a subsampled sequential JPEG coded one component a scan to the
+# wrong pixels and has no arithmetic decoder; 0.5.16-rc2 decodes both, with
+# the `arith` feature. oxideav-mjpeg still encodes, and still decodes
+# lossless JPEGs, which zune-jpeg reads but cannot decode. zune-jpeg is
+# MIT, Apache-2.0 or Zlib, at the user's choice. See `media/oxideav.rs`
+# and `media/oxideav/peak.rs`.
+zune-jpeg = { version = "=0.5.16-rc2", optional = true, features = ["arith"] }
+# The zlib inflater `oxideav-png` itself uses. The PNG decode inflates the
+# pixel data once first with a cap at the size the header declares, because
+# `oxideav-png` inflates without one. Pinned to the exact version
+# `oxideav-png` resolves to, so both passes run the same decoder.
+compcol = { version = "=0.6.10", optional = true, default-features = false, features = ["zlib"] }
 crypto_secretbox = "0.1.1"
 # Heap profiling behind `heap-profiling`; see `src/profiling.rs`. The
 # allocation tests also use it as a dev-dependency.
@@ -242,6 +266,13 @@ dhat = { version = "0.3", optional = true }
 # process leads, so what it started dies with it. The version suprnova-cli
 # already pins, so the lock gains nothing.
 nix = { version = "=0.31.3", default-features = false, features = ["process", "signal"] }
+# Directory-relative syscalls (`openat`, `renameat`, `linkat`, ...) for the
+# local disk, so a symlink swapped into a disk root cannot redirect an
+# operation out of it, and extended attributes on an open file for its user
+# metadata. Both are the versions opendal's `fs` service already brings, so
+# the lock gains nothing.
+rustix = { version = "1.1.4", optional = true, default-features = false, features = ["std", "fs"] }
+xattr = { version = "1.6.1", optional = true }
 
 [features]
 default = [
@@ -276,7 +307,7 @@ magnetar-oauth = [
 ]
 # Enables the OpenDAL-backed filesystem facade with the local, in-memory,
 # and S3 backends. Kept in the default set for backward compatibility.
-filesystem = ["dep:opendal"]
+filesystem = ["dep:opendal", "dep:rustix", "dep:xattr"]
 # Azure Blob Storage and Google Cloud Storage. Off by default, because
 # each drags `rsa` into the dependency graph and `rsa 0.9.x` carries
 # RUSTSEC-2023-0071 (the Marvin timing attack) with no fixed release
@@ -314,9 +345,10 @@ filesystem-gcs = ["filesystem", "opendal/services-gcs"]
 # A feature at all, rather than an unconditional dependency, because a
 # minimal profile (an API-only service that never touches pixels) otherwise
 # pays for five codec compiles it will never call. Turning `media` off
-# removes all eight crates from the tree; `scripts/check-feature-matrix.sh`
-# asserts exactly that.
+# removes the eight OxideAV crates and `compcol` from the tree;
+# `scripts/check-feature-matrix.sh` asserts exactly that.
 media = [
+    "dep:compcol",
     "dep:oxideav-core",
     "dep:oxideav-image-filter",
     "dep:oxideav-pixfmt",
@@ -325,6 +357,7 @@ media = [
     "dep:oxideav-webp",
     "dep:oxideav-gif",
     "dep:oxideav-bmp",
+    "dep:zune-jpeg",
 ]
 # Database drivers are shared by SeaORM, migrations, and Magnetar.
 database-sqlite = [
@@ -377,10 +410,10 @@ otel = [
     "dep:opentelemetry-semantic-conventions",
     "dep:tracing-opentelemetry",
 ]
-# Enables SeaStreamerBroadcastHub - cross-process fanout via sea-streamer.
-# sea-streamer (with stdio backend) is already a base dep (required by the
-# queue/redis driver). This feature gates only the fanout module itself,
-# keeping the public API surface opt-in.
+# Enables SeaStreamerBroadcastHub - cross-process fanout over Redis Streams,
+# through the redis client the framework already carries. It costs no
+# dependencies; it gates only the fanout module, keeping that public API
+# surface opt-in.
 broadcasting-fanout = []
 # Enables the Pinecone vector driver. It costs no extra dependencies -
 # the driver speaks Pinecone's REST API over the `reqwest` client the
@@ -479,6 +512,10 @@ path = "tests/live/dogfood_forms.rs"
 [[test]]
 name = "live_dogfood_server"
 path = "tests/live/dogfood_server.rs"
+
+[[test]]
+name = "live_session_fields"
+path = "tests/live/session_fields.rs"
 
 [[test]]
 name = "live_assets"

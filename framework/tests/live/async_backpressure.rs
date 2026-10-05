@@ -201,14 +201,35 @@ async fn refresh_bursts_coalesce_and_the_document_queue_stays_bounded() {
         report.retained_bytes
     );
 
+    // Coalescing bounds the queue. The lane a coalesced refresh degrades is
+    // recovered by replaying what it missed from the log (ROOT-37), so every
+    // position still reaches the stream, in order: a hole would make the
+    // browser reconnect and replay the whole burst through its renewal.
+    let mut previous = 0_u64;
     let mut refreshes = 0;
     let mut events = 0;
     let mut degraded = false;
     while events < 10 {
-        let envelope = next_envelope(&mut stream).await;
+        let record = stream.next_record().await.expect("stream stays open");
+        let Some(data) = record.data else {
+            continue;
+        };
+        let envelope: Value = serde_json::from_str(&data).expect("envelope JSON");
+        let sequence: u64 = envelope["position"]["sequence"]
+            .as_str()
+            .expect("sequence")
+            .parse()
+            .expect("numeric sequence");
+        assert_eq!(
+            sequence,
+            previous + 1,
+            "the stream skipped from {previous} to {sequence}"
+        );
+        previous = sequence;
         match envelope["payload"]["kind"].as_str().expect("payload kind") {
             "refresh" => refreshes += 1,
             "browser_event" => events += 1,
+            "heartbeat" => {}
             "error" => {
                 assert_eq!(envelope["payload"]["code"], "backpressure");
                 degraded = true;
@@ -218,8 +239,8 @@ async fn refresh_bursts_coalesce_and_the_document_queue_stays_bounded() {
         }
     }
     assert!(
-        refreshes < 200,
-        "{refreshes} refreshes reached the wire instead of coalescing"
+        degraded || refreshes == 200,
+        "{refreshes} of the 200 refreshes reached the stream"
     );
     let reports = inspect_async_transports_for_test(&runtime);
     let report = reports

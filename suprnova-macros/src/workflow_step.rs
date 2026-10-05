@@ -65,7 +65,12 @@ pub fn workflow_step_impl(_attr: TokenStream, input: TokenStream) -> TokenStream
         #fn_vis async fn #fn_name(#fn_inputs) #fn_output {
             if let Some(ctx) = ::suprnova::workflow::WorkflowContext::current() {
                 let __input_json = #input_json;
-                ctx.run_step_with_input(
+                // The step's identity is its module path and name, so two
+                // steps with one name in two modules are two steps. A run
+                // recorded under the bare name, before the module was part
+                // of it, still replays under that name.
+                ctx.run_named_step(
+                    concat!(module_path!(), "::", stringify!(#fn_name)),
                     stringify!(#fn_name),
                     __input_json,
                     // `move`: the context takes a `'static` closure, and a

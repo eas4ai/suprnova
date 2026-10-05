@@ -49,19 +49,40 @@ impl MigratorTrait for Migrator {
     }
 }
 
-/// Current database-server time as whole seconds, so lease bounds are
-/// measured against the same clock the claim and reclaim predicates use.
-async fn server_now_secs(db: &DatabaseConnection) -> i64 {
+/// Which way a server clock read is cut to whole seconds.
+#[derive(Clone, Copy)]
+enum Bound {
+    /// Down: the read before the claim, which the expiry must cover in full.
+    Floor,
+    /// Up: the read after the claim, which the expiry must not pass.
+    Ceil,
+}
+
+/// `expr`, a Postgres timestamp, as whole Unix seconds cut toward `bound`.
+///
+/// `FLOOR` and `CEIL` before the cast: a cast alone rounds to the nearest
+/// second, which moves a lower bound up or an upper bound down.
+async fn epoch_secs(db: &DatabaseConnection, expr: &str, bound: Bound) -> i64 {
+    let cut = match bound {
+        Bound::Floor => "FLOOR",
+        Bound::Ceil => "CEIL",
+    };
     let stmt = Statement::from_string(
         sea_orm::DatabaseBackend::Postgres,
-        "SELECT EXTRACT(EPOCH FROM NOW())::BIGINT AS now_secs".to_string(),
+        format!("SELECT {cut}(EXTRACT(EPOCH FROM {expr}))::BIGINT AS secs"),
     );
     let row = db
         .query_one_raw(stmt)
         .await
         .expect("server clock read")
         .expect("server clock row");
-    row.try_get("", "now_secs").expect("now_secs column")
+    row.try_get("", "secs").expect("secs column")
+}
+
+/// Current database-server time as whole seconds, so lease bounds are
+/// measured against the same clock the claim and reclaim predicates use.
+async fn server_now_secs(db: &DatabaseConnection, bound: Bound) -> i64 {
+    epoch_secs(db, "NOW()", bound).await
 }
 
 fn min_lease_config() -> WorkflowConfig {
@@ -97,12 +118,12 @@ async fn claim_at_minimum_lease_is_server_anchored_and_not_instantly_reclaimable
         .await
         .expect("insert workflow");
 
-    let before = server_now_secs(&raw).await;
+    let before = server_now_secs(&raw, Bound::Floor).await;
     let claimed = claim_next_workflow("worker-a", &config)
         .await
         .expect("claim")
         .expect("a pending row must be claimable");
-    let after = server_now_secs(&raw).await;
+    let after = server_now_secs(&raw, Bound::Ceil).await;
 
     // The expiry is measured from the server clock at claim time: no
     // less than the full lease after the read that preceded the claim,
@@ -152,4 +173,59 @@ async fn claim_at_minimum_lease_is_server_anchored_and_not_instantly_reclaimable
         .expect("an expired lease must be reclaimable");
     assert_eq!(reclaimed.id, claimed.id);
     assert_eq!(reclaimed.attempts, claimed.attempts + 1);
+}
+
+/// The clock reads that bound the lease cut their fraction the right way:
+/// the read before the claim down, the read after it up. A plain
+/// `::BIGINT` cast rounds, so a read at half a second or later came out a
+/// second high, the lower bound passed the real expiry, and the lease test
+/// above failed whenever the claim landed in the second half of a second.
+/// A fixed timestamp at 52.6 seconds makes that case happen every run.
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_clock_reads_floor_before_and_ceil_after() {
+    let raw = connect_postgres().await;
+    let at = "TIMESTAMPTZ '1970-01-01 00:00:52.6+00'";
+    assert_eq!(epoch_secs(&raw, at, Bound::Floor).await, 52);
+    assert_eq!(epoch_secs(&raw, at, Bound::Ceil).await, 53);
+}
+
+/// A cancelled worker drains and returns `Ok` promptly. It runs on
+/// Postgres, the only database the worker claims from: on any other the
+/// worker now refuses to start, so the SQLite version of this test could
+/// no longer reach the drain.
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_worker_run_with_cancel_returns_cleanly() {
+    let raw = connect_postgres().await;
+    raw.execute_unprepared("DROP TABLE IF EXISTS workflows")
+        .await
+        .expect("drop workflows fixture");
+    Migrator::up(&raw, None)
+        .await
+        .expect("migrate workflows fixture");
+    DB::init_with(DatabaseConfig::builder().url(pg_url()).build())
+        .await
+        .expect("DB::init_with");
+
+    let worker = suprnova::workflow::WorkflowWorker::with_config(WorkflowConfig {
+        poll_interval_ms: 20,
+        ..min_lease_config()
+    });
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_for_worker = cancel.clone();
+    let handle = tokio::spawn(async move { worker.run_with_cancel(cancel_for_worker).await });
+
+    // Let the worker reach its idle poll, with no row to claim.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!handle.is_finished(), "the worker idles on Postgres");
+    cancel.cancel();
+
+    tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("the worker exits within 1s of cancellation")
+        .expect("the worker task does not panic")
+        .expect("run_with_cancel returns Ok on a graceful drain");
 }

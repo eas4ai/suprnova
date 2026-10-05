@@ -230,7 +230,13 @@ it ran, in terms you will recognize:
   because the render resolved no identity, observed no principal material,
   and the key says so - a signed-in visitor derives a `Private` key that
   never reaches that entry; and a named guard's own identifier is principal
-  material in exactly the same way as the default guard's.
+  material too, recorded as `<guard>:<id>`. The key's `Principal` dimension
+  is the default guard's identity, so a page built from another guard's
+  user never matches it and is never stored, even when both guards name
+  the same id. A default-guard id that holds a `:` is keyed as `:<id>`, so
+  web user `admin:9` never matches admin `9` either. A hit skips the route's own `AuthMiddleware`, so such a page
+  would otherwise reach a visitor who holds only the default guard's
+  sign-in.
 - **You read an identity, on a route that does not declare `Principal`.**
   Reading the signed-in user narrows the class to `PrivateCached`; if the
   route's declared variance does not include `Principal`, there is no way

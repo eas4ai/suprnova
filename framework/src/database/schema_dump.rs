@@ -851,16 +851,28 @@ struct Target {
     params: Vec<(String, String)>,
 }
 
-/// Postgres URL parameters and the libpq variables that carry them.
-const POSTGRES_PARAMETERS: [(&str, &str); 7] = [
-    ("sslmode", "PGSSLMODE"),
-    ("sslrootcert", "PGSSLROOTCERT"),
-    ("sslcert", "PGSSLCERT"),
-    ("sslkey", "PGSSLKEY"),
-    ("hostaddr", "PGHOSTADDR"),
-    ("application_name", "PGAPPNAME"),
-    ("options", "PGOPTIONS"),
+/// Postgres URL parameters, every spelling SQLx accepts for each, and the
+/// libpq variable that carries it.
+const POSTGRES_PARAMETERS: [(&[&str], &str); 7] = [
+    (&["sslmode", "ssl-mode"], "PGSSLMODE"),
+    (&["sslrootcert", "ssl-root-cert", "ssl-ca"], "PGSSLROOTCERT"),
+    (&["sslcert", "ssl-cert"], "PGSSLCERT"),
+    (&["sslkey", "ssl-key"], "PGSSLKEY"),
+    (&["hostaddr"], "PGHOSTADDR"),
+    (&["application_name"], "PGAPPNAME"),
+    (&["options"], "PGOPTIONS"),
 ];
+
+/// MySQL TLS parameters: every spelling SQLx accepts, and the client option
+/// the tools take.
+const MYSQL_TLS_FILES: [(&[&str], &str); 3] = [
+    (&["ssl-ca", "sslca"], "ssl-ca"),
+    (&["ssl-cert", "sslcert"], "ssl-cert"),
+    (&["ssl-key", "sslkey"], "ssl-key"),
+];
+
+/// The spellings of the MySQL TLS mode.
+const MYSQL_SSL_MODE: &[&str] = &["ssl-mode", "sslmode"];
 
 impl Target {
     fn parse(url: &str) -> Result<Self, FrameworkError> {
@@ -891,16 +903,31 @@ impl Target {
     }
 
     fn param(&self, key: &str) -> Option<&str> {
+        self.param_any(&[key])
+    }
+
+    /// The value of the last parameter spelled any of `keys`: SQLx applies
+    /// the query in order, so the later of two spellings wins.
+    fn param_any(&self, keys: &[&str]) -> Option<&str> {
         self.params
             .iter()
             .rev()
-            .find(|(name, _)| name == key)
+            .find(|(name, _)| keys.contains(&name.as_str()))
             .map(|(_, value)| value.as_str())
     }
 
     fn postgres_args(&self) -> Vec<String> {
         let mut args = Vec::new();
-        let host = self.param("host").unwrap_or(&self.host);
+        // SQLx reads a URL host that decodes to an absolute path as a Unix
+        // socket directory (`postgres://%2Frun%2Fpostgresql/shop`), the only
+        // way the host part can name one, and any other host as written.
+        let decoded = percent_encoding::percent_decode_str(&self.host).decode_utf8_lossy();
+        let url_host = if decoded.starts_with('/') {
+            decoded.as_ref()
+        } else {
+            self.host.as_str()
+        };
+        let host = self.param("host").unwrap_or(url_host);
         if !host.is_empty() {
             args.push(format!("--host={host}"));
         }
@@ -926,11 +953,13 @@ impl Target {
 
     fn postgres_env(&self) -> Vec<(&'static str, String)> {
         let mut env = Vec::new();
-        if let Some(password) = self.password.as_deref().or(self.param("password")) {
+        // SQLx applies a `password` parameter after the URL's own password,
+        // so the parameter wins, as `user`, `host` and `port` do above.
+        if let Some(password) = self.param("password").or(self.password.as_deref()) {
             env.push(("PGPASSWORD", password.to_owned()));
         }
-        for (key, variable) in POSTGRES_PARAMETERS {
-            if let Some(value) = self.param(key) {
+        for (keys, variable) in POSTGRES_PARAMETERS {
+            if let Some(value) = self.param_any(keys) {
                 env.push((variable, value.to_owned()));
             }
         }
@@ -955,12 +984,12 @@ impl Target {
         if !self.user.is_empty() {
             args.push(format!("--user={}", self.user));
         }
-        for key in ["ssl-ca", "ssl-cert", "ssl-key"] {
-            if let Some(value) = self.param(key) {
-                args.push(format!("--{key}={value}"));
+        for (keys, option) in MYSQL_TLS_FILES {
+            if let Some(value) = self.param_any(keys) {
+                args.push(format!("--{option}={value}"));
             }
         }
-        if let Some(mode) = self.param("ssl-mode") {
+        if let Some(mode) = self.param_any(MYSQL_SSL_MODE) {
             let mode = mode.to_ascii_uppercase().replace('-', "_");
             if !mariadb_client {
                 args.push(format!("--ssl-mode={mode}"));
@@ -1102,7 +1131,14 @@ async fn connect(url: &str) -> Result<DatabaseConnection, FrameworkError> {
 
 /// Writes `contents` to `path` through a temporary file beside it, so an
 /// earlier file is replaced only by a complete one.
+///
+/// Each call stages its own file, created new under a name no other call
+/// holds, so two dumps to one path at once never write into each other's
+/// staging file: each rename moves a whole dump, and the last one stands.
+/// A staging file a failed call leaves is removed.
 fn write_replacing(path: &Path, contents: &str) -> Result<(), FrameworkError> {
+    use std::io::Write;
+
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -1114,14 +1150,55 @@ fn write_replacing(path: &Path, contents: &str) -> Result<(), FrameworkError> {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "schema.sql".to_owned());
-    let partial = path.with_file_name(format!(".{name}.partial"));
-    write(&partial, contents)?;
-    std::fs::rename(&partial, path).map_err(|e| {
-        FrameworkError::internal(format!(
-            "could not move the dump to {}: {e}",
-            path.display()
-        ))
-    })
+    let (partial, mut file) = create_staging_file(path, &name)?;
+    let staged = file
+        .write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|e| {
+            FrameworkError::internal(format!("could not write {}: {e}", partial.display()))
+        })
+        .and_then(|()| {
+            drop(file);
+            std::fs::rename(&partial, path).map_err(|e| {
+                FrameworkError::internal(format!(
+                    "could not move the dump to {}: {e}",
+                    path.display()
+                ))
+            })
+        });
+    if staged.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    staged
+}
+
+/// A new staging file beside `path`, named `.<name>.<pid>.<n>.partial`. It
+/// is created with `create_new`, so a name another call or process already
+/// holds is skipped rather than shared.
+fn create_staging_file(
+    path: &Path,
+    name: &str,
+) -> Result<(std::path::PathBuf, std::fs::File), FrameworkError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let partial = path.with_file_name(format!(".{name}.{}.{n}.partial", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)
+        {
+            Ok(file) => return Ok((partial, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(FrameworkError::internal(format!(
+                    "could not create {}: {e}",
+                    partial.display()
+                )));
+            }
+        }
+    }
 }
 
 fn read(path: &Path) -> Result<String, FrameworkError> {
@@ -1192,6 +1269,73 @@ mod tests {
         );
     }
 
+    /// SQLx accepts two spellings of each TLS parameter and applies the
+    /// query in order, a `password=` parameter after the URL's own
+    /// password. The tools must read the URL the same way, or a URL the
+    /// framework connects with sends them another password or no TLS
+    /// policy at all.
+    #[test]
+    fn the_tools_read_the_url_the_way_the_framework_connection_does() {
+        let pg = Target::parse(
+            "postgres://app:stale@db/shop?ssl-mode=verify-full&ssl-root-cert=/ca.pem\
+             &ssl-cert=/client.pem&ssl-key=/client.key&password=current",
+        )
+        .expect("a URL");
+        assert_eq!(
+            pg.postgres_env(),
+            [
+                ("PGPASSWORD", "current".to_owned()),
+                ("PGSSLMODE", "verify-full".to_owned()),
+                ("PGSSLROOTCERT", "/ca.pem".to_owned()),
+                ("PGSSLCERT", "/client.pem".to_owned()),
+                ("PGSSLKEY", "/client.key".to_owned()),
+            ]
+        );
+        let ca = Target::parse("postgres://app@db/shop?ssl-ca=/ca.pem").expect("a URL");
+        assert_eq!(ca.postgres_env(), [("PGSSLROOTCERT", "/ca.pem".to_owned())]);
+        let later = Target::parse("postgres://app@db/shop?sslmode=require&ssl-mode=verify-full")
+            .expect("a URL");
+        assert_eq!(
+            later.postgres_env(),
+            [("PGSSLMODE", "verify-full".to_owned())],
+            "the later of two spellings wins, as it does for the connection"
+        );
+
+        let my = Target::parse(
+            "mysql://app:pw@db:3306/shop?sslmode=verify_identity&sslca=/ca.pem\
+             &sslcert=/client.pem&sslkey=/client.key",
+        )
+        .expect("a URL");
+        assert_eq!(
+            my.mysql_args(false).join(" "),
+            "--host=db --port=3306 --user=app --ssl-ca=/ca.pem --ssl-cert=/client.pem \
+             --ssl-key=/client.key --ssl-mode=VERIFY_IDENTITY"
+        );
+        assert_eq!(
+            my.mysql_args(true).join(" "),
+            "--host=db --port=3306 --user=app --ssl-ca=/ca.pem --ssl-cert=/client.pem \
+             --ssl-key=/client.key --ssl --ssl-verify-server-cert"
+        );
+    }
+
+    /// SQLx reads a URL host that decodes to an absolute path as a Unix
+    /// socket directory, the only way a URL can name one in its host part.
+    /// pg_dump and psql take the directory as `--host`, decoded.
+    #[test]
+    fn a_percent_encoded_socket_directory_reaches_the_tools_decoded() {
+        let socket = Target::parse("postgres://app@%2Frun%2Fpostgresql/shop").expect("a URL");
+        assert_eq!(
+            socket.postgres_args().join(" "),
+            "--host=/run/postgresql --username=app --no-password --dbname=shop"
+        );
+        // A host name stays as written, encoded or not, as it does for SQLx.
+        let host = Target::parse("postgres://app@db%2Dprimary:5433/shop").expect("a URL");
+        assert_eq!(
+            host.postgres_args().join(" "),
+            "--host=db%2Dprimary --port=5433 --username=app --no-password --dbname=shop"
+        );
+    }
+
     #[test]
     fn a_url_gives_the_tools_its_parts_without_the_password_in_arguments() {
         let target =
@@ -1210,5 +1354,48 @@ mod tests {
                 ("PGSSLMODE", "require".to_owned())
             ]
         );
+    }
+
+    // DATA-058: replacements of one dump that run at the same time each
+    // stage their own file. They used to share `.<name>.partial`, so one
+    // writer truncated what another was about to rename, and a rename could
+    // find its staging file already moved.
+    #[test]
+    fn concurrent_replacements_of_one_dump_each_land_whole() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("schema.sql");
+        let payloads: Vec<String> = (0..8)
+            .map(|writer| format!("-- writer {writer}\n").repeat(150_000))
+            .collect();
+        std::thread::scope(|scope| {
+            let writers: Vec<_> = payloads
+                .iter()
+                .map(|payload| {
+                    let path = &path;
+                    scope.spawn(move || {
+                        for _ in 0..4 {
+                            write_replacing(path, payload)?;
+                        }
+                        Ok::<(), FrameworkError>(())
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer
+                    .join()
+                    .expect("a writer thread")
+                    .expect("every replacement succeeds");
+            }
+        });
+        let landed = std::fs::read_to_string(&path).expect("the dump");
+        assert!(
+            payloads.contains(&landed),
+            "the dump is one writer's whole file"
+        );
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("the directory")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        assert_eq!(left, ["schema.sql"], "no staging file is left behind");
     }
 }

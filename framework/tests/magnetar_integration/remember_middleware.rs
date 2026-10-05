@@ -207,13 +207,23 @@ fn response_cookie(headers: &hyper::HeaderMap, name: &str) -> String {
 
 #[tokio::test]
 async fn installed_engine_remember_hydration_rotates_and_binds_both_sessions() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "installed_engine_remember_hydration_rotates_and_binds_both_sessions",
+    )
+    .await
+    {
+        return;
+    }
     let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
     let connection = magnetar_connection().await;
 
     let user = Auth::password()
         .register("remember-middleware@example.test", "correct-password")
         .await
-        .expect("register Magnetar user");
+        .expect("register Magnetar user")
+        .created()
+        .expect("registration creates a new account");
     let store = Arc::new(MemorySessionStore::default());
     let mut config = SessionConfig::default();
     config.cookie_secure = false;
@@ -437,13 +447,23 @@ async fn installed_engine_remember_hydration_rotates_and_binds_both_sessions() {
 
 #[tokio::test]
 async fn failed_remembered_session_issuance_returns_a_successor_cookie_for_retry() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "failed_remembered_session_issuance_returns_a_successor_cookie_for_retry",
+    )
+    .await
+    {
+        return;
+    }
     let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
     let connection = magnetar_connection().await;
 
     let user = Auth::password()
         .register("remember-session-retry@example.test", "correct-password")
         .await
-        .expect("register remembered-session retry user");
+        .expect("register remembered-session retry user")
+        .created()
+        .expect("registration creates a new account");
     let user_db_id = user
         .id
         .as_str()
@@ -590,12 +610,22 @@ async fn failed_remembered_session_issuance_returns_a_successor_cookie_for_retry
 
 #[tokio::test]
 async fn failed_framework_session_write_retires_the_unpersisted_opaque_session() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "failed_framework_session_write_retires_the_unpersisted_opaque_session",
+    )
+    .await
+    {
+        return;
+    }
     let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
     let _connection = magnetar_connection().await;
     let user = Auth::password()
         .register("remember-write-failure@example.test", "correct-password")
         .await
-        .expect("register framework-write failure user");
+        .expect("register framework-write failure user")
+        .created()
+        .expect("registration creates a new account");
     let store = Arc::new(MemorySessionStore::default());
     let mut config = SessionConfig::default();
     config.cookie_secure = false;
@@ -661,12 +691,54 @@ async fn failed_framework_session_write_retires_the_unpersisted_opaque_session()
 
 #[tokio::test]
 async fn handler_identity_transition_retires_a_retryable_successor() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "handler_identity_transition_retires_a_retryable_successor",
+    )
+    .await
+    {
+        return;
+    }
+    identity_transition_retires_a_retryable_successor(TransitionTarget::SameUser).await;
+}
+
+#[tokio::test]
+async fn handler_transition_to_another_account_retires_a_retryable_successor() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "handler_transition_to_another_account_retires_a_retryable_successor",
+    )
+    .await
+    {
+        return;
+    }
+    identity_transition_retires_a_retryable_successor(TransitionTarget::AnotherAccount).await;
+}
+
+/// Who the handler signs in after the remembered sign-in failed retryably.
+enum TransitionTarget {
+    /// The remembered user again.
+    SameUser,
+    /// A second account.
+    AnotherAccount,
+}
+
+async fn identity_transition_retires_a_retryable_successor(target: TransitionTarget) {
     let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
     let connection = magnetar_connection().await;
+    let label = match target {
+        TransitionTarget::SameUser => "same",
+        TransitionTarget::AnotherAccount => "other",
+    };
     let user = Auth::password()
-        .register("remember-retry-transition@example.test", "correct-password")
+        .register(
+            &format!("remember-retry-transition-{label}@example.test"),
+            "correct-password",
+        )
         .await
-        .expect("register retry-transition user");
+        .expect("register retry-transition user")
+        .created()
+        .expect("registration creates a new account");
     let user_db_id = user
         .id
         .as_str()
@@ -697,6 +769,11 @@ async fn handler_identity_transition_retires_a_retryable_successor() {
     };
     let original_cookie = response_cookie(issue_response.headers(), "remember_me");
 
+    // Refuse the remembered sign-in's Magnetar session, so its outcome is
+    // retryable. The refusal holds only while the user still has a remember
+    // row: the handler's transition revokes the committed successor before
+    // the request commits, so the Magnetar session a framework login is
+    // bound to at commit is issued normally - also for the same user.
     connection
         .execute_raw(Statement::from_string(
             DbBackend::Sqlite,
@@ -704,6 +781,7 @@ async fn handler_identity_transition_retires_a_retryable_successor() {
                 "CREATE TRIGGER fail_retry_transition_session_insert
                  BEFORE INSERT ON auth_sessions
                  WHEN NEW.user_id = {user_db_id}
+                     AND EXISTS (SELECT 1 FROM auth_remember_tokens WHERE user_id = {user_db_id})
                  BEGIN
                      SELECT RAISE(ABORT, 'injected retry-transition session failure');
                  END",
@@ -712,7 +790,20 @@ async fn handler_identity_transition_retires_a_retryable_successor() {
         .await
         .expect("install retry-transition session failure trigger");
 
-    let transition_user = user.id.to_string();
+    let transition_user = match target {
+        TransitionTarget::SameUser => user.id.to_string(),
+        TransitionTarget::AnotherAccount => Auth::password()
+            .register(
+                "remember-retry-transition-target@example.test",
+                "correct-password",
+            )
+            .await
+            .expect("register transition target")
+            .created()
+            .expect("registration creates a new account")
+            .id
+            .to_string(),
+    };
     let transition_next: suprnova::middleware::Next = Arc::new(move |_request| {
         let transition_user = transition_user.clone();
         Box::pin(async move {
@@ -770,6 +861,14 @@ async fn handler_identity_transition_retires_a_retryable_successor() {
 
 #[tokio::test]
 async fn installed_engine_rejects_default_guard_identity_without_compatibility_user_id() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "installed_engine_rejects_default_guard_identity_without_compatibility_user_id",
+    )
+    .await
+    {
+        return;
+    }
     let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
     let _connection = magnetar_connection().await;
     let store = Arc::new(MemorySessionStore::default());
@@ -852,16 +951,28 @@ async fn installed_engine_rejects_default_guard_identity_without_compatibility_u
 
 #[tokio::test]
 async fn installed_engine_fresh_binding_clears_hydrated_identity_carrier() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "installed_engine_fresh_binding_clears_hydrated_identity_carrier",
+    )
+    .await
+    {
+        return;
+    }
     let _test_guard = MAGNETAR_TEST_LOCK.lock().await;
     let _connection = magnetar_connection().await;
     let previous = Auth::password()
         .register("remember-switch-previous@example.test", "previous-password")
         .await
-        .expect("register previous remembered identity");
+        .expect("register previous remembered identity")
+        .created()
+        .expect("registration creates a new account");
     let fresh = Auth::password()
         .register("remember-switch-fresh@example.test", "fresh-password")
         .await
-        .expect("register fresh identity");
+        .expect("register fresh identity")
+        .created()
+        .expect("registration creates a new account");
 
     let store = Arc::new(MemorySessionStore::default());
     let mut config = SessionConfig::default();

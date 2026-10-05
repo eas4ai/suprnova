@@ -85,6 +85,21 @@ Magnetar against the shared SeaORM connection, creates the canonical
 The starter also includes a sample users controller and `UserResource` JSON
 serializer and binds to port 8765 in `.env`.
 
+The `app_users` migration creates the time columns as `timestamp with time
+zone` on Postgres and `DATETIME` on MySQL and MariaDB: the `User` model and
+Magnetar both read them as `DateTime<Utc>`, which Postgres decodes only from
+`timestamp with time zone`. An API application generated before this change
+has `timestamp` columns on Postgres, which neither can read. Convert them
+once:
+
+```sql
+ALTER TABLE app_users
+    ALTER COLUMN email_verified_at TYPE timestamptz USING email_verified_at AT TIME ZONE 'UTC',
+    ALTER COLUMN locked_at TYPE timestamptz USING locked_at AT TIME ZONE 'UTC',
+    ALTER COLUMN created_at TYPE timestamptz USING created_at AT TIME ZONE 'UTC',
+    ALTER COLUMN updated_at TYPE timestamptz USING updated_at AT TIME ZONE 'UTC';
+```
+
 `--api` is mutually exclusive with `--frontend`; passing both errors.
 Under `--api`, only the project name is prompted - the
 description/author/frontend prompts are skipped.
@@ -150,7 +165,7 @@ team knows.
 The CLI itself ships via git, not crates.io (pre-launch):
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v3.1.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v3.2.1 suprnova-cli
 ```
 
 `--force` on the same command updates an existing install. Scaffolded

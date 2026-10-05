@@ -606,6 +606,202 @@ async fn renewal_replays_the_bounded_log_tail_and_reissues_authority() {
     assert_eq!(superseded.error_code(), "async_subscription_unknown");
 }
 
+/// ROOT-37: a renewal whose needed tail the log has already evicted is
+/// refused, never answered with an authoritative no-tail proof at the
+/// browser's own position. That proof told the browser nothing had happened
+/// since the position it held, when the events after it were only gone from
+/// the log; the browser accepted it, kept its stale island current, and met
+/// the gap later instead of recovering now. Refused, the membership degrades,
+/// so the island never claims to be current on a position the server could
+/// not prove, as spec 14 requires. A position the log still covers keeps
+/// replaying exactly as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn renewal_from_a_position_the_log_evicted_is_refused_rather_than_proven() {
+    let (router, _runtime) = router_and_runtime();
+    let server = spawn_server(router).await;
+    let alice = Identity::alice();
+    let issued = issue(
+        server.port,
+        &alice,
+        orders_issue_body("sse", "doc-instance-0001"),
+    )
+    .await;
+    let streams = LiveStreams::resolve().expect("Live streams publisher");
+    // One past what the subscription's log retains, so the entry right
+    // after the issued baseline is evicted.
+    let retained = suprnova::live::LiveConfig::default().async_max_replay_events();
+    for index in 0..=retained {
+        streams
+            .event::<OrdersUpdated>(
+                "orders",
+                LiveEventTarget::Document,
+                CanonicalValue::String(format!("event-{index}")),
+            )
+            .await
+            .expect("publish");
+    }
+
+    let renewal = json!({
+        "protocol_version": 1,
+        "operation": "renew",
+        "transport": "sse",
+        "stream": "orders",
+        "island": {
+            "component": ORDERS_COMPONENT,
+            "slot": "orders-slot",
+            "document_key": "orders-document",
+        },
+        "document_instance": "doc-instance-0001",
+        "prior": {
+            "subscription_id": issued.subscription_id,
+            "descriptor_binding": issued.descriptor_binding,
+        },
+        "position": { "epoch": issued.baseline.0, "sequence": "0" },
+    });
+    let reply = post_control(server.port, &alice, SUBSCRIPTION_PATH, None, renewal).await;
+    assert_eq!(
+        reply.status,
+        StatusCode::BAD_REQUEST,
+        "an evicted tail proves nothing about what the browser missed: {}",
+        String::from_utf8_lossy(&reply.body)
+    );
+    assert_eq!(reply.error_code(), "async_position_invalid");
+}
+
+/// The sequence of one delivered envelope.
+fn sequence_of(envelope: &Value) -> u64 {
+    envelope["position"]["sequence"]
+        .as_str()
+        .expect("sequence")
+        .parse()
+        .expect("numeric sequence")
+}
+
+/// ROOT-37: a delivery lane that degraded recovers by replaying what it
+/// missed from the subscription's log, so the browser sees every position
+/// in order. Two refreshes published back to back coalesce in the document
+/// queue, and the lane meets the newer one past the one it superseded. The
+/// lane used to be re-baselined at its delivery cursor instead, with no
+/// proof: the refreshes and the event behind them never reached the
+/// stream, and the next envelope arrived past the hole.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_degraded_lane_replays_what_it_missed_from_the_log() {
+    let (router, _runtime) = router_and_runtime();
+    let server = spawn_server(router).await;
+    let alice = Identity::alice();
+    let orders = issue(
+        server.port,
+        &alice,
+        orders_issue_body("sse", "doc-instance-0001"),
+    )
+    .await;
+    let credential = orders.credential.clone().expect("bearer");
+    let streams = LiveStreams::resolve().expect("Live streams publisher");
+    streams.refresh("orders").await.expect("publish refresh 1");
+    streams.refresh("orders").await.expect("publish refresh 2");
+    streams
+        .event::<OrdersUpdated>(
+            "orders",
+            LiveEventTarget::Document,
+            CanonicalValue::String("before-subscribe".to_owned()),
+        )
+        .await
+        .expect("publish event 3");
+
+    let mut stream = SseClient::open(server.port, &alice, &credential, 1, &[]).await;
+    assert_eq!(stream.status, StatusCode::OK);
+    let _ = stream.next_record().await;
+    assert_eq!(
+        subscribe(server.port, &alice, &credential, &orders, "nonce-orders", 1)
+            .await
+            .status,
+        StatusCode::OK
+    );
+    streams
+        .event::<OrdersUpdated>(
+            "orders",
+            LiveEventTarget::Document,
+            CanonicalValue::String("after-subscribe".to_owned()),
+        )
+        .await
+        .expect("publish event 4");
+
+    let mut seen = Vec::new();
+    while seen.len() < 4 {
+        let envelope = stream.next_data().await.expect("the stream stays open");
+        seen.push((
+            sequence_of(&envelope),
+            envelope["payload"]["kind"]
+                .as_str()
+                .expect("payload kind")
+                .to_owned(),
+        ));
+    }
+    assert_eq!(
+        seen,
+        vec![
+            (1, "refresh".to_owned()),
+            (2, "refresh".to_owned()),
+            (3, "browser_event".to_owned()),
+            (4, "browser_event".to_owned()),
+        ],
+        "every position reaches the stream, in order"
+    );
+}
+
+/// ROOT-37: when the subscription's log has already evicted part of what a
+/// degraded lane missed, nothing can prove continuity, so the transport
+/// retires: the browser reconnects, and its renewal from that position is
+/// refused (see the renewal test above), so the island never claims to be
+/// current. The lane used to be re-baselined at its delivery cursor and
+/// the stream went on past the hole.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_degraded_lane_whose_missed_entries_were_evicted_retires_the_transport() {
+    let (router, _runtime) = router_and_runtime();
+    let server = spawn_server(router).await;
+    let alice = Identity::alice();
+    let orders = issue(
+        server.port,
+        &alice,
+        orders_issue_body("sse", "doc-instance-0001"),
+    )
+    .await;
+    let credential = orders.credential.clone().expect("bearer");
+    let streams = LiveStreams::resolve().expect("Live streams publisher");
+    // One past what the subscription's log retains, so the entry right
+    // after the issued baseline is evicted before the lane reads it.
+    let retained = suprnova::live::LiveConfig::default().async_max_replay_events();
+    for index in 0..=retained {
+        streams
+            .event::<OrdersUpdated>(
+                "orders",
+                LiveEventTarget::Document,
+                CanonicalValue::String(format!("event-{index}")),
+            )
+            .await
+            .expect("publish");
+    }
+
+    let mut stream = SseClient::open(server.port, &alice, &credential, 1, &[]).await;
+    assert_eq!(stream.status, StatusCode::OK);
+    let _ = stream.next_record().await;
+    assert_eq!(
+        subscribe(server.port, &alice, &credential, &orders, "nonce-orders", 1)
+            .await
+            .status,
+        StatusCode::OK
+    );
+    if let Some(envelope) = stream.next_data().await {
+        panic!(
+            "sequence 1 was evicted, yet the stream went on at sequence {}",
+            sequence_of(&envelope)
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn websocket_transport_authenticates_memberships_and_delivers_envelopes() {

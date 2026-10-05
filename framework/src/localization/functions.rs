@@ -7,26 +7,68 @@
 //! framework's own addition - upstream `fluent-bundle` has a
 //! `// TODO: DATETIME()` where it would go.
 
-use super::Lang;
 use super::fluent::ConcurrentBundle;
-use super::format::{DateStyle, TimeStyle};
+use super::format::{self, DateStyle, TimeStyle};
+use super::locale::Locale;
 use crate::error::FrameworkError;
 use fluent_bundle::{FluentArgs, FluentValue};
 use std::borrow::Cow;
 
-/// Register `DATETIME()` on `bundle`.
+/// The names of the functions every catalog's bundle registers:
+/// Fluent's builtin `NUMBER()` and the framework's `DATETIME()`.
+/// fluent-bundle keeps functions in the same name map as messages and
+/// terms, so `fluent.rs` needs them to keep a term or a message from
+/// shadowing one.
+pub(crate) const FUNCTION_NAMES: [&str; 2] = ["NUMBER", "DATETIME"];
+
+/// Register `DATETIME()` on `bundle`, the bundle of `locale`'s catalog.
+///
+/// The function formats in `locale`, the catalog's own, rather than in
+/// the ambient `Lang::locale()`: a caller that asks the translator for
+/// one locale's message explicitly must get that locale's dates, the same
+/// way Fluent's `NUMBER()` uses the bundle's locale.
 ///
 /// Only the registration itself can fail (id already taken); the
 /// function's own runtime behavior never returns `Err` because Fluent
 /// functions can't propagate one - see [`datetime_function`].
-pub(crate) fn register(bundle: &mut ConcurrentBundle) -> Result<(), FrameworkError> {
-    bundle
-        .add_function("DATETIME", datetime_function)
-        .map_err(|e| {
-            FrameworkError::internal(format!(
-                "failed to register the DATETIME() Fluent function: {e}"
-            ))
-        })
+pub(crate) fn register(
+    bundle: &mut ConcurrentBundle,
+    locale: &Locale,
+) -> Result<(), FrameworkError> {
+    register_as(bundle, locale, "DATETIME", "DATETIME")
+}
+
+/// Register `function`, one of [`FUNCTION_NAMES`], on `bundle` under `id`.
+///
+/// A catalog that defines a message named like a function takes that name
+/// in fluent-bundle's one name map, so `fluent.rs` compiles its calls to
+/// the function under an `id` nothing in the catalog uses, and registers
+/// the function under that `id` here as well.
+pub(crate) fn register_as(
+    bundle: &mut ConcurrentBundle,
+    locale: &Locale,
+    function: &str,
+    id: &str,
+) -> Result<(), FrameworkError> {
+    let added = match function {
+        "NUMBER" => bundle.add_function(id, fluent_bundle::builtins::NUMBER),
+        "DATETIME" => {
+            let locale = locale.clone();
+            bundle.add_function(id, move |positional, named| {
+                datetime_function(&locale, positional, named)
+            })
+        }
+        other => {
+            return Err(FrameworkError::internal(format!(
+                "`{other}` is not a Fluent function the framework registers"
+            )));
+        }
+    };
+    added.map_err(|e| {
+        FrameworkError::internal(format!(
+            "failed to register the {function}() Fluent function as `{id}`: {e}"
+        ))
+    })
 }
 
 /// The `DATETIME()` implementation.
@@ -49,7 +91,11 @@ pub(crate) fn register(bundle: &mut ConcurrentBundle) -> Result<(), FrameworkErr
 /// An unrecognized `dateStyle`/`timeStyle` keyword gets the same
 /// treatment (warn, then fall back to the default) rather than silently
 /// being ignored - see [`parse_named_date_style`]/[`parse_named_time_style`].
-fn datetime_function<'a>(positional: &[FluentValue<'a>], named: &FluentArgs) -> FluentValue<'a> {
+fn datetime_function<'a>(
+    locale: &Locale,
+    positional: &[FluentValue<'a>],
+    named: &FluentArgs,
+) -> FluentValue<'a> {
     let Some(value) = positional.first() else {
         tracing::warn!("DATETIME(): missing the required $value positional argument");
         return FluentValue::Error;
@@ -68,10 +114,10 @@ fn datetime_function<'a>(positional: &[FluentValue<'a>], named: &FluentArgs) -> 
     let time_style = parse_named_time_style(named);
 
     let rendered = match (date_style, time_style) {
-        (Some(d), Some(t)) => Lang::try_datetime(&dt, d, t),
-        (Some(d), None) => Lang::try_date(&dt, d),
-        (None, Some(t)) => Lang::try_time(&dt, t),
-        (None, None) => Lang::try_date(&dt, DateStyle::Medium),
+        (Some(d), Some(t)) => format::try_datetime(locale, &dt, d, t),
+        (Some(d), None) => format::try_date(locale, &dt, d),
+        (None, Some(t)) => format::try_time(locale, &dt, t),
+        (None, None) => format::try_date(locale, &dt, DateStyle::Medium),
     };
 
     match rendered {

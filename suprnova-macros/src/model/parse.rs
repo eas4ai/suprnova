@@ -828,6 +828,40 @@ pub(crate) fn is_integer_below_u64(ty: &Type) -> bool {
     }
 }
 
+/// Whether `ty` is `String` or `Option<String>`: a field the database
+/// stores in a text column, which holds a `u64` above `i64::MAX` as its
+/// digits.
+pub(crate) fn is_text(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    if path.qself.is_some() {
+        return false;
+    }
+    let Some(last) = path.path.segments.last() else {
+        return false;
+    };
+    if last.ident == "String" {
+        return matches!(last.arguments, syn::PathArguments::None);
+    }
+    if last.ident != "Option" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return false;
+    };
+    match (args.args.len(), args.args.first()) {
+        (1, Some(syn::GenericArgument::Type(Type::Path(inner)))) => {
+            inner.qself.is_none()
+                && inner.path.segments.last().is_some_and(|segment| {
+                    segment.ident == "String"
+                        && matches!(segment.arguments, syn::PathArguments::None)
+                })
+        }
+        _ => false,
+    }
+}
+
 /// Helper - convert `CamelCase` → `snake_case`.
 pub fn to_snake(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
@@ -2111,6 +2145,22 @@ mod tests {
         ] {
             let ty: Type = syn::parse_str(source).unwrap();
             assert_eq!(classify_unsigned(&ty), shape, "{source}");
+        }
+    }
+
+    #[test]
+    fn text_fields_are_recognised() {
+        for (source, expected) in [
+            ("String", true),
+            ("std::string::String", true),
+            ("Option<String>", true),
+            ("&str", false),
+            ("Option<Option<String>>", false),
+            ("Vec<String>", false),
+            ("u64", false),
+        ] {
+            let ty: Type = syn::parse_str(source).unwrap();
+            assert_eq!(is_text(&ty), expected, "{source}");
         }
     }
 

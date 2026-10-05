@@ -11,11 +11,17 @@
 //!   enabled     BOOLEAN     NOT NULL
 //!   description TEXT
 //!   updated_by  VARCHAR(255)                      -- audit: which user toggled it (opaque id, string-typed for UUID/ULID support)
-//!   created_at  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
-//!   updated_at  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
+//!   created_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP  -- DATETIME on MySQL
+//!   updated_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP  -- DATETIME on MySQL
 //!   UNIQUE INDEX (name, scope_key)
 //! )
 //! ```
+//!
+//! The time columns are `DATETIME` on MySQL and MariaDB, whose `TIMESTAMP`
+//! refuses any time after 2038-01-19. A table this migration created before
+//! has `TIMESTAMP` there;
+//! [`FeatureTimestampsToDatetime`](super::FeatureTimestampsToDatetime)
+//! converts it.
 //!
 //! Consumer apps include this migration in their `Migrator`'s
 //! `migrations()` list - the framework owns the schema, the app owns
@@ -23,7 +29,7 @@
 
 use sea_orm_migration::prelude::*;
 
-use crate::database::migration_guard::create_index_if_missing;
+use crate::database::migration_guard::{create_index_if_missing, utc_timestamp_column};
 
 /// Migration that creates the framework-owned `features` table.
 ///
@@ -58,6 +64,7 @@ enum Features {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let backend = manager.get_database_backend();
         manager
             .create_table(
                 Table::create()
@@ -81,14 +88,12 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Features::Description).text().null())
                     .col(ColumnDef::new(Features::UpdatedBy).string_len(255).null())
                     .col(
-                        ColumnDef::new(Features::CreatedAt)
-                            .timestamp_with_time_zone()
+                        utc_timestamp_column(Features::CreatedAt, backend)
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
                     .col(
-                        ColumnDef::new(Features::UpdatedAt)
-                            .timestamp_with_time_zone()
+                        utc_timestamp_column(Features::UpdatedAt, backend)
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )

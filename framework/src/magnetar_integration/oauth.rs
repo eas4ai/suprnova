@@ -63,6 +63,10 @@ impl OAuthAuth {
 
     /// Begin a session-bound sign-in flow.
     ///
+    /// The flow is bound to the current session, so this also marks the
+    /// session for storage: `SessionMiddleware` then sends its cookie with
+    /// the response, even when the start is the browser's first request.
+    ///
     /// # Errors
     ///
     /// Returns an error when session middleware or the OAuth engine/provider is
@@ -84,6 +88,12 @@ impl OAuthAuth {
             })
             .await
             .map_err(map_error)?;
+        // The ceremony is bound to this session, so the session must reach
+        // the browser. A first-contact start that changed nothing else, such
+        // as a JSON or POST request, would otherwise be neither stored nor
+        // sent as a cookie, and the callback would arrive under another
+        // session and fail the binding.
+        crate::session::session_mut(|session| session.dirty = true);
         Ok(OAuthKickoff {
             authorization_url: begun.authorization_url,
             state: begun.state,
@@ -330,6 +340,11 @@ fn map_error(error: super::engine::HostOAuthError) -> FrameworkError {
     match error {
         super::engine::HostOAuthError::Protocol(error) => {
             FrameworkError::domain(error.to_string(), error.class().status())
+        }
+        super::engine::HostOAuthError::Auth(magnetar::Error::Conflict { resource, message })
+            if resource == super::engine::FRAMEWORK_SECOND_FACTOR =>
+        {
+            FrameworkError::domain(message, 409)
         }
         super::engine::HostOAuthError::Auth(magnetar::Error::InvalidInput { message, .. })
         | super::engine::HostOAuthError::Auth(magnetar::Error::NotFound {

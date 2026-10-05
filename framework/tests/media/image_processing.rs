@@ -14,7 +14,7 @@ use suprnova::{Image, ImageConfig, OutputFormat};
 /// A 1x1 red PNG, byte-literal fixture (verified: `file` reports
 /// `PNG image data, 1 x 1, 8-bit/color RGB, non-interlaced`, and the
 /// subsystem decodes it to `(1, 1, [255, 0, 0, 255])`).
-const RED_PNG_1X1: &[u8] = &[
+pub(crate) const RED_PNG_1X1: &[u8] = &[
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
     0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
@@ -39,10 +39,10 @@ async fn red_png_4x2() -> Vec<u8> {
 /// The override is process-global. Clearing it on the happy path only means a
 /// single failed assertion leaks a tightened cap into every test that runs
 /// after it, turning one red test into a cascade that hides its own cause.
-struct ConfigGuard;
+pub(crate) struct ConfigGuard;
 
 impl ConfigGuard {
-    fn set(config: ImageConfig) -> Self {
+    pub(crate) fn set(config: ImageConfig) -> Self {
         suprnova::media::set_config_for_tests(Some(config));
         Self
     }
@@ -179,6 +179,12 @@ pub(crate) fn webp_chunks(webp: &[u8]) -> Vec<String> {
     chunks
 }
 
+/// The packed RGBA of a 32-bit BMP the driver wrote. The ImageMagick
+/// driver tests use it too.
+pub(crate) fn bmp_rgba_pixels(bmp: &[u8]) -> Vec<u8> {
+    bmp_rgba(bmp).2
+}
+
 /// Run `source` through the pipeline to `format` at `quality`.
 async fn encode(source: &[u8], format: OutputFormat, quality: u8) -> Vec<u8> {
     Image::from_bytes(source.to_vec())
@@ -190,7 +196,7 @@ async fn encode(source: &[u8], format: OutputFormat, quality: u8) -> Vec<u8> {
 }
 
 /// Decode any supported image to `(width, height, packed RGBA)`.
-async fn decoded_rgba(image: &[u8]) -> (u32, u32, Vec<u8>) {
+pub(crate) async fn decoded_rgba(image: &[u8]) -> (u32, u32, Vec<u8>) {
     let bmp = Image::from_bytes(image.to_vec())
         .to_format(OutputFormat::Bmp)
         .to_bytes()

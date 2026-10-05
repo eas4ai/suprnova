@@ -2,7 +2,8 @@
 
 use super::channel::{ChannelKind, LogChannel, LogLevel, LogRecord, LogSink, facility_number};
 use super::sinks::{
-    FileSink, Rotation, StreamSink, flush_all, register_flushable, replace_placeholders,
+    FileSink, ReportedSink, Rotation, StreamSink, flush_all, register_flushable,
+    replace_placeholders,
 };
 use crate::error::FrameworkError;
 use std::collections::{BTreeMap, HashMap};
@@ -19,6 +20,28 @@ pub(crate) enum Leaf {
     Stdout(Option<LogLevel>),
     Stderr(Option<LogLevel>),
     Sink(Arc<dyn LogSink>, Option<LogLevel>),
+}
+
+impl Leaf {
+    /// The same leaf, keeping only what both its own lowest level and
+    /// `outer`, the level of a stack that lists it, keep.
+    fn within(self, outer: Option<LogLevel>) -> Self {
+        let narrowed = |own: Option<LogLevel>| match (own, outer) {
+            (Some(own), Some(outer)) => Some(own.min(outer)),
+            (own, None) => own,
+            (None, outer) => outer,
+        };
+        match self {
+            Leaf::Stdout(level) => Leaf::Stdout(narrowed(level)),
+            Leaf::Stderr(level) => Leaf::Stderr(narrowed(level)),
+            Leaf::Sink(sink, level) => Leaf::Sink(sink, narrowed(level)),
+        }
+    }
+
+    /// Whether this leaf writes to `sink`.
+    fn writes_to(&self, sink: &Arc<dyn LogSink>) -> bool {
+        matches!(self, Leaf::Sink(own, _) if Arc::ptr_eq(own, sink))
+    }
 }
 
 #[derive(Default)]
@@ -43,6 +66,16 @@ pub(crate) static STDERR_MIN: AtomicU8 = AtomicU8::new(8);
 /// Set when the default channel was forgotten: the next event resolves it
 /// again, as Laravel resolves a forgotten channel on its next use.
 static DEFAULT_FORGOTTEN: AtomicBool = AtomicBool::new(false);
+
+/// Set once a default channel has been chosen, by the boot's
+/// `check_channels`, an install, `Log::set_default_channel`, or the first
+/// event that found none chosen and took `LOG_CHANNEL`.
+static DEFAULT_CHOSEN: AtomicBool = AtomicBool::new(false);
+
+/// Set by the first event that takes `LOG_CHANNEL` as the default, so that
+/// neither another thread nor an event raised while resolving it starts a
+/// second resolution.
+static DEFAULT_TAKING: AtomicBool = AtomicBool::new(false);
 
 fn read() -> RwLockReadGuard<'static, Registry> {
     REGISTRY
@@ -156,9 +189,16 @@ fn build(channel: &LogChannel, depth: u8) -> Result<Vec<Leaf>, FrameworkError> {
                     "log stacks nest more than eight deep; a stack probably lists itself",
                 ));
             }
+            // The stack's own level applies on top of each channel's, so a
+            // stack at `Warning` drops info even in a channel that keeps
+            // every level.
             let mut leaves = Vec::new();
             for name in names {
-                leaves.extend(resolve_named(name, depth + 1)?);
+                leaves.extend(
+                    resolve_named(name, depth + 1)?
+                        .into_iter()
+                        .map(|leaf| leaf.within(level)),
+                );
             }
             leaves
         }
@@ -168,7 +208,9 @@ fn build(channel: &LogChannel, depth: u8) -> Result<Vec<Leaf>, FrameworkError> {
                     "the log driver '{driver}' does not exist: add it with Log::extend"
                 ))
             })?;
-            let sink = factory(channel)?;
+            // The driver's failures are reported for it, as the `LogSink`
+            // contract asks of its caller.
+            let sink: Arc<dyn LogSink> = Arc::new(ReportedSink::new(factory(channel)?, driver));
             // A driver may buffer, so it is flushed with the files.
             register_flushable(&sink);
             vec![Leaf::Sink(sink, level)]
@@ -205,29 +247,84 @@ fn level_code(level: Option<LogLevel>) -> u8 {
     level.map_or(8, LogLevel::severity)
 }
 
+/// The lowest level any of the standard-stream leaves keeps, as the
+/// `tracing` formatter's threshold for that stream: `None` when no leaf is
+/// that stream, `Some(None)` when one keeps every level.
+///
+/// `tracing` writes an event to a stream once however many channels in the
+/// default stack name it, so the event goes when any of them keeps its
+/// level, whichever comes first in the stack.
+fn stream_minimum(
+    leaves: &[Leaf],
+    of_stream: impl Fn(&Leaf) -> Option<Option<LogLevel>>,
+) -> Option<Option<LogLevel>> {
+    leaves
+        .iter()
+        .filter_map(of_stream)
+        .reduce(|kept, level| match (kept, level) {
+            (Some(kept), Some(level)) => Some(kept.max(level)),
+            _ => None,
+        })
+}
+
 /// Make `name` the default channel: the one `tracing` events go to.
 pub(crate) fn set_default(name: &str) -> Result<(), FrameworkError> {
     let leaves = resolve_named(name, 0)?;
-    let stdout = leaves.iter().find_map(|leaf| match leaf {
+    install_default(&mut write(), name, leaves);
+    Ok(())
+}
+
+/// Whether `name` is a channel that can be the default, without making it so.
+pub(crate) fn resolves(name: &str) -> Result<(), FrameworkError> {
+    resolve_named(name, 0).map(|_| ())
+}
+
+fn install_default(registry: &mut Registry, name: &str, leaves: Vec<Leaf>) {
+    let stdout = stream_minimum(&leaves, |leaf| match leaf {
         Leaf::Stdout(level) => Some(*level),
         _ => None,
     });
-    let stderr = leaves.iter().find_map(|leaf| match leaf {
+    let stderr = stream_minimum(&leaves, |leaf| match leaf {
         Leaf::Stderr(level) => Some(*level),
         _ => None,
     });
-    let mut registry = write();
     STDOUT_ON.store(stdout.is_some(), Ordering::Relaxed);
     STDOUT_MIN.store(level_code(stdout.flatten()), Ordering::Relaxed);
     STDERR_ON.store(stderr.is_some(), Ordering::Relaxed);
     STDERR_MIN.store(level_code(stderr.flatten()), Ordering::Relaxed);
     registry.default = Some(name.to_owned());
     registry.default_leaves = leaves;
-    Ok(())
+    DEFAULT_CHOSEN.store(true, Ordering::Release);
+}
+
+/// Make `LOG_CHANNEL` the default channel, or stdout when it does not
+/// resolve, if no default has been chosen yet. [`Log::default_channel`]
+/// already reports `LOG_CHANNEL` until one is, so a subscriber installed
+/// without the boot sends its events where that says, while building the
+/// subscriber itself chooses nothing.
+fn take_default_if_unchosen() {
+    if DEFAULT_CHOSEN.load(Ordering::Acquire) || DEFAULT_TAKING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let configured = configured_default();
+    let taken = match resolve_named(&configured, 0) {
+        Ok(leaves) => Some((configured, leaves)),
+        Err(_) => resolve_named("stdout", 0)
+            .ok()
+            .map(|leaves| ("stdout".to_owned(), leaves)),
+    };
+    if let Some((name, leaves)) = taken {
+        let mut registry = write();
+        // A default chosen while this one resolved stands.
+        if registry.default.is_none() {
+            install_default(&mut registry, &name, leaves);
+        }
+    }
 }
 
 /// The sinks of the default channel that are not the standard streams.
 pub(crate) fn default_sinks() -> Vec<(Arc<dyn LogSink>, Option<LogLevel>)> {
+    take_default_if_unchosen();
     if DEFAULT_FORGOTTEN.swap(false, Ordering::Relaxed) {
         refresh_default();
     }
@@ -244,6 +341,7 @@ pub(crate) fn default_sinks() -> Vec<(Arc<dyn LogSink>, Option<LogLevel>)> {
 /// Whether a `tracing` event at `level` goes to standard output (or, with
 /// `stderr`, standard error) as part of the default channel.
 pub(crate) fn stream_enabled(stderr: bool, level: &tracing::Level) -> bool {
+    take_default_if_unchosen();
     let (on, minimum) = if stderr {
         (&STDERR_ON, &STDERR_MIN)
     } else {
@@ -394,15 +492,39 @@ impl Log {
     /// closing its files. It is resolved again the next time it is used,
     /// the default channel by the next `tracing` event, which reopens its
     /// file, as Laravel's `forgetChannel` does after a file was rotated
-    /// away.
+    /// away. A stack that lists the channel is dropped with it, the
+    /// default channel among them, so the stack reopens the file too
+    /// rather than writing on into the rotated one. A [`Logger`] taken
+    /// before keeps the sinks it holds.
     pub fn forget_channel(name: &str) {
-        let removed = write().resolved.remove(name);
-        for leaf in removed.into_iter().flatten() {
-            if let Leaf::Sink(sink, _) = leaf {
-                let _ = sink.flush();
-            }
+        let (forgotten, default_affected) = {
+            let mut registry = write();
+            let forgotten: Vec<Arc<dyn LogSink>> = registry
+                .resolved
+                .remove(name)
+                .into_iter()
+                .flatten()
+                .filter_map(|leaf| match leaf {
+                    Leaf::Sink(sink, _) => Some(sink),
+                    _ => None,
+                })
+                .collect();
+            let shares_a_sink = |leaves: &[Leaf]| {
+                leaves
+                    .iter()
+                    .any(|leaf| forgotten.iter().any(|sink| leaf.writes_to(sink)))
+            };
+            registry.resolved.retain(|_, leaves| !shares_a_sink(leaves));
+            let default_affected = registry.default.as_deref() == Some(name)
+                || shares_a_sink(&registry.default_leaves);
+            (forgotten, default_affected)
+        };
+        // Flushed outside the registry lock: a driver's flush may log.
+        for sink in &forgotten {
+            // A failure is reported by the sink, or by its `ReportedSink`.
+            let _ = sink.flush();
         }
-        if read().default.as_deref() == Some(name) {
+        if default_affected {
             DEFAULT_FORGOTTEN.store(true, Ordering::Relaxed);
         }
     }
@@ -461,6 +583,9 @@ impl Logger {
             context,
         };
         for leaf in &self.leaves {
+            // Every sink reports its own failure once on stderr, a driver's
+            // through its `ReportedSink`, so the result is not needed here:
+            // logging never fails its caller.
             let _ = match leaf {
                 Leaf::Stdout(minimum) if level.passes(*minimum) => {
                     StreamSink::stdout().write(&record)

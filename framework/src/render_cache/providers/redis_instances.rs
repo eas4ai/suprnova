@@ -50,7 +50,9 @@
 //! expiries that arrive together is paid for over the operations that follow
 //! rather than by whichever one is unlucky. Counting the live records is a
 //! `ZCOUNT` over the index rather than a scan of the keyspace, so a mount
-//! costs one logarithmic range count however many instances exist.
+//! costs one logarithmic range count however many instances exist. A mount
+//! at capacity also reads the head of that index, a `ZRANGEBYSCORE` with a
+//! limit, to choose the instance it evicts.
 
 use async_trait::async_trait;
 use suprnova_live::identity::UnixMillis;
@@ -61,8 +63,8 @@ use suprnova_live::ledger::{
 
 use super::redis::{
     LIVE_REDIS_URL, RedisProvider, RedisProviderConfig, SharedScript, StoreTimeOffset,
-    instance_index_key, instance_key, ledger_error, promotion_key, timed_script,
-    unreadable_ledger_status,
+    instance_index_key, instance_key, instance_key_from_name, ledger_error, promotion_key,
+    timed_script, unreadable_ledger_status,
 };
 use super::{as_i64, as_u64};
 use crate::FrameworkError;
@@ -89,6 +91,11 @@ const PRESENT: i64 = 1;
 const NOT_CREATED: i64 = 0;
 /// The status a creation returns when this call created the record.
 const CREATED: i64 = 1;
+/// The status a compare-and-remove returns when the record was gone or had
+/// moved on.
+const NOT_REMOVED: i64 = 0;
+/// The status a compare-and-remove returns when this call removed the record.
+const REMOVED: i64 = 1;
 
 /// Reads one record, treating an elapsed one as absent.
 ///
@@ -214,6 +221,59 @@ local now = suprnova_store_now(tonumber(ARGV[1]))
 return redis.call('ZCOUNT', KEYS[1], string.format('(%d', now), '+inf')
 ";
 
+/// Reads the live instance records whose deadlines come first: the
+/// candidates a full ledger evicts from.
+///
+/// `KEYS[1]` is the expiry index. `ARGV` is the store-time test offset and
+/// the most records to return. The range starts just past store time, the
+/// bound [`COUNT_LUA`] counts from, so it offers exactly the records the
+/// capacity counts, and its limit keeps it a bounded read of the head of the
+/// index however many instances exist. Returns one `{key, record, version,
+/// expires_at_ms}` per live record, soonest first; a member whose hash is
+/// already gone is passed over.
+///
+/// Each live record is written back over a name already read, so the reply
+/// reuses the range's own array. That keeps the body free of an empty table
+/// constructor, which the template guard below refuses in every script.
+const SOONEST_LUA: &str = r"
+local now = suprnova_store_now(tonumber(ARGV[1]))
+local due = redis.call('ZRANGEBYSCORE', KEYS[1], string.format('(%d', now), '+inf',
+    'LIMIT', 0, tonumber(ARGV[2]))
+local kept = 0
+for index = 1, #due do
+    local name = due[index]
+    local held = redis.call('HMGET', name, 'record', 'version', 'expires_at_ms')
+    if held[1] and held[2] and held[3] then
+        local expires_at = tonumber(held[3])
+        if expires_at and expires_at > now then
+            kept = kept + 1
+            due[kept] = {name, held[1], tonumber(held[2]), expires_at}
+        end
+    end
+end
+for index = #due, kept + 1, -1 do
+    due[index] = nil
+end
+return due
+";
+
+/// Removes one instance record and its index member only while the record
+/// still carries the version the caller read.
+///
+/// `KEYS[1]` is the record hash and `KEYS[2]` the expiry index. `ARGV[1]` is
+/// the version the caller read. Returns `1` when this call removed the record
+/// and `0` when it was gone or had moved on. Like [`REMOVE_LUA`] it reads no
+/// clock: a record that elapsed after the read stops counting either way.
+const COMPARE_AND_REMOVE_LUA: &str = r"
+local version = tonumber(redis.call('HGET', KEYS[1], 'version'))
+if not version or version ~= tonumber(ARGV[1]) then
+    return 0
+end
+redis.call('DEL', KEYS[1])
+redis.call('ZREM', KEYS[2], KEYS[1])
+return 1
+";
+
 /// [`LOAD_LUA`], built once so every read after the first ships a hash rather
 /// than the whole body.
 static LOAD: SharedScript = SharedScript::new(|| timed_script(LOAD_LUA));
@@ -233,6 +293,14 @@ static REMOVE: SharedScript = SharedScript::new(|| redis::Script::new(REMOVE_LUA
 
 /// [`COUNT_LUA`], built once for the same reason.
 static COUNT: SharedScript = SharedScript::new(|| timed_script(COUNT_LUA));
+
+/// [`SOONEST_LUA`], built once for the same reason.
+static SOONEST: SharedScript = SharedScript::new(|| timed_script(SOONEST_LUA));
+
+/// [`COMPARE_AND_REMOVE_LUA`], built once for the same reason. Like
+/// [`REMOVE`] it decides nothing by store time, so it needs no clock.
+static COMPARE_AND_REMOVE: SharedScript =
+    SharedScript::new(|| redis::Script::new(COMPARE_AND_REMOVE_LUA));
 
 /// Redis-backed Live instance and promotion record store. See the module
 /// documentation for the key layout, the clock, and why no host transaction
@@ -446,6 +514,65 @@ impl InstanceRecordStore for RedisInstanceRecordStore {
             .map_err(|error| ledger_error(&error))?;
         Ok(usize::try_from(as_u64(live)).unwrap_or(usize::MAX))
     }
+
+    async fn soonest_expiring_instances(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(InstanceRecordKey, StoredRecord)>, LedgerError> {
+        let mut conn = self.provider.connection();
+        let found: Vec<(String, Vec<u8>, u64, u64)> = SOONEST
+            .key(instance_index_key(self.provider.prefix()))
+            .arg(self.time_offset_ms.get())
+            .arg(i64::try_from(limit).unwrap_or(i64::MAX))
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|error| ledger_error(&error))?;
+        let mut records = Vec::with_capacity(found.len());
+        for (name, bytes, version, expires_at) in found {
+            // Only this store writes index members, from identities the
+            // engine validated, so a member that does not parse was written
+            // by something else. It is passed over rather than failing the
+            // read: failing would refuse every mount at capacity until that
+            // member's deadline, and a limit must never take mounting down.
+            let Some(key) = instance_key_from_name(self.provider.prefix(), &name) else {
+                tracing::warn!(
+                    target: "suprnova::render_cache",
+                    kind = "unreadable_instance_address",
+                    "live instance record store passed over an index member it did not write",
+                );
+                continue;
+            };
+            records.push((
+                key,
+                StoredRecord {
+                    bytes,
+                    version,
+                    expires_at: UnixMillis::new(expires_at),
+                },
+            ));
+        }
+        Ok(records)
+    }
+
+    async fn compare_and_remove(
+        &self,
+        key: &InstanceRecordKey,
+        expected_version: u64,
+    ) -> Result<bool, LedgerError> {
+        let mut conn = self.provider.connection();
+        let status: i64 = COMPARE_AND_REMOVE
+            .key(instance_key(self.provider.prefix(), key))
+            .key(instance_index_key(self.provider.prefix()))
+            .arg(as_i64(expected_version))
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|error| ledger_error(&error))?;
+        match status {
+            REMOVED => Ok(true),
+            NOT_REMOVED => Ok(false),
+            _ => Err(unreadable_ledger_status()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -460,13 +587,15 @@ mod tests {
     //! range count rather than a keyspace scan.
     use super::*;
 
-    const SCRIPTS: [&str; 6] = [
+    const SCRIPTS: [&str; 8] = [
         LOAD_LUA,
         INSERT_LUA,
         INSERT_PROMOTION_LUA,
         COMPARE_AND_STORE_LUA,
         REMOVE_LUA,
         COUNT_LUA,
+        SOONEST_LUA,
+        COMPARE_AND_REMOVE_LUA,
     ];
 
     #[test]
@@ -477,6 +606,7 @@ mod tests {
             INSERT_PROMOTION_LUA,
             COMPARE_AND_STORE_LUA,
             COUNT_LUA,
+            SOONEST_LUA,
         ] {
             assert!(
                 body.contains("suprnova_store_now(tonumber(ARGV["),
@@ -486,7 +616,50 @@ mod tests {
         // Removing a record is the kernel's own decision and restores no
         // authority, so it must not need a clock the host may be unable to
         // read.
-        assert!(!REMOVE_LUA.contains("suprnova_store_now"), "{REMOVE_LUA}");
+        for body in [REMOVE_LUA, COMPARE_AND_REMOVE_LUA] {
+            assert!(!body.contains("suprnova_store_now"), "{body}");
+        }
+    }
+
+    #[test]
+    fn eviction_reads_a_bounded_head_of_the_index_and_counts_what_counting_counts() {
+        assert!(
+            SOONEST_LUA.contains(
+                "redis.call('ZRANGEBYSCORE', KEYS[1], string.format('(%d', now), '+inf',\n    \
+                 'LIMIT', 0, tonumber(ARGV[2]))"
+            ),
+            "the candidates start where counting starts and stop at the limit: {SOONEST_LUA}"
+        );
+        assert!(
+            COUNT_LUA.contains("string.format('(%d', now), '+inf'"),
+            "and counting starts at the same exclusive bound: {COUNT_LUA}"
+        );
+        assert!(
+            !SOONEST_LUA.contains("SCAN") && !SOONEST_LUA.contains("KEYS "),
+            "eviction never scans the keyspace: {SOONEST_LUA}"
+        );
+        assert!(
+            SOONEST_LUA.contains("if expires_at and expires_at > now then"),
+            "and never offers a record that has elapsed: {SOONEST_LUA}"
+        );
+        assert!(
+            !SOONEST_LUA.contains("ARGV[3]"),
+            "the script reads two arguments and no third: {SOONEST_LUA}"
+        );
+    }
+
+    #[test]
+    fn eviction_removes_only_the_version_it_read_with_its_index_member() {
+        assert!(
+            COMPARE_AND_REMOVE_LUA
+                .contains("if not version or version ~= tonumber(ARGV[1]) then\n    return 0"),
+            "a claim that landed after the read keeps its record: {COMPARE_AND_REMOVE_LUA}"
+        );
+        assert!(
+            COMPARE_AND_REMOVE_LUA.contains("redis.call('DEL', KEYS[1])")
+                && COMPARE_AND_REMOVE_LUA.contains("redis.call('ZREM', KEYS[2], KEYS[1])"),
+            "the hash and its index member go in one step: {COMPARE_AND_REMOVE_LUA}"
+        );
     }
 
     #[test]

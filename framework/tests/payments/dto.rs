@@ -114,6 +114,65 @@ fn phone_number_serde_roundtrip_as_transparent_string() {
     assert_eq!(back, p);
 }
 
+/// Deserialization is construction: a wire value goes through `new`, so
+/// `digits()` and every routing check can rely on the E.164 invariant for a
+/// value read back from a request, a queue payload or the database.
+#[test]
+fn phone_number_deserialization_validates_like_new() {
+    for bad in [
+        "",
+        "+",
+        "\u{e9}260971234567",
+        "+abc1234567",
+        "123",
+        "+12345678901234567890",
+    ] {
+        let parsed = serde_json::from_value::<PhoneNumber>(serde_json::json!(bad));
+        assert!(
+            parsed.is_err(),
+            "{bad:?} must not deserialize into a PhoneNumber, got {parsed:?}"
+        );
+    }
+
+    // A digits-only value normalizes the way `new` does instead of losing
+    // its first digit to `digits()`.
+    let p: PhoneNumber = serde_json::from_value(serde_json::json!("260971234567")).unwrap();
+    assert_eq!(p.as_e164(), "+260971234567");
+    assert_eq!(p.digits(), "260971234567");
+}
+
+#[test]
+fn country_code_deserialization_validates_like_new() {
+    for bad in ["", "Z", "ZMB", "12", "z1", "\u{e9}\u{e9}"] {
+        let parsed = serde_json::from_value::<CountryCode>(serde_json::json!(bad));
+        assert!(
+            parsed.is_err(),
+            "{bad:?} must not deserialize into a CountryCode, got {parsed:?}"
+        );
+    }
+    let c: CountryCode = serde_json::from_value(serde_json::json!(" zm ")).unwrap();
+    assert_eq!(c.as_str(), "ZM");
+}
+
+#[test]
+fn payment_method_mobile_money_rejects_an_invalid_phone_or_country() {
+    let valid = serde_json::to_value(PaymentMethod::MobileMoney {
+        operator: MobileMoneyOperator::MtnMomo,
+        phone: PhoneNumber::new("+260971234567").unwrap(),
+        country: CountryCode::new("ZM").unwrap(),
+    })
+    .unwrap();
+    assert!(serde_json::from_value::<PaymentMethod>(valid.clone()).is_ok());
+
+    let mut bad_phone = valid.clone();
+    bad_phone["phone"] = serde_json::json!("");
+    assert!(serde_json::from_value::<PaymentMethod>(bad_phone).is_err());
+
+    let mut bad_country = valid;
+    bad_country["country"] = serde_json::json!("zambia");
+    assert!(serde_json::from_value::<PaymentMethod>(bad_country).is_err());
+}
+
 #[test]
 fn country_code_normalizes_to_uppercase() {
     let c = CountryCode::new("zm").unwrap();

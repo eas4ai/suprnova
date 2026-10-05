@@ -692,3 +692,149 @@ async fn redis_flush_tags_spans_multiple_scan_rounds() {
         &survivors[..survivors.len().min(5)]
     );
 }
+
+/// A plain connection for setting up and inspecting keys outside the store.
+async fn raw_connection() -> redis::aio::MultiplexedConnection {
+    redis::Client::open(redis_url())
+        .expect("open a raw Redis client")
+        .get_multiplexed_async_connection()
+        .await
+        .expect("connect a raw Redis client")
+}
+
+/// DRIVERS-005: `flush` matches the prefix literally. It used to send
+/// `SCAN MATCH {prefix}*` with the prefix unescaped, so a prefix holding glob
+/// syntax deleted a neighbour's keys and missed its own.
+#[tokio::test]
+#[ignore = "requires Redis at CACHE_REDIS_TEST_URL or default localhost"]
+async fn redis_flush_treats_the_prefix_as_a_literal_not_a_glob() {
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    // `[ab]` is a glob character class: unescaped, it matches `a` or `b`
+    // and never the literal `[ab]` this store writes under.
+    let s = store_at(&redis_url(), format!("glob{id}[ab]:")).await;
+    let neighbour = format!("glob{id}a:other");
+    let mut raw = raw_connection().await;
+    redis::cmd("SET")
+        .arg(&neighbour)
+        .arg("keep me")
+        .query_async::<()>(&mut raw)
+        .await
+        .expect("seed the neighbour key");
+
+    s.put_raw("k", "v", None).await.unwrap();
+    s.flush().await.unwrap();
+
+    let neighbour_left: bool = redis::cmd("EXISTS")
+        .arg(&neighbour)
+        .query_async(&mut raw)
+        .await
+        .expect("probe the neighbour key");
+    // Clean up before asserting so a failure does not leak the key.
+    redis::cmd("DEL")
+        .arg(&neighbour)
+        .query_async::<()>(&mut raw)
+        .await
+        .expect("remove the neighbour key");
+    assert!(
+        neighbour_left,
+        "flush deleted another application's key: the prefix was read as a glob"
+    );
+    assert!(
+        !s.has("k").await.unwrap(),
+        "flush must remove this store's own key under a prefix with glob syntax"
+    );
+}
+
+/// DRIVERS-005, the escape character itself: a prefix ending in a backslash
+/// escaped the trailing `*`, so `flush` deleted nothing.
+#[tokio::test]
+#[ignore = "requires Redis at CACHE_REDIS_TEST_URL or default localhost"]
+async fn redis_flush_handles_a_prefix_ending_in_a_backslash() {
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let s = store_at(&redis_url(), format!("bs{id}\\")).await;
+    s.put_raw("k", "v", None).await.unwrap();
+    s.flush().await.unwrap();
+    assert!(
+        !s.has("k").await.unwrap(),
+        "flush must remove the store's key when the prefix ends in a backslash"
+    );
+}
+
+/// DRIVERS-003: `touch` extends the tag bookkeeping with the value. It used
+/// to extend only the value, so the tag record expired at the old TTL and a
+/// later `flush_tags` skipped a value that was still live.
+#[tokio::test]
+#[ignore = "requires Redis at CACHE_REDIS_TEST_URL or default localhost"]
+async fn redis_touch_keeps_a_tagged_value_flushable_past_its_first_ttl() {
+    let s = fresh_store("touch-tags").await;
+    s.tagged_put_raw(&["t"], "k", "v", Some(Duration::from_millis(150)))
+        .await
+        .unwrap();
+    assert!(s.touch("k", Duration::from_secs(30)).await.unwrap());
+
+    // Past the original TTL, inside the extended one.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(s.has("k").await.unwrap(), "touch extended the value");
+
+    s.flush_tags(&["t"]).await.unwrap();
+    assert!(
+        !s.has("k").await.unwrap(),
+        "a touched tagged value must still be removed by its tag"
+    );
+}
+
+/// DRIVERS-004: a tag's forward index stops growing with entries that can
+/// no longer be reached. Expired, forgotten, overwritten and flushed-by-
+/// another-tag members are pruned as the tag is written, instead of staying
+/// in the set until that exact tag is flushed.
+#[tokio::test]
+#[ignore = "requires Redis at CACHE_REDIS_TEST_URL or default localhost"]
+async fn redis_tag_index_drops_members_that_can_no_longer_be_reached() {
+    let prefix = format!("tag-gc{}:", uuid::Uuid::new_v4().simple());
+    let s = store_at(&redis_url(), prefix.clone()).await;
+    let index = format!("{prefix}\0tag:b");
+    let mut raw = raw_connection().await;
+
+    // Dead in four ways: expired, forgotten, overwritten untagged, and
+    // flushed through their other tag.
+    for i in 0..3 {
+        s.tagged_put_raw(
+            &["b"],
+            &format!("exp{i}"),
+            "v",
+            Some(Duration::from_millis(50)),
+        )
+        .await
+        .unwrap();
+        s.tagged_put_raw(&["b"], &format!("gone{i}"), "v", None)
+            .await
+            .unwrap();
+        s.forget(&format!("gone{i}")).await.unwrap();
+        s.tagged_put_raw(&["b"], &format!("plain{i}"), "v", None)
+            .await
+            .unwrap();
+        s.put_raw(&format!("plain{i}"), "v", None).await.unwrap();
+        s.tagged_put_raw(&["a", "b"], &format!("both{i}"), "v", None)
+            .await
+            .unwrap();
+    }
+    s.flush_tags(&["a"]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // One more live write to the tag is what prunes it.
+    s.tagged_put_raw(&["b"], "live", "v", None).await.unwrap();
+
+    let members: Vec<String> = redis::cmd("SMEMBERS")
+        .arg(&index)
+        .query_async(&mut raw)
+        .await
+        .expect("read the forward index");
+    assert_eq!(
+        members,
+        vec![format!("{prefix}live")],
+        "the forward index for tag b must hold only the live member"
+    );
+
+    s.flush_tags(&["b"]).await.unwrap();
+    assert!(!s.has("live").await.unwrap());
+}

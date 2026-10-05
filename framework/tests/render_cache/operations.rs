@@ -450,6 +450,17 @@ async fn console_epoch_advance_propagates_when_the_ledger_is_unavailable() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_model_write_with_no_runtime_installed_advances_the_ledger() {
+    // Clears the process-wide installed flag (and some of these force the
+    // write-side switch), which every other test in this binary reads, so
+    // it runs alone in a child process (see `own_process_async`).
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_model_write_with_no_runtime_installed_advances_the_ledger",
+    )
+    .await
+    {
+        return;
+    }
     use render_cache_operations_support::Post;
     use suprnova::render_cache::ledger::SqlGenerationLedger;
     use suprnova_live::render_cache::generation::GenerationLedger as _;
@@ -507,6 +518,17 @@ async fn a_model_write_with_no_runtime_installed_advances_the_ledger() {
 #[tokio::test]
 #[serial_test::serial]
 async fn bump_permission_version_with_no_runtime_installed_advances_the_permission_generation() {
+    // Clears the process-wide installed flag (and some of these force the
+    // write-side switch), which every other test in this binary reads, so
+    // it runs alone in a child process (see `own_process_async`).
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "bump_permission_version_with_no_runtime_installed_advances_the_permission_generation",
+    )
+    .await
+    {
+        return;
+    }
     use suprnova::render_cache::ledger::SqlGenerationLedger;
     use suprnova_live::render_cache::generation::GenerationLedger as _;
 
@@ -546,6 +568,17 @@ async fn bump_permission_version_with_no_runtime_installed_advances_the_permissi
 #[tokio::test]
 #[serial_test::serial]
 async fn a_process_with_render_cache_disabled_writes_nothing() {
+    // Clears the process-wide installed flag (and some of these force the
+    // write-side switch), which every other test in this binary reads, so
+    // it runs alone in a child process (see `own_process_async`).
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_process_with_render_cache_disabled_writes_nothing",
+    )
+    .await
+    {
+        return;
+    }
     use render_cache_operations_support::Post;
     use suprnova::render_cache::ledger::SqlGenerationLedger;
     use suprnova::render_cache::write_side::WriteSideDecision;
@@ -583,6 +616,75 @@ async fn a_process_with_render_cache_disabled_writes_nothing() {
 
     suprnova::render_cache::RenderCache::set_write_side_enabled_for_test(None);
     suprnova::render_cache::mark_installed();
+}
+
+/// DATA-028: a `Closed` decision fixed before this process installed a
+/// serving runtime does not outlive the install. A process that wrote once
+/// while the migration was absent (or the gate was closed) and then installed
+/// RenderCache serves cached pages, so every later write has to advance the
+/// generations those pages observe. The decision table already says an
+/// installed process is `Open`; the cached `Closed` answer used to be read
+/// before that fact was.
+#[cfg(feature = "testing")]
+#[tokio::test]
+#[serial_test::serial]
+async fn installing_a_runtime_after_a_closed_decision_opens_the_write_side() {
+    // Clears the process-wide installed flag (and some of these force the
+    // write-side switch), which every other test in this binary reads, so
+    // it runs alone in a child process (see `own_process_async`).
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "installing_a_runtime_after_a_closed_decision_opens_the_write_side",
+    )
+    .await
+    {
+        return;
+    }
+    use render_cache_operations_support::Post;
+    use suprnova::render_cache::ledger::SqlGenerationLedger;
+    use suprnova::render_cache::write_side::WriteSideDecision;
+    use suprnova_live::render_cache::generation::GenerationLedger as _;
+
+    let _harness = boot_with_render_cache().await;
+    let table = DependencyIdentity::table("posts");
+    let ledger = SqlGenerationLedger::new();
+
+    suprnova::render_cache::RenderCache::uninstall_for_test();
+    suprnova::render_cache::RenderCache::set_write_side_enabled_for_test(Some(false));
+    Post::create(attrs! { title: "written before the install" })
+        .await
+        .expect("write a post");
+    assert_eq!(
+        suprnova::render_cache::RenderCache::write_side_decision_for_test(),
+        WriteSideDecision::Closed,
+        "the first write fixed Closed"
+    );
+
+    // What `RenderCache::install` does to this process's write side.
+    suprnova::render_cache::mark_installed();
+    let before = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table)
+        .unwrap_or(0);
+    Post::create(attrs! { title: "written after the install" })
+        .await
+        .expect("write a post");
+    let after = ledger
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table)
+        .unwrap_or(0);
+
+    suprnova::render_cache::RenderCache::set_write_side_enabled_for_test(None);
+    suprnova::render_cache::mark_installed();
+    assert_eq!(
+        after,
+        before + 1,
+        "a write after the install advances the table it wrote"
+    );
 }
 
 /// Every row of the probe's decision table, against the pure function that
@@ -630,6 +732,14 @@ fn the_write_side_decision_table() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_closed_write_side_is_not_probed_again() {
+    // Clears the process-wide installed flag (and some of these force the
+    // write-side switch), which every other test in this binary reads, so
+    // it runs alone in a child process (see `own_process_async`).
+    if crate::own_process_async::delegate(module_path!(), "a_closed_write_side_is_not_probed_again")
+        .await
+    {
+        return;
+    }
     use render_cache_operations_support::{Post, statement_counter};
 
     let harness = boot_with_render_cache().await;

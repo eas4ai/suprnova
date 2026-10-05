@@ -39,7 +39,7 @@ impl MagnetarPasswordAuthEngine for ResetEngine {
     async fn password_register(
         &self,
         _input: magnetar::plugins::password::RegisterInput,
-    ) -> magnetar::Result<User> {
+    ) -> magnetar::Result<suprnova::Registration> {
         Err(Self::unavailable())
     }
 
@@ -173,6 +173,16 @@ impl MagnetarPasswordAuthEngine for ResetEngine {
 
 #[tokio::test]
 async fn password_reset_facade_delegates_issue_check_and_completion_to_magnetar() {
+    // Its own process: it installs a process-wide Magnetar password engine,
+    // which the tests of this binary that run without an engine must not see.
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "password_reset_facade_delegates_issue_check_and_completion_to_magnetar",
+    )
+    .await
+    {
+        return;
+    }
     let _env = crate::env_lock::lock_env_async().await;
     unsafe {
         std::env::set_var("MAIL_FROM", "test-mailer@example.test");

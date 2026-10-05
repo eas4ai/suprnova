@@ -443,7 +443,17 @@ For full control, use cron syntax:
 .cron("0 */2 * * *")    // Every 2 hours
 .cron("30 4 * * 1-5")   // 4:30 AM on weekdays
 .cron("0 0 1,15 * *")   // 1st and 15th of each month
+.cron("0 9 1-15/7 * *") // 9:00 AM on the 1st, 8th and 15th
 ```
+
+Each field is a comma-separated list of parts. A part is `*`, a value
+`N`, or a range `N-M`, and any of them can take a `/step`; `N/step` runs
+from `N` to the end of the field. A step counts from the first value of
+its part, and for `*` that is the field's first value: `*/2` in the
+day-of-month field is the 1st, 3rd, 5th, and so on, and `*/3` in the
+month field is January, April, July, and October - what cron and
+Laravel mean. The expressions `schedule:list` prints for another
+timezone use the same grammar, so you can schedule one as it reads.
 
 `.cron(...)` **panics** if the expression is malformed (wrong field count,
 unparseable step/range/list). Use `.try_cron(expr)` when the expression is
@@ -558,13 +568,19 @@ They compose. A long-running task that must also be single-server takes
 both.
 
 **Requires a shared cache.** The election is a [`Cache`](cache.md) lock, so
-"one server" means "one process among those sharing a cache backend". Under
-`CACHE_DRIVER=memory` the lock lives in a single process's heap, every
+"one server" means "one process among those sharing a cache backend". With an
+in-memory cache store the lock lives in a single process's heap, every
 replica wins its own election, and the guarantee is silently absent.
 
-In production that is a **boot failure**, not a warning:
+The check asks the cache store the scheduler actually locks through, not
+`CACHE_DRIVER`: an in-memory store your bootstrap binds, or a typed
+`CacheConfig` that selects memory, counts as per-process even when
+`CACHE_DRIVER=redis`. A custom `CacheStore` whose locks are shared across
+processes says so by returning `true` from `CacheStore::locks_are_shared`.
 
-> `refusing to boot in production: 1 task(s) request single-server execution (billing:nightly) but CACHE_DRIVER is memory or unset, so the election lock lives in this process's heap. Every replica would win its own election and run the task, which is what on_one_server() exists to prevent. Set CACHE_DRIVER=redis with REDIS_URL, or set SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true to acknowledge per-process locking - which is only accurate if you run exactly one scheduler.`
+In production a per-process lock is a **boot failure**, not a warning:
+
+> `refusing to boot in production: 1 task(s) request single-server execution (billing:nightly) but the bound cache store keeps its locks in this process (CACHE_DRIVER is memory or unset, or the application bound an in-memory store), so the election lock lives in this process's heap. Every replica would win its own election and run the task, which is what on_one_server() exists to prevent. Set CACHE_DRIVER=redis with REDIS_URL, or set SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true to acknowledge per-process locking - which is only accurate if you run exactly one scheduler.`
 
 Set `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true` if your deployment
 really does run a single scheduler. Outside production the memory driver
@@ -624,7 +640,10 @@ schedule.add(
 with `catch_unwind`, so a panicking task surfaces as a `FrameworkError`
 recorded against the task's name rather than tearing down the scheduler. The
 `schedule:work` daemon drains the JoinSet on shutdown (Ctrl-C / SIGTERM) so
-in-flight background tasks complete before exit.
+in-flight background tasks complete before exit, within a 30-second grace.
+A stop signal that arrives while a tick's inline tasks are still running
+is seen at once: the inline tasks and the background tasks share the
+grace, and whatever is still running at its end is stopped.
 
 **Combine with `without_overlapping`.** The two flags compose - a background
 task with `without_overlapping()` will spawn into the JoinSet and acquire the
@@ -882,8 +901,9 @@ runtime that's already long-lived, so:
   Laravel spawns a child process per background task; we spawn into a
   `JoinSet` and surface completions on the next tick or at shutdown.
 - **Graceful shutdown is a `tokio::select!` arm.** Ctrl-C / SIGTERM
-  drains in-flight background tasks before exit; in-process tasks finish
-  their current call.
+  drains in-flight background tasks before exit, and in-process tasks
+  get the same bounded grace to finish their current call - a task that
+  hangs cannot keep the daemon from stopping.
 - **Same-minute dedup is in-process state.** A `last_run_minute` atomic
   per task guarantees a single process can't double-fire a minute-aligned
   task even if the loop ticks fast. PHP can't do this - every cron tick

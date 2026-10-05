@@ -114,6 +114,11 @@ where
     /// (cloned into the inner builder's WHERE clause).
     #[allow(dead_code)]
     morph_type_value: String,
+    /// The parent's column the children's `<name>_id` holds: the
+    /// parent model's primary key, or the relation's `lk = "..."` the
+    /// macro passes through [`Self::local_key`]. Read by the
+    /// [`Relation`] impl.
+    parent_key: String,
     /// Pre-filtered builder against the child table - both
     /// `<name>_id = <parent_id>` AND `<name>_type = <morph_type>`
     /// applied at construction.
@@ -172,6 +177,7 @@ where
             parent_key_value,
             morph_name,
             morph_type_value,
+            parent_key: L::PRIMARY_KEY.to_string(),
             inner,
             lazy_load: LazyLoadGuard::default(),
             _phantom: PhantomData,
@@ -184,6 +190,17 @@ where
     #[doc(hidden)]
     pub fn __lazy_load(mut self, guard: LazyLoadGuard) -> Self {
         self.lazy_load = guard;
+        self
+    }
+
+    /// Override the parent column the children's `<name>_id` holds.
+    /// Only updates the metadata the [`Relation`] impl exposes - the
+    /// inner builder already holds the key's value, read from the
+    /// parent row at construction. The macro chains it when the
+    /// relation declares `lk = "..."`; the default is the parent
+    /// model's primary key.
+    pub fn local_key(mut self, key: impl Into<String>) -> Self {
+        self.parent_key = key.into();
         self
     }
 
@@ -313,15 +330,7 @@ where
     const KIND: RelationKind = RelationKind::MorphMany;
 
     fn parent_key(&self) -> &str {
-        // Polymorphic relations always join the parent's PK (`id`)
-        // against the child's `<name>_id` column. The macro doesn't
-        // currently expose a parent-key override on morph relations
-        // (the morph runtime keys are baked into the column-name
-        // construction in `__new`); if a non-`id` parent PK is needed
-        // the parent model declares it via `primary_key = "..."` and
-        // the macro reads that when populating the inner builder, not
-        // through this accessor.
-        "id"
+        &self.parent_key
     }
 
     fn foreign_key(&self) -> &str {
@@ -402,6 +411,13 @@ where
     #[doc(hidden)]
     pub fn __lazy_load(mut self, guard: LazyLoadGuard) -> Self {
         self.inner = self.inner.__lazy_load(guard);
+        self
+    }
+
+    /// Override the parent column the child's `<name>_id` holds. Same
+    /// metadata-only contract as [`MorphMany::local_key`].
+    pub fn local_key(mut self, key: impl Into<String>) -> Self {
+        self.inner = self.inner.local_key(key);
         self
     }
 
@@ -583,8 +599,12 @@ where
     type Target = ();
     const KIND: RelationKind = RelationKind::MorphTo;
 
+    /// The key column of the model this row points at, chosen by the
+    /// type the row names through the morph registry. `""` when the
+    /// type names no registered model: no column is known.
     fn parent_key(&self) -> &str {
-        "id"
+        crate::eloquent::relations::find_morph_type(&self.morph_type)
+            .map_or("", |entry| entry.primary_key)
     }
 
     fn foreign_key(&self) -> &str {

@@ -40,8 +40,8 @@ use crate::payments::{
 use crate::routing::Router;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
-    QuerySelect, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, QueryFilter, QuerySelect, Set, TransactionTrait,
 };
 use std::sync::Arc;
 
@@ -67,35 +67,93 @@ fn is_unique_violation(error: &sea_orm::DbErr) -> bool {
     )
 }
 
-/// Advance the render-cache table generation for `E` after a raw
-/// `ActiveModel` write against one of the mirror entities below, issued
-/// against the bare `db: &DatabaseConnection` outside any transaction -
-/// today, only the audit-row bookkeeping in `handle_webhook_inner`
-/// (the receipt insert, the retry `process_error` clear) and `mark_failed`.
+/// Runs one write to the receipt table, `payments_webhook_events`, in a
+/// transaction of its own on `db`, and advances that table's generation in
+/// the same transaction when `changed` says the write changed a row.
 ///
-/// This is safe to call immediately, unlike the writes inside
-/// `try_hydrate`'s transaction (see [`advance_touched_mirror_tables`] for
-/// why those are collected and advanced separately, after commit): there is
-/// no ambient `CURRENT_TX` to join, but there is also no OTHER transaction
-/// open on this connection for a dedicated fallback transaction to contend
-/// with, so `after_table_write`'s "open one when nothing is ambient" branch
-/// runs uncontended. Advances the table identity only (no per-row record -
-/// these entities are reached by raw `ActiveModel`, not a `Model`-trait
-/// instance with a `primary_key_value_json` to build one from). A page
-/// rendered from a payments entity already records that table as a
-/// dependency via the read collector (these are `#[suprnova::model]`
-/// entities), so leaving this uninstrumented meant a write here never
-/// invalidated a page that had already observed it.
-async fn advance_mirror_table<E: sea_orm::EntityTrait>() -> Result<(), PaymentError> {
-    crate::render_cache::orm::after_table_write(crate::database::model::entity_table_name::<E>())
+/// The receipt insert, a retry's clear of the earlier attempt's error, and
+/// the record of a failed hydration's error run before or after the
+/// hydration, outside its transaction. They used to write on `db` directly
+/// and advance afterwards, in a second transaction, so a cancellation while
+/// the write's COMMIT was being acknowledged kept the row and lost its
+/// advance (DATA-039). The write and its advance now commit or roll back as
+/// one unit, through the same transaction, the way the hydration's do; see
+/// [`advance_touched_mirror_tables`].
+///
+/// The outer error is a failure to begin, to advance or to commit, the last
+/// one under `commit_context`. The inner result is the write's own, so a
+/// caller can still tell a duplicate receipt from any other database error;
+/// when the write fails, the transaction rolls back and nothing advances.
+/// After a commit that carried an advance, anything an earlier, failed
+/// advance missed is advanced too, as `orm::atomic` does after its own.
+async fn write_receipt<T, W, Fut>(
+    db: &DatabaseConnection,
+    commit_context: &'static str,
+    write: W,
+    changed: impl FnOnce(&T) -> bool,
+) -> Result<Result<T, sea_orm::DbErr>, PaymentError>
+where
+    W: FnOnce(Arc<DatabaseTransaction>) -> Fut,
+    Fut: std::future::Future<Output = Result<T, sea_orm::DbErr>>,
+{
+    // Decided before the transaction opens, for the reason `try_hydrate`
+    // gives.
+    let advances = crate::render_cache::orm::advances_generations()
         .await
-        .map_err(|e| PaymentError::Internal(format!("{e}")))
+        .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+    let txn = Arc::new(
+        db.begin()
+            .await
+            .map_err(|e| PaymentError::database("begin tx", e))?,
+    );
+    let written = write(Arc::clone(&txn)).await;
+    let advanced = match &written {
+        Ok(value) if advances && changed(value) => advance_touched_mirror_tables(
+            &txn,
+            &[crate::database::model::entity_table_name::<
+                webhook_event::Entity,
+            >()],
+        )
+        .await
+        .map(|()| true),
+        _ => Ok(false),
+    };
+    // Dropping `txn` rolls it back, so a handle that somehow outlived the
+    // write still leaves nothing half-applied.
+    let txn = Arc::try_unwrap(txn).map_err(|_| {
+        PaymentError::Internal(
+            "webhook receipt: a transaction handle outlived its write; rolled back".into(),
+        )
+    })?;
+    let advanced = match advanced {
+        Ok(advanced) => advanced,
+        Err(e) => {
+            let _ = txn.rollback().await;
+            return Err(e);
+        }
+    };
+    match written {
+        Ok(value) => {
+            txn.commit()
+                .await
+                .map_err(|e| PaymentError::database(commit_context, e))?;
+            if advanced {
+                crate::render_cache::orm::repair_unresolved().await;
+            }
+            Ok(Ok(value))
+        }
+        Err(error) => {
+            let _ = txn.rollback().await;
+            Ok(Err(error))
+        }
+    }
 }
 
 /// Advance every payments mirror table that `try_hydrate`'s transaction
-/// touched, once, strictly after that transaction has committed.
+/// touched, once, through that same transaction, just before it commits.
+/// [`write_receipt`] uses it the same way for the receipt table.
 ///
-/// Round 3 called [`advance_mirror_table`] from inside each mirror write,
+/// Round 3 advanced from inside each mirror write,
 /// while the transaction `try_hydrate` opens via `db.begin()` (a raw SeaORM
 /// transaction, not `DB::transaction`) was still open. `in_transaction()`
 /// cannot see that transaction, so every one of those calls took
@@ -111,25 +169,38 @@ async fn advance_mirror_table<E: sea_orm::EntityTrait>() -> Result<(), PaymentEr
 /// 503. This is the same root shape ruling R47 fixed for `Builder::with_tx`:
 /// a transaction the ambient check cannot see.
 ///
-/// Collecting the touched tables instead and advancing once here, after
-/// `commit()` returns `Ok`, fixes the deadlock and removes an imprecision
-/// round 3 accepted rather than avoided: because this only runs on the
-/// success path, a hydration that rolls back no longer advances anything for
-/// a change that never landed.
+/// Round 5 moved the advance after `commit()`, which removed the deadlock
+/// but split the rows from their advance: a cancellation while the COMMIT
+/// was being acknowledged kept the rows and the processed receipt and lost
+/// the advance, and the provider's retry then found the receipt processed
+/// and acknowledged a duplicate, so nothing ever advanced the tables
+/// (DATA-039). The advance now runs through `txn` itself, the way an ORM
+/// write and its advance share one transaction. It opens no second
+/// transaction, so the deadlock stays gone, and the rows and their advance
+/// commit or roll back as one unit; a hydration that rolls back advances
+/// nothing.
 ///
-/// Table-only, same as `advance_mirror_table` - callers push
-/// `entity_table_name::<E>()` for each entity type they wrote, not a
-/// row-level identity.
-async fn advance_touched_mirror_tables(touched: &[&'static str]) -> Result<(), PaymentError> {
+/// Table-only - callers push `entity_table_name::<E>()` for each entity
+/// type they wrote, not a row-level identity: these entities are reached by
+/// raw `ActiveModel`, not a `Model`-trait instance with a
+/// `primary_key_value_json` to build a record identity from. A page rendered
+/// from a payments entity records that table as a dependency through the
+/// read collector (these are `#[suprnova::model]` entities). One
+/// advancement for every table, deduplicated.
+///
+/// The generation ledger lives on the application's primary database, so
+/// this relies on `db` being that database, which is what
+/// [`webhook_routes`] documents.
+async fn advance_touched_mirror_tables(
+    txn: &Arc<DatabaseTransaction>,
+    touched: &[&'static str],
+) -> Result<(), PaymentError> {
     let mut unique: Vec<&'static str> = touched.to_vec();
     unique.sort_unstable();
     unique.dedup();
-    for table in unique {
-        crate::render_cache::orm::after_table_write(table)
-            .await
-            .map_err(|e| PaymentError::Internal(format!("{e}")))?;
-    }
-    Ok(())
+    crate::render_cache::orm::after_table_writes_in(txn, &unique)
+        .await
+        .map_err(|e| PaymentError::Internal(format!("{e}")))
 }
 
 fn validate_provider_event_id(event: &WebhookEvent) -> Result<(), PaymentError> {
@@ -228,19 +299,24 @@ async fn handle_webhook_inner(
             provider_event_type: Set(event.provider_event_type.clone()),
             neutral_event_kind: Set(neutral_str),
             payload: Set(event.raw_payload.clone()),
-            received_at: Set(crate::clock::now().to_rfc3339()),
+            received_at: Set(crate::clock::now()),
             processed_at: Set(None),
             process_error: Set(None),
             ..Default::default()
         };
-        match record.insert(db).await {
-            Ok(_) => {
-                if let Err(e) = advance_mirror_table::<webhook_event::Entity>().await {
-                    tracing::error!(error = %e, "failed to advance render-cache generation for webhook event insert");
-                    return failure_response(500, "persist", &e);
-                }
+        let inserted = write_receipt(
+            db,
+            "commit webhook receipt",
+            |txn| async move { record.insert(txn.as_ref()).await },
+            |_| true,
+        )
+        .await;
+        match inserted {
+            Ok(Ok(_)) => {
+                #[cfg(any(test, feature = "testing"))]
+                seams::hold_point(&event.provider_event_id, WebhookCommit::Receipt).await;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 if !is_unique_violation(&e) {
                     tracing::error!(error = %e, "failed to persist webhook event");
                     return failure_response(500, "persist", &e);
@@ -251,6 +327,10 @@ async fn handle_webhook_inner(
                     "webhook receipt insertion raced; continuing to serialized hydration"
                 );
             }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to persist webhook event");
+                return failure_response(500, "persist", &e);
+            }
         }
     } else {
         // Retry: clear stale process_error from a previous failed attempt so
@@ -258,14 +338,19 @@ async fn handle_webhook_inner(
         if let Some(row) = existing {
             let mut am: webhook_event::ActiveModel = row.into();
             am.process_error = Set(None);
-            match am.update(db).await {
-                Ok(_) => {
-                    if let Err(e) = advance_mirror_table::<webhook_event::Entity>().await {
-                        tracing::error!(error = %e, "failed to advance render-cache generation for webhook event retry-clear");
-                        return failure_response(503, "hydration-failed", &e);
-                    }
+            let cleared = write_receipt(
+                db,
+                "commit webhook retry clear",
+                |txn| async move { am.update(txn.as_ref()).await },
+                |_| true,
+            )
+            .await;
+            match cleared {
+                Ok(Ok(_)) => {
+                    #[cfg(any(test, feature = "testing"))]
+                    seams::hold_point(&event.provider_event_id, WebhookCommit::RetryClear).await;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::error!(error = %e, "failed to clear stale process_error before retry");
                     let error = format!("clear stale process_error before retry: {e}");
                     if let Err(mark_error) = mark_failed(db, &event, &error).await {
@@ -274,6 +359,10 @@ async fn handle_webhook_inner(
                             "failed to record webhook retry preparation failure"
                         );
                     }
+                    return failure_response(503, "hydration-failed", &e);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to clear stale process_error before retry");
                     return failure_response(503, "hydration-failed", &e);
                 }
             }
@@ -386,67 +475,203 @@ async fn try_hydrate(
 ) -> Result<HydrationOutcome, PaymentError> {
     let subscription_snapshot = prefetch_provider_state(provider, event).await?;
 
-    let txn = db
-        .begin()
+    // Decided before the transaction opens: deciding may probe the schema on
+    // a pooled connection of its own, which must not wait on the one this
+    // transaction is about to hold (DATA-039).
+    let advances = crate::render_cache::orm::advances_generations()
         .await
-        .map_err(|e| PaymentError::database("begin tx", e))?;
+        .map_err(|e| PaymentError::Internal(format!("{e}")))?;
 
-    // Serialize concurrent retries: lock the audit row, then re-check whether
-    // a racing attempt already finished. `lock_exclusive` emits
-    // `SELECT … FOR UPDATE` on Postgres/MySQL/MariaDB and is a documented
-    // no-op on SQLite, which serializes writers at the file level instead.
-    let locked = match webhook_event::Entity::find()
-        .filter(webhook_event::Column::Provider.eq(&event.provider))
-        .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
-        .lock_exclusive()
-        .one(&txn)
-        .await
-    {
-        Ok(row) => row,
-        Err(e) => {
-            let _ = txn.rollback().await;
-            return Err(PaymentError::database("lock audit row", e));
-        }
-    };
-    if locked.as_ref().is_some_and(|r| r.processed_at.is_some()) {
-        // A concurrent retry committed while we waited on the lock. Roll back -
-        // we have nothing to add - and report the duplicate.
-        let _ = txn.rollback().await;
-        return Ok(HydrationOutcome::AlreadyProcessed);
-    }
-
-    // Mirror tables this transaction's writes touch, collected rather than
-    // advanced immediately - see `advance_touched_mirror_tables` for why
-    // advancing from inside this transaction deadlocks.
-    let mut touched: Vec<&'static str> = Vec::new();
-
-    match process_webhook(
+    // Shared, so the generation advance can run through this transaction
+    // too; every clone is dropped before the commit takes it back.
+    let txn = Arc::new(
+        db.begin()
+            .await
+            .map_err(|e| PaymentError::database("begin tx", e))?,
+    );
+    let applied = apply_in_transaction(
         &txn,
         provider,
         event,
         subscription_snapshot.as_ref(),
-        &mut touched,
+        advances,
     )
-    .await
-    {
-        Ok(()) => match mark_processed(&txn, event, &mut touched).await {
-            Ok(()) => match txn.commit().await {
-                Ok(()) => {
-                    advance_touched_mirror_tables(&touched).await?;
-                    Ok(HydrationOutcome::Processed)
-                }
-                Err(e) => Err(PaymentError::database("commit", e)),
-            },
-            Err(e) => {
-                let _ = txn.rollback().await;
-                Err(e)
+    .await;
+    // Dropping `txn` rolls it back, so a handle that somehow outlived the
+    // writes still leaves nothing half-applied.
+    let txn = Arc::try_unwrap(txn).map_err(|_| {
+        PaymentError::Internal(
+            "webhook hydration: a transaction handle outlived its writes; rolled back".into(),
+        )
+    })?;
+    match applied {
+        Ok(HydrationOutcome::Processed) => {
+            txn.commit()
+                .await
+                .map_err(|e| PaymentError::database("commit", e))?;
+            #[cfg(any(test, feature = "testing"))]
+            seams::hold_point(&event.provider_event_id, WebhookCommit::Hydration).await;
+            if advances {
+                // The advance committed with the rows. Anything an earlier,
+                // failed advance missed is advanced now, as `orm::atomic`
+                // does after its own commit.
+                crate::render_cache::orm::repair_unresolved().await;
             }
-        },
+            Ok(HydrationOutcome::Processed)
+        }
+        Ok(HydrationOutcome::AlreadyProcessed) => {
+            // A concurrent retry committed while we waited on the lock. Roll
+            // back - we have nothing to add - and report the duplicate.
+            let _ = txn.rollback().await;
+            Ok(HydrationOutcome::AlreadyProcessed)
+        }
         Err(e) => {
             let _ = txn.rollback().await;
             Err(e)
         }
     }
+}
+
+/// The body of [`try_hydrate`]'s transaction: lock and re-check the audit
+/// row, apply the mirror writes, mark the event processed, and advance the
+/// touched tables' generations, all through `txn`. Returns before any
+/// commit or rollback, which stay with the caller that owns `txn`.
+async fn apply_in_transaction(
+    txn: &Arc<DatabaseTransaction>,
+    provider: &dyn PaymentProvider,
+    event: &WebhookEvent,
+    subscription_snapshot: Option<&SubscriptionResult>,
+    advances: bool,
+) -> Result<HydrationOutcome, PaymentError> {
+    // Serialize concurrent retries: lock the audit row, then re-check whether
+    // a racing attempt already finished. `lock_exclusive` emits
+    // `SELECT … FOR UPDATE` on Postgres/MySQL/MariaDB and is a documented
+    // no-op on SQLite, which serializes writers at the file level instead.
+    let locked = webhook_event::Entity::find()
+        .filter(webhook_event::Column::Provider.eq(&event.provider))
+        .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
+        .lock_exclusive()
+        .one(txn.as_ref())
+        .await
+        .map_err(|e| PaymentError::database("lock audit row", e))?;
+    if locked.as_ref().is_some_and(|r| r.processed_at.is_some()) {
+        return Ok(HydrationOutcome::AlreadyProcessed);
+    }
+
+    // Mirror tables this transaction's writes touch, collected and advanced
+    // once, through this same transaction - see
+    // `advance_touched_mirror_tables` for why.
+    let mut touched: Vec<&'static str> = Vec::new();
+    process_webhook(
+        txn.as_ref(),
+        provider,
+        event,
+        subscription_snapshot,
+        &mut touched,
+    )
+    .await?;
+    mark_processed(txn.as_ref(), event, &mut touched).await?;
+    if advances {
+        advance_touched_mirror_tables(txn, &touched).await?;
+    }
+    Ok(HydrationOutcome::Processed)
+}
+
+/// Test-only seam that parks one webhook right after one of its commits, so
+/// a test can cancel the request at the instant that write is durable and
+/// nothing after its commit has run (DATA-039).
+///
+/// Keyed by the provider event id and the commit. Several can be armed at
+/// once and each park is reported on its own, so webhooks other tests run at
+/// the same time never take or see each other's.
+#[cfg(any(test, feature = "testing"))]
+mod seams {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    use super::WebhookCommit;
+
+    type Key = (String, WebhookCommit);
+
+    static ARMED: OnceLock<Mutex<HashSet<Key>>> = OnceLock::new();
+    static PARKED: OnceLock<Mutex<HashSet<Key>>> = OnceLock::new();
+    static PARKED_NOTIFY: OnceLock<tokio::sync::Notify> = OnceLock::new();
+
+    fn lock(set: &'static OnceLock<Mutex<HashSet<Key>>>) -> MutexGuard<'static, HashSet<Key>> {
+        set.get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn parked_notify() -> &'static tokio::sync::Notify {
+        PARKED_NOTIFY.get_or_init(tokio::sync::Notify::new)
+    }
+
+    pub(super) fn hold_next(provider_event_id: &str, commit: WebhookCommit) {
+        let key = (provider_event_id.to_owned(), commit);
+        lock(&PARKED).remove(&key);
+        lock(&ARMED).insert(key);
+    }
+
+    pub(super) async fn wait_until_held(provider_event_id: &str, commit: WebhookCommit) {
+        let key = (provider_event_id.to_owned(), commit);
+        loop {
+            let notified = parked_notify().notified();
+            if lock(&PARKED).remove(&key) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Parks forever when armed for `provider_event_id` and `commit`; the
+    /// test that armed it cancels the request around it.
+    pub(super) async fn hold_point(provider_event_id: &str, commit: WebhookCommit) {
+        let key = (provider_event_id.to_owned(), commit);
+        if lock(&ARMED).remove(&key) {
+            lock(&PARKED).insert(key);
+            parked_notify().notify_waiters();
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Test-only: the commits of a webhook that
+/// [`hold_webhook_commit_for_test`] can park right after.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum WebhookCommit {
+    /// The insert of the event's receipt row.
+    Receipt,
+    /// A retry's clear of the earlier attempt's error on the receipt.
+    RetryClear,
+    /// The record of a failed hydration's error on the receipt.
+    FailureRecord,
+    /// The hydration's transaction.
+    Hydration,
+}
+
+/// Test-only: parks the webhook whose provider event id is
+/// `provider_event_id`, forever, right after `commit`, so a test can cancel
+/// the request at that instant. Each event and commit is armed on its own;
+/// [`wait_until_webhook_commit_held_for_test`] waits for the park.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn hold_webhook_commit_for_test(provider_event_id: &str, commit: WebhookCommit) {
+    seams::hold_next(provider_event_id, commit);
+}
+
+/// Test-only: waits until the webhook armed by
+/// [`hold_webhook_commit_for_test`] for `provider_event_id` and `commit` has
+/// parked.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub async fn wait_until_webhook_commit_held_for_test(
+    provider_event_id: &str,
+    commit: WebhookCommit,
+) {
+    seams::wait_until_held(provider_event_id, commit).await;
 }
 
 /// Dispatch a parsed [`WebhookEvent`] to the mirror-table hydration paths.
@@ -605,7 +830,7 @@ where
     let mark_canceled = matches!(neutral, NeutralEventKind::SubscriptionCanceled)
         || matches!(result.status, SubscriptionStatus::Canceled);
 
-    let now = crate::clock::now().to_rfc3339();
+    let now = crate::clock::now();
 
     match existing {
         Some(model) => {
@@ -613,11 +838,11 @@ where
             let mut am: subscription::ActiveModel = model.into();
             am.provider_customer_id = Set(result.provider_customer_id.clone());
             am.status = Set(status_str.to_string());
-            am.current_period_start = Set(result.current_period_start.to_rfc3339());
-            am.current_period_end = Set(result.current_period_end.to_rfc3339());
+            am.current_period_start = Set(result.current_period_start);
+            am.current_period_end = Set(result.current_period_end);
             am.cancel_at_period_end = Set(result.cancel_at_period_end);
             if mark_canceled && !was_canceled {
-                am.canceled_at = Set(Some(now.clone()));
+                am.canceled_at = Set(Some(now));
             }
             am.provider_metadata = Set(result.provider_metadata.clone());
             am.updated_at = Set(now);
@@ -627,22 +852,18 @@ where
             >());
         }
         None => {
-            let canceled_at = if mark_canceled {
-                Some(now.clone())
-            } else {
-                None
-            };
+            let canceled_at = if mark_canceled { Some(now) } else { None };
             let am = subscription::ActiveModel {
                 provider: Set(provider.to_string()),
                 provider_subscription_id: Set(result.provider_subscription_id.clone()),
                 provider_customer_id: Set(result.provider_customer_id.clone()),
                 status: Set(status_str.to_string()),
-                current_period_start: Set(result.current_period_start.to_rfc3339()),
-                current_period_end: Set(result.current_period_end.to_rfc3339()),
+                current_period_start: Set(result.current_period_start),
+                current_period_end: Set(result.current_period_end),
                 cancel_at_period_end: Set(result.cancel_at_period_end),
                 canceled_at: Set(canceled_at),
                 provider_metadata: Set(result.provider_metadata.clone()),
-                created_at: Set(now.clone()),
+                created_at: Set(now),
                 updated_at: Set(now),
                 ..Default::default()
             };
@@ -682,7 +903,7 @@ where
         .all(db)
         .await?;
 
-    let now = crate::clock::now().to_rfc3339();
+    let now = crate::clock::now();
 
     let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
     for item in &result.items {
@@ -710,7 +931,7 @@ where
                 am.quantity = Set(quantity);
                 am.unit_amount_minor = Set(unit_amount);
                 am.unit_currency = Set(unit_currency);
-                am.updated_at = Set(now.clone());
+                am.updated_at = Set(now);
                 am.update(db).await?;
                 touched.push(crate::database::model::entity_table_name::<
                     subscription_item::Entity,
@@ -725,8 +946,8 @@ where
                     unit_amount_minor: Set(unit_amount),
                     unit_currency: Set(unit_currency),
                     provider_metadata: Set(serde_json::Value::Null),
-                    created_at: Set(now.clone()),
-                    updated_at: Set(now.clone()),
+                    created_at: Set(now),
+                    updated_at: Set(now),
                     ..Default::default()
                 };
                 am.insert(db).await?;
@@ -770,7 +991,7 @@ where
         .one(db)
         .await?;
 
-    let now = crate::clock::now().to_rfc3339();
+    let now = crate::clock::now();
 
     match existing {
         Some(model) => {
@@ -786,7 +1007,7 @@ where
             // Preserve original paid_at across refund/dispute events - the
             // original payment time is the canonical reference.
             if snapshot.paid_at.is_some() {
-                am.paid_at = Set(snapshot.paid_at.map(|t| t.to_rfc3339()));
+                am.paid_at = Set(snapshot.paid_at);
             }
             am.provider_metadata = Set(snapshot.provider_metadata.clone());
             am.updated_at = Set(now);
@@ -805,9 +1026,9 @@ where
                 amount_tax_minor: Set(snapshot.amount_tax_minor),
                 currency: Set(snapshot.currency.clone()),
                 status: Set(snapshot.status.clone()),
-                paid_at: Set(snapshot.paid_at.map(|t| t.to_rfc3339())),
+                paid_at: Set(snapshot.paid_at),
                 provider_metadata: Set(snapshot.provider_metadata.clone()),
-                created_at: Set(now.clone()),
+                created_at: Set(now),
                 updated_at: Set(now),
                 ..Default::default()
             };
@@ -845,7 +1066,7 @@ where
 
     let mut am: transaction::ActiveModel = existing.into();
     am.status = Set(status.to_owned());
-    am.updated_at = Set(crate::clock::now().to_rfc3339());
+    am.updated_at = Set(crate::clock::now());
     am.update(db).await?;
     touched.push(crate::database::model::entity_table_name::<
         transaction::Entity,
@@ -893,7 +1114,7 @@ where
         }
         am.provider_metadata = Set(snap.provider_metadata.clone());
     }
-    am.updated_at = Set(crate::clock::now().to_rfc3339());
+    am.updated_at = Set(crate::clock::now());
     am.update(db).await?;
     touched.push(crate::database::model::entity_table_name::<customer::Entity>());
     Ok(())
@@ -914,7 +1135,7 @@ where
         .await?
         .ok_or_else(|| PaymentError::Internal("webhook event vanished after insert".into()))?;
     let mut am: webhook_event::ActiveModel = model.into();
-    am.processed_at = Set(Some(crate::clock::now().to_rfc3339()));
+    am.processed_at = Set(Some(crate::clock::now()));
     am.process_error = Set(None);
     am.update(db).await?;
     touched.push(crate::database::model::entity_table_name::<
@@ -928,18 +1149,28 @@ async fn mark_failed(
     event: &WebhookEvent,
     err_str: &str,
 ) -> Result<(), PaymentError> {
-    let updated = webhook_event::Entity::update_many()
-        .col_expr(
-            webhook_event::Column::ProcessError,
-            Expr::value(Some(err_str.to_owned())),
-        )
-        .filter(webhook_event::Column::Provider.eq(&event.provider))
-        .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
-        .filter(webhook_event::Column::ProcessedAt.is_null())
-        .exec(db)
-        .await?;
+    let message = err_str.to_owned();
+    let updated = write_receipt(
+        db,
+        "commit webhook failure record",
+        |txn| async move {
+            webhook_event::Entity::update_many()
+                .col_expr(
+                    webhook_event::Column::ProcessError,
+                    Expr::value(Some(message)),
+                )
+                .filter(webhook_event::Column::Provider.eq(&event.provider))
+                .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
+                .filter(webhook_event::Column::ProcessedAt.is_null())
+                .exec(txn.as_ref())
+                .await
+        },
+        |updated| updated.rows_affected >= 1,
+    )
+    .await??;
+    #[cfg(any(test, feature = "testing"))]
     if updated.rows_affected >= 1 {
-        advance_mirror_table::<webhook_event::Entity>().await?;
+        seams::hold_point(&event.provider_event_id, WebhookCommit::FailureRecord).await;
     }
     if updated.rows_affected == 1 {
         return Ok(());
@@ -965,6 +1196,11 @@ async fn mark_failed(
 }
 
 /// Mount the webhook ingress route onto an Axum-compatible Router.
+///
+/// `db` is the application's own database, the one the payments models read
+/// through `DB`. When RenderCache is on, a hydration advances the mirror
+/// tables' generations in the same transaction as the mirror rows, and the
+/// generation ledger lives in that database.
 ///
 /// ```rust,no_run
 /// use std::sync::Arc;
@@ -1106,7 +1342,7 @@ mod tests {
             provider_event_type: Set("payment.succeeded".into()),
             neutral_event_kind: Set(Some("payment_succeeded".into())),
             payload: Set(serde_json::json!({})),
-            received_at: Set(crate::clock::now().to_rfc3339()),
+            received_at: Set(crate::clock::now()),
             processed_at: Set(None),
             process_error: Set(None),
             ..Default::default()
@@ -1128,7 +1364,7 @@ mod tests {
             .await
             .expect("TestDatabase::fresh");
         let conn = db.conn();
-        let processed_at = crate::clock::now().to_rfc3339();
+        let processed_at = crate::clock::now();
         let event = WebhookEvent {
             provider: "mock".into(),
             provider_event_id: "evt_processed_before_failure_record".into(),
@@ -1142,8 +1378,8 @@ mod tests {
             provider_event_type: Set(event.provider_event_type.clone()),
             neutral_event_kind: Set(Some("payment_succeeded".into())),
             payload: Set(event.raw_payload.clone()),
-            received_at: Set(processed_at.clone()),
-            processed_at: Set(Some(processed_at.clone())),
+            received_at: Set(processed_at),
+            processed_at: Set(Some(processed_at)),
             process_error: Set(None),
             ..Default::default()
         }
@@ -1162,7 +1398,7 @@ mod tests {
             .await
             .expect("db ok")
             .expect("audit row");
-        assert_eq!(audit.processed_at.as_deref(), Some(processed_at.as_str()));
+        assert_eq!(audit.processed_at, Some(processed_at));
         assert!(
             audit.process_error.is_none(),
             "a losing contender must not overwrite the committed audit state"
@@ -1194,7 +1430,7 @@ mod tests {
             provider_event_type: Set("payment.succeeded".into()),
             neutral_event_kind: Set(Some("payment_succeeded".into())),
             payload: Set(serde_json::json!({})),
-            received_at: Set(crate::clock::now().to_rfc3339()),
+            received_at: Set(crate::clock::now()),
             processed_at: Set(None),
             process_error: Set(None),
             ..Default::default()
@@ -1305,7 +1541,7 @@ mod tests {
             provider_event_type: Set("payment.succeeded".into()),
             neutral_event_kind: Set(Some("payment_succeeded".into())),
             payload: Set(serde_json::json!({})),
-            received_at: Set(crate::clock::now().to_rfc3339()),
+            received_at: Set(crate::clock::now()),
             processed_at: Set(None),
             process_error: Set(Some("transient failure on first attempt".into())),
             ..Default::default()

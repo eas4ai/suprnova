@@ -81,8 +81,9 @@ impl Event for JobQueued {
     }
 }
 
-/// Fired when the worker pops an envelope and is about to dispatch it.
-/// Mirrors `Illuminate\Queue\Events\JobProcessing`.
+/// Fired first in every attempt on a worker, before the max-attempts check,
+/// the debounce check and the middleware. Mirrors
+/// `Illuminate\Queue\Events\JobProcessing`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobProcessing {
     /// Identity of the job about to be dispatched.
@@ -95,11 +96,19 @@ impl Event for JobProcessing {
     }
 }
 
-/// Fired after a successful run. Mirrors
-/// `Illuminate\Queue\Events\JobProcessed`.
+/// Fired after every attempt whose pipeline returned without an error: the
+/// handler returned `Ok`, middleware deleted the job, middleware released it
+/// back to the queue (then [`JobReleased`] follows), middleware failed it
+/// without an error (after [`JobFailed`]), or the worker dropped it as
+/// superseded by a newer debounced dispatch (after [`JobDebounced`]). Not
+/// fired when the handler or a middleware returned an error or panicked,
+/// when [`FailOnException`](crate::queue::FailOnException) failed the job, or
+/// on a timeout. Mirrors `Illuminate\Queue\Events\JobProcessed`, which
+/// Laravel's worker raises whenever the job's pipeline returns without
+/// throwing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobProcessed {
-    /// Identity of the job that completed successfully.
+    /// Identity of the job whose attempt settled without an error.
     pub job: JobIdentity,
 }
 
@@ -109,11 +118,14 @@ impl Event for JobProcessed {
     }
 }
 
-/// Fired immediately after a job attempt resolves to a terminal outcome
-/// (success / fail / timeout - not retry). Mirrors
-/// `Illuminate\Queue\Events\JobAttempted`. Distinct from [`JobProcessed`]:
-/// `JobAttempted` fires for every terminal settlement, while
-/// `JobProcessed` only fires on a clean success.
+/// Fired last in every attempt the worker settles, whatever the outcome: a
+/// success, an error or panic (retried or failed), a release, deletion or
+/// failure by middleware, a superseded debounced dispatch, and a job that
+/// had already run out of attempts. Not fired after a timeout: Laravel's
+/// worker process is killed there before the `finally` that raises it runs,
+/// and this worker, which drops the attempt and keeps running, raises the
+/// same events. Nor when the settlement itself failed and the reservation
+/// was left for redelivery. Mirrors `Illuminate\Queue\Events\JobAttempted`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobAttempted {
     /// Identity of the job whose attempt just settled.
@@ -126,8 +138,12 @@ impl Event for JobAttempted {
     }
 }
 
-/// Fired when a job throws and the worker is about to decide retry vs
-/// dead-letter. Mirrors `Illuminate\Queue\Events\JobExceptionOccurred`.
+/// Fired when an attempt ended in an error or a panic: before
+/// [`JobReleasedAfterException`] when the job is retried, after
+/// [`JobFailed`] when the error failed it (its last attempt, a job that had
+/// already run out of attempts, or
+/// [`FailOnException`](crate::queue::FailOnException)). Mirrors
+/// `Illuminate\Queue\Events\JobExceptionOccurred`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobExceptionOccurred {
     /// Identity of the job that threw.
@@ -142,8 +158,13 @@ impl Event for JobExceptionOccurred {
     }
 }
 
-/// Fired when the worker dead-letters a job (max_tries exhausted, fatal
-/// timeout, manual fail). Mirrors `Illuminate\Queue\Events\JobFailed`.
+/// Fired when the worker fails a job: an error or panic on its last attempt
+/// (before [`JobExceptionOccurred`]), a job that had already run out of
+/// attempts, a timeout that fails it (before [`JobTimedOut`]), or middleware
+/// that failed it (before [`JobProcessed`], or before
+/// [`JobExceptionOccurred`] for
+/// [`FailOnException`](crate::queue::FailOnException)). Mirrors
+/// `Illuminate\Queue\Events\JobFailed`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobFailed {
     /// Identity of the job that was dead-lettered.
@@ -158,7 +179,8 @@ impl Event for JobFailed {
     }
 }
 
-/// Fired after the worker re-enqueues a failed job (not on release via
+/// Fired after the worker re-enqueues a job whose attempt ended in an error,
+/// between [`JobExceptionOccurred`] and [`JobAttempted`] (not on release via
 /// middleware, which uses [`JobReleased`] instead). Mirrors
 /// `Illuminate\Queue\Events\JobReleasedAfterException`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,9 +199,9 @@ impl Event for JobReleasedAfterException {
     }
 }
 
-/// Fired when middleware (or manual `release(delay)`) re-enqueues a job
-/// **without** counting it as a failed attempt. Distinct from
-/// [`JobReleasedAfterException`] - the original Laravel split, kept here
+/// Fired when middleware re-enqueues a job **without** counting it as a
+/// failed attempt: after [`JobProcessed`], before [`JobAttempted`]. Distinct
+/// from [`JobReleasedAfterException`] - the original Laravel split, kept here
 /// so listeners can distinguish "back-off after error" from "retry later
 /// because lock/throttle was busy".
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,7 +220,9 @@ impl Event for JobReleased {
     }
 }
 
-/// Fired when a job times out during dispatch. Mirrors
+/// Fired when an attempt runs past its timeout: after [`JobFailed`] when the
+/// timeout fails the job, and with no [`JobAttempted`] after it, as Laravel's
+/// worker raises it just before it kills its own process. Mirrors
 /// `Illuminate\Queue\Events\JobTimedOut`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobTimedOut {

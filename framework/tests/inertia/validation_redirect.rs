@@ -285,3 +285,33 @@ async fn the_two_422s_that_must_never_be_bridged() {
     );
     assert!(body.contains("Required."), "got {body}");
 }
+
+/// A same-host absolute `Referer` whose path starts with `//` named a
+/// network path: `http://localhost//evil.test/x` became
+/// `Location: //evil.test/x`, which a browser follows to `evil.test`. The
+/// extracted path must pass the same root-relative guard as a relative
+/// `Referer`, so the redirect falls back to the session's previous URL.
+#[tokio::test]
+async fn a_same_host_referer_cannot_redirect_to_another_host() {
+    let slot = seeded_slot();
+    let addr = spawn_server(router(), stack(&slot), 2).await;
+
+    for referer in [
+        "http://localhost//evil.test/x",
+        "http://localhost//evil.test/x?step=2",
+    ] {
+        let (status, headers, _body) = request(
+            addr,
+            "POST",
+            "/register",
+            &[("X-Inertia", "true"), ("Referer", referer)],
+        )
+        .await;
+        assert_eq!(status, 303);
+        assert_eq!(
+            headers.get("location").map(String::as_str),
+            Some("/register"),
+            "Referer {referer} must not become a cross-origin Location"
+        );
+    }
+}

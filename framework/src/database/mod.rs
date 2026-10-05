@@ -70,6 +70,11 @@ pub mod monitor;
 // Internal: hand-written SQL in the queue / notification stores renders its
 // placeholders through here so Postgres gets `$1` instead of `?`.
 pub(crate) mod placeholder;
+// The stores whose time columns differ by engine read and write them
+// through here, so a `TIMESTAMP` or `timestamptz` column reads like a
+// `DATETIME` or `timestamp` one. Only `StoredDateTime` is public, the field
+// type of the framework's own entities for those tables.
+pub(crate) mod stored_datetime;
 
 /// Implementation details used by Suprnova's generated model code.
 ///
@@ -87,6 +92,27 @@ pub mod __macro_support {
         position: usize,
     ) -> Result<String, FrameworkError> {
         super::placeholder::placeholder(backend, position)
+    }
+
+    /// Runs a generated row write and the render-cache generation advance
+    /// it triggers as one unit, the way the framework's own model writes
+    /// do. The `#[model]` soft delete, restore and force delete call it so
+    /// a future dropped between their row write and their advance cannot
+    /// leave the row committed ahead of the pages that read it.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever `write` or the advance inside it returns.
+    pub async fn atomic_write<T, F, Fut>(
+        connection: Option<&str>,
+        write: F,
+    ) -> Result<T, FrameworkError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, FrameworkError>>,
+        T: Send,
+    {
+        crate::render_cache::orm::atomic(connection, write).await
     }
 }
 pub mod query_builder;
@@ -114,6 +140,7 @@ pub use monitor::ConnectionCount;
 pub use query_builder::QueryBuilder;
 pub use route_binding::{AutoRouteBinding, RouteBinding, RouteParam};
 pub use schema_dump::{PrunedMigration, SchemaDump};
+pub use stored_datetime::StoredDateTime;
 pub use testing::TestDatabase;
 pub use transaction::{Transaction, TxHandle};
 

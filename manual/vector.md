@@ -117,9 +117,11 @@ the thread while the application boots. The first request connects.
 
 **ID mapping.** Qdrant requires point IDs to be either `u64` or a valid UUID. The framework bridges arbitrary strings with three rules:
 
-1. If the string parses as `u64`, use the `Num(u64)` variant.
-2. If the string is a valid UUID, use the `Uuid(String)` variant verbatim.
+1. If the string is the canonical decimal spelling of a `u64` (no sign, no leading zero), use the `Num(u64)` variant.
+2. If the string is a UUID in its canonical spelling (lowercase, hyphenated) and not of version 5, use the `Uuid(String)` variant verbatim.
 3. Otherwise, derive a deterministic v5 UUID from a stable namespace.
+
+The id is a merge key, so `"1"`, `"01"`, and `"+1"` are three items, as they are in every other driver. Only the canonical spellings map to native ids, because Qdrant would read `"01"` as point `1`, and every spelling of one UUID as one point. A version 5 UUID is derived like any other string, because rule 3 produces version 5 UUIDs: taken verbatim, a caller could name the point of another id. Items written before these rules with a non-canonical numeric or UUID id, or with a version 5 UUID, now resolve to a derived id; rewrite them (upsert, then delete the old point through `driver.client()`) to keep one point per item.
 
 The caller's original string is stashed in the point's payload under the reserved key `__suprnova_id` (exported as `SUPRNOVA_ID_PAYLOAD_KEY`) and stripped from `VectorMatch.metadata` on retrieval. Power users who query Qdrant directly via `driver.client()` can filter on `__suprnova_id` to bridge framework writes with direct calls.
 
@@ -253,7 +255,7 @@ let driver = MariaDbVectorDriver::from_url(url)?
 let sql = driver.ensure_table_sql_for("documents", 1536)?;
 // Result:
 // CREATE TABLE IF NOT EXISTS `documents` (
-//   id VARCHAR(255) NOT NULL PRIMARY KEY,
+//   id VARBINARY(254) NOT NULL PRIMARY KEY,
 //   embedding VECTOR(1536) NOT NULL,
 //   metadata JSON NULL,
 //   VECTOR INDEX (embedding) DISTANCE=cosine
@@ -265,11 +267,11 @@ For migration generators that don't have a driver in scope (CLI tools, build scr
 **Distance must match on both ends.** MariaDB silently falls back to a full table scan when the function used at query time doesn't match the index's `DISTANCE=` clause. The driver guards against this in two layers:
 
 1. **`ensure_table_sql_for(name, dim)`** reads `self.distance` for both the emitted migration SQL and the runtime function in `similar` - they cannot drift apart by construction.
-2. **A runtime check on first `similar` call** runs one `SHOW CREATE TABLE` per store, parses the actual `DISTANCE=` clause from the live schema, and errors clearly if it disagrees with `with_distance(...)`. Result is cached, so subsequent calls are zero-cost. This catches hand-written migrations or `from_pool` setups that bypass `ensure_table_sql_for`.
+2. **A runtime check on first `similar` call** runs one `SHOW CREATE TABLE` per store, reads the distance of the vector index from the live schema, and errors clearly if it disagrees with `with_distance(...)`. The server prints the index as `` VECTOR KEY `embedding` (`embedding`) `DISTANCE`=cosine ``, not as the DDL you wrote, and the check reads that form. Result is cached, so subsequent calls are zero-cost. This catches hand-written migrations or `from_pool` setups that bypass `ensure_table_sql_for`.
 
 **Store-name safety.** Store names interpolate into emitted SQL (MySQL doesn't parameterize identifiers). Names are validated as `[A-Za-z_][A-Za-z0-9_]*` of length ≤ 64; the validated name is then backtick-quoted in every statement. Invalid names error with `FrameworkError::param` at the `register`/`upsert`/`similar`/`delete`/`count` boundary.
 
-**IDs and metadata.** `VARCHAR(255)` accepts arbitrary `String` ids - no UUID derivation, no reserved payload keys. Metadata round-trips through MariaDB's `JSON` column type; `null` metadata stores as SQL `NULL`. Non-object metadata (arrays, primitives) is rejected with `FrameworkError::param` for parity with Qdrant and Pinecone.
+**IDs and metadata.** The id column takes any `String` id up to 254 bytes of UTF-8 - no UUID derivation, no reserved payload keys. It is `VARBINARY(254)` for two reasons: MariaDB refuses a vector index on a table whose primary key is longer than 256 bytes, which a `utf8mb4` `VARCHAR(255)` key is, and a binary column compares ids byte for byte, so `Doc` and `doc` are two rows, as they are in every other driver. Metadata round-trips through MariaDB's `JSON` column type; `null` metadata stores as SQL `NULL`. Non-object metadata (arrays, primitives) is rejected with `FrameworkError::param` for parity with Qdrant and Pinecone.
 
 **Score normalization.** MariaDB returns raw *distance* (lower = closer). The trait contract is *score* (higher = more similar) - the driver converts per metric:
 

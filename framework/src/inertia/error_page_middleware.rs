@@ -389,6 +389,9 @@ const ERROR_PAGE_CACHE_CONTROL: &str = "no-cache, private";
 
 /// Whether a header on the replaced response carries over onto the page.
 ///
+/// [`InertiaHeadersMiddleware`](crate::InertiaHeadersMiddleware) applies the
+/// same rule when it turns an empty Inertia response into a redirect back.
+///
 /// One rule, stated as what is **dropped** rather than what is kept, so a
 /// header nobody here thought of survives instead of silently
 /// disappearing. A field is dropped in exactly three cases.
@@ -429,7 +432,7 @@ const ERROR_PAGE_CACHE_CONTROL: &str = "no-cache, private";
 /// client should do next: `Retry-After` on a `429`, `WWW-Authenticate` on
 /// a `401`, `Vary`, `Set-Cookie`, `X-Request-Id`. None of that stopped
 /// being true because the body changed.
-fn header_survives_rewrite(name: &str) -> bool {
+pub(crate) fn header_survives_rewrite(name: &str) -> bool {
     const CONTENT: &[u8] = b"Content-";
     let bytes = name.as_bytes();
     let content_prefixed =
@@ -508,7 +511,9 @@ fn prefers_html_over_json(accept: Option<&str>) -> bool {
 }
 
 /// Quality assigned to one media type by an `Accept` header, as
-/// hundredths so the result is an integer and orders exactly.
+/// thousandths so the result is an integer and orders exactly. RFC 9110
+/// qvalues carry up to three decimals; hundredths tied `0.502` with
+/// `0.501` and read `0.004` as a refusal.
 ///
 /// RFC 9110 §12.5.1 resolves a type against the **most specific**
 /// matching range, not the highest-scoring one: given
@@ -548,7 +553,7 @@ fn quality_for(accept: &str, media_type: &str, subtype: &str) -> u16 {
                 key.trim().eq_ignore_ascii_case("q").then_some(value.trim())
             })
             .next()
-            .map_or(100, parse_quality);
+            .map_or(1000, parse_quality);
         // A later range at the same specificity wins ties, which only
         // matters for a malformed header listing the same range twice.
         best_specificity = specificity;
@@ -559,13 +564,13 @@ fn quality_for(accept: &str, media_type: &str, subtype: &str) -> u16 {
 }
 
 /// Parse an RFC 9110 qvalue (`0`..`1` with up to three decimals) into
-/// hundredths. Anything unparseable reads as `0`, matching the spec's
+/// thousandths. Anything unparseable reads as `0`, matching the spec's
 /// "a sender that does not want the type" default for a broken value.
 fn parse_quality(raw: &str) -> u16 {
     raw.parse::<f32>()
         .ok()
         .filter(|q| (0.0..=1.0).contains(q))
-        .map_or(0, |q| (q * 100.0).round() as u16)
+        .map_or(0, |q| (q * 1000.0).round() as u16)
 }
 
 /// The status's reason phrase, for a body that carried no message.
@@ -764,6 +769,25 @@ mod tests {
         assert!(!prefers_html_over_json(Some("")));
         assert!(!prefers_html_over_json(Some("garbage")));
         assert!(!prefers_html_over_json(Some("text/html;q=nope")));
+    }
+
+    /// RFC 9110 qvalues carry up to three decimals. Rounding them to
+    /// hundredths tied `0.502` with `0.501` and read `0.004` as a refusal.
+    #[test]
+    fn content_negotiation_keeps_three_decimal_qvalues() {
+        assert!(prefers_html_over_json(Some(
+            "text/html;q=0.502, application/json;q=0.501"
+        )));
+        assert!(!prefers_html_over_json(Some(
+            "text/html;q=0.501, application/json;q=0.502"
+        )));
+        // A small positive weight is still acceptable, so it outranks an
+        // explicit refusal.
+        assert!(prefers_html_over_json(Some(
+            "text/html;q=0.004, application/json;q=0"
+        )));
+        assert_eq!(quality_for("text/html;q=0.001", "text", "html"), 1);
+        assert_eq!(quality_for("text/html", "text", "html"), 1000);
     }
 
     #[test]

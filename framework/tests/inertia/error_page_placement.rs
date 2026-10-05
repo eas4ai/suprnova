@@ -76,6 +76,12 @@ impl Middleware for RejectsLikeCsrf {
 
 static BOOT: Once = Once::new();
 
+// `boot` registers process-global middleware and counts the global
+// registry, so every test that calls it runs alone in a child process
+// (`own_process_async::delegate`): another test's install in the same
+// process would change the count, and these registrations would reach
+// every other test's global stack.
+
 /// Boot the app's real stack once for the binary, in the order a
 /// `bootstrap.rs` would write it: session, then the error page, then CSRF,
 /// then `Inertia::install`.
@@ -198,6 +204,14 @@ fn embedded_page_object(html: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn an_app_placed_error_page_covers_a_419_answered_before_the_inertia_layer() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "an_app_placed_error_page_covers_a_419_answered_before_the_inertia_layer",
+    )
+    .await
+    {
+        return;
+    }
     let addr = spawn_server(router(), boot(), 2).await;
 
     let (status, headers, body) = request(
@@ -227,6 +241,14 @@ async fn an_app_placed_error_page_covers_a_419_answered_before_the_inertia_layer
 
 #[tokio::test]
 async fn the_same_419_renders_the_html_shell_for_a_browser_navigation() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "the_same_419_renders_the_html_shell_for_a_browser_navigation",
+    )
+    .await
+    {
+        return;
+    }
     let addr = spawn_server(router(), boot(), 2).await;
 
     let (status, headers, body) = request(
@@ -255,6 +277,14 @@ async fn the_same_419_renders_the_html_shell_for_a_browser_navigation() {
 
 #[tokio::test]
 async fn an_api_client_still_gets_the_419_json_untouched() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "an_api_client_still_gets_the_419_json_untouched",
+    )
+    .await
+    {
+        return;
+    }
     let addr = spawn_server(router(), boot(), 2).await;
 
     let (status, headers, body) =

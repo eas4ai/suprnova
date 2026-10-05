@@ -24,18 +24,25 @@ use hyper_util::rt::TokioIo;
 use once_cell::sync::Lazy;
 
 use suprnova::http::text;
+use suprnova::testing::TestContainer;
 use suprnova::{
     Auth, AuthConfig, AuthManager, AuthMiddleware, Authenticatable, BasicAuthMiddleware,
     FrameworkError, Middleware, MiddlewareRegistry, Next, Request, Response, Router, UserProvider,
     handle_request,
 };
 
-/// Register the default-config `AuthManager` (web → session → "users") and the
-/// in-memory provider behind it, process-wide, so every `Auth::*` facade call
-/// resolves the default guard. Config + provider are identical for all tests.
-static SETUP: Lazy<()> = Lazy::new(|| {
-    suprnova::App::singleton(AuthManager::new(AuthConfig::default()));
-    Auth::register_provider("users", Arc::new(FakeProvider)).expect("register users provider");
+/// The default-config `AuthManager` (web → session → "users") with the
+/// in-memory provider behind it, so every `Auth::*` facade call resolves the
+/// default guard. Config + provider are identical for all tests.
+///
+/// [`spawn_server`] binds it in the container scope its server runs in, not in
+/// the process container: the other files of this binary bind managers of
+/// their own, and the process container keeps one, for whichever file bound
+/// it last.
+static AUTH: Lazy<AuthManager> = Lazy::new(|| {
+    let auth = AuthManager::new(AuthConfig::default());
+    auth.register_provider("users", Arc::new(FakeProvider));
+    auth
 });
 
 #[derive(Clone)]
@@ -159,7 +166,9 @@ fn basic_header(user: &str, password: &str) -> String {
 }
 
 /// Spawn a test server with `registry` as the global middleware set, accepting
-/// `accepts` connections.
+/// `accepts` connections. The server runs in a container scope that binds
+/// [`AUTH`]; `TestContainer::spawn` carries the scope into each connection's
+/// task.
 async fn spawn_server(
     router: impl Into<Router>,
     registry: MiddlewareRegistry,
@@ -173,7 +182,9 @@ async fn spawn_server(
         .expect("bind ephemeral listener");
     let addr = listener.local_addr().expect("local_addr");
 
-    tokio::spawn(async move {
+    let auth = AUTH.clone();
+    tokio::spawn(TestContainer::scope(async move {
+        TestContainer::singleton(auth);
         for _ in 0..accepts {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
@@ -181,7 +192,7 @@ async fn spawn_server(
             let io = TokioIo::new(stream);
             let router = router.clone();
             let middleware = middleware.clone();
-            tokio::spawn(async move {
+            TestContainer::spawn(async move {
                 let svc = service_fn(move |req: hyper::Request<Incoming>| {
                     let router = router.clone();
                     let middleware = middleware.clone();
@@ -192,7 +203,7 @@ async fn spawn_server(
                     .await;
             });
         }
-    });
+    }));
 
     addr
 }
@@ -201,7 +212,6 @@ async fn spawn_server(
 
 #[tokio::test]
 async fn basic_once_valid_credentials_reach_handler() {
-    Lazy::force(&SETUP);
     let registry = MiddlewareRegistry::new().append(BasicAuthMiddleware::once());
     let addr = spawn_server(router(), registry, 1).await;
 
@@ -219,7 +229,6 @@ async fn basic_once_valid_credentials_reach_handler() {
 
 #[tokio::test]
 async fn basic_missing_header_challenges_401() {
-    Lazy::force(&SETUP);
     let registry = MiddlewareRegistry::new().append(BasicAuthMiddleware::once());
     let addr = spawn_server(router(), registry, 1).await;
 
@@ -238,7 +247,6 @@ async fn basic_missing_header_challenges_401() {
 
 #[tokio::test]
 async fn basic_malformed_header_challenges_401() {
-    Lazy::force(&SETUP);
     let registry = MiddlewareRegistry::new().append(BasicAuthMiddleware::once());
     let addr = spawn_server(router(), registry, 1).await;
 
@@ -256,7 +264,6 @@ async fn basic_malformed_header_challenges_401() {
 
 #[tokio::test]
 async fn basic_wrong_password_challenges_401() {
-    Lazy::force(&SETUP);
     let registry = MiddlewareRegistry::new().append(BasicAuthMiddleware::once());
     let addr = spawn_server(router(), registry, 1).await;
 
@@ -273,7 +280,6 @@ async fn basic_wrong_password_challenges_401() {
 
 #[tokio::test]
 async fn basic_stateful_valid_credentials_reach_handler() {
-    Lazy::force(&SETUP);
     // BasicAuthMiddleware::new() is the stateful variant - on a credential
     // match it persists the user into the session via `Auth::login_id`.
     // That now requires a SessionMiddleware-equivalent task-local scope
@@ -298,7 +304,6 @@ async fn basic_stateful_valid_credentials_reach_handler() {
 
 #[tokio::test]
 async fn stale_named_session_identity_does_not_bypass_missing_stateful_guard() {
-    Lazy::force(&SETUP);
     let registry = MiddlewareRegistry::new()
         .append(StaleNamedSessionScope)
         .append(BasicAuthMiddleware::new().for_guard("missing"));
@@ -314,7 +319,6 @@ async fn stale_named_session_identity_does_not_bypass_missing_stateful_guard() {
 
 #[tokio::test]
 async fn auth_for_guard_unauthenticated_returns_401() {
-    Lazy::force(&SETUP);
     let registry = MiddlewareRegistry::new().append(AuthMiddleware::new().for_guard("web"));
     let addr = spawn_server(router(), registry, 1).await;
 
@@ -325,7 +329,6 @@ async fn auth_for_guard_unauthenticated_returns_401() {
 
 #[tokio::test]
 async fn auth_for_guard_authenticated_reaches_handler() {
-    Lazy::force(&SETUP);
     // LoginAsUser runs first (sets the request user via `Auth::set_user`), then
     // the named-guard check sees it through the shared request state.
     let registry = MiddlewareRegistry::new()
@@ -398,7 +401,6 @@ impl Middleware for StaleWebSessionScope {
 
 #[tokio::test]
 async fn auth_default_stale_identity_returns_401_and_clears_slot() {
-    Lazy::force(&SETUP);
     let slot = suprnova::session::new_session_slot_for_test();
     let registry = MiddlewareRegistry::new()
         .append(StaleDefaultSessionScope { slot: slot.clone() })
@@ -418,7 +420,6 @@ async fn auth_default_stale_identity_returns_401_and_clears_slot() {
 
 #[tokio::test]
 async fn auth_for_guard_stale_identity_returns_401_and_clears_slot() {
-    Lazy::force(&SETUP);
     let slot = suprnova::session::new_session_slot_for_test();
     let registry = MiddlewareRegistry::new()
         .append(StaleWebSessionScope { slot: slot.clone() })
@@ -443,7 +444,6 @@ async fn auth_for_guard_stale_identity_returns_401_and_clears_slot() {
 
 #[tokio::test]
 async fn auth_default_valid_identity_still_reaches_handler() {
-    Lazy::force(&SETUP);
     // The provider knows id `"7"`: a live principal must keep working after
     // the boundary started resolving users instead of trusting IDs.
     let slot = suprnova::session::new_session_slot_for_test();

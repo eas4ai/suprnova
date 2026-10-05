@@ -219,6 +219,26 @@ tokio::task_local! {
 thread_local! {
     static QUERY_OVERRIDE: RefCell<Option<HashMap<String, String>>> =
         const { RefCell::new(None) };
+    /// The live flag of the `TestQueryGuard` that installed the override
+    /// above. A guard dropped on another thread clears the flag, and the
+    /// override is wiped here at its next read.
+    static QUERY_OVERRIDE_OWNER: RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
+        const { RefCell::new(None) };
+}
+
+/// Wipe this thread's query override when the guard that installed it has
+/// been dropped, on any thread.
+fn evict_abandoned_query_override() {
+    let abandoned = QUERY_OVERRIDE_OWNER.with(|owner| {
+        owner
+            .borrow()
+            .as_ref()
+            .is_some_and(|live| !live.load(std::sync::atomic::Ordering::Acquire))
+    });
+    if abandoned {
+        QUERY_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+        QUERY_OVERRIDE_OWNER.with(|owner| *owner.borrow_mut() = None);
+    }
 }
 
 /// Facade for the per-request key/value bag.
@@ -415,8 +435,12 @@ impl Context {
     pub fn get<T: DeserializeOwned>(key: &str) -> Option<T> {
         CONTEXT
             .try_with(|store| {
-                let raw = store.data.get(key)?;
-                match serde_json::from_value::<T>(raw.value().clone()) {
+                // Clone the value out and let the map's shard lock go before
+                // deserializing: a custom `Deserialize` may write to the
+                // context, and with the read lock still held that write
+                // waited on this read forever.
+                let raw = store.data.get(key)?.value().clone();
+                match serde_json::from_value::<T>(raw) {
                     Ok(v) => Some(v),
                     Err(err) => {
                         tracing::trace!(
@@ -567,8 +591,10 @@ impl Context {
     pub fn hidden_get<T: DeserializeOwned>(key: &str) -> Option<T> {
         CONTEXT
             .try_with(|store| {
-                let raw = store.hidden.get(key)?;
-                match serde_json::from_value::<T>(raw.value().clone()) {
+                // The shard lock goes before the value deserializes, as in
+                // `get`.
+                let raw = store.hidden.get(key)?.value().clone();
+                match serde_json::from_value::<T>(raw) {
                     Ok(v) => Some(v),
                     Err(err) => {
                         tracing::trace!(
@@ -602,6 +628,7 @@ impl Context {
     pub fn query_param(name: &str) -> Option<String> {
         // The per-thread testing override wins over the scoped query bag.
         // Without an installed override this branch misses and falls through.
+        evict_abandoned_query_override();
         let from_override = QUERY_OVERRIDE.with(|cell| {
             cell.borrow()
                 .as_ref()
@@ -632,6 +659,7 @@ impl Context {
     /// this hook with `default-features = false` and without `testing`.
     #[cfg(any(test, feature = "testing"))]
     pub fn test_set_query(name: impl Into<String>, value: impl Into<String>) {
+        evict_abandoned_query_override();
         QUERY_OVERRIDE.with(|cell| {
             let mut slot = cell.borrow_mut();
             let map = slot.get_or_insert_with(HashMap::new);
@@ -651,6 +679,7 @@ impl Context {
         QUERY_OVERRIDE.with(|cell| {
             *cell.borrow_mut() = None;
         });
+        QUERY_OVERRIDE_OWNER.with(|owner| *owner.borrow_mut() = None);
     }
 
     /// **Testing hook.** Install a query-parameter override and return a
@@ -684,7 +713,12 @@ impl Context {
     #[must_use = "the guard wipes the test query override on drop; binding it to `_` clears immediately"]
     pub fn test_query_guard(name: impl Into<String>, value: impl Into<String>) -> TestQueryGuard {
         Self::test_set_query(name, value);
-        TestQueryGuard { _private: () }
+        let live = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        QUERY_OVERRIDE_OWNER.with(|owner| *owner.borrow_mut() = Some(std::sync::Arc::clone(&live)));
+        TestQueryGuard {
+            origin: std::thread::current().id(),
+            live,
+        }
     }
 }
 
@@ -693,22 +727,33 @@ impl Context {
 /// override on drop so a panicking or early-returning test body can't
 /// leak overrides into the next test scheduled on the same OS thread.
 ///
+/// It wipes the override it installed, wherever it drops. Dropped on
+/// another thread, it used to wipe that thread's override, which belongs
+/// to another test, and leave its own in place. Now it leaves that thread
+/// alone, and its own override is gone at its thread's next read.
+///
 /// Compiled under `cfg(test)` or the `testing` Cargo feature. `testing` is
 /// enabled by default, including in release builds; consumers can remove this
 /// type with `default-features = false` and without `testing`.
 #[cfg(any(test, feature = "testing"))]
 #[must_use = "the guard wipes the test query override on drop; binding it to `_` clears immediately"]
 pub struct TestQueryGuard {
-    // Private field so external crates can't construct one without
-    // going through `Context::test_query_guard`, which is what installs
-    // the override the guard is responsible for.
-    _private: (),
+    // Private fields so external crates can't construct one without going
+    // through `Context::test_query_guard`, which is what installs the
+    // override the guard is responsible for.
+    /// The thread whose override this guard installed.
+    origin: std::thread::ThreadId,
+    /// Cleared on drop; the override is dead from then on.
+    live: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(any(test, feature = "testing"))]
 impl Drop for TestQueryGuard {
     fn drop(&mut self) {
-        Context::test_clear_query();
+        self.live.store(false, std::sync::atomic::Ordering::Release);
+        if std::thread::current().id() == self.origin {
+            Context::test_clear_query();
+        }
     }
 }
 
@@ -1298,5 +1343,79 @@ mod tests {
                 );
             })
             .await;
+    }
+
+    /// A query guard dropped on another thread wipes the override it
+    /// installed and nothing else. It used to wipe the override of the
+    /// thread it dropped on - another test's - and leave its own in place.
+    #[test]
+    fn a_query_guard_dropped_on_another_thread_wipes_only_its_own_override() {
+        Context::test_clear_query();
+        let guard = Context::test_query_guard("page", "3");
+
+        let theirs = std::thread::spawn(move || {
+            let _theirs = Context::test_query_guard("page", "9");
+            drop(guard);
+            Context::query_param("page")
+        })
+        .join()
+        .expect("the other thread does not panic");
+
+        assert_eq!(
+            theirs.as_deref(),
+            Some("9"),
+            "the other thread keeps its override"
+        );
+        assert_eq!(
+            Context::query_param("page"),
+            None,
+            "this thread's override went with its guard"
+        );
+    }
+
+    /// A value whose deserialization writes back into the context, as a
+    /// custom `Deserialize` may: it records that it ran by adding `key`.
+    struct WritesBack {
+        hidden: bool,
+    }
+
+    impl<'de> serde::Deserialize<'de> for WritesBack {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let hidden = bool::deserialize(deserializer)?;
+            if hidden {
+                Context::hidden_add("rewritten", true);
+            } else {
+                Context::add("rewritten", false);
+            }
+            Ok(WritesBack { hidden })
+        }
+    }
+
+    /// A typed read releases the map before the value deserializes. It used
+    /// to hold the map's shard lock across `serde_json::from_value`, so a
+    /// value that wrote the same key while deserializing waited on a lock
+    /// its own read held, and the task never returned.
+    ///
+    /// The reads run on a thread of their own, because a deadlock inside a
+    /// poll cannot be cut short by a timeout on the same runtime.
+    #[test]
+    fn a_typed_read_does_not_hold_the_map_while_the_value_deserializes() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("a runtime");
+            runtime.block_on(CONTEXT.scope(ContextStore::default(), async move {
+                Context::add("rewritten", false);
+                let visible = Context::get::<WritesBack>("rewritten").map(|v| v.hidden);
+                Context::hidden_add("rewritten", true);
+                let hidden = Context::hidden_get::<WritesBack>("rewritten").map(|v| v.hidden);
+                let _ = done.send((visible, hidden));
+            }));
+        });
+        let read = finished
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the typed read deadlocked on the lock it was holding");
+        assert_eq!(read, (Some(false), Some(true)));
     }
 }

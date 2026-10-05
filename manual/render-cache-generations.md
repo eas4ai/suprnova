@@ -156,13 +156,21 @@ narrows the render to `Uncacheable` and names itself in the decline, so an
 invisible tenant filter costs you the cache rather than costing your
 visitors each other's rows.
 
-**Feature flags.** A read of a flag the `features` table holds - at any scope
-key, the global default included - observes that flag's own generation.
-`DatabaseEvaluator::set_flag` advances it after the new value is visible to
-readers, and `DatabaseEvaluator::reload()` advances it for every flag whose
-stored rules changed and tells the cached evaluator which ones those were. A
-flag the table does not hold records nothing: that render depended on the
-default compiled into `is_enabled!`, not on stored state.
+**Feature flags.** Every read of a flag through the framework's evaluators
+observes that flag's own generation, whether the `features` table holds a
+rule for it at any scope key or not. A flag the table does not hold yet
+renders the default compiled into `is_enabled!`, and the first rule stored
+for it changes that answer, so the read depends on it all the same.
+`DatabaseEvaluator::set_flag` and `DatabaseEvaluator::reload()` make the new
+value visible to readers, tell the cached evaluator which flags changed, and
+only then advance each changed flag's generation, so a render that read the
+old answer during the write is invalidated once the write completes.
+
+**Translation catalogs.** A render that calls `Lang::locale()` - every
+translation does - observes the catalog's generation. `Lang::reload()`, and
+the per-request hot reload in `local` and `development`, advance it when a
+catalog's text changed, so the pages rendered from the old text miss.
+`Translator::reload` on its own advances nothing.
 
 **The write side.** Every process whose configuration enables RenderCache and
 whose database holds the RenderCache migration advances generations, so a
@@ -292,6 +300,19 @@ handoff driven by the clock rather than by a write: past `/live/todos`'s
 visitor is handed the copy on hand under `Warning: 110 - "Response is
 Stale"` and `Age: 300`, exactly one rebuild is scheduled, and that rebuild
 really runs.
+
+A node bounds the rebuilds it runs behind requests. A key whose rebuild is
+already running starts no second one, and the node runs at most
+`RENDER_CACHE_MAX_BACKGROUND_REFRESHES` of them at once across all keys. The
+default is 32 for every CPU the process can use. Past that limit a
+stale-servable hit still gets the stored copy at once and starts nothing. A
+later hit starts the rebuild once a running one finishes, and an entry that
+goes Dead first is rebuilt in the foreground. Zero turns these background
+rebuilds off. In `framework/tests/render_cache/middleware.rs`,
+`stale_hits_during_a_running_background_refresh_start_no_more_refreshes`
+proves the first rule, and
+`stale_hits_past_the_background_refresh_limit_serve_stale_and_start_nothing`
+proves the second.
 
 The stale-on-error fallback covers the request that leads a rebuild **and** a
 waiter behind a leader whose rebuild failed. Both are answered the same way:

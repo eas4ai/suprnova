@@ -125,8 +125,8 @@ consults them in the dispatcher; `Notify::queue` checks `should_send` before
 enqueuing each per-channel job, and the worker re-checks `should_send` before
 delivery (state can change between enqueue and run) and runs `after_sending`
 after a successful send. The three lifecycle *events*
-(`NotificationSending` / `NotificationSent` / `NotificationFailed`) still fire
-only on the synchronous path.
+(`NotificationSending` / `NotificationSent` / `NotificationFailed`) fire on
+both paths, and both carry `data()` as their payload.
 
 ## Channels
 
@@ -215,13 +215,15 @@ The second argument is the recipient's polymorphic type tag (what you
 store in `notifiable_type` so you can query inbox rows back later). The
 recipient's `route_for("database")` becomes the `notifiable_id`.
 
-The framework ships the table as a migration,
-`suprnova::notifications::migrations::CreateNotificationsTable`. Register
-it in your app's `Migrator`:
+The framework ships the table as migrations in
+`suprnova::notifications::migrations`. Register both in your app's
+`Migrator`, in this order:
 
 ```rust
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
-use suprnova::notifications::migrations::CreateNotificationsTable;
+use suprnova::notifications::migrations::{
+    CreateNotificationsTable, NotificationTimestampsToDatetime,
+};
 
 pub struct Migrator;
 
@@ -230,6 +232,7 @@ impl MigratorTrait for Migrator {
         vec![
             // ... your app's migrations ...
             Box::new(CreateNotificationsTable),
+            Box::new(NotificationTimestampsToDatetime),
         ]
     }
 }
@@ -238,6 +241,17 @@ impl MigratorTrait for Migrator {
 Then run `suprnova migrate` and the table appears. Until the `Migrator`
 lists the migration, the channel's first insert fails on the missing
 table.
+
+`NotificationTimestampsToDatetime` matters on MySQL and MariaDB.
+`CreateNotificationsTable` creates `read_at`, `created_at` and
+`updated_at` as `DATETIME`, but earlier versions of it created them as
+`TIMESTAMP`, as a table made by hand or by Laravel's notifications
+migration has them. MySQL's `TIMESTAMP` refuses any time after
+2038-01-19 03:14:07 UTC, so every notification written after that fails.
+The upgrade converts each of those columns that is still `TIMESTAMP` to
+`DATETIME`, keeping its nullability and the stored UTC times. It changes
+nothing on Postgres or SQLite, on a column that is already `DATETIME`, or
+when it runs again, and its `down` leaves the columns `DATETIME`.
 
 #### Reading the inbox
 
@@ -381,7 +395,7 @@ the call site at boot uses `?`.
 
 ### Lifecycle events
 
-Three events surround every synchronous channel delivery:
+Three events surround every channel delivery, synchronous or queued:
 
 | Event | When | Listener-error behaviour |
 |---|---|---|
@@ -389,8 +403,11 @@ Three events surround every synchronous channel delivery:
 | `NotificationSent` | After a successful delivery | Best-effort dispatch - listener errors don't propagate |
 | `NotificationFailed` | When a channel returned an error | Best-effort dispatch; the underlying channel error still propagates per the first-failure-stops contract |
 
-All three carry `(notification, channel, route, data)`. `Failed` adds
-the stringified `error`. Listen with `EventFacade::listen::<E, L>` -
+All three carry `(notification, channel, route, data)`, where `data` is the
+notification's `data()` - the payload the channels see. A queued
+notification is rebuilt on the worker from its full serialized form, but
+the events still carry `data()`, so a field you keep out of `data()` never
+reaches a listener. `Failed` adds the stringified `error`. Listen with `EventFacade::listen::<E, L>` -
 see [Events](events.md).
 
 These events fire only on the synchronous `Notify::send` path. The
@@ -438,6 +455,8 @@ register_notification_factory::<OrderShipped>()?;
 Notify::queue(&user, OrderShipped { tracking }).await?;
 ```
 
+The worker already knows `SendNotificationJob`: the framework registers its own job, so you register factories and never call `register_job` for it.
+
 At dispatch time the worker:
 
 1. Looks up the notification factory by `notification_name`
@@ -454,10 +473,11 @@ silently (the recipient returned `None` at queue time).
 
 `Notify::queue` also evaluates `should_send` at enqueue time, so a vetoed
 channel is never enqueued in the first place; the worker re-check covers
-state that changes between enqueue and run. The queued path **does not**
-fire the three lifecycle events (`NotificationSending` / `NotificationSent`
-/ `NotificationFailed`) - those remain synchronous-only. If you depend on
-the events, send through `Notify::send`.
+state that changes between enqueue and run. The worker fires the three
+lifecycle events (`NotificationSending` / `NotificationSent` /
+`NotificationFailed`) around each channel exactly as `Notify::send` does,
+with the same `data()` payload, and a `NotificationSending` listener error
+vetoes the channel on the worker too.
 
 ### Queue tuning
 
@@ -714,6 +734,7 @@ surprising under concurrent load.
 | `NotificationSending`, `NotificationSent`, `NotificationFailed` | `suprnova::` |
 | `set_dispatcher`, `register_notification_factory` | `suprnova::notifications::` |
 | `all_for`, `unread_for`, `read_for`, `mark_as_read`, `mark_as_unread`, `mark_all_as_read`, `delete_for` | `suprnova::notifications::` |
+| `CreateNotificationsTable`, `NotificationTimestampsToDatetime` | `suprnova::notifications::migrations::` |
 | `assert_sent`, `assert_sent_named`, `assert_sent_times`, `assert_sent_to`, `assert_sent_to_on`, `assert_nothing_sent`, `assert_nothing_sent_to`, `assert_count`, `recorded_notifications` | `suprnova::notifications::` |
 | `#[derive(NotificationMailable)]` | `suprnova::` |
 

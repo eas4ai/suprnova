@@ -24,6 +24,9 @@ use render_cache_support::{Author, Book, Post, Tag, Trashable, Widget, boot};
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
 use suprnova::attrs;
 use suprnova::eloquent::{MassPrunable, prune_one};
+use suprnova::payments::webhook_route::{
+    WebhookCommit, hold_webhook_commit_for_test, wait_until_webhook_commit_held_for_test,
+};
 use suprnova::payments::{
     MockPaymentProvider, PaymentProvider, PaymentProviderRegistry, SubscribeRequest, Subscription,
     webhook_routes,
@@ -166,6 +169,78 @@ async fn bulk_builder_and_unknown_raw_writes_collapse_to_broader_authority() {
         Some(1),
         "a raw SELECT must not advance the broad authority"
     );
+}
+
+/// DATA-055: a raw batch that begins with `SELECT` is still a write when a
+/// later statement in it writes. `DB::unprepared` runs the whole string, and
+/// PostgreSQL's simple-query protocol and SQLite both run every statement in
+/// it, so classifying the batch by its first six bytes let
+/// `SELECT 1; UPDATE ...` commit a write that advanced nothing, and every
+/// page that read the table kept being served until it aged out. Shared with
+/// `ledger::live_postgres_a_raw_batch_that_begins_with_select_still_advances_the_broad_authority`.
+pub(crate) async fn assert_a_raw_batch_that_begins_with_select_still_advances_the_broad_authority()
+{
+    let ledger = SqlGenerationLedger::new();
+    let broad = DependencyIdentity::broad();
+    DB::unprepared("DROP TABLE IF EXISTS data055_rows")
+        .await
+        .expect("drop the scratch table");
+    DB::unprepared("CREATE TABLE data055_rows (id INTEGER PRIMARY KEY, title TEXT NOT NULL)")
+        .await
+        .expect("create the scratch table");
+    DB::unprepared("INSERT INTO data055_rows (id, title) VALUES (7, 'old')")
+        .await
+        .expect("seed the scratch row");
+    let before = ledger
+        .current(&[broad.digest()])
+        .await
+        .expect("current")
+        .get(&broad)
+        .unwrap_or(0);
+
+    DB::unprepared("SELECT 1; UPDATE data055_rows SET title = 'new' WHERE id = 7")
+        .await
+        .expect("the batch runs");
+
+    let title = DB::select_one("SELECT title FROM data055_rows WHERE id = 7", vec![])
+        .await
+        .expect("read the row back")
+        .expect("the row exists")
+        .get_string("title")
+        .expect("a title");
+    assert_eq!(title, "new", "precondition: the batch's write landed");
+    let after = ledger
+        .current(&[broad.digest()])
+        .await
+        .expect("current")
+        .get(&broad)
+        .unwrap_or(0);
+    assert_eq!(
+        after,
+        before + 1,
+        "a batch whose later statement writes advances the broad authority"
+    );
+
+    // A single SELECT, with or without its own terminator, is still a read.
+    DB::unprepared("SELECT COUNT(*) FROM data055_rows;")
+        .await
+        .expect("a lone select");
+    assert_eq!(
+        ledger
+            .current(&[broad.digest()])
+            .await
+            .expect("current")
+            .get(&broad)
+            .unwrap_or(0),
+        after,
+        "a lone SELECT advances nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_raw_batch_that_begins_with_select_still_advances_the_broad_authority() {
+    boot().await;
+    assert_a_raw_batch_that_begins_with_select_still_advances_the_broad_authority().await;
 }
 
 /// Ruling R45: the read side (`observe_record_read_json` /
@@ -1506,10 +1581,12 @@ async fn payments_webhook_insert_and_update_advance_the_table_generation() {
 // Round 4 could only test the audit-row bookkeeping sites (1 and 13) - the
 // actual mirror-table upserts (sites 3-12) deadlocked under SQLite when
 // exercised through the real webhook route, because `advance_mirror_table`
-// ran from inside `try_hydrate`'s own open transaction. Round 5 hoists that
-// advance to run once, after the transaction commits, which removes the
-// deadlock; this test is the proof - the same insert/update scenario round 4
-// could not safely drive.
+// ran from inside `try_hydrate`'s own open transaction and opened a second
+// one. Round 5 hoisted that advance after the commit; DATA-039 then moved it
+// into the hydration's own transaction, which opens no second one, so the
+// deadlock stays gone and the rows and their advance commit together. This
+// test is the proof - the same insert/update scenario round 4 could not
+// safely drive.
 //
 // This has exactly one caller (the unconditional SQLite test right below).
 // An earlier draft also built `#[ignore]`d live-Postgres and live-MySQL
@@ -1578,7 +1655,7 @@ async fn payments_webhook_mirror_scenario(conn: Arc<sea_orm::DatabaseConnection>
         after_insert,
         Some(before.unwrap_or(0) + 1),
         "a subscription.created webhook insert must advance the payments_subscriptions table \
-         generation, once, after the hydration transaction commits"
+         generation, once, with the hydration transaction"
     );
 
     // Update path: subscription.updated finds the mirror row just inserted,
@@ -1620,6 +1697,288 @@ async fn payments_webhook_subscription_insert_and_update_advance_the_mirror_tabl
         .expect("payments + render-cache migrations should apply cleanly");
     let conn = Arc::new(db.conn().clone());
     payments_webhook_mirror_scenario(conn).await;
+}
+
+/// Serves one connection against `router` on a task the caller can abort.
+/// Unlike [`spawn_payments_server`], the request is served on that task
+/// itself, so aborting it drops the handler wherever it is parked, the way a
+/// client disconnect or a timeout drops a request.
+async fn serve_one_payments_connection(
+    router: Router,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let router = Arc::new(router);
+    let middleware = Arc::new(MiddlewareRegistry::new());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral listener");
+    let addr = listener.local_addr().expect("local_addr");
+    let server = tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let svc = service_fn(move |req: hyper::Request<Incoming>| {
+            let router = router.clone();
+            let middleware = middleware.clone();
+            async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), svc)
+            .await;
+    });
+    (addr, server)
+}
+
+/// DATA-039, payments: a webhook whose hydration is canceled once its
+/// transaction has committed leaves its mirror tables advanced. The
+/// hydration used to commit the mirror rows and the processed receipt first,
+/// and only then start the advance that guards them, so a cancellation
+/// while the COMMIT was being acknowledged left the rows durable and the
+/// tables on their old generations. The provider's retry then found the
+/// receipt processed and acknowledged it as a duplicate, so nothing ever
+/// advanced them.
+#[tokio::test]
+async fn a_payment_hydration_canceled_after_its_commit_leaves_its_tables_advanced() {
+    suprnova::render_cache::mark_installed();
+    let db = TestDatabase::fresh::<PaymentsRenderCacheMigrator>()
+        .await
+        .expect("payments + render-cache migrations should apply cleanly");
+    let conn = Arc::new(db.conn().clone());
+
+    let provider_name = "render-cache-payments-canceled-commit";
+    let mock = Arc::new(MockPaymentProvider::new());
+    let as_trait: Arc<dyn PaymentProvider> = mock.clone();
+    PaymentProviderRegistry::bind(provider_name, as_trait);
+    let sub = mock
+        .subscribe(SubscribeRequest {
+            customer_ref: "cus_render_cache_canceled".into(),
+            price_refs: vec!["price_a".into()],
+            trial_days: None,
+            idempotency_key: None,
+            metadata: None,
+        })
+        .await
+        .expect("mock subscribe");
+
+    let before = subscriptions_generation().await;
+
+    let event_id = "evt_render_cache_canceled_commit";
+    let body = Bytes::from(
+        serde_json::json!({
+            "id": event_id,
+            "type": "subscription.created",
+            "data": { "object": {
+                "id": sub.provider_subscription_id,
+                "customer": sub.provider_customer_id,
+            }}
+        })
+        .to_string(),
+    );
+    let path = format!("/webhooks/payments/{provider_name}");
+
+    // The first delivery parks right after its commit and is canceled there.
+    deliver_and_cancel_at(
+        &conn,
+        &path,
+        event_id,
+        body.clone(),
+        WebhookCommit::Hydration,
+    )
+    .await;
+
+    use suprnova::sea_orm::EntityTrait as _;
+    let mirrored = suprnova::payments::entities::subscription::Entity::find()
+        .all(conn.as_ref())
+        .await
+        .expect("read the subscription mirror");
+    assert_eq!(
+        mirrored.len(),
+        1,
+        "precondition: the canceled hydration's commit landed"
+    );
+
+    // The provider retries the delivery it never saw acknowledged.
+    let addr = spawn_payments_server(webhook_routes(conn.clone()), 1).await;
+    let (status, resp) = send_payments_webhook(addr, &path, body).await;
+    assert_eq!(
+        status.as_u16(),
+        200,
+        "the retry is acknowledged: {}",
+        String::from_utf8_lossy(&resp)
+    );
+
+    assert!(
+        subscriptions_generation().await > before,
+        "the canceled hydration committed its mirror rows, so their table generation moved"
+    );
+}
+
+async fn subscriptions_generation() -> u64 {
+    table_generation("payments_subscriptions").await
+}
+
+async fn receipts_generation() -> u64 {
+    table_generation("payments_webhook_events").await
+}
+
+async fn table_generation(name: &str) -> u64 {
+    let table = DependencyIdentity::table(name);
+    SqlGenerationLedger::new()
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table)
+        .unwrap_or(0)
+}
+
+/// Sends `body` to `path` and cancels the request once it parks right after
+/// the `commit` it makes for `event_id`.
+async fn deliver_and_cancel_at(
+    conn: &Arc<sea_orm::DatabaseConnection>,
+    path: &str,
+    event_id: &str,
+    body: Bytes,
+    commit: WebhookCommit,
+) {
+    hold_webhook_commit_for_test(event_id, commit);
+    let (addr, server) = serve_one_payments_connection(webhook_routes(conn.clone())).await;
+    let client = tokio::spawn({
+        let path = path.to_owned();
+        async move { send_payments_webhook(addr, &path, body).await }
+    });
+    wait_until_webhook_commit_held_for_test(event_id, commit).await;
+    server.abort();
+    client.abort();
+    assert!(
+        server
+            .await
+            .expect_err("the server was aborted")
+            .is_cancelled()
+    );
+    assert!(
+        client
+            .await
+            .expect_err("the client was aborted")
+            .is_cancelled()
+    );
+}
+
+/// A database with the payments and RenderCache schemas, and a mock
+/// provider bound under `provider_name` that knows no subscription, so a
+/// `subscription.created` webhook fails its hydration.
+async fn receipts_fixture(
+    provider_name: &'static str,
+) -> (TestDatabase, Arc<sea_orm::DatabaseConnection>) {
+    suprnova::render_cache::mark_installed();
+    let db = TestDatabase::fresh::<PaymentsRenderCacheMigrator>()
+        .await
+        .expect("payments + render-cache migrations should apply cleanly");
+    let conn = Arc::new(db.conn().clone());
+    let provider: Arc<dyn PaymentProvider> = Arc::new(MockPaymentProvider::new());
+    PaymentProviderRegistry::bind(provider_name, provider);
+    (db, conn)
+}
+
+/// A `subscription.created` webhook for a subscription the mock provider
+/// has never seen: its receipt is written, and its hydration fails.
+fn failing_webhook(event_id: &str) -> Bytes {
+    Bytes::from(
+        serde_json::json!({
+            "id": event_id,
+            "type": "subscription.created",
+            "data": { "object": {
+                "id": "sub_never_registered",
+                "customer": "cus_never_registered",
+            }}
+        })
+        .to_string(),
+    )
+}
+
+/// DATA-039, the receipt insert: a webhook canceled right after its receipt
+/// row commits leaves `payments_webhook_events` advanced. The insert used to
+/// commit on its own and advance afterwards, in a second transaction, so a
+/// cancellation while the COMMIT was being acknowledged kept the receipt and
+/// lost its advance.
+#[tokio::test]
+async fn a_webhook_canceled_after_its_receipt_insert_commits_leaves_the_receipt_table_advanced() {
+    let provider_name = "render-cache-receipt-insert";
+    let (_db, conn) = receipts_fixture(provider_name).await;
+    let before = receipts_generation().await;
+
+    let event_id = "evt_render_cache_receipt_insert";
+    deliver_and_cancel_at(
+        &conn,
+        &format!("/webhooks/payments/{provider_name}"),
+        event_id,
+        failing_webhook(event_id),
+        WebhookCommit::Receipt,
+    )
+    .await;
+
+    assert_eq!(
+        receipts_generation().await,
+        before + 1,
+        "the receipt insert's commit carried its advance"
+    );
+}
+
+/// DATA-039, the failure record: a webhook canceled right after its failed
+/// hydration's error is recorded on the receipt leaves the receipt table
+/// advanced for both writes. The failure record used to commit on its own
+/// and advance afterwards.
+#[tokio::test]
+async fn a_webhook_canceled_after_its_failure_record_commits_leaves_the_receipt_table_advanced() {
+    let provider_name = "render-cache-receipt-failure";
+    let (_db, conn) = receipts_fixture(provider_name).await;
+    let before = receipts_generation().await;
+
+    let event_id = "evt_render_cache_receipt_failure";
+    deliver_and_cancel_at(
+        &conn,
+        &format!("/webhooks/payments/{provider_name}"),
+        event_id,
+        failing_webhook(event_id),
+        WebhookCommit::FailureRecord,
+    )
+    .await;
+
+    assert_eq!(
+        receipts_generation().await,
+        before + 2,
+        "the receipt insert and the failure record each carried their advance"
+    );
+}
+
+/// DATA-039, the retry's error clear: a retry canceled right after it clears
+/// the earlier attempt's error from the receipt leaves the receipt table
+/// advanced. The clear used to commit on its own and advance afterwards.
+#[tokio::test]
+async fn a_retry_canceled_after_its_error_clear_commits_leaves_the_receipt_table_advanced() {
+    let provider_name = "render-cache-receipt-retry";
+    let (_db, conn) = receipts_fixture(provider_name).await;
+    let path = format!("/webhooks/payments/{provider_name}");
+    let event_id = "evt_render_cache_receipt_retry";
+
+    // The first delivery runs to the end: receipt, failed hydration, error.
+    let addr = spawn_payments_server(webhook_routes(conn.clone()), 1).await;
+    let (status, _) = send_payments_webhook(addr, &path, failing_webhook(event_id)).await;
+    assert_eq!(status.as_u16(), 503, "precondition: the hydration failed");
+    let after_first = receipts_generation().await;
+
+    deliver_and_cancel_at(
+        &conn,
+        &path,
+        event_id,
+        failing_webhook(event_id),
+        WebhookCommit::RetryClear,
+    )
+    .await;
+
+    assert_eq!(
+        receipts_generation().await,
+        after_first + 1,
+        "the retry's error clear carried its advance"
+    );
 }
 
 /// The evaluator chain a real application boots, over the database
@@ -1833,22 +2192,184 @@ async fn reload_invalidates_the_cached_evaluator() {
     );
 }
 
-/// A flag the snapshot does not hold at any scope key records no `Feature`
-/// dependency: the render depended on the caller's compiled default, not on
-/// stored state, and a generation for it would be a row nothing writes.
+/// DRIVERS-076: a flag the snapshot does not hold at any scope key still
+/// records its `Feature` dependency. The render used the caller's compiled
+/// default, and that answer changes the moment the first rule for the flag
+/// is stored: `set_flag` (or a `reload` that finds the new row) advances
+/// exactly this generation. Without the dependency, nothing could reach the
+/// entry, and the default's output was served until its freshness ran out.
 #[tokio::test]
-async fn a_flag_the_snapshot_does_not_hold_records_no_feature_dependency() {
+async fn an_absent_flag_records_its_dependency_so_the_first_stored_rule_invalidates_the_entry() {
     boot().await;
     let features = bootstrap_flags().await;
+    features.cached.invalidate_all();
 
-    let report = feature_report(&features.cached, "orm-suite-absent").await;
+    let (observed, epoch) = observed_feature_window(&features.cached, "orm-suite-absent").await;
     assert!(
-        !report.observed.iter().any(|identity| matches!(
-            identity,
-            DependencyIdentity::Feature(name) if name == "orm-suite-absent"
-        )),
-        "an absent flag records nothing, got {:?}",
-        report.observed
+        observed
+            .get(&DependencyIdentity::feature("orm-suite-absent"))
+            .is_some(),
+        "the render that used the compiled default observed the flag's generation"
+    );
+    assert!(
+        !entry_is_invalidated(&observed, epoch).await,
+        "nothing has changed yet"
+    );
+
+    features
+        .database
+        .set_flag("orm-suite-absent", "", true)
+        .await
+        .expect("store the first rule");
+
+    assert!(
+        entry_is_invalidated(&observed, epoch).await,
+        "the first stored rule changes the answer, so it must reach the entry"
+    );
+}
+
+/// The probe `a_render_during_a_flag_write_is_invalidated_once_the_write_completes`
+/// installs in the cache slot ahead of the `CachedEvaluator`. When the write
+/// tells caches, it runs what a concurrent render would run at that instant:
+/// a flag read through the cache, closed against the ledger.
+struct RenderDuringTheWrite {
+    cached: Arc<suprnova::features::CachedEvaluator>,
+    feature: &'static str,
+    window: std::sync::Mutex<
+        Option<(
+            suprnova_live::render_cache::generation::GenerationSet,
+            u64,
+            Option<bool>,
+        )>,
+    >,
+}
+
+impl RenderDuringTheWrite {
+    async fn render(&self) {
+        use suprnova::features::Evaluator as _;
+
+        let answer = self
+            .cached
+            .is_enabled(self.feature, &suprnova::features::Context::root());
+        let (observed, epoch) = observed_feature_window(&self.cached, self.feature).await;
+        *self.window.lock().expect("probe lock") = Some((observed, epoch, answer));
+    }
+
+    fn take(
+        &self,
+    ) -> (
+        suprnova_live::render_cache::generation::GenerationSet,
+        u64,
+        Option<bool>,
+    ) {
+        self.window
+            .lock()
+            .expect("probe lock")
+            .take()
+            .expect("the write told its caches")
+    }
+}
+
+#[async_trait::async_trait]
+impl suprnova::features::FeatureSync for RenderDuringTheWrite {
+    async fn on_flag_changed(&self, feature: &str, _scope_key: &str) {
+        if feature == self.feature {
+            self.render().await;
+        }
+    }
+
+    async fn on_snapshot_reloaded(&self, changed: &[String]) {
+        if changed.iter().any(|name| name == self.feature) {
+            self.render().await;
+        }
+    }
+}
+
+/// Binds `probe` ahead of the `CachedEvaluator` in the cache slot, so it runs
+/// while the cache still holds whatever it held when the write began.
+fn bind_probe_ahead_of_the_cache(
+    features: &suprnova::features::BootstrappedFeatures,
+    probe: &Arc<RenderDuringTheWrite>,
+) {
+    use suprnova::features::{CompositeFeatureSync, FeatureSync};
+    use suprnova::testing::TestContainer;
+
+    TestContainer::bind::<dyn FeatureSync>(Arc::new(CompositeFeatureSync::new(
+        vec![features.database.clone() as Arc<dyn FeatureSync>],
+        vec![
+            Arc::clone(probe) as Arc<dyn FeatureSync>,
+            features.cached.clone() as Arc<dyn FeatureSync>,
+        ],
+    )));
+}
+
+/// DRIVERS-078: a render that reads a flag while `set_flag` is in progress
+/// is invalidated once the write completes. The `CachedEvaluator` keeps
+/// answering with the old value until the write tells it, so if the
+/// `Feature` generation had already advanced by then, that render would
+/// publish the old answer under the new generation and look coherent until
+/// its freshness ran out. The write now tells its caches before it advances.
+#[tokio::test]
+async fn a_render_during_a_flag_write_is_invalidated_once_the_write_completes() {
+    boot().await;
+    let features = bootstrap_flags().await;
+    features
+        .database
+        .set_flag("orm-suite-in-flight", "", false)
+        .await
+        .expect("seed the flag");
+    let probe = Arc::new(RenderDuringTheWrite {
+        cached: features.cached.clone(),
+        feature: "orm-suite-in-flight",
+        window: std::sync::Mutex::new(None),
+    });
+    let _ = observed_feature_window(&features.cached, "orm-suite-in-flight").await;
+    bind_probe_ahead_of_the_cache(&features, &probe);
+
+    features
+        .database
+        .set_flag("orm-suite-in-flight", "", true)
+        .await
+        .expect("flip the flag");
+
+    let (observed, epoch, answer) = probe.take();
+    assert!(
+        answer == Some(true) || entry_is_invalidated(&observed, epoch).await,
+        "a render that read {answer:?} during the write must not stay coherent after it"
+    );
+}
+
+/// The `reload` half of DRIVERS-078: an out-of-band change picked up by
+/// `reload` tells the caches before it advances the generation, for the
+/// same reason as `set_flag`.
+#[tokio::test]
+async fn a_render_during_a_reload_is_invalidated_once_the_reload_completes() {
+    boot().await;
+    let features = bootstrap_flags().await;
+    features
+        .database
+        .set_flag("orm-suite-reload-in-flight", "", false)
+        .await
+        .expect("seed the flag");
+    let probe = Arc::new(RenderDuringTheWrite {
+        cached: features.cached.clone(),
+        feature: "orm-suite-reload-in-flight",
+        window: std::sync::Mutex::new(None),
+    });
+    let _ = observed_feature_window(&features.cached, "orm-suite-reload-in-flight").await;
+    bind_probe_ahead_of_the_cache(&features, &probe);
+
+    DB::table("features")
+        .filter("name", "orm-suite-reload-in-flight")
+        .update(attrs! { enabled: true })
+        .await
+        .expect("write the row out of band");
+    features.database.reload().await.expect("reload");
+
+    let (observed, epoch, answer) = probe.take();
+    assert!(
+        answer == Some(true) || entry_is_invalidated(&observed, epoch).await,
+        "a render that read {answer:?} during the reload must not stay coherent after it"
     );
 }
 
@@ -2180,4 +2701,139 @@ async fn where_has_observes_the_related_table_and_a_write_to_it_invalidates() {
             report.observed
         );
     }
+}
+
+// ---- DATA-039: a canceled write never splits its row from its advance ----
+
+/// A soft-delete model on its own table, so the advancement seam below can
+/// be armed for exactly this suite's writes.
+#[suprnova::model(
+    table = "d039_rows",
+    timestamps = false,
+    soft_deletes,
+    fillable = ["title", "counter"]
+)]
+pub struct D039Row {
+    pub id: i64,
+    pub title: String,
+    pub counter: i64,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn d039_table() {
+    DB::unprepared(
+        "CREATE TABLE IF NOT EXISTS d039_rows (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            title TEXT NOT NULL, \
+            counter INTEGER NOT NULL DEFAULT 0, \
+            deleted_at TEXT\
+         )",
+    )
+    .await
+    .expect("create d039_rows");
+}
+
+async fn d039_generation() -> u64 {
+    let table = DependencyIdentity::table("d039_rows");
+    SqlGenerationLedger::new()
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table)
+        .unwrap_or(0)
+}
+
+async fn d039_row(id: i64) -> Option<D039Row> {
+    D039Row::with_trashed()
+        .filter("id", id)
+        .first()
+        .await
+        .expect("read the row back")
+}
+
+/// Runs `write` until its generation advance starts, then drops it there,
+/// the way a client disconnect, a timeout or a `select!` drops a request.
+async fn cancel_at_the_advance<F>(write: F)
+where
+    F: std::future::Future,
+{
+    suprnova::render_cache::RenderCache::hold_next_advance_for_test("d039_rows");
+    tokio::select! {
+        biased;
+        _ = write => panic!("the advance was parked, so the write cannot have finished"),
+        () = suprnova::render_cache::RenderCache::wait_until_advance_held_for_test("d039_rows") => {}
+    }
+}
+
+/// DATA-039: a write canceled between its row write and its generation
+/// advance leaves the two agreeing. Bulk builder writes, `increment`, and
+/// the generated soft delete, restore and force delete used to commit the
+/// row on their own and then advance in a second transaction, so a drop in
+/// between left the row durable and every entry that read the table on its
+/// old generation. Each case passes when the row is unchanged (the write
+/// rolled back with its advance) or the generation moved.
+#[tokio::test]
+async fn a_write_canceled_at_its_advance_never_leaves_the_row_ahead_of_its_generation() {
+    boot().await;
+    d039_table().await;
+
+    let row = D039Row::create(attrs! { title: "before", counter: 0_i64 })
+        .await
+        .expect("seed");
+    let generation = d039_generation().await;
+    cancel_at_the_advance(
+        D039Row::query()
+            .filter("id", row.id)
+            .update_all(attrs! { title: "changed" }),
+    )
+    .await;
+    let after = d039_row(row.id).await.expect("present");
+    assert!(
+        after.title == "before" || d039_generation().await > generation,
+        "update_all: the row changed to {:?} while the generation stayed at {generation}",
+        after.title
+    );
+
+    let generation = d039_generation().await;
+    cancel_at_the_advance(after.increment("counter", 1)).await;
+    let after = d039_row(row.id).await.expect("present");
+    assert!(
+        after.counter == 0 || d039_generation().await > generation,
+        "increment: the counter moved to {} while the generation stayed at {generation}",
+        after.counter
+    );
+
+    let generation = d039_generation().await;
+    cancel_at_the_advance(after.clone().delete()).await;
+    let after = d039_row(row.id).await.expect("present");
+    assert!(
+        after.deleted_at.is_none() || d039_generation().await > generation,
+        "soft delete: the row was tombstoned while the generation stayed at {generation}"
+    );
+
+    let generation = d039_generation().await;
+    cancel_at_the_advance(D039Row::query().filter("id", row.id).delete_all()).await;
+    let after = d039_row(row.id).await.expect("present");
+    assert!(
+        after.deleted_at.is_none() || d039_generation().await > generation,
+        "delete_all: the row was tombstoned while the generation stayed at {generation}"
+    );
+
+    // Tombstone it for real, then cancel a restore.
+    after.clone().delete().await.expect("soft delete");
+    let trashed = d039_row(row.id).await.expect("present");
+    let generation = d039_generation().await;
+    cancel_at_the_advance(trashed.clone().restore()).await;
+    let after = d039_row(row.id).await.expect("present");
+    assert!(
+        after.deleted_at.is_some() || d039_generation().await > generation,
+        "restore: the row came back while the generation stayed at {generation}"
+    );
+
+    let generation = d039_generation().await;
+    cancel_at_the_advance(after.clone().force_delete()).await;
+    assert!(
+        d039_row(row.id).await.is_some() || d039_generation().await > generation,
+        "force delete: the row is gone while the generation stayed at {generation}"
+    );
 }

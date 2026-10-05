@@ -9,11 +9,11 @@
 //! complains.
 //!
 //! `Environment::detect()` reads the process-wide `APP_ENV` var and these
-//! tests mutate it alongside `MAIL_DRIVER`, so - like
-//! `inertia_production_fail_closed.rs` and `app_key_production_fail_closed.rs` -
-//! they live in their own test binary and serialise against each other with
-//! `#[serial_test::serial]`. Each `tests/*.rs` file is a separate process, so
-//! no other integration test can interleave with these.
+//! tests mutate it alongside `MAIL_DRIVER`, and they clear the process-wide
+//! mail transport. They share the `mail` test binary with every other mail
+//! test, so they take the same unnamed `#[serial]` lock those tests take: a
+//! named key would let them clear the transport in the middle of another
+//! test's send.
 //!
 //! The env-free half of the matrix (`select_driver` driven with explicit
 //! arguments) is unit-tested in `framework/src/mail/boot.rs`.
@@ -74,8 +74,7 @@ impl EnvGuard {
     ///
     /// # Safety
     /// Mutates process-global env. Safe here because every test in this file
-    /// is `#[serial]`-locked against the others and this binary contains no
-    /// other tests.
+    /// holds the environment lock and the binary-wide `#[serial]` lock.
     fn take() -> Self {
         let guard = Self {
             app_env: std::env::var("APP_ENV").ok(),
@@ -138,7 +137,7 @@ fn set(name: &str, value: &str) {
 }
 
 #[tokio::test]
-#[serial(mail_sec03_env)]
+#[serial]
 async fn production_boot_without_a_mail_driver_fails_closed() {
     let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
@@ -169,7 +168,7 @@ async fn production_boot_without_a_mail_driver_fails_closed() {
 }
 
 #[test]
-#[serial(mail_sec03_env)]
+#[serial]
 fn production_boot_on_the_log_driver_fails_closed() {
     let _env = crate::env_lock::lock_env();
     let _guard = EnvGuard::take();
@@ -186,7 +185,7 @@ fn production_boot_on_the_log_driver_fails_closed() {
 }
 
 #[test]
-#[serial(mail_sec03_env)]
+#[serial]
 fn production_boot_on_the_memory_driver_fails_closed() {
     let _env = crate::env_lock::lock_env();
     let _guard = EnvGuard::take();
@@ -206,7 +205,7 @@ fn production_boot_on_the_memory_driver_fails_closed() {
 }
 
 #[test]
-#[serial(mail_sec03_env)]
+#[serial]
 fn production_boot_on_an_unknown_driver_fails_instead_of_falling_back_to_log() {
     let _env = crate::env_lock::lock_env();
     let _guard = EnvGuard::take();
@@ -225,7 +224,7 @@ fn production_boot_on_an_unknown_driver_fails_instead_of_falling_back_to_log() {
 }
 
 #[tokio::test]
-#[serial(mail_sec03_env)]
+#[serial]
 async fn production_boot_succeeds_with_the_explicit_override() {
     let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
@@ -245,7 +244,7 @@ async fn production_boot_succeeds_with_the_explicit_override() {
 }
 
 #[test]
-#[serial(mail_sec03_env)]
+#[serial]
 fn a_negative_override_value_does_not_open_the_gate() {
     let _env = crate::env_lock::lock_env();
     let _guard = EnvGuard::take();
@@ -265,7 +264,7 @@ fn a_negative_override_value_does_not_open_the_gate() {
 // `#[tokio::test]`, not `#[test]`: lettre's SMTP transport binds to the
 // ambient Tokio reactor both when it is constructed and when it is dropped.
 #[tokio::test]
-#[serial(mail_sec03_env)]
+#[serial]
 async fn production_boot_on_a_delivering_driver_is_unaffected() {
     let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
@@ -297,7 +296,7 @@ async fn production_boot_on_a_delivering_driver_is_unaffected() {
 /// certificate check - and the both-unset arm logged a `warn!` in
 /// production and booted plaintext anyway.
 #[tokio::test]
-#[serial(mail_sec03_env)]
+#[serial]
 async fn production_smtp_without_credentials_refuses_to_boot() {
     let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
@@ -318,7 +317,7 @@ async fn production_smtp_without_credentials_refuses_to_boot() {
 /// Explicitly asking for no encryption is refused the same way. An
 /// operator who set this deliberately still has to acknowledge it.
 #[tokio::test]
-#[serial(mail_sec03_env)]
+#[serial]
 async fn production_smtp_with_encryption_none_refuses_to_boot() {
     let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
@@ -336,7 +335,7 @@ async fn production_smtp_with_encryption_none_refuses_to_boot() {
 
 /// The escape hatch, for a relay on a private network.
 #[tokio::test]
-#[serial(mail_sec03_env)]
+#[serial]
 async fn the_insecure_override_lets_production_boot_in_the_clear() {
     let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
@@ -353,7 +352,7 @@ async fn the_insecure_override_lets_production_boot_in_the_clear() {
 /// Same truthiness discipline as its SEC-03 sibling: presence is not
 /// consent. A deploy that writes `=false` must keep the guard armed.
 #[tokio::test]
-#[serial(mail_sec03_env)]
+#[serial]
 async fn a_non_truthy_insecure_override_keeps_the_guard_armed() {
     let _env = crate::env_lock::lock_env_async().await;
     for value in ["false", "0", "no", "maybe", ""] {
@@ -375,7 +374,7 @@ async fn a_non_truthy_insecure_override_keeps_the_guard_armed() {
 /// Implicit TLS, previously unreachable from any combination of
 /// environment variables.
 #[tokio::test]
-#[serial(mail_sec03_env)]
+#[serial]
 async fn implicit_tls_boots_from_the_environment() {
     let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
@@ -395,7 +394,7 @@ async fn implicit_tls_boots_from_the_environment() {
 /// a message about the credentials rather than about encryption - the two
 /// failures must stay distinguishable to whoever is reading the log.
 #[tokio::test]
-#[serial(mail_sec03_env)]
+#[serial]
 async fn an_encrypted_mode_without_credentials_names_the_credentials() {
     let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
@@ -417,7 +416,7 @@ async fn an_encrypted_mode_without_credentials_names_the_credentials() {
 /// credentials and no encryption setting, and its Mailpit speaks no TLS.
 /// If this fails, a fresh scaffold cannot send mail locally.
 #[tokio::test]
-#[serial(mail_sec03_env)]
+#[serial]
 async fn development_smtp_still_boots_against_a_local_catcher() {
     let _env = crate::env_lock::lock_env_async().await;
     for app_env in [None, Some("local"), Some("development"), Some("testing")] {
@@ -440,7 +439,7 @@ async fn development_smtp_still_boots_against_a_local_catcher() {
 /// A typo must not degrade to plaintext, and must surface on the
 /// developer's machine rather than in the deploy.
 #[tokio::test]
-#[serial(mail_sec03_env)]
+#[serial]
 async fn an_unrecognised_encryption_value_fails_outside_production_too() {
     let _env = crate::env_lock::lock_env_async().await;
     let _guard = EnvGuard::take();
@@ -459,7 +458,7 @@ async fn an_unrecognised_encryption_value_fails_outside_production_too() {
 }
 
 #[tokio::test]
-#[serial(mail_sec03_env)]
+#[serial]
 async fn non_production_boot_is_unchanged() {
     let _env = crate::env_lock::lock_env_async().await;
     for app_env in [None, Some("local"), Some("development"), Some("staging")] {

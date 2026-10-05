@@ -415,13 +415,121 @@ streaming byte counter during read.
 
 `FormRequest::extract` looks only at the `Content-Type` header:
 
-- `application/x-www-form-urlencoded` → parsed via `serde_urlencoded`
+- `application/x-www-form-urlencoded` → parsed as a form, as described in
+  [empty values, repeated names, and fields that don't parse](#empty-values-repeated-names-and-fields-that-dont-parse)
 - `application/json` or any `application/*+json` suffix → parsed via `serde_json`
 - Anything else (including a missing header) → rejected with HTTP 415
   Unsupported Media Type, before the body is read
 
 For multipart bodies (`multipart/form-data`), see
 [file uploads](#file-uploads-multipartrequest) below.
+
+## Empty values, repeated names, and fields that don't parse
+
+A form can't send `null`. An HTML form sends an empty input as `name=`, and
+Inertia sends a `null` value as an empty field when it posts `FormData`.
+Laravel's default `ConvertEmptyStringsToNull` middleware reads the empty
+value as `null`. A form-urlencoded `FormRequest` and a `MultipartRequest`
+read it the same way:
+
+- An `Option` field is `None`, an `Option<String>` included.
+- A required field is missing, a `String` included, so the request fails
+  with a `422`.
+- A list keeps the `null` in its place. An element of a `Vec<Option<T>>` is
+  `None`. An element of a `Vec<T>`, which has no place for `null`, is
+  missing, and is reported under its index, such as `ids.1`.
+
+The name itself stays, holding `null`, so a cleared field is told apart from
+one never sent. Read into a `serde_json::Value` or a map, `name=Ada&bio=`
+gives `{"name": "Ada", "bio": null}`, and a `#[serde(flatten)]` map sees
+`bio` too. A `#[serde(default)]` field that arrives empty is `null`, not its
+default: the default is for a field the form left out.
+
+A `bool` field reads what forms send, in a url-encoded body, a query
+string and a multipart body alike: `1` and `0`, as Inertia sends them,
+`true` and `false`, and `on` and `off`, as an HTML checkbox sends them, the
+words in any case.
+
+A name sent more than once keeps its last value, as PHP does. The body
+`title=&title=Holiday` gives `Holiday`, and `title=Holiday&title=` gives
+`null`. A name that ends in `[]` is a list: `tags[]=rust&tags[]=web` fills a
+`tags: Vec<String>` field. `req.form()`, the form-urlencoded branch of
+`req.input()`, and `req.query_into()` read by the same rules.
+
+A field that is missing, or whose value doesn't parse as its type, answers
+the way a failing rule does: a `422` whose `errors` names every such field
+under its input name, with the catalog message for its type. An Inertia
+form gets the usual redirect back with those errors in `props.errors`. A
+JSON body reads the same way, nested fields included, and a JSON `null`
+where a value is required counts as missing.
+
+| Failure | Catalog key |
+|---|---|
+| A required field missing, empty, or JSON `null` | `validation-required` |
+| A value that isn't an integer, a number, or a `bool` for such a field | `validation-integer`, `validation-numeric`, `validation-boolean` |
+| A JSON value that isn't a string for a `String` field, or a list where one value belongs | `validation-string` |
+| Any other value that doesn't fit, such as an unknown enum variant | `validation-format` |
+
+`title=&count=abc` posted to a struct with `title: String` and `count: u32`
+answers with both:
+
+```json
+{
+    "message": "The given data was invalid.",
+    "errors": {
+        "title": ["The title field is required."],
+        "count": ["The count field must be an integer."]
+    }
+}
+```
+
+A body that isn't JSON at all, or a field a struct denies with
+`#[serde(deny_unknown_fields)]`, is no field's failure: it answers `422`
+with a message that words it.
+
+```rust
+use suprnova::{handler, json_response, request, Response};
+
+#[request]
+pub struct UpdateProfile {
+    pub name: String,
+    pub bio: Option<String>,
+}
+
+#[handler]
+pub async fn update(form: UpdateProfile) -> Response {
+    // `name=Ada&bio=` arrives with `bio` as `None`, and `name=&bio=Hi`
+    // fails with a `422` before this code runs.
+    json_response!({ "name": form.name, "has_bio": form.bio.is_some() })
+}
+```
+
+### Why Suprnova diverges
+
+- A JSON body keeps `""` as an empty string. JSON has its own `null`, and
+  Inertia sends a `null` value as one, so an empty string in JSON is text
+  the client chose. To require text there, validate `length(min = 1)`.
+  Laravel converts a JSON `""` to `null` too.
+- Text isn't trimmed. Laravel's `TrimStrings` middleware runs before
+  `ConvertEmptyStringsToNull`, so a value of spaces is `null` in Laravel and
+  text in Suprnova.
+- A JSON body reads a `bool` as JSON `true` or `false` only. Laravel's
+  `boolean` rule also takes `1`, `0`, `"1"` and `"0"` there. A JSON client
+  sends a JSON boolean, which a `bool` field reads as it is.
+- A `MultipartRequest` field that holds one file takes the first file part
+  of its name, where PHP keeps the last. The extractor checks a file while
+  the body streams, before it knows whether a later part of the same name
+  follows, so it decides on the first one.
+- The `#[validate(...)]` rules run only once every field parses, so a
+  request with a field that doesn't parse hears about the parse failures
+  alone. Laravel checks every rule at once. A struct can't be built while a
+  field has no value of its type, and the rules run on the struct.
+- A JSON object nested in the body reports its first missing field, and a
+  field after that object in the body is checked once the object reads.
+  Missing fields at the top of the body are all reported at once.
+- A Precognition request that asks about a field which parses, while
+  another field doesn't, gets those other fields' errors rather than a
+  `204`: the rules for the field it asked about haven't run.
 
 ## Reading the body directly
 
@@ -523,6 +631,7 @@ Field shapes:
 | `String` / `u32` / any `FromStr` | text field (required) |
 | `Option<String>` / `Option<T: FromStr>` | optional text field |
 | `Vec<String>` / `Vec<T: FromStr>` | repeated text fields |
+| `Vec<Option<String>>` / `Vec<Option<T: FromStr>>` | repeated text fields, an empty one as `None` |
 
 A text field is read through its type's `FromStr`, except a `bool`, which
 takes what forms send: `1` and `0`, as Inertia sends them, `true` and
@@ -530,17 +639,18 @@ takes what forms send: `1` and `0`, as Inertia sends them, `true` and
 case. An unchecked checkbox sends nothing, so declare it `Option<bool>` and
 read a missing value as `false` with `unwrap_or(false)`.
 
-Inertia sends a `null` value as an empty text part. For a type that can't
-hold empty text, such as `u32`, `f64` or `bool`, an empty part counts as a
-missing value: an `Option` field is `None`, a required field reports
-`validation-required`, and a `Vec` field leaves the element out. A `String`
-field keeps the empty string, as a `FormRequest` does for a JSON `""` or a
-urlencoded `name=`.
+An empty text part is `null`, as
+[empty values, repeated names, and fields that don't parse](#empty-values-repeated-names-and-fields-that-dont-parse)
+describes: an `Option` field is `None`, a required field reports
+`validation-required`, and an empty element is `None` in a
+`Vec<Option<T>>` and reports `validation-required` under its index in a
+`Vec<T>`. A `String` field is no exception. A `Vec<UploadedFile<V>>` field
+still leaves out an empty file input or a `null` file, which is how a
+client leaves a file out.
 
-A field that holds one value, rather than a `Vec`, is decided by the first
-part of its name that isn't missing in this sense. If that part doesn't
-parse, the field reports that one error, and any later part of the name is
-ignored.
+A text field that holds one value, rather than a `Vec`, takes the last part
+of its name. Only that part is parsed, so an earlier part that doesn't parse
+reports nothing, and a last part that doesn't parse reports one error.
 
 Built-in validators in `suprnova::http::upload::validators`:
 
@@ -550,7 +660,16 @@ Built-in validators in `suprnova::http::upload::validators`:
   (Named after Laravel's own rule; the plain `Image` name belongs to the
   image-manipulation pipeline - see [Images](images.md).)
 - `MimeType<L>` - accepts a fixed allowlist provided by your own
-  `MimeAllowlist` type.
+  `MimeAllowlist` type. The type is detected from the file's magic bytes.
+  The client's `Content-Type` counts only for bytes that carry no magic
+  (`text/csv`, `application/json`), never for a type that has some: bytes
+  that aren't a PNG don't pass as `image/png` whatever the header claims.
+  Markup and script text is refused before the header is read. SVG is the
+  exception, being markup: an allowlist that names `image/svg+xml` accepts
+  a file whose root element is `<svg>` (after an optional XML declaration,
+  comments and doctype), and refuses any other text declared as SVG. An
+  SVG can carry script, so serve uploaded ones as attachments or from
+  another origin.
 - `()` - no-op; `UploadedFile<()>` accepts any bytes.
 
 Validators compose as tuples: `(ImageFile, MaxSize<5_242_880>)` runs both,
@@ -1002,6 +1121,8 @@ let acceptable = req.acceptable_content_types();
 
 `accepts(&[ty])` matches both bare types and `application/<vendor>+json`-style suffixes. `accepts_any_content_type()` returns true when there is no Accept header or the top preference is `*/*`.
 
+A type the header weights `q=0` is refused, as RFC 9110 defines it: `acceptable_content_types()` leaves it out, and `accepts`, `prefers`, `wants_json` and `expects_json` treat it as unwanted. The most specific matching range decides, so `Accept: */*, application/json;q=0` accepts HTML and refuses JSON. Laravel lists a `q=0` type as acceptable; Suprnova follows the RFC instead.
+
 ### Query string
 
 ```rust
@@ -1011,9 +1132,21 @@ let map = req.query_params(); // HashMap<String, String>
 
 // Typed query parse via serde
 #[derive(serde::Deserialize)]
-struct SearchQuery { page: u32, q: String }
+struct SearchQuery {
+    q: String,
+    page: Option<u32>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
 let q: SearchQuery = req.query_into()?;
 ```
+
+`query_into` reads the query as a form body reads: `?page=` leaves `page`
+`None`, `?q=a&q=b` gives `b`, and `?tags[]=a&tags[]=b` fills `tags`. A field
+that is missing or doesn't parse answers as a form request's does: a `422`
+whose `errors` names each such field with its catalog message, so an
+Inertia visit is redirected back with them. A query that fails for another
+reason answers `422` with a message.
 
 ### Route metadata
 

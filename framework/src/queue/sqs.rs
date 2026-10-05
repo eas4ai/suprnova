@@ -66,7 +66,16 @@
 //! any more: after SQS refused the send that would have carried it, or after
 //! a delete of its message on a reservation that had not expired. A payload
 //! whose fate the driver cannot know, such as one whose send timed out, is
-//! left on the disk.
+//! left on the disk, and so is one whose send was refused after an earlier
+//! try timed out or met a fault of the service: that try may have left a
+//! message in the queue. A retry after such a try carries a copy of the
+//! payload at a new path, so when SQS took both tries each message owns
+//! its payload, and acknowledging one cannot leave the other unreadable.
+//!
+//! The payloads of a queue live under `sqs-payloads/<name>-<digest>/`, where
+//! the digest is of the endpoint, the region and the whole queue URL, so
+//! same-named queues in different accounts or regions, and queues with one
+//! URL behind different endpoints, never share a directory.
 
 use crate::error::FrameworkError;
 use crate::filesystem::Storage;
@@ -304,6 +313,9 @@ pub struct SqsQueueDriver {
     client: reqwest::Client,
     /// The URL requests are posted to, with a trailing `/`.
     endpoint: String,
+    /// The region requests are signed for. With the endpoint, it names the
+    /// service a queue URL is resolved by; see `queue_key`.
+    region: String,
     signer: Signer<Credential>,
     prefix: Option<String>,
     /// A queue name, or a queue URL.
@@ -405,10 +417,32 @@ enum Failure {
     Garbled(FrameworkError),
 }
 
+/// What [`SqsQueueDriver::request_tracked`] saw across its tries.
+struct Attempted {
+    /// The outcome of the last try.
+    outcome: Result<Value, Failure>,
+    /// Whether any try, the last included, may have been carried out by SQS:
+    /// it had no answer, or a fault of the service answered it.
+    maybe_acted: bool,
+}
+
 impl Failure {
     /// Whether SQS did not act on the request.
     fn is_definite(&self) -> bool {
         matches!(self, Failure::NotSent(_) | Failure::Refused(_))
+    }
+
+    /// Whether SQS may have carried out the request although it failed:
+    /// no answer came, or the service answered with a fault of its own
+    /// (5xx), which does not say the request was not carried out. A
+    /// refusal of the request itself (4xx, throttling included) says it
+    /// was not.
+    fn may_have_acted(&self) -> bool {
+        match self {
+            Failure::NotSent(_) => false,
+            Failure::Refused(error) => error.status >= 500,
+            Failure::Unknown(_) | Failure::Garbled(_) => true,
+        }
     }
 
     fn into_error(self, action: &str) -> FrameworkError {
@@ -527,6 +561,7 @@ impl SqsQueueDriver {
         let driver = Self {
             client,
             endpoint,
+            region,
             signer,
             prefix: config.prefix.filter(|prefix| !prefix.trim().is_empty()),
             queue: config.queue,
@@ -601,29 +636,103 @@ impl SqsQueueDriver {
     /// Post one action, trying again after a throttled request, a fault of
     /// the service, or no answer, up to three tries in all.
     async fn request(&self, action: &str, body: &Value) -> Result<Value, Failure> {
-        // Serialized once; each try sends the same shared bytes rather than
-        // a copy of them.
-        let payload = bytes::Bytes::from(serde_json::to_vec(body).map_err(|error| {
-            Failure::NotSent(FrameworkError::internal(format!(
-                "SQS {action}: encode: {error}"
-            )))
-        })?);
-        let mut tries = 0;
-        loop {
-            tries += 1;
-            let outcome = self.request_once(action, &payload).await;
-            let again = match &outcome {
-                Err(Failure::Refused(error)) => error.is_retryable(),
-                Err(Failure::Unknown(_)) => true,
-                _ => false,
-            };
-            if !again || tries >= MAX_TRIES {
-                return outcome;
+        self.request_tracked(action, body).await.outcome
+    }
+
+    /// [`Self::request`], also reporting whether any try may have been
+    /// carried out by SQS without the driver learning it.
+    async fn request_tracked(&self, action: &str, body: &Value) -> Attempted {
+        let payload = match encode_body(action, body) {
+            Ok(payload) => payload,
+            Err(failure) => {
+                return Attempted {
+                    outcome: Err(failure),
+                    maybe_acted: false,
+                };
             }
-            // 100 ms, then 200 ms, each with up to 50 ms of jitter so workers
-            // throttled together do not retry together.
-            let jitter = (Uuid::new_v4().as_u128() % 50) as u64;
-            tokio::time::sleep(Duration::from_millis(100 * (1 << (tries - 1)) + jitter)).await;
+        };
+        let mut retry = Retry::default();
+        loop {
+            let outcome = self.request_once(action, &payload).await;
+            match retry.after(&outcome) {
+                Next::Done => {
+                    return Attempted {
+                        outcome,
+                        maybe_acted: retry.maybe_acted,
+                    };
+                }
+                Next::Again { .. } => retry.wait().await,
+            }
+        }
+    }
+
+    /// Send `messages` with `action`, the request built by `build`, trying
+    /// again as [`Self::request`] does.
+    ///
+    /// A try SQS may have carried out may have left messages in the queue
+    /// that point at the overflow payloads of `messages`, and a retry SQS
+    /// takes as well leaves a second message for each. A message deletes
+    /// its payload when it is acknowledged, so two messages must never
+    /// share one: before the try after such a try, every payload is copied
+    /// to a new path and `messages` point at the copies. The payloads the
+    /// earlier try carried stay on the disk, and `maybe_acted` then speaks
+    /// for the copies alone. When a copy cannot be made, the send stops
+    /// with the last outcome.
+    async fn send_with_own_payloads(
+        &self,
+        action: &'static str,
+        queue_url: &str,
+        messages: &mut [Outgoing],
+        build: fn(&str, &[Outgoing]) -> Value,
+    ) -> Attempted {
+        let mut payload = match encode_body(action, &build(queue_url, messages)) {
+            Ok(payload) => payload,
+            Err(failure) => {
+                return Attempted {
+                    outcome: Err(failure),
+                    maybe_acted: false,
+                };
+            }
+        };
+        let mut retry = Retry::default();
+        loop {
+            let outcome = self.request_once(action, &payload).await;
+            match retry.after(&outcome) {
+                Next::Done => {
+                    return Attempted {
+                        outcome,
+                        maybe_acted: retry.maybe_acted,
+                    };
+                }
+                Next::Again { may_have_acted } => {
+                    if may_have_acted && messages.iter().any(|message| message.pointer.is_some()) {
+                        let copied = match self.copy_overflows(queue_url, messages).await {
+                            Ok(()) => encode_body(action, &build(queue_url, messages))
+                                .map_err(|failure| failure.into_error(action)),
+                            Err(error) => Err(error),
+                        };
+                        match copied {
+                            Ok(copies) => {
+                                payload = copies;
+                                retry.fresh_payloads();
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    action,
+                                    "SQS: could not copy the overflow payloads for a retry after \
+                                     a try without an answer; the send stops and the payloads stay"
+                                );
+                                return Attempted {
+                                    outcome,
+                                    maybe_acted: retry.maybe_acted,
+                                };
+                            }
+                        }
+                    }
+                    retry.wait().await;
+                }
+            }
         }
     }
 
@@ -754,14 +863,13 @@ impl SqsQueueDriver {
     /// by at most 15 minutes, writing it to the overflow disk when it is too
     /// large for one message.
     async fn send(&self, queue_url: &str, envelope: &Envelope) -> Result<(), FrameworkError> {
-        let message = self.encode(queue_url, envelope).await?;
-        let mut request = json!({ "QueueUrl": queue_url, "MessageBody": message.body });
-        if message.delay > 0 {
-            request["DelaySeconds"] = json!(message.delay);
-        }
-        let outcome = self
-            .request("SendMessage", &request)
-            .await
+        let mut message = [self.encode(queue_url, envelope).await?];
+        let attempted = self
+            .send_with_own_payloads("SendMessage", queue_url, &mut message, send_message_request)
+            .await;
+        let [message] = message;
+        let outcome = attempted
+            .outcome
             .and_then(|reply| match reply["MessageId"].as_str() {
                 Some(_) => Ok(()),
                 None => Err(Failure::Garbled(FrameworkError::internal(
@@ -772,19 +880,22 @@ impl SqsQueueDriver {
         match outcome {
             Ok(()) => Ok(()),
             Err(failure) => {
-                self.discard(&message, &failure).await;
+                self.discard(&message, &failure, attempted.maybe_acted)
+                    .await;
                 Err(failure.into_error("SendMessage"))
             }
         }
     }
 
     /// Delete the payload of a message whose send failed, when SQS is known
-    /// not to have taken it.
-    async fn discard(&self, message: &Outgoing, failure: &Failure) {
+    /// not to have taken it: the last try was refused and no try may have
+    /// been carried out. A refusal after a try that had no answer does not
+    /// say the earlier try left no message.
+    async fn discard(&self, message: &Outgoing, failure: &Failure, maybe_acted: bool) {
         let Some(path) = &message.pointer else {
             return;
         };
-        if failure.is_definite() {
+        if failure.is_definite() && !maybe_acted {
             self.delete_payload(path).await;
         } else {
             tracing::warn!(
@@ -793,6 +904,65 @@ impl SqsQueueDriver {
                  hold a message that points at it"
             );
         }
+    }
+
+    /// `message` pointing at a copy of its overflow payload, at a new path,
+    /// for a retry after a try SQS may have carried out. The payload it
+    /// pointed at stays: a message from that try may point at it.
+    async fn copy_overflow(
+        &self,
+        queue_url: &str,
+        message: &Outgoing,
+    ) -> Result<Outgoing, FrameworkError> {
+        let (Some(overflow), Some(path)) = (&self.overflow, &message.pointer) else {
+            return Err(FrameworkError::internal(
+                "SQS: a message without an overflow payload has nothing to copy",
+            ));
+        };
+        let operator = overflow.operator()?;
+        let bytes = operator.read(path).await.map_err(|error| {
+            FrameworkError::internal(format!(
+                "SQS: could not read the overflow payload '{path}' to copy it: {error}"
+            ))
+        })?;
+        let copy = overflow_path(&self.queue_key(queue_url));
+        operator.write(&copy, bytes).await.map_err(|error| {
+            FrameworkError::internal(format!(
+                "SQS: could not write a copy of the overflow payload: {error}"
+            ))
+        })?;
+        tracing::warn!(
+            path = path.as_str(),
+            copy = copy.as_str(),
+            "SQS: a send got no answer, so its retry carries a copy of the overflow payload; \
+             the original stays in case SQS holds a message that points at it"
+        );
+        Ok(Outgoing {
+            body: pointer_body(&copy),
+            delay: message.delay,
+            pointer: Some(copy),
+        })
+    }
+
+    /// The overflow directory name of the queue at `queue_url`, as this
+    /// driver reaches it. See [`queue_key`].
+    fn queue_key(&self, queue_url: &str) -> String {
+        queue_key(&self.endpoint, &self.region, queue_url)
+    }
+
+    /// Point every message of `messages` that carries an overflow payload
+    /// at a copy of it. See [`Self::copy_overflow`].
+    async fn copy_overflows(
+        &self,
+        queue_url: &str,
+        messages: &mut [Outgoing],
+    ) -> Result<(), FrameworkError> {
+        for message in messages.iter_mut() {
+            if message.pointer.is_some() {
+                *message = self.copy_overflow(queue_url, message).await?;
+            }
+        }
+        Ok(())
     }
 
     /// The message for `envelope`: its body, or a pointer to the overflow
@@ -807,11 +977,7 @@ impl SqsQueueDriver {
             .map_err(|error| FrameworkError::internal(format!("SQS: encode the job: {error}")))?;
         let (body, pointer) = match &self.overflow {
             Some(overflow) if overflow.always || body.len() >= MAX_MESSAGE_BYTES => {
-                let path = format!(
-                    "{OVERFLOW_ROOT}/{}/{}.json",
-                    queue_key(queue_url),
-                    Uuid::new_v4()
-                );
+                let path = overflow_path(&self.queue_key(queue_url));
                 overflow
                     .operator()?
                     .write(&path, body.into_bytes())
@@ -821,7 +987,7 @@ impl SqsQueueDriver {
                             "SQS: could not write the job to the overflow disk: {error}"
                         ))
                     })?;
-                (json!({ POINTER_KEY: path }).to_string(), Some(path))
+                (pointer_body(&path), Some(path))
             }
             None if body.len() > MAX_MESSAGE_BYTES => {
                 return Err(FrameworkError::internal(format!(
@@ -865,58 +1031,66 @@ impl SqsQueueDriver {
             }
         }
 
-        for (number, chunk) in chunks.iter().enumerate() {
-            let entries: Vec<Value> = chunk
-                .iter()
-                .enumerate()
-                .map(|(index, message)| {
-                    let mut entry = json!({ "Id": index.to_string(), "MessageBody": message.body });
-                    if message.delay > 0 {
-                        entry["DelaySeconds"] = json!(message.delay);
-                    }
-                    entry
-                })
-                .collect();
-            let request = json!({ "QueueUrl": queue_url, "Entries": entries });
+        for number in 0..chunks.len() {
+            let Attempted {
+                outcome,
+                maybe_acted,
+            } = self
+                .send_with_own_payloads(
+                    "SendMessageBatch",
+                    queue_url,
+                    &mut chunks[number],
+                    batch_request,
+                )
+                .await;
+            let chunk = &chunks[number];
             // The messages of this batch SQS did not take, and the failure.
-            let (unsent, failure): (Vec<&Outgoing>, Failure) =
-                match self.request("SendMessageBatch", &request).await {
-                    Ok(reply) => {
-                        if !reply["Successful"].is_array() && !reply["Failed"].is_array() {
-                            let failure = Failure::Garbled(FrameworkError::internal(
-                                "SQS SendMessageBatch: the reply lists no messages; check that \
+            // After a try that may have been carried out, an entry the last
+            // try rejected may be in the queue from that earlier try, so no
+            // message of this batch counts as not taken.
+            let (unsent, failure): (Vec<&Outgoing>, Failure) = match outcome {
+                Ok(reply) => {
+                    if !reply["Successful"].is_array() && !reply["Failed"].is_array() {
+                        let failure = Failure::Garbled(FrameworkError::internal(
+                            "SQS SendMessageBatch: the reply lists no messages; check that \
                                  SQS_ENDPOINT is an SQS endpoint",
-                            ));
-                            (Vec::new(), failure)
-                        } else {
-                            let failed = reply["Failed"].as_array().cloned().unwrap_or_default();
-                            let Some(first) = failed.first() else {
-                                continue;
-                            };
-                            let rejected: Vec<usize> = failed
-                                .iter()
-                                .filter_map(|entry| entry["Id"].as_str()?.parse().ok())
-                                .collect();
-                            let failure = Failure::NotSent(FrameworkError::internal(format!(
-                                "SQS SendMessageBatch rejected {} of {} messages. First \
+                        ));
+                        (Vec::new(), failure)
+                    } else {
+                        let failed = reply["Failed"].as_array().cloned().unwrap_or_default();
+                        let Some(first) = failed.first() else {
+                            continue;
+                        };
+                        let rejected: Vec<usize> = failed
+                            .iter()
+                            .filter_map(|entry| entry["Id"].as_str()?.parse().ok())
+                            .collect();
+                        let failure = Failure::NotSent(FrameworkError::internal(format!(
+                            "SQS SendMessageBatch rejected {} of {} messages. First \
                                  failure {}: {}",
-                                failed.len(),
-                                chunk.len(),
-                                first["Code"].as_str().unwrap_or("Unknown"),
-                                first["Message"].as_str().unwrap_or_default()
-                            )));
-                            let unsent = chunk
+                            failed.len(),
+                            chunk.len(),
+                            first["Code"].as_str().unwrap_or("Unknown"),
+                            first["Message"].as_str().unwrap_or_default()
+                        )));
+                        let unsent = if maybe_acted {
+                            Vec::new()
+                        } else {
+                            chunk
                                 .iter()
                                 .enumerate()
                                 .filter(|(index, _)| rejected.contains(index))
                                 .map(|(_, message)| message)
-                                .collect();
-                            (unsent, failure)
-                        }
+                                .collect()
+                        };
+                        (unsent, failure)
                     }
-                    Err(failure) if failure.is_definite() => (chunk.iter().collect(), failure),
-                    Err(failure) => (Vec::new(), failure),
-                };
+                }
+                Err(failure) if failure.is_definite() && !maybe_acted => {
+                    (chunk.iter().collect(), failure)
+                }
+                Err(failure) => (Vec::new(), failure),
+            };
             // The later batches were never sent.
             let later = chunks.iter().skip(number + 1).flatten();
             for message in unsent.into_iter().chain(later) {
@@ -1186,6 +1360,9 @@ impl QueueDriver for SqsQueueDriver {
         token: &ReservationToken,
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError> {
+        // Resolved before the reservation is taken, so a delay no date can
+        // hold fails with the job still reserved.
+        let available_at = crate::queue::driver::available_after(requeue_delay)?;
         let Some(held) = self.take(token)? else {
             return Ok(());
         };
@@ -1201,9 +1378,7 @@ impl QueueDriver for SqsQueueDriver {
             // counts the attempt and waits out the delay, and drop this one.
             let (mut copy, _) = self.decode(&held.body).await?;
             copy.attempts = held.attempts.saturating_add(1);
-            copy.available_at = crate::clock::now()
-                + chrono::Duration::from_std(requeue_delay)
-                    .unwrap_or_else(|_| chrono::Duration::zero());
+            copy.available_at = available_at;
             self.send(&held.queue_url, &copy).await?;
             return self.delete_held(&held, true).await;
         }
@@ -1225,13 +1400,15 @@ impl QueueDriver for SqsQueueDriver {
         env: &Envelope,
         delay: Duration,
     ) -> Result<(), FrameworkError> {
+        // Resolved before the reservation is taken, so a delay no date can
+        // hold fails with the job still reserved.
+        let available_at = crate::queue::driver::available_after(delay)?;
         let Some(held) = self.take(token)? else {
             return Ok(());
         };
         let mut copy = env.clone();
         copy.attempts = held.attempts;
-        copy.available_at = crate::clock::now()
-            + chrono::Duration::from_std(delay).unwrap_or_else(|_| chrono::Duration::zero());
+        copy.available_at = available_at;
         self.send(&held.queue_url, &copy).await?;
         self.delete_held(&held, true).await
     }
@@ -1262,7 +1439,7 @@ impl QueueDriver for SqsQueueDriver {
             .as_ref()
             .filter(|overflow| overflow.flush_on_clear)
         {
-            let directory = format!("{OVERFLOW_ROOT}/{}/", queue_key(&url));
+            let directory = format!("{OVERFLOW_ROOT}/{}/", self.queue_key(&url));
             overflow
                 .operator()?
                 .delete_with(&directory)
@@ -1311,11 +1488,128 @@ fn delay_secs(available_at: DateTime<Utc>) -> u64 {
     }
 }
 
-/// A directory name for the queue at `queue_url`: its last path segment,
-/// with anything but letters, digits, `-` and `_` replaced.
-fn queue_key(queue_url: &str) -> String {
-    queue_url
-        .trim_end_matches('/')
+/// A new, unique path for an overflow payload of the queue whose directory
+/// name is `queue_key`.
+fn overflow_path(queue_key: &str) -> String {
+    format!("{OVERFLOW_ROOT}/{queue_key}/{}.json", Uuid::new_v4())
+}
+
+/// The body of a message that points at the overflow payload at `path`.
+fn pointer_body(path: &str) -> String {
+    json!({ POINTER_KEY: path }).to_string()
+}
+
+/// The `SendMessage` request that sends the one message of `messages` to
+/// `queue_url`.
+fn send_message_request(queue_url: &str, messages: &[Outgoing]) -> Value {
+    let mut request = json!({ "QueueUrl": queue_url });
+    if let Some(message) = messages.first() {
+        request["MessageBody"] = json!(message.body);
+        if message.delay > 0 {
+            request["DelaySeconds"] = json!(message.delay);
+        }
+    }
+    request
+}
+
+/// `body` serialized once, so each try sends the same shared bytes rather
+/// than a copy of them.
+fn encode_body(action: &str, body: &Value) -> Result<bytes::Bytes, Failure> {
+    serde_json::to_vec(body)
+        .map(bytes::Bytes::from)
+        .map_err(|error| {
+            Failure::NotSent(FrameworkError::internal(format!(
+                "SQS {action}: encode: {error}"
+            )))
+        })
+}
+
+/// The retry policy of one request: a throttled request, a fault of the
+/// service, or no answer is tried again, up to three tries in all, and the
+/// policy remembers whether any try may have been carried out.
+#[derive(Default)]
+struct Retry {
+    tries: u32,
+    maybe_acted: bool,
+}
+
+/// What [`Retry::after`] decided.
+enum Next {
+    /// The outcome stands.
+    Done,
+    /// Try again; `may_have_acted` says whether SQS may have carried out
+    /// the try just made.
+    Again { may_have_acted: bool },
+}
+
+impl Retry {
+    /// Record one try's `outcome` and say whether to try again.
+    fn after(&mut self, outcome: &Result<Value, Failure>) -> Next {
+        self.tries += 1;
+        let may_have_acted = matches!(outcome, Err(failure) if failure.may_have_acted());
+        self.maybe_acted |= may_have_acted;
+        let again = match outcome {
+            Err(Failure::Refused(error)) => error.is_retryable(),
+            Err(Failure::Unknown(_)) => true,
+            _ => false,
+        };
+        if again && self.tries < MAX_TRIES {
+            Next::Again { may_have_acted }
+        } else {
+            Next::Done
+        }
+    }
+
+    /// The payloads the next try carries are copies no earlier try carried.
+    fn fresh_payloads(&mut self) {
+        self.maybe_acted = false;
+    }
+
+    /// Wait before the next try: 100 ms, then 200 ms, each with up to 50 ms
+    /// of jitter so workers throttled together do not retry together.
+    async fn wait(&self) {
+        let jitter = (Uuid::new_v4().as_u128() % 50) as u64;
+        tokio::time::sleep(Duration::from_millis(
+            100 * (1 << (self.tries.saturating_sub(1))) + jitter,
+        ))
+        .await;
+    }
+}
+
+/// The `SendMessageBatch` request that sends `chunk` to `queue_url`, each
+/// entry named by its index.
+fn batch_request(queue_url: &str, chunk: &[Outgoing]) -> Value {
+    let entries: Vec<Value> = chunk
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let mut entry = json!({ "Id": index.to_string(), "MessageBody": message.body });
+            if message.delay > 0 {
+                entry["DelaySeconds"] = json!(message.delay);
+            }
+            entry
+        })
+        .collect();
+    json!({ "QueueUrl": queue_url, "Entries": entries })
+}
+
+/// A directory name for the queue at `queue_url`, reached through
+/// `endpoint` in `region`: the URL's last path segment, with anything but
+/// letters, digits, `-` and `_` replaced, then `-` and the first 16
+/// hexadecimal digits of the SHA-256 of the endpoint, the region and the
+/// whole URL.
+///
+/// The name alone is not the queue: two accounts, or two regions, each have
+/// a queue named `jobs`, and drivers for both can overflow onto one disk.
+/// Nor is the URL: it is resolved by the service at the endpoint, so two
+/// ElasticMQ instances can each answer to one URL, and LocalStack keeps a
+/// queue per region behind one URL. `clear` with `flush_on_clear` deletes
+/// this directory, so it must hold the payloads of this queue and of no
+/// other. Each part goes into the digest after its length, so two different
+/// triples never make one input.
+fn queue_key(endpoint: &str, region: &str, queue_url: &str) -> String {
+    let url = queue_url.trim_end_matches('/');
+    let name: String = url
         .rsplit('/')
         .next()
         .unwrap_or_default()
@@ -1327,7 +1621,14 @@ fn queue_key(queue_url: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    let mut hasher = Sha256::new();
+    for part in [endpoint.trim_end_matches('/'), region, url] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let digest = hex::encode(&hasher.finalize()[..8]);
+    format!("{name}-{digest}")
 }
 
 #[cfg(test)]
@@ -1349,13 +1650,67 @@ mod tests {
         assert_eq!(seconds(Duration::ZERO, 900), 0);
     }
 
+    const ENDPOINT: &str = "https://sqs.us-east-1.amazonaws.com/";
+
     #[test]
-    fn the_queue_key_is_the_last_segment() {
-        assert_eq!(
-            queue_key("https://sqs.us-east-1.amazonaws.com/1/jobs-prod"),
-            "jobs-prod"
+    fn the_queue_key_is_the_last_segment_and_a_digest_of_the_url() {
+        let key = queue_key(
+            ENDPOINT,
+            "us-east-1",
+            "https://sqs.us-east-1.amazonaws.com/1/jobs-prod",
         );
-        assert_eq!(queue_key("http://localhost:9324/queue/a.b"), "a_b");
+        assert!(key.starts_with("jobs-prod-"), "{key}");
+        assert_eq!(key.len(), "jobs-prod-".len() + 16, "{key}");
+        assert!(
+            queue_key(ENDPOINT, "us-east-1", "http://localhost:9324/queue/a.b").starts_with("a_b-"),
+            "the name keeps its sanitizing"
+        );
+        assert_eq!(
+            key,
+            queue_key(
+                "https://sqs.us-east-1.amazonaws.com",
+                "us-east-1",
+                "https://sqs.us-east-1.amazonaws.com/1/jobs-prod/"
+            ),
+            "a trailing slash is the same queue, and the same endpoint"
+        );
+    }
+
+    #[test]
+    fn same_named_queues_elsewhere_get_different_keys() {
+        let key = queue_key(
+            ENDPOINT,
+            "us-east-1",
+            "https://sqs.us-east-1.amazonaws.com/1/jobs",
+        );
+        for other in [
+            "https://sqs.us-east-1.amazonaws.com/2/jobs",
+            "https://sqs.us-west-2.amazonaws.com/1/jobs",
+            "http://localhost:9324/queue/jobs",
+        ] {
+            assert_ne!(key, queue_key(ENDPOINT, "us-east-1", other), "{other}");
+        }
+    }
+
+    #[test]
+    fn one_queue_url_at_another_endpoint_or_region_gets_another_key() {
+        let url = "http://localhost:4566/000000000000/jobs";
+        let key = queue_key("http://localhost:4566/", "us-east-1", url);
+        assert_ne!(
+            key,
+            queue_key("http://localhost:4567/", "us-east-1", url),
+            "another endpoint"
+        );
+        assert_ne!(
+            key,
+            queue_key("http://localhost:4566/", "eu-west-1", url),
+            "another region"
+        );
+        assert_ne!(
+            queue_key("http://a", "bc", url),
+            queue_key("http://ab", "c", url),
+            "the parts cannot run together"
+        );
     }
 
     #[test]

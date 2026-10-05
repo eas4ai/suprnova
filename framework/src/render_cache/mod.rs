@@ -612,6 +612,7 @@ impl RenderCache {
             hot_serves: std::sync::atomic::AtomicU64::new(0),
             #[cfg(any(test, feature = "testing"))]
             background_rebuilds: std::sync::atomic::AtomicU64::new(0),
+            background_refreshes: std::sync::Mutex::new(std::collections::BTreeSet::new()),
         });
         *runtime_slot().write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&runtime));
         // Appends, never clears: `register_global_middleware` is
@@ -690,17 +691,17 @@ impl RenderCache {
     ///
     /// Dropped before L0 is cleared, so a request that starts after this
     /// point derives its key under the new epoch and the clear that follows
-    /// has only entries nothing will look for left to reclaim. That is an
-    /// ordering preference, not a barrier: an authority read already in
-    /// flight when this commits can still `refresh` the lease back to the
-    /// pre-advance value afterwards, and a request that captured the old
-    /// epoch before the drop keeps using it. Neither is a correctness
-    /// problem, because both self-heal within one request. L0 is empty, so
-    /// such a request misses and renders; its own
+    /// has only entries nothing will look for left to reclaim. An authority
+    /// read already in flight when this commits cannot put the pre-advance
+    /// epoch back into the lease afterwards: dropping the lease also spends
+    /// the ticket that read took (see `middleware::EpochCache`). It used to
+    /// be able to, and the next request then derived its key under the old
+    /// epoch and, with L1 configured, found the old entry there and served
+    /// it under a still-live validation lease (DATA-046). A request that
+    /// captured the old epoch before the drop keeps using it; L0 is empty,
+    /// so such a request misses and renders, and its own
     /// `fresh_reread_is_coherent` reads the post-advance epoch, finds it
-    /// unequal to the one the render carried, and declines to publish - and
-    /// that same reread stores the new epoch, so the lease is correct again
-    /// from there on.
+    /// unequal to the one the render carried, and declines to publish.
     ///
     /// L0 is cleared, not merely left to age out: every L0 key embeds the
     /// epoch it was derived under
@@ -1177,6 +1178,36 @@ impl RenderCache {
         hints::deliver_for_test(&runtime.leases, runtime.clock.as_ref(), body);
     }
 
+    /// Test-only: runs `payload` through the hint subscriber's receive step,
+    /// exactly as a message arriving on the channel would, and returns the
+    /// body that step queued for the applier, or `None` when it queued
+    /// nothing. Records the same outcome the subscriber records.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn queued_hint_after_receive_for_test(payload: &[u8]) -> Option<String> {
+        hints::queued_after_receive_for_test(payload)
+    }
+
+    /// Test-only: parks the next generation advancement that names
+    /// `table`, forever, so a test can cancel the write that started it
+    /// between its row write and its advance. Each table is armed on its
+    /// own, so tests that run at the same time do not disarm each other;
+    /// [`Self::wait_until_advance_held_for_test`] waits for the park.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn hold_next_advance_for_test(table: &str) {
+        orm::seams::hold_next(table);
+    }
+
+    /// Test-only: waits until the advancement armed for `table` by
+    /// [`Self::hold_next_advance_for_test`] has parked.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn wait_until_advance_held_for_test(table: &str) {
+        orm::seams::wait_until_held(table).await;
+    }
+
     /// Test-only: renders `digests` as a hint message body. Handing it more
     /// than [`hints::MAX_HINT_DIGESTS`] digests is how a test builds a
     /// deliberately over-bound message.
@@ -1397,6 +1428,7 @@ mod tests {
             },
             failure: FailurePolicy::Open,
             hints: HintsConfig::Disabled,
+            max_background_refreshes: 1,
             build_id: "disabled-install-test".to_owned(),
             clock_override: None,
             coordinator_override: None,

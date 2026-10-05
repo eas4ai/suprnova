@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use suprnova::FrameworkError;
@@ -546,5 +547,172 @@ async fn queued_mail_carries_the_context_of_the_code_that_queued_it() {
     assert_eq!(
         context.data.get("trace_id"),
         Some(&serde_json::json!("abc"))
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn queued_mail_fires_message_sending_and_message_sent() {
+    // The manual promises both events for every successful dispatch.
+    // Changing `send` to `queue` must not silently drop them for audit or
+    // metrics listeners.
+    use suprnova::events::{EventFacade, dispatched};
+    use suprnova::mail::{MessageSending, MessageSent};
+
+    let _events = EventFacade::fake();
+    let capture = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(capture.clone());
+    let _ = suprnova::mail::register_mailable_factory::<WelcomeMail>();
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Mail::to("alice@example.org")
+        .queue(WelcomeMail {
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+    run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: Some(1),
+            queues: Vec::new(),
+        },
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert_eq!(capture.captured().len(), 1, "the queued mail was delivered");
+    let sending = dispatched::<MessageSending>(|e| e.subject == "Welcome, Alice");
+    let sent = dispatched::<MessageSent>(|e| e.subject == "Welcome, Alice");
+    assert_eq!(sending.len(), 1, "MessageSending fires once on the worker");
+    assert_eq!(sent.len(), 1, "MessageSent fires once on the worker");
+    assert_eq!(sent[0].to[0].email, "alice@example.org");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_failed_queued_send_fires_message_sending_but_not_message_sent() {
+    use suprnova::events::{EventFacade, dispatched};
+    use suprnova::mail::transport::{MailTransport, OutgoingMessage};
+    use suprnova::mail::{MessageSending, MessageSent};
+
+    struct Refusing;
+    #[async_trait]
+    impl MailTransport for Refusing {
+        async fn send(&self, _msg: &OutgoingMessage) -> Result<(), FrameworkError> {
+            Err(FrameworkError::internal("provider down"))
+        }
+    }
+
+    let _events = EventFacade::fake();
+    let _ = Mail::set_transport(Arc::new(Refusing));
+    let _ = suprnova::mail::register_mailable_factory::<WelcomeMail>();
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Mail::to("alice@example.org")
+        .queue(WelcomeMail { name: "Bob".into() })
+        .await
+        .unwrap();
+    run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: Some(1),
+            queues: Vec::new(),
+        },
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert_eq!(
+        dispatched::<MessageSending>(|e| e.subject == "Welcome, Bob").len(),
+        1
+    );
+    assert!(
+        dispatched::<MessageSent>(|e| e.subject == "Welcome, Bob").is_empty(),
+        "a failed send must not report MessageSent"
+    );
+}
+
+/// Set only in the child process that
+/// `a_worker_with_no_manual_job_registration_delivers_queued_mail` spawns.
+const SCAFFOLD_WORKER_CHILD: &str = "SUPRNOVA_SCAFFOLD_MAIL_WORKER_CHILD";
+
+/// The worker of an app built from the manual: a transport, a queue driver
+/// and the mailable factory, and no `register_job` call. It runs in its own
+/// process because the job registry is process-global and other tests in
+/// this binary register `SendMailJob` by hand, which would hide the defect.
+#[tokio::test]
+async fn scaffold_shaped_mail_worker_child() {
+    if std::env::var(SCAFFOLD_WORKER_CHILD).is_err() {
+        return;
+    }
+    let _events = suprnova::events::EventFacade::fake();
+    let capture = Arc::new(InMemoryMailTransport::new());
+    Mail::set_transport(capture.clone()).unwrap();
+    suprnova::mail::register_mailable_factory::<WelcomeMail>().unwrap();
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Mail::to("alice@example.org")
+        .queue(WelcomeMail {
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+    run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: Some(1),
+            queues: Vec::new(),
+        },
+        CancellationToken::new(),
+    )
+    .await;
+
+    let exceptions: Vec<String> =
+        suprnova::events::dispatched::<suprnova::queue::events::JobExceptionOccurred>(|_| true)
+            .into_iter()
+            .map(|e| e.exception)
+            .collect();
+    let msgs = capture.captured();
+    assert_eq!(
+        msgs.len(),
+        1,
+        "the worker must deliver queued mail with no manual register_job; \
+         worker exceptions: {exceptions:?}"
+    );
+    assert_eq!(msgs[0].subject, "Welcome, Alice");
+}
+
+#[test]
+fn a_worker_with_no_manual_job_registration_delivers_queued_mail() {
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--exact",
+            "queue::scaffold_shaped_mail_worker_child",
+            "--nocapture",
+        ])
+        .env(SCAFFOLD_WORKER_CHILD, "1")
+        .output()
+        .expect("spawn the worker child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("running 1 test"),
+        "the child filter matched no test (its module path changed?); stdout:\n{stdout}"
+    );
+    assert!(
+        output.status.success(),
+        "a worker that follows the manual must deliver queued mail; status: {}\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
     );
 }

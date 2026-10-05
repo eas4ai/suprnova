@@ -309,12 +309,38 @@ impl JobMiddleware for ThrottlesExceptions {
         }
         match next(env).await {
             Ok(JobOutcome::Completed) => {
-                RateLimiter::clear(&key).await?;
+                // Log the cleanup failure; do NOT propagate it, for the reason
+                // `WithoutOverlapping` gives above: the handler already ran
+                // and committed its side effects, and an `Err` here makes the
+                // worker retry them. A counter left behind only throttles this
+                // key sooner, until it lapses at `decay`.
+                if let Err(err) = RateLimiter::clear(&key).await {
+                    tracing::warn!(
+                        %key,
+                        error = %err,
+                        "failed to clear the exception-throttle counter; the job \
+                         already completed, so its outcome stands and the counter \
+                         will lapse at its decay"
+                    );
+                }
                 Ok(JobOutcome::Completed)
             }
             Ok(other) => Ok(other),
             Err(err) => {
-                RateLimiter::hit(&key, self.decay.as_secs()).await?;
+                // Log the counting failure; do NOT propagate it. The job
+                // failed with an error of its own, and that error is the
+                // reason recorded for this attempt. Returning the cache's
+                // error instead would record the wrong reason and, with a
+                // backoff, turn a release into a failed attempt. A missed
+                // count only throttles this key later than it would have.
+                if let Err(count_err) = RateLimiter::hit(&key, self.decay.as_secs()).await {
+                    tracing::warn!(
+                        %key,
+                        error = %count_err,
+                        "failed to count a job failure for exception throttling; \
+                         the job's own error stands"
+                    );
+                }
                 if self.backoff.is_zero() {
                     Err(err)
                 } else {
@@ -409,9 +435,11 @@ impl JobMiddleware for FailOnException {
             Ok(outcome) => Ok(outcome),
             Err(err) => {
                 if (self.matcher)(&err) {
-                    Ok(JobOutcome::Failed {
-                        reason: err.to_string(),
-                    })
+                    // Laravel's fails the job and rethrows, so the attempt
+                    // ends in this error; the worker reads it from here.
+                    let reason = err.to_string();
+                    crate::queue::worker::failed_by_error(err);
+                    Ok(JobOutcome::Failed { reason })
                 } else {
                     Err(err)
                 }
@@ -688,15 +716,50 @@ mod release_failure_tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use uuid::Uuid;
 
-    /// Acquires locks normally; fails every release. Models the real
-    /// failure - the lock was taken, the handler ran, and the backend went
-    /// away before the release landed.
-    struct ReleaseErroringCache(InMemoryCache);
+    /// Acquires locks normally; fails every lock release, or every
+    /// `forget`. Models the real failure - the lock was taken or the counter
+    /// hit, the handler ran, and the backend went away before the cleanup
+    /// landed.
+    struct ErroringCache {
+        inner: InMemoryCache,
+        release_fails: bool,
+        forget_fails: bool,
+        increment_fails: bool,
+    }
+
+    impl ErroringCache {
+        fn failing_release() -> Self {
+            Self {
+                inner: InMemoryCache::new(),
+                release_fails: true,
+                forget_fails: false,
+                increment_fails: false,
+            }
+        }
+
+        fn failing_forget() -> Self {
+            Self {
+                inner: InMemoryCache::new(),
+                release_fails: false,
+                forget_fails: true,
+                increment_fails: false,
+            }
+        }
+
+        fn failing_increment() -> Self {
+            Self {
+                inner: InMemoryCache::new(),
+                release_fails: false,
+                forget_fails: false,
+                increment_fails: true,
+            }
+        }
+    }
 
     #[async_trait]
-    impl CacheStore for ReleaseErroringCache {
+    impl CacheStore for ErroringCache {
         async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError> {
-            self.0.get_raw(key).await
+            self.inner.get_raw(key).await
         }
         async fn put_raw(
             &self,
@@ -704,22 +767,30 @@ mod release_failure_tests {
             value: &str,
             ttl: Option<Duration>,
         ) -> Result<(), FrameworkError> {
-            self.0.put_raw(key, value, ttl).await
+            self.inner.put_raw(key, value, ttl).await
         }
         async fn has(&self, key: &str) -> Result<bool, FrameworkError> {
-            self.0.has(key).await
+            self.inner.has(key).await
         }
         async fn forget(&self, key: &str) -> Result<bool, FrameworkError> {
-            self.0.forget(key).await
+            if self.forget_fails {
+                return Err(FrameworkError::internal("synthetic Redis blip on forget"));
+            }
+            self.inner.forget(key).await
         }
         async fn flush(&self) -> Result<(), FrameworkError> {
-            self.0.flush().await
+            self.inner.flush().await
         }
         async fn increment(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
-            self.0.increment(key, amount).await
+            if self.increment_fails {
+                return Err(FrameworkError::internal(
+                    "synthetic Redis blip on increment",
+                ));
+            }
+            self.inner.increment(key, amount).await
         }
         async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
-            self.0.decrement(key, amount).await
+            self.inner.decrement(key, amount).await
         }
         async fn tagged_put_raw(
             &self,
@@ -728,22 +799,25 @@ mod release_failure_tests {
             value: &str,
             ttl: Option<Duration>,
         ) -> Result<(), FrameworkError> {
-            self.0.tagged_put_raw(tags, key, value, ttl).await
+            self.inner.tagged_put_raw(tags, key, value, ttl).await
         }
         async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError> {
-            self.0.flush_tags(tags).await
+            self.inner.flush_tags(tags).await
         }
         async fn acquire_lock(
             &self,
             key: &str,
             ttl: Duration,
         ) -> Result<Option<String>, FrameworkError> {
-            self.0.acquire_lock(key, ttl).await
+            self.inner.acquire_lock(key, ttl).await
         }
-        async fn release_lock(&self, _key: &str, _token: &str) -> Result<bool, FrameworkError> {
-            Err(FrameworkError::internal(
-                "synthetic Redis blip on lock release",
-            ))
+        async fn release_lock(&self, key: &str, token: &str) -> Result<bool, FrameworkError> {
+            if self.release_fails {
+                return Err(FrameworkError::internal(
+                    "synthetic Redis blip on lock release",
+                ));
+            }
+            self.inner.release_lock(key, token).await
         }
         async fn refresh_lock(
             &self,
@@ -751,10 +825,10 @@ mod release_failure_tests {
             token: &str,
             ttl: Duration,
         ) -> Result<bool, FrameworkError> {
-            self.0.refresh_lock(key, token, ttl).await
+            self.inner.refresh_lock(key, token, ttl).await
         }
         async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
-            self.0.touch(key, ttl).await
+            self.inner.touch(key, ttl).await
         }
     }
 
@@ -786,7 +860,7 @@ mod release_failure_tests {
     #[serial]
     async fn release_failure_does_not_discard_a_completed_job() {
         let _cache_scope = TestContainer::fake();
-        TestContainer::bind::<dyn CacheStore>(Arc::new(ReleaseErroringCache(InMemoryCache::new())));
+        TestContainer::bind::<dyn CacheStore>(Arc::new(ErroringCache::failing_release()));
 
         // Count handler invocations: the point of the bug is that the
         // side effects run, then run again on the retry.
@@ -826,7 +900,7 @@ mod release_failure_tests {
     #[serial]
     async fn release_failure_does_not_mask_a_real_job_failure() {
         let _cache_scope = TestContainer::fake();
-        TestContainer::bind::<dyn CacheStore>(Arc::new(ReleaseErroringCache(InMemoryCache::new())));
+        TestContainer::bind::<dyn CacheStore>(Arc::new(ErroringCache::failing_release()));
 
         let next: Next = Box::new(|_env| Box::pin(async { Err(FrameworkError::internal("boom")) }));
         let mw = WithoutOverlapping::new("release_blip_err");
@@ -836,6 +910,82 @@ mod release_failure_tests {
         assert!(
             err.to_string().contains("boom"),
             "the surfaced error must be the handler's, not the release blip; got: {err}"
+        );
+    }
+
+    /// DRIVERS-053: clearing the failure counter after a job completed went
+    /// through `?`, so a cache blip during that cleanup turned the completed
+    /// job into a failed one, and the worker ran its side effects again.
+    #[tokio::test]
+    #[serial]
+    async fn throttle_cleanup_failure_does_not_discard_a_completed_job() {
+        let _cache_scope = TestContainer::fake();
+        TestContainer::bind::<dyn CacheStore>(Arc::new(ErroringCache::failing_forget()));
+
+        let runs = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&runs);
+        let next: Next = Box::new(move |_env| {
+            let counter = Arc::clone(&counter);
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(JobOutcome::Completed)
+            })
+        });
+
+        let mw = ThrottlesExceptions::new(3, Duration::from_secs(60)).by("throttle_clear_blip");
+        let outcome = mw.handle(env_named("J"), next).await;
+
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        let outcome = outcome.expect(
+            "a failed counter cleanup must not surface as a job failure: the \
+             handler already committed its side effects",
+        );
+        assert!(
+            matches!(outcome, JobOutcome::Completed),
+            "the handler's own outcome must survive the cleanup failure, got {outcome:?}"
+        );
+    }
+
+    /// A cache error while counting a failure replaced the job's own error,
+    /// so the failure reason recorded for the job was the cache's.
+    #[tokio::test]
+    #[serial]
+    async fn throttle_count_failure_keeps_the_jobs_own_error() {
+        let _cache_scope = TestContainer::fake();
+        TestContainer::bind::<dyn CacheStore>(Arc::new(ErroringCache::failing_increment()));
+
+        let next: Next = Box::new(|_env| Box::pin(async { Err(FrameworkError::internal("boom")) }));
+        let mw = ThrottlesExceptions::new(3, Duration::from_secs(60)).by("throttle_hit_blip");
+        let err = mw
+            .handle(env_named("J"), next)
+            .await
+            .expect_err("the handler's own error must still propagate");
+        assert!(
+            err.to_string().contains("boom"),
+            "the surfaced error must be the handler's, not the cache blip; got: {err}"
+        );
+    }
+
+    /// The same blip with a backoff configured: the job is released for the
+    /// backoff, as it would be had the count landed, rather than failed with
+    /// the cache's error.
+    #[tokio::test]
+    #[serial]
+    async fn throttle_count_failure_still_releases_with_backoff() {
+        let _cache_scope = TestContainer::fake();
+        TestContainer::bind::<dyn CacheStore>(Arc::new(ErroringCache::failing_increment()));
+
+        let next: Next = Box::new(|_env| Box::pin(async { Err(FrameworkError::internal("boom")) }));
+        let mw = ThrottlesExceptions::new(3, Duration::from_secs(60))
+            .backoff(Duration::from_secs(5))
+            .by("throttle_hit_blip_backoff");
+        let outcome = mw
+            .handle(env_named("J"), next)
+            .await
+            .expect("a failed count must not turn the release into a cache error");
+        assert!(
+            matches!(outcome, JobOutcome::Released { delay } if delay == Duration::from_secs(5)),
+            "the job is released for its backoff, got {outcome:?}"
         );
     }
 }

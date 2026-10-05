@@ -142,6 +142,80 @@ impl DatabaseUserProvider {
         self
     }
 
+    /// How an id above `i64::MAX` binds against the identifier column.
+    ///
+    /// The default parser binds it as a `u64`, the number an integer key
+    /// holds, and `DB::table` compares it as that number. A text identifier
+    /// column holds such an id as its digits, though, and the number does
+    /// not find it: Postgres refuses to compare text with a number, and
+    /// MySQL compares the two as doubles, which cannot tell neighbouring
+    /// 20-digit ids apart and so could answer with another user. On those
+    /// two databases the column's type is read, for such an id only, and a
+    /// text column gets the digits. SQLite compares the digits itself, by
+    /// the column's affinity.
+    ///
+    /// The type comes from the table the lookup reads, and no other. On
+    /// Postgres `to_regclass` resolves the lookup's own quoted name, so an
+    /// unqualified table is the first one the search path holds, as for the
+    /// query itself; a table of the same name in a later schema, whose
+    /// column may have another type, never decides the bind. MySQL has no
+    /// search path: an unqualified table is the current database's.
+    async fn bind_large_id(&self, n: u64) -> Result<SeaValue, FrameworkError> {
+        let backend = DB::connection()?.inner().get_database_backend();
+        let (sql, values) = match backend {
+            sea_orm::DbBackend::Postgres => (
+                "SELECT format_type(a.atttypid, a.atttypmod) AS data_type \
+                 FROM pg_catalog.pg_attribute a \
+                 WHERE a.attrelid = to_regclass($1) AND a.attname = $2 \
+                 AND a.attnum > 0 AND NOT a.attisdropped"
+                    .to_owned(),
+                vec![
+                    SeaValue::from(crate::database::clauses::quote_identifier(
+                        backend,
+                        &self.table,
+                    )),
+                    SeaValue::from(self.identifier_column.clone()),
+                ],
+            ),
+            sea_orm::DbBackend::MySql => {
+                let (schema_test, schema) = match self.table.split_once('.') {
+                    Some((schema, table)) => ("table_schema = ?", Some((schema, table))),
+                    None => ("table_schema = DATABASE()", None),
+                };
+                let table = schema.map_or(self.table.as_str(), |(_, table)| table);
+                let mut values = vec![
+                    SeaValue::from(table.to_owned()),
+                    SeaValue::from(self.identifier_column.clone()),
+                ];
+                if let Some((schema, _)) = schema {
+                    values.push(SeaValue::from(schema.to_owned()));
+                }
+                (
+                    format!(
+                        "SELECT CAST(data_type AS CHAR) AS data_type \
+                         FROM information_schema.columns \
+                         WHERE table_name = ? AND column_name = ? AND {schema_test}"
+                    ),
+                    values,
+                )
+            }
+            _ => return Ok(SeaValue::BigUnsigned(Some(n))),
+        };
+        let rows = DB::select(&sql, values).await?;
+        let text = rows
+            .first()
+            .and_then(|row| row.get_string("data_type").ok())
+            .is_some_and(|data_type| {
+                let data_type = data_type.to_lowercase();
+                data_type.contains("char") || data_type.contains("text")
+            });
+        Ok(if text {
+            SeaValue::String(Some(n.to_string()))
+        } else {
+            SeaValue::BigUnsigned(Some(n))
+        })
+    }
+
     /// Build a [`GenericUser`] from a row.
     fn row_to_user(&self, row: DynamicRow) -> Arc<dyn Authenticatable> {
         let map = row.into_map();
@@ -162,8 +236,12 @@ impl UserProvider for DatabaseUserProvider {
         &self,
         id: &str,
     ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        let value = match (self.id_parser)(id) {
+            SeaValue::BigUnsigned(Some(n)) if n > i64::MAX as u64 => self.bind_large_id(n).await?,
+            value => value,
+        };
         let row = DB::table(&self.table)
-            .filter(self.identifier_column.clone(), (self.id_parser)(id))
+            .filter(self.identifier_column.clone(), value)
             .first()
             .await?;
         Ok(row.map(|r| self.row_to_user(r)))

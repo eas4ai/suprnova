@@ -229,7 +229,7 @@ Suprnova refuses that before allocating anything.
 | Var | Default | Purpose |
 |---|---|---|
 | `IMAGE_MAX_DIMENSION` | `16384` | Cap on width and height in pixels |
-| `IMAGE_MAX_ALLOC_BYTES` | `268435456` (256 MiB) | Cap on the decoded RGBA footprint, and on the size of the source file itself |
+| `IMAGE_MAX_ALLOC_BYTES` | `1073741824` (1 GiB) | Cap on the memory one decode may allocate, and on the size of the source file itself |
 | `IMAGE_MAGICK_TIMEOUT_SECS` | `30` | Wall-clock ceiling on one ImageMagick invocation (`magick` driver only) |
 
 The framework parses the input's own header - a few dozen bytes, no
@@ -237,6 +237,68 @@ allocation - reads the declared dimensions, and rejects oversized input
 before a decoder is constructed. The same caps apply to resize targets,
 because `resize(50_000, 50_000)` allocates just as much whether the
 numbers came from an attacker or a typo.
+
+A header can also declare a small image over data that asks for far
+more, and the default driver bounds that too:
+
+- PNG pixel data that inflates past the size its header declares is
+  refused when the inflate reaches that size. A few kilobytes of
+  compressed data can expand to gigabytes.
+- Only the first frame of an animated GIF is decoded, because the
+  pipeline only uses the first frame, and decoding stops the moment that
+  frame is complete. A first frame larger than the GIF's logical screen
+  is refused before it is decoded.
+- A lossless WebP, or a WebP's lossless alpha plane, is read as far as
+  its last prefix code before it decodes, and the tables those codes build
+  count toward the limit. How many tables there are is written in the
+  compressed data, not in a header: 160 KiB of codes can ask for 250 MB
+  of tables for a 4x4 image. The read keeps no pixels and holds one
+  group's tables at a time, at most about 17 KiB.
+- A file or stored source is read no further than
+  `IMAGE_MAX_ALLOC_BYTES`, even when the size its storage reports is
+  wrong or missing, as it is for a pipe.
+- A JPEG's Extended XMP segments are counted before it decodes. The JPEG
+  decoder keeps every segment of an unfinished series and re-reads all of
+  them after each marker, so the work grows with the square of the
+  segment count: 100,000 one-byte segments, about 8 MB, ask for billions
+  of comparisons. The default driver counts the bytes those passes would
+  read and refuses the JPEG when that is over `IMAGE_MAX_ALLOC_BYTES`. A
+  complete series, as cameras and editors write one, is far below it.
+
+### What a decode costs
+
+`IMAGE_MAX_ALLOC_BYTES` is the most memory one decode may allocate, not
+only the size of the decoded image. Decoders hold more than the pixels
+they return: an inflated PNG next to its unfiltered rows, a progressive
+JPEG's coefficients, the canvases a GIF frame is composed on. So the
+default driver works out, from the image's headers, how many bytes its
+decode will allocate, and refuses the image when that is over the limit.
+The refusal names the estimate:
+
+```text
+image exceeds configured decode limits: decoding this 8000x6000 image/png
+needs about 1923381182 bytes, over the IMAGE_MAX_ALLOC_BYTES limit of 1073741824
+```
+
+As a guide, a decode needs about this many times width x height x 4
+bytes:
+
+| Format | Times |
+|---|---|
+| PNG, 8-bit | 1.3 (grey or palette) to 5 (incompressible RGBA) |
+| PNG, 16-bit | 2.5 (grey) to 10 (incompressible RGBA). At the 1 GiB default, 16-bit RGBA tops out at about 27 megapixels and 16-bit RGB at about 36 |
+| GIF | 1.0 to 1.1 |
+| JPEG, sequential (baseline, extended, arithmetic) | 1.0 to 1.1 |
+| JPEG, progressive, or one component a scan | 1.5 (grey) to 2.5 (4:4:4) |
+| JPEG, lossless | 1.3 (grey) to 4 (RGB) |
+| WebP | 1.4 to 2.4 |
+| BMP | 1.0 to 2.1 |
+
+So the default 1 GiB decodes a 48-megapixel photo (8000x6000) in every
+8-bit format, a progressive 4:4:4 JPEG and a PNG of incompressible RGBA
+included. 16-bit PNG holds more and tops out lower, as the table says.
+Raise `IMAGE_MAX_ALLOC_BYTES` if your users upload larger images, or
+lower it on a small host.
 
 A limit hit is a 4xx-shaped `FrameworkError::param`, because oversized
 input is a client problem, not a server fault.
@@ -277,9 +339,16 @@ Like Laravel, the image surface is two drivers, chosen with
 ### `IMAGE_DRIVER=oxideav`
 
 The default. Pure Rust, built on the [OxideAV](https://github.com/OxideAV)
-codec family: no native library, nothing to install, nothing to
+codec family, with [zune-jpeg](https://github.com/etemesi254/zune-image)
+decoding JPEG: no native library, nothing to install, nothing to
 configure. It is the right choice for almost every application, and it
 is what a scaffolded app gets.
+
+It reads 8-bit JPEGs in every coding: baseline, progressive and
+arithmetic, greyscale, YCbCr at 4:4:4, 4:2:2, 4:2:0, 4:4:0 or 4:1:1, RGB,
+and lossless. CMYK and 12-bit JPEGs need the `magick` driver, and so does a
+lossless JPEG of more than 67,108,864 samples (width x height x
+components), which its decoder, oxideav-mjpeg, refuses.
 
 ### `IMAGE_DRIVER=magick`
 
@@ -293,6 +362,11 @@ carry - HEIC being the common one. The cost is a host dependency: the
 operator installs ImageMagick and its delegates, and owns their
 licensing. The framework links nothing and compiles nothing native
 either way.
+
+Like the default driver, it works on the first frame of an animation
+and drops the rest. A GIF's first frame is composed onto the GIF's
+logical screen first, so both drivers produce the same image and report
+the same size for it.
 
 Arguments are always a fixed array handed straight to the process, never
 a shell string, and every numeric argument is formatted from an

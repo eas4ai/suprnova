@@ -11,7 +11,6 @@ use crate::common;
 
 use common::{request_with_body, request_with_chunked_body, request_with_declared_length};
 use serde::Deserialize;
-use std::sync::Mutex;
 use suprnova::FormRequest;
 use validator::Validate;
 
@@ -51,36 +50,14 @@ struct TinyDerivedForm {
     payload: String,
 }
 
-// ── Serial-execution guard ───────────────────────────────────────────────────
+// ── The process-global cap ───────────────────────────────────────────────────
 //
-// These tests mutate a process-global atomic; Cargo runs integration tests in
-// parallel within the same binary by default. The guard pattern mirrors
-// `BodyCapGuard` in `uploads.rs` - same poison-tolerant Mutex, same RAII
-// reset-to-default-on-drop so a panicking test doesn't leak overrides into the
-// next.
-
-static REQ_BODY_CAP_LOCK: Mutex<()> = Mutex::new(());
-
-struct ReqBodyCapGuard {
-    _guard: std::sync::MutexGuard<'static, ()>,
-}
-
-impl ReqBodyCapGuard {
-    fn acquire() -> Self {
-        let guard = REQ_BODY_CAP_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Always start from the compile-time default.
-        suprnova::http::body::set_global_max_request_body_bytes(0);
-        Self { _guard: guard }
-    }
-}
-
-impl Drop for ReqBodyCapGuard {
-    fn drop(&mut self) {
-        suprnova::http::body::set_global_max_request_body_bytes(0);
-    }
-}
+// The global request body cap is a process-wide atomic that every body read
+// in the process consults, the CSRF middleware's form buffering included. A
+// test that sets it runs alone in a child process (see `own_process`),
+// so no other test of the binary reads a body under a cap meant for one test.
+// The other tests here read the compile-time default, which nothing in the
+// shared process changes.
 
 // Build a `{"payload": "xxx..."}` JSON body of `payload_len` characters.
 fn json_payload(payload_len: usize) -> Vec<u8> {
@@ -95,8 +72,6 @@ fn json_payload(payload_len: usize) -> Vec<u8> {
 
 #[tokio::test]
 async fn default_cap_rejects_oversize_payload() {
-    let _g = ReqBodyCapGuard::acquire();
-
     // 9 MiB payload - clears the 8 MiB compile-time default.
     let body = json_payload(9 * 1024 * 1024);
     let req = request_with_body("/", "application/json", &body).await;
@@ -110,8 +85,6 @@ async fn default_cap_rejects_oversize_payload() {
 
 #[tokio::test]
 async fn content_length_pre_check_rejects_without_reading_body() {
-    let _g = ReqBodyCapGuard::acquire();
-
     // Declare 20 MiB in the header but send a 1 KiB body - pre-check fires
     // on the header alone, so the server never reads past the headers.
     let small_body = json_payload(1024);
@@ -127,8 +100,6 @@ async fn content_length_pre_check_rejects_without_reading_body() {
 
 #[tokio::test]
 async fn per_form_request_override_allows_larger_body() {
-    let _g = ReqBodyCapGuard::acquire();
-
     // 12 MiB payload - over the default 8 MiB cap, under LargeForm's 32 MiB.
     let body = json_payload(12 * 1024 * 1024);
     let req = request_with_body("/", "application/json", &body).await;
@@ -141,10 +112,18 @@ async fn per_form_request_override_allows_larger_body() {
     );
 }
 
-#[tokio::test]
-async fn global_override_raises_default_for_unannotated_form() {
-    let _g = ReqBodyCapGuard::acquire();
+#[test]
+fn global_override_raises_default_for_unannotated_form() {
+    crate::own_process::run_alone(
+        "request_body_cap::global_override_raises_default_for_unannotated_form_child",
+    );
+}
 
+#[tokio::test]
+async fn global_override_raises_default_for_unannotated_form_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     // Raise the process-global to 16 MiB. DefaultForm has no override, so
     // it now inherits 16 MiB. A 10 MiB body - previously rejected by the
     // 8 MiB default - should now succeed.
@@ -166,8 +145,6 @@ async fn pre_check_message_includes_cap_bytes() {
     // The 413 error message must include the cap so operators can grep
     // logs to identify the source of the rejection (matches the
     // multipart cap's `"multipart body exceeds N bytes (cap)"` shape).
-    let _g = ReqBodyCapGuard::acquire();
-
     let small_body = json_payload(1024);
     let req =
         request_with_declared_length("/", "application/json", 20 * 1024 * 1024, &small_body).await;
@@ -183,10 +160,18 @@ async fn pre_check_message_includes_cap_bytes() {
     );
 }
 
-#[tokio::test]
-async fn progressive_cap_catches_chunked_without_content_length() {
-    let _g = ReqBodyCapGuard::acquire();
+#[test]
+fn progressive_cap_catches_chunked_without_content_length() {
+    crate::own_process::run_alone(
+        "request_body_cap::progressive_cap_catches_chunked_without_content_length_child",
+    );
+}
 
+#[tokio::test]
+async fn progressive_cap_catches_chunked_without_content_length_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     // Cap at 1 MiB. Send a chunked body in 256 KiB pieces, totalling 2 MiB.
     // No Content-Length is sent (chunked transfers don't carry one), so
     // the pre-check has nothing to act on; the cap has to enforce during
@@ -217,8 +202,6 @@ async fn progressive_cap_catches_chunked_without_content_length() {
 
 #[tokio::test]
 async fn derive_with_form_request_attribute_lowers_cap() {
-    let _g = ReqBodyCapGuard::acquire();
-
     // TinyDerivedForm caps itself at 4 MiB via the macro attribute. A 5 MiB
     // body - well under the 8 MiB default - should still be rejected
     // because the per-struct override wins.
@@ -234,8 +217,6 @@ async fn derive_with_form_request_attribute_lowers_cap() {
 
 #[tokio::test]
 async fn derive_with_form_request_attribute_accepts_in_range_body() {
-    let _g = ReqBodyCapGuard::acquire();
-
     // 1 MiB body - under TinyDerivedForm's 4 MiB cap.
     let body = json_payload(1024 * 1024);
     let req = request_with_body("/", "application/json", &body).await;
@@ -250,8 +231,6 @@ async fn derive_with_form_request_attribute_accepts_in_range_body() {
 
 #[tokio::test]
 async fn under_cap_request_succeeds() {
-    let _g = ReqBodyCapGuard::acquire();
-
     // Sanity check: a small body well under the default cap parses cleanly.
     let body = json_payload(1024);
     let req = request_with_body("/", "application/json", &body).await;

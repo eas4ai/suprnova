@@ -8,6 +8,7 @@
 
 use std::str::FromStr;
 
+use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{DatabaseConnection, DbBackend};
 use sea_orm_migration::prelude::*;
@@ -68,6 +69,9 @@ async fn create_entries(conn: &DatabaseConnection) {
         t.float("weight");
         t.string("tag");
         t.decimal("price", 30, 2).nullable();
+        t.small_integer("tiny").nullable();
+        t.date("due_on").nullable();
+        t.string("logged_at").nullable();
     })
     .await
     .expect("create ia_entries");
@@ -346,6 +350,249 @@ async fn postgres_averages_read_as_f64_and_decimal() {
 #[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
 async fn mysql_averages_read_as_f64_and_decimal() {
     averages_read_as_f64_and_decimal(&connect_mysql().await).await;
+}
+
+/// `with_min` and `with_max` read a 32-bit and a 16-bit integer column, which
+/// Postgres answers as `int4` and `int2`, and a date column, native or
+/// text, on every database. A date has no `f64`, so `_min_of` / `_max_of`
+/// answer `Some(None)` for it, as before, and `_min_as` / `_max_as` read it
+/// as a date. Reading it is never an error. It fails
+/// while the relation aggregate reads only `int8` on Postgres, and while a
+/// date fails the whole query.
+pub async fn relation_min_max_read_every_column(conn: &DatabaseConnection) {
+    create_entries(conn).await;
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(conn.clone()));
+    let owner = IaOwner::create(attrs! { name: "owner" })
+        .await
+        .expect("create an owner");
+    for (small, tiny, due_on, logged_at) in [
+        (3i32, 9i16, "2026-03-04", "2026-01-02T03:04:05+00:00"),
+        (7, 2, "2026-01-02", "2026-05-06T07:08:09+00:00"),
+    ] {
+        run(
+            conn,
+            &format!(
+                "INSERT INTO ia_entries \
+                 (ia_owner_id, amount, hits, small, ratio, weight, tag, tiny, due_on, logged_at) \
+                 VALUES ({}, 0, 0, {small}, 0, 0, 'dated', {tiny}, '{due_on}', '{logged_at}')",
+                owner.id
+            ),
+        )
+        .await
+        .expect("insert an entry");
+    }
+
+    let owners = IaOwner::query()
+        .with_min(("entries", "small"))
+        .with_max(("entries", "small"))
+        .with_min(("entries", "tiny"))
+        .with_max(("entries", "tiny"))
+        .with_min(("entries", "due_on"))
+        .with_max(("entries", "due_on"))
+        .with_max(("entries", "logged_at"))
+        .get()
+        .await
+        .expect("relation aggregates over int4, int2 and date columns");
+    let owner = owners.first().expect("the owner");
+    assert_eq!(
+        owner.entries_min_of("small"),
+        Some(Some(3.0)),
+        "with_min int4"
+    );
+    assert_eq!(
+        owner.entries_max_of("small"),
+        Some(Some(7.0)),
+        "with_max int4"
+    );
+    assert_eq!(
+        owner.entries_min_of("tiny"),
+        Some(Some(2.0)),
+        "with_min int2"
+    );
+    assert_eq!(
+        owner.entries_max_of("tiny"),
+        Some(Some(9.0)),
+        "with_max int2"
+    );
+    assert_eq!(
+        owner.entries_max_of("due_on"),
+        Some(None),
+        "a date has no f64"
+    );
+    assert_eq!(
+        owner.entries_max_of("logged_at"),
+        Some(None),
+        "text has no f64"
+    );
+    let day = |text: &str| NaiveDate::parse_from_str(text, "%Y-%m-%d").expect("a date");
+    assert_eq!(
+        owner.entries_min_as::<NaiveDate>("due_on"),
+        Some(day("2026-01-02")),
+        "with_min of a date column"
+    );
+    assert_eq!(
+        owner.entries_max_as::<NaiveDate>("due_on"),
+        Some(day("2026-03-04")),
+        "with_max of a date column"
+    );
+    assert_eq!(
+        owner.entries_max_as::<DateTime<Utc>>("logged_at"),
+        Some(
+            DateTime::parse_from_rfc3339("2026-05-06T07:08:09+00:00")
+                .expect("a time")
+                .with_timezone(&Utc)
+        ),
+        "with_max of a date-time stored as text"
+    );
+    assert_eq!(
+        owner.entries_max_as::<i64>("small"),
+        Some(7),
+        "a number reads too"
+    );
+    assert_eq!(
+        owner.entries_max_as::<NaiveDate>("small"),
+        None,
+        "a value that does not read as the type"
+    );
+
+    drop_tables(conn, TABLES).await;
+}
+
+#[tokio::test]
+async fn sqlite_relation_min_max_read_every_column() {
+    relation_min_max_read_every_column(&connect_sqlite().await).await;
+}
+
+/// `<rel>_min_as::<Decimal>` and `<rel>_max_as::<Decimal>` read the exact
+/// minimum and maximum of a `DECIMAL(30, 2)` column on Postgres and MySQL,
+/// `12345678901234567.89` and `12345678901234567.91`, which no `f64` holds.
+/// They used to read the nearest `f64`, 12345678901234568, because the
+/// value was kept as a JSON float. `min_as::<f64>` and `_min_of` still read
+/// the nearest `f64`, `min_as::<String>` reads the decimal's text, as
+/// Laravel's `withMin` attribute holds it, and a whole minimum still reads
+/// as an integer. SQLite stores the column as a real, so there `Decimal`
+/// reads that real, and 7.00 is the real 7.0, not an integer.
+pub async fn relation_min_max_keep_exact_decimals(conn: &DatabaseConnection) {
+    create_entries(conn).await;
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(conn.clone()));
+    let money = IaOwner::create(attrs! { name: "money" })
+        .await
+        .expect("create the money owner");
+    let small = IaOwner::create(attrs! { name: "small" })
+        .await
+        .expect("create the small owner");
+    run(
+        conn,
+        &format!(
+            "INSERT INTO ia_entries (ia_owner_id, amount, hits, small, ratio, weight, tag, price) \
+             VALUES ({m}, 0, 0, 0, 0, 0, 'money', 12345678901234567.89), \
+             ({m}, 0, 0, 0, 0, 0, 'money', 12345678901234567.91), \
+             ({s}, 0, 0, 0, 0, 0, 'small', 7.00), \
+             ({s}, 0, 0, 0, 0, 0, 'small', 9.50)",
+            m = money.id,
+            s = small.id
+        ),
+    )
+    .await
+    .expect("insert the decimal rows");
+
+    let owners = IaOwner::query()
+        .with_min(("entries", "price"))
+        .with_max(("entries", "price"))
+        .order_by_asc("id")
+        .get()
+        .await
+        .expect("relation min and max over a decimal column");
+    let [money, small] = owners.as_slice() else {
+        panic!("two owners, got {}", owners.len());
+    };
+    let decimal = |text: &str| Decimal::from_str(text).expect("a decimal");
+    let nearest_min = 12345678901234567.89_f64;
+    let nearest_max = 12345678901234567.91_f64;
+
+    assert_eq!(money.entries_min_of("price"), Some(Some(nearest_min)));
+    assert_eq!(money.entries_max_of("price"), Some(Some(nearest_max)));
+    assert_eq!(
+        money.entries_min_as::<f64>("price"),
+        Some(nearest_min),
+        "min_as::<f64> reads the nearest f64"
+    );
+    if conn.get_database_backend() == DbBackend::Sqlite {
+        assert_eq!(
+            money.entries_min_as::<Decimal>("price"),
+            Some(decimal(&nearest_min.to_string())),
+            "SQLite stores the column as a real, and the minimum is that real"
+        );
+    } else {
+        assert_eq!(
+            money.entries_min_as::<Decimal>("price"),
+            Some(decimal("12345678901234567.89")),
+            "the exact minimum"
+        );
+        assert_eq!(
+            money.entries_max_as::<Decimal>("price"),
+            Some(decimal("12345678901234567.91")),
+            "the exact maximum"
+        );
+        assert_eq!(
+            money.entries_min_as::<String>("price").as_deref(),
+            Some("12345678901234567.89"),
+            "the decimal's text, as Laravel's attribute holds it"
+        );
+        assert_eq!(
+            small.entries_min_as::<i64>("price"),
+            Some(7),
+            "a whole minimum reads as an integer"
+        );
+    }
+
+    assert_eq!(
+        small.entries_max_as::<Decimal>("price"),
+        Some(decimal("9.5"))
+    );
+    assert_eq!(small.entries_max_as::<f64>("price"), Some(9.5));
+    assert_eq!(
+        small.entries_max_as::<i64>("price"),
+        None,
+        "a fraction does not read as an integer"
+    );
+
+    drop_tables(conn, TABLES).await;
+}
+
+#[tokio::test]
+async fn sqlite_relation_min_max_keep_exact_decimals() {
+    relation_min_max_keep_exact_decimals(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_relation_min_max_keep_exact_decimals() {
+    relation_min_max_keep_exact_decimals(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_relation_min_max_keep_exact_decimals() {
+    relation_min_max_keep_exact_decimals(&connect_mysql().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_relation_min_max_read_every_column() {
+    relation_min_max_read_every_column(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_relation_min_max_read_every_column() {
+    relation_min_max_read_every_column(&connect_mysql().await).await;
 }
 
 #[tokio::test]

@@ -46,8 +46,9 @@ use crate::models::users::User;
 ///
 /// Called from `cmd/main.rs` via `.bootstrap(bootstrap::register)`, before
 /// `Server::from_config()`. This hook is process-wide: every subcommand runs
-/// it, including the queue, schedule, and workflow workers and the console
-/// binary, not only `serve`. Register database, container bindings, event
+/// it, including the queue, schedule, and workflow workers, `down`, `up`, and
+/// the console binary, not only `serve`. The migration commands run before
+/// it and without it, so a fresh database can be migrated. Register database, container bindings, event
 /// listeners, and job registration here. The HTTP stack (global middleware
 /// and `Inertia::install`) is installed separately via
 /// `.http_bootstrap(|| async { bootstrap::register_http_stack() })` in

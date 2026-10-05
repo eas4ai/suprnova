@@ -623,6 +623,11 @@ impl CacheStore for InMemoryCache {
             .store
             .write()
             .map_err(|_| FrameworkError::internal("Cache lock poisoned"))?;
+        // Taken after the store lock, the order every other writer uses.
+        let mut idx = self
+            .tag_index
+            .write()
+            .map_err(|_| FrameworkError::internal("Tag index poisoned"))?;
         for (tag, members) in candidates {
             for k in members {
                 // Validate against the entry's own tag set before
@@ -636,8 +641,22 @@ impl CacheStore for InMemoryCache {
                     // caller needs to see; the value is already gone.
                     _ => false,
                 };
-                if should_delete {
-                    s.remove(&k);
+                if !should_delete {
+                    continue;
+                }
+                // Drop the deleted entry from its other tags' indexes too.
+                // Nothing else would: the sweep only reaches entries still
+                // in the store, so a tag written often and never flushed
+                // would keep every key another tag's flush deleted.
+                if let Some(entry) = s.remove(&k) {
+                    for other in entry.tags.iter().filter(|other| **other != tag) {
+                        if let Some(set) = idx.get_mut(other) {
+                            set.remove(&k);
+                            if set.is_empty() {
+                                idx.remove(other);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1106,6 +1125,30 @@ mod tests {
         assert_eq!(cache.raw_len(), 1, "only the forever entry is left");
         assert!(cache.tag_index.read().expect("tag index").is_empty());
         assert!(cache.has("forever").await.unwrap());
+    }
+
+    /// DRIVERS-004: flushing one tag also drops the deleted entries from the
+    /// indexes of their other tags. It used to leave them there, so a tag that
+    /// was written often and never flushed itself grew without bound, sweep or
+    /// no sweep, while the values it pointed at were long gone.
+    #[tokio::test]
+    async fn flush_tags_prunes_deleted_entries_from_their_other_tags() {
+        let cache = InMemoryCache::with_prefix("t:");
+        for i in 0..50 {
+            cache
+                .tagged_put_raw(&["a", "b"], &format!("k{i}"), "v", None)
+                .await
+                .unwrap();
+        }
+        cache.flush_tags(&["a"]).await.unwrap();
+
+        assert_eq!(cache.raw_len(), 0, "flushing a removed every entry");
+        let idx = cache.tag_index.read().expect("tag index");
+        assert!(
+            idx.get("b").is_none_or(HashSet::is_empty),
+            "tag b still lists {} entries that flush_tags(a) deleted",
+            idx.get("b").map_or(0, HashSet::len)
+        );
     }
 
     /// MEM-001: the sweep task holds the cache weakly and ends with it.

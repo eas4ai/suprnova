@@ -3,6 +3,10 @@
 
 #[path = "../support/common.rs"]
 mod common;
+#[path = "../support/env_lock.rs"]
+mod env_lock;
+#[path = "../support/own_process.rs"]
+mod own_process;
 
 pub mod file_responses;
 pub mod multipart_limits;

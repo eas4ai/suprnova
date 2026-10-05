@@ -91,9 +91,8 @@ async fn the_public_document_is_a_hit_whose_seed_still_promotes() {
     // 4. The served representation is the stored one, with the metadata a
     //    cached response carries. `PublicShared` with the builder's default
     //    `SharedCachePolicy::Private` means no `s-maxage` for a shared
-    //    proxy, and a `max-age` that is the policy's five minutes bounded
-    //    underneath by the public seed's own promotion deadline (24 hours),
-    //    so five minutes is what survives.
+    //    proxy, and `no-cache` for the browser's own cache: every reuse is
+    //    revalidated, which the stored entry answers.
     assert_eq!(second.body, first.body, "byte for byte the stored entry");
     let etag = first.header("etag").expect("etag").to_owned();
     assert_eq!(second.header("etag"), Some(etag.as_str()));
@@ -101,18 +100,7 @@ async fn the_public_document_is_a_hit_whose_seed_still_promotes() {
         second.header("age").is_some(),
         "a served entry carries its age"
     );
-    let cache_control = first.header("cache-control").expect("cache-control");
-    assert!(
-        cache_control.starts_with("private, max-age="),
-        "{cache_control}"
-    );
-    let max_age: u64 = cache_control
-        .split("max-age=")
-        .nth(1)
-        .expect("max-age")
-        .parse()
-        .expect("seconds");
-    assert_eq!(max_age, 300, "the policy's fresh interval: {cache_control}");
+    assert_eq!(first.header("cache-control"), Some("private, no-cache"));
 
     // 5. The seed inside the cached document still promotes, exactly as one
     //    freshly rendered does.
@@ -553,8 +541,9 @@ async fn the_private_document_is_cached_per_principal_and_never_crosses() {
     );
     assert_eq!(
         ada_second.header("cache-control"),
-        Some("private, max-age=60"),
-        "a private entry is never offered to a shared cache"
+        Some("private, no-cache"),
+        "a private entry is never offered to a shared cache, and the browser revalidates it \
+         before every reuse"
     );
 
     // 4. A third principal shares neither entry.

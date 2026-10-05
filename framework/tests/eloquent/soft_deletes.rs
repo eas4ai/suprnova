@@ -237,6 +237,86 @@ async fn trashed_returns_bool() {
     assert!(t.trashed());
 }
 
+/// Whether a row with `id` is still stored, trashed or not, and its
+/// `deleted_at` when it is.
+async fn stored_deleted_at(id: i64) -> Option<Option<DateTime<Utc>>> {
+    T10User::with_trashed()
+        .filter("id", id)
+        .first()
+        .await
+        .unwrap()
+        .map(|row| row.deleted_at)
+}
+
+/// `destroy`, `delete_quietly` and a `delete` reached through the
+/// `Model` trait tombstone a soft-delete model's rows, as the concrete
+/// `delete()` does. They used to dispatch to the trait default, a hard
+/// `DELETE`, which removed the row for good.
+#[tokio::test]
+async fn generic_delete_paths_tombstone_a_soft_delete_model() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate_users(&db).await;
+    let a = T10User::create(attrs! { name: "A", email: "a@x.com" })
+        .await
+        .unwrap();
+    let b = T10User::create(attrs! { name: "B", email: "b@x.com" })
+        .await
+        .unwrap();
+    let c = T10User::create(attrs! { name: "C", email: "c@x.com" })
+        .await
+        .unwrap();
+    let d = T10User::create(attrs! { name: "D", email: "d@x.com" })
+        .await
+        .unwrap();
+
+    assert_eq!(T10User::destroy([a.id, b.id]).await.unwrap(), 2);
+    let (c_id, d_id) = (c.id, d.id);
+    c.delete_quietly().await.unwrap();
+    // Through the `Model` trait, the way generic framework and app code
+    // reaches a model it does not name.
+    <T10User as Model>::delete(d).await.unwrap();
+
+    for id in [a.id, b.id, c_id, d_id] {
+        let stored = stored_deleted_at(id).await;
+        assert!(
+            matches!(stored, Some(Some(_))),
+            "row {id} is kept with deleted_at set, got {stored:?}"
+        );
+        assert!(T10User::find(id).await.unwrap().is_none());
+    }
+
+    // `destroy` of a trashed row finds nothing to delete, like any other
+    // read of the model.
+    assert_eq!(T10User::destroy([a.id]).await.unwrap(), 0);
+    assert!(matches!(stored_deleted_at(a.id).await, Some(Some(_))));
+}
+
+/// `delete_or_fail` tombstones a soft-delete model's row, and answers
+/// not-found for a row that is already trashed, as the scoped read does.
+#[tokio::test]
+async fn delete_or_fail_tombstones_a_soft_delete_model() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate_users(&db).await;
+    let u = T10User::create(attrs! { name: "A", email: "a@x.com" })
+        .await
+        .unwrap();
+    let id = u.id;
+    let stale = u.clone();
+
+    u.delete_or_fail().await.unwrap();
+    assert!(
+        matches!(stored_deleted_at(id).await, Some(Some(_))),
+        "the row is kept with deleted_at set"
+    );
+
+    let err = stale.delete_or_fail().await.unwrap_err();
+    assert!(
+        matches!(err, suprnova::FrameworkError::ModelNotFound { .. }),
+        "a trashed row is not found: {err:?}"
+    );
+    assert!(matches!(stored_deleted_at(id).await, Some(Some(_))));
+}
+
 // ---- Prunable -----------------------------------------------------------
 
 #[model(table = "t10_sessions", fillable = ["token", "expires_at"], timestamps = false)]
@@ -452,4 +532,154 @@ async fn mass_prunable_uses_dedicated_delete_renderer() {
 
     let remaining: Vec<String> = T10AuditLog::pluck::<String>("event").await.unwrap();
     assert_eq!(remaining, vec!["recent".to_string()]);
+}
+
+// ---- Every delete path stamps and touches as `delete()` does -------------
+
+#[model(table = "t10_owners", fillable = ["name"])]
+pub struct T10Owner {
+    pub id: i64,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[model(
+    table = "t10_notes",
+    soft_deletes,
+    fillable = ["owner_id", "body"],
+    touches = ["owner"],
+    relations = { owner: BelongsTo<T10Owner> { fk = "owner_id" } },
+)]
+pub struct T10Note {
+    pub id: i64,
+    pub owner_id: i64,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+#[model(
+    table = "t10_tasks",
+    fillable = ["owner_id", "body"],
+    touches = ["owner"],
+    relations = { owner: BelongsTo<T10Owner> { fk = "owner_id" } },
+)]
+pub struct T10Task {
+    pub id: i64,
+    pub owner_id: i64,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A moment well before the test runs, written straight into the
+/// tables so a stamp or a touch shows as a change.
+const LONG_AGO: &str = "2001-01-01T00:00:00+00:00";
+
+async fn migrate_owned(db: &TestDatabase) {
+    for sql in [
+        "CREATE TABLE t10_owners (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, \
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        "CREATE TABLE t10_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER NOT NULL, \
+            body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT)",
+        "CREATE TABLE t10_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER NOT NULL, \
+            body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+}
+
+/// Puts every timestamp in the owned tables back at [`LONG_AGO`].
+async fn age_everything(db: &TestDatabase) {
+    for table in ["t10_owners", "t10_notes", "t10_tasks"] {
+        db.execute_unprepared(&format!("UPDATE {table} SET updated_at = '{LONG_AGO}'"))
+            .await
+            .unwrap();
+    }
+}
+
+fn long_ago() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(LONG_AGO)
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
+async fn owner_updated_at(id: i64) -> DateTime<Utc> {
+    T10Owner::find(id).await.unwrap().unwrap().updated_at
+}
+
+/// `delete()` on a soft-delete model with timestamps stamps `updated_at`
+/// with the tombstone, as Laravel's `runSoftDelete` does and as
+/// `delete_all` and `delete_or_fail` already did.
+#[tokio::test]
+async fn soft_delete_stamps_updated_at() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate_owned(&db).await;
+    let owner = T10Owner::create(attrs! { name: "owner" }).await.unwrap();
+    let note = T10Note::create(attrs! { owner_id: owner.id, body: "note" })
+        .await
+        .unwrap();
+    age_everything(&db).await;
+    let note = T10Note::find(note.id).await.unwrap().unwrap();
+    assert_eq!(note.updated_at, long_ago());
+
+    let id = note.id;
+    note.delete().await.unwrap();
+    let trashed = T10Note::with_trashed()
+        .filter("id", id)
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        trashed.updated_at,
+        long_ago(),
+        "the soft delete stamps updated_at"
+    );
+    assert_eq!(Some(trashed.updated_at), trashed.deleted_at);
+}
+
+/// `delete_or_fail` touches the owners `touches` names, as `delete()`
+/// does, on a soft-delete model and on a plain one.
+#[tokio::test]
+async fn delete_or_fail_touches_owners() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate_owned(&db).await;
+    let owner = T10Owner::create(attrs! { name: "owner" }).await.unwrap();
+    let note = T10Note::create(attrs! { owner_id: owner.id, body: "note" })
+        .await
+        .unwrap();
+    let task = T10Task::create(attrs! { owner_id: owner.id, body: "task" })
+        .await
+        .unwrap();
+
+    age_everything(&db).await;
+    T10Note::find(note.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .delete_or_fail()
+        .await
+        .unwrap();
+    assert_ne!(
+        owner_updated_at(owner.id).await,
+        long_ago(),
+        "tombstoning a note touches its owner"
+    );
+
+    age_everything(&db).await;
+    T10Task::find(task.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .delete_or_fail()
+        .await
+        .unwrap();
+    assert_ne!(
+        owner_updated_at(owner.id).await,
+        long_ago(),
+        "deleting a task touches its owner"
+    );
 }

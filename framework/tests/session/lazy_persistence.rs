@@ -20,6 +20,7 @@ struct CountingStore {
     reads: AtomicUsize,
     writes: AtomicUsize,
     read_fails: AtomicBool,
+    write_fails: AtomicBool,
     session: Mutex<Option<SessionData>>,
 }
 
@@ -37,6 +38,15 @@ impl CountingStore {
             ..Self::default()
         }
     }
+
+    /// A store that cannot be written, like the database driver in a
+    /// process that has no database connection.
+    fn with_failing_write() -> Self {
+        Self {
+            write_fails: AtomicBool::new(true),
+            ..Self::default()
+        }
+    }
 }
 
 #[async_trait]
@@ -51,6 +61,9 @@ impl SessionStore for CountingStore {
 
     async fn write(&self, _session: &SessionData) -> Result<(), FrameworkError> {
         self.writes.fetch_add(1, Ordering::SeqCst);
+        if self.write_fails.load(Ordering::SeqCst) {
+            return Err(FrameworkError::internal("simulated session write failure"));
+        }
         Ok(())
     }
 
@@ -419,4 +432,282 @@ async fn clean_request_survives_existing_session_read_failure_without_write() {
     assert!(response.is_ok());
     assert_eq!(store.reads.load(Ordering::SeqCst), 1);
     assert_eq!(store.writes.load(Ordering::SeqCst), 0);
+}
+
+/// The value of the `name` cookie a response set, if any.
+fn set_cookie_value<B>(response: &hyper::Response<B>, name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find(|value| value.starts_with(&prefix))
+        .and_then(|value| value.split(';').next())
+        .map(|pair| pair[prefix.len()..].to_owned())
+}
+
+/// `SessionMiddleware` around `CsrfMiddleware` around a handler that
+/// answers `ok`, the order an application registers them in.
+async fn through_session_and_csrf(
+    sessions: &SessionMiddleware,
+    request: suprnova::Request,
+) -> hyper::Response<http_body_util::combinators::BoxBody<bytes::Bytes, std::convert::Infallible>> {
+    through_session_csrf_and(sessions, request, || Ok(suprnova::HttpResponse::text("ok"))).await
+}
+
+/// `SessionMiddleware` around `CsrfMiddleware` around a handler that
+/// answers with `answer`.
+async fn through_session_csrf_and(
+    sessions: &SessionMiddleware,
+    request: suprnova::Request,
+    answer: fn() -> suprnova::Response,
+) -> hyper::Response<http_body_util::combinators::BoxBody<bytes::Bytes, std::convert::Infallible>> {
+    use suprnova::Middleware;
+
+    let next: suprnova::middleware::Next = Arc::new(move |request| {
+        Box::pin(async move {
+            let handler: suprnova::middleware::Next =
+                Arc::new(move |_request| Box::pin(async move { answer() }));
+            suprnova::CsrfMiddleware::new()
+                .handle(request, handler)
+                .await
+        })
+    });
+    match sessions.handle(request, next).await {
+        Ok(response) | Err(response) => response.into_hyper(),
+    }
+}
+
+/// IDENTITY-014: a cookieless SPA bootstrap that is not a tracked HTML GET
+/// (a JSON GET, or a HEAD) receives an `XSRF-TOKEN` together with the session
+/// that token belongs to, so its next unsafe request passes the check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cookieless_csrf_bootstrap_persists_the_session_its_token_belongs_to() {
+    ensure_crypt();
+    let config = insecure_config();
+    let session_cookie = config.cookie_name.clone();
+    for (method, headers) in [
+        ("GET", vec![("accept", "application/json")]),
+        ("HEAD", Vec::new()),
+    ] {
+        let store = Arc::new(crate::cookie_prefix_roundtrip::MemoryStore::default());
+        let sessions = SessionMiddleware::with_store(config.clone(), store);
+
+        let bootstrap = through_session_and_csrf(
+            &sessions,
+            suprnova::Request::for_test_with_headers(method, "/csrf-cookie", headers),
+        )
+        .await;
+        let token = set_cookie_value(&bootstrap, "XSRF-TOKEN")
+            .unwrap_or_else(|| panic!("{method}: the bootstrap hands out an XSRF-TOKEN"));
+        let session = set_cookie_value(&bootstrap, &session_cookie).unwrap_or_else(|| {
+            panic!("{method}: the token is useless without its session, which must persist")
+        });
+
+        let cookie = format!("{session_cookie}={session}");
+        let submit = through_session_and_csrf(
+            &sessions,
+            suprnova::Request::for_test_with_headers(
+                "POST",
+                "/submit",
+                [
+                    ("cookie", cookie.as_str()),
+                    ("x-xsrf-token", token.as_str()),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(
+            submit.status().as_u16(),
+            200,
+            "{method}: the token echoed with its session must pass the CSRF check"
+        );
+    }
+}
+
+/// What an auth gate answers an anonymous caller.
+fn unauthenticated() -> suprnova::Response {
+    Err(
+        suprnova::HttpResponse::json(serde_json::json!({"message": "Unauthenticated."}))
+            .status(401),
+    )
+}
+
+/// A cookieless request the application refuses, such as an auth gate's 401
+/// on an API route, creates no durable session: it gets no `XSRF-TOKEN` and
+/// no session cookie, the store is never written, and the 401 reaches the
+/// client even when the store cannot be written at all. A token handed out
+/// here would belong to a session nobody stores.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_cookieless_request_hands_out_no_token_and_stores_no_session() {
+    ensure_crypt();
+    let config = insecure_config();
+    let session_cookie = config.cookie_name.clone();
+    for (method, headers) in [
+        ("GET", vec![("accept", "application/json")]),
+        ("GET", Vec::new()),
+        ("HEAD", Vec::new()),
+    ] {
+        let store = Arc::new(CountingStore::with_failing_write());
+        let sessions = SessionMiddleware::with_store(config.clone(), store.clone());
+
+        let refused = through_session_csrf_and(
+            &sessions,
+            suprnova::Request::for_test_with_headers(method, "/api/users/1", headers),
+            unauthenticated,
+        )
+        .await;
+
+        assert_eq!(
+            refused.status().as_u16(),
+            401,
+            "{method}: the refusal reaches the client; a refused request needs no session write"
+        );
+        assert_eq!(
+            store.writes.load(Ordering::SeqCst),
+            0,
+            "{method}: a refused cookieless request must not store a session"
+        );
+        assert_eq!(
+            set_cookie_value(&refused, "XSRF-TOKEN"),
+            None,
+            "{method}: a token whose session is not stored is useless"
+        );
+        assert_eq!(
+            set_cookie_value(&refused, &session_cookie),
+            None,
+            "{method}: no session was stored, so no session cookie"
+        );
+    }
+}
+
+/// A stored session keeps receiving its token on a refused response: the
+/// token belongs to a session the store already holds, and handing it out
+/// writes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_request_with_a_stored_session_still_gets_its_token() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use suprnova::http::cookie::Cookie;
+
+    ensure_crypt();
+    let config = insecure_config();
+    let session_id = "e".repeat(40);
+    let token = "f".repeat(40);
+    let mut stored = SessionData::new(session_id.clone(), token.clone());
+    stored.loaded_from_store = true;
+    let store = Arc::new(CountingStore::with_session(stored));
+    let sessions = SessionMiddleware::with_store(config.clone(), store.clone());
+    let touched_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let cookie =
+        Cookie::encrypted(&config.cookie_name, format!("{session_id}.{touched_at}")).unwrap();
+    let cookie_header = format!(
+        "{}={}",
+        config.cookie_name,
+        percent_encode_cookie_value(cookie.value())
+    );
+
+    let refused = through_session_csrf_and(
+        &sessions,
+        suprnova::Request::for_test_with_headers(
+            "GET",
+            "/api/users/1",
+            [("cookie", cookie_header.as_str())],
+        ),
+        unauthenticated,
+    )
+    .await;
+
+    assert_eq!(refused.status().as_u16(), 401);
+    assert_eq!(
+        set_cookie_value(&refused, "XSRF-TOKEN").as_deref(),
+        Some(token.as_str()),
+        "the stored session's token is still handed out"
+    );
+    assert_eq!(
+        store.writes.load(Ordering::SeqCst),
+        0,
+        "handing out a stored session's token writes nothing"
+    );
+}
+
+/// A custom store that builds the sessions it reads with `SessionData::new`
+/// never sets `loaded_from_store`. The session its read returned is still a
+/// stored session: a successful request through the CSRF middleware leaves
+/// it as it is and writes nothing, as with the database driver.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_a_custom_store_read_is_not_rewritten_by_a_successful_csrf_request() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use suprnova::http::cookie::Cookie;
+
+    ensure_crypt();
+    let config = insecure_config();
+    let session_id = "g".repeat(40);
+    let token = "h".repeat(40);
+    let touched_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let cookie =
+        Cookie::encrypted(&config.cookie_name, format!("{session_id}.{touched_at}")).unwrap();
+    let cookie_header = format!(
+        "{}={}",
+        config.cookie_name,
+        percent_encode_cookie_value(cookie.value())
+    );
+
+    for (method, headers) in [
+        (
+            "GET",
+            vec![
+                ("cookie", cookie_header.as_str()),
+                ("accept", "application/json"),
+            ],
+        ),
+        (
+            "POST",
+            vec![
+                ("cookie", cookie_header.as_str()),
+                ("x-xsrf-token", token.as_str()),
+            ],
+        ),
+    ] {
+        let stored = SessionData::new(session_id.clone(), token.clone());
+        assert!(
+            !stored.loaded_from_store,
+            "the custom store sets nothing beyond SessionData::new"
+        );
+        let store = Arc::new(CountingStore::with_session(stored));
+        let sessions = SessionMiddleware::with_store(config.clone(), store.clone());
+
+        let response = through_session_and_csrf(
+            &sessions,
+            suprnova::Request::for_test_with_headers(method, "/api/profile", headers),
+        )
+        .await;
+
+        assert_eq!(
+            response.status().as_u16(),
+            200,
+            "{method}: the stored session's token passes"
+        );
+        assert_eq!(
+            store.reads.load(Ordering::SeqCst),
+            1,
+            "{method}: the cookie names a stored session"
+        );
+        assert_eq!(
+            store.writes.load(Ordering::SeqCst),
+            0,
+            "{method}: a session the store returned and nothing changed is not written again"
+        );
+        assert_eq!(
+            set_cookie_value(&response, "XSRF-TOKEN").as_deref(),
+            Some(token.as_str()),
+            "{method}: the stored session still hands out its token"
+        );
+    }
 }

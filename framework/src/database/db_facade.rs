@@ -41,6 +41,8 @@
 //! SET clause, joined subqueries, join conditions, the WHERE clause and
 //! every subquery inside it - so each binding lines up with its position.
 
+use std::collections::HashMap;
+
 use crate::FrameworkError;
 use crate::database::DB;
 use crate::database::clauses::{
@@ -112,53 +114,82 @@ fn sqlite_value_by_runtime_type(
     None
 }
 
-/// True when `sql`, ignoring leading whitespace, starts with `SELECT`
-/// (case-insensitive). Used by [`DB::statement`](crate::DB::statement) to
-/// decide whether a raw statement is a read (skip the render cache's
-/// broad-authority advance) or a write of unknown shape (advance it).
+/// True when `sql` is one `SELECT` statement: it starts with `SELECT`
+/// (case-insensitive, leading whitespace ignored) and holds no `;` before
+/// an optional trailing one. Used by [`DB::statement`](crate::DB::statement)
+/// and its raw siblings to decide whether a raw statement is a read (skip
+/// the render cache's broad-authority advance) or a write of unknown shape
+/// (advance it).
+///
+/// The single-statement half matters because `DB::unprepared` runs its
+/// whole string, and PostgreSQL's simple-query protocol and SQLite both run
+/// every statement in a batch: `SELECT 1; UPDATE posts ...` commits the
+/// update. Judged by its first six bytes alone, that batch advanced nothing
+/// and every page that read `posts` went on being served (DATA-055). A `;`
+/// inside a string literal also counts, which only ever over-invalidates.
 fn is_select_statement(sql: &str) -> bool {
-    sql.trim_start()
-        .get(.."SELECT".len())
-        .is_some_and(|head| head.eq_ignore_ascii_case("SELECT"))
+    let trimmed = sql.trim();
+    let single = trimmed
+        .strip_suffix(';')
+        .unwrap_or(trimmed)
+        .bytes()
+        .all(|byte| byte != b';');
+    single
+        && trimmed
+            .get(.."SELECT".len())
+            .is_some_and(|head| head.eq_ignore_ascii_case("SELECT"))
 }
 
-/// Bind `value`, written to `table.column`, and return its placeholder.
+/// Bind `value`, written to `column`, and return its placeholder.
 ///
-/// A JSON `u64` above `i64::MAX` binds as an unsigned number, which a
-/// MySQL unsigned column stores exactly. Postgres and SQLite have no
-/// integer column that holds it - as text, Postgres refused the statement
-/// and SQLite stored a rounded real - so there the write is refused before
-/// anything is sent, as a model's write is: a database error that names
-/// the column, which a client sees as the generic 500 body.
+/// A JSON `u64` above `i64::MAX` binds as `large` says for its column (see
+/// `bind_large_unsigned`), which reads the column's type where it must so
+/// that no integer column stores a rounded value; as text, Postgres refused
+/// the statement and SQLite stored a rounded real.
 fn write_value_expression(
     backend: DbBackend,
-    (table, column): (&str, &str),
+    column: &str,
     value: &serde_json::Value,
+    large: &HashMap<String, SeaValue>,
     values: &mut Vec<SeaValue>,
     position: &mut usize,
-) -> Result<String, FrameworkError> {
+) -> String {
     if value.is_null() {
-        return Ok("NULL".to_owned());
+        return "NULL".to_owned();
     }
 
-    let bound = match value.as_u64() {
-        Some(n) if n > i64::MAX as u64 => {
-            let bound = SeaValue::BigUnsigned(Some(n));
-            crate::eloquent::casts::unsigned::refuse_unsigned_overflow(
-                backend, table, column, &bound,
-            )
-            .map_err(FrameworkError::database)?;
-            bound
-        }
-        _ => crate::eloquent::model::json_value_to_sea_value(value),
-    };
     *position += 1;
+    let bound = match large.get(column) {
+        Some(bound) => bound.clone(),
+        None => crate::eloquent::model::json_value_to_sea_value(value),
+    };
+    let ph = match (backend, &bound) {
+        (DbBackend::Postgres, SeaValue::Decimal(_)) => format!("CAST(${position} AS NUMERIC)"),
+        (DbBackend::Postgres, _) => format!("${position}"),
+        _ => "?".to_owned(),
+    };
     values.push(bound);
-    Ok(if backend == DbBackend::Postgres {
-        format!("${position}")
-    } else {
-        "?".to_owned()
-    })
+    ph
+}
+
+/// How the `u64` values above `i64::MAX` among `attrs`, written to `table`
+/// through `exec`, bind, by column.
+async fn large_unsigned_writes(
+    exec: &crate::database::transaction::ExecutorChoice,
+    table: &str,
+    attrs: &Attrs,
+) -> Result<HashMap<String, SeaValue>, FrameworkError> {
+    use crate::database::transaction::ExecutorChoice;
+    use crate::eloquent::casts::unsigned::{bind_large_unsigned, large_unsigned_attrs};
+
+    let large = large_unsigned_attrs(attrs.iter());
+    if large.is_empty() {
+        return Ok(HashMap::new());
+    }
+    match exec {
+        ExecutorChoice::Tx(t, _) => bind_large_unsigned(t.as_ref(), table, &large).await,
+        ExecutorChoice::Pool(c, _) => bind_large_unsigned(c.inner(), table, &large).await,
+    }
 }
 
 /// One entry in a [`DbTableBuilder`]'s select list.
@@ -1013,11 +1044,15 @@ impl DbTableBuilder {
     }
 
     /// Execute `SELECT COUNT(*) FROM ... WHERE ...` and return the
-    /// count. Ignores `select` / `order` / `limit` / `offset` - count
-    /// semantics don't care about those. A grouped query counts its
-    /// groups: the grouped SELECT runs as a subquery and the outer query
-    /// counts its rows, because `COUNT(*)` beside a `GROUP BY` counts each
-    /// group's rows instead.
+    /// count. The `select` list and the ordering are dropped. The limit and
+    /// offset stay on the COUNT statement, as in Laravel's
+    /// `DB::table()->count()`, so they bound the one row the count returns,
+    /// not the rows it counts: a limit of one or more keeps the whole
+    /// count, and an offset of one or more, or a limit of 0, leaves no row,
+    /// so the count is 0. A grouped query counts its groups: the grouped
+    /// SELECT runs as a subquery and the outer query counts its rows,
+    /// because `COUNT(*)` beside a `GROUP BY` counts each group's rows
+    /// instead. The limit and offset then bound the outer count's row.
     ///
     /// Uses `query_one` + `try_get` directly instead of
     /// `JsonValue::find_by_statement` because aggregate columns
@@ -1039,16 +1074,17 @@ impl DbTableBuilder {
         let backend = exec.backend();
         let mut copy = self;
         copy.order.clear();
-        copy.limit_value = None;
-        copy.offset_value = None;
+        let (limit, offset) = (copy.limit_value.take(), copy.offset_value.take());
+        let bounds = super::clauses::render_limit_offset(backend, limit, offset);
         let (sql, values) = if copy.groups.is_empty() {
             copy.select_items = vec![SelectItem::Raw("COUNT(*) AS count".into())];
-            copy.render_select(backend)?
+            let (sql, values) = copy.render_select(backend)?;
+            (format!("{sql}{bounds}"), values)
         } else {
             copy.select_items = vec![SelectItem::Raw("1 AS __suprnova_group".into())];
             let (grouped, values) = copy.render_select(backend)?;
             (
-                format!("SELECT COUNT(*) AS count FROM ({grouped}) AS __suprnova_groups"),
+                format!("SELECT COUNT(*) AS count FROM ({grouped}) AS __suprnova_groups{bounds}"),
                 values,
             )
         };
@@ -1120,6 +1156,7 @@ impl DbTableBuilder {
             )));
         }
 
+        let large = large_unsigned_writes(&exec, &self.table, &attrs).await?;
         let mut values: Vec<SeaValue> = Vec::new();
         let mut position = 0usize;
         let placeholders: Vec<String> = cols
@@ -1128,9 +1165,9 @@ impl DbTableBuilder {
                 let v = attrs
                     .get(c)
                     .expect("key present in iter must be present in get");
-                write_value_expression(backend, (&self.table, c), v, &mut values, &mut position)
+                write_value_expression(backend, c, v, &large, &mut values, &mut position)
             })
-            .collect::<Result<_, _>>()?;
+            .collect();
 
         let base = format!(
             "INSERT INTO {} ({}) VALUES ({})",
@@ -1246,7 +1283,8 @@ impl DbTableBuilder {
         )
         .await?;
         let backend = exec.backend();
-        let (sql, values) = self.render_update(&attrs, backend)?;
+        let large = large_unsigned_writes(&exec, &self.table, &attrs).await?;
+        let (sql, values) = self.render_update(&attrs, &large, backend)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
         let result = exec
             .run(stmt)
@@ -1415,12 +1453,11 @@ impl DbTableBuilder {
             sql.push_str(&order.join(", "));
         }
 
-        if let Some(n) = self.limit_value {
-            sql.push_str(&format!(" LIMIT {n}"));
-        }
-        if let Some(n) = self.offset_value {
-            sql.push_str(&format!(" OFFSET {n}"));
-        }
+        sql.push_str(&super::clauses::render_limit_offset(
+            backend,
+            self.limit_value,
+            self.offset_value,
+        ));
 
         Ok(sql)
     }
@@ -1428,6 +1465,7 @@ impl DbTableBuilder {
     fn render_update(
         &self,
         attrs: &Attrs,
+        large: &HashMap<String, SeaValue>,
         backend: DbBackend,
     ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         let mut values: Vec<SeaValue> = Vec::new();
@@ -1440,16 +1478,11 @@ impl DbTableBuilder {
                 let v = attrs
                     .get(col)
                     .expect("key present in iter must be present in get");
-                let expression = write_value_expression(
-                    backend,
-                    (&self.table, col),
-                    v,
-                    &mut values,
-                    &mut counter,
-                )?;
-                Ok(format!("{} = {expression}", quote_identifier(backend, col)))
+                let expression =
+                    write_value_expression(backend, col, v, large, &mut values, &mut counter);
+                format!("{} = {expression}", quote_identifier(backend, col))
             })
-            .collect::<Result<_, FrameworkError>>()?;
+            .collect();
         sql.push_str(&sets.join(", "));
 
         sql.push_str(&self.render_where_clauses(backend, &mut values, &mut counter)?);
@@ -2236,7 +2269,7 @@ mod where_clause_render_tests {
         attrs.insert("active", false);
         let err = DbTableBuilder::new("users")
             .where_binary("email", "Alice@example.com")
-            .render_update(&attrs, DbBackend::Sqlite)
+            .render_update(&attrs, &HashMap::new(), DbBackend::Sqlite)
             .expect_err("UPDATE renders through the same clause builder");
         assert!(
             format!("{err}").contains("where_binary is not supported"),
@@ -2253,7 +2286,7 @@ mod where_clause_render_tests {
         attrs.insert("name", "Bob");
         let (sql, values) = DbTableBuilder::new("users")
             .filter("id", 7i64)
-            .render_update(&attrs, DbBackend::Postgres)
+            .render_update(&attrs, &HashMap::new(), DbBackend::Postgres)
             .expect("no binary term, so Postgres renders");
         assert_eq!(sql, r#"UPDATE "users" SET "name" = $1 WHERE "id" = $2"#);
         assert_eq!(values.len(), 2, "got: {values:?}");

@@ -142,3 +142,86 @@ async fn sse_response_emits_each_event_on_its_own_frame() {
         "event: multi\nid: 7\ndata: first line\ndata: second line"
     );
 }
+
+/// IDENTITY-017: `EventSource` sends the remembered event id as UTF-8 on
+/// reconnect. An id the framework emitted with `with_id("café")` must come
+/// back from `last_event_id`, or the producer cannot resume from it.
+#[cfg(feature = "testing")]
+#[test]
+fn last_event_id_reads_a_utf8_id() {
+    use suprnova::Request;
+    use suprnova::sse::last_event_id;
+
+    let request = Request::for_test_with_headers("GET", "/stream", [("last-event-id", "café")]);
+    assert_eq!(last_event_id(&request).as_deref(), Some("café"));
+
+    let request =
+        Request::for_test_with_headers("GET", "/stream", [("last-event-id", "order-日本-42")]);
+    assert_eq!(last_event_id(&request).as_deref(), Some("order-日本-42"));
+
+    // ASCII ids keep working, and an absent header is still `None`.
+    let request = Request::for_test_with_headers("GET", "/stream", [("last-event-id", "7")]);
+    assert_eq!(last_event_id(&request).as_deref(), Some("7"));
+    let request = Request::for_test("GET", "/stream");
+    assert_eq!(last_event_id(&request), None);
+}
+
+/// Serve one request whose handler reports what `last_event_id` read,
+/// and send it a `Last-Event-ID` header holding `raw` bytes. Goes over a
+/// real socket so hyper parses the non-ASCII header bytes the way it does
+/// for a browser.
+async fn last_event_id_seen_by_server(raw: &'static [u8]) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((stream_tcp, _)) = listener.accept().await {
+            let io = TokioIo::new(stream_tcp);
+            let svc = service_fn(|req: hyper::Request<hyper::body::Incoming>| async move {
+                let request = suprnova::Request::new(req);
+                let seen =
+                    suprnova::sse::last_event_id(&request).unwrap_or_else(|| "<none>".to_string());
+                Ok::<_, Infallible>(HttpResponse::text(seen).into_hyper())
+            });
+            let _ = http1::Builder::new().serve_connection(io, svc).await;
+        }
+    });
+
+    let stream_tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut sender, conn) =
+        hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(TokioIo::new(stream_tcp))
+            .await
+            .unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let req = hyper::Request::builder()
+        .method("GET")
+        .uri("/stream")
+        .header("Host", "localhost")
+        .header(
+            "last-event-id",
+            hyper::header::HeaderValue::from_bytes(raw).expect("obs-text is a valid header value"),
+        )
+        .body(Empty::<Bytes>::new())
+        .unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
+/// IDENTITY-017 over the wire: the UTF-8 bytes a browser sends for a
+/// Unicode id reach the handler as that id.
+#[tokio::test]
+async fn last_event_id_reads_a_utf8_id_sent_over_the_wire() {
+    assert_eq!(
+        last_event_id_seen_by_server("café".as_bytes()).await,
+        "café"
+    );
+}
+
+/// IDENTITY-017 failure mode: bytes that are not UTF-8 are not an id any
+/// browser sent, so the helper reports no id rather than a lossy one.
+#[tokio::test]
+async fn last_event_id_rejects_bytes_that_are_not_utf8() {
+    assert_eq!(last_event_id_seen_by_server(b"caf\xE9").await, "<none>");
+}

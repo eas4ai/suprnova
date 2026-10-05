@@ -2,5 +2,12 @@
   display: flex;
   align-items: center;
   gap: var(--sn-space-2);
+  font-size: var(--sn-font-size-sm);
   font-weight: var(--sn-font-weight-normal);
+}
+
+/* The space below it in a plain form. The selector weighs nothing, so a
+   container that spaces its parts with a gap clears it with any rule. */
+:where(.sn-switch) {
+  margin-block-end: var(--sn-density-field-gap);
 }

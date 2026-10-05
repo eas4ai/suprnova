@@ -8,8 +8,7 @@ use crate::auth_flows::events::{AccountLocked, AccountUnlocked};
 use crate::error::FrameworkError;
 use crate::magnetar_integration::engine::LockoutAdmission;
 use crate::magnetar_integration::{
-    admit_attempt, cancel_attempt, finalize_failed_attempt, lockout_status, record_failed_attempt,
-    reset_attempts, unlock_account,
+    lockout_status, record_failed_attempt, reset_attempts, unlock_account,
 };
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -87,6 +86,12 @@ fn should_fire_locked_once(email: &str, locked_until: Option<DateTime<Utc>>) -> 
     fire
 }
 
+/// The key Magnetar's lockout rows use for `email`: the address normalized
+/// exactly as its password check normalizes it.
+fn lockout_key(email: &str) -> String {
+    magnetar::password::normalize_email(email)
+}
+
 /// The smallest size at which the dedup map sweeps. Sized so steady-state
 /// ops doesn't sweep (typical lockout volume is a few-to-tens of events
 /// per process per day), but a sustained brute-force burst can't grow the
@@ -95,7 +100,11 @@ const DEDUP_SWEEP_THRESHOLD: usize = 1024;
 
 /// Facade for brute-force-protection operations.
 ///
-/// All methods delegate to the installed Magnetar engine.
+/// All methods delegate to the installed Magnetar engine. Each one keys the
+/// lockout on the email normalized the way Magnetar's own password check
+/// does (trimmed, lowercase), so `" Alice@Example.com"` and
+/// `"alice@example.com"` share one counter: a throttle that checked one
+/// spelling while sign-in counted another would never see the lock.
 ///
 /// # Example
 ///
@@ -121,59 +130,6 @@ const DEDUP_SWEEP_THRESHOLD: usize = 1024;
 pub struct BruteForce;
 
 impl BruteForce {
-    /// Reserve one attempt before proof evaluation without exceeding the
-    /// configured per-account budget.
-    pub(crate) async fn admit_attempt(
-        email: &str,
-        context: Option<&str>,
-    ) -> Result<LockoutAdmission, FrameworkError> {
-        let admission = admit_attempt(email, context).await.map_err(|error| {
-            tracing::error!(%error, "authentication attempt admission failed");
-            FrameworkError::domain("authentication attempt admission unavailable", 503)
-        })?;
-        if admission.locked_event && should_fire_locked_once(email, admission.status.locked_until) {
-            let _ = crate::events::EventFacade::dispatch(AccountLocked {
-                email: email.to_owned(),
-                failed_attempts: admission.status.failed_attempts,
-            })
-            .await;
-        }
-        Ok(admission)
-    }
-
-    /// Publish the lock transition won by an admitted attempt after its proof
-    /// has failed. Successful proofs reset the reservation without firing.
-    pub(crate) async fn finish_admitted_failure(
-        email: &str,
-        admission: &LockoutAdmission,
-    ) -> Result<LockoutStatus, FrameworkError> {
-        let finalized = finalize_failed_attempt(email, admission)
-            .await
-            .map_err(|error| {
-                tracing::error!(%error, "authentication attempt finalization failed");
-                FrameworkError::domain("authentication attempt finalization unavailable", 503)
-            })?;
-        if finalized.locked_event && should_fire_locked_once(email, finalized.status.locked_until) {
-            let _ = crate::events::EventFacade::dispatch(AccountLocked {
-                email: email.to_owned(),
-                failed_attempts: finalized.status.failed_attempts,
-            })
-            .await;
-        }
-        Ok(finalized.status)
-    }
-
-    /// Cancel one admitted attempt when proof evaluation cannot complete.
-    pub(crate) async fn cancel_admitted_attempt(
-        email: &str,
-        admission: &LockoutAdmission,
-    ) -> Result<(), FrameworkError> {
-        cancel_attempt(email, admission).await.map_err(|error| {
-            tracing::error!(%error, "authentication attempt cancellation failed; state uncertain");
-            FrameworkError::domain("authentication attempt state is uncertain", 503)
-        })
-    }
-
     /// Record a failed authentication attempt for `email`. Optionally
     /// stamp the client IP for audit logs.
     ///
@@ -189,6 +145,7 @@ impl BruteForce {
         email: &str,
         ip: Option<&str>,
     ) -> Result<LockoutStatus, FrameworkError> {
+        let email = &lockout_key(email);
         let status = record_failed_attempt(email, ip).await?;
 
         // Edge case: dispatch AccountLocked exactly once per
@@ -212,7 +169,7 @@ impl BruteForce {
 
     /// Fetch the current [`LockoutStatus`] without recording an attempt.
     pub async fn get_lockout_status(email: &str) -> Result<LockoutStatus, FrameworkError> {
-        lockout_status(email).await
+        lockout_status(&lockout_key(email)).await
     }
 
     /// Convenience check - `true` if the account is currently locked.
@@ -230,16 +187,27 @@ impl BruteForce {
     /// unlock. See [`BruteForce::unlock_account`] for the
     /// audit-event-firing variant.
     pub async fn reset_attempts(email: &str) -> Result<(), FrameworkError> {
-        reset_attempts(email).await
+        reset_attempts(&lockout_key(email)).await
     }
 
     /// Atomically clear an exact admitted challenge attempt after its proof
     /// succeeds. Legacy engines without the reservation lifecycle fail closed.
+    ///
+    /// # Errors
+    ///
+    /// [`FrameworkError::domain`] with status `503` when the lockout store
+    /// cannot clear the attempt: the proof was accepted, but its outcome is
+    /// not recorded, and the caller must not report success.
     pub async fn reset_admitted_attempt(
         email: &str,
         admission: &LockoutAdmission,
     ) -> Result<(), FrameworkError> {
-        crate::magnetar_integration::reset_admitted_attempts(email, admission).await
+        crate::magnetar_integration::reset_admitted_attempts(&lockout_key(email), admission)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "authentication attempt reset failed");
+                FrameworkError::domain("authentication attempt reset unavailable", 503)
+            })
     }
 
     /// Admin / forced unlock. Clears the attempt counter and the
@@ -251,6 +219,7 @@ impl BruteForce {
     /// [`AccountUnlocked`] event fires **only** on `true` - see the
     /// module-level docs for rationale.
     pub async fn unlock_account(email: &str) -> Result<bool, FrameworkError> {
+        let email = &lockout_key(email);
         let was_locked = unlock_account(email).await?;
 
         if was_locked {

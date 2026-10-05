@@ -123,6 +123,15 @@ impl Number {
         if let Ok(n) = <u64 as TryGetable>::try_get_by(row, column) {
             return Ok(Self::Integer(n.into()));
         }
+        // Postgres answers `integer` for the MIN and MAX of an `INTEGER`
+        // column and `smallint` for those of a `SMALLINT` one, and its
+        // driver decodes neither as an `i64`.
+        if let Ok(n) = <i32 as TryGetable>::try_get_by(row, column) {
+            return Ok(Self::Integer(n.into()));
+        }
+        if let Ok(n) = <i16 as TryGetable>::try_get_by(row, column) {
+            return Ok(Self::Integer(n.into()));
+        }
         if let Ok(n) = <f64 as TryGetable>::try_get_by(row, column) {
             return Ok(Self::Real(n));
         }
@@ -181,6 +190,30 @@ impl Number {
         exact.ok_or_else(|| DbErr::Type(format!("{self} does not fit in a Decimal exactly")))
     }
 
+    /// The number as JSON: an integer exactly when JSON holds it, a real
+    /// as the nearest `f64` (a NaN or an infinity as `null`), and any other
+    /// `numeric` / `DECIMAL` as its exact decimal text. A JSON float would
+    /// round `12345678901234567.89` to the nearest `f64`, and a `Decimal`
+    /// read from it would be that rounded value; read from the text, it is
+    /// exact. The text is also what Laravel's `withMin` attribute holds.
+    fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::Integer(n) => i64::try_from(*n)
+                .map(serde_json::Value::from)
+                .or_else(|_| u64::try_from(*n).map(serde_json::Value::from))
+                .unwrap_or_else(|_| float_json(*n as f64)),
+            Self::Real(n) => float_json(*n),
+            Self::Decimal(n) => {
+                let n = n.normalized();
+                match (n.is_integer(), n.to_i64(), n.to_u64()) {
+                    (true, Some(whole), _) => serde_json::Value::from(whole),
+                    (true, None, Some(whole)) => serde_json::Value::from(whole),
+                    _ => serde_json::Value::String(n.to_plain_string()),
+                }
+            }
+        }
+    }
+
     /// The number as the nearest `f64`.
     fn nearest_f64(&self) -> Result<f64, DbErr> {
         match self {
@@ -191,6 +224,12 @@ impl Number {
                 .ok_or_else(|| DbErr::Type(format!("{self} does not read as f64"))),
         }
     }
+}
+
+/// An `f64` as JSON, `null` for a NaN or an infinity, which JSON has no
+/// number for.
+fn float_json(n: f64) -> serde_json::Value {
+    serde_json::Number::from_f64(n).map_or(serde_json::Value::Null, serde_json::Value::Number)
 }
 
 /// Reads the result of an aggregate (`COUNT`, `SUM`, `AVG`) at `column`
@@ -260,21 +299,91 @@ mod sealed {
     impl Sealed for rust_decimal::Decimal {}
 }
 
-/// Reads a relation aggregate (`with_sum`, `with_avg`, `with_min`,
-/// `with_max`) at `column` as the nearest `f64`, or `None` for a NULL,
-/// whichever numeric type the database answered: the sum of an integer
-/// column is `numeric` on Postgres and `DECIMAL` on MySQL. A value that is
-/// not a number is an error rather than a missing aggregate.
+/// A relation aggregate (`with_sum`, `with_avg`, `with_min`, `with_max`) as
+/// the code `#[suprnova::model]` generates stores it.
+///
+/// **Not part of the public API.** It is `pub` because that generated code
+/// names it.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct __RelationAggregate {
+    /// The value as the nearest `f64`, when the database answered a number.
+    pub number: Option<f64>,
+    /// The value as JSON, whatever its type: a number, text, or a date or
+    /// a time as the ISO 8601 text serde writes for it. A `numeric` /
+    /// `DECIMAL` that is not a 64-bit integer is its exact decimal text.
+    /// This is what `<rel>_min_as` and `<rel>_max_as` read, through
+    /// [`__relation_aggregate_as`], so the minimum or maximum of a date
+    /// column is usable as Laravel's `withMax` attribute is.
+    pub value: Option<serde_json::Value>,
+}
+
+/// Reads a relation minimum or maximum as `T`, for the `<rel>_min_as` and
+/// `<rel>_max_as` accessors `#[suprnova::model]` generates.
+///
+/// `value` is the aggregate as JSON and `number` its nearest `f64`, both
+/// as [`__relation_aggregate`] stored them. `T` reads `value` first, so a
+/// `Decimal` reads a decimal's exact text, and a date reads its ISO 8601
+/// text. A `T` that does not read text, such as `f64`, then reads the
+/// nearest `f64`, which a decimal has. `None` when there is no value, or
+/// `T` reads neither.
+///
+/// **Not part of the public API.** It is `pub` because that generated code
+/// calls it.
+#[doc(hidden)]
+pub fn __relation_aggregate_as<T: serde::de::DeserializeOwned>(
+    value: Option<&serde_json::Value>,
+    number: Option<f64>,
+) -> Option<T> {
+    let value = value?;
+    serde_json::from_value(value.clone()).ok().or_else(|| {
+        let nearest = serde_json::Number::from_f64(number?)?;
+        serde_json::from_value(serde_json::Value::Number(nearest)).ok()
+    })
+}
+
+/// Reads a relation aggregate at `column`, whatever type the database
+/// answered: every integer width, a real, `numeric` / `DECIMAL`, text, a
+/// date, a time or a date-time. A NULL, or a value of a type none of those
+/// reads, is the empty aggregate, never an error: `with_min` and `with_max`
+/// over a date column answered `None` before they could read it, and a page
+/// that shows one renders either way.
 ///
 /// **Not part of the public API.** It is `pub` because the code
 /// `#[suprnova::model]` generates for relation aggregates calls it.
 #[doc(hidden)]
-pub fn __relation_aggregate(row: &QueryResult, column: &str) -> Result<Option<f64>, DbErr> {
+pub fn __relation_aggregate(row: &QueryResult, column: &str) -> __RelationAggregate {
     match Number::read(row, column) {
-        Ok(number) => number.nearest_f64().map(Some),
-        Err(TryGetError::Null(_)) => Ok(None),
-        Err(TryGetError::DbErr(error)) => Err(error),
+        Ok(number) => __RelationAggregate {
+            number: number.nearest_f64().ok(),
+            value: Some(number.to_json()),
+        },
+        Err(TryGetError::Null(_)) => __RelationAggregate::default(),
+        Err(TryGetError::DbErr(_)) => __RelationAggregate {
+            number: None,
+            value: non_numeric_json(row, column),
+        },
     }
+}
+
+/// A value that is not a number, as JSON: text as it is, and a date, a
+/// time or a date-time as serde writes it. `None` for a NULL or any other
+/// type.
+fn non_numeric_json(row: &QueryResult, column: &str) -> Option<serde_json::Value> {
+    fn read<T: TryGetable + serde::Serialize>(
+        row: &QueryResult,
+        column: &str,
+    ) -> Option<serde_json::Value> {
+        <T as TryGetable>::try_get_by(row, column)
+            .ok()
+            .and_then(|value| serde_json::to_value(value).ok())
+    }
+    read::<String>(row, column)
+        .or_else(|| read::<chrono::DateTime<chrono::Utc>>(row, column))
+        .or_else(|| read::<chrono::NaiveDateTime>(row, column))
+        .or_else(|| read::<chrono::NaiveDate>(row, column))
+        .or_else(|| read::<chrono::NaiveTime>(row, column))
+        .or_else(|| read::<bool>(row, column))
 }
 
 #[cfg(test)]
@@ -305,6 +414,39 @@ mod tests {
         assert_eq!(exact(Number::Real(f64::INFINITY)), None);
         assert_eq!(exact(decimal("0.12345678901234567890123456789")), None);
         assert_eq!(decimal("1.750").to_string(), "1.75");
+    }
+
+    #[test]
+    fn a_relation_min_or_max_keeps_a_decimal_exact() {
+        let decimal = |text: &str| Number::Decimal(text.parse().expect("a decimal"));
+        assert_eq!(
+            decimal("12345678901234567.890").to_json(),
+            serde_json::json!("12345678901234567.89")
+        );
+        assert_eq!(decimal("65.000").to_json(), serde_json::json!(65));
+        assert_eq!(
+            decimal("1e30").to_json(),
+            serde_json::json!("1000000000000000000000000000000")
+        );
+
+        let min = decimal("12345678901234567.89");
+        let (value, number) = (min.to_json(), min.nearest_f64().ok());
+        let read = |value: Option<&serde_json::Value>| {
+            (
+                __relation_aggregate_as::<Decimal>(value, number),
+                __relation_aggregate_as::<f64>(value, number),
+                __relation_aggregate_as::<i64>(value, number),
+            )
+        };
+        assert_eq!(
+            read(Some(&value)),
+            (
+                Some(Decimal::from_str_exact("12345678901234567.89").expect("a decimal")),
+                Some(12345678901234567.89),
+                None
+            )
+        );
+        assert_eq!(read(None), (None, None, None), "no value, nothing to read");
     }
 
     #[test]

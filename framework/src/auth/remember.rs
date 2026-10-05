@@ -83,9 +83,13 @@
 //! Same reason passwords are hashed.
 
 use chrono::Duration;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Select, Set,
+    TransactionTrait,
+};
 
 use crate::database::DB;
+use crate::database::stored_datetime::storable_expiry;
 use crate::error::FrameworkError;
 use crate::hashing;
 
@@ -107,6 +111,31 @@ const VERIFIER_BYTES: usize = 32;
 /// cookie."
 #[doc(hidden)]
 pub const COOKIE_NAME: &str = "remember_me";
+
+/// The columns verification and revocation read from a token row.
+///
+/// The time columns are left out: the queries filter on `expires_at` in
+/// SQL and never need its value.
+#[derive(FromQueryResult)]
+struct TokenRow {
+    id: i64,
+    user_id: String,
+    selector: String,
+    token_hash: String,
+}
+
+/// Narrow `select` to the [`TokenRow`] columns.
+fn token_rows(select: Select<entity::Entity>) -> sea_orm::Selector<sea_orm::SelectModel<TokenRow>> {
+    select
+        .select_only()
+        .columns([
+            entity::Column::Id,
+            entity::Column::UserId,
+            entity::Column::Selector,
+            entity::Column::TokenHash,
+        ])
+        .into_model::<TokenRow>()
+}
 
 /// Generate a fresh `(selector, verifier_plaintext, verifier_hash)`
 /// triple.
@@ -146,24 +175,56 @@ pub async fn generate_token() -> Result<(String, String, String), FrameworkError
     Ok((selector, verifier_plaintext, verifier_hash))
 }
 
+/// `ttl_minutes` as a lifetime, and the moment a token issued now with it
+/// expires.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] naming the lifetime when no date can hold
+/// it: the minutes overflow a duration, or the expiry runs past the dates
+/// the clock represents. `ttl_minutes` comes from configuration and from
+/// callers of the public API, so a value that large is an error, not a
+/// panic.
+pub(crate) fn remember_expiry(
+    ttl_minutes: i64,
+) -> Result<(Duration, chrono::DateTime<chrono::Utc>), FrameworkError> {
+    Duration::try_minutes(ttl_minutes)
+        .and_then(|lifetime| {
+            crate::clock::now()
+                .checked_add_signed(lifetime)
+                .map(|expires_at| (lifetime, expires_at))
+        })
+        .ok_or_else(|| {
+            FrameworkError::internal(format!(
+                "remember-me lifetime of {ttl_minutes} minutes runs past the dates the clock can hold"
+            ))
+        })
+}
+
 /// Issue a new remember token for `user_id`. Inserts a row keyed on a
 /// random selector and storing the bcrypt hash of the verifier;
 /// returns the composite plaintext `"{selector}.{verifier}"` to the
 /// caller. The caller is responsible for shipping the plaintext to the
 /// client (via the session middleware's pending-cookies slot, set by
 /// `Auth::login_remember`).
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] when `ttl_minutes` puts the expiry outside
+/// the dates the clock can hold, or when hashing or the database fails.
 pub async fn issue(user_id: &str, ttl_minutes: i64) -> Result<String, FrameworkError> {
+    let (_, expires_at) = remember_expiry(ttl_minutes)?;
     let (selector, verifier_plaintext, verifier_hash) = generate_token().await?;
-    let expires_at = crate::clock::now() + Duration::minutes(ttl_minutes);
     let now = crate::clock::now();
 
     let conn = DB::connection()?;
+    let backend = conn.inner().get_database_backend();
     let model = entity::ActiveModel {
         user_id: Set(user_id.to_string()),
         selector: Set(selector.clone()),
         token_hash: Set(verifier_hash),
-        expires_at: Set(expires_at.naive_utc()),
-        created_at: Set(now.naive_utc()),
+        expires_at: Set(storable_expiry(backend, expires_at.naive_utc()).into()),
+        created_at: Set(now.into()),
         last_used_at: Set(None),
         ..Default::default()
     };
@@ -210,12 +271,14 @@ pub async fn verify_and_rotate(
 
     // O(1) indexed lookup: the UNIQUE constraint on `selector` means
     // this returns 0 or 1 rows.
-    let rows = entity::Entity::find()
-        .filter(entity::Column::Selector.eq(selector))
-        .filter(entity::Column::ExpiresAt.gt(now))
-        .all(conn.inner())
-        .await
-        .map_err(|e| FrameworkError::database(format!("look up remember token: {e}")))?;
+    let rows = token_rows(
+        entity::Entity::find()
+            .filter(entity::Column::Selector.eq(selector))
+            .filter(entity::Column::ExpiresAt.gt(now)),
+    )
+    .all(conn.inner())
+    .await
+    .map_err(|e| FrameworkError::database(format!("look up remember token: {e}")))?;
 
     let mut rows = rows.into_iter().filter(|row| row.selector == selector);
     let row = match rows.next() {
@@ -285,16 +348,18 @@ pub(crate) async fn revoke_by_selector(
         FrameworkError::database(format!("begin remember selector revocation: {error}"))
     })?;
     let result = async {
-        let rows = entity::Entity::find()
-            .filter(entity::Column::UserId.eq(user_id))
-            .filter(entity::Column::Selector.eq(selector))
-            .all(&transaction)
-            .await
-            .map_err(|error| {
-                FrameworkError::database(format!(
-                    "find remember token for selector revocation: {error}"
-                ))
-            })?;
+        let rows = token_rows(
+            entity::Entity::find()
+                .filter(entity::Column::UserId.eq(user_id))
+                .filter(entity::Column::Selector.eq(selector)),
+        )
+        .all(&transaction)
+        .await
+        .map_err(|error| {
+            FrameworkError::database(format!(
+                "find remember token for selector revocation: {error}"
+            ))
+        })?;
         let mut rows = rows
             .into_iter()
             .filter(|row| row.user_id == user_id && row.selector == selector);
@@ -383,9 +448,15 @@ pub async fn prune_expired() -> Result<u64, FrameworkError> {
 /// - `user_id`      VARCHAR not null - opaque string id (post-Phase-3 String-everywhere)
 /// - `selector`     VARCHAR not null UNIQUE - 22-char URL-safe base64 lookup key
 /// - `token_hash`   VARCHAR not null - bcrypt hash of the verifier plaintext
-/// - `expires_at`   TIMESTAMP not null - token TTL boundary
-/// - `created_at`   TIMESTAMP not null
-/// - `last_used_at` TIMESTAMP null - currently informational (rotation deletes the row before update)
+/// - `expires_at`   DATETIME not null - token TTL boundary
+/// - `created_at`   DATETIME not null
+/// - `last_used_at` DATETIME null - currently informational (rotation deletes the row before update)
+///
+/// Older scaffolds created the time columns as `TIMESTAMP` on MySQL and
+/// MariaDB, and a table may have `timestamptz` on Postgres. The fields are
+/// [`StoredDateTime`](crate::database::StoredDateTime), which reads each of
+/// those as well as `DATETIME`, `timestamp` and SQLite text, so a
+/// whole-row read through this entity works on every one.
 pub mod entity {
     use sea_orm::entity::prelude::*;
 
@@ -404,11 +475,11 @@ pub mod entity {
         /// Bcrypt hash of the verifier - the private half of the token.
         pub token_hash: String,
         /// TTL boundary; the cookie is rejected once `now > expires_at`.
-        pub expires_at: chrono::NaiveDateTime,
+        pub expires_at: crate::database::StoredDateTime,
         /// Wall-clock time the token row was created.
-        pub created_at: chrono::NaiveDateTime,
+        pub created_at: crate::database::StoredDateTime,
         /// Informational; current rotation strategy deletes the row instead of updating this.
-        pub last_used_at: Option<chrono::NaiveDateTime>,
+        pub last_used_at: Option<crate::database::StoredDateTime>,
     }
 
     /// SeaORM relation enum - `remember_tokens` is a leaf table with no
@@ -446,5 +517,21 @@ mod tests {
             !hashing::verify(&ver2, &hash).expect("verify"),
             "wrong verifier must not verify"
         );
+    }
+
+    /// A lifetime no date can hold is an error, not a panic: `i64::MAX`
+    /// minutes overflows the duration, and a smaller one that fits the
+    /// duration still runs past the last date chrono represents.
+    #[tokio::test]
+    async fn issue_refuses_a_lifetime_no_date_can_hold() {
+        for ttl_minutes in [i64::MAX, i64::MIN, 100_000_000_000_000] {
+            let outcome = tokio::spawn(issue("overflow-user", ttl_minutes)).await;
+            // The error names the lifetime: no database is registered here,
+            // so any other error would come from a later step.
+            assert!(
+                matches!(&outcome, Ok(Err(error)) if error.to_string().contains("lifetime")),
+                "ttl_minutes {ttl_minutes} must return an error, got {outcome:?}"
+            );
+        }
     }
 }

@@ -77,6 +77,8 @@ struct Outgoing {
     finish: bool,
     /// When set, the body waits for this notification after the head.
     gate: Option<Arc<Notify>>,
+    /// The body's media type, multipart unless a test says otherwise.
+    content_type: Option<&'static str>,
 }
 
 impl Outgoing {
@@ -92,6 +94,7 @@ impl Outgoing {
             chunks,
             finish: true,
             gate: None,
+            content_type: None,
         }
     }
 
@@ -103,7 +106,14 @@ impl Outgoing {
             chunks: Vec::new(),
             finish: true,
             gate: None,
+            content_type: None,
         }
+    }
+
+    /// Send the body as `media_type` rather than multipart.
+    fn content_type(mut self, media_type: &'static str) -> Self {
+        self.content_type = Some(media_type);
+        self
     }
 
     fn header(mut self, name: &'static str, value: impl Into<String>) -> Self {
@@ -170,9 +180,12 @@ async fn send(app: &App, out: Outgoing) -> Reply {
                 out.method, out.path
             );
             if out.method == "POST" {
+                let content_type = out.content_type.map_or_else(
+                    || format!("multipart/form-data; boundary={BOUNDARY}"),
+                    str::to_string,
+                );
                 head.push_str(&format!(
-                    "Content-Type: multipart/form-data; boundary={BOUNDARY}\r\n\
-                     Transfer-Encoding: chunked\r\n"
+                    "Content-Type: {content_type}\r\nTransfer-Encoding: chunked\r\n"
                 ));
             }
             for (name, value) in &out.headers {
@@ -635,6 +648,7 @@ async fn typed(req: Request) -> Response {
     Ok(HttpResponse::json(json!({ "ok": true })))
 }
 
+#[cfg(feature = "localization")]
 #[tokio::test]
 async fn a_text_part_that_does_not_parse_answers_422_with_the_type_key() {
     let app = App::new(Router::new().post("/typed", typed));
@@ -735,6 +749,7 @@ fn key(errors: &ValidationErrors, field: &str) -> String {
 /// Bind a translator over the framework's English catalog plus `overrides`,
 /// an application's `lang/en/validation.ftl`, for the current
 /// `TestContainer::scope`.
+#[cfg(feature = "localization")]
 fn bind_catalog(overrides: &str) -> tempfile::TempDir {
     use suprnova::{FluentTranslator, Locale, LocalizationConfig, Translator};
 
@@ -770,6 +785,7 @@ async fn attachments(req: Request) -> Response {
     Ok(HttpResponse::json(json!({ "ok": true })))
 }
 
+#[cfg(feature = "localization")]
 #[tokio::test]
 async fn messages_come_from_the_catalog_by_key_and_an_application_overrides_them() {
     let app = App::new(
@@ -1646,7 +1662,9 @@ struct Nullable {
     #[field("title")]
     title: String,
     #[field("ids[]")]
-    ids: Vec<u32>,
+    ids: Vec<Option<u32>>,
+    #[field("tags[]")]
+    tags: Vec<Option<String>>,
 }
 
 async fn nullable(req: Request) -> Response {
@@ -1659,6 +1677,7 @@ async fn nullable(req: Request) -> Response {
         "note": form.note,
         "title": form.title,
         "ids": form.ids,
+        "tags": form.tags,
     })))
 }
 
@@ -1677,10 +1696,13 @@ async fn an_empty_part_is_null_for_an_optional_typed_field() {
                 text_part("ratio", ""),
                 text_part("address", ""),
                 text_part("note", ""),
-                text_part("title", ""),
+                text_part("title", "Holiday"),
                 text_part("ids[]", "3"),
                 text_part("ids[]", ""),
                 text_part("ids[]", "4"),
+                text_part("tags[]", "beach"),
+                text_part("tags[]", ""),
+                text_part("tags[]", "sun"),
             ]),
         ),
     )
@@ -1692,12 +1714,72 @@ async fn an_empty_part_is_null_for_an_optional_typed_field() {
     assert_eq!(body["active"], Value::Null);
     assert_eq!(body["ratio"], Value::Null);
     assert_eq!(body["address"], Value::Null);
-    // A string field keeps the empty string, as a `FormRequest` does for
-    // JSON `""` and for urlencoded `note=`.
-    assert_eq!(body["note"], "");
-    assert_eq!(body["title"], "");
-    // A null element of a list of numbers is left out.
-    assert_eq!(body["ids"], json!([3, 4]));
+    // A `String` is no exception: Laravel's `ConvertEmptyStringsToNull`
+    // makes the empty text `null` whatever the field's rules.
+    assert_eq!(body["note"], Value::Null);
+    assert_eq!(body["title"], "Holiday");
+    // A list whose elements may be null keeps a null element in its place,
+    // of numbers and of text alike.
+    assert_eq!(body["ids"], json!([3, null, 4]));
+    assert_eq!(body["tags"], json!(["beach", null, "sun"]));
+}
+
+#[derive(MultipartRequest)]
+struct RequiredText {
+    #[field("title")]
+    title: String,
+}
+
+async fn required_text(req: Request) -> Response {
+    let form = RequiredText::from_request(req).await?;
+    Ok(HttpResponse::json(json!({ "title": form.title })))
+}
+
+#[tokio::test]
+async fn an_empty_part_for_a_required_string_field_is_missing() {
+    let app = App::new(Router::new().post("/required-text", required_text));
+
+    // An empty first part, and an empty last part after a value: the last
+    // part decides, and empty text is `null`, so `required` fails.
+    for parts in [
+        vec![text_part("title", "")],
+        vec![text_part("title", "Holiday"), text_part("title", "")],
+    ] {
+        let reply = send(&app, Outgoing::post("/required-text", form(&parts))).await;
+        assert_eq!(reply.status, 422, "{}", reply.text());
+        assert_eq!(
+            first_message(&reply, "title"),
+            "The title field is required."
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_later_part_carries_the_value_after_an_empty_first_part() {
+    let app = App::new(Router::new().post("/nullable", nullable));
+
+    let reply = send(
+        &app,
+        Outgoing::post(
+            "/nullable",
+            form(&[
+                text_part("title", ""),
+                text_part("title", "Holiday"),
+                text_part("note", ""),
+                text_part("note", "kept"),
+                text_part("count", "1"),
+                text_part("count", "2"),
+            ]),
+        ),
+    )
+    .await;
+
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    let body = reply.json();
+    // PHP keeps the last value of a name that is not a list.
+    assert_eq!(body["title"], "Holiday");
+    assert_eq!(body["note"], "kept");
+    assert_eq!(body["count"], 2);
 }
 
 #[derive(MultipartRequest)]
@@ -1794,6 +1876,7 @@ fn encoded_body() -> Vec<u8> {
     ])
 }
 
+#[cfg(feature = "localization")]
 #[tokio::test]
 async fn a_text_part_that_is_not_utf8_answers_422_under_its_name() {
     let app = App::new(Router::new().post("/encoded", encoded));
@@ -2079,11 +2162,12 @@ async fn a_text_part_over_the_in_memory_limit_answers_413_and_stops_the_read() {
     assert!(!NOTES_HANDLER_RAN.load(Ordering::SeqCst), "the handler ran");
 }
 
-// ── PAR-043: the first part decides a field that holds one value ──
+// ── PAR-043: the last part decides a text field that holds one value ──
 
 #[tokio::test]
-async fn the_first_part_decides_a_text_field_that_holds_one_value() {
-    // A required field: the second failing part adds nothing.
+async fn the_last_part_decides_a_text_field_that_holds_one_value() {
+    // A required field: only the last part is parsed, so two failing
+    // parts report one error.
     let errors = typed_errors(form(&[
         text_part("count", "abc"),
         text_part("count", "xyz"),
@@ -2092,9 +2176,14 @@ async fn the_first_part_decides_a_text_field_that_holds_one_value() {
     assert_eq!(key(&errors, "count"), "validation-integer");
     assert_eq!(errors.errors["count"].len(), 1, "{errors}");
 
-    // A later part that parses does not undo the first part's failure.
+    // An earlier part that fails is replaced by a later one that parses,
+    // as PHP keeps the last value of the name.
     let errors = typed_errors(form(&[text_part("count", "abc"), text_part("count", "5")])).await;
-    assert_eq!(errors.errors["count"].len(), 1, "{errors}");
+    assert!(!errors.errors.contains_key("count"), "{errors}");
+
+    // And a later part that fails replaces one that parsed.
+    let errors = typed_errors(form(&[text_part("count", "5"), text_part("count", "abc")])).await;
+    assert_eq!(key(&errors, "count"), "validation-integer");
 
     // An optional field, the same.
     let req = crate::common::request_from_multipart(
@@ -2113,5 +2202,397 @@ async fn the_first_part_decides_a_text_field_that_holds_one_value() {
     };
     assert_eq!(key(&errors, "count"), "validation-integer");
     assert_eq!(errors.errors["count"].len(), 1, "{errors}");
+    assert_eq!(errors.errors.len(), 1, "{errors}");
+}
+
+// ── Empty text and repeated names: a url-encoded form reads the same ──
+//
+// `FormRequest` reads a url-encoded body by Laravel's rules too, so a form
+// posted either way gives a handler the same values.
+
+/// The text fields of `Nullable`, read from a url-encoded body.
+#[derive(Debug, serde::Deserialize, validator::Validate, suprnova::FormRequestDerive)]
+struct UrlencodedText {
+    title: String,
+    note: Option<String>,
+    count: Option<u32>,
+}
+
+async fn urlencoded(body: &str) -> Result<UrlencodedText, FrameworkError> {
+    let req =
+        crate::common::request_with_body("/", "application/x-www-form-urlencoded", body.as_bytes())
+            .await;
+    UrlencodedText::from_request(req).await
+}
+
+#[tokio::test]
+async fn an_empty_urlencoded_value_for_a_required_string_field_is_missing() {
+    // An empty first value, an empty last value after a value, and no
+    // value at all: each is a validation failure under the field's name.
+    for body in ["title=&note=kept", "title=Holiday&title=", "note=kept"] {
+        let errors = match urlencoded(body).await {
+            Err(FrameworkError::Validation(errors)) => errors,
+            other => panic!("`{body}`: expected validation errors, got {other:?}"),
+        };
+        assert_eq!(key(&errors, "title"), "validation-required", "`{body}`");
+        assert_eq!(
+            errors.errors["title"][0].fallback, "The title field is required.",
+            "`{body}`"
+        );
+        assert_eq!(errors.errors.len(), 1, "`{body}`: {errors}");
+    }
+}
+
+#[tokio::test]
+async fn an_empty_urlencoded_value_is_null_for_an_optional_field() {
+    let form = match urlencoded("title=Holiday&note=&count=").await {
+        Ok(form) => form,
+        Err(error) => panic!("{error}"),
+    };
+    assert_eq!(form.title, "Holiday");
+    assert_eq!(form.note, None);
+    assert_eq!(form.count, None);
+}
+
+#[tokio::test]
+async fn a_repeated_urlencoded_name_keeps_its_last_value() {
+    let form = match urlencoded("title=&title=Holiday&note=&note=kept&count=1&count=2").await {
+        Ok(form) => form,
+        Err(error) => panic!("{error}"),
+    };
+    assert_eq!(form.title, "Holiday");
+    assert_eq!(form.note.as_deref(), Some("kept"));
+    assert_eq!(form.count, Some(2));
+}
+
+/// Every kind of field a url-encoded form request can fail on.
+#[derive(Debug, serde::Deserialize, validator::Validate, suprnova::FormRequestDerive)]
+struct UrlencodedTyped {
+    title: String,
+    count: u32,
+    ratio: f64,
+    active: bool,
+    note: Option<String>,
+    #[serde(default)]
+    remember: bool,
+}
+
+async fn urlencoded_typed(body: &str) -> Result<UrlencodedTyped, FrameworkError> {
+    let req =
+        crate::common::request_with_body("/", "application/x-www-form-urlencoded", body.as_bytes())
+            .await;
+    UrlencodedTyped::from_request(req).await
+}
+
+#[tokio::test]
+async fn a_urlencoded_form_reports_every_field_that_does_not_parse_under_its_name() {
+    let errors = match urlencoded_typed("count=abc&ratio=half&active=maybe&note=x").await {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {other:?}"),
+    };
+    assert_eq!(key(&errors, "title"), "validation-required");
+    assert_eq!(key(&errors, "count"), "validation-integer");
+    assert_eq!(key(&errors, "ratio"), "validation-numeric");
+    assert_eq!(key(&errors, "active"), "validation-boolean");
+    // An optional field and a `#[serde(default)]` one are not required.
+    assert_eq!(errors.errors.len(), 4, "{errors}");
+
+    // Every required field missing at once is reported at once.
+    let errors = match urlencoded_typed("note=x").await {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {other:?}"),
+    };
+    for field in ["title", "count", "ratio", "active"] {
+        assert_eq!(key(&errors, field), "validation-required", "{field}");
+    }
+    assert_eq!(errors.errors.len(), 4, "{errors}");
+
+    // A form that parses still extracts.
+    let form = match urlencoded_typed("title=t&count=3&ratio=0.5&active=true").await {
+        Ok(form) => form,
+        Err(error) => panic!("{error}"),
+    };
+    assert_eq!((form.count, form.active, form.remember), (3, true, false));
+    assert_eq!((form.ratio, form.note), (0.5, None));
+}
+
+#[derive(Debug, serde::Deserialize, validator::Validate)]
+struct JsonAddress {
+    street: String,
+}
+
+/// Every kind of field a JSON form request can fail on, nested ones too.
+#[derive(Debug, serde::Deserialize, validator::Validate, suprnova::FormRequestDerive)]
+struct JsonTyped {
+    title: String,
+    count: u32,
+    ratio: f64,
+    active: bool,
+    tags: Vec<u32>,
+    note: Option<String>,
+    address: JsonAddress,
+}
+
+async fn json_typed(body: &str) -> Result<JsonTyped, FrameworkError> {
+    let req = crate::common::request_with_body("/", "application/json", body.as_bytes()).await;
+    JsonTyped::from_request(req).await
+}
+
+#[tokio::test]
+async fn a_json_form_reports_every_field_that_does_not_parse_under_its_name() {
+    let errors = match json_typed(
+        r#"{"title": null, "count": "abc", "ratio": "x", "active": 1,
+            "tags": [1, "two"], "note": 5, "address": {}}"#,
+    )
+    .await
+    {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {other:?}"),
+    };
+    // `null` is a missing value, as Laravel's `required` reads it.
+    assert_eq!(key(&errors, "title"), "validation-required");
+    assert_eq!(key(&errors, "count"), "validation-integer");
+    assert_eq!(key(&errors, "ratio"), "validation-numeric");
+    assert_eq!(key(&errors, "active"), "validation-boolean");
+    assert_eq!(key(&errors, "tags.1"), "validation-integer");
+    assert_eq!(key(&errors, "note"), "validation-string");
+    assert_eq!(key(&errors, "address.street"), "validation-required");
+    assert_eq!(errors.errors.len(), 7, "{errors}");
+
+    // Fields left out entirely, every one of them at once.
+    let errors = match json_typed(r#"{"tags": []}"#).await {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {other:?}"),
+    };
+    for field in ["title", "count", "ratio", "active", "address"] {
+        assert_eq!(key(&errors, field), "validation-required", "{field}");
+    }
+    assert_eq!(errors.errors.len(), 5, "{errors}");
+
+    // A body that is not JSON at all is no field's failure.
+    match json_typed(r#"{"title": "#).await {
+        Err(FrameworkError::Domain { status_code, .. }) => assert_eq!(status_code, 422),
+        other => panic!("expected a parse error, got {other:?}"),
+    }
+
+    // A body that parses still extracts.
+    let form = match json_typed(
+        r#"{"title": "t", "count": 3, "ratio": 1, "active": true, "tags": [4],
+            "address": {"street": "Main"}}"#,
+    )
+    .await
+    {
+        Ok(form) => form,
+        Err(error) => panic!("{error}"),
+    };
+    assert_eq!((form.count, form.tags, form.note), (3, vec![4], None));
+    assert_eq!((form.ratio, form.active), (1.0, true));
+    assert_eq!(form.address.street, "Main");
+}
+
+async fn typed_form_handler(req: Request) -> Response {
+    let form = UrlencodedTyped::from_request(req).await?;
+    Ok(HttpResponse::json(json!({ "title": form.title })))
+}
+
+async fn typed_json_handler(req: Request) -> Response {
+    let form = JsonTyped::from_request(req).await?;
+    Ok(HttpResponse::json(json!({ "title": form.title })))
+}
+
+#[tokio::test]
+async fn an_inertia_form_request_gets_its_field_errors_back_in_props_errors() {
+    let slot = Arc::new(Mutex::new(Some(SessionData::new(
+        "sess-form-request".into(),
+        "csrf".into(),
+    ))));
+    let page = |req: Request| async move {
+        InertiaResponse::new("Profile/Edit")
+            .resolve(&req)
+            .await
+            .map_err(HttpResponse::from)
+    };
+    let app = App::with(
+        Router::new()
+            .post("/profile", typed_form_handler)
+            .get("/profile", page)
+            .post("/settings", typed_json_handler)
+            .get("/settings", page),
+        MiddlewareRegistry::new()
+            .append(SeededSessionScope(slot.clone()))
+            .append(InertiaValidationRedirectMiddleware::new()),
+    );
+
+    for (path, content_type, body) in [
+        (
+            "/profile",
+            "application/x-www-form-urlencoded",
+            "title=&count=abc&ratio=1&active=true",
+        ),
+        (
+            "/settings",
+            "application/json",
+            r#"{"count": "abc", "ratio": 1, "active": true, "tags": [], "address": {"street": "x"}}"#,
+        ),
+    ] {
+        let posted = send(
+            &app,
+            Outgoing::post(path, body.as_bytes().to_vec())
+                .content_type(content_type)
+                .header("X-Inertia", "true")
+                .header("Referer", format!("http://localhost{path}")),
+        )
+        .await;
+        assert_eq!(posted.status, 303, "{content_type}: {}", posted.text());
+        assert_eq!(
+            posted.headers.get("location").map(String::as_str),
+            Some(path)
+        );
+
+        slot.lock()
+            .expect("session slot")
+            .as_mut()
+            .expect("session")
+            .age_flash_data();
+        let shown = send(&app, Outgoing::get(path).header("X-Inertia", "true")).await;
+        assert_eq!(shown.status, 200, "{}", shown.text());
+        let errors = shown.json()["props"]["errors"].clone();
+        assert_eq!(
+            errors["title"], "The title field is required.",
+            "{content_type}: {errors}"
+        );
+        assert_eq!(
+            errors["count"], "The count field must be an integer.",
+            "{content_type}: {errors}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_precognitive_form_request_reports_the_fields_it_was_asked_about() {
+    let app = App::new(Router::new().post("/profile", typed_form_handler));
+    let ask = |only: &'static str| {
+        Outgoing::post("/profile", b"count=abc&ratio=1&active=true".to_vec())
+            .content_type("application/x-www-form-urlencoded")
+            .header("Precognition", "true")
+            .header("Precognition-Validate-Only", only)
+    };
+
+    // Asked about `count`, which does not parse: only its error comes back.
+    let reply = send(&app, ask("count")).await;
+    assert_eq!(reply.status, 422, "{}", reply.text());
+    assert_eq!(
+        first_message(&reply, "count"),
+        "The count field must be an integer."
+    );
+    assert!(!errors(&reply).contains_key("title"), "{}", reply.text());
+
+    // Asked about `ratio`, which parses: the form still cannot be checked
+    // while other fields do not parse, so it is not reported valid, and
+    // the fields in the way are named.
+    let reply = send(&app, ask("ratio")).await;
+    assert_eq!(reply.status, 422, "{}", reply.text());
+    assert_eq!(
+        first_message(&reply, "title"),
+        "The title field is required."
+    );
+}
+
+// ── An empty value is a present key holding null, as Laravel keeps it ──
+
+#[tokio::test]
+async fn an_empty_urlencoded_value_is_a_present_key_with_null() {
+    let req = crate::common::request_with_body(
+        "/",
+        "application/x-www-form-urlencoded",
+        b"name=Ada&bio=&tags[]=a&tags[]=&tags[]=b",
+    )
+    .await;
+    let form: Value = match req.form().await {
+        Ok(form) => form,
+        Err(error) => panic!("{error}"),
+    };
+    // A cleared field is told apart from one never sent.
+    assert_eq!(
+        form,
+        json!({ "name": "Ada", "bio": null, "tags": ["a", null, "b"] })
+    );
+}
+
+/// A list whose elements may be null, and one whose elements may not.
+#[derive(Debug, serde::Deserialize, validator::Validate, suprnova::FormRequestDerive)]
+struct UrlencodedLists {
+    #[serde(default)]
+    maybe: Vec<Option<u32>>,
+    #[serde(default)]
+    ids: Vec<u32>,
+}
+
+#[tokio::test]
+async fn a_null_list_element_is_none_or_a_missing_element() {
+    let read = |body: &'static str| async move {
+        let req = crate::common::request_with_body(
+            "/",
+            "application/x-www-form-urlencoded",
+            body.as_bytes(),
+        )
+        .await;
+        UrlencodedLists::from_request(req).await
+    };
+    let form = match read("maybe[]=3&maybe[]=&maybe[]=4").await {
+        Ok(form) => form,
+        Err(error) => panic!("{error}"),
+    };
+    assert_eq!(form.maybe, vec![Some(3), None, Some(4)]);
+    assert!(form.ids.is_empty());
+
+    // An element that cannot be null is required, under its own index.
+    let errors = match read("ids[]=3&ids[]=&ids[]=4").await {
+        Err(FrameworkError::Validation(errors)) => errors,
+        other => panic!("expected validation errors, got {other:?}"),
+    };
+    assert_eq!(key(&errors, "ids.1"), "validation-required");
+    assert_eq!(errors.errors.len(), 1, "{errors}");
+}
+
+#[tokio::test]
+async fn a_urlencoded_bool_reads_what_forms_send() {
+    for (sent, read) in [
+        ("1", true),
+        ("0", false),
+        ("true", true),
+        ("FALSE", false),
+        ("on", true),
+        ("Off", false),
+    ] {
+        let body = format!("title=t&count=1&ratio=1&active={sent}");
+        match urlencoded_typed(&body).await {
+            Ok(form) => assert_eq!(form.active, read, "`{sent}`"),
+            Err(error) => panic!("`{sent}`: {error}"),
+        }
+    }
+    for sent in ["yes", "2", " 1"] {
+        let body = format!("title=t&count=1&ratio=1&active={sent}");
+        let errors = match urlencoded_typed(&body).await {
+            Err(FrameworkError::Validation(errors)) => errors,
+            other => panic!("`{sent}`: expected validation errors, got {other:?}"),
+        };
+        assert_eq!(key(&errors, "active"), "validation-boolean", "`{sent}`");
+    }
+}
+
+#[tokio::test]
+async fn an_empty_part_of_a_list_that_cannot_hold_null_is_a_missing_element() {
+    let errors = typed_errors(form(&[
+        text_part("count", "1"),
+        text_part("ratio", "1"),
+        text_part("active", "1"),
+        text_part("address", "127.0.0.1"),
+        text_part("tags[]", "1"),
+        text_part("tags[]", ""),
+        text_part("tags[]", "3"),
+    ]))
+    .await;
+    assert_eq!(key(&errors, "tags.1"), "validation-required");
     assert_eq!(errors.errors.len(), 1, "{errors}");
 }

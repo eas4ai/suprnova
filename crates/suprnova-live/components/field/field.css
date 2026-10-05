@@ -1,12 +1,22 @@
 .sn-field {
   display: grid;
   gap: var(--sn-space-1);
-  margin-block-end: var(--sn-density-stack);
+}
+
+/* The space below it in a plain form. The selector weighs nothing, so a
+   container that spaces its parts with a gap clears it with any rule. */
+:where(.sn-field) {
+  margin-block-end: var(--sn-density-field-gap);
+}
+
+/* The 4px grid gap and this 2px margin put the label 6px above its control. */
+.sn-field > .sn-label {
+  margin-block-end: calc(var(--sn-space-1) / 2);
 }
 
 .sn-hint {
   margin: 0;
-  font-size: var(--sn-font-size-sm);
+  font-size: var(--sn-font-size-xs);
   color: var(--sn-color-text-muted);
 }
 
@@ -16,7 +26,7 @@
 
 .sn-error {
   display: block;
-  font-size: var(--sn-font-size-sm);
+  font-size: var(--sn-font-size-xs);
   color: var(--sn-color-danger);
 }
 

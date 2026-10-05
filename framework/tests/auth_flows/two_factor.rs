@@ -9,6 +9,7 @@
 
 use sea_orm_migration::prelude::*;
 use suprnova::auth_flows::two_factor::migration::Migration as TwoFactorMigration;
+use suprnova::auth_flows::two_factor::migration_attempts::Migration as TwoFactorAttemptsMigration;
 use suprnova::auth_flows::two_factor::migration_replay::Migration as TwoFactorReplayMigration;
 use suprnova::auth_flows::{TwoFactor, TwoFactorUser};
 use suprnova::testing::TestDatabase;
@@ -35,6 +36,8 @@ impl sea_orm_migration::MigratorTrait for TestMigrator {
         vec![
             Box::new(TwoFactorMigration),
             Box::new(TwoFactorReplayMigration),
+            Box::new(TwoFactorAttemptsMigration),
+            Box::new(suprnova::auth_flows::two_factor::migration_rotation::Migration),
             Box::new(CreateRememberTokensTable),
         ]
     }
@@ -160,6 +163,32 @@ fn totp_code_for(otpauth_url: &str) -> String {
         .unwrap()
 }
 
+/// The code an authenticator app shows at `unix_seconds`.
+fn totp_code_at(otpauth_url: &str, unix_seconds: i64) -> String {
+    use totp_rs::{Algorithm, Secret, TOTP};
+    let url = url::Url::parse(otpauth_url).unwrap();
+    let secret = url
+        .query_pairs()
+        .find(|(k, _)| k == "secret")
+        .map(|(_, v)| v.into_owned())
+        .expect("otpauth url must contain a secret query param");
+    let bytes = Secret::Encoded(secret).to_bytes().unwrap();
+    let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, bytes, None, "user".into()).unwrap();
+    totp.generate(<u64 as TryFrom<i64>>::try_from(unix_seconds).unwrap())
+}
+
+/// Confirm with the code of two minutes ago, on a clock set back to then.
+/// A confirmation uses its code up and claims that code's window, so
+/// confirming in the past leaves the current codes free for the proofs a
+/// test makes next.
+async fn confirm_earlier<U: TwoFactorUser>(user: &U, otpauth_url: &str) {
+    let earlier = chrono::Utc::now() - chrono::Duration::seconds(120);
+    let _clock = suprnova::testing::TestClock::travel_to(earlier);
+    TwoFactor::confirm(user, &totp_code_at(otpauth_url, earlier.timestamp()))
+        .await
+        .expect("confirm");
+}
+
 #[tokio::test]
 async fn start_challenge_sets_pending_and_clears_auth_user() {
     ensure_crypt();
@@ -277,8 +306,7 @@ async fn enrollment_round_trip() {
     );
 
     // Confirm with a real code derived from the otpauth URL.
-    let code = totp_code_for(&response.otpauth_url);
-    TwoFactor::confirm(&user, &code).await.unwrap();
+    confirm_earlier(&user, &response.otpauth_url).await;
 
     assert!(TwoFactor::is_enabled(&user).await.unwrap());
 
@@ -472,7 +500,7 @@ async fn recovery_code_consume_is_single_use() {
 }
 
 #[tokio::test]
-async fn re_enroll_invalidates_old_recovery_codes_and_resets_confirmed() {
+async fn re_enroll_invalidates_old_recovery_codes_once_confirmed() {
     ensure_crypt();
     let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
 
@@ -482,17 +510,16 @@ async fn re_enroll_invalidates_old_recovery_codes_and_resets_confirmed() {
     };
 
     let first = TwoFactor::enroll(&user).await.unwrap();
-    let confirm_code = totp_code_for(&first.otpauth_url);
-    TwoFactor::confirm(&user, &confirm_code).await.unwrap();
+    confirm_earlier(&user, &first.otpauth_url).await;
     assert!(TwoFactor::is_enabled(&user).await.unwrap());
 
     // Re-enroll: proof required because the existing enrollment is
     // confirmed. A live TOTP code from the current secret satisfies
-    // the proof check; the prior row is then overwritten and
-    // confirmed_at cleared.
+    // the proof check; the new secret then waits as a pending rotation
+    // while the confirmed one keeps gating.
     let proof = totp_code_for(&first.otpauth_url);
     let second = TwoFactor::re_enroll(&user, &proof).await.unwrap();
-    assert!(!TwoFactor::is_enabled(&user).await.unwrap());
+    assert!(TwoFactor::is_enabled(&user).await.unwrap());
 
     // Sanity: the new enrollment must produce a different secret /
     // codes than the first.
@@ -660,8 +687,7 @@ async fn consuming_all_codes_clears_recovery_column() {
     };
 
     let response = TwoFactor::enroll(&user).await.unwrap();
-    let code = totp_code_for(&response.otpauth_url);
-    TwoFactor::confirm(&user, &code).await.unwrap();
+    confirm_earlier(&user, &response.otpauth_url).await;
 
     // Drain every code.
     for c in &response.recovery_codes {
@@ -688,11 +714,10 @@ async fn verify_rejects_replay_within_same_timestep() {
     };
 
     let response = TwoFactor::enroll(&user).await.unwrap();
-    let code = totp_code_for(&response.otpauth_url);
 
-    // Confirm enrollment with the code - this also exercises check_code
-    // but the verify-replay path only kicks in for `verify()`.
-    TwoFactor::confirm(&user, &code).await.unwrap();
+    // Confirm enrollment with an earlier code; the confirmation uses its
+    // own code up, which `the_confirmation_code_cannot_be_used_again` pins.
+    confirm_earlier(&user, &response.otpauth_url).await;
 
     // First verify after confirmation accepts the current code.
     let live = totp_code_for(&response.otpauth_url);
@@ -743,9 +768,7 @@ async fn concurrent_verifies_in_same_timestep_elect_one_winner() {
     };
 
     let response = TwoFactor::enroll(&user).await.unwrap();
-    TwoFactor::confirm(&user, &totp_code_for(&response.otpauth_url))
-        .await
-        .unwrap();
+    confirm_earlier(&user, &response.otpauth_url).await;
 
     let live = totp_code_for(&response.otpauth_url);
     let (r1, r2, r3, r4, r5) = tokio::join!(
@@ -828,8 +851,9 @@ async fn re_enroll_with_valid_recovery_code_succeeds() {
     let recovery_proof = resp1.recovery_codes[0].clone();
     let resp2 = TwoFactor::re_enroll(&user, &recovery_proof).await.unwrap();
 
-    // New enrollment is pending; old enrollment cleared.
-    assert!(!TwoFactor::is_enabled(&user).await.unwrap());
+    // The new secret waits as a pending rotation; the confirmed one
+    // keeps gating until it is confirmed.
+    assert!(TwoFactor::is_enabled(&user).await.unwrap());
     assert_ne!(resp1.otpauth_url, resp2.otpauth_url);
 
     // Same recovery code can't be reused (consumed during re_enroll +
@@ -919,9 +943,7 @@ async fn verify_stamps_forward_skew_edge_to_block_next_step_replay() {
     };
 
     let resp = TwoFactor::enroll(&user).await.unwrap();
-    TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
-        .await
-        .unwrap();
+    confirm_earlier(&user, &resp.otpauth_url).await;
 
     let before_step = chrono::Utc::now().timestamp() / 30;
     let live = totp_code_for(&resp.otpauth_url);
@@ -978,9 +1000,7 @@ async fn verify_replay_state_resets_on_re_enrollment() {
 
     // Enroll, confirm, verify (sets last_used_timestep).
     let resp1 = TwoFactor::enroll(&user).await.unwrap();
-    TwoFactor::confirm(&user, &totp_code_for(&resp1.otpauth_url))
-        .await
-        .unwrap();
+    confirm_earlier(&user, &resp1.otpauth_url).await;
     let live1 = totp_code_for(&resp1.otpauth_url);
     assert!(TwoFactor::verify(&user, &live1).await.unwrap());
 
@@ -993,13 +1013,507 @@ async fn verify_replay_state_resets_on_re_enrollment() {
     // replay check we just installed).
     let recovery_proof = resp1.recovery_codes[0].clone();
     let resp2 = TwoFactor::re_enroll(&user, &recovery_proof).await.unwrap();
-    TwoFactor::confirm(&user, &totp_code_for(&resp2.otpauth_url))
-        .await
-        .unwrap();
+    confirm_earlier(&user, &resp2.otpauth_url).await;
 
     let live2 = totp_code_for(&resp2.otpauth_url);
     assert!(
         TwoFactor::verify(&user, &live2).await.unwrap(),
         "re-enrollment must reset replay state so verify succeeds against the new secret"
     );
+}
+
+// ---- Brute-force lockout without a Magnetar engine -------------------------
+//
+// This file runs with no Magnetar engine installed. The second factor keeps
+// its own attempt counter, so the lockout holds here too.
+
+async fn enrolled_user(id: &str) -> (FakeUser, suprnova::auth_flows::EnrollmentResponse) {
+    let user = FakeUser {
+        id: id.into(),
+        email: format!("{id}@example.com"),
+    };
+    let resp = TwoFactor::enroll(&user).await.expect("enroll");
+    TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .expect("confirm");
+    (user, resp)
+}
+
+/// The manual gates login on `verify`. Without an engine it must still
+/// stop after the threshold and refuse even the right code.
+#[tokio::test]
+async fn verify_locks_without_a_magnetar_engine() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let (user, resp) = enrolled_user("no-engine-verify").await;
+
+    for _ in 0..5 {
+        assert!(!TwoFactor::verify(&user, "000000").await.unwrap());
+    }
+    let live = totp_code_for(&resp.otpauth_url);
+    let error = TwoFactor::verify(&user, &live)
+        .await
+        .expect_err("a locked second factor refuses the right code");
+    assert_eq!(error.status_code(), 429);
+    let error = TwoFactor::consume_recovery_code(&user, &resp.recovery_codes[0])
+        .await
+        .expect_err("recovery codes share the lock");
+    assert_eq!(error.status_code(), 429);
+}
+
+/// Parallel wrong confirmations are each reserved before their code is
+/// read, so no more than the threshold is evaluated.
+#[tokio::test]
+async fn parallel_wrong_confirmations_evaluate_at_most_the_threshold() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let user = FakeUser {
+        id: "parallel-confirm".into(),
+        email: "parallel-confirm@example.com".into(),
+    };
+    TwoFactor::enroll(&user).await.expect("enroll");
+
+    let guesses = (0..8).map(|_| TwoFactor::confirm(&user, "000000"));
+    let outcomes = futures::future::join_all(guesses).await;
+    let statuses: Vec<u16> = outcomes
+        .iter()
+        .map(|outcome| outcome.as_ref().err().map_or(200, |e| e.status_code()))
+        .collect();
+    assert_eq!(
+        statuses.iter().filter(|status| **status == 401).count(),
+        5,
+        "only the threshold of guesses is evaluated: {statuses:?}"
+    );
+    assert_eq!(
+        statuses.iter().filter(|status| **status == 429).count(),
+        3,
+        "every guess past it is refused: {statuses:?}"
+    );
+}
+
+/// Re-enrollment and recovery-code rotation take a proof too, and share the
+/// counter: wrong proofs lock both, and the right proof is then refused.
+#[tokio::test]
+async fn re_enroll_and_regenerate_share_the_lock() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let (user, resp) = enrolled_user("proof-paths-lock").await;
+
+    for _ in 0..3 {
+        let error = TwoFactor::re_enroll(&user, "000000")
+            .await
+            .expect_err("a wrong proof is rejected");
+        assert_eq!(error.status_code(), 401);
+    }
+    for _ in 0..2 {
+        let error = TwoFactor::regenerate_recovery_codes(&user, "000000")
+            .await
+            .expect_err("a wrong proof is rejected");
+        assert_eq!(error.status_code(), 401);
+    }
+    let error = TwoFactor::regenerate_recovery_codes(&user, &resp.recovery_codes[0])
+        .await
+        .expect_err("locked");
+    assert_eq!(error.status_code(), 429);
+    let error = TwoFactor::re_enroll(&user, &resp.recovery_codes[0])
+        .await
+        .expect_err("locked");
+    assert_eq!(error.status_code(), 429);
+}
+
+/// A lockout store that cannot record an attempt closes every proof path
+/// with 503 instead of evaluating the code unthrottled.
+#[tokio::test]
+async fn an_unavailable_attempt_store_fails_closed() {
+    ensure_crypt();
+    let db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let (user, resp) = enrolled_user("store-down").await;
+    let pending = FakeUser {
+        id: "store-down-pending".into(),
+        email: "store-down-pending@example.com".into(),
+    };
+    TwoFactor::enroll(&pending).await.expect("enroll pending");
+    db.execute_unprepared("DROP TABLE two_factor_attempts")
+        .await
+        .unwrap();
+
+    let live = totp_code_for(&resp.otpauth_url);
+    let statuses = [
+        TwoFactor::verify(&user, &live)
+            .await
+            .err()
+            .map(|e| e.status_code()),
+        TwoFactor::consume_recovery_code(&user, &resp.recovery_codes[0])
+            .await
+            .err()
+            .map(|e| e.status_code()),
+        TwoFactor::re_enroll(&user, &live)
+            .await
+            .err()
+            .map(|e| e.status_code()),
+        TwoFactor::regenerate_recovery_codes(&user, &live)
+            .await
+            .err()
+            .map(|e| e.status_code()),
+        TwoFactor::confirm(&pending, "000000")
+            .await
+            .err()
+            .map(|e| e.status_code()),
+    ];
+    assert_eq!(statuses, [Some(503); 5]);
+}
+
+// ---- Enrollment writes conditional on what was read -------------------------
+//
+// `confirm` reads the enrollment, reserves an attempt, checks the code, then
+// writes. A trigger on the attempt reservation lands a concurrent change at
+// exactly that point, between the read and the write.
+
+async fn on_attempt_reservation(db: &TestDatabase, change: &str) {
+    db.execute_unprepared(&format!(
+        "CREATE TRIGGER concurrent_change AFTER INSERT ON two_factor_attempts \
+         BEGIN {change}; END"
+    ))
+    .await
+    .unwrap();
+}
+
+async fn stored_secret(db: &TestDatabase, user_id: &str) -> String {
+    use sea_orm::EntityTrait;
+    suprnova::auth_flows::two_factor::entity::Entity::find_by_id(user_id.to_owned())
+        .one(db.conn())
+        .await
+        .unwrap()
+        .expect("enrollment row")
+        .secret
+}
+
+/// A second enrollment replaces the secret after `confirm` read it: the code
+/// proved possession of the old secret only, so nothing is confirmed.
+#[tokio::test]
+async fn a_confirmation_cannot_bless_a_secret_replaced_while_it_ran() {
+    ensure_crypt();
+    let db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let user = FakeUser {
+        id: "replaced-mid-confirm".into(),
+        email: "replaced-mid-confirm@example.com".into(),
+    };
+    let resp = TwoFactor::enroll(&user).await.expect("enroll");
+    let other = suprnova::Crypt::encrypt_string(
+        suprnova::CryptPurpose::TwoFactorSecret,
+        "JBSWY3DPEHPK3PXP",
+    )
+    .unwrap();
+    on_attempt_reservation(
+        &db,
+        &format!(
+            "UPDATE two_factor_credentials SET secret = '{other}' WHERE user_id = '{}'",
+            user.id
+        ),
+    )
+    .await;
+
+    let error = TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .expect_err("the enrollment changed after it was read");
+    assert_eq!(error.status_code(), 409);
+    assert!(
+        !TwoFactor::is_enabled(&user).await.unwrap(),
+        "an unproven secret must stay unconfirmed"
+    );
+    assert_eq!(stored_secret(&db, &user.id).await, other);
+}
+
+/// Another confirmation of the same enrollment lands while this one runs:
+/// the enrollment is confirmed once, and `TwoFactorEnrolled` fires once.
+#[tokio::test]
+async fn a_confirmation_racing_another_confirms_once() {
+    ensure_crypt();
+    let db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let _events = suprnova::EventFacade::fake();
+    let user = FakeUser {
+        id: "double-confirm".into(),
+        email: "double-confirm@example.com".into(),
+    };
+    let resp = TwoFactor::enroll(&user).await.expect("enroll");
+    on_attempt_reservation(
+        &db,
+        &format!(
+            "UPDATE two_factor_credentials SET confirmed_at = updated_at WHERE user_id = '{}'",
+            user.id
+        ),
+    )
+    .await;
+
+    let error = TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .expect_err("the enrollment was confirmed meanwhile");
+    assert_eq!(error.status_code(), 409);
+    suprnova::events::testing::assert_not_dispatched::<
+        suprnova::auth_flows::events::TwoFactorEnrolled,
+    >(|_| true);
+}
+
+/// `enroll` decides whether it may replace the row in the same statement
+/// that replaces it, so a confirmed enrollment - even one confirmed after
+/// any earlier read - is never replaced without `re_enroll`'s proof.
+#[tokio::test]
+async fn enroll_never_replaces_a_confirmed_secret() {
+    ensure_crypt();
+    let db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let user = FakeUser {
+        id: "confirmed-kept".into(),
+        email: "confirmed-kept@example.com".into(),
+    };
+    let resp = TwoFactor::enroll(&user).await.expect("enroll");
+    TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .expect("confirm");
+    let confirmed = stored_secret(&db, &user.id).await;
+
+    let error = TwoFactor::enroll(&user).await.expect_err("already enabled");
+    assert_eq!(error.status_code(), 409);
+    assert_eq!(stored_secret(&db, &user.id).await, confirmed);
+    assert!(TwoFactor::is_enabled(&user).await.unwrap());
+}
+
+/// The threshold is configuration: `TWO_FACTOR_MAX_ATTEMPTS=3` locks the
+/// second factor at the third failure.
+#[test]
+fn a_lowered_threshold_locks_at_that_count() {
+    let _env = crate::env_lock::lock_env();
+    let _snap = crate::env_snapshot::EnvSnapshot::capture(&["TWO_FACTOR_MAX_ATTEMPTS"]);
+    crate::env_snapshot::set_env("TWO_FACTOR_MAX_ATTEMPTS", Some("3"));
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async {
+            ensure_crypt();
+            let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+            let (user, resp) = enrolled_user("lowered-threshold").await;
+
+            for _ in 0..3 {
+                assert!(!TwoFactor::verify(&user, "000000").await.unwrap());
+            }
+            let error = TwoFactor::verify(&user, &totp_code_for(&resp.otpauth_url))
+                .await
+                .expect_err("the fourth attempt is refused at a threshold of 3");
+            assert_eq!(error.status_code(), 429);
+        });
+}
+
+/// A lockout built in code and bound in the container wins over the
+/// environment.
+#[tokio::test]
+async fn a_lockout_bound_in_code_sets_the_threshold() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    suprnova::testing::TestContainer::singleton(
+        suprnova::auth_flows::TwoFactorLockout::new(2, 15).expect("valid lockout"),
+    );
+    let (user, resp) = enrolled_user("code-threshold").await;
+
+    for _ in 0..2 {
+        assert!(!TwoFactor::verify(&user, "000000").await.unwrap());
+    }
+    let error = TwoFactor::verify(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .expect_err("the third attempt is refused at a threshold of 2");
+    assert_eq!(error.status_code(), 429);
+}
+
+/// An application that upgraded without adding the attempt-counter
+/// migration gets 503 from every proof path. The log says why, naming the
+/// migration to add.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_missing_attempt_table_logs_the_migration_to_add() {
+    ensure_crypt();
+    let db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let (user, resp) = enrolled_user("missing-attempt-table").await;
+    db.execute_unprepared("DROP TABLE two_factor_attempts")
+        .await
+        .unwrap();
+
+    let error = TwoFactor::verify(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .expect_err("no attempt can be counted");
+    assert_eq!(error.status_code(), 503);
+    assert!(
+        logs_contain("migration_attempts"),
+        "the log names the missing migration"
+    );
+}
+
+// ---- A confirmation uses its code up ----------------------------------------
+
+/// The code that confirmed an enrollment is spent: replaying it, at sign-in
+/// or anywhere else a code is checked, is refused like any other replay.
+#[tokio::test]
+async fn the_confirmation_code_cannot_be_used_again() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let user = FakeUser {
+        id: "confirmation-code-spent".into(),
+        email: "confirmation-code-spent@example.com".into(),
+    };
+    let resp = TwoFactor::enroll(&user).await.expect("enroll");
+    let code = totp_code_for(&resp.otpauth_url);
+    TwoFactor::confirm(&user, &code).await.expect("confirm");
+
+    assert!(
+        !TwoFactor::verify(&user, &code).await.unwrap(),
+        "the confirmation code is not accepted a second time"
+    );
+}
+
+/// The confirmation committed, then the attempt bookkeeping after it
+/// failed. The enrollment is confirmed all the same, so the caller hears
+/// so and `TwoFactorEnrolled` fires; an error here would report a live
+/// second factor as not enabled.
+#[tokio::test]
+async fn a_committed_confirmation_survives_a_failed_attempt_settle() {
+    ensure_crypt();
+    let db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let _events = suprnova::EventFacade::fake();
+    let user = FakeUser {
+        id: "confirmed-then-unsettled".into(),
+        email: "confirmed-then-unsettled@example.com".into(),
+    };
+    let resp = TwoFactor::enroll(&user).await.expect("enroll");
+    db.execute_unprepared(
+        "CREATE TRIGGER refuse_attempt_settle BEFORE DELETE ON two_factor_attempts \
+         BEGIN SELECT RAISE(ABORT, 'injected attempt settle failure'); END",
+    )
+    .await
+    .unwrap();
+
+    TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .expect("a committed confirmation is reported as one");
+
+    assert!(TwoFactor::is_enabled(&user).await.unwrap());
+    assert_eq!(
+        suprnova::events::testing::dispatched_count::<
+            suprnova::auth_flows::events::TwoFactorEnrolled,
+        >(|enrolled| enrolled.user_id == user.id),
+        1
+    );
+}
+
+// ---- A rotation keeps the confirmed secret until the new one is confirmed ---
+
+/// `re_enroll` with proof starts a rotation. Until the new secret is
+/// confirmed, the confirmed one keeps gating sign-in: a rotation nobody
+/// finishes must not leave the account without a second factor.
+#[tokio::test]
+async fn a_rotation_keeps_the_confirmed_secret_gating_until_it_is_confirmed() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let user = FakeUser {
+        id: "rotation-gates".into(),
+        email: "rotation-gates@example.com".into(),
+    };
+    let first = TwoFactor::enroll(&user).await.expect("enroll");
+    confirm_earlier(&user, &first.otpauth_url).await;
+
+    let second = TwoFactor::re_enroll(&user, &first.recovery_codes[0])
+        .await
+        .expect("rotate with a recovery code as proof");
+
+    assert!(
+        TwoFactor::is_enabled(&user).await.unwrap(),
+        "the confirmed secret still gates sign-in"
+    );
+    assert!(
+        !TwoFactor::verify(&user, &totp_code_for(&second.otpauth_url))
+            .await
+            .unwrap(),
+        "the unconfirmed secret proves nothing yet"
+    );
+    assert!(
+        TwoFactor::verify(&user, &totp_code_for(&first.otpauth_url))
+            .await
+            .unwrap(),
+        "the confirmed secret still signs in"
+    );
+
+    // Confirming the new secret finishes the rotation: it gates from now
+    // on, and the old secret and its recovery codes are gone.
+    confirm_earlier(&user, &second.otpauth_url).await;
+    assert!(TwoFactor::is_enabled(&user).await.unwrap());
+    assert!(
+        TwoFactor::verify(&user, &totp_code_for(&second.otpauth_url))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !TwoFactor::consume_recovery_code(&user, &first.recovery_codes[1])
+            .await
+            .unwrap(),
+        "the old recovery codes went with the old secret"
+    );
+    assert!(
+        TwoFactor::consume_recovery_code(&user, &second.recovery_codes[0])
+            .await
+            .unwrap()
+    );
+}
+
+/// `enroll` takes no proof, so it must not replace a pending rotation: that
+/// would hand the second factor to whoever holds the session.
+#[tokio::test]
+async fn enroll_cannot_overwrite_a_pending_rotation() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let user = FakeUser {
+        id: "rotation-kept".into(),
+        email: "rotation-kept@example.com".into(),
+    };
+    let first = TwoFactor::enroll(&user).await.expect("enroll");
+    confirm_earlier(&user, &first.otpauth_url).await;
+    let second = TwoFactor::re_enroll(&user, &first.recovery_codes[0])
+        .await
+        .expect("rotate");
+
+    let error = TwoFactor::enroll(&user)
+        .await
+        .expect_err("no proof, no new enrollment");
+    assert_eq!(error.status_code(), 409);
+
+    // The rotation the proof started is the one that confirms.
+    confirm_earlier(&user, &second.otpauth_url).await;
+    assert!(
+        TwoFactor::verify(&user, &totp_code_for(&second.otpauth_url))
+            .await
+            .unwrap()
+    );
+}
+
+/// Every attempt and rotation row keys the user id in a column of 255
+/// characters, so enrollment refuses a longer id on every engine instead
+/// of enrolling it and answering 503 at every proof.
+#[tokio::test]
+async fn enrollment_refuses_a_user_id_longer_than_255_characters() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let too_long = FakeUser {
+        id: "u".repeat(256),
+        email: "long-id@example.com".into(),
+    };
+    let error = TwoFactor::enroll(&too_long)
+        .await
+        .expect_err("a 256-character user id is refused");
+    assert_eq!(error.status_code(), 422);
+    assert!(!TwoFactor::is_enabled(&too_long).await.unwrap());
+
+    let longest = FakeUser {
+        id: "u".repeat(255),
+        email: "longest-id@example.com".into(),
+    };
+    TwoFactor::enroll(&longest)
+        .await
+        .expect("255 characters fit");
 }

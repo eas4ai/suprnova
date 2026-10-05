@@ -337,8 +337,10 @@ async fn unregistered_mount_selection_is_concealed_before_snapshot_or_component_
 async fn a_small_json_entry_limit_assembles_the_runtime() {
     ensure_crypt();
     let _container = suprnova::container::testing::TestContainer::fake();
-    suprnova::App::init();
-    suprnova::App::singleton(
+    // Bound in this test's container, which ends with the test: a 16-entry
+    // limit left in the process container broke the runtime of every later
+    // test whose snapshots are larger.
+    suprnova::container::testing::TestContainer::singleton(
         suprnova::live::LiveConfig::builder()
             .max_json_entries(16)
             .build()

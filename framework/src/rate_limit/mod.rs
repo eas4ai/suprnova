@@ -288,7 +288,22 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
 
 use crate::Request;
 use crate::http::{HttpResponse, Response};
+use std::cell::RefCell;
 use std::sync::Arc;
+
+tokio::task_local! {
+    /// The identity buckets [`identity_key`] names beside the key it
+    /// returns, collected while [`RateLimitMiddleware`] computes one
+    /// request's key.
+    ///
+    /// The key function returns one string, the bucket an ambiguous request
+    /// shares with every other one. That request must also be refused by,
+    /// and counted against, the bucket of each identity it names, or an
+    /// address whose own bucket is spent gets one more attempt through the
+    /// shared bucket. The middleware opens this scope around the key
+    /// function and acquires every bucket collected in it.
+    static NAMED_BUCKETS: RefCell<Vec<String>>;
+}
 
 /// Build a rate-limit key that identifies the **account being acted on**,
 /// not the caller acting on it.
@@ -310,12 +325,33 @@ use std::sync::Arc;
 ///
 /// # Where the identity is read from
 ///
-/// `field` is looked up in the query string first, then in a buffered
-/// form body - so one key function serves `POST /resend?email=…` and a
-/// form-encoded `POST /password/request` alike. Reading the body
-/// requires
-/// [`RateLimitMiddleware::key_reads_body`]; without it the body half is
-/// simply skipped.
+/// `field` is read from the query string and from a buffered body - a
+/// form field, or a top-level string field of a JSON object - so one key
+/// function serves `POST /resend?email=…`, a form-encoded
+/// `POST /password/request` and a JSON login alike. Reading the body
+/// requires [`RateLimitMiddleware::key_reads_body`]; without it the body
+/// half is simply skipped. A blank value in one place does not hide the
+/// other, and a JSON field that is no string (a number, an array, an
+/// object) names nobody.
+///
+/// # Ambiguous requests
+///
+/// A handler reads the identity from one place, and the key function
+/// cannot know which. If the query string and the body name two different
+/// identities, trusting either would let a caller put the real address
+/// where the handler reads it and a fresh decoy where the key does, buying
+/// a new bucket per decoy. Such a request is keyed on one bucket per
+/// `prefix` and `field` that every ambiguous request shares, so changing
+/// the decoy buys nothing. No legitimate client sends two different
+/// addresses, so the shared bucket only ever holds attempts to evade the
+/// limit. The same address in both places, after normalisation, is one
+/// identity.
+///
+/// Inside [`RateLimitMiddleware`], an ambiguous request is also refused by,
+/// and counted against, the bucket of each identity it names. Otherwise the
+/// shared bucket would be an extra quota: once an address had spent its
+/// own bucket, a request adding a decoy beside it would still get through.
+/// Called anywhere else, this function only returns the shared key.
 ///
 /// # Normalisation and hashing
 ///
@@ -358,18 +394,35 @@ use std::sync::Arc;
 /// ```
 pub fn identity_key(request: &Request, field: &str, prefix: &str) -> String {
     match read_identity(request, field) {
-        Some(value) if !value.trim().is_empty() => {
-            let normalised = value.trim().to_lowercase();
-            format!("{prefix}:{field}:{}", hashed_identity(&normalised))
+        Identity::Named(value) => named_identity_key(prefix, field, &value),
+        // Two different identities - one bucket for every such request,
+        // so a varying decoy cannot open fresh ones. The middleware also
+        // acquires the bucket of each identity named.
+        Identity::Ambiguous { query, body } => {
+            let named = [
+                named_identity_key(prefix, field, &query),
+                named_identity_key(prefix, field, &body),
+            ];
+            let _ = NAMED_BUCKETS.try_with(|buckets| buckets.borrow_mut().extend(named));
+            format!("{prefix}:{field}-ambiguous")
         }
         // No identity to key on - fall back to the caller, so the request
         // is still throttled by *something*. The `-absent` marker keeps
         // this out of any co-mounted per-IP limiter's bucket.
-        _ => format!(
+        Identity::Absent => format!(
             "{prefix}:{field}-absent:ip:{}",
             request.ip().unwrap_or_else(|| "anon".into())
         ),
     }
+}
+
+/// The bucket of the identity `value` names in `field`: normalised, then
+/// hashed (see [`identity_key`]).
+fn named_identity_key(prefix: &str, field: &str, value: &str) -> String {
+    format!(
+        "{prefix}:{field}:{}",
+        hashed_identity(&normalise_identity(value))
+    )
 }
 
 /// Does this request name an identity to key on?
@@ -397,17 +450,75 @@ pub fn identity_key(request: &Request, field: &str, prefix: &str) -> String {
 /// Shares [`identity_key`]'s lookup exactly, so the two cannot disagree
 /// about whether a field is present.
 pub fn names_identity(request: &Request, field: &str) -> bool {
-    read_identity(request, field).is_some()
+    !matches!(read_identity(request, field), Identity::Absent)
 }
 
-/// Query string first, then a buffered form body. `None` for absent or
-/// blank - a blank value is not an identity, and treating it as one
-/// would hand every caller who sends `field=` the same free bucket.
-fn read_identity(request: &Request, field: &str) -> Option<String> {
-    request
-        .query_param(field)
-        .or_else(|| request.cached_form_field(field))
-        .filter(|value| !value.trim().is_empty())
+/// What a request says about the identity in one field.
+enum Identity {
+    /// One identity: from the query string, the body, or both agreeing.
+    Named(String),
+    /// The query string and the body name two different identities.
+    Ambiguous {
+        /// The identity the query string names.
+        query: String,
+        /// The identity the body names.
+        body: String,
+    },
+    /// Neither place names one.
+    Absent,
+}
+
+/// Read `field` from the query string and from a buffered body (see
+/// [`body_field`]).
+///
+/// Blank counts as absent - a blank value is not an identity, and treating
+/// it as one would hand every caller who sends `field=` the same free
+/// bucket. Each place is checked on its own: a blank `?field=` used to end
+/// the lookup before the body, so the address the handler acted on went
+/// unkeyed and `names_identity` stood the limiter aside.
+fn read_identity(request: &Request, field: &str) -> Identity {
+    let present = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+    let query = present(request.query_param(field));
+    let body = present(body_field(request, field));
+    match (query, body) {
+        (Some(query), Some(body)) if normalise_identity(&query) != normalise_identity(&body) => {
+            Identity::Ambiguous { query, body }
+        }
+        (Some(value), _) | (None, Some(value)) => Identity::Named(value),
+        (None, None) => Identity::Absent,
+    }
+}
+
+/// `field` from a buffered body: a form field, or a top-level string field
+/// of a JSON object.
+///
+/// A JSON route used to have no body identity at all. It was keyed on the
+/// caller's IP, and a `?field=` decoy moved each request into a fresh
+/// bucket while the handler acted on the address in the JSON. Only a
+/// top-level string counts, because that is what a handler deserialises
+/// into a `String` field; a repeated key resolves to its last value, as
+/// `serde_json` reads it.
+fn body_field(request: &Request, field: &str) -> Option<String> {
+    if let Some(value) = request.cached_form_field(field) {
+        return Some(value);
+    }
+    if !request.is_json() {
+        return None;
+    }
+    let bytes = request.cached_body()?;
+    match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(serde_json::Value::Object(mut object)) => match object.remove(field) {
+            Some(serde_json::Value::String(value)) => Some(value),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Trimmed and lowercased, because `Alice@Example.com` and
+/// `alice@example.com` reach the same mailbox.
+fn normalise_identity(value: &str) -> String {
+    value.trim().to_lowercase()
 }
 
 /// Hex of the first 16 bytes of SHA-256. Not a secret - a stable,
@@ -723,59 +834,66 @@ where
             return next(request).await;
         }
 
-        let key = (self.key_fn)(&request);
-        match self.limiter.try_acquire(&key, &self.config).await {
-            Ok(true) => {
-                let mut request = request;
-                request.record_live_security_check(
-                    crate::live::attestation::SecurityCheck::RateLimit,
-                    None,
-                );
-                next(request).await
-            }
-            Ok(false) => {
-                // Compute how long the caller must wait before trying again.
-                let secs = self
-                    .limiter
-                    .retry_after(&key, &self.config)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                Err(HttpResponse::text("429 Too Many Requests")
-                    .status(429)
-                    .header("retry-after", secs.to_string()))
-            }
-            // The limiter backend itself errored (e.g. Redis unreachable) -
-            // it could not make a decision. Behavior is governed by the
-            // configured `BackendErrorPolicy`. Either way the error is now
-            // logged (it was previously swallowed silently): `warn` when
-            // failing open since it self-limits to backend outages, `error`
-            // when failing closed since that path actively rejects live
-            // traffic.
-            Err(e) => match self.on_backend_error {
-                BackendErrorPolicy::FailOpen => {
-                    tracing::warn!(
-                        error = %e,
-                        key = %key,
-                        "rate limiter backend error; failing open (request passed through)"
-                    );
-                    next(request).await
+        // The key, then every identity bucket `identity_key` named for an
+        // ambiguous request (see `NAMED_BUCKETS`). The request passes only
+        // when each bucket admits it, and the first refusal decides.
+        let (key, named) = NAMED_BUCKETS.sync_scope(RefCell::new(Vec::new()), || {
+            let key = (self.key_fn)(&request);
+            (key, NAMED_BUCKETS.with(RefCell::take))
+        });
+        for key in std::iter::once(key).chain(named) {
+            match self.limiter.try_acquire(&key, &self.config).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    // Compute how long the caller must wait before trying again.
+                    let secs = self
+                        .limiter
+                        .retry_after(&key, &self.config)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    return Err(HttpResponse::text("429 Too Many Requests")
+                        .status(429)
+                        .header("retry-after", secs.to_string()));
                 }
-                BackendErrorPolicy::FailClosed => {
-                    tracing::error!(
-                        error = %e,
-                        key = %key,
-                        "rate limiter backend error; failing closed with 503"
-                    );
-                    Err(HttpResponse::text("503 Service Unavailable")
-                        .status(503)
-                        .header("retry-after", "1")
-                        .with_error_report_from(&e))
+                // The limiter backend itself errored (e.g. Redis unreachable) -
+                // it could not make a decision. Behavior is governed by the
+                // configured `BackendErrorPolicy`. Either way the error is now
+                // logged (it was previously swallowed silently): `warn` when
+                // failing open since it self-limits to backend outages, `error`
+                // when failing closed since that path actively rejects live
+                // traffic.
+                Err(e) => {
+                    return match self.on_backend_error {
+                        BackendErrorPolicy::FailOpen => {
+                            tracing::warn!(
+                                error = %e,
+                                key = %key,
+                                "rate limiter backend error; failing open (request passed through)"
+                            );
+                            next(request).await
+                        }
+                        BackendErrorPolicy::FailClosed => {
+                            tracing::error!(
+                                error = %e,
+                                key = %key,
+                                "rate limiter backend error; failing closed with 503"
+                            );
+                            Err(HttpResponse::text("503 Service Unavailable")
+                                .status(503)
+                                .header("retry-after", "1")
+                                .with_error_report_from(&e))
+                        }
+                    };
                 }
-            },
+            }
         }
+        let mut request = request;
+        request
+            .record_live_security_check(crate::live::attestation::SecurityCheck::RateLimit, None);
+        next(request).await
     }
 }
 

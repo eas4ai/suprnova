@@ -105,6 +105,10 @@ impl Event for PasswordResetCompleted {
 /// `failed_attempts` is the count at the moment of lock - useful when
 /// the threshold is configurable and the listener wants to log how
 /// many attempts triggered this specific lock.
+///
+/// The second factor has a counter of its own: the
+/// `crate::auth_flows::TwoFactor` proof paths fire this event once when
+/// wrong codes lock them, with the email the caller supplied.
 #[derive(Debug, Clone)]
 pub struct AccountLocked {
     /// Email of the locked account.
@@ -122,7 +126,8 @@ impl Event for AccountLocked {
 /// Fires when an administrator (or another flow such as a successful
 /// password reset) forcibly unlocks an account that was previously
 /// locked due to too many failed login attempts. See
-/// `crate::auth_flows::BruteForce::unlock_account`.
+/// `crate::auth_flows::BruteForce::unlock_account`, and
+/// `crate::auth_flows::TwoFactor::unlock` for the second factor.
 ///
 /// The event is **only** emitted when `unlock_account` reports that
 /// the account had been locked; a no-op unlock on an already-unlocked

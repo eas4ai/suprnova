@@ -38,6 +38,8 @@ suprnova::queue::worker::register_job::<SendWelcomeEmail>();
 Queue::push(SendWelcomeEmail { user_id: 42 }).await?;
 ```
 
+Register the jobs you write. The framework's own jobs - `SendMailJob` behind `Mail::queue` and `SendNotificationJob` behind `Notify::queue` - are registered before your code runs.
+
 A worker process drains the configured driver until cancelled:
 
 ```rust
@@ -216,11 +218,21 @@ SQS_OVERFLOW_DELETE_AFTER_PROCESSING=true # delete the file when the job is done
 SQS_OVERFLOW_FLUSH_ON_CLEAR=false         # true deletes the files on Queue::clear
 ```
 
-The files go under `sqs-payloads/<queue>/` on the disk. The server does not
-boot when overflow is on and the disk is not registered. A file is deleted
-only when the driver knows no message points at it any more, so a send that
-times out, or a settlement after its reservation expired, leaves the file
-on the disk rather than risk a message that can no longer be read.
+The files go under `sqs-payloads/<queue>-<digest>/` on the disk, where the
+digest is 16 hexadecimal digits of the SHA-256 of the endpoint, the region
+and the full queue URL. Two queues with one name in different accounts or
+regions, or one queue URL served by two endpoints (two ElasticMQ or
+LocalStack instances, or LocalStack's per-region queues), never share a
+directory, and `SQS_OVERFLOW_FLUSH_ON_CLEAR` deletes only the cleared
+queue's files. The server does not boot when overflow is on and the disk is not
+registered. A file is deleted only when the driver knows no message points
+at it any more, so a send that times out, a send that is refused after an
+earlier try timed out or met a fault of the service (5xx), or a settlement
+after its reservation expired, leaves the file on the disk rather than risk
+a message that can no longer be read. A retry after a send that got no
+answer, or met a fault of the service, carries its own copy of the file: if
+SQS took both tries, each of the two messages owns a file, and the job's
+duplicate stays readable after the first one is acknowledged.
 
 `SqsQueueDriver` is behind the `queue-sqs` cargo feature, which is on by
 default and brings `filesystem` with it.
@@ -672,11 +684,24 @@ is what makes the surviving run carry the newest payload rather than the oldest.
 If the token has expired or been evicted, the job runs - debouncing fails open,
 because a lost token is not evidence that somebody else owns the window.
 
+A dispatch claims the window only once the driver has accepted its envelope.
+A push that fails, or a dispatch cancelled before its push - an HTTP handler
+whose client disconnects - leaves the window to the last dispatch that reached
+the queue, so the work already queued still runs.
+
 The [`sync` driver](#drivers) has no worker, so it runs every dispatch inline
 and nothing is ever collapsed. Laravel's sync driver behaves the same way.
-`Queue::bulk` pushes at the driver level and does not arm a window either, so a
-debounced job pushed in bulk runs every copy. Laravel's `Queue::bulk` skips its
-own debounce acquisition for the same reason.
+`Queue::bulk` arms each job's window in order and claims it once the driver
+accepts the batch, so a debounced burst pushed in one call collapses onto its
+last job, as separate pushes do. When the maximum wait runs out on one job of
+the batch, the jobs after it for the same window are queued with no delay
+too, so the job that claims the window is the run the maximum wait forced.
+
+#### Why Suprnova diverges
+
+Laravel's `Queue::bulk` skips debouncing, so a debounced job pushed in bulk
+runs every copy. In Suprnova the window is a property of the job, declared by
+`debounce_for`, so it holds however the job reaches the queue.
 
 Set the window at the call site instead when it belongs to the caller:
 
@@ -1417,14 +1442,14 @@ as a `String` since `FrameworkError` doesn't derive `Clone`.
 | `JobQueued` | after the driver accepts |
 | `UniqueJobSkipped` | `push_unique` suppressed a duplicate inside the `unique_for` window |
 | `JobDebounced` | the worker dropped an envelope a newer debounced dispatch superseded |
-| `JobProcessing` | worker popped, about to dispatch |
-| `JobProcessed` | handler returned `Ok` |
-| `JobAttempted` | every terminal settlement (success, fail, timeout) |
-| `JobExceptionOccurred` | handler returned `Err`, will retry |
-| `JobReleasedAfterException` | retry-after-error re-enqueue happened |
-| `JobReleased` | middleware-driven release (no failure) |
-| `JobFailed` | dead-lettered |
-| `JobTimedOut` | per-attempt timeout exceeded |
+| `JobProcessing` | first in every attempt on a worker, before the max-attempts check, the debounce check and the middleware |
+| `JobProcessed` | the attempt returned without an error: the handler returned `Ok`, middleware deleted the job, released it (before `JobReleased`) or failed it without an error (after `JobFailed`), or the worker dropped it as superseded (after `JobDebounced`) |
+| `JobAttempted` | last in every attempt the worker settles, whatever the outcome; not after a timeout |
+| `JobExceptionOccurred` | the attempt ended in an error or a panic: before `JobReleasedAfterException` when retried, after `JobFailed` when the error failed the job (last attempt, attempts already exhausted, `FailOnException`) |
+| `JobReleasedAfterException` | the job was put back after an error, before `JobAttempted` |
+| `JobReleased` | middleware put the job back without spending an attempt, after `JobProcessed` |
+| `JobFailed` | the job failed: an error on its last attempt, attempts already exhausted, a timeout that fails it (before `JobTimedOut`), or middleware |
+| `JobTimedOut` | the attempt ran past its timeout; no `JobAttempted` follows, as Laravel's worker exits there |
 | `Looping` | every loop iteration (before the pop) |
 | `WorkerStarting` / `WorkerStopping` | once per worker lifetime |
 | `WorkerInterrupted` | `Queue::restart()` signal observed |
@@ -1616,6 +1641,16 @@ hits zero the worker fires the registered `then`/`catch`/`finally`
 callbacks. By default the first failure cancels the batch;
 `.allow_failures()` keeps remaining jobs going.
 
+When a push fails part way through `dispatch()`, the jobs that never reached
+the queue are recorded as failed and the batch is cancelled. If that leaves
+nothing pending, because the jobs that were queued have already settled,
+`dispatch()` fires the callbacks itself before it returns the push error.
+
+The [`sync` driver](#drivers) runs each job inline inside `dispatch()` and
+settles it against the batch as a worker would, so a batch on `sync` finishes
+and fires its callbacks before `dispatch()` returns. A job that a middleware
+releases is left pending: nothing runs it again on `sync`, as in Laravel.
+
 ### Durable batches
 
 `MemoryBatchRepository` is lost on restart, which strands every in-flight
@@ -1638,19 +1673,23 @@ CREATE TABLE job_batches (
     name          TEXT NOT NULL,
     total_jobs    INTEGER NOT NULL,
     options_json  TEXT NOT NULL,
-    created_at    INTEGER NOT NULL,
-    cancelled_at  INTEGER NULL,
-    finished_at   INTEGER NULL
+    created_at    BIGINT NOT NULL,
+    cancelled_at  BIGINT NULL,
+    finished_at   BIGINT NULL
 );
 
 CREATE TABLE job_batch_settlements (
     batch_id   TEXT NOT NULL,
     job_id     TEXT NOT NULL,
     failed     INTEGER NOT NULL,
-    settled_at INTEGER NOT NULL,
+    settled_at BIGINT NOT NULL,
     PRIMARY KEY (batch_id, job_id)
 );
 ```
+
+The epoch columns are `BIGINT` so they outlive 2038. Tables created with
+`INTEGER` epoch columns from an earlier version of this schema keep
+working: the repository reads every integer column at either width.
 
 `DatabaseBatchRepository::with_tables(db, batches, settlements)` names them
 yourself; both names are validated as SQL identifiers at construction.

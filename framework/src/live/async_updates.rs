@@ -24,21 +24,22 @@ use suprnova_live::async_updates::{
     AsyncDeliveryDisposition, AsyncDeliveryErrorKind, AsyncDispatchError, AsyncEnvelope,
     AsyncEnvelopeContext, AsyncEnvelopeDispatchPort, AsyncEventSession, AsyncEventSource,
     AsyncMembershipRegistryPort, AsyncMembershipRequest, AsyncMembershipValidation, AsyncPayload,
-    AsyncPolicy, AsyncTransportAuthorityPort, AsyncTransportAuthorityRequest,
-    AsyncTransportAuthorityValidation, AsyncTransportError, AsyncTransportErrorKind,
-    AsyncTransportFuture, AuthorizedSubscription, AuthorizedTransportSubscription,
-    BoundedDocumentTransportSession, BoundedPresentationSignalContracts, BufferDisposition,
-    CapabilityVersion, CloseDisposition, CurrentSubscriptionRegistration,
-    DocumentAuthorizationScope, DocumentTransportHandle, DocumentTransportKind,
-    DocumentTransportLimits, DocumentTransportSession, EventTarget, Heartbeat,
-    MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, MAX_EVENT_FANOUT, PollFallbackPolicy, PollInitialBehavior,
-    PollVisibilityPolicy, RegisteredBrowserEvent, RegisteredRefresh, ResolvedAsyncDelivery,
-    ResolvedEventFanout, SequenceDisposition, SseEncoder, SseMembershipControl, StreamEpoch,
-    StreamName, StreamPosition, StreamSequence, SubscriptionBinding, SubscriptionDescriptor,
-    SubscriptionError, SubscriptionErrorKind, SubscriptionId, SubscriptionIssueRequest,
-    SubscriptionModes, SubscriptionService, TopicName, TrustedMountParameters, VerifiedOrigin,
-    WebSocketCodec, WebSocketControlRecord, WebSocketMembershipAcknowledgment,
-    WebSocketMembershipControl, WebSocketMembershipRequest, encode_async_envelope,
+    AsyncPolicy, AsyncReplayMembershipRequest, AsyncReplayMembershipValidation,
+    AsyncTransportAuthorityPort, AsyncTransportAuthorityRequest, AsyncTransportAuthorityValidation,
+    AsyncTransportError, AsyncTransportErrorKind, AsyncTransportFuture, AuthorizedSubscription,
+    AuthorizedTransportSubscription, BoundedDocumentTransportSession,
+    BoundedPresentationSignalContracts, BufferDisposition, CapabilityVersion, CloseDisposition,
+    CurrentSubscriptionRegistration, DocumentAuthorizationScope, DocumentTransportHandle,
+    DocumentTransportKind, DocumentTransportLimits, DocumentTransportSession, EventTarget,
+    Heartbeat, MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, MAX_EVENT_FANOUT, PollFallbackPolicy,
+    PollInitialBehavior, PollVisibilityPolicy, RegisteredBrowserEvent, RegisteredRefresh,
+    ResolvedAsyncDelivery, ResolvedEventFanout, SequenceDisposition, SseEncoder,
+    SseMembershipControl, StreamEpoch, StreamName, StreamPosition, StreamSequence,
+    SubscriptionBinding, SubscriptionDescriptor, SubscriptionError, SubscriptionErrorKind,
+    SubscriptionId, SubscriptionIssueRequest, SubscriptionModes, SubscriptionService, TopicName,
+    TrustedMountParameters, VerifiedOrigin, WebSocketCodec, WebSocketControlRecord,
+    WebSocketMembershipAcknowledgment, WebSocketMembershipControl, WebSocketMembershipRequest,
+    encode_async_envelope,
 };
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::clock::Clock;
@@ -709,6 +710,9 @@ impl AsyncState {
     }
 
     /// Issues one new signed subscription for a validated mount context.
+    ///
+    /// `principal` is the route's principal the request was authorized for
+    /// (see `ports::route_principal`); every delivery re-authorizes it.
     #[allow(
         clippy::too_many_arguments,
         reason = "issuance keeps every independently trusted authority input explicit"
@@ -723,6 +727,7 @@ impl AsyncState {
         origin: VerifiedOrigin,
         baseline: StreamPosition,
         session_id: Option<String>,
+        principal: String,
     ) -> Result<IssuedView, AsyncErrorKind> {
         let now = self.now()?;
         let expires_at = UnixMillis::new(now.get().saturating_add(SUBSCRIPTION_LIFETIME_MS));
@@ -907,7 +912,7 @@ impl AsyncState {
                 binding_text,
                 previous_binding: None,
                 authorized: Arc::new(authorized),
-                principal: crate::auth::guard::Auth::id(),
+                principal: Some(principal),
                 session: context.host_scope_facts().session().cloned(),
                 session_id: session_id
                     .filter(|candidate| crate::session::is_valid_session_id(candidate)),
@@ -975,6 +980,16 @@ impl AsyncState {
                 if position.0 != log.epoch() || position.1 > log.head() {
                     return Err(AsyncErrorKind::PositionInvalid);
                 }
+                // ROOT-37: a position whose tail the log already evicted
+                // cannot be resumed from. Only the events themselves prove
+                // what the browser missed, so the renewal is refused before
+                // any authority rotates, rather than answered with an
+                // authoritative no-tail proof at the browser's own position.
+                // The browser then degrades the membership, so the island
+                // never claims to be current on that position (spec 14).
+                if log.tail_after(position.0, position.1).is_none() {
+                    return Err(AsyncErrorKind::PositionInvalid);
+                }
             }
             self.prune(&mut tables, now);
             let record = tables
@@ -1025,7 +1040,9 @@ impl AsyncState {
             match encoded_tail(&log, position.0, position.1) {
                 Some(tail) if tail.is_empty() => (Vec::new(), "authoritative_no_tail"),
                 Some(tail) => (tail, "complete_replay"),
-                None => (Vec::new(), "authoritative_no_tail"),
+                // Evicted (or no longer encodable) since the check above: the
+                // same refusal, for the same reason (ROOT-37).
+                None => return Err(AsyncErrorKind::PositionInvalid),
             }
         };
         let mut guard = self.tables();
@@ -2340,22 +2357,7 @@ impl AsyncMembershipRegistryPort for MembershipRegistryPort {
                     let Some(transport) = tables.transports.get(&record.transport) else {
                         return;
                     };
-                    let recipients = match event.target() {
-                        EventTarget::SelfIsland
-                        | EventTarget::Parent
-                        | EventTarget::NamedIsland(_) => 1,
-                        EventTarget::Child | EventTarget::Document | EventTarget::Browser(_) => {
-                            u16::try_from(transport.memberships.len().max(1))
-                                .unwrap_or(u16::MAX)
-                                .min(event.maximum_fanout().get())
-                        }
-                    };
-                    NonZeroU16::new(recipients).map(|recipients| {
-                        ResolvedEventFanout::from_host(
-                            recipients,
-                            target_scope(&transport.handle, event.target()),
-                        )
-                    })
+                    event_fanout(event, transport)
                 }
                 _ => None,
             };
@@ -2379,6 +2381,61 @@ impl AsyncMembershipRegistryPort for MembershipRegistryPort {
             validation.accept_current(claims.stream(), claims.events(), &state.signals);
         }
     }
+
+    /// Validates a replay transcript the delivery loop admits to recover a
+    /// degraded lane (ROOT-37) against the same current claims and fanout
+    /// a live delivery of each envelope is checked against.
+    fn validate_replay_current(
+        &self,
+        request: AsyncReplayMembershipRequest<'_>,
+        validation: &mut AsyncReplayMembershipValidation<'_>,
+    ) {
+        let Some(state) = self.0.upgrade() else {
+            return;
+        };
+        let tables = state.tables();
+        let Some(record) = tables.issued.get(&request.subscription().to_base64url()) else {
+            return;
+        };
+        let Some(transport) = tables.transports.get(&record.transport) else {
+            return;
+        };
+        let resolved = request
+            .envelopes()
+            .iter()
+            .map(|envelope| match envelope.payload() {
+                AsyncPayload::BrowserEvent(event) => event_fanout(event, transport),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let claims = record.authorized.verified().claims();
+        validation.accept_current(
+            claims.stream(),
+            claims.events(),
+            &state.signals,
+            claims.authorization_memo(),
+            &record.document_scope,
+            &resolved,
+        );
+    }
+}
+
+/// The recipients a browser event resolves to on `transport` now.
+fn event_fanout(
+    event: &RegisteredBrowserEvent,
+    transport: &TransportRecord,
+) -> Option<ResolvedEventFanout> {
+    let recipients = match event.target() {
+        EventTarget::SelfIsland | EventTarget::Parent | EventTarget::NamedIsland(_) => 1,
+        EventTarget::Child | EventTarget::Document | EventTarget::Browser(_) => {
+            u16::try_from(transport.memberships.len().max(1))
+                .unwrap_or(u16::MAX)
+                .min(event.maximum_fanout().get())
+        }
+    };
+    NonZeroU16::new(recipients).map(|recipients| {
+        ResolvedEventFanout::from_host(recipients, target_scope(&transport.handle, event.target()))
+    })
 }
 
 struct TransportAuthorityPort(Weak<AsyncState>);
@@ -2626,41 +2683,25 @@ async fn drain_transport(
             }
         }
     }
-    loop {
-        let mut collector = FrameCollector {
-            frames: Vec::new(),
-            sse,
-        };
-        match document.dispatch_next(registry, &mut collector) {
-            Ok(Some(AsyncDeliveryDisposition::Sequence(SequenceDisposition::Apply))) => {
-                frames.extend(collector.frames);
-            }
-            Ok(Some(AsyncDeliveryDisposition::Sequence(
-                SequenceDisposition::Degraded(_)
-                | SequenceDisposition::AwaitingRecovery
-                | SequenceDisposition::ScopeMismatch,
-            ))) => {
-                degraded += 1;
-                reconcile = true;
-            }
-            Ok(Some(_)) => {}
-            Ok(None) => break,
-            Err(error) => match error.kind() {
-                AsyncDeliveryErrorKind::Retired => {
-                    retire = true;
-                    break;
-                }
-                AsyncDeliveryErrorKind::AuthorizationLost | AsyncDeliveryErrorKind::Sequence(_) => {
-                    reconcile = true
-                }
-            },
+    let dispatched = dispatch_queued(document, registry, sse, &mut frames, &mut degraded, true);
+    reconcile |= dispatched.reconcile;
+    retire |= dispatched.retire;
+    if reconcile && !retire {
+        let recovery = reconcile_memberships(state, key, document);
+        if recovery.unproven {
+            // Nothing proves what a degraded lane missed. Retired, the
+            // transport makes the browser reconnect and renew from the
+            // position it holds, which replays what the log still has or
+            // is refused, so the island refreshes (ROOT-37).
+            retire = true;
+        } else if recovery.replayed {
+            // Every replay goes out now, so none is still queued when the
+            // next drain reconciles. A lane that degrades again here is
+            // reconciled on that drain.
+            let dispatched =
+                dispatch_queued(document, registry, sse, &mut frames, &mut degraded, false);
+            retire |= dispatched.retire;
         }
-        if frames.len() >= DELIVERY_BATCH {
-            break;
-        }
-    }
-    if reconcile {
-        reconcile_memberships(state, key, document);
     }
     let metrics = (
         document.retained_events(),
@@ -2679,16 +2720,93 @@ async fn drain_transport(
     (frames, retire)
 }
 
-/// Re-baselines degraded lanes at their delivery cursor and drops lost memberships.
+/// What dispatching a document's queued deliveries asks of the caller.
+#[derive(Default)]
+struct Dispatched {
+    /// A lane degraded, or a delivery lost its authority.
+    reconcile: bool,
+    /// The document retired its delivery.
+    retire: bool,
+}
+
+/// Dispatches the deliveries queued in `document`, appending the frames
+/// the browser receives to `frames` and counting the dropped ones in
+/// `degraded`. With `batch`, it stops once `frames` holds a batch.
+fn dispatch_queued(
+    document: &mut BoundedDocumentTransportSession,
+    registry: &dyn AsyncMembershipRegistryPort,
+    sse: bool,
+    frames: &mut Vec<Bytes>,
+    degraded: &mut u64,
+    batch: bool,
+) -> Dispatched {
+    let mut outcome = Dispatched::default();
+    loop {
+        let mut collector = FrameCollector {
+            frames: Vec::new(),
+            sse,
+        };
+        match document.dispatch_next(registry, &mut collector) {
+            Ok(Some(
+                AsyncDeliveryDisposition::Sequence(SequenceDisposition::Apply)
+                | AsyncDeliveryDisposition::Replay(_),
+            )) => {
+                frames.extend(collector.frames);
+            }
+            Ok(Some(AsyncDeliveryDisposition::Sequence(
+                SequenceDisposition::Degraded(_)
+                | SequenceDisposition::AwaitingRecovery
+                | SequenceDisposition::ScopeMismatch,
+            ))) => {
+                *degraded += 1;
+                outcome.reconcile = true;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(error) => match error.kind() {
+                AsyncDeliveryErrorKind::Retired => {
+                    outcome.retire = true;
+                    break;
+                }
+                AsyncDeliveryErrorKind::AuthorizationLost | AsyncDeliveryErrorKind::Sequence(_) => {
+                    outcome.reconcile = true;
+                }
+            },
+        }
+        if batch && frames.len() >= DELIVERY_BATCH {
+            break;
+        }
+    }
+    outcome
+}
+
+/// What reconciling a document's memberships found.
+#[derive(Default)]
+struct Reconciled {
+    /// A degraded lane's missed envelopes were admitted as a replay.
+    replayed: bool,
+    /// A degraded lane missed envelopes that no replay can prove.
+    unproven: bool,
+}
+
+/// Recovers degraded lanes with proof and drops lost memberships.
+///
+/// A degraded lane missed every envelope after its position that the
+/// transport has already read from the subscription's log. While the log
+/// holds all of them they are replayed, which proves continuity. Once it
+/// has evicted one, nothing can, and the caller retires the transport. The
+/// lane used to be re-baselined at its delivery cursor as if an
+/// authoritative refresh had happened, and the stream went on past the
+/// envelopes the browser never received (ROOT-37).
 fn reconcile_memberships(
     state: &AsyncState,
     key: &TransportKey,
     document: &mut BoundedDocumentTransportSession,
-) {
+) -> Reconciled {
     let members = {
         let tables = state.tables();
         let Some(transport) = tables.transports.get(key) else {
-            return;
+            return Reconciled::default();
         };
         transport
             .memberships
@@ -2706,6 +2824,8 @@ fn reconcile_memberships(
             })
             .collect::<Vec<_>>()
     };
+    let registry = state.membership_registry.as_ref();
+    let mut outcome = Reconciled::default();
     let mut lost = Vec::new();
     for (id, authorization, subscription, cursor, log) in members {
         if !document.transport().contains_membership(&subscription) {
@@ -2715,20 +2835,15 @@ fn reconcile_memberships(
         if document.sequence_state(&authorization)
             == Some(suprnova_live::async_updates::SequenceState::Degraded)
         {
-            let position = cursor.load(Ordering::Acquire).saturating_sub(1);
-            let epoch = lock_log(&log).epoch();
-            let _ = document.recover_from_authoritative_refresh(
-                &authorization,
-                state.membership_registry.as_ref(),
-                &FixedContinuity(StreamPosition::new(
-                    StreamEpoch::new(epoch),
-                    StreamSequence::new(position),
-                )),
-            );
+            if replay_missed(document, &authorization, registry, &cursor, &log) {
+                outcome.replayed = true;
+            } else {
+                outcome.unproven = true;
+            }
         }
     }
     if lost.is_empty() {
-        return;
+        return outcome;
     }
     let mut tables = state.tables();
     if let Some(transport) = tables.transports.get_mut(key) {
@@ -2742,6 +2857,42 @@ fn reconcile_memberships(
             record.transport_wake = None;
         }
     }
+    outcome
+}
+
+/// Admits, as a replay, every envelope after the degraded lane's position
+/// that the transport has read from `log`, which `cursor` marks. `false`
+/// when the log no longer holds one of them, or the engine refuses the
+/// replay: continuity cannot be proven then.
+fn replay_missed(
+    document: &mut BoundedDocumentTransportSession,
+    authorization: &AuthorizedTransportSubscription,
+    registry: &dyn AsyncMembershipRegistryPort,
+    cursor: &AtomicU64,
+    log: &Arc<Mutex<SubscriptionLog>>,
+) -> bool {
+    let Some(position) = document.sequence_position(authorization) else {
+        return false;
+    };
+    let through = cursor.load(Ordering::Acquire).saturating_sub(1);
+    let transcript = {
+        let log = lock_log(log);
+        if position.epoch().get() != log.epoch() {
+            return false;
+        }
+        let mut transcript = Vec::new();
+        for sequence in position.sequence().get().saturating_add(1)..=through {
+            let Some(envelope) = log.entry_at(sequence) else {
+                return false;
+            };
+            transcript.push(envelope.clone());
+        }
+        transcript
+    };
+    matches!(
+        document.admit_replay(authorization, transcript, registry),
+        Ok(BufferDisposition::Queued)
+    )
 }
 
 pub(crate) fn browser_safe_generation(value: u64) -> bool {

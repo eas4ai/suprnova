@@ -10,74 +10,73 @@
 //! `return_path` entirely, and always wraps in `multipart/mixed`.
 
 use crate::error::FrameworkError;
-use crate::mail::address::Address;
 use crate::mail::transport::OutgoingMessage;
-use lettre::message::header::{HeaderName, HeaderValue};
+use crate::mail::wire;
 use lettre::message::{
-    Attachment as LettreAttachment, Mailbox, MessageBuilder, MultiPart, SinglePart,
-    header::ContentType,
+    Attachment as LettreAttachment, MessageBuilder, MultiPart, SinglePart, header::ContentType,
 };
-
-pub(crate) fn custom_header(name: &str, value: &str) -> Result<HeaderValue, FrameworkError> {
-    let header_name = HeaderName::new_from_ascii(name.to_string())
-        .map_err(|e| FrameworkError::internal(format!("mail header name {name}: {e}")))?;
-    Ok(HeaderValue::new(header_name, value.to_string()))
-}
-
-pub(crate) fn address_to_mailbox(a: &Address) -> Result<Mailbox, FrameworkError> {
-    let parsed: lettre::Address = a
-        .email
-        .parse()
-        .map_err(|e| FrameworkError::internal(format!("mail parse address {}: {e}", a.email)))?;
-    Ok(Mailbox::new(a.name.clone(), parsed))
-}
 
 /// Envelope plus the full header superset: custom headers, `X-Priority` and
 /// `Importance`, `X-Tag`, `X-Metadata-*`, and `Return-Path`.
-pub(crate) fn base_builder(msg: &OutgoingMessage) -> Result<MessageBuilder, FrameworkError> {
+///
+/// Every address and header goes through [`wire`], so a header name with CR
+/// or LF, or a metadata key that would make one, is an error here instead of
+/// a second header in the output. `transport` names the caller in that error.
+pub(crate) fn base_builder(
+    transport: &str,
+    msg: &OutgoingMessage,
+) -> Result<MessageBuilder, FrameworkError> {
+    wire::check_message(transport, msg)?;
     let mut builder = lettre::Message::builder()
-        .from(address_to_mailbox(&msg.from)?)
+        .from(wire::mailbox(transport, &msg.from)?)
         .subject(&msg.subject);
 
     for a in &msg.to {
-        builder = builder.to(address_to_mailbox(a)?);
+        builder = builder.to(wire::mailbox(transport, a)?);
     }
     for a in &msg.cc {
-        builder = builder.cc(address_to_mailbox(a)?);
+        builder = builder.cc(wire::mailbox(transport, a)?);
     }
     for a in &msg.bcc {
-        builder = builder.bcc(address_to_mailbox(a)?);
+        builder = builder.bcc(wire::mailbox(transport, a)?);
     }
     for a in &msg.reply_to {
-        builder = builder.reply_to(address_to_mailbox(a)?);
+        builder = builder.reply_to(wire::mailbox(transport, a)?);
     }
 
     // Tags / metadata / priority / return-path / custom headers ride on
     // RFC 5322 headers so a backend MTA can route on them.
     for (name, value) in &msg.headers {
-        builder = builder.raw_header(custom_header(name, value)?);
+        builder = builder.raw_header(wire::mime_header(transport, name, value)?);
     }
     if let Some(p) = msg.priority {
-        builder = builder.raw_header(custom_header("X-Priority", &p.to_string())?);
+        builder = builder.raw_header(wire::mime_header(transport, "X-Priority", &p.to_string())?);
         // Importance: 1-2 = High, 3 = Normal, 4-5 = Low.
         let imp = match p {
             1..=2 => "High",
             4..=5 => "Low",
             _ => "Normal",
         };
-        builder = builder.raw_header(custom_header("Importance", imp)?);
+        builder = builder.raw_header(wire::mime_header(transport, "Importance", imp)?);
     }
     for t in &msg.tags {
-        builder = builder.raw_header(custom_header("X-Tag", t)?);
+        builder = builder.raw_header(wire::mime_header(transport, "X-Tag", t)?);
     }
     for (k, v) in &msg.metadata {
-        builder = builder.raw_header(custom_header(
+        // The metadata key becomes part of a header name here, so it is
+        // held to the header-name rule.
+        builder = builder.raw_header(wire::mime_header(
+            transport,
             format!("X-Metadata-{k}").as_str(),
             v.as_str(),
         )?);
     }
     if let Some(rp) = &msg.return_path {
-        builder = builder.raw_header(custom_header("Return-Path", &rp.to_string())?);
+        builder = builder.raw_header(wire::mime_header(
+            transport,
+            "Return-Path",
+            &wire::email(transport, rp)?,
+        )?);
     }
 
     Ok(builder)

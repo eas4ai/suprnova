@@ -15,8 +15,8 @@ Add the adapter crate. Until Suprnova ships its v0.1 release, the framework and 
 ```toml
 # Cargo.toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.1.0" }
-suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.1.0" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.2.1" }
+suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.2.1" }
 ```
 
 Register the provider and the webhook router at boot. The webhook router is a regular `Router` you compose into your `routes::register()`:
@@ -56,6 +56,8 @@ pub fn register() -> Router {
 ```
 
 `webhook_routes(db)` returns a `Router` containing just `POST /webhooks/payments/{provider}`. Because `Router::get` and `Router::post` each return a `RouteBuilder` that converts back to `Router` via `.into()`, chaining on top of the payments router is the most direct way to compose. If you already use the `routes!{}` macro for your normal routes, drop the webhook POST into the same block - `webhook_routes` is a convenience wrapper around one `Router::new().post(...)` call.
+
+Pass the application's own database as `db`, the one `DB` and the payments models use. With [RenderCache](render-cache.md) on, every write the webhook makes - the event's receipt row, its mirror rows, and the error a failed attempt records - advances its table's generation in the same transaction that writes the row, so a cached page that read those tables goes stale the moment the write commits. The generation ledger lives in that database.
 
 Every payments type has one path, `suprnova::payments::<Type>`, for example `suprnova::payments::StartSessionRequest`. The modules that hold the request and result types are reached as `suprnova::payments::dto::<module>`; a path such as `suprnova::payments::session::StartSessionRequest` does not compile.
 
@@ -101,7 +103,7 @@ That `SessionPayload` goes into your Inertia page props. The frontend dispatches
 
 ```toml
 # Cargo.toml
-suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.1.0" }
+suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.2.1" }
 ```
 
 Required env vars:
@@ -132,7 +134,7 @@ Stripe implements every trait including the optional `Payment` (server-side capt
 
 ```toml
 # Cargo.toml
-suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.1.0" }
+suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.2.1" }
 ```
 
 Required env vars:
@@ -479,6 +481,8 @@ The same module also exports a helper `pub fn migrations() -> Vec<Box<dyn Migrat
 | `payments_webhook_events` | Audit log and idempotency guard |
 
 Every table has a `provider_metadata` JSON column. When the framework's neutral representation doesn't cover a provider-specific field, read it from there.
+
+Every timestamp column is a native `timestamp with time zone` column (`TIMESTAMP` on MySQL and MariaDB), so the database's own date functions work on it. The mirror models declare `AsNativeDateTime` on those fields, and the SeaORM entities under `suprnova::payments::entities` carry them as `DateTime<Utc>` (`Option<DateTime<Utc>>` for `canceled_at`, `paid_at` and `processed_at`). Set them with a `DateTime<Utc>`, not with formatted text.
 
 ### Transactions table
 

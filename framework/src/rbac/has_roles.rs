@@ -256,15 +256,44 @@ async fn select_all(
 /// `DB::affecting_statement_on_table` for this module's inserts: the one
 /// table the statement writes advances, rather than the broad authority
 /// `DB::insert` would have advanced.
+///
+/// Every granting helper checks for the row first and inserts only when it
+/// saw none. Two concurrent requests can both see none, and the second
+/// insert then meets the row the first one wrote. That row is the state the
+/// second request asked for, so the insert skips a row its table's unique
+/// key already holds, and the caller reads it back, instead of reporting a
+/// duplicate-key error. The skip is the database's own, in the same
+/// statement, so it holds however the requests interleave, and on Postgres
+/// it leaves an enclosing transaction usable, where a caught unique
+/// violation would have aborted it.
 async fn insert(statement: ObservedStatement, values: Vec<Value>) -> Result<bool, FrameworkError> {
     let table = statement
         .tables
         .first()
         .copied()
         .ok_or_else(|| FrameworkError::internal("rbac insert statement names no table"))?;
-    let rows =
-        DB::affecting_statement_on_table(&render(statement.sql, backend()?), values, table).await?;
+    let backend = backend()?;
+    let sql = format!(
+        "{} {}",
+        render(statement.sql, backend),
+        skip_existing_row(backend)
+    );
+    let rows = DB::affecting_statement_on_table(&sql, values, table).await?;
     Ok(rows > 0)
+}
+
+/// The clause that makes an insert skip a row its table's unique key
+/// already holds, for [`insert`].
+///
+/// MySQL has no `ON CONFLICT`. `INSERT IGNORE` would also turn a value too
+/// long for its column into a truncated row, so the no-op update on the
+/// duplicate key is the one that skips only the conflict. Every table here
+/// has an `id` primary key.
+fn skip_existing_row(backend: DatabaseBackend) -> &'static str {
+    match backend {
+        DatabaseBackend::MySql => "ON DUPLICATE KEY UPDATE id = id",
+        _ => "ON CONFLICT DO NOTHING",
+    }
 }
 
 /// [`insert`]'s mirror for this module's deletes, advancing the one table
@@ -337,7 +366,8 @@ pub async fn create_role(name: &str) -> Result<i64, FrameworkError> {
 /// Create a role for a named guard, returning its id.
 ///
 /// Use this when an app separates session and token principals with distinct
-/// guards.
+/// guards. Idempotent, also when two requests create the same role at once:
+/// both get the id of the one row.
 pub async fn create_role_on_guard(name: &str, guard_name: &str) -> Result<i64, FrameworkError> {
     if let Some(id) = find_role_id(name, guard_name).await? {
         return Ok(id);

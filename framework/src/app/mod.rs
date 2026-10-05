@@ -44,6 +44,9 @@ use std::time::Duration;
 
 pub mod maintenance;
 pub mod paths;
+pub(crate) mod process_boot;
+
+use process_boot::ProcessBoot;
 
 /// Boxed async bootstrap function (avoids repeating the complex trait-object type).
 type BootstrapFn = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
@@ -294,6 +297,40 @@ enum Commands {
     },
     /// Bring the application out of maintenance mode
     Up,
+}
+
+impl Commands {
+    /// What this command boots before it runs: the one table every
+    /// subcommand's boot is read from.
+    ///
+    /// `serve` and `web:run` need everything [`ProcessBoot::Work`] names;
+    /// they boot it through `Server::from_config` and `Server::run`, which
+    /// add the HTTP-only hook and the Live runtime. Every other command
+    /// boots through [`Application::boot_process`] with this value.
+    fn boot(&self) -> ProcessBoot {
+        match self {
+            Commands::Migrate { .. }
+            | Commands::MigrateStatus
+            | Commands::MigrateRollback { .. }
+            | Commands::MigrateFresh { .. }
+            | Commands::SchemaDump { .. } => ProcessBoot::Migrations,
+            Commands::ScheduleList { .. } => ProcessBoot::Core,
+            Commands::Down { .. } | Commands::Up => ProcessBoot::Maintenance,
+            Commands::Serve { .. }
+            | Commands::WebRun { .. }
+            | Commands::ScheduleWork
+            | Commands::ScheduleRun
+            | Commands::WorkflowWork
+            | Commands::QueueWork { .. }
+            | Commands::QueuePause { .. }
+            | Commands::QueueResume { .. }
+            | Commands::QueueFailed
+            | Commands::QueueRetry { .. }
+            | Commands::QueueForget { .. }
+            | Commands::QueueFlush { .. }
+            | Commands::QueuePruneFailed { .. } => ProcessBoot::Work,
+        }
+    }
 }
 
 /// Application builder for suprnova framework
@@ -606,6 +643,122 @@ fn report_background_outcome(
 /// SIGKILL, and the operator saw a scheduler that "didn't stop".
 const SCHEDULER_DRAIN_GRACE: Duration = Duration::from_secs(30);
 
+/// The `schedule:work` loop: run the due tasks on every `tick`, until
+/// `shutdown` fires, then give the work still running up to `grace`.
+///
+/// The inline run of a tick is raced against the signal. It used to be
+/// awaited to the end inside the tick arm, and the loop could not look at
+/// the signal again until it returned: a task that hung kept SIGTERM from
+/// ever starting the drain, and the orchestrator killed the process at the
+/// end of its own grace period, background tasks and all. Now a signal
+/// that arrives mid-run gives the inline run and the background tasks one
+/// shared grace window, and whatever is still running at its end is
+/// dropped or aborted - the bound every other drain in the framework has.
+///
+/// Split out of the daemon so a test can drive it with a riggable shutdown
+/// signal and a short grace.
+async fn run_scheduler_loop(
+    schedule: &Schedule,
+    mut tick: tokio::time::Interval,
+    shutdown: &crate::signals::ShutdownListener,
+    grace: Duration,
+) {
+    // Long-lived JoinSet for `.run_in_background()` tasks. These tasks
+    // are fire-and-forget within a tick - the loop polls completed ones
+    // before each tick and on shutdown awaits the rest before exit, so a
+    // slow background task never gets dropped mid-flight.
+    let mut bg_tasks: tokio::task::JoinSet<crate::schedule::ScheduledTaskJoin> =
+        tokio::task::JoinSet::new();
+
+    let signal = loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                // Surface any background tasks that completed since the
+                // last tick. `try_join_next` is non-blocking - anything
+                // still running stays in the set for the next sweep.
+                while let Some(joined) = bg_tasks.try_join_next() {
+                    report_background_outcome(joined);
+                }
+                // Run this tick's due tasks, racing the stop signal.
+                // `run_in_background` tasks land in `bg_tasks` and are
+                // observed on the next tick or at shutdown.
+                let deadline = {
+                    let run = schedule.run_due_tasks_into(&mut bg_tasks);
+                    tokio::pin!(run);
+                    tokio::select! {
+                        results = &mut run => {
+                            report_inline_outcomes(results);
+                            None
+                        }
+                        signal = shutdown.fired() => {
+                            println!(
+                                "suprnova: scheduler shutting down ({}); waiting up to {}s \
+                                 for the tasks still running.",
+                                signal.as_str(),
+                                grace.as_secs()
+                            );
+                            let deadline = tokio::time::Instant::now() + grace;
+                            match tokio::time::timeout_at(deadline, &mut run).await {
+                                Ok(results) => report_inline_outcomes(results),
+                                Err(_) => eprintln!(
+                                    "suprnova: stopped the inline scheduled task(s) still \
+                                     running after the {}s shutdown grace",
+                                    grace.as_secs()
+                                ),
+                            }
+                            Some(deadline)
+                        }
+                    }
+                };
+                if let Some(deadline) = deadline {
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    drain_background_at_shutdown(&mut bg_tasks, remaining, grace).await;
+                    return;
+                }
+            }
+            signal = shutdown.fired() => break signal,
+        }
+    };
+
+    println!("suprnova: scheduler shutting down ({}).", signal.as_str());
+    // Admission is closed by construction: the loop has ended, so no
+    // further tick can spawn into `bg_tasks`.
+    if !bg_tasks.is_empty() {
+        println!(
+            "suprnova: waiting up to {}s for {} background task(s) to finish…",
+            grace.as_secs(),
+            bg_tasks.len()
+        );
+    }
+    drain_background_at_shutdown(&mut bg_tasks, grace, grace).await;
+}
+
+/// Print the failures among a tick's inline results.
+fn report_inline_outcomes(results: Vec<crate::schedule::ScheduledTaskJoin>) {
+    for (name, result) in results {
+        if let Err(e) = result {
+            eprintln!("suprnova: scheduled task '{name}' failed: {e}");
+        }
+    }
+}
+
+/// Drain the background tasks for up to `wait`, and report the ones the
+/// shutdown `grace` cut off.
+async fn drain_background_at_shutdown(
+    bg_tasks: &mut tokio::task::JoinSet<crate::schedule::ScheduledTaskJoin>,
+    wait: Duration,
+    grace: Duration,
+) {
+    let abandoned = drain_with_grace(bg_tasks, wait).await;
+    if abandoned > 0 {
+        eprintln!(
+            "suprnova: aborted {abandoned} background task(s) still running after \
+             the {}s shutdown grace",
+            grace.as_secs()
+        );
+    }
+}
+
 /// Await every task in `tasks`, reporting each outcome, until `grace`
 /// expires. Returns the number still running at the deadline, which are
 /// aborted.
@@ -671,9 +824,14 @@ where
     /// Register a bootstrap function
     ///
     /// This async function is called to register services, middleware,
-    /// and other application components. It is process-wide: every
-    /// subcommand runs it, not only the server. Register HTTP-only
-    /// components - global middleware, `Inertia::install` - with
+    /// and other application components. It is process-wide: the server,
+    /// the workers, the queue, schedule and maintenance commands, and the
+    /// console binary all run it. The migration commands (`migrate`,
+    /// `migrate:*`, `schema:dump`) do not: a fresh database has to be
+    /// migratable even when this hook reads a table the migrations create,
+    /// as `bootstrap_database_cached` reads `features`. `serve` runs its
+    /// own migrations before this hook for the same reason. Register
+    /// HTTP-only components - global middleware, `Inertia::install` - with
     /// [`http_bootstrap`](Self::http_bootstrap) instead, which only the
     /// server path runs.
     ///
@@ -711,7 +869,7 @@ where
     /// Register global middleware and the Inertia layer here; keep
     /// process-wide work - `DB::init`, container bindings, event listeners,
     /// job registration - in [`bootstrap`](Self::bootstrap), which every
-    /// subcommand runs.
+    /// subcommand but the migration commands runs.
     ///
     /// # Example
     ///
@@ -924,7 +1082,6 @@ where
     /// - `down` / `up`: Enter / leave maintenance mode
     pub async fn run(self) {
         let cli = Cli::parse();
-
         // Configuration is loaded by `#[suprnova::main]` *before* the
         // runtime exists, not here. Loading it writes to the process
         // environment, which is only sound while the process is
@@ -942,7 +1099,13 @@ where
             eprintln!("{message}");
             std::process::exit(1);
         }
+        self.run_cli(cli).await;
+    }
 
+    /// Everything [`Self::run`] does after the argv parse and the boot
+    /// precondition. Split out so a test can run one subcommand from an
+    /// argv it builds, rather than the test binary's own.
+    async fn run_cli(self, cli: Cli) {
         // Register all #[policy] gates collected via inventory::submit!.
         // Called here (before the subcommand match) so background workers,
         // CLI commands, and scheduled tasks all see registered gates - not
@@ -965,13 +1128,17 @@ where
             config_fn();
         }
 
-        // The long-running workers dispatch events from jobs, tasks and
-        // workflows, and a queued listener runs as a task of its own; see
-        // the drain after the match.
-        let worker = matches!(
+        // What the command boots, from the one table that says so. The server
+        // (no command, `serve`, `web:run`) boots through `Server` itself. A
+        // booted command shuts its process down after the match.
+        let boot = cli
+            .command
+            .as_ref()
+            .map_or(ProcessBoot::Work, Commands::boot);
+        let booted = !matches!(
             cli.command,
-            Some(Commands::ScheduleWork | Commands::WorkflowWork | Commands::QueueWork { .. })
-        );
+            None | Some(Commands::Serve { .. } | Commands::WebRun { .. })
+        ) && boot != ProcessBoot::Migrations;
 
         match cli.command {
             None
@@ -1018,16 +1185,16 @@ where
                 Self::dump_schema::<M>(path, prune).await;
             }
             Some(Commands::ScheduleWork) => {
-                Self::run_scheduler_daemon_internal(bootstrap_fn, schedule_fn).await;
+                Self::run_scheduler_daemon_internal(boot, bootstrap_fn, schedule_fn).await;
             }
             Some(Commands::ScheduleRun) => {
-                Self::run_scheduled_tasks_internal(bootstrap_fn, schedule_fn).await;
+                Self::run_scheduled_tasks_internal(boot, bootstrap_fn, schedule_fn).await;
             }
             Some(Commands::ScheduleList { timezone }) => {
-                Self::list_scheduled_tasks(schedule_fn, timezone).await;
+                Self::list_scheduled_tasks(boot, bootstrap_fn, schedule_fn, timezone).await;
             }
             Some(Commands::WorkflowWork) => {
-                Self::run_workflow_worker_internal(bootstrap_fn).await;
+                Self::run_workflow_worker_internal(boot, bootstrap_fn).await;
             }
             Some(Commands::QueueWork {
                 visibility_timeout,
@@ -1037,6 +1204,7 @@ where
                 connection,
             }) => {
                 Self::run_queue_worker_internal(
+                    boot,
                     bootstrap_fn,
                     visibility_timeout,
                     poll_interval_ms,
@@ -1051,30 +1219,37 @@ where
                 all,
                 connection,
             }) => {
-                Self::run_queue_pause_internal(bootstrap_fn, queue, all, connection).await;
+                Self::run_queue_pause_internal(boot, bootstrap_fn, queue, all, connection).await;
             }
             Some(Commands::QueueResume {
                 queue,
                 all,
                 connection,
             }) => {
-                Self::run_queue_resume_internal(bootstrap_fn, queue, all, connection).await;
+                Self::run_queue_resume_internal(boot, bootstrap_fn, queue, all, connection).await;
             }
             Some(Commands::QueueFailed) => {
-                Self::run_failed_jobs_internal(bootstrap_fn, FailedJobsCommand::Failed).await;
+                Self::run_failed_jobs_internal(boot, bootstrap_fn, FailedJobsCommand::Failed).await;
             }
             Some(Commands::QueueRetry { ids }) => {
-                Self::run_failed_jobs_internal(bootstrap_fn, FailedJobsCommand::Retry(ids)).await;
+                Self::run_failed_jobs_internal(boot, bootstrap_fn, FailedJobsCommand::Retry(ids))
+                    .await;
             }
             Some(Commands::QueueForget { id }) => {
-                Self::run_failed_jobs_internal(bootstrap_fn, FailedJobsCommand::Forget(id)).await;
+                Self::run_failed_jobs_internal(boot, bootstrap_fn, FailedJobsCommand::Forget(id))
+                    .await;
             }
             Some(Commands::QueueFlush { hours }) => {
-                Self::run_failed_jobs_internal(bootstrap_fn, FailedJobsCommand::Flush { hours })
-                    .await;
+                Self::run_failed_jobs_internal(
+                    boot,
+                    bootstrap_fn,
+                    FailedJobsCommand::Flush { hours },
+                )
+                .await;
             }
             Some(Commands::QueuePruneFailed { hours }) => {
                 Self::run_failed_jobs_internal(
+                    boot,
                     bootstrap_fn,
                     FailedJobsCommand::PruneFailed { hours },
                 )
@@ -1091,6 +1266,8 @@ where
                 message,
             }) => {
                 Self::run_down(
+                    boot,
+                    bootstrap_fn,
                     retry,
                     refresh,
                     secret,
@@ -1103,14 +1280,15 @@ where
                 .await;
             }
             Some(Commands::Up) => {
-                Self::run_up().await;
+                Self::run_up(boot, bootstrap_fn).await;
             }
         }
-        // A worker waits for its queued listeners as the server does at the
-        // end of its graceful shutdown: returning drops the runtime, and
-        // every listener still running would end with it.
-        if worker {
-            crate::events::drain_queued_at_shutdown().await;
+        // A booted process stops its supervisors and waits for its queued
+        // listeners as the server does at the end of its graceful shutdown:
+        // returning drops the runtime, and every task still running would
+        // end with it.
+        if booted {
+            process_boot::finish_process().await;
         }
         // Every command ends here; the file log channels buffer, and nothing
         // a worker wrote before a clean exit may be lost.
@@ -1138,7 +1316,7 @@ where
             Ok(s) => s,
             Err(e) => {
                 eprintln!("suprnova: failed to start server: {e}");
-                std::process::exit(1);
+                process_boot::exit_after_boot(1).await;
             }
         };
 
@@ -1151,7 +1329,7 @@ where
 
         if let Err(e) = server.run().await {
             eprintln!("suprnova: server exited with error: {e}");
-            std::process::exit(1);
+            process_boot::exit_after_boot(1).await;
         }
     }
 
@@ -1375,25 +1553,23 @@ where
     ///
     /// The first tick is aligned to the next minute boundary, then due tasks
     /// are evaluated once per minute (matching Laravel's per-minute cron
-    /// evaluation). Runs the app's `bootstrap_fn` and then the runtime drivers
-    /// (see [`Self::boot_worker_process`]) so tasks can resolve services;
-    /// stops on Ctrl-C or SIGTERM.
+    /// evaluation). Runs the app's `bootstrap_fn`, the container's services
+    /// and the runtime drivers (see [`Self::boot_process`]) so tasks can
+    /// resolve services; stops on Ctrl-C or SIGTERM.
     async fn run_scheduler_daemon_internal(
+        boot: ProcessBoot,
         bootstrap_fn: Option<BootstrapFn>,
         schedule_fn: Option<ScheduleFn>,
     ) {
         let shutdown = Self::start_daemon();
-        if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
-            eprintln!("suprnova: scheduler bootstrap error: {e}");
-            std::process::exit(1);
-        }
+        Self::boot_or_exit("schedule:work", boot, bootstrap_fn).await;
         let schedule = build_schedule(schedule_fn);
         // Before any task runs: a production deployment that asks for
         // single-server execution with a per-process cache would get every
         // replica running every task, silently. Fail the boot instead.
         if let Err(e) = schedule.validate_single_server_locking() {
             eprintln!("suprnova: {e}");
-            std::process::exit(1);
+            process_boot::exit_after_boot(1).await;
         }
 
         println!("==============================================");
@@ -1422,60 +1598,13 @@ where
         // skip missed ticks and resume on the next aligned boundary.
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Long-lived JoinSet for `.run_in_background()` tasks. These tasks
-        // are fire-and-forget within a tick - the loop polls completed ones
-        // before each tick and on shutdown awaits the rest before exit, so a
-        // slow background task never gets dropped mid-flight.
-        let mut bg_tasks: tokio::task::JoinSet<crate::schedule::ScheduledTaskJoin> =
-            tokio::task::JoinSet::new();
-
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    // Surface any background tasks that completed since the
-                    // last tick. `try_join_next` is non-blocking - anything
-                    // still running stays in the set for the next sweep.
-                    while let Some(joined) = bg_tasks.try_join_next() {
-                        report_background_outcome(joined);
-                    }
-                    // Run this tick's due tasks. Inline tasks complete
-                    // before we return; `run_in_background` tasks land in
-                    // `bg_tasks` and are observed on the next tick or at
-                    // shutdown.
-                    for (name, result) in schedule.run_due_tasks_into(&mut bg_tasks).await {
-                        if let Err(e) = result {
-                            eprintln!("suprnova: scheduled task '{name}' failed: {e}");
-                        }
-                    }
-                }
-                signal = shutdown.fired() => {
-                    println!("suprnova: scheduler shutting down ({}).", signal.as_str());
-                    // Admission is closed by construction: this arm breaks the
-                    // loop, so no further tick can spawn into `bg_tasks`.
-                    if !bg_tasks.is_empty() {
-                        println!(
-                            "suprnova: waiting up to {}s for {} background task(s) to finish…",
-                            SCHEDULER_DRAIN_GRACE.as_secs(),
-                            bg_tasks.len()
-                        );
-                    }
-                    let abandoned = drain_with_grace(&mut bg_tasks, SCHEDULER_DRAIN_GRACE).await;
-                    if abandoned > 0 {
-                        eprintln!(
-                            "suprnova: aborted {abandoned} background task(s) still running after \
-                             the {}s shutdown grace",
-                            SCHEDULER_DRAIN_GRACE.as_secs()
-                        );
-                    }
-                    break;
-                }
-            }
-        }
+        run_scheduler_loop(&schedule, tick, &shutdown, SCHEDULER_DRAIN_GRACE).await;
     }
 
     /// `schedule:run`: evaluate and run the due tasks once, then exit. Exits
     /// non-zero if any task failed.
     async fn run_scheduled_tasks_internal(
+        boot: ProcessBoot,
         bootstrap_fn: Option<BootstrapFn>,
         schedule_fn: Option<ScheduleFn>,
     ) {
@@ -1485,25 +1614,21 @@ where
         // command, and installing a handler it never reads would only
         // make Ctrl-C stop working.
         Self::install_daemon_logging();
-        if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
-            eprintln!("suprnova: scheduler bootstrap error: {e}");
-            std::process::exit(1);
-        }
+        Self::boot_or_exit("schedule:run", boot, bootstrap_fn).await;
         let schedule = build_schedule(schedule_fn);
         // Before any task runs: a production deployment that asks for
         // single-server execution with a per-process cache would get every
         // replica running every task, silently. Fail the boot instead.
         if let Err(e) = schedule.validate_single_server_locking() {
             eprintln!("suprnova: {e}");
-            std::process::exit(1);
+            process_boot::exit_after_boot(1).await;
         }
 
         println!("Running due scheduled tasks...");
         let (results, any_failed) = evaluate_due_once(&schedule).await;
-        // The tasks may have started queued listeners, and this process ends
-        // next, by returning or by the failure exit below, which would skip
-        // the drain the long-running workers get after the match.
-        crate::events::drain_queued_at_shutdown().await;
+        // The tasks may have started queued listeners; they finish before
+        // the results print.
+        process_boot::finish_process().await;
         if results.is_empty() {
             println!("No tasks were due.");
             return;
@@ -1515,12 +1640,21 @@ where
             }
         }
         if any_failed {
-            std::process::exit(1);
+            process_boot::exit_after_boot(1).await;
         }
     }
 
     /// `schedule:list`: print every registered task and its cron expression.
-    async fn list_scheduled_tasks(schedule_fn: Option<ScheduleFn>, timezone: Option<String>) {
+    ///
+    /// Boots the core of the process first, so the schedule it builds is the
+    /// one the daemon would run: a schedule function that reads a binding or
+    /// a path the `bootstrap` hook installed sees it here too.
+    async fn list_scheduled_tasks(
+        boot: ProcessBoot,
+        bootstrap_fn: Option<BootstrapFn>,
+        schedule_fn: Option<ScheduleFn>,
+        timezone: Option<String>,
+    ) {
         let display_tz = match resolve_display_timezone(timezone.as_deref()) {
             Ok(tz) => tz,
             Err(message) => {
@@ -1528,6 +1662,7 @@ where
                 std::process::exit(1);
             }
         };
+        Self::boot_or_exit("schedule:list", boot, bootstrap_fn).await;
         let schedule = build_schedule(schedule_fn);
         print!(
             "{}",
@@ -1535,12 +1670,9 @@ where
         );
     }
 
-    async fn run_workflow_worker_internal(bootstrap_fn: Option<BootstrapFn>) {
+    async fn run_workflow_worker_internal(boot: ProcessBoot, bootstrap_fn: Option<BootstrapFn>) {
         let shutdown = Self::start_daemon();
-        if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
-            eprintln!("Workflow worker bootstrap error: {e}");
-            std::process::exit(1);
-        }
+        Self::boot_or_exit("workflow:work", boot, bootstrap_fn).await;
 
         let worker = crate::workflow::WorkflowWorker::new();
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -1569,11 +1701,11 @@ where
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
                         eprintln!("Workflow worker error during drain: {e}");
-                        std::process::exit(1);
+                        process_boot::exit_after_boot(1).await;
                     }
                     Err(e) => {
                         eprintln!("Workflow worker task panicked during drain: {e}");
-                        std::process::exit(1);
+                        process_boot::exit_after_boot(1).await;
                     }
                 }
             }
@@ -1582,11 +1714,11 @@ where
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
                         eprintln!("Workflow worker error: {e}");
-                        std::process::exit(1);
+                        process_boot::exit_after_boot(1).await;
                     }
                     Err(e) => {
                         eprintln!("Workflow worker task panicked: {e}");
-                        std::process::exit(1);
+                        process_boot::exit_after_boot(1).await;
                     }
                 }
             }
@@ -1596,14 +1728,15 @@ where
     /// `queue:work`: drain a queue connection until cancelled. The default
     /// connection unless `--connection` names another.
     ///
-    /// Runs the app's `bootstrap_fn` and then the runtime drivers (see
-    /// [`Self::boot_worker_process`] for why that order), so popped jobs can
-    /// resolve services from the container. Honours Ctrl-C and SIGTERM
+    /// Runs the app's `bootstrap_fn`, the container's services and the
+    /// runtime drivers (see [`Self::boot_process`] for why that order), so
+    /// popped jobs can resolve services from the container. Honours Ctrl-C and SIGTERM
     /// cleanly via
     /// `CancellationToken`: the cancel fires at the next pop boundary, so an
     /// in-flight handler runs to completion (bounded by its own per-job
     /// `timeout()` if set) before the worker exits.
     async fn run_queue_worker_internal(
+        boot: ProcessBoot,
         bootstrap_fn: Option<BootstrapFn>,
         visibility_timeout: u64,
         poll_interval_ms: u64,
@@ -1612,10 +1745,7 @@ where
         connection: Option<String>,
     ) {
         let shutdown = Self::start_daemon();
-        if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
-            eprintln!("suprnova: queue worker bootstrap error: {e}");
-            std::process::exit(1);
-        }
+        Self::boot_or_exit("queue:work", boot, bootstrap_fn).await;
 
         // Resolved here as well as inside the worker: a connection nobody
         // registered has to stop the process before the banner promises a
@@ -1626,7 +1756,7 @@ where
             Ok(target) => (target.driver, target.label),
             Err(e) => {
                 eprintln!("suprnova: the queue worker cannot start: {e}");
-                std::process::exit(1);
+                process_boot::exit_after_boot(1).await;
             }
         };
 
@@ -1672,7 +1802,7 @@ where
                 crate::queue::worker::run_worker_on(&connection, cfg, cancel_for_worker).await
             {
                 eprintln!("suprnova: queue worker could not start: {e}");
-                std::process::exit(1);
+                process_boot::exit_after_boot(1).await;
             }
         });
 
@@ -1684,13 +1814,13 @@ where
                 cancel.cancel();
                 if let Err(e) = worker.await {
                     eprintln!("suprnova: queue worker task error during drain: {e}");
-                    std::process::exit(1);
+                    process_boot::exit_after_boot(1).await;
                 }
             }
             res = &mut worker => {
                 if let Err(e) = res {
                     eprintln!("suprnova: queue worker task error: {e}");
-                    std::process::exit(1);
+                    process_boot::exit_after_boot(1).await;
                 }
             }
         }
@@ -1706,6 +1836,7 @@ where
     /// `queue:resume` has no equivalent check; see
     /// [`Self::run_queue_resume_internal`].
     async fn run_queue_pause_internal(
+        boot: ProcessBoot,
         bootstrap_fn: Option<BootstrapFn>,
         queue: Option<String>,
         all: bool,
@@ -1722,15 +1853,12 @@ where
                 std::process::exit(1);
             }
         };
-        if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
-            eprintln!("suprnova: queue:pause bootstrap error: {e}");
-            std::process::exit(1);
-        }
+        Self::boot_or_exit("queue:pause", boot, bootstrap_fn).await;
         match target {
             PauseTarget::All => {
                 if let Err(e) = crate::queue::Queue::pause_all().await {
                     eprintln!("suprnova: failed to pause all queues: {e}");
-                    std::process::exit(1);
+                    process_boot::exit_after_boot(1).await;
                 }
                 println!("Job processing on all queues across all connections has been paused.");
             }
@@ -1739,12 +1867,12 @@ where
                     Ok(connection) => connection,
                     Err(e) => {
                         eprintln!("suprnova: {e}");
-                        std::process::exit(1);
+                        process_boot::exit_after_boot(1).await;
                     }
                 };
                 if let Err(e) = crate::queue::Queue::pause(&connection, &queue).await {
                     eprintln!("suprnova: failed to pause queue [{connection}:{queue}]: {e}");
-                    std::process::exit(1);
+                    process_boot::exit_after_boot(1).await;
                 }
                 println!("Job processing on queue [{connection}:{queue}] has been paused.");
             }
@@ -1760,26 +1888,24 @@ where
     /// that was only met in part, such as a retry of an id that names no
     /// job, exits non-zero after printing.
     async fn run_failed_jobs_internal(
+        boot: ProcessBoot,
         bootstrap_fn: Option<BootstrapFn>,
         command: FailedJobsCommand,
     ) {
         let name = command.name();
-        if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
-            eprintln!("suprnova: {name} bootstrap error: {e}");
-            std::process::exit(1);
-        }
+        Self::boot_or_exit(name, boot, bootstrap_fn).await;
         match crate::queue::failed_console::run(command).await {
             Ok(report) => {
                 for line in &report.lines {
                     println!("{line}");
                 }
                 if !report.succeeded {
-                    std::process::exit(1);
+                    process_boot::exit_after_boot(1).await;
                 }
             }
             Err(e) => {
                 eprintln!("suprnova: {name}: {e}");
-                std::process::exit(1);
+                process_boot::exit_after_boot(1).await;
             }
         }
     }
@@ -1790,6 +1916,7 @@ where
     /// ability to *clear* one, which would leave an operator stuck with no
     /// way to undo an earlier pause once the switch is off.
     async fn run_queue_resume_internal(
+        boot: ProcessBoot,
         bootstrap_fn: Option<BootstrapFn>,
         queue: Option<String>,
         all: bool,
@@ -1802,15 +1929,12 @@ where
                 std::process::exit(1);
             }
         };
-        if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
-            eprintln!("suprnova: queue:resume bootstrap error: {e}");
-            std::process::exit(1);
-        }
+        Self::boot_or_exit("queue:resume", boot, bootstrap_fn).await;
         match target {
             PauseTarget::All => {
                 if let Err(e) = crate::queue::Queue::resume_all().await {
                     eprintln!("suprnova: failed to resume all queues: {e}");
-                    std::process::exit(1);
+                    process_boot::exit_after_boot(1).await;
                 }
                 println!("Job processing on all queues across all connections has been resumed.");
             }
@@ -1824,7 +1948,7 @@ where
                     .unwrap_or_else(|_| connection.unwrap_or_default());
                 if let Err(e) = crate::queue::Queue::resume(&connection, &queue).await {
                     eprintln!("suprnova: failed to resume queue [{connection}:{queue}]: {e}");
-                    std::process::exit(1);
+                    process_boot::exit_after_boot(1).await;
                 }
                 println!("Job processing on queue [{connection}:{queue}] has been resumed.");
             }
@@ -1845,38 +1969,6 @@ where
         }
     }
 
-    /// Shared bootstrap for non-server subcommands that still need the
-    /// runtime drivers: Cache, Queue, RateLimit, Mail, Storage. Mirrors the
-    /// driver-bootstrap order in `Server::run` (telemetry / encryption
-    /// keys / authorization init are subcommand-specific and stay out
-    /// of this helper).
-    async fn bootstrap_runtime_drivers() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        crate::cache::Cache::bootstrap().await?;
-        #[cfg(feature = "localization")]
-        crate::localization::Localization::bootstrap().await?;
-        // The disks first: the `sqs` queue driver checks its overflow disk.
-        #[cfg(feature = "filesystem")]
-        crate::filesystem::bootstrap_from_env()?;
-        crate::queue::bootstrap_from_env().await?;
-        crate::rate_limit::bootstrap_from_env().await?;
-        crate::mail::boot::bootstrap_from_env()?;
-        Ok(())
-    }
-
-    /// Full boot for the long-running non-server subcommands (`queue:work`,
-    /// `schedule:work`, `schedule:run`, `workflow:work`).
-    ///
-    /// The app's `bootstrap_fn` runs **first**, then the env-driven drivers.
-    /// That order is not cosmetic: `QUEUE_DRIVER=database` resolves its
-    /// connection out of `DB`, which only exists once the app's bootstrap has
-    /// called `DB::init`. Booting the drivers first made every worker
-    /// subcommand die with "requires DB::init() to run first" before it could
-    /// pop a single job. `Server::run` already boots the drivers after
-    /// `bootstrap_fn`; this makes the worker paths agree with it, which also
-    /// means a `bootstrap_fn` that installs a driver by hand is overridden by
-    /// the environment in exactly the same way under `serve` and under
-    /// `queue:work`. The storage disk of the environment is the one that
-    /// gives way: a disk the bootstrap registered under its name is kept.
     /// Give a daemon process a tracing subscriber.
     ///
     /// `serve` gets one from `init_telemetry`; the daemons come through a
@@ -1888,7 +1980,7 @@ where
     /// process looked idle while it was doing all of it.
     ///
     /// Called from the four daemon entry points rather than from
-    /// [`Self::boot_worker_process`], which they share: that helper is
+    /// [`Self::boot_process`], which they share: that helper is
     /// also exercised directly by a unit test, and installing a global
     /// subscriber inside a test binary poisons `tracing_test`'s one-shot
     /// initialiser for every capture-based test that runs afterwards. The
@@ -1900,7 +1992,7 @@ where
     /// race ahead of `serve`'s telemetry one and cost OTel builds their
     /// layers.
     fn install_daemon_logging() {
-        // The channel is checked in `boot_worker_process`, once the
+        // The channel is checked in `boot_process`, once the
         // bootstrap that may define it has run; until then the bootstrap's
         // own events go to the channel if it is built in, else stdout.
         crate::logging::init_subscriber(crate::logging::LogConfig::from_env());
@@ -1924,16 +2016,43 @@ where
         crate::signals::spawn_shutdown_listener()
     }
 
-    async fn boot_worker_process(
+    /// Boot a non-server process: the application's `bootstrap` hook, then
+    /// what `boot` names (see [`process_boot::boot_after_hook`]).
+    ///
+    /// Every subcommand but `serve` and the migration commands boots here,
+    /// with the [`ProcessBoot`] that [`Commands::boot`] gives it, so a
+    /// worker, a queue command and `down` cannot each assemble a different
+    /// subset of the boot again.
+    /// The hook runs first: `QUEUE_DRIVER=database` resolves its connection
+    /// out of the `DB` the hook initialized, and a log channel the hook
+    /// defines can be `LOG_CHANNEL`. A bootstrap that installs a driver by
+    /// hand is overridden by the environment in exactly the same way under
+    /// `serve` and under `queue:work`; the storage disk of the environment
+    /// is the one that gives way, so a disk the bootstrap registered under
+    /// its name is kept.
+    async fn boot_process(
+        boot: ProcessBoot,
         bootstrap_fn: Option<BootstrapFn>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), process_boot::BootError> {
+        if boot == ProcessBoot::Migrations {
+            return Ok(());
+        }
         if let Some(bootstrap_fn) = bootstrap_fn {
             bootstrap_fn().await;
         }
-        // After the bootstrap, so a channel it defines is known; a channel
-        // that does not exist stops the worker here.
-        crate::logging::check_channels()?;
-        Self::bootstrap_runtime_drivers().await
+        process_boot::boot_after_hook(boot).await
+    }
+
+    /// [`Self::boot_process`], or report the failure and exit non-zero.
+    ///
+    /// A failure comes after the application's hook ran, so the exit goes
+    /// through [`process_boot::exit_after_boot`]: the supervisors the hook
+    /// started are stopped and drained first.
+    async fn boot_or_exit(command: &str, boot: ProcessBoot, bootstrap_fn: Option<BootstrapFn>) {
+        if let Err(e) = Self::boot_process(boot, bootstrap_fn).await {
+            eprintln!("suprnova: {command} bootstrap error: {e}");
+            process_boot::exit_after_boot(1).await;
+        }
     }
 
     /// Run the boot hooks for an HTTP server process: the process-wide hook
@@ -1941,7 +2060,7 @@ where
     ///
     /// The order is the contract - everything the HTTP hook registers may
     /// assume the process-wide hook has already run. Worker processes never
-    /// come through here; [`Self::boot_worker_process`] takes only the
+    /// come through here; [`Self::boot_process`] takes only the
     /// process-wide hook, which is what keeps the HTTP stack (and its
     /// fail-closed Inertia manifest check) off machines that ship no
     /// frontend assets.
@@ -1958,8 +2077,15 @@ where
     }
 
     /// `down`: record the maintenance payload via the configured driver.
+    ///
+    /// Runs the application's `bootstrap` hook first, as every subcommand
+    /// but the migration commands does: a storage path or a cache store the
+    /// hook installs is the one the serving process reads, so `down` must
+    /// write to it too.
     #[allow(clippy::too_many_arguments)]
     async fn run_down(
+        boot: ProcessBoot,
+        bootstrap_fn: Option<BootstrapFn>,
         retry: Option<u64>,
         refresh: Option<u64>,
         secret: Option<String>,
@@ -1969,7 +2095,7 @@ where
         except: Vec<String>,
         message: Option<String>,
     ) {
-        Self::bootstrap_maintenance_driver().await;
+        Self::boot_or_exit("down", boot, bootstrap_fn).await;
 
         let secret = match (secret, with_secret) {
             (Some(s), _) => Some(s),
@@ -1996,42 +2122,22 @@ where
             }
             Err(e) => {
                 eprintln!("suprnova: failed to enter maintenance mode: {e}");
-                std::process::exit(1);
+                process_boot::exit_after_boot(1).await;
             }
         }
     }
 
-    /// `up`: clear maintenance state via the configured driver.
-    async fn run_up() {
-        Self::bootstrap_maintenance_driver().await;
+    /// `up`: clear maintenance state via the configured driver, after the
+    /// same boot `down` runs.
+    async fn run_up(boot: ProcessBoot, bootstrap_fn: Option<BootstrapFn>) {
+        Self::boot_or_exit("up", boot, bootstrap_fn).await;
 
         match maintenance::maintenance_mode().deactivate().await {
             Ok(()) => println!("Application is now live."),
             Err(e) => {
                 eprintln!("suprnova: failed to bring the application up: {e}");
-                std::process::exit(1);
+                process_boot::exit_after_boot(1).await;
             }
-        }
-    }
-
-    /// The cache-backed maintenance driver needs the cache bootstrapped; the
-    /// file driver needs nothing. Only boot the cache when it's in use.
-    async fn bootstrap_maintenance_driver() {
-        if env::var("MAINTENANCE_DRIVER").as_deref() == Ok("cache")
-            && let Err(e) = crate::cache::Cache::bootstrap().await
-        {
-            eprintln!("suprnova: maintenance (cache driver) bootstrap failed: {e}");
-            std::process::exit(1);
-        }
-
-        // Unlike the cache driver, localization has no "only when it's in
-        // use" gate: `up`/`down` print user-facing status text and may run
-        // a custom `MaintenanceDriver` that calls `Lang::get`/`__!`, so a
-        // `Translator` is always bootstrapped for these commands too.
-        #[cfg(feature = "localization")]
-        if let Err(e) = crate::localization::Localization::bootstrap().await {
-            eprintln!("suprnova: localization bootstrap failed: {e}");
-            std::process::exit(1);
         }
     }
 }
@@ -2258,7 +2364,7 @@ mod worker_boot_order_tests {
             })
         });
 
-        Application::<NoMigrator>::boot_worker_process(Some(bootstrap))
+        Application::<NoMigrator>::boot_process(ProcessBoot::Work, Some(bootstrap))
             .await
             .expect("the database queue driver must find an initialised connection");
 
@@ -2290,13 +2396,13 @@ mod worker_boot_order_tests {
                 crate::logging::Log::define(name, crate::logging::LogChannel::single(path));
             })
         });
-        Application::<NoMigrator>::boot_worker_process(Some(bootstrap))
+        Application::<NoMigrator>::boot_process(ProcessBoot::Work, Some(bootstrap))
             .await
             .expect("the channel the bootstrap defines is the default");
         assert_eq!(crate::logging::Log::default_channel(), name);
 
         let _missing = EnvGuard::set(&[("LOG_CHANNEL", "no-such-log-channel")]);
-        let error = Application::<NoMigrator>::boot_worker_process(None)
+        let error = Application::<NoMigrator>::boot_process(ProcessBoot::Work, None)
             .await
             .expect_err("a channel nothing defines stops the worker");
         assert!(error.to_string().contains("no-such-log-channel"), "{error}");
@@ -2335,7 +2441,7 @@ mod worker_boot_order_tests {
             ("S3_SECRET_KEY", "suprnova-test-secret"),
         ]);
 
-        Application::<NoMigrator>::boot_worker_process(None)
+        Application::<NoMigrator>::boot_process(ProcessBoot::Work, None)
             .await
             .expect("the overflow disk the environment describes is registered in time");
 
@@ -2346,6 +2452,556 @@ mod worker_boot_order_tests {
         crate::queue::Queue::set_driver(std::sync::Arc::new(
             crate::queue::memory::MemoryQueueDriver::new(),
         ));
+    }
+
+    /// The console reports a driver that does not boot and goes on with the
+    /// rest; a worker refuses to start. Production with a mail driver that
+    /// delivers nothing is a mail boot that fails on purpose.
+    #[tokio::test]
+    #[serial]
+    async fn the_console_reports_a_driver_that_does_not_boot_and_goes_on() {
+        let _env = EnvGuard::set(&[
+            ("APP_ENV", "production"),
+            ("RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION", "true"),
+            ("MAIL_DRIVER", "log"),
+            ("MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION", "false"),
+        ]);
+
+        let worker = process_boot::boot_after_hook(ProcessBoot::Work).await;
+        let console = process_boot::boot_after_hook(ProcessBoot::Console).await;
+        crate::queue::Queue::set_driver(std::sync::Arc::new(
+            crate::queue::memory::MemoryQueueDriver::new(),
+        ));
+
+        let error = worker.expect_err("a worker refuses to start without its mail driver");
+        assert!(error.to_string().contains("MAIL"), "{error}");
+        console.expect("the console goes on, and a command that sends mail fails when it does");
+    }
+
+    // Every subcommand but `serve` boots through `boot_process` with the
+    // value `Commands::boot` gives it. The tests below parse each
+    // subcommand's argv, boot what it names, and look at what came up:
+    //
+    // - the hook: the application's `bootstrap`, which `down`, `up` and
+    //   `schedule:list` used to skip;
+    // - the services: the `#[injectable]` and `#[service]` inventory, which
+    //   no worker and no console booted - a job that resolved an action
+    //   failed with `ServiceNotFound` under `queue:work`;
+    // - the policies: the `#[policy]` inventory;
+    // - the drivers: `QUEUE_DRIVER=database` is set, so a boot that builds
+    //   the drivers leaves the `database` queue driver behind, and one that
+    //   does not leaves the `memory` driver each test starts from.
+
+    thread_local! {
+        /// How many times this thread booted the singleton inventory. The
+        /// probe entry below counts itself; a thread-local so a boot in a
+        /// test running in parallel cannot be mistaken for this test's.
+        static SERVICE_BOOTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn count_service_boot() -> Result<(), String> {
+        SERVICE_BOOTS.with(|boots| boots.set(boots.get() + 1));
+        Ok(())
+    }
+
+    inventory::submit!(crate::container::provider::SingletonEntry {
+        register: count_service_boot,
+        name: "process_boot_probe",
+    });
+
+    /// Set once the `#[policy]` inventory has been drained.
+    static POLICIES_DRAINED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    inventory::submit!(crate::authorization::__PolicyRegistration {
+        register: || POLICIES_DRAINED.store(true, std::sync::atomic::Ordering::SeqCst),
+    });
+
+    /// What one subcommand's boot brought up.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Booted {
+        hook: bool,
+        services: bool,
+        policies: bool,
+        queue_driver: String,
+    }
+
+    /// Parse `argv`, boot what its subcommand names, and report what came up.
+    async fn boot(argv: &[&str]) -> Booted {
+        let command = Cli::try_parse_from(argv)
+            .expect("the argv parses")
+            .command
+            .expect("the argv names a subcommand");
+        crate::queue::Queue::set_driver(std::sync::Arc::new(
+            crate::queue::memory::MemoryQueueDriver::new(),
+        ));
+        let _env = EnvGuard::set(&[("QUEUE_DRIVER", "database"), ("QUEUE_DB_TABLE", "jobs")]);
+        let hook_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran = std::sync::Arc::clone(&hook_ran);
+        let bootstrap: BootstrapFn = Box::new(move || {
+            Box::pin(async move {
+                crate::database::DB::init_with(
+                    crate::database::DatabaseConfig::builder()
+                        .url("sqlite::memory:")
+                        .build(),
+                )
+                .await
+                .expect("the bootstrap initialises the database");
+                ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        });
+        let before = SERVICE_BOOTS.with(std::cell::Cell::get);
+        Application::<NoMigrator>::boot_process(command.boot(), Some(bootstrap))
+            .await
+            .expect("the boot succeeds");
+        let booted = Booted {
+            hook: hook_ran.load(std::sync::atomic::Ordering::SeqCst),
+            services: SERVICE_BOOTS.with(std::cell::Cell::get) > before,
+            policies: POLICIES_DRAINED.load(std::sync::atomic::Ordering::SeqCst),
+            queue_driver: crate::queue::Queue::driver_name()
+                .expect("a queue driver is set")
+                .to_string(),
+        };
+        crate::queue::Queue::set_driver(std::sync::Arc::new(
+            crate::queue::memory::MemoryQueueDriver::new(),
+        ));
+        booted
+    }
+
+    fn work() -> Booted {
+        Booted {
+            hook: true,
+            services: true,
+            policies: true,
+            queue_driver: "database".to_string(),
+        }
+    }
+
+    fn without_drivers() -> Booted {
+        Booted {
+            queue_driver: "memory".to_string(),
+            ..work()
+        }
+    }
+
+    async fn assert_migrations_boot_nothing(argv: &[&str]) {
+        let booted = boot(argv).await;
+        assert!(!booted.hook, "{argv:?} runs no application hook");
+        assert!(!booted.services, "{argv:?} boots no services");
+        assert_eq!(booted.queue_driver, "memory", "{argv:?} builds no driver");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn queue_work_boots_the_hook_services_policies_and_drivers() {
+        assert_eq!(boot(&["app", "queue:work"]).await, work());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn queue_pause_boots_the_hook_services_policies_and_drivers() {
+        assert_eq!(boot(&["app", "queue:pause", "default"]).await, work());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn queue_resume_boots_the_hook_services_policies_and_drivers() {
+        assert_eq!(boot(&["app", "queue:resume", "default"]).await, work());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn queue_failed_boots_the_hook_services_policies_and_drivers() {
+        assert_eq!(boot(&["app", "queue:failed"]).await, work());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn queue_retry_boots_the_hook_services_policies_and_drivers() {
+        assert_eq!(boot(&["app", "queue:retry", "all"]).await, work());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn queue_forget_boots_the_hook_services_policies_and_drivers() {
+        assert_eq!(boot(&["app", "queue:forget", "1"]).await, work());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn queue_flush_boots_the_hook_services_policies_and_drivers() {
+        assert_eq!(boot(&["app", "queue:flush"]).await, work());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn queue_prune_failed_boots_the_hook_services_policies_and_drivers() {
+        assert_eq!(boot(&["app", "queue:prune-failed"]).await, work());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn schedule_work_boots_the_hook_services_policies_and_drivers() {
+        assert_eq!(boot(&["app", "schedule:work"]).await, work());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn schedule_run_boots_the_hook_services_policies_and_drivers() {
+        assert_eq!(boot(&["app", "schedule:run"]).await, work());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn workflow_work_boots_the_hook_services_policies_and_drivers() {
+        assert_eq!(boot(&["app", "workflow:work"]).await, work());
+    }
+
+    /// `schedule:list` builds the schedule the daemon would run, so it
+    /// runs the hook that schedule may read; it runs no task, so it needs
+    /// no driver.
+    #[tokio::test]
+    #[serial]
+    async fn schedule_list_boots_the_hook_services_and_policies() {
+        assert_eq!(boot(&["app", "schedule:list"]).await, without_drivers());
+    }
+
+    /// `down` runs the hook: a storage path or a cache store the hook
+    /// installs is the one the serving process reads its maintenance state
+    /// from. The queue driver is not built - a broken queue backend must
+    /// not stop the command an operator runs during the outage.
+    #[tokio::test]
+    #[serial]
+    async fn down_boots_the_hook_services_and_policies() {
+        assert_eq!(boot(&["app", "down"]).await, without_drivers());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn up_boots_the_hook_services_and_policies() {
+        assert_eq!(boot(&["app", "up"]).await, without_drivers());
+    }
+
+    /// The migrations run no hook, as `serve` runs its own migrations
+    /// before the hook: a fresh database has to be migratable even when the
+    /// hook reads a table the migrations have not created yet.
+    #[tokio::test]
+    #[serial]
+    async fn migrate_boots_nothing() {
+        assert_migrations_boot_nothing(&["app", "migrate"]).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn migrate_status_boots_nothing() {
+        assert_migrations_boot_nothing(&["app", "migrate:status"]).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn migrate_rollback_boots_nothing() {
+        assert_migrations_boot_nothing(&["app", "migrate:rollback"]).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn migrate_fresh_boots_nothing() {
+        assert_migrations_boot_nothing(&["app", "migrate:fresh"]).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn schema_dump_boots_nothing() {
+        assert_migrations_boot_nothing(&["app", "schema:dump"]).await;
+    }
+}
+
+#[cfg(test)]
+mod process_exit_tests {
+    use super::*;
+    use crate::supervisor::{RestartPolicy, Supervisor, SupervisorRegistry};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const CHILD_MODE: &str = "SUPRNOVA_PROCESS_EXIT_CHILD";
+
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    static STOPPED: AtomicBool = AtomicBool::new(false);
+
+    /// A supervisor the application's bootstrap starts, as the dogfood
+    /// app's does: it runs until its token is cancelled.
+    struct BootstrapSupervisor;
+
+    #[async_trait::async_trait]
+    impl Supervisor for BootstrapSupervisor {
+        fn name(&self) -> &'static str {
+            "bootstrap_supervisor"
+        }
+
+        async fn run(
+            &self,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<(), FrameworkError> {
+            STARTED.store(true, Ordering::SeqCst);
+            cancel.cancelled().await;
+            STOPPED.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn restart_policy(&self) -> RestartPolicy {
+            RestartPolicy::Never
+        }
+    }
+
+    /// The body of the test below, in a process of its own: it cancels the
+    /// process-wide supervisor token, which would refuse every supervisor
+    /// a later test in a shared process starts.
+    #[test]
+    fn booted_command_child() {
+        if std::env::var_os(CHILD_MODE).is_none() {
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            let app = Application::new().bootstrap(|| async {
+                SupervisorRegistry::spawn(std::sync::Arc::new(BootstrapSupervisor)).await;
+                for _ in 0..200 {
+                    if STARTED.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            });
+            let cli = Cli::try_parse_from(["app", "schedule:list"]).expect("the argv parses");
+            app.run_cli(cli).await;
+        });
+        assert!(
+            STARTED.load(Ordering::SeqCst),
+            "the bootstrap's supervisor ran"
+        );
+        assert!(
+            STOPPED.load(Ordering::SeqCst),
+            "the command returned with the bootstrap's supervisor still running"
+        );
+    }
+
+    /// A booted subcommand stops and drains the supervisors its bootstrap
+    /// started before it returns, as `Server::run` does at its shutdown.
+    /// The workers and commands used to return with them still running,
+    /// and the runtime's teardown cut them off mid-work.
+    #[test]
+    fn a_booted_command_drains_the_supervisors_its_bootstrap_started() {
+        let output =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "app::process_exit_tests::booted_command_child",
+                    "--nocapture",
+                ])
+                .env(CHILD_MODE, "1")
+                .output()
+                .expect("spawn the child");
+        assert!(
+            output.status.success(),
+            "status: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+            "child filter matched no test; stdout:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+        );
+    }
+
+    /// Selects the subcommand [`failing_command_child`] runs; unset, the
+    /// child does nothing.
+    const FAILING_CHILD: &str = "SUPRNOVA_PROCESS_EXIT_FAILING_CHILD";
+    /// A storage path the failing child's bootstrap installs.
+    const FAILING_STORAGE: &str = "SUPRNOVA_PROCESS_EXIT_STORAGE";
+    /// Printed by [`ReportingSupervisor`] when it sees its cancel token.
+    const STOPPED_MARKER: &str = "reporting supervisor stopped";
+
+    static REPORTING_STARTED: AtomicBool = AtomicBool::new(false);
+
+    /// A supervisor that says on stdout when it stops: a failing command
+    /// exits the process, so the parent test reads the line instead of a
+    /// flag.
+    struct ReportingSupervisor;
+
+    #[async_trait::async_trait]
+    impl Supervisor for ReportingSupervisor {
+        fn name(&self) -> &'static str {
+            "reporting_supervisor"
+        }
+
+        async fn run(
+            &self,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<(), FrameworkError> {
+            REPORTING_STARTED.store(true, Ordering::SeqCst);
+            cancel.cancelled().await;
+            println!("{STOPPED_MARKER}");
+            Ok(())
+        }
+
+        fn restart_policy(&self) -> RestartPolicy {
+            RestartPolicy::Never
+        }
+    }
+
+    /// Runs the subcommand `FAILING_CHILD` names in a process of its own,
+    /// with a bootstrap that starts [`ReportingSupervisor`] and, when
+    /// `FAILING_STORAGE` is set, installs that storage path. The command is
+    /// expected to fail and exit the process.
+    #[test]
+    fn failing_command_child() {
+        let Some(command) = std::env::var_os(FAILING_CHILD) else {
+            return;
+        };
+        let command = command.into_string().expect("a UTF-8 subcommand");
+        let storage = std::env::var_os(FAILING_STORAGE);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            let app = Application::new().bootstrap(move || async move {
+                if let Some(storage) = storage {
+                    crate::app::paths::use_storage_path(storage);
+                }
+                SupervisorRegistry::spawn(std::sync::Arc::new(ReportingSupervisor)).await;
+                for _ in 0..200 {
+                    if REPORTING_STARTED.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert!(
+                    REPORTING_STARTED.load(Ordering::SeqCst),
+                    "the bootstrap's supervisor ran"
+                );
+            });
+            let cli = Cli::try_parse_from(["app", command.as_str()]).expect("the argv parses");
+            app.run_cli(cli).await;
+        });
+        panic!("{command} was expected to fail and exit the process");
+    }
+
+    /// Runs [`failing_command_child`] for `command` with `env` set, and
+    /// returns its exit code and stdout.
+    fn run_failing_child(command: &str, env: &[(&str, &std::ffi::OsStr)]) -> (Option<i32>, String) {
+        let mut child =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"));
+        child
+            .args([
+                "--exact",
+                "app::process_exit_tests::failing_command_child",
+                "--nocapture",
+            ])
+            .env(FAILING_CHILD, command);
+        for (key, value) in env {
+            child.env(key, value);
+        }
+        let output = child.output().expect("spawn the child");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            stdout.contains("running 1 test"),
+            "child filter matched no test; stdout:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("was expected to fail"),
+            "{command} did not fail; stdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+        (output.status.code(), stdout)
+    }
+
+    /// A command whose framework boot fails after the bootstrap ran stops
+    /// and drains the supervisors that bootstrap started before it exits.
+    /// The failure exit used to skip the drain, and the process ended with
+    /// them mid-work. `LOG_CHANNEL` names a channel nothing defines, which
+    /// fails the boot after the bootstrap.
+    #[test]
+    fn a_boot_failure_drains_the_supervisors_its_bootstrap_started() {
+        let (code, stdout) = run_failing_child(
+            "schedule:list",
+            &[("LOG_CHANNEL", std::ffi::OsStr::new("no-such-channel"))],
+        );
+        assert_eq!(code, Some(1), "stdout:\n{stdout}");
+        assert!(
+            stdout.contains(STOPPED_MARKER),
+            "the boot failure exited with the bootstrap's supervisor still running; \
+             stdout:\n{stdout}"
+        );
+    }
+
+    /// `down` that cannot record maintenance mode drains the supervisors
+    /// its bootstrap started before it exits, as a command that succeeds
+    /// does. The storage path the bootstrap installs is a file, so the
+    /// maintenance file cannot be written under it.
+    #[test]
+    fn a_failed_down_drains_the_supervisors_its_bootstrap_started() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-directory");
+        std::fs::write(&file, b"").expect("write the blocking file");
+        let (code, stdout) = run_failing_child("down", &[(FAILING_STORAGE, file.as_os_str())]);
+        assert_eq!(code, Some(1), "stdout:\n{stdout}");
+        assert!(
+            stdout.contains(STOPPED_MARKER),
+            "the failed down exited with the bootstrap's supervisor still running; \
+             stdout:\n{stdout}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod scheduler_loop_tests {
+    use super::*;
+    use crate::signals::ShutdownSignal;
+
+    /// A stop signal reaches the daemon while an inline task is running.
+    /// The tick arm used to await every inline task to the end before the
+    /// loop looked at the signal again, so a task that never returned kept
+    /// SIGTERM from ever starting the drain. The run is now raced against
+    /// the signal and gets the grace window, and no more.
+    #[tokio::test]
+    async fn a_hung_inline_task_does_not_keep_the_daemon_from_stopping() {
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let in_task = std::sync::Arc::clone(&started);
+        let mut schedule = Schedule::new();
+        let task = schedule
+            .call(move || {
+                let in_task = std::sync::Arc::clone(&in_task);
+                async move {
+                    in_task.notify_one();
+                    std::future::pending::<Result<(), FrameworkError>>().await
+                }
+            })
+            .cron("* * * * *")
+            .name("never-returns");
+        schedule.add(task);
+
+        let (stop, shutdown) = crate::signals::riggable();
+        let stopper = tokio::spawn(async move {
+            started.notified().await;
+            stop.send(Some(ShutdownSignal::Terminate))
+                .expect("the daemon still listens");
+        });
+        // An interval's first tick is immediate, so the task runs at once.
+        let tick = tokio::time::interval(Duration::from_secs(60));
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_scheduler_loop(&schedule, tick, &shutdown, Duration::from_millis(100)),
+        )
+        .await
+        .expect("the daemon stops within its grace once the signal arrives");
+        stopper.await.expect("the stopper does not panic");
     }
 }
 

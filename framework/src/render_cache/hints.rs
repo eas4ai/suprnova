@@ -47,7 +47,8 @@
 //! # Bounds
 //!
 //! - One message carries at most [`MAX_HINT_DIGESTS`] digests. A message
-//!   over that bound is dropped whole, never truncated.
+//!   over that bound is dropped whole, never truncated, and a payload longer
+//!   than such a message can be is dropped before it is copied or queued.
 //! - The publish queue and the inbound queue are both bounded. A
 //!   subscriber that fills its inbound queue is dropped and resubscribes
 //!   rather than queued without limit, and it lengthens its own pause
@@ -189,8 +190,9 @@ pub(crate) const APPLIED: &str = "applied";
 /// message this node could not decode, which names nothing either way and
 /// changes nothing.
 pub(crate) const IGNORED_UNKNOWN_KEY: &str = "ignored_unknown_key";
-/// The message carried more than [`MAX_HINT_DIGESTS`] digests and was
-/// dropped whole.
+/// The message carried more than [`MAX_HINT_DIGESTS`] digests, or more
+/// bytes than a message of that many digests can occupy, and was dropped
+/// whole.
 pub(crate) const DROPPED_OVER_BOUND: &str = "dropped_over_bound";
 /// This node's subscription ended and is being re-established.
 pub(crate) const SUBSCRIBER_DROPPED: &str = "subscriber_dropped";
@@ -248,18 +250,23 @@ fn encode(digests: &[[u8; 32]]) -> String {
 
 /// Reads one message body back, refusing anything outside the bound.
 ///
-/// The digest count is decided before the byte length, and by counting
-/// separators rather than by splitting, so an over-bound message is
-/// reported as over-bound rather than as merely long, and so that deciding
-/// it allocates nothing. Both checks run before any digest is parsed: this
+/// The byte length is decided first, then the digest count, by counting
+/// separators rather than by splitting, so deciding either allocates
+/// nothing and neither scans past the bound. Both report an over-bound
+/// message as over-bound. Both checks run before any digest is parsed: this
 /// is an unauthenticated channel, and the first thing a message has to earn
 /// is the right to be looked at.
 fn decode(body: &str) -> Result<Vec<[u8; 32]>, HintDecodeError> {
-    if body.bytes().filter(|byte| *byte == b',').count() > MAX_HINT_DIGESTS {
+    // A body longer than the most a well-formed message can occupy is over
+    // the bound however many digests it claims, and checking its length
+    // first means the comma count below never scans more than that many
+    // bytes. The subscriber already refuses such a payload before it is
+    // queued; this keeps `decode` bounded for any other caller.
+    if body.len() > MAX_HINT_BYTES {
         return Err(HintDecodeError::OverBound);
     }
-    if body.len() > MAX_HINT_BYTES {
-        return Err(HintDecodeError::Malformed);
+    if body.bytes().filter(|byte| *byte == b',').count() > MAX_HINT_DIGESTS {
+        return Err(HintDecodeError::OverBound);
     }
     let rest = body
         .strip_prefix(VERSION_TAG)
@@ -637,6 +644,46 @@ fn offer_to_applier(
     }
 }
 
+/// Takes one received payload, borrowed from the Redis message, and hands
+/// it to the applier as an owned body.
+///
+/// A payload longer than any well-formed hint is dropped here, before it is
+/// copied out of the message or queued, and counted under
+/// `dropped_over_bound`. The channel is unauthenticated, and the inbound
+/// queue bounds messages, not bytes: converting every payload first let 64
+/// arbitrarily large bodies sit in the queue, each then scanned for commas
+/// before the decoder's own length check refused it (DATA-044).
+///
+/// `None` while the subscription may continue; see [`offer_to_applier`].
+fn receive(
+    inbound: &tokio::sync::mpsc::Sender<String>,
+    payload: &[u8],
+) -> Option<SubscriptionEnding> {
+    if payload.len() > MAX_HINT_BYTES {
+        count(DROPPED_OVER_BOUND);
+        return None;
+    }
+    let Ok(body) = std::str::from_utf8(payload) else {
+        // Not text this build can read. Counted as a delivered message
+        // that named nothing, exactly as an undecodable body is, so the two
+        // cannot be told apart by an attacker either.
+        count(IGNORED_UNKNOWN_KEY);
+        return None;
+    };
+    offer_to_applier(inbound, body.to_owned())
+}
+
+/// Runs `payload` through the subscriber's own receive step into a queue of
+/// one, and returns what was queued for the applier, or `None` when the
+/// receive step queued nothing. The seam that proves what reaches the
+/// bounded inbound queue without a live Redis (DATA-044).
+#[cfg(any(test, feature = "testing"))]
+pub(crate) fn queued_after_receive_for_test(payload: &[u8]) -> Option<String> {
+    let (inbound, mut applier) = tokio::sync::mpsc::channel(1);
+    let _ = receive(&inbound, payload);
+    applier.try_recv().ok()
+}
+
 /// Subscribes and forwards messages until the subscription ends, reporting
 /// how it ended so [`next_backoff`] can decide the pause that follows.
 ///
@@ -663,14 +710,7 @@ async fn hold_subscription(
     let mut delivered = false;
     while let Some(message) = futures::StreamExt::next(&mut stream).await {
         delivered = true;
-        let Ok(body) = message.get_payload::<String>() else {
-            // Not text this build can read. Counted as a delivered
-            // message that named nothing, exactly as an undecodable body
-            // is, so the two cannot be told apart by an attacker either.
-            count(IGNORED_UNKNOWN_KEY);
-            continue;
-        };
-        if let Some(ending) = offer_to_applier(inbound, body) {
+        if let Some(ending) = receive(inbound, message.get_payload_bytes()) {
             return Ok(ending);
         }
     }

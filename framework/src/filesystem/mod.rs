@@ -32,6 +32,10 @@
 //! # }
 //! ```
 
+#[cfg(unix)]
+mod confined;
+#[cfg(unix)]
+mod confined_fs;
 mod disk;
 mod path_guard;
 mod read_through;
@@ -42,7 +46,7 @@ pub mod streaming;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
-pub use disk::{ChecksumAlgorithm, DiskExt};
+pub use disk::{ChecksumAlgorithm, DiskExt, TemporaryUploadUrl};
 pub use streaming::copy_between_disks;
 
 use crate::FrameworkError;
@@ -251,18 +255,22 @@ fn set_variable(variable: &impl Fn(&str) -> Option<String>, name: &str) -> Optio
 /// so an operator watching a crash loop should expect it to grow.
 pub const ATOMIC_STAGING_DIR: &str = ".suprnova-atomic";
 
-/// Build the `opendal` local-filesystem service for `root` with atomic writes
-/// configured.
+/// Build the local-filesystem operator for `root`, with atomic writes staged
+/// under [`ATOMIC_STAGING_DIR`].
 ///
 /// Shared by [`Storage::register_fs_with`] and the `read_through` tests so both
-/// exercise the same staging configuration; a disk built any other way takes
-/// opendal's non-atomic quick path and writes in place.
+/// exercise the same staging configuration.
+///
+/// On Unix the service underneath is `confined_fs::ConfinedFs`, which
+/// resolves every path through directory handles so a symlink swapped into
+/// the root cannot redirect an operation out of it. Elsewhere it is opendal's
+/// own `fs` service.
 ///
 /// `root` must already be valid UTF-8. The staging path is `root` joined with
 /// [`ATOMIC_STAGING_DIR`], which is pure ASCII, so the re-encode only fails if
 /// the caller broke that contract - reported rather than lossily converted,
 /// since a mangled staging path would silently stage somewhere else.
-pub(crate) fn atomic_fs_service(root: &str) -> Result<services::Fs, FrameworkError> {
+pub(crate) fn local_fs_operator(root: &str) -> Result<Operator, FrameworkError> {
     let staging = Path::new(root).join(ATOMIC_STAGING_DIR);
     // opendal creates the staging directory only when the path is missing; a
     // regular *file* of that name satisfies its `metadata` probe and
@@ -283,10 +291,16 @@ pub(crate) fn atomic_fs_service(root: &str) -> Result<services::Fs, FrameworkErr
              staging atomic writes, so move it aside before registering the disk"
         )));
     }
-    let staging = staging.to_str().ok_or_else(|| {
-        FrameworkError::internal("storage fs atomic staging directory path is not valid UTF-8")
-    })?;
-    Ok(services::Fs::default().root(root).atomic_write_dir(staging))
+    #[cfg(unix)]
+    let operator = Operator::new(confined_fs::ConfinedFs::new(root));
+    #[cfg(not(unix))]
+    let operator = {
+        let staging = staging.to_str().ok_or_else(|| {
+            FrameworkError::internal("storage fs atomic staging directory path is not valid UTF-8")
+        })?;
+        Operator::new(services::Fs::default().root(root).atomic_write_dir(staging))
+    };
+    operator.map_err(|e| FrameworkError::internal(format!("opendal fs init: {e}")))
 }
 
 /// Static facade for the named-disk storage system.
@@ -786,14 +800,11 @@ impl Storage {
             .as_ref()
             .to_str()
             .ok_or_else(|| FrameworkError::internal("storage fs root path is not valid UTF-8"))?;
-        let builder = atomic_fs_service(root_str)?;
         // `PathGuardLayer` is applied to the raw FS operator before the user's
         // `layer_fn` runs, so the traversal guard sits closest to the backend
         // and the caller's own layers (retry, logging, tracing) wrap it. The
         // caller can add layers but cannot strip the guard.
-        let guarded = Operator::new(builder)
-            .map_err(|e| FrameworkError::internal(format!("opendal fs init: {e}")))?
-            .layer(path_guard::PathGuardLayer);
+        let guarded = local_fs_operator(root_str)?.layer(path_guard::PathGuardLayer);
         let layered = layer_fn(guarded);
         registry::register(name, layered);
         Ok(())
@@ -1154,12 +1165,12 @@ impl Storage {
         // promotion write and the existence probes can use the high-level
         // operator API. It is the same backend as the stack the layer wraps,
         // so there is no second disk and no way to recurse.
-        let composed = primary.clone().layer(read_through::ReadThroughLayer {
+        let composed = primary.clone().layer(read_through::ReadThroughLayer::new(
             primary,
             fallback,
-            copy: config.copy,
-            throw_on_promotion_failure: config.throw_on_promotion_failure,
-        });
+            config.copy,
+            config.throw_on_promotion_failure,
+        ));
 
         registry::register(name, layer_fn(composed));
         Ok(())

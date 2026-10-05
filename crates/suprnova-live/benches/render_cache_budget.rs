@@ -207,13 +207,14 @@ const CONTENT_TYPE_VALUE: &str = "text/html; charset=utf-8";
 const REFERRER_POLICY_VALUE: &str = "same-origin";
 /// The `Cache-Control` a `C64` hit must serve, pinned literally rather than
 /// recomputed through the same formatter the response used.
-const C64_CACHE_CONTROL: &str = "private, max-age=300";
+const C64_CACHE_CONTROL: &str = "private, no-cache";
 /// Milliseconds a seeded `C64` body's promotion deadline still has at the
-/// measured instant. Its `Cache-Control` shrinks with the clock, so that
-/// one value cannot be precomputed and the hit forms it per request.
+/// measured instant. A seeded hit forms its `Cache-Control` per request,
+/// because a shared age shrinks with the seed's clock; this entry is
+/// private, so the value it forms is the constant revalidation directive.
 const C64_SEED_REMAINING_MS: u64 = 45_000;
 /// The `Cache-Control` the seeded variant must serve, pinned literally.
-const C64_SEEDED_CACHE_CONTROL: &str = "private, max-age=45";
+const C64_SEEDED_CACHE_CONTROL: &str = "private, no-cache";
 /// The assembly bound `C64+4` runs under.
 const MAX_ASSEMBLED_BYTES: usize = 8 << 20;
 /// Literal shell pieces around the nonce hole and the four slots.
@@ -921,8 +922,8 @@ struct NotModifiedResult {
 }
 
 /// The same hit for a body that embeds a public seed deadline, whose
-/// `Cache-Control` shrinks with the clock and so is the one header value a
-/// hit cannot precompute. Reported so the entry shape with the most
+/// `Cache-Control` the hit forms per request, because a shared age would
+/// shrink with the clock. Reported so the entry shape with the most
 /// per-request work is measured rather than reasoned about.
 #[derive(Serialize)]
 struct SeedDeadlineResult {

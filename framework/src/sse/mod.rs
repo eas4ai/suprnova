@@ -613,7 +613,14 @@ pub fn last_event_id_from_value(value: Option<&str>) -> Option<String> {
 /// resumes from where it dropped instead of re-receiving the entire
 /// history.
 ///
-/// Returns `None` when the header is absent OR contains a NUL byte -
+/// Any id [`SseEvent::with_id`] accepts comes back, Unicode included:
+/// `EventSource` sends the remembered id as UTF-8, so the header bytes
+/// are decoded as UTF-8. [`crate::Request::header`] cannot be used here,
+/// because it returns only visible-ASCII values, and a resume from a
+/// Unicode id would then look like a fresh connection.
+///
+/// Returns `None` when the header is absent, when its bytes are not
+/// UTF-8 (no browser sends such an id), or when it contains a NUL byte -
 /// per the spec a NUL invalidates the id, and pre-filtering keeps
 /// producer code from having to defend against it on every read.
 ///
@@ -621,11 +628,11 @@ pub fn last_event_id_from_value(value: Option<&str>) -> Option<String> {
 /// for SQL fragments, file paths, or anything else. Validate the shape
 /// (e.g. parse as a `u64` cursor) at the point of use.
 ///
-/// Internally delegates to [`last_event_id_from_value`] - that function
-/// is the one targeted by unit tests since constructing a `Request` in
-/// isolation requires a live `hyper::body::Incoming` body.
+/// Internally delegates to [`last_event_id_from_value`] for the NUL
+/// rule, so that rule is unit-testable without a `Request`.
 pub fn last_event_id(req: &crate::Request) -> Option<String> {
-    last_event_id_from_value(req.header("last-event-id"))
+    let raw = req.headers().get("last-event-id")?;
+    last_event_id_from_value(std::str::from_utf8(raw.as_bytes()).ok())
 }
 
 #[cfg(test)]

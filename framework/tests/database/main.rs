@@ -23,6 +23,7 @@ mod query_fixture;
 pub mod query_helpers;
 pub mod raw_helpers;
 pub mod sea_orm_aliases;
+pub mod time_column_types;
 pub mod transactions;
 pub mod tx_leak_diagnostic;
 pub mod url_prod_validation;

@@ -71,6 +71,7 @@ pub mod http;
 pub mod http_client;
 pub mod idempotency;
 pub mod inertia;
+pub(crate) mod json_number;
 /// Server-driven interactive components and their application-facing contracts.
 pub mod live;
 #[cfg(feature = "localization")]
@@ -167,9 +168,9 @@ pub use database::{
     ConnectionRegistry, DB, Database, DatabaseBusy, DatabaseConfig, DatabaseType, DbConnection,
     DbTableBuilder, DynamicRow, EntityExt, EntityExtMut, IntoWhereIn, JoinClause,
     PRIMARY_CONNECTION_NAME, PrunedMigration, QueryExecuted, QueryListener,
-    READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, RouteParam, SchemaDump, Transaction,
-    TransactionBeginning, TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource,
-    WhereIn,
+    READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, RouteParam, SchemaDump,
+    StoredDateTime, Transaction, TransactionBeginning, TransactionCommitted, TransactionRolledBack,
+    TxHandle, UrlSource, WhereIn,
 };
 #[cfg(feature = "magnetar-oauth")]
 pub use magnetar::{
@@ -194,7 +195,6 @@ pub use magnetar::{
         oauth_x::{XOAuthProvider, XProviderConfig},
     },
 };
-pub use magnetar_integration::SignInOutcome;
 #[cfg(any(
     feature = "database-sqlite",
     feature = "database-postgres",
@@ -213,6 +213,7 @@ pub use magnetar_integration::{
     install_magnetar_oauth_engine_with_factor,
     oauth_transport::ReqwestOAuthTransport,
 };
+pub use magnetar_integration::{Registration, SignInOutcome};
 #[cfg(feature = "magnetar-oauth")]
 pub use secrecy::SecretString;
 
@@ -284,7 +285,7 @@ pub use filesystem::GcsConfig;
 #[cfg(feature = "filesystem")]
 pub use filesystem::{
     ATOMIC_STAGING_DIR, ChecksumAlgorithm, DiskExt, ENV_S3_DISK, ReadThroughConfig, S3Config,
-    Storage, copy_between_disks,
+    Storage, TemporaryUploadUrl, copy_between_disks,
 };
 pub use hashing::{
     Algorithm as HashAlgorithm, Argon2Options, Argon2iHasher, Argon2idHasher, BcryptHasher,
@@ -443,11 +444,11 @@ pub use ::chrono_tz::Tz;
 pub use seed::Seeder;
 pub use server::{Server, handle_request, handle_request_with_peer};
 pub use session::{
-    DatabaseSessionDriver, SessionBlock, SessionConfig, SessionData, SessionGcSupervisor,
-    SessionMiddleware, SessionMigrationError, SessionStore, auth_user_id, clear_auth_user,
-    destroy_all_for_user, generate_csrf_token, generate_session_id, get_csrf_token,
-    invalidate_session, is_authenticated, is_valid_session_id, regenerate_csrf_token,
-    regenerate_session_id, session, session_mut, set_auth_user,
+    DatabaseSessionDriver, DestroyedSessions, SessionBlock, SessionConfig, SessionData,
+    SessionGcSupervisor, SessionMiddleware, SessionMigrationError, SessionStore, auth_user_id,
+    clear_auth_user, destroy_all_for_guard_user, destroy_all_for_user, generate_csrf_token,
+    generate_session_id, get_csrf_token, invalidate_session, is_authenticated, is_valid_session_id,
+    regenerate_csrf_token, regenerate_session_id, session, session_mut, set_auth_user,
 };
 pub use sse::{EndSignal, SseEvent, StreamedEvent};
 pub use static_files::StaticFiles;
@@ -516,6 +517,10 @@ pub use auth_flows::{
 };
 #[doc(hidden)]
 pub use clap as __clap;
+/// The mail serializer for transport authors: quoted mailbox text, bare
+/// emails, and the header and message checks every built-in transport uses.
+/// See [`mail::wire`].
+pub use mail::wire as mail_wire;
 pub use mail::{
     Address, Attachment, Mail, MailBuilder, MailFake, Mailable, MessageSending, MessageSent,
     OutgoingMessage, QueuedSnapshot, SendMailJob,
@@ -540,18 +545,18 @@ pub use eloquent::{
     AggregateKind, AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal,
     AsEncrypted, AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat,
     AsHashed, AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsNaiveDateTime,
-    AsNativeDateTime, AsObject, AsOptionalArray, AsOptionalArrayObject, AsOptionalCollection,
-    AsOptionalDateTime, AsOptionalJson, AsOptionalNaiveDateTime, AsOptionalNativeDateTime,
-    AsOptionalObject, AsOptionalU64, AsString, AsTimestamp, AsU64, Attrs, BelongsTo, BelongsToMany,
-    Builder, Cast, Collection, Direction, DynCast, EagerLoadCache, EagerLoadDispatch,
-    EloquentModel, Fillable, FirstOrCreate, GlobalScope, HasMany, HasManyThrough, HasOne,
-    HasOneThrough, IntoColumn, IntoDynCast, IntoVal, LazyCollection, LazyLoadingViolation,
-    MassPrunable, Model, ModelEntry, MorphMany, MorphOne, MorphTo, MorphToMany, MorphTypeEntry,
-    MorphedByMany, Prunable, PrunerEntry, Relation, RelationEntry, RelationKind, ReplicateExt,
-    ScopeRegistry, SoftDeletes, StoredU64, Touchable, clear_lazy_loading_violation_handler,
-    find_model_by_table, find_morph_type, find_morph_type_by_id, find_relation,
-    handle_lazy_loading_violation, models, morph_types, prevent_lazy_loading,
-    prevent_silently_discarding_attributes, preventing_lazy_loading,
+    AsNativeDateTime, AsNativeJson, AsObject, AsOptionalArray, AsOptionalArrayObject,
+    AsOptionalCollection, AsOptionalDateTime, AsOptionalJson, AsOptionalNaiveDateTime,
+    AsOptionalNativeDateTime, AsOptionalNativeJson, AsOptionalObject, AsOptionalU64, AsString,
+    AsTimestamp, AsU64, Attrs, BelongsTo, BelongsToMany, Builder, Cast, Collection, Direction,
+    DynCast, EagerLoadCache, EagerLoadDispatch, EloquentModel, Fillable, FirstOrCreate,
+    GlobalScope, HasMany, HasManyThrough, HasOne, HasOneThrough, IntoColumn, IntoDynCast, IntoVal,
+    LazyCollection, LazyLoadingViolation, MassPrunable, Model, ModelEntry, MorphMany, MorphOne,
+    MorphTo, MorphToMany, MorphTypeEntry, MorphedByMany, Prunable, PrunerEntry, Relation,
+    RelationEntry, RelationKind, ReplicateExt, ScopeRegistry, SoftDeletes, StoredU64, Touchable,
+    clear_lazy_loading_violation_handler, find_model_by_table, find_morph_type,
+    find_morph_type_by_id, find_relation, handle_lazy_loading_violation, models, morph_types,
+    prevent_lazy_loading, prevent_silently_discarding_attributes, preventing_lazy_loading,
     preventing_silently_discarding_attributes, prune_all, prune_all_dry, prune_one, relations,
     relations_of, unguarded,
 };
@@ -620,6 +625,13 @@ pub use indexmap;
 // Re-export for macro usage
 #[doc(hidden)]
 pub use serde_json;
+
+// The `#[derive(Data)]` route-param extractor parses form bodies with
+// `form_urlencoded`. Naming it through this crate means an application that
+// depends only on `suprnova` compiles that code; `::url::...` resolved only
+// in crates that happened to depend on `url` themselves.
+#[doc(hidden)]
+pub use ::url::form_urlencoded as __form_urlencoded;
 
 // Re-export serde for InertiaProps derive macro
 pub use serde;

@@ -67,24 +67,94 @@ pub(crate) async fn advance(identities: Vec<DependencyIdentity>) -> Result<(), F
         return Ok(());
     }
     if already_in_transaction {
+        #[cfg(any(test, feature = "testing"))]
+        seams::hold_point(&identities).await;
         return super::ledger::advance_in_current_transaction(&identities).await;
     }
     if !DB::is_connected() {
         return Ok(());
     }
+    #[cfg(any(test, feature = "testing"))]
+    seams::hold_point(&identities).await;
+    // DATA-029: carries every identity an earlier failed advance left
+    // behind, so the first advance that can land repairs those missed
+    // invalidations too, instead of serving resuming over them. `mark`
+    // says which failures those are, so a failure recorded while this
+    // advance runs is not resolved by it.
+    let (missed, mark) = super::write_side::unresolved();
+    let mut carried = identities;
+    for missed in missed {
+        if !carried.contains(&missed) {
+            carried.push(missed);
+        }
+    }
+    let attempted = carried.clone();
+    // DATA-039: the row this advance describes has already committed, so a
+    // drop of this future before the advance lands - a client disconnect, a
+    // timeout, a `select!` - would leave it ahead of its generations with
+    // nothing to say so. The guard suspends serving for them instead.
+    let unfinished = UnfinishedAdvance(Some(attempted.clone()));
     let outcome = DB::transaction(move |_tx| {
-        Box::pin(async move { super::ledger::advance_in_dedicated_transaction(&identities).await })
+        Box::pin(async move { super::ledger::advance_in_dedicated_transaction(&carried).await })
     })
     .await;
+    unfinished.finish();
     // CACHE-009: this branch is the one where the advance could not share
     // the row write's transaction, so a failure here leaves a committed row
-    // whose dependents may still be served. Serving stops until an
-    // advancement lands; see `super::write_side::suspend_serving`.
+    // whose dependents may still be served. Serving stops until every
+    // identity it missed has been advanced; see
+    // `super::write_side::suspend_serving`.
     match &outcome {
-        Ok(()) => super::write_side::confirm_advancement(),
-        Err(_) => super::write_side::suspend_serving(),
+        Ok(()) => super::write_side::resolve(&attempted, mark),
+        Err(_) => super::write_side::suspend_serving(&attempted),
     }
     outcome
+}
+
+/// A dedicated advance that has not finished yet. Dropped unfinished, it
+/// records its identities as unresolved and suspends serving, exactly as a
+/// failed advance does; [`Self::finish`] disarms it once the advance has an
+/// outcome to act on.
+struct UnfinishedAdvance(Option<Vec<DependencyIdentity>>);
+
+impl UnfinishedAdvance {
+    fn finish(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for UnfinishedAdvance {
+    fn drop(&mut self) {
+        if let Some(identities) = self.0.take() {
+            super::write_side::suspend_serving(&identities);
+        }
+    }
+}
+
+/// Advances, in a transaction of its own, every identity an earlier failed
+/// advancement left behind (DATA-029).
+///
+/// Called after a write committed together with its own advancement. That
+/// write succeeded and must not report an older write's failure, so a
+/// failure here is logged and leaves serving suspended, which is the
+/// protection the missed identities still need.
+///
+/// `pub(crate)` for the payments webhook hydration, which commits its own
+/// raw transaction with its advance inside it (DATA-039) and repairs after
+/// that commit the way [`atomic`] does after its own.
+pub(crate) async fn repair_unresolved() {
+    let (missed, _) = super::write_side::unresolved();
+    if missed.is_empty() {
+        return;
+    }
+    if let Err(error) = advance(missed).await {
+        tracing::warn!(
+            target: "suprnova::render_cache",
+            error = %error,
+            "render cache could not advance the generations an earlier write missed; \
+             stored entries stay unserved until it can",
+        );
+    }
 }
 
 /// CACHE-009: runs a row write together with the generation advancement it
@@ -102,6 +172,19 @@ pub(crate) async fn advance(identities: Vec<DependencyIdentity>) -> Result<(), F
 /// split commit this closes: a row durable, its advance rolled back, and
 /// the old representation still current.
 ///
+/// A named-connection write is also guarded before its row write starts.
+/// Its row commits on its own connection, and its advance only starts once
+/// that write has returned, so a drop of this future while the row's COMMIT
+/// is in flight, or between it and the advance, used to leave the row
+/// durable with nothing recording it. The guard records the broad identity,
+/// which every representation observes, because which identities the write
+/// will advance is only known once it has run. Dropped before `write`
+/// returns, it suspends serving until a later advance carries that identity;
+/// once `write` returns, its own advance has landed or recorded its own
+/// failure, and the guard stands down. A `write` that returns an error is
+/// taken to have committed nothing, so an ordinary failed write does not
+/// suspend serving.
+///
 /// `write` is a closure returning a future rather than a future, because
 /// whether to open a transaction is decided here, before the future is
 /// built inside it.
@@ -114,19 +197,22 @@ where
     Fut: std::future::Future<Output = Result<T, FrameworkError>>,
     T: Send,
 {
-    let on_primary = connection.is_none_or(|name| name == crate::database::PRIMARY_CONNECTION_NAME);
-    let shareable = !in_transaction()
-        && on_primary
-        && DB::is_connected()
-        && super::write_side_open(false).await?;
-    if !shareable {
+    if in_transaction() || !DB::is_connected() || !super::write_side_open(false).await? {
         return write().await;
+    }
+    let on_primary = connection.is_none_or(|name| name == crate::database::PRIMARY_CONNECTION_NAME);
+    if !on_primary {
+        let pending = UnfinishedAdvance(Some(vec![DependencyIdentity::broad()]));
+        let outcome = write().await;
+        pending.finish();
+        return outcome;
     }
     let outcome = DB::transaction_ambient(write).await;
     if outcome.is_ok() {
-        // The advancement committed with the row it describes, which is the
-        // confirmation a suspended process is waiting for.
-        super::write_side::confirm_advancement();
+        // The advancement committed with the row it describes. That says
+        // nothing about what an earlier, failed advancement missed, so those
+        // identities are advanced now rather than forgotten (DATA-029).
+        repair_unresolved().await;
     }
     outcome
 }
@@ -269,6 +355,50 @@ pub async fn after_bulk_write_with_handle(
     super::ledger::advance_via_handle(handle, &unkeyed_identities(table)?).await
 }
 
+/// The identities [`after_table_writes_in`] advances: each table and its
+/// unkeyed-write identity, once each.
+fn table_writes_identities(tables: &[&str]) -> Result<Vec<DependencyIdentity>, FrameworkError> {
+    let mut identities = Vec::with_capacity(tables.len() * 2);
+    for table in tables {
+        for identity in unkeyed_identities(table)? {
+            if !identities.contains(&identity) {
+                identities.push(identity);
+            }
+        }
+    }
+    Ok(identities)
+}
+
+/// Whether this process advances generations, decided before a write opens
+/// a raw SeaORM transaction for [`after_table_writes_in`] (DATA-039).
+///
+/// Deciding may probe the schema, and the probe takes a pooled connection
+/// of its own. Asked from inside the transaction, it could wait on the
+/// connection the transaction already holds, so it is asked first, while
+/// the write holds nothing.
+pub(crate) async fn advances_generations() -> Result<bool, FrameworkError> {
+    super::write_side_open(false).await
+}
+
+/// After one operation wrote rows of several tables it cannot name rows
+/// in, through `txn`, the raw SeaORM transaction that wrote them: the
+/// tables and their unkeyed-write identities, advanced together in one
+/// advancement, so the rows and their advance commit or roll back as one
+/// unit (DATA-039).
+///
+/// For a writer that owns a transaction the framework did not open, which
+/// `in_transaction()` cannot see: the payments webhook hydration. Advancing
+/// after its COMMIT left a window in which a cancellation kept the rows and
+/// lost the advance. The caller asks [`advances_generations`] before it
+/// opens `txn`, and commits it after this returns, then calls
+/// [`repair_unresolved`] the way [`atomic`] does after its own commit.
+pub(crate) async fn after_table_writes_in(
+    txn: &std::sync::Arc<sea_orm::DatabaseTransaction>,
+    tables: &[&str],
+) -> Result<(), FrameworkError> {
+    super::ledger::advance_in_raw_transaction(txn, &table_writes_identities(tables)?).await
+}
+
 /// After a query-builder write on a known table (`DB::table(...).insert` /
 /// `.update` / `.delete`), and after a raw statement whose single table the
 /// caller named (`DB::affecting_statement_on_table`). Same effect as
@@ -344,4 +474,75 @@ pub async fn after_row_write_with_handle(
     key: &serde_json::Value,
 ) -> Result<(), FrameworkError> {
     super::ledger::advance_via_handle(handle, &row_identities(table, key)?).await
+}
+
+/// Test-only seam that parks one advancement, so a test can cancel the
+/// write that started it at the instant between its row write and its
+/// generation advance (DATA-039).
+///
+/// Holds one armed park per table and reports each table's park on its
+/// own, so tests that run at the same time never take or see each other's.
+#[cfg(any(test, feature = "testing"))]
+pub(crate) mod seams {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+
+    use suprnova_live::render_cache::generation::DependencyIdentity;
+
+    /// Table identities whose next advancement parks.
+    static ARMED: Mutex<BTreeSet<DependencyIdentity>> = Mutex::new(BTreeSet::new());
+    /// Table identities whose armed advancement has parked.
+    static PARKED: Mutex<BTreeSet<DependencyIdentity>> = Mutex::new(BTreeSet::new());
+    static PARKED_NOTIFY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+
+    fn parked_notify() -> &'static tokio::sync::Notify {
+        PARKED_NOTIFY.get_or_init(tokio::sync::Notify::new)
+    }
+
+    fn lock(
+        set: &'static Mutex<BTreeSet<DependencyIdentity>>,
+    ) -> std::sync::MutexGuard<'static, BTreeSet<DependencyIdentity>> {
+        set.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Parks the next advancement that names `table`'s table identity.
+    pub(crate) fn hold_next(table: &str) {
+        let identity = DependencyIdentity::table(table);
+        lock(&PARKED).remove(&identity);
+        lock(&ARMED).insert(identity);
+    }
+
+    /// Waits until the advancement armed for `table` has parked.
+    pub(crate) async fn wait_until_held(table: &str) {
+        let identity = DependencyIdentity::table(table);
+        loop {
+            let notified = parked_notify().notified();
+            if lock(&PARKED).remove(&identity) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Parks forever when armed for one of `identities`; the test that
+    /// armed it cancels the write around it.
+    pub(crate) async fn hold_point(identities: &[DependencyIdentity]) {
+        let armed = {
+            let mut armed = lock(&ARMED);
+            let hit = identities
+                .iter()
+                .find(|identity| armed.contains(*identity))
+                .cloned();
+            if let Some(identity) = &hit {
+                armed.remove(identity);
+            }
+            hit
+        };
+        if let Some(identity) = armed {
+            lock(&PARKED).insert(identity);
+            parked_notify().notify_waiters();
+            std::future::pending::<()>().await;
+        }
+    }
 }

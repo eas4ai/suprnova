@@ -331,7 +331,8 @@ async fn named_connection_is_preserved() {
 /// CACHE-009, second sentence: when a write's advancement cannot share
 /// the row write's transaction (a write on a named connection, whose
 /// ledger lives on the primary) and then fails, this process stops
-/// serving stored entries until an advancement succeeds.
+/// serving stored entries until the identities it missed are advanced,
+/// which the next advancement that lands does (DATA-029).
 #[tokio::test]
 #[serial_test::serial]
 async fn serving_stops_while_a_named_connection_advance_is_unconfirmed() {
@@ -377,19 +378,28 @@ async fn serving_stops_while_a_named_connection_advance_is_unconfirmed() {
         )
         .await
         .expect("restore the generation log");
-    // A write the `/cached/1` entry does not depend on: `users`, not
-    // `posts`, so the successful advancement confirms serving without
-    // invalidating the entry this test watches.
+    // A write the `/cached/1` entry does not depend on directly: `users`,
+    // not `posts`. Its successful advancement also carries the broad
+    // identity the failed raw write missed (DATA-029), and every entry
+    // observes the broad identity, so the watched entry is rebuilt once
+    // rather than served on its old generation, and then served again.
     User::create(attrs! { name: "confirms" })
         .await
         .expect("a primary write whose advancement succeeds");
     let renders_before = counting_route::renders();
+    let rebuilt = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(rebuilt.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        renders_before + 1,
+        "the missed invalidation was repaired, so the entry it covered is rebuilt"
+    );
     let served = dispatch_get(&harness, "/cached/1", &[]).await;
     assert_eq!(served.status, StatusCode::OK);
     assert_eq!(
         counting_route::renders(),
-        renders_before,
-        "once an advancement lands, stored entries are served again"
+        renders_before + 1,
+        "once every missed advancement lands, stored entries are served again"
     );
 }
 
@@ -417,6 +427,294 @@ async fn head_first_does_not_publish_get() {
         counting_route::renders(),
         2,
         "the HEAD render was not published"
+    );
+}
+
+/// The generation the ledger holds for `identity`, or zero before any
+/// advance.
+async fn generation_of(identity: &suprnova::render_cache::DependencyIdentity) -> u64 {
+    use suprnova::render_cache::ledger::SqlGenerationLedger;
+    use suprnova_live::render_cache::generation::GenerationLedger as _;
+
+    SqlGenerationLedger::new()
+        .current(&[identity.digest()])
+        .await
+        .expect("read the ledger")
+        .get(identity)
+        .unwrap_or(0)
+}
+
+/// DATA-029: a successful write to another table does not erase an
+/// invalidation this process failed to record. A raw named-connection write
+/// advances the broad identity every entry observes; when that dedicated
+/// advancement failed, every entry stayed on its old generation, and the
+/// next unrelated success used to clear the suspension and let those
+/// entries pass full authority validation again. The missed identities are
+/// now kept and advanced by the next advancement that can land, and serving
+/// resumes only once they are.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_unrelated_successful_write_repairs_a_missed_invalidation_before_serving_resumes() {
+    let _harness = boot_with_render_cache().await;
+    let aux = hardening_aux_connection().await;
+    let broad = suprnova::render_cache::DependencyIdentity::broad();
+    let before = generation_of(&broad).await;
+
+    let primary = DB::connection().expect("the harness connected the primary database");
+    primary
+        .inner()
+        .execute_unprepared("DROP TABLE suprnova_render_generation_log")
+        .await
+        .expect("remove the generation log so the dedicated advancement fails");
+    let write = DB::statement_on(
+        aux,
+        "UPDATE markers SET marker = 'changed' WHERE id = 1",
+        Vec::new(),
+    )
+    .await;
+    assert!(write.is_err(), "the failed advancement is reported");
+    primary
+        .inner()
+        .execute_unprepared(
+            "CREATE TABLE suprnova_render_generation_log (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, identity TEXT NOT NULL, generation INTEGER NOT NULL, epoch INTEGER NOT NULL, committed_at TIMESTAMP NOT NULL)",
+        )
+        .await
+        .expect("restore the generation log");
+
+    User::create(attrs! { name: "unrelated" })
+        .await
+        .expect("a primary write whose advancement succeeds");
+
+    assert!(
+        generation_of(&broad).await > before,
+        "the write that confirmed serving also advanced the identity the failed one missed"
+    );
+}
+
+/// Parks the first primary-connection commit made on the arming thread,
+/// inside its `TransactionCommitted` listener, until the test releases it.
+///
+/// The dispatcher is process-global, so the listener sees the commits of
+/// every test running beside this one. Each test runs on its own
+/// current-thread runtime, so the arming thread picks out this test's own
+/// commit and leaves every other one alone.
+#[derive(Default)]
+struct ParkOneCommit {
+    armed_on: std::sync::Mutex<Option<std::thread::ThreadId>>,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl ParkOneCommit {
+    fn arm(&self) {
+        *self
+            .armed_on
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::thread::current().id());
+    }
+}
+
+#[suprnova::async_trait]
+impl suprnova::Listener<suprnova::database::events::TransactionCommitted> for ParkOneCommit {
+    async fn handle(
+        &self,
+        event: &suprnova::database::events::TransactionCommitted,
+    ) -> Result<(), suprnova::FrameworkError> {
+        let mine = {
+            let mut armed_on = self
+                .armed_on
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mine = event.connection_name == suprnova::PRIMARY_CONNECTION_NAME
+                && *armed_on == Some(std::thread::current().id());
+            if mine {
+                *armed_on = None;
+            }
+            mine
+        };
+        if mine {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+}
+
+/// DATA-029, overlapping operations: an advance that lands resolves only the
+/// failures it carried, never a newer failure for the same identity. A raw
+/// named-connection write advances the broad identity in a transaction of
+/// its own. Here that advance commits and then waits in a
+/// `TransactionCommitted` listener while a second named-connection write
+/// commits and fails its own advance of the same identity. The first advance
+/// then finishes. It used to resolve the broad identity outright, which
+/// erased the second write's failure: serving resumed, and the entry built
+/// before the second write was served on a generation that never covered it.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_older_advance_never_resolves_a_newer_failure_of_the_same_identity() {
+    use suprnova::database::events::TransactionCommitted;
+
+    let harness = boot_with_render_cache().await;
+    let aux = hardening_aux_connection().await;
+    let broad = suprnova::render_cache::DependencyIdentity::broad();
+    let gate = std::sync::Arc::new(ParkOneCommit::default());
+    suprnova::EventFacade::listen::<TransactionCommitted, _>(gate.clone()).await;
+
+    // The first write: its advance commits, then parks in the listener.
+    gate.arm();
+    let first = tokio::spawn(async move {
+        DB::statement_on(
+            aux,
+            "UPDATE markers SET marker = 'first' WHERE id = 1",
+            Vec::new(),
+        )
+        .await
+    });
+    gate.entered.notified().await;
+
+    // An entry built on the generations the first advance left.
+    let warm = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(warm.status, StatusCode::OK);
+    let renders_after_warm = counting_route::renders();
+    let hit = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(hit.body, warm.body);
+    assert_eq!(
+        counting_route::renders(),
+        renders_after_warm,
+        "precondition: the entry is served"
+    );
+
+    // The second write commits and its advance fails.
+    let primary = DB::connection().expect("the harness connected the primary database");
+    primary
+        .inner()
+        .execute_unprepared("DROP TABLE suprnova_render_generation_log")
+        .await
+        .expect("remove the generation log so the second advancement fails");
+    let second = DB::statement_on(
+        aux,
+        "UPDATE markers SET marker = 'second' WHERE id = 1",
+        Vec::new(),
+    )
+    .await;
+    assert!(
+        second.is_err(),
+        "the second write's failed advance is reported"
+    );
+    primary
+        .inner()
+        .execute_unprepared(
+            "CREATE TABLE suprnova_render_generation_log (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, identity TEXT NOT NULL, generation INTEGER NOT NULL, epoch INTEGER NOT NULL, committed_at TIMESTAMP NOT NULL)",
+        )
+        .await
+        .expect("restore the generation log");
+
+    // The first write finishes after the second one failed.
+    gate.release.notify_one();
+    let first = first.await.expect("the first write's task");
+    suprnova::EventFacade::forget::<TransactionCommitted>();
+    assert!(first.is_ok(), "the first write and its advance succeeded");
+
+    let renders_before = counting_route::renders();
+    let after = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(after.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        renders_before + 1,
+        "the second write's advance is still unconfirmed, so the stored entry is not served"
+    );
+
+    // The next advancement that lands carries the identity the second write
+    // missed, and serving resumes once it has.
+    let before_repair = generation_of(&broad).await;
+    User::create(attrs! { name: "repairs" })
+        .await
+        .expect("a primary write whose advancement succeeds");
+    assert!(
+        generation_of(&broad).await > before_repair,
+        "the repairing write advanced the identity the second write missed"
+    );
+    let rebuilt = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(rebuilt.status, StatusCode::OK);
+    let renders_after_rebuild = counting_route::renders();
+    let served = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(served.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        renders_after_rebuild,
+        "once every missed advancement lands, stored entries are served again"
+    );
+}
+
+/// CACHE-009, a cancel during a named-connection write's COMMIT: a write
+/// on a named connection commits its row on that connection and only then
+/// advances on the primary, so a drop of the write after its row is durable
+/// and before its advance starts used to leave nothing behind. Serving went
+/// on from entries whose generations never covered the row. The write now
+/// records a pending suspension before its row write starts, so that drop
+/// leaves serving suspended until a later advance repairs it.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_named_connection_write_canceled_during_its_commit_leaves_serving_suspended() {
+    let harness = boot_with_render_cache().await;
+    let aux = hardening_aux_connection().await;
+
+    let warm = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(warm.status, StatusCode::OK);
+    let renders_after_warm = counting_route::renders();
+    let hit = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(hit.body, warm.body);
+    assert_eq!(
+        counting_route::renders(),
+        renders_after_warm,
+        "precondition: the entry is served"
+    );
+
+    // The row write returns, and the write is dropped before anything after
+    // it runs: the same state a drop while its COMMIT was acknowledged leaves.
+    RenderCache::hold_next_advance_for_test("markers");
+    tokio::select! {
+        biased;
+        _ = DB::table("markers")
+            .on(aux)
+            .filter("id", 1)
+            .update(attrs! { marker: "canceled" }) => {
+            panic!("the advance was parked, so the write cannot have finished")
+        }
+        () = RenderCache::wait_until_advance_held_for_test("markers") => {}
+    }
+    let rows = DB::select_on(aux, "SELECT marker FROM markers WHERE id = 1", Vec::new())
+        .await
+        .expect("read the aux marker");
+    assert_eq!(
+        rows.first()
+            .map(|row| row.get_string("marker").expect("the marker column")),
+        Some("canceled".to_owned()),
+        "precondition: the canceled write's row committed"
+    );
+
+    let renders_before = counting_route::renders();
+    let after = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(after.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        renders_before + 1,
+        "the canceled write never advanced, so the stored entry is not served"
+    );
+
+    // The next advancement that lands repairs it, and serving resumes.
+    User::create(attrs! { name: "repairs the canceled write" })
+        .await
+        .expect("a primary write whose advancement succeeds");
+    let rebuilt = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(rebuilt.status, StatusCode::OK);
+    let renders_after_rebuild = counting_route::renders();
+    let served = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(served.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        renders_after_rebuild,
+        "once the repair lands, stored entries are served again"
     );
 }
 

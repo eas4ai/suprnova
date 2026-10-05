@@ -193,6 +193,8 @@ Acceptance criteria:
   idempotency identity and never browser or public-storage authority.
 - Repeated finalization cannot duplicate a file or domain record.
 - A completed temporary upload may expire if never finalized.
+- A finalizer that can make nothing durable refuses before the upload enters
+  `Finalizing`, so the upload stays `Ready` and expires.
 
 UX flow:
 
@@ -211,7 +213,18 @@ Cleanup authority is ledger-owned. One bounded claim operation first advances
 an expired `Created`, `Queued`, `Transferring`, `Verifying`, or `Ready` record to
 `Expired` under its exact current revision, or selects an already `Rejected`,
 `Canceled`, `Expired`, or `Failed` record, then installs a short lease bound to
-the resulting revision. `Finalizing` and `Finalized` records are never eligible.
+the resulting revision. A `Finalizing` record becomes eligible when its upload
+expires: no transition is admitted for an expired upload, so a finalization
+that failed or stalled can no longer commit, and the claim fails the record
+under its exact revision. A `Finalized` record is kept until the same expiry,
+which is its idempotency window, and is then eligible as it stands. A claim
+for a record that ever entered `Finalizing` retires its provider bytes through
+`UploadProvider::retire_after_finalization` instead of deleting them:
+finalization may have committed them as durable output, and only the provider
+can tell. The default keeps the bytes; quarantine, which is temporary storage
+by contract, deletes them. A host releases the pending capacity a finalized
+upload held when finalization commits, so finalized uploads never count
+against the pending limits while they wait out the window.
 Provider deletion and validation-evidence removal run outside the ledger lock
 and are idempotent; terminalization succeeds only while the exact lease and
 revision remain current, then removes the reclaimed temporary authority record.
@@ -239,6 +252,11 @@ Acceptance criteria:
 - Background cleanup has closed age, volume, outcome, retry, and orphan metrics
   without upload, filename, path, scope, principal, grant, or raw-error labels.
 - A browser disconnect does not leave permanent unowned files.
+- A finalization that never commits holds neither its record nor its
+  temporary bytes past the upload's expiry, and a finalized record is
+  reclaimed when that expiry closes its idempotency window. Cleanup never
+  deletes bytes that finalization may have committed as durable output.
+- Repeated successful uploads never exhaust a scope's pending capacity.
 - Removal updates component state and validation without forging native file
   input values. The runtime may assign only `input.value = ""` to clear a
   retired native selection; assigning a non-empty value or `input.files` is
@@ -309,6 +327,30 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-04 -- The framework host retires a finalized direct-storage upload
+  through the application's direct provider and its
+  `UploadProvider::retire_after_finalization`, as the cleanup rules above
+  require. Its upload router used to skip the direct provider and report the
+  reclaim done, so whatever a provider retires there, temporary objects or
+  its own bookkeeping, stayed behind. The provider's default still keeps the
+  bytes, and quarantined reverse-proxy bytes are still deleted.
+- 2026-10-04 -- Reclaimed finalized and stalled uploads (audit ROOT-16), on
+  the owner's confirmation of 2026-10-04 16:29 ("yes temp files should be
+  cleaned up"): temporary and uncommitted upload bytes are cleaned up,
+  committed output is never deleted, and finalized records are reclaimed after
+  a bounded window. The window is the upload's own expiry, after which no
+  operation on the upload is admitted. A `Finalizing` record whose
+  finalization failed or stalled is failed and claimed at the same expiry, and
+  a finalizer that can make nothing durable refuses before `Finalizing`. A
+  claim for an upload whose finalization began retires its bytes through the
+  provider, which keeps them unless it knows they are temporary: the framework
+  deletes quarantined reverse-proxy bytes and keeps direct-storage bytes,
+  which a finalizer may have adopted as its output. The framework releases a
+  finalized upload's pending slots, and deletes its quarantined bytes, when
+  finalization commits. Cleanup cannot reconcile a stalled finalization
+  first: the ledger keeps neither the action nor the logical idempotency key
+  the finalizer's `reconcile` needs. This supersedes the 2026-08-25 rule that
+  `Finalizing` and `Finalized` records are never eligible.
 - 2026-10-04 -- Upload limits are server configuration delivered in the
   configuration element: `LIVE_UPLOAD_CHUNK_BYTES` (8 MiB, 64 MiB ceiling),
   `LIVE_UPLOAD_MAX_ACTIVE` (8), `LIVE_UPLOAD_MAX_FILE_BYTES` (1 GiB, 1 TiB

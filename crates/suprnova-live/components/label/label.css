@@ -1,6 +1,8 @@
+/* 6px above the control that follows it in a plain form. A field and a
+   fieldset space their parts with a gap and set the margin to match. */
 .sn-label {
   display: block;
-  margin-block-end: var(--sn-space-1);
+  margin-block-end: calc(var(--sn-space-1) * 1.5);
   font-weight: var(--sn-font-weight-medium);
 }
 

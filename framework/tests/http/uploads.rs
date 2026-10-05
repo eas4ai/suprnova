@@ -410,46 +410,13 @@ async fn validator_instance_is_threaded_across_chunk_and_final() {
 
 // ── Multipart body cap & spill threshold: default / global override / per-struct override ──
 //
-// These tests mutate two independent process-global atomics (body cap
-// and spill threshold). Cargo runs tests within a single integration
-// binary in parallel by default, so concurrent mutations would race.
-// The `UploadGlobalsGuard` below combines a poison-tolerant Mutex with
-// RAII reset-to-default-on-drop covering BOTH atomics so even if a test
-// panics mid-assertion the next one starts clean. We share one mutex
-// across body-cap and spill-threshold tests - both atomics are global,
-// so simultaneous mutation from sibling tests would still race even if
-// each used a separate lock.
-
-use std::sync::Mutex;
-
-static UPLOAD_GLOBALS_LOCK: Mutex<()> = Mutex::new(());
-
-struct UploadGlobalsGuard {
-    _guard: std::sync::MutexGuard<'static, ()>,
-}
-
-impl UploadGlobalsGuard {
-    fn acquire() -> Self {
-        let guard = UPLOAD_GLOBALS_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Always start from the compile-time defaults for both atomics.
-        suprnova::http::upload::set_global_max_multipart_body_bytes(0);
-        suprnova::http::upload::set_global_upload_spill_threshold(0);
-        Self { _guard: guard }
-    }
-}
-
-impl Drop for UploadGlobalsGuard {
-    fn drop(&mut self) {
-        // Restore the defaults for any test that doesn't take the lock
-        // (the non-cap/threshold tests don't touch the globals, but a
-        // stale override could still leak across test invocations if we
-        // skipped this).
-        suprnova::http::upload::set_global_max_multipart_body_bytes(0);
-        suprnova::http::upload::set_global_upload_spill_threshold(0);
-    }
-}
+// The global body cap and spill threshold are process-wide atomics that
+// every multipart parse in the process reads. A test that sets one runs
+// alone in a child process (see `own_process`): a lock among these
+// tests did not stop the other tests of the binary, such as
+// `derive_rejects_oversize_at_byte_boundary`, from parsing under a 1 MiB
+// cap meant for one test. The tests here that read the defaults run in
+// the shared process, where no test changes them.
 
 #[derive(suprnova::MultipartRequest)]
 struct UncappedBlob {
@@ -460,8 +427,6 @@ struct UncappedBlob {
 
 #[tokio::test]
 async fn body_cap_uses_default_when_no_override() {
-    let _g = UploadGlobalsGuard::acquire();
-
     // 26 MiB body - exceeds the 25 MiB compile-time default.
     let big = vec![0u8; 26 * 1024 * 1024];
     let body = build_multipart_body("test", &[("file", Some("a.bin"), &big)]);
@@ -473,10 +438,16 @@ async fn body_cap_uses_default_when_no_override() {
     assert_eq!(err.status_code(), 413);
 }
 
-#[tokio::test]
-async fn body_cap_respects_global_override() {
-    let _g = UploadGlobalsGuard::acquire();
+#[test]
+fn body_cap_respects_global_override() {
+    crate::own_process::run_alone("uploads::body_cap_respects_global_override_child");
+}
 
+#[tokio::test]
+async fn body_cap_respects_global_override_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     // Set a 1 MiB process-global cap.
     suprnova::http::upload::set_global_max_multipart_body_bytes(1024 * 1024);
 
@@ -497,10 +468,16 @@ struct TinyBlob {
     file: suprnova::UploadedFile,
 }
 
-#[tokio::test]
-async fn body_cap_per_struct_override_wins() {
-    let _g = UploadGlobalsGuard::acquire();
+#[test]
+fn body_cap_per_struct_override_wins() {
+    crate::own_process::run_alone("uploads::body_cap_per_struct_override_wins_child");
+}
 
+#[tokio::test]
+async fn body_cap_per_struct_override_wins_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     // Bump the global way up - per-struct should still apply.
     suprnova::http::upload::set_global_max_multipart_body_bytes(100 * 1024 * 1024);
 
@@ -517,8 +494,6 @@ async fn body_cap_per_struct_override_wins() {
 
 #[tokio::test]
 async fn body_cap_per_struct_under_cap_succeeds() {
-    let _g = UploadGlobalsGuard::acquire();
-
     // 256-byte body, under the per-struct 512-byte cap - should succeed.
     let small = vec![0u8; 256];
     let body = build_multipart_body("test", &[("file", Some("a.bin"), &small)]);
@@ -535,10 +510,16 @@ struct AnyFile {
     file: suprnova::UploadedFile,
 }
 
-#[tokio::test]
-async fn upload_spills_to_disk_above_threshold() {
-    let _g = UploadGlobalsGuard::acquire();
+#[test]
+fn upload_spills_to_disk_above_threshold() {
+    crate::own_process::run_alone("uploads::upload_spills_to_disk_above_threshold_child");
+}
 
+#[tokio::test]
+async fn upload_spills_to_disk_above_threshold_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     // Drop the spill threshold so a small body forces the disk path.
     // Bump the body cap so the cap doesn't reject first.
     suprnova::http::upload::set_global_upload_spill_threshold(1024); // 1 KiB
@@ -557,13 +538,38 @@ async fn upload_spills_to_disk_above_threshold() {
     assert!(bytes.iter().all(|b| *b == 7u8));
 }
 
+/// `usize::MAX` is the documented way to turn spilling off. Sizing the
+/// sniff buffer as `threshold + 1` overflowed on it, so every part
+/// panicked before a byte was read.
+#[test]
+fn upload_with_spilling_disabled_stays_in_memory() {
+    crate::own_process::run_alone("uploads::upload_with_spilling_disabled_stays_in_memory_child");
+}
+
+#[tokio::test]
+async fn upload_with_spilling_disabled_stays_in_memory_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    suprnova::http::upload::set_global_upload_spill_threshold(usize::MAX);
+
+    let small = vec![5u8; 2048];
+    let body = build_multipart_body("test", &[("file", Some("small.bin"), &small)]);
+    let req = request_from_multipart("test", body).await;
+
+    let form = AnyFile::from_request(req)
+        .await
+        .expect("an upload with spilling disabled must parse");
+    assert_eq!(form.file.size, 2048);
+    let bytes = form.file.bytes().await.unwrap();
+    assert!(bytes.iter().all(|b| *b == 5u8));
+}
+
 #[tokio::test]
 async fn upload_stays_in_memory_below_threshold() {
-    let _g = UploadGlobalsGuard::acquire();
-
-    // Default 2 MiB spill threshold (set via `0` sentinel above). A 1 KiB
-    // body must NOT trigger the disk path - assertion is content-equality
-    // round-tripped through the in-memory accessor.
+    // Default 2 MiB spill threshold. A 1 KiB body must NOT trigger the
+    // disk path - assertion is content-equality round-tripped through the
+    // in-memory accessor.
     let small = vec![3u8; 1024];
     let body = build_multipart_body("test", &[("file", Some("small.bin"), &small)]);
     let req = request_from_multipart("test", body).await;
@@ -576,14 +582,18 @@ async fn upload_stays_in_memory_below_threshold() {
 }
 
 #[cfg(all(feature = "filesystem", feature = "testing"))]
+#[test]
+fn store_as_streams_disk_backed_part_to_storage() {
+    crate::own_process::run_alone("uploads::store_as_streams_disk_backed_part_to_storage_child");
+}
+
+#[cfg(all(feature = "filesystem", feature = "testing"))]
 #[tokio::test]
-async fn store_as_streams_disk_backed_part_to_storage() {
+async fn store_as_streams_disk_backed_part_to_storage_child() {
     use suprnova::Storage;
-    let _g = UploadGlobalsGuard::acquire();
-    // `Storage::fake()` serialises against other Storage tests via its
-    // own internal mutex; our `UploadGlobalsGuard` mutex is independent
-    // (covers the spill/cap atomics). Acquiring both is fine - they
-    // don't share any state.
+    if !crate::own_process::is_child() {
+        return;
+    }
     let _storage_guard = Storage::fake();
     Storage::register_memory("spill_dest");
 

@@ -21,7 +21,7 @@ pub use simple::Paginator;
 use sea_orm::{ColumnTrait, EntityTrait, ModelTrait, QueryFilter, QueryOrder, QuerySelect, Select};
 
 use crate::FrameworkError;
-use crate::database::transaction::ExecutorChoice;
+use crate::database::transaction::{CountOf, ExecutorChoice};
 
 /// Static facade: `Pagination::length_aware` and `Pagination::cursor`.
 pub struct Pagination;
@@ -37,6 +37,10 @@ impl Pagination {
     /// Use [`Self::length_aware_on`] to target a named connection.
     ///
     /// `current_page` is 1-based; values `< 1` are clamped to `1`.
+    ///
+    /// A limit or an offset already on `query` is dropped, as in
+    /// Laravel's `paginate`: the total counts every matching row, and the
+    /// page takes its own limit and offset.
     ///
     /// `per_page == 0` returns `FrameworkError::param("per_page")` (HTTP
     /// 400) - the same validation the Eloquent
@@ -92,7 +96,12 @@ impl Pagination {
         E::Model: Send + Sync,
     {
         let page = current_page.max(1);
-        let total = exec.select_count(query.clone()).await?;
+        // The total counts every match, as Laravel's
+        // `getCountForPagination()` does: the page below replaces any
+        // limit and offset the query carries.
+        let total = exec
+            .select_count(query.clone(), CountOf::AllMatches)
+            .await?;
         let offset = (page - 1).saturating_mul(per_page);
         let data = exec
             .select_all(query.offset(offset).limit(per_page))
@@ -133,6 +142,12 @@ impl Pagination {
     ///   `prev_cursor` is set iff more rows lie before; `next_cursor`
     ///   points at this page's last row (back toward the caller's
     ///   origin).
+    ///
+    /// The keyset alone orders the pages: an `ORDER BY` already on
+    /// `query` is dropped, because it would sort ahead of `order_col`
+    /// and make the boundary skip and repeat rows. An `OFFSET` on
+    /// `query` positions the first page only, the one requested without
+    /// a cursor; every later page starts at its cursor.
     ///
     /// `order_col` should be a column with a total order suitable for
     /// keyset pagination - typically the primary key. Any SeaORM
@@ -199,6 +214,14 @@ impl Pagination {
             Some(c) => Some(CursorPaginator::<E::Model>::decode_value(c)?),
             None => None,
         };
+        let mut query = query;
+        {
+            let statement = sea_orm::QueryTrait::query(&mut query);
+            statement.clear_order_by();
+            if decoded.is_some() {
+                statement.reset_offset();
+            }
+        }
         let plan = plan_scan(decoded);
 
         // Apply the plan to the SeaORM query: order in the plan's

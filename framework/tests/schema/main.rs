@@ -27,9 +27,13 @@ mod mysql;
 mod postgres;
 mod signed_columns;
 mod sqlite;
+#[cfg(feature = "testing")]
 mod unsigned_auth;
+mod unsigned_exact;
 mod unsigned_keys;
+#[cfg(feature = "testing")]
 mod unsigned_keyset;
+mod unsigned_pivots;
 mod unsigned_reads;
 mod unsigned_table_reads;
 mod unsigned_table_writes;

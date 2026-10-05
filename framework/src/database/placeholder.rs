@@ -26,6 +26,27 @@ pub(crate) fn placeholder(backend: DatabaseBackend, n: usize) -> Result<String, 
     }
 }
 
+/// The placeholder for parameter `n` holding `value`.
+///
+/// On Postgres a `numeric` parameter is cast in the SQL text. sqlx keeps a
+/// prepared statement per SQL text, with the parameter types of its first
+/// use, and a comparison such as `"id" = $1` usually binds an integer
+/// there; a `numeric` sent to that statement later fails with "incorrect
+/// binary data format". The cast gives the `numeric` form a text of its
+/// own. A `u64` above `i64::MAX` binds as `numeric` on Postgres when the
+/// column's type is unknown, which is the case that needs it.
+pub(crate) fn typed_placeholder(
+    backend: DatabaseBackend,
+    n: usize,
+    value: &sea_orm::Value,
+) -> Result<String, FrameworkError> {
+    let ph = placeholder(backend, n)?;
+    Ok(match (backend, value) {
+        (DatabaseBackend::Postgres, sea_orm::Value::Decimal(_)) => format!("CAST({ph} AS NUMERIC)"),
+        _ => ph,
+    })
+}
+
 /// Render `count` consecutive placeholders starting at ordinal `start`,
 /// comma-joined for direct interpolation into a `VALUES (…)` or `IN (…)`
 /// list.

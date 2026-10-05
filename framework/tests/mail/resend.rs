@@ -147,3 +147,61 @@ async fn resend_encodes_attachments_as_base64_with_filename_and_content_type() {
         .unwrap();
     assert_eq!(decoded, b"%PDF-1.4\n%test-content");
 }
+
+/// Resend's `tags` schema requires both `name` and `value`, and rejects the
+/// whole email over a tag without one. A bare Suprnova tag maps the way SES
+/// maps it: `{name: "tag_<i>", value: tag}`.
+#[tokio::test]
+#[serial]
+async fn resend_sends_each_tag_as_a_name_value_pair() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/emails"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "x" })))
+        .mount(&server)
+        .await;
+
+    let transport = ResendMailTransport::with_endpoint("test-key", server.uri());
+    let _ = Mail::set_transport(Arc::new(transport));
+    Mail::to("alice@example.org")
+        .tag("onboarding")
+        .tag("welcome-v2")
+        .send(M::default())
+        .await
+        .unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(
+        body["tags"],
+        serde_json::json!([
+            { "name": "tag_0", "value": "onboarding" },
+            { "name": "tag_1", "value": "welcome-v2" },
+        ])
+    );
+}
+
+/// A tag Resend cannot carry (outside `[A-Za-z0-9_-]`) is refused before the
+/// request, instead of Resend rejecting the email on every retry.
+#[tokio::test]
+#[serial]
+async fn resend_refuses_a_tag_it_cannot_carry_before_any_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "x" })))
+        .mount(&server)
+        .await;
+
+    let transport = ResendMailTransport::with_endpoint("test-key", server.uri());
+    let _ = Mail::set_transport(Arc::new(transport));
+    let err = Mail::to("alice@example.org")
+        .tag("spring sale")
+        .send(M::default())
+        .await
+        .expect_err("a tag with a space cannot be sent to Resend");
+    assert!(
+        err.to_string().contains("Resend"),
+        "the error names the provider: {err}"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}

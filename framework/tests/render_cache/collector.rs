@@ -389,6 +389,55 @@ async fn a_slot_scope_that_begins_the_handler_inside_it_restores_to_content() {
     assert!(report.gate.observed.is_empty());
 }
 
+/// DATA-027: the slot is a property of the mount future, not of the task. A
+/// handler that joins an identity-bound mount with independent work runs
+/// both on one task; while the mount is pending, the sibling's reads build
+/// the shell and must be recorded there. Attributing them to the slot would
+/// drop a principal read (so a personalized shell classifies as public) and
+/// a table read (so a write never invalidates the shell). The two channels
+/// pin the overlap: the sibling reads only after the slot has been entered
+/// and before it can finish, whatever order `join!` polls in.
+#[tokio::test]
+async fn a_sibling_future_joined_beside_a_pending_slot_reads_into_the_content_bucket() {
+    let report = Collector::scope(async {
+        collector::begin_handler();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::join!(
+            collector::slot_scope(async move {
+                let _ = entered_tx.send(());
+                let _ = done_rx.await;
+                collector::observe_table_read("island_t");
+            }),
+            async move {
+                let _ = entered_rx.await;
+                collector::observe_table_read("shell_t");
+                collector::observe_principal_value("alice");
+                collector::observe_session_read();
+                let _ = done_tx.send(());
+            }
+        );
+        current_report().expect("report")
+    })
+    .await;
+    assert_eq!(
+        report.observed,
+        vec![DependencyIdentity::table("shell_t")],
+        "the sibling's table read is a shell dependency and the island's is not"
+    );
+    assert!(
+        report.context.principal_read,
+        "the sibling's principal read must reach the shell's context"
+    );
+    assert!(report.context.principal_material.contains("alice"));
+    assert!(report.context.session_read);
+    assert_eq!(
+        report.slot_reads, 1,
+        "only the island's own read is a slot read"
+    );
+    assert!(report.gate.observed.is_empty());
+}
+
 #[tokio::test]
 async fn folding_the_gate_into_content_reproduces_the_undivided_report() {
     let mut report = Collector::scope(async {
@@ -596,7 +645,26 @@ pub struct Probe {
     pub amount: f64,
 }
 
+/// Creates the RenderCache tables beside a test's own.
+///
+/// These tests seed rows through the model API and check what the reads
+/// record. Every other test in this binary installs RenderCache, which is
+/// process-wide, so under plain `cargo test` a seeding write here often
+/// runs with the write side open and advances generations. An installed
+/// process always has the RenderCache schema, so each database here has it
+/// too: the seeding writes then succeed whether or not another test has
+/// installed RenderCache by the time they run.
+async fn render_cache_schema(db: &TestDatabase) {
+    use sea_orm_migration::{MigrationTrait as _, SchemaManager};
+
+    suprnova::render_cache::migration::Migration
+        .up(&SchemaManager::new(db.conn()))
+        .await
+        .expect("create the render cache tables");
+}
+
 async fn migrate(db: &TestDatabase) {
+    render_cache_schema(db).await;
     db.execute_unprepared(
         r#"CREATE TABLE render_cache_collector_probe (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1145,4 +1213,506 @@ async fn current_tenant_outside_the_middleware_records_a_tenant_read_with_no_val
         report.context.tenant_material.is_empty(),
         "and there is no value to record"
     );
+}
+
+// ---- DATA-033: legacy read wrappers and raw relation reads -----------
+//
+// A cacheable route that reads through the legacy `EntityExt` /
+// `QueryBuilder` surface, or loads a relation count or aggregate, must
+// record every table those reads touched. Each one used to run its query
+// with no observation, so the stored entry depended on nothing a later
+// write to that table advanced, and it was served until it aged out.
+
+/// A plain SeaORM entity over the probe table, the shape an application
+/// that predates `#[model]` reads through `EntityExt` and `QueryBuilder`.
+mod legacy_probe {
+    use suprnova::sea_orm;
+    use suprnova::sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "render_cache_collector_probe")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub name: String,
+        pub amount: f64,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+impl suprnova::database::EntityExt for legacy_probe::Entity {}
+
+/// The identities one read recorded, in a content-bucket scope.
+async fn observed_by<F: std::future::Future>(read: F) -> Vec<DependencyIdentity> {
+    Collector::scope(async move {
+        collector::begin_handler();
+        read.await;
+        collector::current_report().expect("report").observed
+    })
+    .await
+}
+
+#[tokio::test]
+#[serial]
+async fn legacy_entity_and_query_builder_reads_observe_the_table() {
+    use suprnova::database::{EntityExt as _, QueryBuilder};
+
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate(&db).await;
+    Probe::create(attrs!(name: "a", amount: 1.0))
+        .await
+        .expect("create");
+    let table = DependencyIdentity::table(TABLE);
+
+    let reads: Vec<(&str, Vec<DependencyIdentity>)> = vec![
+        (
+            "EntityExt::all",
+            observed_by(async {
+                let _ = legacy_probe::Entity::all().await.expect("all");
+            })
+            .await,
+        ),
+        (
+            "EntityExt::find_by_pk",
+            observed_by(async {
+                let _ = legacy_probe::Entity::find_by_pk(1_i64).await.expect("find");
+            })
+            .await,
+        ),
+        (
+            "EntityExt::count_all",
+            observed_by(async {
+                let _ = legacy_probe::Entity::count_all().await.expect("count");
+            })
+            .await,
+        ),
+        (
+            "EntityExt::first",
+            observed_by(async {
+                let _ = legacy_probe::Entity::first().await.expect("first");
+            })
+            .await,
+        ),
+        (
+            "QueryBuilder::all",
+            observed_by(async {
+                let _ = QueryBuilder::<legacy_probe::Entity>::new()
+                    .all()
+                    .await
+                    .expect("all");
+            })
+            .await,
+        ),
+        (
+            "QueryBuilder::first",
+            observed_by(async {
+                let _ = QueryBuilder::<legacy_probe::Entity>::new()
+                    .first()
+                    .await
+                    .expect("first");
+            })
+            .await,
+        ),
+        (
+            "QueryBuilder::count",
+            observed_by(async {
+                let _ = QueryBuilder::<legacy_probe::Entity>::new()
+                    .count()
+                    .await
+                    .expect("count");
+            })
+            .await,
+        ),
+    ];
+    for (read, observed) in reads {
+        assert!(
+            observed.contains(&table),
+            "{read} must record the table it read, got {observed:?}"
+        );
+    }
+}
+
+#[model(table = "ct_parents", timestamps = false, relations = {
+    children: HasMany<CtChild>,
+    tags: BelongsToMany<CtTag, CtParentTag>,
+    grandchildren: HasManyThrough<CtChild, CtGrandchild>,
+    grandchild: HasOneThrough<CtChild, CtGrandchild>,
+})]
+pub struct CtParent {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "ct_children", timestamps = false)]
+pub struct CtChild {
+    pub id: i64,
+    pub ct_parent_id: i64,
+    pub amount: f64,
+}
+
+#[model(table = "ct_grandchildren", timestamps = false)]
+pub struct CtGrandchild {
+    pub id: i64,
+    pub ct_child_id: i64,
+    pub amount: f64,
+}
+
+#[model(table = "ct_tags", timestamps = false)]
+pub struct CtTag {
+    pub id: i64,
+    pub name: String,
+    pub weight: f64,
+}
+
+#[model(table = "ct_parent_tags", timestamps = false)]
+pub struct CtParentTag {
+    pub id: i64,
+    pub ct_parent_id: i64,
+    pub ct_tag_id: i64,
+}
+
+async fn migrate_relations(db: &TestDatabase) {
+    render_cache_schema(db).await;
+    for sql in [
+        "CREATE TABLE ct_parents (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE ct_children (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         ct_parent_id INTEGER NOT NULL, amount REAL NOT NULL)",
+        "CREATE TABLE ct_grandchildren (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         ct_child_id INTEGER NOT NULL, amount REAL NOT NULL)",
+        "CREATE TABLE ct_tags (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         name TEXT NOT NULL, weight REAL NOT NULL)",
+        "CREATE TABLE ct_parent_tags (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         ct_parent_id INTEGER NOT NULL, ct_tag_id INTEGER NOT NULL)",
+    ] {
+        db.execute_unprepared(sql).await.expect("create table");
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn relation_counts_aggregates_and_through_loads_observe_every_table_they_read() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate_relations(&db).await;
+    let parent = CtParent::create(attrs!(name: "p")).await.expect("parent");
+    let child = CtChild::create(attrs!(ct_parent_id: parent.id, amount: 2.0))
+        .await
+        .expect("child");
+    CtGrandchild::create(attrs!(ct_child_id: child.id, amount: 3.0))
+        .await
+        .expect("grandchild");
+    let tag = CtTag::create(attrs!(name: "t", weight: 4.0))
+        .await
+        .expect("tag");
+    CtParentTag::create(attrs!(ct_parent_id: parent.id, ct_tag_id: tag.id))
+        .await
+        .expect("pivot");
+
+    let children = DependencyIdentity::table("ct_children");
+    let grandchildren = DependencyIdentity::table("ct_grandchildren");
+    let tags = DependencyIdentity::table("ct_tags");
+    let pivot = DependencyIdentity::table("ct_parent_tags");
+
+    let cases: Vec<(&str, Vec<DependencyIdentity>, Vec<&DependencyIdentity>)> = vec![
+        (
+            "HasMany count",
+            observed_by(async {
+                let _ = CtParent::with_count(["children"])
+                    .get()
+                    .await
+                    .expect("count");
+            })
+            .await,
+            vec![&children],
+        ),
+        (
+            "HasMany sum",
+            observed_by(async {
+                let _ = CtParent::with_sum(("children", "amount"))
+                    .get()
+                    .await
+                    .expect("sum");
+            })
+            .await,
+            vec![&children],
+        ),
+        (
+            "BelongsToMany count",
+            observed_by(async {
+                let _ = CtParent::with_count(["tags"]).get().await.expect("count");
+            })
+            .await,
+            vec![&pivot],
+        ),
+        (
+            "BelongsToMany sum",
+            observed_by(async {
+                let _ = CtParent::with_sum(("tags", "weight"))
+                    .get()
+                    .await
+                    .expect("sum");
+            })
+            .await,
+            vec![&pivot, &tags],
+        ),
+        (
+            "HasManyThrough count",
+            observed_by(async {
+                let _ = CtParent::with_count(["grandchildren"])
+                    .get()
+                    .await
+                    .expect("count");
+            })
+            .await,
+            vec![&children, &grandchildren],
+        ),
+        (
+            "HasManyThrough sum",
+            observed_by(async {
+                let _ = CtParent::with_sum(("grandchildren", "amount"))
+                    .get()
+                    .await
+                    .expect("sum");
+            })
+            .await,
+            vec![&children, &grandchildren],
+        ),
+        (
+            "HasManyThrough eager load",
+            observed_by(async {
+                let _ = CtParent::with(["grandchildren"]).get().await.expect("load");
+            })
+            .await,
+            vec![&children, &grandchildren],
+        ),
+    ];
+    for (read, observed, expected) in cases {
+        for table in expected {
+            assert!(
+                observed.contains(table),
+                "{read} must record {table:?}, got {observed:?}"
+            );
+        }
+    }
+}
+
+/// DATA-033, the lazy Through reads: `get`, `first` and `count` on a
+/// `HasManyThrough`, and `get` on a `HasOneThrough`, join the intermediate
+/// table, so moving or removing an intermediate row changes what they
+/// return. Each must record the intermediate table beside the target. They
+/// recorded only the target, so an entry built from one stayed current
+/// after its intermediate rows changed.
+#[tokio::test]
+#[serial]
+async fn lazy_through_reads_observe_the_intermediate_and_the_target_table() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate_relations(&db).await;
+    let parent = CtParent::create(attrs!(name: "p")).await.expect("parent");
+    let child = CtChild::create(attrs!(ct_parent_id: parent.id, amount: 2.0))
+        .await
+        .expect("child");
+    CtGrandchild::create(attrs!(ct_child_id: child.id, amount: 3.0))
+        .await
+        .expect("grandchild");
+
+    let children = DependencyIdentity::table("ct_children");
+    let grandchildren = DependencyIdentity::table("ct_grandchildren");
+
+    let cases: Vec<(&str, Vec<DependencyIdentity>)> = vec![
+        (
+            "HasManyThrough get",
+            observed_by(async {
+                let rows = parent.grandchildren().get().await.expect("get");
+                assert_eq!(rows.len(), 1, "the join reaches the grandchild");
+            })
+            .await,
+        ),
+        (
+            "HasManyThrough first",
+            observed_by(async {
+                let row = parent.grandchildren().first().await.expect("first");
+                assert!(row.is_some(), "the join reaches the grandchild");
+            })
+            .await,
+        ),
+        (
+            "HasManyThrough count",
+            observed_by(async {
+                let count = parent.grandchildren().count().await.expect("count");
+                assert_eq!(count, 1, "the join counts the grandchild");
+            })
+            .await,
+        ),
+        (
+            "HasOneThrough get",
+            observed_by(async {
+                let row = parent.grandchild().get().await.expect("get");
+                assert!(row.is_some(), "the join reaches the grandchild");
+            })
+            .await,
+        ),
+    ];
+    for (read, observed) in cases {
+        for table in [&children, &grandchildren] {
+            assert!(
+                observed.contains(table),
+                "{read} must record {table:?}, got {observed:?}"
+            );
+        }
+    }
+}
+
+#[model(table = "ctm_posts", morph_type = "ctm_post", timestamps = false, relations = {
+    images: MorphMany<CtmImage> { name = "imageable" },
+    labels: MorphToMany<CtmLabel, CtmLabelable> { name = "labelable" },
+})]
+pub struct CtmPost {
+    pub id: i64,
+    pub title: String,
+    pub score: f64,
+}
+
+#[model(table = "ctm_images", timestamps = false, relations = {
+    imageable: MorphTo { targets = [CtmPost] },
+})]
+pub struct CtmImage {
+    pub id: i64,
+    pub imageable_id: i64,
+    pub imageable_type: String,
+    pub size: f64,
+}
+
+#[model(table = "ctm_labels", timestamps = false, relations = {
+    posts: MorphedByMany<CtmPost, CtmLabelable> {
+        name = "labelable",
+        target_morph_type = "ctm_post",
+    },
+})]
+pub struct CtmLabel {
+    pub id: i64,
+    pub name: String,
+    pub weight: f64,
+}
+
+#[model(table = "ctm_labelables", primary_key = "id", timestamps = false)]
+pub struct CtmLabelable {
+    pub id: i64,
+    pub ctm_label_id: i64,
+    pub labelable_id: i64,
+    pub labelable_type: String,
+}
+
+/// DATA-033, the polymorphic arms: `MorphMany`, `MorphToMany` and
+/// `MorphedByMany` counts and aggregates run their own raw reads, and each
+/// must record the child, pivot and related tables it read.
+#[tokio::test]
+#[serial]
+async fn morph_relation_counts_and_aggregates_observe_every_table_they_read() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    render_cache_schema(&db).await;
+    for sql in [
+        "CREATE TABLE ctm_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         title TEXT NOT NULL, score REAL NOT NULL)",
+        "CREATE TABLE ctm_images (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         imageable_id INTEGER NOT NULL, imageable_type TEXT NOT NULL, size REAL NOT NULL)",
+        "CREATE TABLE ctm_labels (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         name TEXT NOT NULL, weight REAL NOT NULL)",
+        "CREATE TABLE ctm_labelables (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         ctm_label_id INTEGER NOT NULL, labelable_id INTEGER NOT NULL, \
+         labelable_type TEXT NOT NULL)",
+    ] {
+        db.execute_unprepared(sql).await.expect("create table");
+    }
+    let post = CtmPost::create(attrs!(title: "p", score: 5.0))
+        .await
+        .expect("post");
+    CtmImage::create(attrs!(imageable_id: post.id, imageable_type: "ctm_post", size: 2.0))
+        .await
+        .expect("image");
+    let label = CtmLabel::create(attrs!(name: "l", weight: 3.0))
+        .await
+        .expect("label");
+    CtmLabelable::create(attrs!(
+        ctm_label_id: label.id,
+        labelable_id: post.id,
+        labelable_type: "ctm_post",
+    ))
+    .await
+    .expect("pivot");
+
+    let posts = DependencyIdentity::table("ctm_posts");
+    let images = DependencyIdentity::table("ctm_images");
+    let labels = DependencyIdentity::table("ctm_labels");
+    let pivot = DependencyIdentity::table("ctm_labelables");
+
+    let cases: Vec<(&str, Vec<DependencyIdentity>, Vec<&DependencyIdentity>)> = vec![
+        (
+            "MorphMany count",
+            observed_by(async {
+                let _ = CtmPost::with_count(["images"]).get().await.expect("count");
+            })
+            .await,
+            vec![&images],
+        ),
+        (
+            "MorphMany sum",
+            observed_by(async {
+                let _ = CtmPost::with_sum(("images", "size"))
+                    .get()
+                    .await
+                    .expect("sum");
+            })
+            .await,
+            vec![&images],
+        ),
+        (
+            "MorphToMany count",
+            observed_by(async {
+                let _ = CtmPost::with_count(["labels"]).get().await.expect("count");
+            })
+            .await,
+            vec![&pivot],
+        ),
+        (
+            "MorphToMany sum",
+            observed_by(async {
+                let _ = CtmPost::with_sum(("labels", "weight"))
+                    .get()
+                    .await
+                    .expect("sum");
+            })
+            .await,
+            vec![&pivot, &labels],
+        ),
+        (
+            "MorphedByMany count",
+            observed_by(async {
+                let _ = CtmLabel::with_count(["posts"]).get().await.expect("count");
+            })
+            .await,
+            vec![&pivot],
+        ),
+        (
+            "MorphedByMany sum",
+            observed_by(async {
+                let _ = CtmLabel::with_sum(("posts", "score"))
+                    .get()
+                    .await
+                    .expect("sum");
+            })
+            .await,
+            vec![&pivot, &posts],
+        ),
+    ];
+    for (read, observed, expected) in cases {
+        for table in expected {
+            assert!(
+                observed.contains(table),
+                "{read} must record {table:?}, got {observed:?}"
+            );
+        }
+    }
 }

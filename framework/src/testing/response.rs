@@ -150,10 +150,18 @@ impl TestResponse {
     /// The value of the first `Set-Cookie` header naming `name`, if
     /// any. Percent-decoded, via the same [`crate::http::parse_cookies`]
     /// every inbound `Cookie` header goes through.
+    ///
+    /// Only the `name=value` pair that opens each header is read. The
+    /// rest of a `Set-Cookie` line is attributes (`Path=/`, `HttpOnly`),
+    /// not cookies; parsed as a request `Cookie` header, each became one,
+    /// so `assert_cookie("Path")` passed on any cookie with a path.
     pub fn cookie(&self, name: &str) -> Option<String> {
         self.headers_named("set-cookie")
             .into_iter()
-            .find_map(|raw| crate::http::parse_cookies(raw).remove(name))
+            .find_map(|raw| {
+                let pair = raw.split(';').next().unwrap_or(raw);
+                crate::http::parse_cookies(pair).remove(name)
+            })
     }
 
     /// The response body decoded as UTF-8 (lossily - invalid sequences

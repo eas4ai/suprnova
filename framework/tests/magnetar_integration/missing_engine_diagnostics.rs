@@ -32,6 +32,14 @@ impl RateLimiterDriver for AllowingLimiter {
 
 #[tokio::test]
 async fn missing_factor_session_engine_names_bootstrap_action() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "missing_factor_session_engine_names_bootstrap_action",
+    )
+    .await
+    {
+        return;
+    }
     let error = Auth::oauth("missing")
         .complete_outcome("code", "state")
         .await
@@ -42,6 +50,14 @@ async fn missing_factor_session_engine_names_bootstrap_action() {
 
 #[tokio::test]
 async fn missing_password_engine_names_bootstrap_action() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "missing_password_engine_names_bootstrap_action",
+    )
+    .await
+    {
+        return;
+    }
     suprnova::App::bind::<dyn RateLimiterDriver>(Arc::new(AllowingLimiter));
     let error = Auth::password()
         .register("missing@example.test", "correct-password")
@@ -53,6 +69,14 @@ async fn missing_password_engine_names_bootstrap_action() {
 
 #[tokio::test]
 async fn missing_passkey_engine_names_bootstrap_action() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "missing_passkey_engine_names_bootstrap_action",
+    )
+    .await
+    {
+        return;
+    }
     let slot = suprnova::session::new_session_slot_for_test();
     let error = suprnova::session::session_scope_for_test(slot, async {
         Auth::passkey()
@@ -67,6 +91,14 @@ async fn missing_passkey_engine_names_bootstrap_action() {
 
 #[tokio::test]
 async fn missing_oauth_engine_names_bootstrap_action() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "missing_oauth_engine_names_bootstrap_action",
+    )
+    .await
+    {
+        return;
+    }
     let error = Auth::oauth("missing")
         .verify_oauth_identity("code", "state")
         .await

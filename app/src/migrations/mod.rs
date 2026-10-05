@@ -37,11 +37,19 @@ impl MigratorTrait for Migrator {
             // Phase 11 R4 - adds last_used_timestep to
             // two_factor_credentials for TOTP replay protection.
             Box::new(suprnova::auth_flows::two_factor::migration_replay::Migration),
+            // Second-factor attempt counter for the TwoFactor facade.
+            Box::new(suprnova::auth_flows::two_factor::migration_attempts::Migration),
+            // Pending rotations, so a rotation keeps the confirmed secret
+            // gating until the new one is confirmed.
+            Box::new(suprnova::auth_flows::two_factor::migration_rotation::Migration),
             // Phase 13 - framework-owned features table. Powers
             // DatabaseEvaluator + admin CRUD. The app's Migrator
             // includes it so `suprnova migrate` provisions the table
             // alongside this project's own schema.
             Box::new(suprnova::features::migrations::CreateFeaturesTable),
+            // Moves a features table an older CreateFeaturesTable made on
+            // MySQL from TIMESTAMP (which stops at 2038-01-19) to DATETIME.
+            Box::new(suprnova::features::migrations::FeatureTimestampsToDatetime),
             // Phase 10A T11 - adds the columns the migrated dogfood
             // models (User, Todo) declare on top of the original
             // bare-bones schema. See the migration's module doc for

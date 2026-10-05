@@ -439,6 +439,8 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
     let avg_of_fn = quote::format_ident!("{}_avg_of", name);
     let min_of_fn = quote::format_ident!("{}_min_of", name);
     let max_of_fn = quote::format_ident!("{}_max_of", name);
+    let min_as_fn = quote::format_ident!("{}_min_as", name);
+    let max_as_fn = quote::format_ident!("{}_max_as", name);
     let with_where_fn = quote::format_ident!("with_where_{}", name);
     // For Through kinds the parser stores generics left-to-right as
     // `(rel.target, rel.through)` where the first generic is the
@@ -603,8 +605,10 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
             #[doc = "Outer `Option` is \"did `with_min` populate this cell?\" \
                      - `None` means the call was not made. Inner `Option` is \
                      \"is the result NULL?\" - `Some(None)` means `with_min` \
-                     was called but the group was empty (SQL's NULL-on-empty). \
-                     `Some(Some(value))` is the populated, non-empty case."]
+                     was called but the group was empty (SQL's NULL-on-empty) \
+                     or the minimum is not a number, such as a date; read \
+                     that with `<rel>_min_as`. `Some(Some(value))` is the \
+                     populated, numeric case."]
             pub fn #min_of_fn(
                 &self,
                 col: &str,
@@ -634,6 +638,64 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
                 self.__eager
                     .get_aggregate::<::core::option::Option<f64>>(&key)
                     .copied()
+            }
+
+            #[doc = "Read the `with_min((\"...\", col))` aggregate as `T`, \
+                     whatever the column's type: a date, a time, text or a \
+                     number, as Laravel's `withMin` attribute holds it. A \
+                     date or a time reads from the ISO 8601 text serde \
+                     writes for it, so `T` can be the chrono type of the \
+                     column. A decimal reads exactly as \
+                     `rust_decimal::Decimal`, from its text, and as the \
+                     nearest `f64` as `f64`. `None` when `with_min` was not \
+                     called for this column, the group was empty, or the \
+                     value does not read as `T`."]
+            pub fn #min_as_fn<T: ::suprnova::serde::de::DeserializeOwned>(
+                &self,
+                col: &str,
+            ) -> ::core::option::Option<T> {
+                let key = ::suprnova::eloquent::relations::aggregate_cache_key(
+                    #name_str,
+                    ::suprnova::AggregateKind::Min,
+                    col,
+                );
+                let value = self
+                    .__eager
+                    .get_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                        &::suprnova::eloquent::relations::aggregate_value_cache_key(&key),
+                    )
+                    .and_then(|value| value.as_ref());
+                let number = self
+                    .__eager
+                    .get_aggregate::<::core::option::Option<f64>>(&key)
+                    .copied()
+                    .flatten();
+                ::suprnova::database::column_value::__relation_aggregate_as::<T>(value, number)
+            }
+
+            #[doc = "Read the `with_max((\"...\", col))` aggregate as `T`, \
+                     whatever the column's type. See `<rel>_min_as`."]
+            pub fn #max_as_fn<T: ::suprnova::serde::de::DeserializeOwned>(
+                &self,
+                col: &str,
+            ) -> ::core::option::Option<T> {
+                let key = ::suprnova::eloquent::relations::aggregate_cache_key(
+                    #name_str,
+                    ::suprnova::AggregateKind::Max,
+                    col,
+                );
+                let value = self
+                    .__eager
+                    .get_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                        &::suprnova::eloquent::relations::aggregate_value_cache_key(&key),
+                    )
+                    .and_then(|value| value.as_ref());
+                let number = self
+                    .__eager
+                    .get_aggregate::<::core::option::Option<f64>>(&key)
+                    .copied()
+                    .flatten();
+                ::suprnova::database::column_value::__relation_aggregate_as::<T>(value, number)
             }
 
             #with_where_block
@@ -710,13 +772,18 @@ fn emit_relation_inventory(
         },
     };
 
-    // Target primary key - used by the existence engine to render
-    // `pivot.related = target.<pk>` joins. Read from the related model's
-    // `const PRIMARY_KEY` so models with `primary_key = "uuid"` join
-    // through the correct column. MorphTo has no single target table
-    // and no single PK column; emit `""` as the sentinel.
+    // Target key - used by the existence engine to render
+    // `pivot.related = target.<key>` joins. A many-to-many joins on the
+    // column its pivot's related key holds, the declared `related_key`
+    // or else the related model's `const PRIMARY_KEY`, as its reads do
+    // (`related_key_expr`). Every other kind reads the related model's
+    // primary key. MorphTo has no single target table and no single PK
+    // column; emit `""` as the sentinel.
     let target_primary_key_expr: TokenStream = match rel.kind {
         RelationKindAttr::MorphTo => quote! { "" },
+        RelationKindAttr::BelongsToMany
+        | RelationKindAttr::MorphToMany
+        | RelationKindAttr::MorphedByMany => related_key_expr(rel, target_ty),
         _ => quote! {
             <#target_ty as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY
         },
@@ -766,10 +833,17 @@ fn emit_relation_inventory(
         },
     };
 
-    // Parent key (PK on the OWNER's side). LK override applies to the
-    // has-family relations. BelongsTo's "parent_key" maps to the OWNED
-    // model's PK column ("id" by default). All others default to "id".
-    let parent_key_str = match rel.kind {
+    // Parent key (the key on the OWNER's side). For the has-family
+    // relations it is this model's column the relation matches its
+    // foreign key against: the `lk` override, else this model's primary
+    // key - the same column `local_key_ident` reads for the relation's
+    // own queries. A model keyed on `uid` correlates `has("kids")` on
+    // `uid`, not on an `id` column it may not have. BelongsTo's
+    // "parent_key" maps to the OWNER's key column: the `lk` override,
+    // else the owner model's primary key (`owner_key_expr`), so `has`
+    // and the owner-touch cascade find the owner by the column the
+    // relation's reads use.
+    let parent_key_expr: TokenStream = match rel.kind {
         RelationKindAttr::HasOne
         | RelationKindAttr::HasMany
         | RelationKindAttr::MorphOne
@@ -778,13 +852,28 @@ fn emit_relation_inventory(
         | RelationKindAttr::MorphToMany
         | RelationKindAttr::MorphedByMany
         | RelationKindAttr::HasOneThrough
-        | RelationKindAttr::HasManyThrough => lk_override(rel).unwrap_or("id").to_string(),
+        | RelationKindAttr::HasManyThrough => {
+            let key = lk_override(rel).unwrap_or(input.primary_key.as_str());
+            quote! { #key }
+        }
         // BelongsTo: parent_key is the COLUMN on the related table the
-        // child's FK references (defaults to "id").
-        RelationKindAttr::BelongsTo => lk_override(rel).unwrap_or("id").to_string(),
-        // MorphTo: parent_key is the PK on the (variable) target
-        // table - Laravel default "id".
-        RelationKindAttr::MorphTo => "id".to_string(),
+        // child's FK references.
+        RelationKindAttr::BelongsTo => owner_key_expr(rel, target_ty),
+        // MorphTo: parent_key is the key on the (variable) target
+        // table. When every declared target keys on the same column,
+        // that column; when they differ there is no one key, so `""`,
+        // and the key is chosen per row from the type the row names,
+        // through the morph registry (`MorphTypeEntry::primary_key`),
+        // as the owner-touch cascade and `MorphTo::parent_key` do.
+        RelationKindAttr::MorphTo => match morph_targets(rel) {
+            Some(targets) if !targets.is_empty() => {
+                let keys = targets.iter().map(|target| {
+                    quote! { <#target as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY }
+                });
+                quote! { ::suprnova::eloquent::relations::__shared_key(&[#(#keys),*]) }
+            }
+            _ => quote! { "" },
+        },
     };
 
     // Foreign key - what the child / pivot / morph row carries.
@@ -849,7 +938,7 @@ fn emit_relation_inventory(
                 target_type_name: &target_type_name,
                 target_table_expr: &target_table_expr,
                 foreign_key: "",
-                parent_key: &parent_key_str,
+                parent_key: &parent_key_expr,
                 pivot_table_expr: &pivot_table_token,
                 pivot_parent_key: &parent_pivot_col,
                 pivot_related_key: &related_pivot_col,
@@ -892,11 +981,19 @@ fn emit_relation_inventory(
                     .unwrap_or_else(|| morph_type_of(input)),
                 _ => String::new(),
             };
-            // For MorphedByMany the pivot's <parent>_id column points
-            // at the related, and the morph column points at the
-            // parent (the morph side). Swap parent/related pivot keys.
+            // For MorphedByMany the pivot column that points at this
+            // (parent) model is its `pivot_foreign_key`, defaulted to
+            // `<snake(parent)>_id` as the relation method defaults it,
+            // and the morph column points at the related model (the
+            // morph side). It used to default to `<snake(target)>_id`,
+            // a column the pivot does not have, so `has` failed.
             let (pivot_parent_col, pivot_related_col) = match rel.kind {
-                RelationKindAttr::MorphedByMany => (related_col.clone(), morph_col.clone()),
+                RelationKindAttr::MorphedByMany => {
+                    let parent_col = pivot_fk_override(rel)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| default_has_fk(&parent_struct_name));
+                    (parent_col, morph_col.clone())
+                }
                 _ => (morph_col.clone(), related_col.clone()),
             };
             return emit_inventory_token(&InventoryFields {
@@ -908,7 +1005,7 @@ fn emit_relation_inventory(
                 target_type_name: &target_type_name,
                 target_table_expr: &target_table_expr,
                 foreign_key: "",
-                parent_key: &parent_key_str,
+                parent_key: &parent_key_expr,
                 pivot_table_expr: &pivot_table_token,
                 pivot_parent_key: &pivot_parent_col,
                 pivot_related_key: &pivot_related_col,
@@ -946,7 +1043,7 @@ fn emit_relation_inventory(
         target_type_name: &target_type_name,
         target_table_expr: &target_table_expr,
         foreign_key: &foreign_key_str,
-        parent_key: &parent_key_str,
+        parent_key: &parent_key_expr,
         pivot_table_expr: &pivot_table_expr,
         pivot_parent_key: &pivot_parent_key_str,
         pivot_related_key: &pivot_related_key_str,
@@ -972,7 +1069,7 @@ struct InventoryFields<'a> {
     target_type_name: &'a str,
     target_table_expr: &'a TokenStream,
     foreign_key: &'a str,
-    parent_key: &'a str,
+    parent_key: &'a TokenStream,
     pivot_table_expr: &'a TokenStream,
     pivot_parent_key: &'a str,
     pivot_related_key: &'a str,
@@ -1108,6 +1205,50 @@ fn lk_override(rel: &RelationDecl) -> Option<&str> {
     })
 }
 
+/// The parent field whose value a relation matches against its foreign
+/// key: the field `lk = "..."` names, else the primary key.
+///
+/// Every has-family path reads the parent's key through this one ident:
+/// the lazy relation method, the eager, count and aggregate arms, and so
+/// the pivot writes of a many-to-many. The inventory entry the existence
+/// engine reads names the same column. A `BelongsTo`'s `lk` names the
+/// owner's column on the target instead, and a `MorphTo` has no parent
+/// key of its own, so both keep the primary key, which they never read.
+fn local_key_ident(input: &ModelInput, rel: &RelationDecl) -> Result<syn::Ident> {
+    let pk = quote::format_ident!("{}", input.primary_key);
+    match rel.kind {
+        RelationKindAttr::BelongsTo | RelationKindAttr::MorphTo => Ok(pk),
+        _ => match lk_override(rel) {
+            None => Ok(pk),
+            Some(lk) if field_type(input, lk).is_some() => Ok(quote::format_ident!("{lk}")),
+            Some(lk) => Err(syn::Error::new_spanned(
+                &rel.name,
+                format!(
+                    "`lk = \"{lk}\"` names no field of `{}`: the local key a relation \
+                     reads must be a field of the model",
+                    input.item.ident
+                ),
+            )),
+        },
+    }
+}
+
+/// The owner column a `BelongsTo`'s foreign key holds, as a `&str`
+/// expression: the declared `lk`, else the owner model's own primary
+/// key, as Laravel's `belongsTo` defaults its owner key to the related
+/// model's key name.
+///
+/// The lazy relation, the eager, count and aggregate arms, and the
+/// inventory entry `has` and owner touches read, all use this one
+/// expression. They used to default to `id`, which an owner keyed on
+/// another column does not have.
+fn owner_key_expr(rel: &RelationDecl, target_ty: &syn::Type) -> TokenStream {
+    match lk_override(rel) {
+        Some(lk) => quote! { #lk },
+        None => quote! { <#target_ty as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY },
+    }
+}
+
 /// Look up the user-declared `with_default = || ...` closure on a
 /// BelongsTo relation. Returns the parsed expression; emission wraps
 /// it in `.with_default(<expr>)` at the call site.
@@ -1145,14 +1286,39 @@ fn pivot_related_override(rel: &RelationDecl) -> Option<&str> {
 }
 
 /// Look up the user-declared `related_key = "..."` override - the
-/// related-side primary-key COLUMN name used by `BelongsToMany`'s
-/// `.get()` IN-filter and the aggregate JOIN. Defaults to `"id"` when
-/// omitted (matches SeaORM convention).
+/// related-side COLUMN a many-to-many pivot's related key holds. See
+/// [`related_key_expr`] for the default.
 fn related_key_override(rel: &RelationDecl) -> Option<&str> {
     rel.options.iter().find_map(|o| match o {
         RelationOpt::RelatedKey(s) => Some(s.as_str()),
         _ => None,
     })
+}
+
+/// The pivot table a many-to-many relation reads and writes, as a
+/// `&str` expression: the declared `pivot_table`, else the table the
+/// pivot model is declared over. The eager arms read pivot rows from it,
+/// as the lazy relation and the pivot writes do.
+fn pivot_table_str(rel: &RelationDecl, pivot_ty: &syn::Type) -> TokenStream {
+    match pivot_table_override(rel) {
+        Some(t) => quote! { #t },
+        None => quote! { <#pivot_ty as ::suprnova::eloquent::EloquentModel>::TABLE },
+    }
+}
+
+/// The related column a many-to-many pivot's related key holds, as a
+/// `&str` expression: the declared `related_key`, else the related
+/// model's own primary key, as Laravel's `$relatedKey` defaults to the
+/// related model's key name.
+///
+/// The lazy relation, the eager arm and the aggregate join all read
+/// this one expression. The eager arm used to hardcode `id`, so a pivot
+/// holding another column matched the wrong rows when loaded eagerly.
+fn related_key_expr(rel: &RelationDecl, target_ty: &syn::Type) -> TokenStream {
+    match related_key_override(rel) {
+        Some(rk) => quote! { #rk },
+        None => quote! { <#target_ty as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY },
+    }
 }
 
 /// Look up `with_pivot = ["col1", ...]` extra columns. Returns an
@@ -1190,14 +1356,29 @@ fn second_key_override(rel: &RelationDecl) -> Option<&str> {
 
 /// Look up the user-declared `second_local_key = "..."` override for
 /// `HasOneThrough` / `HasManyThrough` - the column on the intermediate
-/// `B` matched by `second_key`. Defaults to `"id"`. Required when the
-/// intermediate model declares `#[model(primary_key = "...")]` with a
-/// non-`id` PK.
+/// `B` matched by `second_key`. See [`second_local_key_expr`] for the
+/// default.
 fn second_local_key_override(rel: &RelationDecl) -> Option<&str> {
     rel.options.iter().find_map(|o| match o {
         RelationOpt::SecondLocalKey(s) => Some(s.as_str()),
         _ => None,
     })
+}
+
+/// The column on a Through relation's intermediate `B` that the target's
+/// `second_key` holds, as a `&str` expression: the declared
+/// `second_local_key`, else `B`'s own primary key, as Laravel's
+/// `hasManyThrough` defaults its `secondLocalKey` to the intermediate's
+/// key name.
+///
+/// The lazy relation and the eager, count and aggregate arms all read
+/// this one expression. They used to default to `id`, which an
+/// intermediate keyed on another column does not have.
+fn second_local_key_expr(rel: &RelationDecl, through_ty: &syn::Type) -> TokenStream {
+    match second_local_key_override(rel) {
+        Some(key) => quote! { #key },
+        None => quote! { <#through_ty as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY },
+    }
 }
 
 /// True when `with_timestamps` (bare flag or `= true`) is declared.
@@ -1517,7 +1698,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
     let struct_ident = &input.item.ident;
     let parent_name = struct_ident.to_string();
     let pk_name = &input.primary_key;
-    let pk_ident = quote::format_ident!("{pk_name}");
+    let pk_ident = local_key_ident(input, rel)?;
     let method_ident = &rel.name;
     let target_ty = &rel.target;
     let lazy_load = emit_lazy_load_guard(&parent_name, rel);
@@ -1525,7 +1706,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
     match rel.kind {
         RelationKindAttr::HasOne => {
             // FK on the child = <snake(parent_struct)>_id by default.
-            // LK on the parent = the parent's PK by default ("id").
+            // LK on the parent = the parent's primary key by default.
             let fk = fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_has_fk(&parent_name));
@@ -1559,14 +1740,9 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             let fk = fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_belongs_to_fk(target_ty));
-            // owner key on parent = parent's PK by default ("id").
-            // T2: BelongsTo's parent PK isn't introspectable from this
-            // macro (the parent struct lives in a different `#[model]`
-            // invocation), so we default to "id" + honour an explicit
-            // `lk = "..."` override.
-            let owner_key = lk_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            // The owner's column the foreign key holds - see
+            // `owner_key_expr`.
+            let owner_key = owner_key_expr(rel, target_ty);
 
             let fk_ident = quote::format_ident!("{}", fk);
             // Inspect the FK field type on the child struct. If
@@ -1615,7 +1791,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
         RelationKindAttr::HasMany => {
             // FK on the child table = <snake(parent_struct)>_id by
             // default - same default as HasOne. LK = parent's PK by
-            // default ("id"), configurable via `lk = "..."`.
+            // default, configurable via `lk = "..."`.
             let fk = fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_has_fk(&parent_name));
@@ -1693,19 +1869,15 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             } else {
                 quote! {}
             };
-            let local_key_chain = if lk == "id" {
-                quote! {}
-            } else {
-                quote! { .local_key(#lk) }
-            };
-            // Related-side PK column. Defaults to `"id"`. Chained as
-            // `.related_pk(#rk)` so the runtime IN-filter (`.get()`)
-            // and aggregate JOIN read the correct column when the
-            // related model declares a non-`id` primary key.
-            let related_key_chain = match related_key_override(rel) {
-                Some(rk) if rk != "id" => quote! { .related_pk(#rk) },
-                _ => quote! {},
-            };
+            // Always chained: the runtime default is the model's primary
+            // key, so a declared `lk` that happens to be `id` still has
+            // to be passed on.
+            let local_key_chain = quote! { .local_key(#lk) };
+            // Related-side key column - see `related_key_expr`. Chained
+            // as `.related_pk(...)` so the runtime IN-filter (`.get()`)
+            // reads the column the eager arm and the aggregate JOIN read.
+            let related_key = related_key_expr(rel, target_ty);
+            let related_key_chain = quote! { .related_pk(#related_key) };
 
             Ok(quote! {
                 impl #struct_ident {
@@ -1774,23 +1946,16 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             let lk = lk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| pk_name.clone());
-            let local_key_chain = if lk == "id" {
-                quote! {}
-            } else {
-                quote! { .local_key(#lk) }
-            };
+            // Always chained: the runtime default is the model's primary
+            // key, so a declared `lk` that happens to be `id` still has
+            // to be passed on.
+            let local_key_chain = quote! { .local_key(#lk) };
             // Second local key - column on the intermediate `B`
-            // matched by `second_key`. Defaults to `"id"`. Chained as
-            // `.second_local_key(...)` so the runtime JOIN reads the
-            // right column for intermediates declaring a non-`id` PK.
-            let second_local_key = second_local_key_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
-            let second_local_key_chain = if second_local_key == "id" {
-                quote! {}
-            } else {
-                quote! { .second_local_key(#second_local_key) }
-            };
+            // matched by `second_key` (`second_local_key_expr`).
+            // Chained as `.second_local_key(...)` so the runtime JOIN
+            // reads the column the eager, count and aggregate arms read.
+            let second_local_key = second_local_key_expr(rel, through_ty);
+            let second_local_key_chain = quote! { .second_local_key(#second_local_key) };
 
             // Pick the runtime struct name based on the kind. Both
             // wrappers share the same `__new` shape.
@@ -1848,6 +2013,14 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             //    to equal for the row to belong to this parent.
             let morph_name = morph_name_or_default(rel);
             let morph_type_value = morph_type_of(input);
+            // A declared `lk` is the parent column the relation reads
+            // (`local_key_ident`); the runtime metadata names it too.
+            // Without one, the runtime default is the parent's primary
+            // key.
+            let local_key_chain = match lk_override(rel) {
+                Some(lk) => quote! { .local_key(#lk) },
+                None => quote! {},
+            };
             let wrapper = match rel.kind {
                 RelationKindAttr::MorphMany => quote! { MorphMany },
                 RelationKindAttr::MorphOne => quote! { MorphOne },
@@ -1876,6 +2049,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                             ::std::string::String::from(#morph_name),
                             ::std::string::String::from(#morph_type_value),
                         )
+                        #local_key_chain
                         .__lazy_load(#lazy_load)
                     }
                 }
@@ -2254,15 +2428,12 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             } else {
                 quote! {}
             };
-            let local_key_chain = if lk == "id" {
-                quote! {}
-            } else {
-                quote! { .local_key(#lk) }
-            };
-            let related_key_chain = match related_key_override(rel) {
-                Some(rk) if rk != "id" => quote! { .related_pk(#rk) },
-                _ => quote! {},
-            };
+            // Always chained: the runtime default is the model's primary
+            // key, so a declared `lk` that happens to be `id` still has
+            // to be passed on.
+            let local_key_chain = quote! { .local_key(#lk) };
+            let related_key = related_key_expr(rel, target_ty);
+            let related_key_chain = quote! { .related_pk(#related_key) };
 
             Ok(quote! {
                 impl #struct_ident {
@@ -2332,15 +2503,12 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             let lk = lk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| pk_name.clone());
-            let local_key_chain = if lk == "id" {
-                quote! {}
-            } else {
-                quote! { .local_key(#lk) }
-            };
-            let related_key_chain = match related_key_override(rel) {
-                Some(rk) if rk != "id" => quote! { .related_pk(#rk) },
-                _ => quote! {},
-            };
+            // Always chained: the runtime default is the model's primary
+            // key, so a declared `lk` that happens to be `id` still has
+            // to be passed on.
+            let local_key_chain = quote! { .local_key(#lk) };
+            let related_key = related_key_expr(rel, target_ty);
+            let related_key_chain = quote! { .related_pk(#related_key) };
 
             Ok(quote! {
                 impl #struct_ident {
@@ -2445,8 +2613,7 @@ fn emit_predicate_extractor(target_ty: &syn::Type, name_str: &str) -> TokenStrea
 fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<TokenStream>> {
     let struct_ident = &input.item.ident;
     let name_str = rel.name.to_string();
-    let pk_name = &input.primary_key;
-    let pk_ident = quote::format_ident!("{pk_name}");
+    let pk_ident = local_key_ident(input, rel)?;
     let target_ty = &rel.target;
     let parent_name = struct_ident.to_string();
 
@@ -2527,10 +2694,9 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_belongs_to_fk(target_ty));
             let fk_ident = quote::format_ident!("{}", fk);
-            // Owner key on the parent.
-            let owner_key = lk_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            // The owner's column the foreign key holds - see
+            // `owner_key_expr`.
+            let owner_key = owner_key_expr(rel, target_ty);
             let fk_is_optional = field_is_optional(input, &fk);
             let with_default_chain = match with_default_expr(rel) {
                 Some(expr) => quote! { .with_default(#expr) },
@@ -2751,6 +2917,11 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // applies its closure to the RELATED-table query (not the
             // pivot scan). The downcast targets `#target_ty`.
             let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
+            // The related column the pivot's related key holds - see
+            // `related_key_expr`.
+            let related_key = related_key_expr(rel, target_ty);
+            // The pivot table the relation names - see `pivot_table_str`.
+            let pivot_table = pivot_table_str(rel, pivot_ty);
 
             Ok(Some(quote! {
                 #name_str => {
@@ -2762,13 +2933,17 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    // Step 1: pivot rows where FK ∈ pk_values.
+                    // Step 1: pivot rows where FK ∈ pk_values, read from
+                    // the relation's own pivot table.
                     let pivots: ::std::vec::Vec<#pivot_ty> =
-                        <#pivot_ty as ::suprnova::eloquent::Model>::query()
-                            .filter_in(#pivot_fk, pk_values.clone())
-                            .get()
-                            .await?
-                            .into_vec();
+                        ::suprnova::eloquent::relations::belongs_to_many::__eager_pivot_rows::<#pivot_ty>(
+                            #pivot_table,
+                            <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
+                            #pivot_fk,
+                            pk_values.clone(),
+                            ::core::option::Option::None,
+                        )
+                        .await?;
 
                     if pivots.is_empty() {
                         // Every parent gets an empty slice so the
@@ -2803,20 +2978,15 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         }
                     }
 
-                    // Step 2: related rows where PK ∈ related_ids.
-                    // `id` is the default related-key column; the
-                    // `.local_key()` override on the relation surface
-                    // is not currently honoured here because the
-                    // eager dispatcher uses Model::query() which keys
-                    // off the model's declared primary key. T9's
-                    // with_where surface can extend this if non-default
-                    // related keys land in practice.
+                    // Step 2: related rows whose related key is in
+                    // related_ids - the declared `related_key`, else the
+                    // related model's primary key, as the lazy read uses.
                     let related_rows: ::std::vec::Vec<#target_ty> = if related_ids.is_empty() {
                         ::std::vec::Vec::new()
                     } else {
                         let __sn_builder: ::suprnova::Builder<#target_ty> =
                             <#target_ty as ::suprnova::eloquent::Model>::query()
-                                .filter_in("id", related_ids);
+                                .filter_in(#related_key, related_ids);
                         let __sn_builder = match __sn_pred.take() {
                             ::core::option::Option::Some(f) => f(__sn_builder),
                             ::core::option::Option::None => __sn_builder,
@@ -2824,15 +2994,15 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         __sn_builder.get().await?.into_vec()
                     };
 
-                    // Index related rows by their `id` field (JSON-
+                    // Index related rows by their related key (JSON-
                     // string form) for fast lookup.
                     let mut by_related_id: HashMap<::std::string::String, #target_ty>
                         = HashMap::new();
                     for r in related_rows.into_iter() {
                         let key = ::suprnova::eloquent::relations::eager_row_column(
                             &r,
-                            ::suprnova::eloquent::Model::field_value(&r, "id"),
-                            "id",
+                            ::suprnova::eloquent::Model::field_value(&r, #related_key),
+                            #related_key,
                         )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
@@ -2920,14 +3090,11 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             let second_key = second_key_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(through_ty))));
-            // Column on B matched by `second_key`. Defaults to "id";
-            // overridable for intermediates declaring a non-`id` PK
-            // via `second_local_key = "..."`. Query 1 below `SELECT`s
-            // this column as `__sn_b_id` so the b->parent map keys
-            // off the correct join target.
-            let second_local_key = second_local_key_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            // Column on B matched by `second_key`
+            // (`second_local_key_expr`). Query 1 below `SELECT`s this
+            // column as `__sn_b_id` so the b->parent map keys off the
+            // correct join target.
+            let second_local_key = second_local_key_expr(rel, through_ty);
             let is_one = matches!(rel.kind, RelationKindAttr::HasOneThrough);
             // Distribute branch: HasOneThrough stores `set_one`
             // (None if no row); HasManyThrough stores `set_many`
@@ -3043,22 +3210,30 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
                         _ => "TEXT",
                     };
+                    // A trashed intermediate maps to no parent, so its
+                    // rows are left out, as the lazy read leaves them out.
                     let __sn_map_sql = ::std::format!(
                         "SELECT CAST({slk} AS {cast}) AS __sn_b_id, \
                                 CAST({fk} AS {cast}) AS __sn_parent_id \
                            FROM {table} \
-                          WHERE {fk} IN ({phs})",
+                          WHERE {fk} IN ({phs}){alive}",
                         cast = __sn_cast_kw,
                         fk = #first_key,
                         slk = #second_local_key,
                         table = __sn_b_table,
                         phs = placeholders.join(", "),
+                        alive = ::suprnova::eloquent::relations::__soft_delete_guard::<#through_ty>(
+                            __sn_b_table,
+                        ),
                     );
                     let __sn_map_stmt = ::suprnova::sea_orm::Statement::from_sql_and_values(
                         db_backend,
                         &__sn_map_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_b_table);
                     let __sn_map_rows = __sn_exec.query_all(__sn_map_stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -3285,6 +3460,11 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // Predicate extractor - `with_where` applies to the
             // RELATED-table query (Step 2), mirroring BelongsToMany.
             let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
+            // The related column the pivot's related key holds - see
+            // `related_key_expr`.
+            let related_key = related_key_expr(rel, target_ty);
+            // The pivot table the relation names - see `pivot_table_str`.
+            let pivot_table = pivot_table_str(rel, pivot_ty);
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
@@ -3295,23 +3475,18 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    // Type-string predicate. JSON-wrap so the inner
-                    // WhereTerm storage stays homogeneous with the
-                    // IN-list.
-                    let morph_type_predicate =
-                        ::suprnova::serde_json::Value::String(
-                            ::std::string::String::from(#parent_morph_type),
-                        );
-
                     // Step 1: pivot rows where <name>_id ∈ pk_values
-                    //         AND <name>_type = '<self_morph_type>'.
+                    //         AND <name>_type = '<self_morph_type>', read
+                    //         from the relation's own pivot table.
                     let pivots: ::std::vec::Vec<#pivot_ty> =
-                        <#pivot_ty as ::suprnova::eloquent::Model>::query()
-                            .filter_in(#id_col, pk_values.clone())
-                            .filter(#type_col, morph_type_predicate)
-                            .get()
-                            .await?
-                            .into_vec();
+                        ::suprnova::eloquent::relations::belongs_to_many::__eager_pivot_rows::<#pivot_ty>(
+                            #pivot_table,
+                            <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
+                            #id_col,
+                            pk_values.clone(),
+                            ::core::option::Option::Some((#type_col, #parent_morph_type)),
+                        )
+                        .await?;
 
                     if pivots.is_empty() {
                         for p in parents.iter_mut() {
@@ -3347,7 +3522,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     } else {
                         let __sn_builder: ::suprnova::Builder<#target_ty> =
                             <#target_ty as ::suprnova::eloquent::Model>::query()
-                                .filter_in("id", related_ids);
+                                .filter_in(#related_key, related_ids);
                         let __sn_builder = match __sn_pred.take() {
                             ::core::option::Option::Some(f) => f(__sn_builder),
                             ::core::option::Option::None => __sn_builder,
@@ -3360,8 +3535,8 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     for r in related_rows.into_iter() {
                         let key = ::suprnova::eloquent::relations::eager_row_column(
                             &r,
-                            ::suprnova::eloquent::Model::field_value(&r, "id"),
-                            "id",
+                            ::suprnova::eloquent::Model::field_value(&r, #related_key),
+                            #related_key,
                         )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
@@ -3453,6 +3628,11 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // Predicate extractor - `with_where` applies to the
             // TARGET-table query (Step 2). Mirrors MorphToMany.
             let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
+            // The related column the pivot's related key holds - see
+            // `related_key_expr`.
+            let related_key = related_key_expr(rel, target_ty);
+            // The pivot table the relation names - see `pivot_table_str`.
+            let pivot_table = pivot_table_str(rel, pivot_ty);
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
@@ -3463,20 +3643,18 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    let morph_type_predicate =
-                        ::suprnova::serde_json::Value::String(
-                            ::std::string::String::from(#target_morph_type),
-                        );
-
                     // Step 1: pivot rows for these tags filtered by
-                    // the declared target morph type.
+                    // the declared target morph type, read from the
+                    // relation's own pivot table.
                     let pivots: ::std::vec::Vec<#pivot_ty> =
-                        <#pivot_ty as ::suprnova::eloquent::Model>::query()
-                            .filter_in(#pivot_fk, pk_values.clone())
-                            .filter(#type_col, morph_type_predicate)
-                            .get()
-                            .await?
-                            .into_vec();
+                        ::suprnova::eloquent::relations::belongs_to_many::__eager_pivot_rows::<#pivot_ty>(
+                            #pivot_table,
+                            <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
+                            #pivot_fk,
+                            pk_values.clone(),
+                            ::core::option::Option::Some((#type_col, #target_morph_type)),
+                        )
+                        .await?;
 
                     if pivots.is_empty() {
                         for p in parents.iter_mut() {
@@ -3512,7 +3690,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     } else {
                         let __sn_builder: ::suprnova::Builder<#target_ty> =
                             <#target_ty as ::suprnova::eloquent::Model>::query()
-                                .filter_in("id", target_ids);
+                                .filter_in(#related_key, target_ids);
                         let __sn_builder = match __sn_pred.take() {
                             ::core::option::Option::Some(f) => f(__sn_builder),
                             ::core::option::Option::None => __sn_builder,
@@ -3526,8 +3704,8 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     for r in target_rows.into_iter() {
                         let key = ::suprnova::eloquent::relations::eager_row_column(
                             &r,
-                            ::suprnova::eloquent::Model::field_value(&r, "id"),
-                            "id",
+                            ::suprnova::eloquent::Model::field_value(&r, #related_key),
+                            #related_key,
                         )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
@@ -3729,8 +3907,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
 fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<TokenStream>> {
     let struct_ident = &input.item.ident;
     let name_str = rel.name.to_string();
-    let pk_name = &input.primary_key;
-    let pk_ident = quote::format_ident!("{pk_name}");
+    let pk_ident = local_key_ident(input, rel)?;
     let target_ty = &rel.target;
     let parent_name = struct_ident.to_string();
 
@@ -3782,9 +3959,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             let fk = fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_belongs_to_fk(target_ty));
-            let owner_key = lk_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            let owner_key = owner_key_expr(rel, target_ty);
             let fk_ident = quote::format_ident!("{}", fk);
             let fk_is_optional = field_is_optional(input, &fk);
             let per_parent_key_expr = if fk_is_optional {
@@ -3923,6 +4098,16 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
+                    // The related rows as the related model's `query()` reads
+                    // them: its soft-delete filter and global scopes apply, so
+                    // the count or total covers the rows `with` loads. The
+                    // source binds come first.
+                    let (__sn_source, __sn_source_binds) =
+                        ::suprnova::Builder::<#target_ty>::__relation_source(
+                            db_backend,
+                            <#target_ty as ::suprnova::eloquent::EloquentModel>::TABLE,
+                        )?;
+                    let __sn_offset = __sn_source_binds.len();
 
                     // Build the placeholder list. Per-backend dialect
                     // matches the inner `Builder` renderer: Postgres
@@ -3933,10 +4118,11 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
                     let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    binds.extend(__sn_source_binds);
                     for (i, v) in pk_json_values.iter().enumerate() {
                         let ph = match db_backend {
                             ::suprnova::sea_orm::DatabaseBackend::Postgres => {
-                                ::std::format!("${}", i + 1)
+                                ::std::format!("${}", i + 1 + __sn_offset)
                             }
                             _ => ::std::string::String::from("?"),
                         };
@@ -3953,8 +4139,6 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
                         _ => "TEXT",
                     };
-                    let __sn_table = <#target_ty as
-                        ::suprnova::eloquent::EloquentModel>::TABLE;
                     let __sn_sql = ::std::format!(
                         "SELECT CAST({fk} AS {cast}) AS __sn_fk_key, \
                                 COUNT(*) AS __sn_count \
@@ -3963,7 +4147,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                           GROUP BY {fk}",
                         fk = #fk,
                         cast = __sn_cast_kw,
-                        table = __sn_table,
+                        table = __sn_source,
                         phs = placeholders.join(", "),
                     );
 
@@ -3971,6 +4155,11 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         db_backend,
                         &__sn_sql,
                         binds,
+                    );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::TABLE,
                     );
                     let rows = __sn_exec.query_all(stmt)
                         .await
@@ -4100,6 +4289,9 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_table);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -4164,12 +4356,8 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             let second_key = second_key_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(through_ty))));
-            // JOIN-target column on B. Defaults to `"id"`; overridable
-            // via `second_local_key = "..."` for intermediates with a
-            // non-`id` PK.
-            let second_local_key = second_local_key_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            // JOIN-target column on B (`second_local_key_expr`).
+            let second_local_key = second_local_key_expr(rel, through_ty);
 
             Ok(Some(quote! {
                 #name_str => {
@@ -4200,15 +4388,26 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
+                    // The related rows as the related model's `query()` reads
+                    // them: its soft-delete filter and global scopes apply, so
+                    // the count or total covers the rows `with` loads. The
+                    // source binds come first.
+                    let (__sn_source, __sn_source_binds) =
+                        ::suprnova::Builder::<#target_ty>::__relation_source(
+                            db_backend,
+                            "__sn_c",
+                        )?;
+                    let __sn_offset = __sn_source_binds.len();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
                     let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    binds.extend(__sn_source_binds);
                     for (i, v) in pk_json_values.iter().enumerate() {
                         let ph = match db_backend {
                             ::suprnova::sea_orm::DatabaseBackend::Postgres => {
-                                ::std::format!("${}", i + 1)
+                                ::std::format!("${}", i + 1 + __sn_offset)
                             }
                             _ => ::std::string::String::from("?"),
                         };
@@ -4224,22 +4423,21 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     };
                     let __sn_b_table = <#through_ty as
                         ::suprnova::eloquent::EloquentModel>::TABLE;
-                    let __sn_c_table = <#target_ty as
-                        ::suprnova::eloquent::EloquentModel>::TABLE;
                     let __sn_sql = ::std::format!(
                         "SELECT CAST(__sn_b.{fk} AS {cast}) AS __sn_fk_key, \
                                 COUNT(*) AS __sn_count \
-                           FROM {c_table} __sn_c \
+                           FROM {c_table} \
                            JOIN {b_table} __sn_b \
                              ON __sn_c.{second_key} = __sn_b.{slk} \
-                          WHERE __sn_b.{fk} IN ({phs}) \
+                          WHERE __sn_b.{fk} IN ({phs}){b_alive} \
                           GROUP BY __sn_b.{fk}",
                         fk = #first_key,
                         second_key = #second_key,
                         slk = #second_local_key,
                         cast = __sn_cast_kw,
-                        c_table = __sn_c_table,
+                        c_table = __sn_source,
                         b_table = __sn_b_table,
+                        b_alive = ::suprnova::eloquent::relations::__soft_delete_guard::<#through_ty>("__sn_b"),
                         phs = placeholders.join(", "),
                     );
 
@@ -4248,6 +4446,12 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::TABLE,
+                    );
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_b_table);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -4328,15 +4532,26 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
+                    // The related rows as the related model's `query()` reads
+                    // them: its soft-delete filter and global scopes apply, so
+                    // the count or total covers the rows `with` loads. The
+                    // source binds come first.
+                    let (__sn_source, __sn_source_binds) =
+                        ::suprnova::Builder::<#target_ty>::__relation_source(
+                            db_backend,
+                            <#target_ty as ::suprnova::eloquent::EloquentModel>::TABLE,
+                        )?;
+                    let __sn_offset = __sn_source_binds.len();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
                     let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len() + 1);
+                    binds.extend(__sn_source_binds);
                     for (i, v) in pk_json_values.iter().enumerate() {
                         let ph = match db_backend {
                             ::suprnova::sea_orm::DatabaseBackend::Postgres => {
-                                ::std::format!("${}", i + 1)
+                                ::std::format!("${}", i + 1 + __sn_offset)
                             }
                             _ => ::std::string::String::from("?"),
                         };
@@ -4350,7 +4565,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     // remaining backends. Bound after the IN-list.
                     let type_ph = match db_backend {
                         ::suprnova::sea_orm::DatabaseBackend::Postgres => {
-                            ::std::format!("${}", pk_json_values.len() + 1)
+                            ::std::format!("${}", pk_json_values.len() + 1 + __sn_offset)
                         }
                         _ => ::std::string::String::from("?"),
                     };
@@ -4360,8 +4575,6 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
                         _ => "TEXT",
                     };
-                    let __sn_table = <#target_ty as
-                        ::suprnova::eloquent::EloquentModel>::TABLE;
                     let __sn_sql = ::std::format!(
                         "SELECT CAST({id} AS {cast}) AS __sn_fk_key, \
                                 COUNT(*) AS __sn_count \
@@ -4371,7 +4584,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                           GROUP BY {id}",
                         id = #id_col,
                         cast = __sn_cast_kw,
-                        table = __sn_table,
+                        table = __sn_source,
                         type_col = #type_col,
                         type_ph = type_ph,
                         phs = placeholders.join(", "),
@@ -4381,6 +4594,11 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         db_backend,
                         &__sn_sql,
                         binds,
+                    );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::TABLE,
                     );
                     let rows = __sn_exec.query_all(stmt)
                         .await
@@ -4519,6 +4737,9 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_table);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -4662,6 +4883,9 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_table);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -4724,8 +4948,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
 fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<TokenStream>> {
     let struct_ident = &input.item.ident;
     let name_str = rel.name.to_string();
-    let pk_name = &input.primary_key;
-    let pk_ident = quote::format_ident!("{pk_name}");
+    let pk_ident = local_key_ident(input, rel)?;
     let target_ty = &rel.target;
     let parent_name = struct_ident.to_string();
 
@@ -4749,7 +4972,16 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .await?
                             .into_vec();
                     use ::std::collections::HashMap;
-                    let mut by_fk: HashMap<::std::string::String, f64> = HashMap::new();
+                    // The column's value as an `f64` when it is a number,
+                    // and as JSON whatever its type, which `_min_as` /
+                    // `_max_as` read (a date has no `f64`).
+                    let mut by_fk: HashMap<
+                        ::std::string::String,
+                        (
+                            ::core::option::Option<f64>,
+                            ::core::option::Option<::suprnova::serde_json::Value>,
+                        ),
+                    > = HashMap::new();
                     for r in rows.iter() {
                         let key = ::suprnova::eloquent::relations::eager_row_column(
                             r,
@@ -4758,17 +4990,16 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        let col_val = ::suprnova::eloquent::relations::eager_row_column(
+                        let col = ::suprnova::eloquent::relations::eager_row_column(
                             r,
                             ::suprnova::eloquent::Model::field_value(r, column),
                             column,
                         )
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0);
+                            .filter(|v| !v.is_null());
                         // Each parent's group has 0-or-1 row, so the
                         // aggregate function is the same on every kind -
                         // just record the column value.
-                        by_fk.insert(key, col_val);
+                        by_fk.insert(key, (col.as_ref().and_then(|v| v.as_f64()), col));
                     }
                     // Sum/Avg over an empty group stores 0.0
                     // (consistent with the framework's COALESCE
@@ -4792,7 +5023,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        let opt_v: ::core::option::Option<f64> = by_fk.get(&key).copied();
+                        let (opt_v, value) = by_fk.get(&key).cloned().unwrap_or_default();
                         match kind {
                             ::suprnova::AggregateKind::Sum
                             | ::suprnova::AggregateKind::Avg => {
@@ -4807,6 +5038,14 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                     &__sn_agg_key,
                                     opt_v,
                                 );
+                                p.__eager.set_aggregate::<
+                                    ::core::option::Option<::suprnova::serde_json::Value>,
+                                >(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(
+                                        &__sn_agg_key,
+                                    ),
+                                    value,
+                                );
                             }
                         }
                     }
@@ -4818,9 +5057,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
             let fk = fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_belongs_to_fk(target_ty));
-            let owner_key = lk_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            let owner_key = owner_key_expr(rel, target_ty);
             let fk_ident = quote::format_ident!("{}", fk);
             let fk_is_optional = field_is_optional(input, &fk);
             let per_parent_key_expr = if fk_is_optional {
@@ -4858,7 +5095,15 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .into_vec()
                     };
                     use ::std::collections::HashMap;
-                    let mut by_pk: HashMap<::std::string::String, f64> = HashMap::new();
+                    // As in the HasOne arm: the value as an `f64` when it
+                    // is a number, and as JSON whatever its type.
+                    let mut by_pk: HashMap<
+                        ::std::string::String,
+                        (
+                            ::core::option::Option<f64>,
+                            ::core::option::Option<::suprnova::serde_json::Value>,
+                        ),
+                    > = HashMap::new();
                     for r in parent_rows.iter() {
                         let key = ::suprnova::eloquent::relations::eager_row_column(
                             r,
@@ -4867,14 +5112,13 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        let col_val = ::suprnova::eloquent::relations::eager_row_column(
+                        let col = ::suprnova::eloquent::relations::eager_row_column(
                             r,
                             ::suprnova::eloquent::Model::field_value(r, column),
                             column,
                         )
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0);
-                        by_pk.insert(key, col_val);
+                            .filter(|v| !v.is_null());
+                        by_pk.insert(key, (col.as_ref().and_then(|v| v.as_f64()), col));
                     }
                     // Sum/Avg over an empty group stores 0.0
                     // (framework COALESCE behaviour). Min/Max over an
@@ -4892,11 +5136,11 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     for p in parents.iter_mut() {
                         let v: ::core::option::Option<::suprnova::serde_json::Value> =
                             #per_parent_key_expr;
-                        let opt_v: ::core::option::Option<f64> = match &v {
+                        let (opt_v, value) = match &v {
                             ::core::option::Option::Some(jv) => {
-                                by_pk.get(&jv.to_string()).copied()
+                                by_pk.get(&jv.to_string()).cloned().unwrap_or_default()
                             }
-                            ::core::option::Option::None => ::core::option::Option::None,
+                            ::core::option::Option::None => ::core::default::Default::default(),
                         };
                         match kind {
                             ::suprnova::AggregateKind::Sum
@@ -4911,6 +5155,14 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
                                     &__sn_agg_key,
                                     opt_v,
+                                );
+                                p.__eager.set_aggregate::<
+                                    ::core::option::Option<::suprnova::serde_json::Value>,
+                                >(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(
+                                        &__sn_agg_key,
+                                    ),
+                                    value,
                                 );
                             }
                         }
@@ -4983,6 +5235,16 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
+                    // The related rows as the related model's `query()` reads
+                    // them: its soft-delete filter and global scopes apply, so
+                    // the count or total covers the rows `with` loads. The
+                    // source binds come first.
+                    let (__sn_source, __sn_source_binds) =
+                        ::suprnova::Builder::<#target_ty>::__relation_source(
+                            db_backend,
+                            <#target_ty as ::suprnova::eloquent::EloquentModel>::TABLE,
+                        )?;
+                    let __sn_offset = __sn_source_binds.len();
 
                     // Build the placeholder list. Per-backend dialect
                     // matches the inner `Builder` renderer: Postgres
@@ -4993,10 +5255,11 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
                     let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    binds.extend(__sn_source_binds);
                     for (i, v) in pk_json_values.iter().enumerate() {
                         let ph = match db_backend {
                             ::suprnova::sea_orm::DatabaseBackend::Postgres => {
-                                ::std::format!("${}", i + 1)
+                                ::std::format!("${}", i + 1 + __sn_offset)
                             }
                             _ => ::std::string::String::from("?"),
                         };
@@ -5013,8 +5276,6 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
                         _ => "TEXT",
                     };
-                    let __sn_table = <#target_ty as
-                        ::suprnova::eloquent::EloquentModel>::TABLE;
 
                     // The aggregate expression is selected at runtime
                     // from `kind`. The `column` arg flows untyped into
@@ -5046,7 +5307,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         fk = #fk,
                         cast = __sn_cast_kw,
                         agg = __sn_agg_expr,
-                        table = __sn_table,
+                        table = __sn_source,
                         phs = placeholders.join(", "),
                     );
 
@@ -5054,6 +5315,11 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         db_backend,
                         &__sn_sql,
                         binds,
+                    );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::TABLE,
                     );
                     let rows = __sn_exec.query_all(stmt)
                         .await
@@ -5079,14 +5345,17 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         ::std::string::String,
                         ::core::option::Option<f64>,
                     > = HashMap::new();
+                    let mut by_fk_value: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<::suprnova::serde_json::Value>,
+                    > = HashMap::new();
                     for r in rows.iter() {
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> =
-                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
-                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                        by_fk.insert(key, agg);
+                        let agg = ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg");
+                        by_fk.insert(key.clone(), agg.number);
+                        by_fk_value.insert(key, agg.value);
                     }
 
                     let __sn_agg_key: ::std::string::String =
@@ -5118,6 +5387,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
                                     &__sn_agg_key,
                                     agg,
+                                );
+                                p.__eager.set_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(&__sn_agg_key),
+                                    by_fk_value.get(&key).cloned().flatten(),
                                 );
                             }
                         }
@@ -5155,13 +5428,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
             let pivot_related = pivot_related_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(target_ty))));
-            // Related-side PK column. Defaults to `"id"`. When the user
-            // declares `related_key = "uuid"` on the relation, the JOIN
-            // reads `__sn_r.uuid = __sn_p.{rk}` instead of the broken
-            // `__sn_r.id = ...` form.
-            let related_pk = related_key_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            // Related-side key column - see `related_key_expr`. When the
+            // user declares `related_key = "uuid"` on the relation, the
+            // JOIN reads `__sn_r.uuid = __sn_p.{rk}`.
+            let related_pk = related_key_expr(rel, target_ty);
             let pivot_table_expr: TokenStream = match pivot_table_override(rel) {
                 Some(t) => {
                     let lit = syn::LitStr::new(t, proc_macro2::Span::call_site());
@@ -5201,15 +5471,26 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
+                    // The related rows as the related model's `query()` reads
+                    // them: its soft-delete filter and global scopes apply, so
+                    // the count or total covers the rows `with` loads. The
+                    // source binds come first.
+                    let (__sn_source, __sn_source_binds) =
+                        ::suprnova::Builder::<#target_ty>::__relation_source(
+                            db_backend,
+                            "__sn_r",
+                        )?;
+                    let __sn_offset = __sn_source_binds.len();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
                     let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    binds.extend(__sn_source_binds);
                     for (i, v) in pk_json_values.iter().enumerate() {
                         let ph = match db_backend {
                             ::suprnova::sea_orm::DatabaseBackend::Postgres => {
-                                ::std::format!("${}", i + 1)
+                                ::std::format!("${}", i + 1 + __sn_offset)
                             }
                             _ => ::std::string::String::from("?"),
                         };
@@ -5224,8 +5505,6 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         _ => "TEXT",
                     };
                     let __sn_pivot = #pivot_table_expr;
-                    let __sn_related = <#target_ty as
-                        ::suprnova::eloquent::EloquentModel>::TABLE;
 
                     let __sn_agg_expr: ::std::string::String = match kind {
                         ::suprnova::AggregateKind::Sum => {
@@ -5246,7 +5525,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         "SELECT CAST(__sn_p.{fk} AS {cast}) AS __sn_fk_key, \
                                 {agg} AS __sn_agg \
                            FROM {pivot} __sn_p \
-                           JOIN {related} __sn_r ON __sn_r.{related_pk} = __sn_p.{rk} \
+                           JOIN {related} ON __sn_r.{related_pk} = __sn_p.{rk} \
                           WHERE __sn_p.{fk} IN ({phs}) \
                           GROUP BY __sn_p.{fk}",
                         fk = #pivot_fk,
@@ -5255,7 +5534,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         cast = __sn_cast_kw,
                         agg = __sn_agg_expr,
                         pivot = __sn_pivot,
-                        related = __sn_related,
+                        related = __sn_source,
                         phs = placeholders.join(", "),
                     );
 
@@ -5263,6 +5542,12 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         db_backend,
                         &__sn_sql,
                         binds,
+                    );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_pivot);
+                    ::suprnova::render_cache::collector::observe_table_read(
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::TABLE,
                     );
                     let rows = __sn_exec.query_all(stmt)
                         .await
@@ -5273,14 +5558,17 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         ::std::string::String,
                         ::core::option::Option<f64>,
                     > = HashMap::new();
+                    let mut by_fk_value: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<::suprnova::serde_json::Value>,
+                    > = HashMap::new();
                     for r in rows.iter() {
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> =
-                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
-                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                        by_fk.insert(key, agg);
+                        let agg = ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg");
+                        by_fk.insert(key.clone(), agg.number);
+                        by_fk_value.insert(key, agg.value);
                     }
 
                     // Cache key is the wide `<rel>_<kind>_<col>` form
@@ -5312,6 +5600,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
                                     &__sn_agg_key,
                                     agg,
+                                );
+                                p.__eager.set_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(&__sn_agg_key),
+                                    by_fk_value.get(&key).cloned().flatten(),
                                 );
                             }
                         }
@@ -5356,12 +5648,8 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
             let second_key = second_key_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(through_ty))));
-            // JOIN-target column on B. Defaults to `"id"`; overridable
-            // via `second_local_key = "..."` for intermediates with a
-            // non-`id` PK.
-            let second_local_key = second_local_key_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            // JOIN-target column on B (`second_local_key_expr`).
+            let second_local_key = second_local_key_expr(rel, through_ty);
 
             Ok(Some(quote! {
                 #name_str => {
@@ -5392,15 +5680,26 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
+                    // The related rows as the related model's `query()` reads
+                    // them: its soft-delete filter and global scopes apply, so
+                    // the count or total covers the rows `with` loads. The
+                    // source binds come first.
+                    let (__sn_source, __sn_source_binds) =
+                        ::suprnova::Builder::<#target_ty>::__relation_source(
+                            db_backend,
+                            "__sn_c",
+                        )?;
+                    let __sn_offset = __sn_source_binds.len();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
                     let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    binds.extend(__sn_source_binds);
                     for (i, v) in pk_json_values.iter().enumerate() {
                         let ph = match db_backend {
                             ::suprnova::sea_orm::DatabaseBackend::Postgres => {
-                                ::std::format!("${}", i + 1)
+                                ::std::format!("${}", i + 1 + __sn_offset)
                             }
                             _ => ::std::string::String::from("?"),
                         };
@@ -5415,8 +5714,6 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         _ => "TEXT",
                     };
                     let __sn_b_table = <#through_ty as
-                        ::suprnova::eloquent::EloquentModel>::TABLE;
-                    let __sn_c_table = <#target_ty as
                         ::suprnova::eloquent::EloquentModel>::TABLE;
 
                     let __sn_agg_expr: ::std::string::String = match kind {
@@ -5437,18 +5734,19 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     let __sn_sql = ::std::format!(
                         "SELECT CAST(__sn_b.{fk} AS {cast}) AS __sn_fk_key, \
                                 {agg} AS __sn_agg \
-                           FROM {c_table} __sn_c \
+                           FROM {c_table} \
                            JOIN {b_table} __sn_b \
                              ON __sn_c.{second_key} = __sn_b.{slk} \
-                          WHERE __sn_b.{fk} IN ({phs}) \
+                          WHERE __sn_b.{fk} IN ({phs}){b_alive} \
                           GROUP BY __sn_b.{fk}",
                         fk = #first_key,
                         second_key = #second_key,
                         slk = #second_local_key,
                         cast = __sn_cast_kw,
                         agg = __sn_agg_expr,
-                        c_table = __sn_c_table,
+                        c_table = __sn_source,
                         b_table = __sn_b_table,
+                        b_alive = ::suprnova::eloquent::relations::__soft_delete_guard::<#through_ty>("__sn_b"),
                         phs = placeholders.join(", "),
                     );
 
@@ -5457,6 +5755,12 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::TABLE,
+                    );
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_b_table);
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -5466,14 +5770,17 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         ::std::string::String,
                         ::core::option::Option<f64>,
                     > = HashMap::new();
+                    let mut by_fk_value: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<::suprnova::serde_json::Value>,
+                    > = HashMap::new();
                     for r in rows.iter() {
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> =
-                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
-                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                        by_fk.insert(key, agg);
+                        let agg = ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg");
+                        by_fk.insert(key.clone(), agg.number);
+                        by_fk_value.insert(key, agg.value);
                     }
 
                     // Cache key is the wide `<rel>_<kind>_<col>` form
@@ -5505,6 +5812,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
                                     &__sn_agg_key,
                                     agg,
+                                );
+                                p.__eager.set_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(&__sn_agg_key),
+                                    by_fk_value.get(&key).cloned().flatten(),
                                 );
                             }
                         }
@@ -5569,15 +5880,26 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
+                    // The related rows as the related model's `query()` reads
+                    // them: its soft-delete filter and global scopes apply, so
+                    // the count or total covers the rows `with` loads. The
+                    // source binds come first.
+                    let (__sn_source, __sn_source_binds) =
+                        ::suprnova::Builder::<#target_ty>::__relation_source(
+                            db_backend,
+                            <#target_ty as ::suprnova::eloquent::EloquentModel>::TABLE,
+                        )?;
+                    let __sn_offset = __sn_source_binds.len();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
                     let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len() + 1);
+                    binds.extend(__sn_source_binds);
                     for (i, v) in pk_json_values.iter().enumerate() {
                         let ph = match db_backend {
                             ::suprnova::sea_orm::DatabaseBackend::Postgres => {
-                                ::std::format!("${}", i + 1)
+                                ::std::format!("${}", i + 1 + __sn_offset)
                             }
                             _ => ::std::string::String::from("?"),
                         };
@@ -5588,7 +5910,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     }
                     let type_ph = match db_backend {
                         ::suprnova::sea_orm::DatabaseBackend::Postgres => {
-                            ::std::format!("${}", pk_json_values.len() + 1)
+                            ::std::format!("${}", pk_json_values.len() + 1 + __sn_offset)
                         }
                         _ => ::std::string::String::from("?"),
                     };
@@ -5598,8 +5920,6 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
                         _ => "TEXT",
                     };
-                    let __sn_table = <#target_ty as
-                        ::suprnova::eloquent::EloquentModel>::TABLE;
 
                     let __sn_agg_expr: ::std::string::String = match kind {
                         ::suprnova::AggregateKind::Sum => {
@@ -5626,7 +5946,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         id = #id_col,
                         cast = __sn_cast_kw,
                         agg = __sn_agg_expr,
-                        table = __sn_table,
+                        table = __sn_source,
                         type_col = #type_col,
                         type_ph = type_ph,
                         phs = placeholders.join(", "),
@@ -5637,6 +5957,11 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::TABLE,
+                    );
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -5646,14 +5971,17 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         ::std::string::String,
                         ::core::option::Option<f64>,
                     > = HashMap::new();
+                    let mut by_fk_value: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<::suprnova::serde_json::Value>,
+                    > = HashMap::new();
                     for r in rows.iter() {
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> =
-                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
-                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                        by_fk.insert(key, agg);
+                        let agg = ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg");
+                        by_fk.insert(key.clone(), agg.number);
+                        by_fk_value.insert(key, agg.value);
                     }
 
                     // Cache key is the wide `<rel>_<kind>_<col>` form
@@ -5685,6 +6013,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
                                     &__sn_agg_key,
                                     agg,
+                                );
+                                p.__eager.set_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(&__sn_agg_key),
+                                    by_fk_value.get(&key).cloned().flatten(),
                                 );
                             }
                         }
@@ -5724,9 +6056,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
             let pivot_related = pivot_related_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(target_ty))));
-            let related_pk = related_key_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            let related_pk = related_key_expr(rel, target_ty);
             let pivot_table_expr: TokenStream = match pivot_table_override(rel) {
                 Some(t) => {
                     let lit = syn::LitStr::new(t, proc_macro2::Span::call_site());
@@ -5765,15 +6095,26 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
+                    // The related rows as the related model's `query()` reads
+                    // them: its soft-delete filter and global scopes apply, so
+                    // the count or total covers the rows `with` loads. The
+                    // source binds come first.
+                    let (__sn_source, __sn_source_binds) =
+                        ::suprnova::Builder::<#target_ty>::__relation_source(
+                            db_backend,
+                            "__sn_r",
+                        )?;
+                    let __sn_offset = __sn_source_binds.len();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
                     let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len() + 1);
+                    binds.extend(__sn_source_binds);
                     for (i, v) in pk_json_values.iter().enumerate() {
                         let ph = match db_backend {
                             ::suprnova::sea_orm::DatabaseBackend::Postgres => {
-                                ::std::format!("${}", i + 1)
+                                ::std::format!("${}", i + 1 + __sn_offset)
                             }
                             _ => ::std::string::String::from("?"),
                         };
@@ -5784,7 +6125,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     }
                     let type_ph = match db_backend {
                         ::suprnova::sea_orm::DatabaseBackend::Postgres => {
-                            ::std::format!("${}", pk_json_values.len() + 1)
+                            ::std::format!("${}", pk_json_values.len() + 1 + __sn_offset)
                         }
                         _ => ::std::string::String::from("?"),
                     };
@@ -5795,8 +6136,6 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         _ => "TEXT",
                     };
                     let __sn_pivot = #pivot_table_expr;
-                    let __sn_related = <#target_ty as
-                        ::suprnova::eloquent::EloquentModel>::TABLE;
 
                     let __sn_agg_expr: ::std::string::String = match kind {
                         ::suprnova::AggregateKind::Sum => {
@@ -5817,7 +6156,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         "SELECT CAST(__sn_p.{id} AS {cast}) AS __sn_fk_key, \
                                 {agg} AS __sn_agg \
                            FROM {pivot} __sn_p \
-                           JOIN {related} __sn_r ON __sn_r.{related_pk} = __sn_p.{rk} \
+                           JOIN {related} ON __sn_r.{related_pk} = __sn_p.{rk} \
                           WHERE __sn_p.{id} IN ({phs}) \
                             AND __sn_p.{type_col} = {type_ph} \
                           GROUP BY __sn_p.{id}",
@@ -5827,7 +6166,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         cast = __sn_cast_kw,
                         agg = __sn_agg_expr,
                         pivot = __sn_pivot,
-                        related = __sn_related,
+                        related = __sn_source,
                         type_col = #type_col,
                         type_ph = type_ph,
                         phs = placeholders.join(", "),
@@ -5838,6 +6177,12 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_pivot);
+                    ::suprnova::render_cache::collector::observe_table_read(
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::TABLE,
+                    );
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -5847,14 +6192,17 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         ::std::string::String,
                         ::core::option::Option<f64>,
                     > = HashMap::new();
+                    let mut by_fk_value: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<::suprnova::serde_json::Value>,
+                    > = HashMap::new();
                     for r in rows.iter() {
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> =
-                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
-                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                        by_fk.insert(key, agg);
+                        let agg = ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg");
+                        by_fk.insert(key.clone(), agg.number);
+                        by_fk_value.insert(key, agg.value);
                     }
 
                     // Cache key is the wide `<rel>_<kind>_<col>` form
@@ -5886,6 +6234,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
                                     &__sn_agg_key,
                                     agg,
+                                );
+                                p.__eager.set_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(&__sn_agg_key),
+                                    by_fk_value.get(&key).cloned().flatten(),
                                 );
                             }
                         }
@@ -5928,9 +6280,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
             let pivot_fk = pivot_fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
-            let related_pk = related_key_override(rel)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "id".to_string());
+            let related_pk = related_key_expr(rel, target_ty);
             let pivot_table_expr: TokenStream = match pivot_table_override(rel) {
                 Some(t) => {
                     let lit = syn::LitStr::new(t, proc_macro2::Span::call_site());
@@ -5969,15 +6319,26 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
+                    // The related rows as the related model's `query()` reads
+                    // them: its soft-delete filter and global scopes apply, so
+                    // the count or total covers the rows `with` loads. The
+                    // source binds come first.
+                    let (__sn_source, __sn_source_binds) =
+                        ::suprnova::Builder::<#target_ty>::__relation_source(
+                            db_backend,
+                            "__sn_r",
+                        )?;
+                    let __sn_offset = __sn_source_binds.len();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
                     let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len() + 1);
+                    binds.extend(__sn_source_binds);
                     for (i, v) in pk_json_values.iter().enumerate() {
                         let ph = match db_backend {
                             ::suprnova::sea_orm::DatabaseBackend::Postgres => {
-                                ::std::format!("${}", i + 1)
+                                ::std::format!("${}", i + 1 + __sn_offset)
                             }
                             _ => ::std::string::String::from("?"),
                         };
@@ -5988,7 +6349,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     }
                     let type_ph = match db_backend {
                         ::suprnova::sea_orm::DatabaseBackend::Postgres => {
-                            ::std::format!("${}", pk_json_values.len() + 1)
+                            ::std::format!("${}", pk_json_values.len() + 1 + __sn_offset)
                         }
                         _ => ::std::string::String::from("?"),
                     };
@@ -5999,8 +6360,6 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         _ => "TEXT",
                     };
                     let __sn_pivot = #pivot_table_expr;
-                    let __sn_related = <#target_ty as
-                        ::suprnova::eloquent::EloquentModel>::TABLE;
 
                     let __sn_agg_expr: ::std::string::String = match kind {
                         ::suprnova::AggregateKind::Sum => {
@@ -6021,7 +6380,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         "SELECT CAST(__sn_p.{fk} AS {cast}) AS __sn_fk_key, \
                                 {agg} AS __sn_agg \
                            FROM {pivot} __sn_p \
-                           JOIN {related} __sn_r ON __sn_r.{related_pk} = __sn_p.{id_col} \
+                           JOIN {related} ON __sn_r.{related_pk} = __sn_p.{id_col} \
                           WHERE __sn_p.{fk} IN ({phs}) \
                             AND __sn_p.{type_col} = {type_ph} \
                           GROUP BY __sn_p.{fk}",
@@ -6031,7 +6390,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         cast = __sn_cast_kw,
                         agg = __sn_agg_expr,
                         pivot = __sn_pivot,
-                        related = __sn_related,
+                        related = __sn_source,
                         type_col = #type_col,
                         type_ph = type_ph,
                         phs = placeholders.join(", "),
@@ -6042,6 +6401,12 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
+                    // DATA-033: this raw read names its tables to the render
+                    // cache, so a write to any of them invalidates the page.
+                    ::suprnova::render_cache::collector::observe_table_read(__sn_pivot);
+                    ::suprnova::render_cache::collector::observe_table_read(
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::TABLE,
+                    );
                     let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -6051,14 +6416,17 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         ::std::string::String,
                         ::core::option::Option<f64>,
                     > = HashMap::new();
+                    let mut by_fk_value: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<::suprnova::serde_json::Value>,
+                    > = HashMap::new();
                     for r in rows.iter() {
                         let key: ::std::string::String = r
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let agg: ::core::option::Option<f64> =
-                            ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg")
-                                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                        by_fk.insert(key, agg);
+                        let agg = ::suprnova::database::column_value::__relation_aggregate(r, "__sn_agg");
+                        by_fk.insert(key.clone(), agg.number);
+                        by_fk_value.insert(key, agg.value);
                     }
 
                     // Cache key is the wide `<rel>_<kind>_<col>` form
@@ -6090,6 +6458,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
                                     &__sn_agg_key,
                                     agg,
+                                );
+                                p.__eager.set_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                                    &::suprnova::eloquent::relations::aggregate_value_cache_key(&__sn_agg_key),
+                                    by_fk_value.get(&key).cloned().flatten(),
                                 );
                             }
                         }
@@ -6551,32 +6923,23 @@ fn emit_recurse_batched_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Op
         | RelationKindAttr::MorphedByMany => Ok(Some(quote! {
             #name_str => {
                 #split_rest
-                // Take every parent's children out by value, recording the
-                // per-parent counts so they can be restored in order.
-                let mut owned: ::std::vec::Vec<#target_ty> = ::std::vec::Vec::new();
-                let mut takes: ::std::vec::Vec<(usize, usize)> = ::std::vec::Vec::new();
-                for (i, p) in parents.iter_mut().enumerate() {
-                    if let ::core::option::Option::Some(mut children) =
-                        p.__eager.take_many::<#target_ty>(#name_str)
-                    {
-                        let n = children.len();
-                        owned.append(&mut children);
-                        takes.push((i, n));
-                    }
-                }
+                // Take every parent's children out by value. The guard
+                // puts each parent's own children back, in order, when it
+                // drops: after the load, and also when the load fails or
+                // the caller stops awaiting it.
+                let mut __sn_taken = ::suprnova::eloquent::relations::__TakenRows::take(
+                    parents,
+                    |p: &mut Self| p.__eager.take_many::<#target_ty>(#name_str),
+                    |p: &mut Self, children: ::std::vec::Vec<#target_ty>| {
+                        p.__eager.set_many(#name_str, children)
+                    },
+                );
+                let owned: &mut ::std::vec::Vec<#target_ty> = __sn_taken.rows();
                 if owned.is_empty() {
                     #walk_without_children
                     return ::core::result::Result::Ok(());
                 }
                 #process_owned
-                // Put the (now-populated) children back into each parent in
-                // the same order they were taken.
-                let mut drained = owned.into_iter();
-                for (i, n) in takes {
-                    let chunk: ::std::vec::Vec<#target_ty> =
-                        drained.by_ref().take(n).collect();
-                    parents[i].__eager.set_many(#name_str, chunk);
-                }
                 return ::core::result::Result::Ok(());
             }
         })),
@@ -6587,27 +6950,25 @@ fn emit_recurse_batched_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Op
         | RelationKindAttr::MorphOne => Ok(Some(quote! {
             #name_str => {
                 #split_rest
-                let mut owned: ::std::vec::Vec<#target_ty> = ::std::vec::Vec::new();
-                let mut takes: ::std::vec::Vec<usize> = ::std::vec::Vec::new();
-                for (i, p) in parents.iter_mut().enumerate() {
-                    if let ::core::option::Option::Some(child) =
-                        p.__eager.take_one::<#target_ty>(#name_str)
-                    {
-                        owned.push(child);
-                        takes.push(i);
-                    }
-                }
+                // Same take-and-guard as the many kinds: the guard puts
+                // each parent's child back however the load ends.
+                let mut __sn_taken = ::suprnova::eloquent::relations::__TakenRows::take(
+                    parents,
+                    |p: &mut Self| {
+                        p.__eager
+                            .take_one::<#target_ty>(#name_str)
+                            .map(|child| ::std::vec![child])
+                    },
+                    |p: &mut Self, mut child: ::std::vec::Vec<#target_ty>| {
+                        p.__eager.set_one(#name_str, child.pop())
+                    },
+                );
+                let owned: &mut ::std::vec::Vec<#target_ty> = __sn_taken.rows();
                 if owned.is_empty() {
                     #walk_without_children
                     return ::core::result::Result::Ok(());
                 }
                 #process_owned
-                let mut drained = owned.into_iter();
-                for i in takes {
-                    if let ::core::option::Option::Some(child) = drained.next() {
-                        parents[i].__eager.set_one(#name_str, ::core::option::Option::Some(child));
-                    }
-                }
                 return ::core::result::Result::Ok(());
             }
         })),
@@ -6687,27 +7048,24 @@ fn emit_recurse_batched_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Op
                         ::core::option::Option::None => (rest, ::core::option::Option::None),
                     };
                     #family_check
-                    let mut owned: ::std::vec::Vec<#enum_ident> = ::std::vec::Vec::new();
-                    let mut takes: ::std::vec::Vec<usize> = ::std::vec::Vec::new();
-                    for (i, p) in parents.iter_mut().enumerate() {
-                        if let ::core::option::Option::Some(value) =
-                            p.__eager.take_one::<#enum_ident>(#name_str)
-                        {
-                            owned.push(value);
-                            takes.push(i);
-                        }
-                    }
+                    // The guard puts every value back into the parent it
+                    // came from however the load ends.
+                    let mut __sn_taken = ::suprnova::eloquent::relations::__TakenRows::take(
+                        parents,
+                        |p: &mut Self| {
+                            p.__eager
+                                .take_one::<#enum_ident>(#name_str)
+                                .map(|value| ::std::vec![value])
+                        },
+                        |p: &mut Self, mut value: ::std::vec::Vec<#enum_ident>| {
+                            p.__eager.set_one(#name_str, value.pop())
+                        },
+                    );
+                    let owned: &mut ::std::vec::Vec<#enum_ident> = __sn_taken.rows();
                     if owned.is_empty() {
                         return ::core::result::Result::Ok(());
                     }
                     #( #per_target )*
-                    // Put every value back into the parent it came from.
-                    let mut drained = owned.into_iter();
-                    for i in takes {
-                        if let ::core::option::Option::Some(value) = drained.next() {
-                            parents[i].__eager.set_one(#name_str, ::core::option::Option::Some(value));
-                        }
-                    }
                     return ::core::result::Result::Ok(());
                 }
             }))
