@@ -1735,7 +1735,10 @@ fn reg_007_a_workspace_members_lock_in_a_parent_directory_is_read() {
         error.contains("3.0.0") && error.contains("Cargo.lock"),
         "{error}"
     );
-    assert!(!member.join("Cargo.lock").exists(), "live:add wrote a lock into the member");
+    assert!(
+        !member.join("Cargo.lock").exists(),
+        "live:add wrote a lock into the member"
+    );
 }
 
 // ===========================================================================
