@@ -1,5 +1,0 @@
-error: a Live field the view sees cannot be named `component`: the view binds the component itself under that name; rename the field
- --> tests/ui/live/fail/view_field_named_component.rs:6:5
-  |
-6 |     component: String,
-  |     ^^^^^^^^^

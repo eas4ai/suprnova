@@ -95,6 +95,13 @@ Views are Askama templates. The template root is `templates/` unless an
 </div>
 ```
 
+The view sees every field that is not secret by its name, such as
+`{{ count }}`, and the component itself as `component`, so
+`{{ component.total() }}` calls a method. A field may be named `component`
+too: the view then reads the field as `component` and the component as
+`component_`, or as the first of `component__`, `component___`, and so on
+that no field takes.
+
 Directives use the closed `live:` grammar: `live:click`, `live:submit`,
 `live:model`, `live:upload`, `live:key`, `live:loading`, and the rest of the
 documented set. The checker proves every directive against the component:
