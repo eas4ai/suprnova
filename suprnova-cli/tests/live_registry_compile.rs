@@ -26,6 +26,9 @@ const BIN: &str = env!("CARGO_BIN_EXE_suprnova");
 /// The markers `scaffold_snapshot.rs` refuses in scaffolder output.
 const FORBIDDEN_MARKERS: [&str; 4] = ["TODO", "FIXME", "unimplemented!", "panic!("];
 
+/// Where the test library says it is published.
+const SOURCE: &str = "github.com/acme-test/acme-ui";
+
 /// The registration line `live:add` writes for the example (REG-005).
 const REGISTRATION: &str = ".register::<crate::live::acme::counter::Counter>()?";
 
@@ -93,9 +96,10 @@ impl Author {
         text
     }
 
-    /// `live:registry new acme` in `cwd`, returning the library root.
+    /// `live:registry new acme --source <SOURCE>` in `cwd`, returning the
+    /// library root.
     fn new_library(&self, cwd: &Path) -> PathBuf {
-        let text = self.succeed(cwd, &["live:registry", "new", "acme"]);
+        let text = self.succeed(cwd, &["live:registry", "new", "acme", "--source", SOURCE]);
         assert!(
             text.contains("library-keys"),
             "names the key's place:\n{text}"
@@ -276,7 +280,12 @@ fn reg_018_registry_new_scaffolds_the_tree_with_an_example_and_a_key_outside_the
     let tmp = scratch();
     let author = Author::new(tmp.path());
     let library = author.new_library(tmp.path());
-    assert!(library.join("library.json").is_file());
+    let library_json: serde_json::Value =
+        serde_json::from_str(&read(library.join("library.json"))).expect("library.json");
+    assert_eq!(
+        library_json["source"], SOURCE,
+        "--source is the published address"
+    );
     for file in [
         "manifest.json",
         "manifest.sig",
@@ -320,6 +329,23 @@ fn reg_018_registry_new_scaffolds_the_tree_with_an_example_and_a_key_outside_the
         std::fs::read(library.join("components/counter/manifest.sig")).expect("sig"),
         signature,
         "the same tree and key sign to the same bytes"
+    );
+
+    // Without --source, source is left empty and nothing is signed until
+    // the author names it.
+    let unsourced_dir = tmp.path().join("unsourced");
+    std::fs::create_dir_all(&unsourced_dir).expect("dir");
+    let text = author.succeed(&unsourced_dir, &["live:registry", "new", "acme"]);
+    assert!(text.contains("source"), "{text}");
+    let unsourced = unsourced_dir.join("acme");
+    assert!(!unsourced.join("components/counter/manifest.sig").exists());
+    let refused = author.suprnova(&unsourced, &["live:registry", "check"]);
+    assert!(!refused.status.success());
+    assert!(
+        combined(&refused)
+            .contains("set source in library.json to the address the library will be published at"),
+        "{}",
+        combined(&refused)
     );
 
     let inside = library.join("signing.key");
@@ -658,17 +684,8 @@ fn reg_033_a_rotated_key_installs_after_a_terminal_re_pin_and_former_records_sti
     let author = Author::new(tmp.path());
     let library = author.new_library(tmp.path());
 
-    // Name where the library is published, add a second component, sign.
-    let library_json = read(library.join("library.json"));
-    std::fs::write(
-        library.join("library.json"),
-        library_json.replacen(
-            "\"github.com/acme/acme\"",
-            "\"github.com/acme-test/acme-ui\"",
-            1,
-        ),
-    )
-    .expect("library.json");
+    // A second component, view only, so one record stays under the
+    // former key after the rotation.
     let badge = library.join("components/badge");
     std::fs::create_dir_all(&badge).expect("badge");
     std::fs::write(

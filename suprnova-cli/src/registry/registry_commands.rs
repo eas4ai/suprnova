@@ -54,14 +54,34 @@ const MAX_PLAN_COMPONENTS: usize = 64;
 /// The example component's one Live component, as its manifest names it.
 const EXAMPLE_REGISTER: &str = "counter::Counter";
 
+/// What `check`, `sign` and `rotate-key` say about an empty `source`.
+const EMPTY_SOURCE: &str =
+    "set source in library.json to the address the library will be published at";
+
 /// The version a new library starts at.
 const FIRST_VERSION: &str = "0.1.0";
 
 /// Scaffolds a library tree with one example component and a `preview/`
 /// application, makes the key pair, and says where the private key is.
+/// `library.json`'s `source` is left empty; [`new_with_source`] names it.
 pub fn new(namespace: &str, directory: &Path) -> Result<()> {
+    new_with_source(namespace, directory, None)
+}
+
+/// [`new`] with the address the library will be published at, which is
+/// what `live:registry new --source` passes. With an address the example
+/// is signed at once; without one `source` is written empty and nothing is
+/// signed, because every signature covers the address (REG-023).
+pub fn new_with_source(namespace: &str, directory: &Path, source: Option<&str>) -> Result<()> {
     let config = author_key::config_dir()?;
-    let created = create_library(namespace, directory, &config, &Registry, &HttpsFetcher)?;
+    let created = create_library(
+        namespace,
+        directory,
+        source,
+        &config,
+        &Registry,
+        &HttpsFetcher,
+    )?;
     ui::success(&format!(
         "Created the {namespace} library in {}",
         directory.display()
@@ -69,11 +89,17 @@ pub fn new(namespace: &str, directory: &Path) -> Result<()> {
     ui::hint(
         "library.json, components/counter/ (a view, a stylesheet, a script and a Live component), and preview/, an application that renders each component from where it sits",
     );
-    ui::success(&format!(
-        "Signed {} with the key {}",
-        plural(created.signed, "component"),
-        created.fingerprint
-    ));
+    if created.signed > 0 {
+        ui::success(&format!(
+            "Signed {} with the key {}",
+            plural(created.signed, "component"),
+            created.fingerprint
+        ));
+    } else {
+        ui::warning(&format!(
+            "library.json's source is empty, so nothing is signed yet: {EMPTY_SOURCE}, then run `suprnova live:registry sign`."
+        ));
+    }
     ui::br();
     ui::warning(&format!(
         "Your private signing key is at {}",
@@ -82,23 +108,21 @@ pub fn new(namespace: &str, directory: &Path) -> Result<()> {
     ui::hint(
         "Back it up and never commit it. Losing it strands every pin: an application that pinned this library's key accepts no version another key signs, and nothing else can sign one.",
     );
-    ui::hint(&format!(
-        "library.json names the library's source as {}; set it to the repository you publish at, then run `suprnova live:registry sign`.",
-        created.source
-    ));
     ui::br();
     let library = format!("cd {}", directory.display());
     let preview = format!("cd {}", directory.join(PREVIEW_DIR).display());
-    ui::panel(
-        "Next Steps",
-        &[
-            &library,
-            "suprnova live:registry check",
-            &preview,
-            "suprnova serve --backend-only",
-            "open http://localhost:8765/preview/counter",
-        ],
-    );
+    let mut steps: Vec<&str> = vec![&library];
+    if created.signed == 0 {
+        steps.push("set \"source\" in library.json");
+        steps.push("suprnova live:registry sign");
+    }
+    steps.extend([
+        "suprnova live:registry check",
+        &preview,
+        "suprnova serve --backend-only",
+        "open http://localhost:8765/preview/counter",
+    ]);
+    ui::panel("Next Steps", &steps);
     Ok(())
 }
 
@@ -375,7 +399,6 @@ struct LocalComponent {
 struct Created {
     key_path: PathBuf,
     fingerprint: Fingerprint,
-    source: String,
     signed: usize,
 }
 
@@ -384,6 +407,7 @@ struct Created {
 fn create_library(
     namespace: &str,
     directory: &Path,
+    source: Option<&str>,
     config: &Path,
     tools: &dyn Tools,
     fetcher: &dyn Fetcher,
@@ -404,9 +428,14 @@ fn create_library(
     std::fs::create_dir(directory).map_err(|error| {
         RegistryError::Io(format!("cannot create {}: {error}", directory.display()))
     })?;
-    let source = placeholder_source(namespace);
+    let source = source.unwrap_or_default().to_owned();
     let outcome = write_library(namespace, &source, directory, &public)
         .and_then(|()| {
+            if source.is_empty() {
+                // Every signature covers the address, so there is nothing
+                // to sign until the author names it.
+                return Ok(0);
+            }
             let inspection = inspect(directory, false, tools, fetcher)?;
             sign_inspection(directory, &inspection, &secret, &public, tools)
         })
@@ -419,7 +448,6 @@ fn create_library(
         Ok(signed) => Ok(Created {
             key_path,
             fingerprint: public.fingerprint(),
-            source,
             signed,
         }),
         Err(error) => match std::fs::remove_dir_all(directory) {
@@ -616,12 +644,6 @@ fn rotate_with_key_file(
 ) -> Result<Rotated> {
     let inspection = inspect(root, false, tools, fetcher)?;
     let library = refuse_problems(&inspection, "rotated")?;
-    let placeholder = placeholder_source(&library.namespace);
-    if library.source == placeholder {
-        return Err(RegistryError::Invalid(format!(
-            "library.json names the source {placeholder}, the one live:registry new writes; set it to the repository you publish at first, because every handover statement names it. Nothing was rotated."
-        )));
-    }
     let current_fingerprint = library.public_key.fingerprint();
     let key_path = author_key::key_file_for(root, &library.public_key, named, config)?;
     let (current_secret, current_public) = author_key::read_key_file(&key_path)?;
@@ -808,12 +830,6 @@ fn rotated_library_json(
         description: text("description"),
     })
     .into_bytes())
-}
-
-/// The source `live:registry new` writes until the author names where the
-/// library is published.
-fn placeholder_source(namespace: &str) -> String {
-    format!("github.com/{namespace}/{namespace}")
 }
 
 /// Signs every component of a library with the key file `named` names, or
@@ -1029,6 +1045,28 @@ fn inspect(
             });
         }
     };
+    // An empty source is what `new` writes until the author names the
+    // address; every signature covers it, so it is refused by name before
+    // the parser's general refusal.
+    let empty_source = library::strict_json_object(&library_bytes)
+        .ok()
+        .and_then(|object| {
+            object
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .map(str::is_empty)
+        })
+        .unwrap_or(false);
+    if empty_source {
+        report
+            .problems
+            .push(format!("{LIBRARY_FILE}: {EMPTY_SOURCE}"));
+        return Ok(Inspection {
+            report,
+            library: None,
+            statements: Vec::new(),
+        });
+    }
     let library = match tools.parse_library_json(&library_bytes) {
         Ok(library) => library,
         Err(error) => {
@@ -2129,12 +2167,22 @@ mod tests {
         created: Created,
     }
 
+    /// Where the test libraries say they are published.
+    const SOURCE: &str = "github.com/acme/acme-ui";
+
     fn library() -> Library {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("acme");
         let config = dir.path().join("config");
-        let created = create_library("acme", &root, &config, &FAKE, &FakeFetcher::default())
-            .expect("live:registry new");
+        let created = create_library(
+            "acme",
+            &root,
+            Some(SOURCE),
+            &config,
+            &FAKE,
+            &FakeFetcher::default(),
+        )
+        .expect("live:registry new");
         Library {
             _dir: dir,
             root,
@@ -2208,7 +2256,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&library_json).expect("json");
         assert_eq!(parsed["namespace"], "acme");
         assert_eq!(parsed["version"], "0.1.0");
-        assert_eq!(parsed["source"], library.created.source.as_str());
+        assert_eq!(parsed["source"], SOURCE);
         assert_eq!(
             parsed["framework"],
             format!("^{}", env!("CARGO_PKG_VERSION")).as_str()
@@ -2364,8 +2412,15 @@ mod tests {
         for namespace in ["suprnova", "sn", "live", "Acme", "1acme", "self", "a_b"] {
             let target = dir.path().join("lib");
             assert!(
-                create_library(namespace, &target, &config, &FAKE, &FakeFetcher::default())
-                    .is_err(),
+                create_library(
+                    namespace,
+                    &target,
+                    Some(SOURCE),
+                    &config,
+                    &FAKE,
+                    &FakeFetcher::default()
+                )
+                .is_err(),
                 "{namespace}"
             );
             assert!(!target.exists(), "{namespace} left a directory");
@@ -2374,7 +2429,15 @@ mod tests {
         std::fs::create_dir(&existing).expect("dir");
         std::fs::write(existing.join("keep"), "mine").expect("file");
         assert!(
-            create_library("acme", &existing, &config, &FAKE, &FakeFetcher::default()).is_err()
+            create_library(
+                "acme",
+                &existing,
+                Some(SOURCE),
+                &config,
+                &FAKE,
+                &FakeFetcher::default()
+            )
+            .is_err()
         );
         assert_eq!(
             std::fs::read_to_string(existing.join("keep")).expect("kept"),
@@ -2439,9 +2502,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("acme");
         let config = dir.path().join("config");
-        let error = create_library("acme", &root, &config, &ScanFails, &FakeFetcher::default())
-            .err()
-            .expect("refused");
+        let error = create_library(
+            "acme",
+            &root,
+            Some(SOURCE),
+            &config,
+            &ScanFails,
+            &FakeFetcher::default(),
+        )
+        .err()
+        .expect("refused");
         assert!(error.to_string().contains("scan"), "{error}");
         assert!(!root.exists());
         let keys = config.join("suprnova/library-keys");
@@ -2815,10 +2885,14 @@ mod tests {
     /// Names where the library is published, as an author does before a
     /// release, and signs it again.
     fn publish_at(library: &Library, source: &str, tools: &dyn Tools) {
+        let path = library.root.join("library.json");
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        let current = json["source"].as_str().expect("source").to_owned();
         edit(
-            &library.root.join("library.json"),
-            &format!("\"{}\"", library.created.source),
-            &format!("\"{source}\""),
+            &path,
+            &format!("\"source\": \"{current}\""),
+            &format!("\"source\": \"{source}\""),
         );
         sign_with_key_file(
             &library.root,
@@ -3026,18 +3100,73 @@ mod tests {
     }
 
     #[test]
-    fn reg_033_rotate_key_refuses_the_placeholder_source() {
+    fn reg_033_rotate_key_refuses_an_empty_source() {
         let library = library();
+        edit(
+            &library.root.join("library.json"),
+            &format!("\"source\": \"{SOURCE}\""),
+            "\"source\": \"\"",
+        );
         let before = snapshot(&library.root);
         let keys = key_files(&library.config);
         let error = rotate(&library, &Fake { seed: 11 })
             .err()
             .expect("refused")
             .to_string();
-        assert!(error.contains(&library.created.source), "{error}");
-        assert!(error.contains("source"), "{error}");
+        assert!(error.contains(super::EMPTY_SOURCE), "{error}");
         assert_eq!(snapshot(&library.root), before);
         assert_eq!(key_files(&library.config), keys);
+    }
+
+    #[test]
+    fn reg_033_rotate_key_accepts_the_address_new_once_wrote_as_a_placeholder() {
+        let library = real_library();
+        let rotated = rotate(&library, &Registry).expect("rotates");
+        assert_eq!(rotated.source, "github.com/acme/acme");
+    }
+
+    #[test]
+    fn reg_018_new_without_a_source_writes_an_empty_one_and_signs_nothing_until_it_is_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("acme");
+        let config = dir.path().join("config");
+        let created = create_library("acme", &root, None, &config, &FAKE, &FakeFetcher::default())
+            .expect("live:registry new");
+        assert_eq!(created.signed, 0);
+        assert!(
+            created.key_path.is_file(),
+            "the key is written all the same"
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("library.json")).expect("read"))
+                .expect("json");
+        assert_eq!(json["source"], "");
+        let signature = root.join("components/counter/manifest.sig");
+        assert!(!signature.exists(), "nothing is signed without a source");
+        let library = Library {
+            _dir: dir,
+            root: root.clone(),
+            config: config.clone(),
+            created,
+        };
+        let report = check(&root);
+        assert!(
+            problems(&report).contains(super::EMPTY_SOURCE),
+            "{}",
+            problems(&report)
+        );
+        let error = sign(&library).expect_err("sign refuses an empty source");
+        assert!(error.to_string().contains(super::EMPTY_SOURCE), "{error}");
+        assert!(!signature.exists());
+
+        edit(
+            &root.join("library.json"),
+            "\"source\": \"\"",
+            &format!("\"source\": \"{SOURCE}\""),
+        );
+        assert_eq!(sign(&library).expect("signs"), 1);
+        let report = check(&root);
+        assert!(report.passed(), "{}", problems(&report));
     }
 
     #[test]
@@ -3100,8 +3229,17 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("acme");
         let config = dir.path().join("config");
-        let created = create_library("acme", &root, &config, &Registry, &FakeFetcher::default())
-            .expect("live:registry new with the real tools");
+        // The address the scaffold once wrote as a placeholder: a real
+        // address of any shape is accepted.
+        let created = create_library(
+            "acme",
+            &root,
+            Some("github.com/acme/acme"),
+            &config,
+            &Registry,
+            &FakeFetcher::default(),
+        )
+        .expect("live:registry new with the real tools");
         Library {
             _dir: dir,
             root,
