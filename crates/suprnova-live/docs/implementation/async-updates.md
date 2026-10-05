@@ -317,9 +317,11 @@ subscription, and every log together stays inside
 `LIVE_ASYNC_REPLAY_BUDGET_BYTES`, the oldest entries anywhere evicted first; heartbeats are appended to idle memberships every
 five seconds and the browser heartbeat timeout is fifteen seconds. Delivery
 runs through the engine's bounded document transport under the configured
-queue depth, queue bytes and payload size, with 128 memberships per document. A gap or degraded lane is re-baselined at its delivery cursor
-through `recover_from_authoritative_refresh`; the browser deduplicates the
-overlap. One SSE transport has exactly one reader; a second reader is
+queue depth, queue bytes and payload size, with 128 memberships per document. A degraded lane recovers only with proof: every envelope it missed
+that the transport has already read is replayed from the subscription's log
+through `admit_replay`, and when the log has evicted one of them the
+transport retires, so the browser reconnects and renews from the position it
+holds. One SSE transport has exactly one reader; a second reader is
 `async_transport_reader_exists`, a reader disconnect retires the transport and
 releases every membership, and a later reader must present a new
 `Suprnova-Transport-Generation`. Membership controls carry a per-generation
