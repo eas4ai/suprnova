@@ -75,12 +75,45 @@ pub(crate) fn explain_helper_failure(kind: &str) -> String {
     }
 }
 
+/// Verifies every third-party component `suprnova.toml` records against
+/// its pinned key, offline, before anything is built (REG-027). A changed
+/// vendored file is reported; a bad signature or a missing pin fails.
+fn verify_recorded_components() -> Result<(), String> {
+    let root =
+        std::env::current_dir().map_err(|e| format!("cannot read the working directory: {e}"))?;
+    let verification =
+        crate::registry::project::verify_installed(&root).map_err(|e| e.to_string())?;
+    for (address, path) in &verification.changed {
+        ui::warning(&format!(
+            "{address}: {} changed since install",
+            path.display()
+        ));
+    }
+    if !verification.failures.is_empty() {
+        for (address, reason) in &verification.failures {
+            ui::error(&format!("{address} failed verification: {reason}"));
+        }
+        return Err(format!(
+            "{} recorded component(s) failed verification against their pinned keys",
+            verification.failures.len()
+        ));
+    }
+    if !verification.verified.is_empty() {
+        ui::success(&format!(
+            "Verified {} recorded third-party component(s) against their pinned keys",
+            verification.verified.len()
+        ));
+    }
+    Ok(())
+}
+
 fn run_inner(
     templates: Vec<PathBuf>,
     allow_unproved: bool,
     timeout_secs: u64,
 ) -> Result<(), String> {
     require_project()?;
+    verify_recorded_components()?;
     let roots = template_roots(templates)?;
     let listed: Vec<String> = roots
         .iter()

@@ -130,7 +130,7 @@ When you run `suprnova serve`, the CLI:
 5. Installs `cargo-watch` via `cargo install --locked --version "^8.5"
    cargo-watch` if it isn't on the PATH yet (one-time, with an
    "Installing..." notice). Skipped under `--frontend-only`.
-   The version is bounded because `serve` drives `cargo watch -x`, whose
+   The version is bounded because `serve` drives `cargo watch -s`, whose
    meaning is not guaranteed across a major bump; `--locked` builds the
    dependency tree cargo-watch published rather than re-resolving it at
    install time. A command that installs software as a side effect of
@@ -163,16 +163,24 @@ When you run `suprnova serve`, the CLI:
 
    On a scaffolded full-stack project the full invocation is
    `cargo watch --no-vcs-ignores -w src -w cmd -w Cargo.toml -w Cargo.lock
-   -w .env -w lang -x 'run --bin <package-name> -- serve --no-migrate'`.
+   -w .env -w lang -s '<suprnova> live:wait && cargo run --bin <package-name> -- serve --no-migrate'`,
+   where `<suprnova>` is the path of the `suprnova` binary that runs `serve`.
    Under `--migrate always`, or when step 7 could not run the migrations, the
-   command is `run --bin <package-name>` and the backend migrates by itself.
+   build command is `cargo run --bin <package-name>` and the backend migrates
+   by itself.
+   `live:wait` returns at once unless a `suprnova live:add` is installing a
+   component. While one holds the project lock it waits, so no build starts
+   on a half-written install, and the build that follows sees every file
+   the install wrote. If an install was killed partway, `live:wait` (and
+   `serve` itself, when it starts) puts back every file the install's
+   journal names before anything is built.
    Frontend edits and the
    generated `frontend/src/types/*.ts` are outside that scope, so they
    never restart the backend.
 9. Spawns `npm run dev` in `frontend/` for Vite, which gives you HMR for
    Svelte/React/Vue components and Tailwind classes. Skipped under
    `--backend-only`, and when the project has no frontend.
-10. Spawns every extra process declared in the project's `Suprnova.toml`
+10. Spawns every extra process declared in the project's `suprnova.toml`
    (see [Extra dev processes](#extra-dev-processes) below), each with its
    own `[name]` prefix - queue workers, log tailers, anything else you'd
    otherwise juggle in another terminal.
@@ -198,7 +206,7 @@ When you run `suprnova serve`, the CLI:
 
 `Ctrl+C` signals the manager to set its shutdown flag, kill every child,
 and exit. If a child exits on its own - a Rust compile error too severe
-for `cargo watch` to recover, a crashed Vite process, a `Suprnova.toml`
+for `cargo watch` to recover, a crashed Vite process, a `suprnova.toml`
 process that failed - it's respawned after a short backoff (200ms,
 doubling on each consecutive crash, capped at 5s; a process that stayed
 up 30s resets the climb) instead of tearing the session down. Pass
@@ -309,7 +317,7 @@ Two cases leave the backend to migrate by itself, as it does under
 
 `suprnova serve` always runs the backend and Vite, but most projects have
 more than two things to keep running - a queue worker, a log tailer, a
-mail-catcher. Declare them in a `Suprnova.toml` at the project root and
+mail-catcher. Declare them in a `suprnova.toml` at the project root and
 `serve` spawns, prefixes, and auto-restarts them right alongside the
 backend and frontend:
 
@@ -329,8 +337,10 @@ args = ["-f", "storage/logs/app.log"]
 Each entry needs `name` and `command`; `args` defaults to none, `color`
 defaults to one of green/yellow/blue/white assigned in declaration order
 (or pick one of the eight named `console` colors - black, red, green,
-yellow, blue, magenta, cyan, white). Names must be unique. `Suprnova.toml`
-is entirely optional; a project without one runs exactly as before.
+yellow, blue, magenta, cyan, white). Names must be unique. `suprnova.toml`
+is entirely optional; a project without one runs exactly as before. The
+name is all lowercase: `serve` refuses a project that holds only a
+`Suprnova.toml`, and asks you to rename it.
 
 ### Why Suprnova diverges
 
@@ -341,7 +351,7 @@ inside the same process that already booted the application.
 `suprnova serve` is a separate binary from your app; it never links or
 runs your Rust code, and only ever shells out to `cargo watch` and `npm`.
 There's no application boot to hook into, so registration has to be data
-the CLI reads rather than a call your code makes - hence `Suprnova.toml`
+the CLI reads rather than a call your code makes - hence `suprnova.toml`
 instead of a `DevProcesses::register()` API.
 
 ## JSON output
@@ -354,7 +364,7 @@ field:
 
 | `type` | Fields | Meaning |
 |---|---|---|
-| `started` | `ts`, `name`, `pid` | A process (backend, frontend, the `migrate` run, or a `Suprnova.toml` entry) was spawned for the first time. |
+| `started` | `ts`, `name`, `pid` | A process (backend, frontend, the `migrate` run, or a `suprnova.toml` entry) was spawned for the first time. |
 | `output` | `ts`, `name`, `stream` (`"stdout"` or `"stderr"`), `line` | One line of a child's output, carried as a field rather than passed through raw. |
 | `exited` | `ts`, `name`, `code` (nullable) | A process exited. `code` is `null` if it was killed by a signal rather than returning a status. |
 | `restart_scheduled` | `ts`, `name`, `delay_ms` | A crashed process will be respawned after `delay_ms` (see the backoff schedule above). |
@@ -440,7 +450,7 @@ regeneration to once every 500 ms. If a change isn't showing up:
 
 ### A process keeps crash-looping
 
-If a child - backend, frontend, or a `Suprnova.toml` entry - can't start
+If a child - backend, frontend, or a `suprnova.toml` entry - can't start
 (bad code, a missing binary, a port conflict), it respawns on the backoff
 schedule described above instead of stopping. Look at the `[name]` lines
 right before each "respawning in …ms" notice for the real error (a rustc

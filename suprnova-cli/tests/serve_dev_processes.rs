@@ -1,5 +1,5 @@
 //! T15 - `suprnova serve`: crash respawn with backoff, `--no-restart`,
-//! `--timestamps`, `--json` NDJSON events, and the `Suprnova.toml`
+//! `--timestamps`, `--json` NDJSON events, and the `suprnova.toml`
 //! extra-process registry.
 //!
 //! Hermetic: `--frontend-only` skips the `cargo-watch` bootstrap entirely
@@ -264,7 +264,7 @@ impl Fixture {
     }
 
     fn write_suprnova_toml(&self, body: &str) {
-        fs::write(self.root().join("Suprnova.toml"), body).expect("write Suprnova.toml");
+        fs::write(self.root().join("suprnova.toml"), body).expect("write suprnova.toml");
     }
 
     /// Write a minimal `Cargo.toml` with `[package].name = package_name`,
@@ -612,7 +612,7 @@ fn json_mode_suppresses_the_prefixed_human_output() {
 /// `src/` satisfy `validate_suprnova_project` and the watcher's
 /// `watcher.watch("src", ...)`, and a shimmed `cargo` satisfies both
 /// `ensure_cargo_watch`'s `cargo watch --version` probe and the actual
-/// `cargo watch -x '...'` backend spawn without a real build). Before the
+/// `cargo watch -s '...'` backend spawn without a real build). Before the
 /// fix, `start_type_watcher` printed its "Watching for Rust file
 /// changes..." notice via a raw, unconditional `println!` that never
 /// looked at `--json` - this test is what catches that regressing again.
@@ -1135,7 +1135,7 @@ fn serve_runs_the_migrations_when_it_starts_and_the_watched_backend_runs_none() 
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert_eq!(calls[0], "run --bin shop -- migrate");
     assert!(
-        calls[1].ends_with("-x run --bin shop -- serve --no-migrate"),
+        calls[1].ends_with("live:wait && cargo run --bin shop -- serve --no-migrate"),
         "a restart of the watcher must run no migration: {calls:?}"
     );
 }
@@ -1179,7 +1179,7 @@ fn a_failed_run_leaves_the_backend_to_migrate_by_itself() {
 
     assert_eq!(calls[0], "run --bin shop -- migrate");
     assert!(
-        calls[1].ends_with("-x run --bin shop"),
+        calls[1].ends_with("live:wait && cargo run --bin shop"),
         "the backend must migrate itself, and refuse to serve until it can: {calls:?}"
     );
     let stderr = fs::read_to_string(&err_path).unwrap_or_default();
@@ -1199,7 +1199,10 @@ fn migrate_always_is_the_backend_that_migrates_on_every_start() {
     child.terminate();
 
     assert_eq!(calls.len(), 1, "no run at the start: {calls:?}");
-    assert!(calls[0].ends_with("-x run --bin shop"), "{calls:?}");
+    assert!(
+        calls[0].ends_with("live:wait && cargo run --bin shop"),
+        "{calls:?}"
+    );
 }
 
 #[test]
@@ -1215,7 +1218,7 @@ fn no_migrate_runs_no_migration_at_all() {
 
         assert_eq!(calls.len(), 1, "{flags:?}: no run at the start: {calls:?}");
         assert!(
-            calls[0].ends_with("-x run --bin shop -- serve --no-migrate"),
+            calls[0].ends_with("live:wait && cargo run --bin shop -- serve --no-migrate"),
             "{flags:?}: {calls:?}"
         );
     }
@@ -1233,7 +1236,10 @@ fn a_project_with_no_migrations_directory_is_left_to_migrate_by_itself() {
     child.terminate();
 
     assert_eq!(calls.len(), 1, "{calls:?}");
-    assert!(calls[0].ends_with("-x run --bin shop"), "{calls:?}");
+    assert!(
+        calls[0].ends_with("live:wait && cargo run --bin shop"),
+        "{calls:?}"
+    );
 }
 
 #[test]

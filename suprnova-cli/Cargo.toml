@@ -69,6 +69,21 @@ serde_json = "1"
 # The registry compares library versions and framework requirements
 # (`registry/`), already in the workspace lock through the framework.
 semver = "1"
+# The registry verifies each third-party component's Ed25519 signature over
+# its verification hash, and lets an author sign one (`registry/signing.rs`).
+# Pure Rust; its build runs only `rustc` (curve25519-dalek's build script
+# asks `rustc` for its version).
+ed25519-dalek = "2.2"
+# The registry edits `suprnova.toml` in place, keeping every comment, key
+# order and table it does not own byte for byte (`registry/project.rs`).
+# Already in the workspace lock through `proc-macro-crate`.
+toml_edit = "0.25"
+# The registry fetches a library's files over HTTPS (`registry/fetch.rs`).
+# The same reqwest the framework uses, without its default provider:
+# `ring`, which the CLI already builds through sqlx, is installed as the
+# rustls provider, so no second TLS crypto library enters the CLI's build.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 # The Live tooling helper runs in its own process group so a timeout can
 # kill everything it started, and an interrupt is forwarded to that group

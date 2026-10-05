@@ -1,4 +1,9 @@
 mod commands;
+// The registry is the library's module, reached through the library crate
+// rather than compiled a second time into the binary: much of it (the test
+// fetcher, the authoring commands' primitives) is public API the binary's
+// commands never call, and a private copy would report it all as dead.
+use suprnova_cli::registry;
 mod secure_fs;
 mod templates;
 pub mod ui;
@@ -189,21 +194,37 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Install a Live component library component from its manifest
+    /// Install a Live component from the shipped library or a third-party one
     #[command(name = "live:add")]
     LiveAdd {
-        /// Shipped component to install (e.g., field, password-input)
+        /// The component: a shipped name (e.g., field),
+        /// [<host>/]<owner>/<library>/<component>[@<version>], an https://
+        /// URL of a component directory, or a ./path to one on disk
         name: Option<String>,
-        /// Install a third-party component from this manifest instead
+        /// Install the component whose manifest.json is at this path in a
+        /// library tree on disk
         #[arg(long)]
         manifest: Option<std::path::PathBuf>,
-        /// Replace a file the application has edited
+        /// Replace a file the application has edited, and accept a
+        /// downgrade or a release whose content changed
         #[arg(long)]
         force: bool,
-        /// Report what would be written without touching the project
+        /// Fetch, verify, scan and report the plan without writing anything
         #[arg(long)]
         dry_run: bool,
+        /// Confirm a third-party plan without a terminal; approves no
+        /// capability and pins no key
+        #[arg(long)]
+        yes: bool,
+        /// Approve a capability the component uses (repeatable): database,
+        /// network, files, mail, queue, cache, session, environment, process
+        #[arg(long = "allow", value_name = "CAPABILITY")]
+        allow: Vec<String>,
     },
+    /// Wait until no live:add holds the project lock, restoring an
+    /// interrupted install first; `serve` runs it before each build
+    #[command(name = "live:wait", hide = true)]
+    LiveWait,
     /// Check every registered Live view with the integrated checker
     #[command(name = "live:check")]
     LiveCheck {
@@ -541,8 +562,20 @@ fn main() {
             manifest,
             force,
             dry_run,
+            yes,
+            allow,
         } => {
-            commands::live_add::run(name, manifest, force, dry_run);
+            commands::live_add::run(commands::live_add::Request {
+                name,
+                manifest,
+                force,
+                dry_run,
+                yes,
+                allow,
+            });
+        }
+        Commands::LiveWait => {
+            commands::serve::wait_for_installs();
         }
         Commands::LiveCheck {
             templates,

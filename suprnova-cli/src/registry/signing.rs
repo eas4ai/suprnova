@@ -48,6 +48,12 @@ impl PublicKey {
     pub fn bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// Wraps 32 key bytes. Whether they are a valid Ed25519 point is
+    /// decided when a signature is verified against them.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        PublicKey(bytes)
+    }
 }
 
 impl fmt::Debug for PublicKey {
@@ -96,6 +102,17 @@ impl Signature {
         Ok(Signature(bytes))
     }
 
+    /// Reads a signature written with nothing around it, as a JSON value
+    /// holds one (REG-033).
+    pub fn parse_strict(text: &str) -> Result<Self> {
+        if text.trim() != text {
+            return Err(RegistryError::Invalid(
+                "a signature is base64 with nothing around it".to_owned(),
+            ));
+        }
+        Signature::parse(text)
+    }
+
     /// The signature as `manifest.sig` writes it.
     pub fn encode(&self) -> String {
         STANDARD.encode(self.0)
@@ -139,6 +156,24 @@ impl SecretKey {
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         SecretKey(bytes)
     }
+
+    /// The public key of this secret key, the one `library.json` names.
+    pub fn public_key(&self) -> PublicKey {
+        PublicKey(
+            ed25519_dalek::SigningKey::from_bytes(&self.0)
+                .verifying_key()
+                .to_bytes(),
+        )
+    }
+}
+
+impl Drop for SecretKey {
+    /// Overwrites the secret when the key is dropped, so it does not linger
+    /// in freed memory.
+    fn drop(&mut self) {
+        self.0 = [0; 32];
+        std::hint::black_box(&self.0);
+    }
 }
 
 impl fmt::Debug for SecretKey {
@@ -148,32 +183,103 @@ impl fmt::Debug for SecretKey {
 }
 
 /// Verifies `signature` by `key` over the ASCII bytes of `hash`.
+///
+/// Strict verification: a key of small order or a signature in a
+/// non-canonical encoding is refused, so one component has exactly one
+/// valid signature per key.
 pub fn verify(key: &PublicKey, hash: &Digest, signature: &Signature) -> Result<()> {
-    let _ = (key, hash, signature);
-    Err(RegistryError::NotBuilt("signature verification"))
+    verify_message(key, hash.as_str().as_bytes(), signature).map_err(|reason| {
+        RegistryError::Invalid(format!(
+            "the signature does not verify over {hash} with the key {}: {reason}",
+            key.fingerprint()
+        ))
+    })
 }
 
 /// Verifies a key handover: `handover.from` signed `handover.to`, and
 /// `handover.to` is `new_key`'s fingerprint.
 pub fn verify_handover(handover: &KeyHandover, new_key: &PublicKey) -> Result<()> {
-    let _ = (handover, new_key);
-    Err(RegistryError::NotBuilt("key handover verification"))
+    if handover.to != new_key.fingerprint() {
+        return Err(RegistryError::Invalid(format!(
+            "the handover from {} names {}, not the new key {}",
+            handover.from.fingerprint(),
+            handover.to,
+            new_key.fingerprint()
+        )));
+    }
+    verify_message(
+        &handover.from,
+        handover.to.as_str().as_bytes(),
+        &handover.signature,
+    )
+    .map_err(|reason| {
+        RegistryError::Invalid(format!(
+            "the handover from {} to {} does not verify: {reason}",
+            handover.from.fingerprint(),
+            handover.to
+        ))
+    })
 }
 
-/// Signs the ASCII bytes of `hash` with `key`.
+fn verify_message(
+    key: &PublicKey,
+    message: &[u8],
+    signature: &Signature,
+) -> std::result::Result<(), String> {
+    let verifying = ed25519_dalek::VerifyingKey::from_bytes(key.bytes())
+        .map_err(|_| "the key is not a valid Ed25519 public key".to_owned())?;
+    let signature = ed25519_dalek::Signature::from_bytes(signature.bytes());
+    verifying
+        .verify_strict(message, &signature)
+        .map_err(|_| "the signature is not the key's".to_owned())
+}
+
+/// Signs the ASCII bytes of `hash` with `key`. Ed25519 signing is
+/// deterministic, so one tree and one key always sign to the same bytes
+/// (REG-020).
 pub fn sign(key: &SecretKey, hash: &Digest) -> Result<Signature> {
-    let _ = (key, hash);
-    Err(RegistryError::NotBuilt("signing"))
+    Ok(sign_message(key, hash.as_str().as_bytes()))
 }
 
-/// Makes a new key pair.
+/// Signs a handover from `former` to `new_key` (REG-033): `former` signs
+/// the ASCII bytes of the new key's fingerprint.
+pub fn sign_handover(former: &SecretKey, new_key: &PublicKey) -> Result<KeyHandover> {
+    let to = new_key.fingerprint();
+    let signature = sign_message(former, to.as_str().as_bytes());
+    Ok(KeyHandover {
+        from: former.public_key(),
+        to,
+        signature,
+    })
+}
+
+fn sign_message(key: &SecretKey, message: &[u8]) -> Signature {
+    use ed25519_dalek::Signer as _;
+    let signing = ed25519_dalek::SigningKey::from_bytes(key.bytes());
+    Signature(signing.sign(message).to_bytes())
+}
+
+/// Makes a new key pair from the operating system's random source.
 pub fn generate() -> Result<(SecretKey, PublicKey)> {
-    Err(RegistryError::NotBuilt("key generation"))
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        RegistryError::Io(format!(
+            "the operating system's random source is unavailable: {error}"
+        ))
+    })?;
+    let secret = SecretKey::from_bytes(bytes);
+    bytes = [0; 32];
+    std::hint::black_box(&bytes);
+    let public = secret.public_key();
+    Ok((secret, public))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PublicKey, Signature};
+    use super::{
+        PublicKey, SecretKey, Signature, generate, sign, sign_handover, verify, verify_handover,
+    };
+    use crate::registry::statement::Digest;
 
     #[test]
     fn keys_and_signatures_round_trip_through_their_written_forms() {
@@ -190,5 +296,34 @@ mod tests {
             signature
         );
         assert!(Signature::parse("AAAA").is_err());
+    }
+
+    #[test]
+    fn a_signature_verifies_only_over_its_hash_with_its_key() {
+        let secret = SecretKey::from_bytes([1u8; 32]);
+        let public = secret.public_key();
+        let hash = Digest::of(b"statement");
+        let signature = sign(&secret, &hash).expect("sign");
+        verify(&public, &hash, &signature).expect("verifies");
+        assert_eq!(sign(&secret, &hash).expect("sign again"), signature);
+        assert!(verify(&public, &Digest::of(b"other"), &signature).is_err());
+        let other = SecretKey::from_bytes([2u8; 32]).public_key();
+        assert!(verify(&other, &hash, &signature).is_err());
+        let (fresh, fresh_public) = generate().expect("generate");
+        assert_eq!(fresh.public_key(), fresh_public);
+    }
+
+    #[test]
+    fn a_handover_verifies_only_for_the_key_it_names() {
+        let former = SecretKey::from_bytes([3u8; 32]);
+        let new_key = SecretKey::from_bytes([4u8; 32]).public_key();
+        let handover = sign_handover(&former, &new_key).expect("handover");
+        verify_handover(&handover, &new_key).expect("verifies");
+        let stranger = SecretKey::from_bytes([5u8; 32]).public_key();
+        assert!(verify_handover(&handover, &stranger).is_err());
+        let mut forged = handover.clone();
+        forged.from = stranger;
+        assert!(verify_handover(&forged, &new_key).is_err());
+        assert!(Signature::parse_strict(&format!(" {}", handover.signature.encode())).is_err());
     }
 }
