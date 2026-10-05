@@ -39,14 +39,8 @@ pub fn scan_with_elements(
         .filter(|(name, _)| name.ends_with(".js"))
         .map(|(name, _)| name.clone())
         .collect();
-    let importable_directories: BTreeSet<String> = component
-        .importable_views
-        .iter()
-        .filter_map(|view| {
-            view.rsplit_once('/')
-                .map(|(directory, _)| directory.to_string())
-        })
-        .collect();
+    let importable_scripts: BTreeSet<String> =
+        component.importable_scripts.iter().cloned().collect();
     let element_prefix = if component.namespace == "suprnova" {
         "sn-".to_string()
     } else {
@@ -93,7 +87,7 @@ pub fn scan_with_elements(
             elements,
             own_scripts: own_scripts.clone(),
             own_directory: format!("{}-ui/{}", component.namespace, component.directory),
-            importable_directories: importable_directories.clone(),
+            importable_scripts: importable_scripts.clone(),
         };
         report.findings.extend(scan_script(text, &context));
     }

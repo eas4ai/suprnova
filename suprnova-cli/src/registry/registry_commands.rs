@@ -1167,11 +1167,13 @@ fn inspect(
         plan.visited_local.insert(directory.clone());
         let mut dependency_modules = Vec::new();
         let mut importable_views = shipped_views.clone();
+        let mut importable_scripts = Vec::new();
         let mut dependency_views = Vec::new();
         for dependency in &component.manifest.dependencies {
             if let Some(reached) = plan.resolve(&Origin::Local, &directory, dependency) {
                 dependency_modules.extend(reached.modules);
                 importable_views.extend(reached.views);
+                importable_scripts.extend(reached.scripts);
                 dependency_views.extend(reached.sources);
             }
         }
@@ -1197,6 +1199,7 @@ fn inspect(
             files: &component.files,
             dependency_modules: &dependency_modules,
             importable_views: &importable_views,
+            importable_scripts: &importable_scripts,
         };
         // The same scan `live:add` makes: the Rust held to `register`, the
         // scripts to `elements`, and the views of its dependencies followed.
@@ -1466,6 +1469,8 @@ struct Reached {
     modules: Vec<String>,
     /// Its views, as a view includes them.
     views: Vec<String>,
+    /// Its scripts, as a script imports them (REG-032).
+    scripts: Vec<String>,
     /// Its views' sources by the same paths, for the view checks of the
     /// component that depends on it.
     sources: Vec<(String, String)>,
@@ -1658,6 +1663,10 @@ impl<'a> Plan<'a> {
                     reached.sources.push((path.clone(), source.to_owned()));
                 }
                 reached.views.push(path);
+            } else if file.ends_with(".js") {
+                reached
+                    .scripts
+                    .push(format!("{}-ui/{name}/{file}", self.library.namespace));
             }
         }
         Some(reached)

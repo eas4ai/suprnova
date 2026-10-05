@@ -951,8 +951,10 @@ impl Resolver<'_> {
         let in_plan: BTreeSet<ComponentAddress> =
             order.iter().map(|loaded| loaded.address.clone()).collect();
         let shipped_views = shipped_views();
-        let mut modules_of: BTreeMap<ComponentAddress, (String, Vec<String>, Vec<String>)> =
-            BTreeMap::new();
+        let mut modules_of: BTreeMap<
+            ComponentAddress,
+            (String, Vec<String>, Vec<String>, Vec<String>),
+        > = BTreeMap::new();
         // Each planned component's view sources by view path, for the view
         // checks of the components that depend on it.
         let mut view_sources_of: BTreeMap<ComponentAddress, Vec<(String, String)>> =
@@ -1076,12 +1078,14 @@ impl Resolver<'_> {
             } else {
                 let mut dependency_modules = Vec::new();
                 let mut importable_views = shipped_views.clone();
+                let mut importable_scripts = Vec::new();
                 let mut dependency_views = Vec::new();
                 for dependency in &loaded.dependencies {
-                    if let Some((module, rust, views)) = modules_of.get(dependency) {
+                    if let Some((module, rust, views, scripts)) = modules_of.get(dependency) {
                         dependency_modules
                             .extend(rust.iter().map(|name| format!("{module}::{name}")));
                         importable_views.extend(views.iter().cloned());
+                        importable_scripts.extend(scripts.iter().cloned());
                     }
                     if let Some(sources) = view_sources_of.get(dependency) {
                         dependency_views.extend(sources.iter().cloned());
@@ -1099,6 +1103,7 @@ impl Resolver<'_> {
                         files: &loaded.files,
                         dependency_modules: &dependency_modules,
                         importable_views: &importable_views,
+                        importable_scripts: &importable_scripts,
                     },
                     &context,
                 )?;
@@ -1152,6 +1157,7 @@ impl Resolver<'_> {
                             files: &loaded.files,
                             dependency_modules: &dependency_modules,
                             importable_views: &importable_views,
+                            importable_scripts: &importable_scripts,
                         },
                         &ScanContext {
                             register: Some(&installed_manifest.register),
@@ -1182,7 +1188,17 @@ impl Resolver<'_> {
                 .filter(|name| FileKind::of(name) == Some(FileKind::View))
                 .map(|name| format!("{namespace}-ui/{}/{name}", address.component))
                 .collect();
-            modules_of.insert(address.clone(), (ns_module.clone(), modules.clone(), views));
+            let scripts: Vec<String> = loaded
+                .manifest
+                .files
+                .iter()
+                .filter(|name| FileKind::of(name) == Some(FileKind::Script))
+                .map(|name| format!("{namespace}-ui/{}/{name}", address.component))
+                .collect();
+            modules_of.insert(
+                address.clone(),
+                (ns_module.clone(), modules.clone(), views, scripts),
+            );
             let sources: Vec<(String, String)> = loaded
                 .files
                 .iter()

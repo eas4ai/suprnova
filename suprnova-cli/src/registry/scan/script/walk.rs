@@ -92,7 +92,7 @@ pub(super) struct Context<'c> {
     pub elements: Option<&'c [String]>,
     pub own_scripts: BTreeSet<String>,
     pub own_directory: String,
-    pub importable_directories: BTreeSet<String>,
+    pub importable_scripts: BTreeSet<String>,
 }
 
 pub(super) struct Walker<'a, 'c> {
@@ -2488,7 +2488,9 @@ impl<'a, 'c> Walker<'a, 'c> {
             if directory == self.context.own_directory {
                 return self.context.own_scripts.contains(file);
             }
-            self.context.importable_directories.contains(directory)
+            self.context
+                .importable_scripts
+                .contains(&format!("{directory}/{file}"))
         });
         if !admitted {
             self.refuse(

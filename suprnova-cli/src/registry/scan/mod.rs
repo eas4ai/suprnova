@@ -86,6 +86,11 @@ pub struct ComponentFiles<'a> {
     /// The views the components it depends on and the shipped library
     /// carry, which its views may include, import or extend.
     pub importable_views: &'a [String],
+    /// The scripts the components it depends on carry, as
+    /// `<namespace>-ui/<directory>/<file>`, which its scripts may import
+    /// (REG-032). A shipped script is one of them only through a declared
+    /// dependency.
+    pub importable_scripts: &'a [String],
 }
 
 /// The stack the scans run on. The parsers and the walkers recurse once per
