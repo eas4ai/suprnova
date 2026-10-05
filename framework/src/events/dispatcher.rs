@@ -7,9 +7,10 @@ use rand::RngExt;
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::sync::{Mutex as TokioMutex, Semaphore};
+use tokio::sync::{Mutex as TokioMutex, Notify, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{debug, error, warn};
 
@@ -133,7 +134,48 @@ pub struct EventDispatcher {
     /// closure; [`Self::flush`] drains the bucket and awaits each.
     pushed: TokioMutex<HashMap<&'static str, Vec<DeferredCall>>>,
     queued_tasks: TokioMutex<JoinSet<()>>,
+    /// The queued listeners not finished yet, wherever their task is held:
+    /// in `queued_tasks`, or in a batch a drain took out of it.
+    queued_in_flight: Arc<QueuedInFlight>,
     queued_permits: Arc<Semaphore>,
+}
+
+/// How many queued listeners have not finished, and a wake-up each time
+/// one does.
+///
+/// A drain takes the task set out under its lock and joins it without the
+/// lock, so a second drain running at the same time finds the set empty.
+/// The set alone cannot tell that second drain that listeners are still
+/// running; this count, which spans every batch, can.
+#[derive(Default)]
+struct QueuedInFlight {
+    count: AtomicUsize,
+    finished: Notify,
+}
+
+impl QueuedInFlight {
+    fn count(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+    }
+}
+
+/// Owned by one queued-listener task for as long as the task exists. It is
+/// dropped with the task's future - when the listener finishes, and when a
+/// drain aborts it or its runtime shuts down - and counts the listener out.
+struct InFlightSlot(Arc<QueuedInFlight>);
+
+impl InFlightSlot {
+    fn take(in_flight: &Arc<QueuedInFlight>) -> Self {
+        in_flight.count.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(in_flight))
+    }
+}
+
+impl Drop for InFlightSlot {
+    fn drop(&mut self) {
+        self.0.count.fetch_sub(1, Ordering::SeqCst);
+        self.0.finished.notify_waiters();
+    }
 }
 
 impl EventDispatcher {
@@ -157,6 +199,7 @@ impl EventDispatcher {
             listeners: RwLock::new(HashMap::new()),
             pushed: TokioMutex::new(HashMap::new()),
             queued_tasks: TokioMutex::new(JoinSet::new()),
+            queued_in_flight: Arc::new(QueuedInFlight::default()),
             queued_permits: Arc::new(Semaphore::new(queued_concurrency.max(1))),
         }
     }
@@ -481,7 +524,9 @@ impl EventDispatcher {
             while let Some(finished) = tasks.try_join_next() {
                 settle_queued_task(finished);
             }
+            let slot = InFlightSlot::take(&self.queued_in_flight);
             tasks.spawn(IN_QUEUED_LISTENER.scope((), async move {
+                let _slot = slot;
                 let _permit = match permits.acquire_owned().await {
                     Ok(permit) => permit, // released when the task ends
                     // The semaphore is only closed if we explicitly close it,
@@ -561,7 +606,8 @@ impl EventDispatcher {
     ///
     /// The task set is taken out under the lock and drained without holding
     /// it, so a listener that itself dispatches a queued event cannot deadlock
-    /// against the drain.
+    /// against the drain. Two drains may run at once: each one waits for, and
+    /// counts, the listeners the other has taken out, and aborts only its own.
     pub async fn drain_queued(&self, timeout: Duration) -> usize {
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
@@ -572,15 +618,30 @@ impl EventDispatcher {
         // without closing the permit semaphore (which would leave the
         // dispatcher permanently unusable). A listener is in the set before
         // it holds a permit, so an empty set means nothing admitted is still
-        // to run. The shared `deadline` spans all batches so a continuous
+        // to run - unless another drain took it out first, which the in-flight
+        // count shows. The shared `deadline` spans all batches so a continuous
         // arrival stream still can't hang shutdown.
         loop {
+            // Registered before the set and the count are read, so a listener
+            // that finishes in between still wakes this drain.
+            let finished = self.queued_in_flight.finished.notified();
+            tokio::pin!(finished);
+            finished.as_mut().enable();
             let mut set = {
                 let mut guard = self.queued_tasks.lock().await;
                 std::mem::replace(&mut *guard, JoinSet::new())
             };
             if set.is_empty() {
-                return 0;
+                if self.queued_in_flight.count() == 0 {
+                    return 0;
+                }
+                // Another drain holds the listeners still running, or one was
+                // admitted since the swap: wait for one to finish, then look
+                // again.
+                tokio::select! {
+                    _ = finished => continue,
+                    _ = &mut deadline => return self.abort_stragglers(&mut set).await,
+                }
             }
             loop {
                 tokio::select! {
@@ -590,26 +651,34 @@ impl EventDispatcher {
                             Some(finished) => settle_queued_task(finished),
                         }
                     }
-                    _ = &mut deadline => {
-                        // Listeners admitted while this batch drained went
-                        // into the fresh set; they are stragglers too.
-                        let mut late = {
-                            let mut guard = self.queued_tasks.lock().await;
-                            std::mem::replace(&mut *guard, JoinSet::new())
-                        };
-                        let mut remaining = 0;
-                        for straggling in [&mut set, &mut late] {
-                            while let Some(finished) = straggling.try_join_next() {
-                                settle_queued_task(finished);
-                            }
-                            remaining += straggling.len();
-                            straggling.abort_all();
-                        }
-                        return remaining;
-                    }
+                    _ = &mut deadline => return self.abort_stragglers(&mut set).await,
                 }
             }
         }
+    }
+
+    /// Abort the batch a drain holds and the listeners admitted while it
+    /// waited, at the drain's deadline, and return how many listeners are
+    /// still running. The count includes the listeners another drain holds:
+    /// they are running too, and that drain aborts them at its own deadline.
+    async fn abort_stragglers(&self, batch: &mut JoinSet<()>) -> usize {
+        // Listeners admitted while this batch drained went into the fresh
+        // set; they are stragglers too.
+        let mut late = {
+            let mut guard = self.queued_tasks.lock().await;
+            std::mem::replace(&mut *guard, JoinSet::new())
+        };
+        for straggling in [&mut *batch, &mut late] {
+            while let Some(finished) = straggling.try_join_next() {
+                settle_queued_task(finished);
+            }
+        }
+        // Read before the aborts: an aborted task counts itself out only
+        // once its future is dropped, which may be later.
+        let remaining = self.queued_in_flight.count();
+        batch.abort_all();
+        late.abort_all();
+        remaining
     }
 
     /// True when at least one listener is registered for event type `E`.

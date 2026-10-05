@@ -33,7 +33,7 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 
-use suprnova::config::{AppConfig, Config, Environment};
+use suprnova::config::{AppConfig, Config, Environment, ServerConfig};
 use suprnova::{MiddlewareRegistry, Router, handle_request};
 
 /// Route through the real `handle_request`, so this exercises the actual
@@ -96,6 +96,10 @@ async fn get(addr: SocketAddr, path: &str) -> (u16, Value) {
     (status, json)
 }
 
+/// Install the whole config the probe reads. The repository is
+/// process-wide, and the readiness-gate tests in this binary register a
+/// `ServerConfig` with a readiness token; left in place, it turns these
+/// probes into the router's 404.
 fn install_app_config(env: Environment, debug: bool) {
     Config::register(
         AppConfig::builder()
@@ -105,6 +109,7 @@ fn install_app_config(env: Environment, debug: bool) {
             .url("http://localhost:0")
             .build(),
     );
+    Config::register(ServerConfig::builder().build());
 }
 
 /// The headline case. Production-shaped config, database not initialized,

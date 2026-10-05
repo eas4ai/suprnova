@@ -10,10 +10,11 @@
 //! stalled connection also pins a semaphore permit forever).
 //!
 //! `Server::run` boots telemetry, cache, queue, mail, and rate-limit
-//! drivers as process-wide singletons, so - like the other boot-time
-//! process-global tests in this crate (see
-//! `app_key_production_fail_closed.rs`) - this scenario lives in its own
-//! test binary rather than sharing one with unrelated tests.
+//! drivers as process-wide singletons, and `Server::from_config` reads the
+//! process-wide `AppConfig`, which the health tests in this binary set to
+//! production without an `APP_KEY`. So this scenario runs alone in a child
+//! process (`own_process_async::delegate`) rather than sharing one with
+//! unrelated tests.
 
 use std::time::Duration;
 use suprnova::{Router, Server};
@@ -22,6 +23,14 @@ use tokio::net::TcpStream;
 
 #[tokio::test]
 async fn incomplete_request_head_is_closed_within_the_configured_deadline() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "incomplete_request_head_is_closed_within_the_configured_deadline",
+    )
+    .await
+    {
+        return;
+    }
     // Learn a free port by binding ephemeral (`:0`) and reading back the
     // OS-assigned port, then release it immediately so `Server::run` can
     // bind the same address. Small TOCTOU window, but this is the
