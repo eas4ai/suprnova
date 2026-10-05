@@ -310,9 +310,10 @@ pub struct FrameworkVersion {
 }
 
 /// The `suprnova` version the application's own package depends on: from
-/// `Cargo.lock`, or with no lock from the `v<version>` tag of the git
-/// dependency in `Cargo.toml`, as the scaffold writes it (REG-007). Reads
-/// both, writes neither.
+/// the nearest `Cargo.lock` in the application's directory or a parent of
+/// it, which is where a workspace keeps its members' lock, or with no lock
+/// from the `v<version>` tag of the git dependency in `Cargo.toml`, as the
+/// scaffold writes it (REG-007). Reads both, writes neither.
 pub fn framework_version(root: &Path) -> Result<FrameworkVersion> {
     let manifest_text = std::fs::read_to_string(root.join("Cargo.toml"))
         .map_err(|error| RegistryError::Io(format!("cannot read Cargo.toml: {error}")))?;
@@ -325,8 +326,18 @@ pub fn framework_version(root: &Path) -> Result<FrameworkVersion> {
         .and_then(toml::Value::as_str)
         .ok_or_else(|| RegistryError::Invalid("Cargo.toml names no [package]".to_owned()))?
         .to_owned();
-    match std::fs::read_to_string(root.join("Cargo.lock")) {
-        Ok(lock_text) => {
+    let lock_path = nearest_lock(root);
+    let lock_origin = match &lock_path {
+        Some(path) if path.parent() == Some(root) => "Cargo.lock".to_owned(),
+        Some(path) => format!("the workspace's Cargo.lock at {}", path.display()),
+        None => String::new(),
+    };
+    let lock_read = match &lock_path {
+        Some(path) => std::fs::read_to_string(path).map(Some),
+        None => Ok(None),
+    };
+    match lock_read {
+        Ok(Some(lock_text)) => {
             let lock: toml::Table = toml::from_str(&lock_text).map_err(|error| {
                 RegistryError::Invalid(format!("Cargo.lock is not valid TOML: {error}"))
             })?;
@@ -383,10 +394,10 @@ pub fn framework_version(root: &Path) -> Result<FrameworkVersion> {
             })?;
             Ok(FrameworkVersion {
                 version,
-                from: "Cargo.lock".to_owned(),
+                from: lock_origin,
             })
         }
-        Err(error) if error.kind() == ErrorKind::NotFound => {
+        Ok(None) => {
             let tag = manifest
                 .get("dependencies")
                 .and_then(|dependencies| dependencies.get("suprnova"))
@@ -410,6 +421,15 @@ pub fn framework_version(root: &Path) -> Result<FrameworkVersion> {
             "cannot read Cargo.lock: {error}"
         ))),
     }
+}
+
+/// The nearest `Cargo.lock` at `root` or above it: the application's own,
+/// or the workspace's when the application is a member (REG-007). Nothing
+/// is run to find it, so the lookup is cargo's own rule read from disk.
+fn nearest_lock(root: &Path) -> Option<std::path::PathBuf> {
+    root.ancestors()
+        .map(|directory| directory.join("Cargo.lock"))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Resolves a source into a plan: fetches, verifies and scans every
@@ -931,8 +951,10 @@ impl Resolver<'_> {
         let in_plan: BTreeSet<ComponentAddress> =
             order.iter().map(|loaded| loaded.address.clone()).collect();
         let shipped_views = shipped_views();
-        let mut modules_of: BTreeMap<ComponentAddress, (String, Vec<String>, Vec<String>)> =
-            BTreeMap::new();
+        let mut modules_of: BTreeMap<
+            ComponentAddress,
+            (String, Vec<String>, Vec<String>, Vec<String>),
+        > = BTreeMap::new();
         // Each planned component's view sources by view path, for the view
         // checks of the components that depend on it.
         let mut view_sources_of: BTreeMap<ComponentAddress, Vec<(String, String)>> =
@@ -1056,12 +1078,14 @@ impl Resolver<'_> {
             } else {
                 let mut dependency_modules = Vec::new();
                 let mut importable_views = shipped_views.clone();
+                let mut importable_scripts = Vec::new();
                 let mut dependency_views = Vec::new();
                 for dependency in &loaded.dependencies {
-                    if let Some((module, rust, views)) = modules_of.get(dependency) {
+                    if let Some((module, rust, views, scripts)) = modules_of.get(dependency) {
                         dependency_modules
                             .extend(rust.iter().map(|name| format!("{module}::{name}")));
                         importable_views.extend(views.iter().cloned());
+                        importable_scripts.extend(scripts.iter().cloned());
                     }
                     if let Some(sources) = view_sources_of.get(dependency) {
                         dependency_views.extend(sources.iter().cloned());
@@ -1079,6 +1103,7 @@ impl Resolver<'_> {
                         files: &loaded.files,
                         dependency_modules: &dependency_modules,
                         importable_views: &importable_views,
+                        importable_scripts: &importable_scripts,
                     },
                     &context,
                 )?;
@@ -1132,6 +1157,7 @@ impl Resolver<'_> {
                             files: &loaded.files,
                             dependency_modules: &dependency_modules,
                             importable_views: &importable_views,
+                            importable_scripts: &importable_scripts,
                         },
                         &ScanContext {
                             register: Some(&installed_manifest.register),
@@ -1162,7 +1188,17 @@ impl Resolver<'_> {
                 .filter(|name| FileKind::of(name) == Some(FileKind::View))
                 .map(|name| format!("{namespace}-ui/{}/{name}", address.component))
                 .collect();
-            modules_of.insert(address.clone(), (ns_module.clone(), modules.clone(), views));
+            let scripts: Vec<String> = loaded
+                .manifest
+                .files
+                .iter()
+                .filter(|name| FileKind::of(name) == Some(FileKind::Script))
+                .map(|name| format!("{namespace}-ui/{}/{name}", address.component))
+                .collect();
+            modules_of.insert(
+                address.clone(),
+                (ns_module.clone(), modules.clone(), views, scripts),
+            );
             let sources: Vec<(String, String)> = loaded
                 .files
                 .iter()

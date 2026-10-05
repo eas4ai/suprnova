@@ -56,6 +56,7 @@ fn reg_030_std_fs_under_an_alias_is_refused_naming_the_file_and_line() {
         files: &files,
         dependency_modules: &[],
         importable_views: &[],
+        importable_scripts: &[],
     };
     let report = scan_component(&component, &empty_allowlist()).expect("the scan runs");
     assert!(!report.accepted(), "the component was admitted: {report:?}");
@@ -248,6 +249,7 @@ fn scan_fixture(dir: &Path) -> ScanReport {
         files: &files,
         dependency_modules: &[],
         importable_views: &[],
+        importable_scripts: &[],
     };
     let elements = manifest_list(dir, "elements");
     scan_component_with_manifest(
@@ -281,6 +283,146 @@ fn markers(dir: &Path) -> Vec<(String, String, u32)> {
         }
     }
     found
+}
+
+/// REG-032: a static import resolves only to the component's own scripts
+/// or to a script a dependency's manifest names; a file in a dependency's
+/// directory that its manifest does not name, and a shipped script the
+/// component does not depend on, are refused.
+#[test]
+fn reg_032_a_static_import_may_name_only_the_scripts_its_dependencies_carry() {
+    let scan = |script: &str| {
+        let files = vec![
+            ("widget.html".to_string(), b"<div>x</div>".to_vec()),
+            ("widget.js".to_string(), script.as_bytes().to_vec()),
+        ];
+        let importable_scripts = vec!["other-ui/thing/thing.js".to_string()];
+        let component = ComponentFiles {
+            namespace: "acme",
+            directory: "widget",
+            files: &files,
+            dependency_modules: &[],
+            importable_views: &[
+                "suprnova-ui/combobox/combobox.html".to_string(),
+                "other-ui/thing/thing.html".to_string(),
+            ],
+            importable_scripts: &importable_scripts,
+        };
+        scan_component(&component, allowlist::embedded().expect("allowlist")).expect("scan")
+    };
+    let named = scan("import \"/other-ui/thing/thing.js\";\n");
+    assert!(named.accepted(), "{:?}", named.findings);
+    let unnamed = scan("import \"/other-ui/thing/extra.js\";\n");
+    assert!(
+        unnamed.findings.iter().any(|f| f.check == "script-import"),
+        "{:?}",
+        unnamed.findings
+    );
+    let shipped = scan("import \"/suprnova-ui/combobox/combobox.js\";\n");
+    assert!(
+        shipped.findings.iter().any(|f| f.check == "script-import"),
+        "{:?}",
+        shipped.findings
+    );
+}
+
+/// REG-031: a view calls nothing the scan cannot show carries no
+/// capability, so a call into a dependency's Rust, whose functions this
+/// scan does not read, is refused.
+#[test]
+fn reg_031_a_view_may_not_call_a_dependencys_function() {
+    let files = vec![(
+        "widget.html".to_string(),
+        b"<p>{{ crate::live::evil::helper::token() }}</p>\n".to_vec(),
+    )];
+    let dependency_modules = vec!["evil::helper".to_string()];
+    let component = ComponentFiles {
+        namespace: "evil",
+        directory: "widget",
+        files: &files,
+        dependency_modules: &dependency_modules,
+        importable_views: &[],
+        importable_scripts: &[],
+    };
+    let report =
+        scan_component(&component, allowlist::embedded().expect("allowlist")).expect("scan");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.check == "view-call" && finding.line == Some(1)),
+        "{:?}",
+        report.findings
+    );
+}
+
+/// REG-006: every public API that reaches one of the nine effects carries
+/// its capability, including methods that live on an otherwise effect-free
+/// type (a redirect that writes the session, a response that opens a file),
+/// and an API that rewrites the application for every request is refused
+/// like a container binding.
+#[test]
+fn reg_006_effectful_methods_on_effect_free_types_carry_their_capability() {
+    let list = allowlist::embedded().expect("the embedded allowlist parses");
+    let carries = [
+        ("suprnova::Redirect::set_intended_url", Capability::Session),
+        ("suprnova::Redirect::back", Capability::Session),
+        ("suprnova::Redirect::with", Capability::Session),
+        (
+            "suprnova::HttpResponse::without_cookie",
+            Capability::Session,
+        ),
+        ("suprnova::url::previous", Capability::Session),
+        ("suprnova::live::LiveDocument::mount", Capability::Session),
+        ("suprnova::HttpResponse::download", Capability::Files),
+        ("suprnova::HttpResponse::file", Capability::Files),
+        (
+            "suprnova::Router::try_live_ui_assets_for",
+            Capability::Files,
+        ),
+        ("suprnova::hash", Capability::Environment),
+        ("suprnova::url::signed_route", Capability::Environment),
+        ("suprnova::InertiaConfig::new", Capability::Environment),
+        ("suprnova::InertiaConfig", Capability::Environment),
+        ("suprnova::Password::uncompromised", Capability::Network),
+        (
+            "suprnova::live::verify_ledger_backend",
+            Capability::Database,
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (path, capability) in carries {
+        let found = match list.admit(path) {
+            Some(Admission::Item { item, .. }) | Some(Admission::Prefix { item, .. }) => {
+                item.capability
+            }
+            _ => match list.member(
+                path.rsplit_once("::").expect("a member path").0,
+                path.rsplit_once("::").expect("a member path").1,
+            ) {
+                Some(Admission::Item { item, .. }) | Some(Admission::Prefix { item, .. }) => {
+                    item.capability
+                }
+                _ => None,
+            },
+        };
+        if found != Some(capability) {
+            wrong.push(format!("{path}: {found:?}, not {capability:?}"));
+        }
+    }
+    for path in [
+        "suprnova::register_global_middleware",
+        "suprnova::prepend_global_middleware",
+        "suprnova::register_middleware_group",
+        "suprnova::register_terminable",
+        "suprnova::data::registry::register",
+        "suprnova::InertiaRegistry::share_value",
+    ] {
+        if !matches!(list.admit(path), Some(Admission::Refused { .. })) {
+            wrong.push(format!("{path} is admitted"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// REG-022, REG-030, REG-031, REG-032: every component of the bypass corpus
@@ -430,6 +572,7 @@ fn reg_016_every_shipped_component_passes_the_view_and_script_scans() {
             files: &files,
             dependency_modules: &[],
             importable_views: &importable,
+            importable_scripts: &[],
         };
         let elements = manifest_list(dir, "elements");
         let report = scan_component_with_manifest(
@@ -616,6 +759,7 @@ fn reg_022_inputs_built_to_exhaust_a_parsers_stack_are_refused() {
             files: &files,
             dependency_modules: &[],
             importable_views: &[],
+            importable_scripts: &[],
         };
         let report = scan_component(
             &component,
@@ -647,6 +791,7 @@ fn reg_022_a_file_no_scan_reads_is_refused() {
         files: &files,
         dependency_modules: &[],
         importable_views: &[],
+        importable_scripts: &[],
     };
     let report = scan_component(
         &component,
@@ -679,6 +824,7 @@ use crate::live::acme::secret::Key;\n"
         files: &files,
         dependency_modules: &dependencies,
         importable_views: &[],
+        importable_scripts: &[],
     };
     let report = scan_component(
         &component,
@@ -744,6 +890,7 @@ fn reg_016_every_shipped_component_passes_the_scan() {
                 files: &files,
                 dependency_modules: &[],
                 importable_views: &shipped_views,
+                importable_scripts: &[],
             },
             allowlist,
         )
@@ -801,6 +948,7 @@ fn reg_022_the_scaffolded_example_component_passes_the_scan_and_the_view_checks(
             files: &files,
             dependency_modules: &[],
             importable_views: &[],
+            importable_scripts: &[],
         };
         let report = scan_component_with_manifest(
             &component,
@@ -900,6 +1048,7 @@ fn reg_030_a_chain_on_a_suprnova_return_value_is_typed_from_the_recorded_return_
             files: &files,
             dependency_modules: &[],
             importable_views: &[],
+            importable_scripts: &[],
         };
         scan_component(&component, &list).expect("the scan runs")
     };

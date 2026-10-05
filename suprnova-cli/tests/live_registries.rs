@@ -1702,6 +1702,45 @@ fn reg_007_with_neither_a_lock_nor_a_tag_live_add_refuses() {
     assert!(!root.path().join("Cargo.lock").exists());
 }
 
+/// REG-007: a workspace member's `suprnova` version is read from the
+/// workspace's `Cargo.lock` in a parent directory, not from the member's
+/// manifest tag or the no-lock refusal.
+#[test]
+fn reg_007_a_workspace_members_lock_in_a_parent_directory_is_read() {
+    let library = Lib::acme().widget().set("framework", json!(">=4.0.0"));
+    let workspace = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"3\"\n",
+    )
+    .expect("workspace manifest");
+    fs::write(
+        workspace.path().join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"fixture\"\nversion = \"0.1.0\"\ndependencies = [\n \"suprnova\",\n]\n\n[[package]]\nname = \"suprnova\"\nversion = \"3.0.0\"\nsource = \"git+https://github.com/eas4ai/suprnova.git?tag=v3.0.0#0000000000000000000000000000000000000000\"\n",
+    )
+    .expect("workspace lock");
+    let member = workspace.path().join("app");
+    fs::create_dir_all(&member).expect("member");
+    fs::write(
+        member.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\n[dependencies]\nsuprnova = { path = \"../../framework\" }\n",
+    )
+    .expect("member manifest");
+    pin(&member, ADDRESS, &library.key());
+    let error = expect_refused(
+        add(&member, "acme/acme-ui/widget", &fetcher(&[&library])),
+        ">=4.0.0",
+    );
+    assert!(
+        error.contains("3.0.0") && error.contains("Cargo.lock"),
+        "{error}"
+    );
+    assert!(
+        !member.join("Cargo.lock").exists(),
+        "live:add wrote a lock into the member"
+    );
+}
+
 // ===========================================================================
 // REG-008: sources and addresses
 // ===========================================================================

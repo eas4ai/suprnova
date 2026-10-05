@@ -92,7 +92,7 @@ pub(super) struct Context<'c> {
     pub elements: Option<&'c [String]>,
     pub own_scripts: BTreeSet<String>,
     pub own_directory: String,
-    pub importable_directories: BTreeSet<String>,
+    pub importable_scripts: BTreeSet<String>,
 }
 
 pub(super) struct Walker<'a, 'c> {
@@ -1900,6 +1900,30 @@ impl<'a, 'c> Walker<'a, 'c> {
         }
     }
 
+    /// Whether a timer's handler is a function: [`Self::callback_safe`]
+    /// without the `null` and `undefined` it allows for an optional
+    /// callback, because REG-032 refuses a timer given anything but a
+    /// function, and a `null` handler is the shape a string handler takes
+    /// once the scan cannot read it.
+    fn timer_handler_safe(&self, value: &Expression<'a>, depth: usize) -> bool {
+        if depth > MAX_TRACE_DEPTH {
+            return false;
+        }
+        match unparen(value) {
+            Expression::NullLiteral(_) => false,
+            Expression::Identifier(reference) if reference.name == "undefined" => false,
+            Expression::ConditionalExpression(conditional) => {
+                self.timer_handler_safe(&conditional.consequent, depth + 1)
+                    && self.timer_handler_safe(&conditional.alternate, depth + 1)
+            }
+            Expression::LogicalExpression(logical) => {
+                self.timer_handler_safe(&logical.left, depth + 1)
+                    && self.timer_handler_safe(&logical.right, depth + 1)
+            }
+            other => self.callback_safe(other, depth),
+        }
+    }
+
     /// Whether a value passed where it will be called is a function the
     /// script defines or a standard browser function whose arguments need
     /// no checking.
@@ -2060,7 +2084,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                 }
             }
             Rule::Timer => match Self::argument_expression(arguments, 0) {
-                Some(argument) if self.callback_safe(argument, 0) => {}
+                Some(argument) if self.timer_handler_safe(argument, 0) => {}
                 Some(argument) => self.refuse(
                     "script-timer",
                     argument.span(),
@@ -2464,7 +2488,9 @@ impl<'a, 'c> Walker<'a, 'c> {
             if directory == self.context.own_directory {
                 return self.context.own_scripts.contains(file);
             }
-            self.context.importable_directories.contains(directory)
+            self.context
+                .importable_scripts
+                .contains(&format!("{directory}/{file}"))
         });
         if !admitted {
             self.refuse(

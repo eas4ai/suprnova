@@ -192,6 +192,15 @@ pub(crate) struct Walker<'a> {
     block_counter: usize,
     pub(super) serde_derive: Vec<bool>,
     pub(crate) capabilities: BTreeSet<Capability>,
+    /// The items whose bodies are being visited: a function or method, a
+    /// static or a const, each keyed as [`Walker::item_capabilities`] is.
+    item_keys: Vec<String>,
+    /// The capabilities each of the component's own functions, methods,
+    /// statics and consts reaches in its own body, keyed by its full path
+    /// under `crate::live::` for a free item and by its bare name for a
+    /// method, so the view scan can refuse a call that carries one
+    /// (REG-031). Calls between them are joined by the view scan.
+    pub(crate) item_capabilities: BTreeMap<String, BTreeSet<Capability>>,
     pub(crate) findings: Vec<Finding>,
     pub(crate) defined: Vec<DefinedComponent>,
 }
@@ -223,6 +232,8 @@ impl<'a> Walker<'a> {
             block_counter: 0,
             serde_derive: Vec::new(),
             capabilities: BTreeSet::new(),
+            item_keys: Vec::new(),
+            item_capabilities: BTreeMap::new(),
             findings: Vec::new(),
             defined: Vec::new(),
         }
@@ -251,7 +262,27 @@ impl<'a> Walker<'a> {
             && let Some(capability) = capability
         {
             self.capabilities.insert(capability);
+            for key in &self.item_keys {
+                self.item_capabilities
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(capability);
+            }
         }
+    }
+
+    /// Visits an item's body with its key on the stack, so every
+    /// capability granted inside is recorded against it.
+    fn with_item_key(&mut self, key: String, visit: impl FnOnce(&mut Self)) {
+        self.item_capabilities.entry(key.clone()).or_default();
+        self.item_keys.push(key);
+        visit(self);
+        self.item_keys.pop();
+    }
+
+    /// The key of a free item named `name` in the current module.
+    fn free_item_key(&self, name: &syn::Ident) -> String {
+        format!("{}::{}", self.module.join("::"), unraw(name))
     }
 
     // ----- impl table -----------------------------------------------------
@@ -1109,7 +1140,10 @@ impl<'a> Walker<'a> {
             }
             syn::Item::Fn(item) => {
                 self.check_attrs(&item.attrs, Site::Other);
-                self.visit_fn(&item.sig, &item.block, None);
+                let key = self.free_item_key(&item.sig.ident);
+                self.with_item_key(key, |walker| {
+                    walker.visit_fn(&item.sig, &item.block, None);
+                });
             }
             syn::Item::Trait(item) => {
                 self.check_attrs(&item.attrs, Site::Other);
@@ -1141,7 +1175,12 @@ impl<'a> Walker<'a> {
                         syn::TraitItem::Fn(method) => {
                             self.check_attrs(&method.attrs, Site::Other);
                             match &method.default {
-                                Some(block) => self.visit_fn(&method.sig, block, None),
+                                Some(block) => {
+                                    let key = unraw(&method.sig.ident);
+                                    self.with_item_key(key, |walker| {
+                                        walker.visit_fn(&method.sig, block, None);
+                                    });
+                                }
                                 None => self.visit_signature_only(&method.sig),
                             }
                         }
@@ -1183,7 +1222,10 @@ impl<'a> Walker<'a> {
             syn::Item::Const(item) => {
                 self.check_attrs(&item.attrs, Site::Other);
                 let ty = self.visit_type(&item.ty);
-                self.visit_expr(&item.expr, Some(&ty));
+                let key = self.free_item_key(&item.ident);
+                self.with_item_key(key, |walker| {
+                    walker.visit_expr(&item.expr, Some(&ty));
+                });
             }
             syn::Item::Static(item) => {
                 self.check_attrs(&item.attrs, Site::Other);
@@ -1195,7 +1237,10 @@ impl<'a> Walker<'a> {
                     );
                 }
                 let ty = self.visit_type(&item.ty);
-                self.visit_expr(&item.expr, Some(&ty));
+                let key = self.free_item_key(&item.ident);
+                self.with_item_key(key, |walker| {
+                    walker.visit_expr(&item.expr, Some(&ty));
+                });
             }
             syn::Item::Type(item) => {
                 self.check_attrs(&item.attrs, Site::Other);
@@ -1398,7 +1443,11 @@ impl<'a> Walker<'a> {
                         &method.attrs,
                         if live { Site::LiveMethod } else { Site::Other },
                     );
-                    self.visit_fn(&method.sig, &method.block, Some(self_ty.clone()));
+                    let key = unraw(&method.sig.ident);
+                    let method_ty = self_ty.clone();
+                    self.with_item_key(key, |walker| {
+                        walker.visit_fn(&method.sig, &method.block, Some(method_ty));
+                    });
                 }
                 syn::ImplItem::Const(constant) => {
                     self.check_attrs(&constant.attrs, Site::Other);

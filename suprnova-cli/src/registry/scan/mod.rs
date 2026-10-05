@@ -86,6 +86,11 @@ pub struct ComponentFiles<'a> {
     /// The views the components it depends on and the shipped library
     /// carry, which its views may include, import or extend.
     pub importable_views: &'a [String],
+    /// The scripts the components it depends on carry, as
+    /// `<namespace>-ui/<directory>/<file>`, which its scripts may import
+    /// (REG-032). A shipped script is one of them only through a declared
+    /// dependency.
+    pub importable_scripts: &'a [String],
 }
 
 /// The stack the scans run on. The parsers and the walkers recurse once per
@@ -200,9 +205,13 @@ fn scan_on_this_thread(
             });
         }
     }
-    let (rust_report, defined) = rust::scan_detailed(component, allowlist)?;
+    let rust::Detailed {
+        report: rust_report,
+        defined,
+        item_capabilities,
+    } = rust::scan_detailed(component, allowlist)?;
     report.merge(rust_report);
-    report.merge(view::scan(component, allowlist)?);
+    report.merge(view::scan(component, allowlist, &item_capabilities)?);
     report.merge(script::scan_with_elements(component, context.elements)?);
     if let Some(register) = context.register {
         report

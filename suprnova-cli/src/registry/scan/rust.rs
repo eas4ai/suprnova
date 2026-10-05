@@ -9,26 +9,37 @@ mod modules;
 mod ty;
 mod walk;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::allowlist::Allowlist;
 use super::{ComponentFiles, Finding, ScanReport};
-use crate::registry::Result;
+use crate::registry::{Capability, Result};
 
 pub(crate) use walk::DefinedComponent;
 
 /// Scans the component's Rust files.
 pub fn scan(component: &ComponentFiles<'_>, allowlist: &Allowlist) -> Result<ScanReport> {
-    scan_detailed(component, allowlist).map(|(report, _)| report)
+    scan_detailed(component, allowlist).map(|detailed| detailed.report)
+}
+
+/// What the Rust scan finds beyond its report.
+pub(crate) struct Detailed {
+    /// The findings and capabilities.
+    pub(crate) report: ScanReport,
+    /// Where each Live component the Rust defines sits, for the check
+    /// against the manifest's `register`.
+    pub(crate) defined: Vec<DefinedComponent>,
+    /// The capabilities each own function, method, static and const
+    /// reaches in its own body, for the view scan (REG-031).
+    pub(crate) item_capabilities: BTreeMap<String, BTreeSet<Capability>>,
 }
 
 /// Scans the component's Rust files and also returns where each Live
-/// component it defines sits, for the check against the manifest's
-/// `register`.
+/// component it defines sits and what each of its items reaches.
 pub(crate) fn scan_detailed(
     component: &ComponentFiles<'_>,
     allowlist: &Allowlist,
-) -> Result<(ScanReport, Vec<DefinedComponent>)> {
+) -> Result<Detailed> {
     let namespace_module = component.namespace.replace('-', "_");
     let mut report = ScanReport::default();
     let mut parsed = Vec::new();
@@ -65,7 +76,11 @@ pub(crate) fn scan_detailed(
         }
     }
     if parsed.is_empty() {
-        return Ok((report, Vec::new()));
+        return Ok(Detailed {
+            report,
+            defined: Vec::new(),
+            item_capabilities: BTreeMap::new(),
+        });
     }
     let mut table = modules::ModuleTable::default();
     for (_, stem, file) in &parsed {
@@ -126,7 +141,11 @@ pub(crate) fn scan_detailed(
     report
         .defined_components
         .extend(walker.defined.iter().map(|defined| defined.path.clone()));
-    Ok((report, walker.defined.clone()))
+    Ok(Detailed {
+        report,
+        defined: walker.defined.clone(),
+        item_capabilities: std::mem::take(&mut walker.item_capabilities),
+    })
 }
 
 /// The 1-based line a span starts on, for findings outside the walker.

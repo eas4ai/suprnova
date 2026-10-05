@@ -331,21 +331,20 @@ fn reg_018_registry_new_scaffolds_the_tree_with_an_example_and_a_key_outside_the
         "the same tree and key sign to the same bytes"
     );
 
-    // Without --source, source is left empty and nothing is signed until
-    // the author names it.
+    // Without --source there is no address for the signatures to cover, so
+    // the command is refused and nothing is written.
     let unsourced_dir = tmp.path().join("unsourced");
     std::fs::create_dir_all(&unsourced_dir).expect("dir");
-    let text = author.succeed(&unsourced_dir, &["live:registry", "new", "acme"]);
-    assert!(text.contains("source"), "{text}");
-    let unsourced = unsourced_dir.join("acme");
-    assert!(!unsourced.join("components/counter/manifest.sig").exists());
-    let refused = author.suprnova(&unsourced, &["live:registry", "check"]);
-    assert!(!refused.status.success());
+    let refused = author.suprnova(&unsourced_dir, &["live:registry", "new", "acme"]);
+    assert!(!refused.status.success(), "{}", combined(&refused));
     assert!(
-        combined(&refused)
-            .contains("set source in library.json to the address the library will be published at"),
+        combined(&refused).contains("--source"),
         "{}",
         combined(&refused)
+    );
+    assert!(
+        !unsourced_dir.join("acme").exists(),
+        "nothing is written without --source"
     );
 
     let inside = library.join("signing.key");
