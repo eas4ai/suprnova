@@ -1430,6 +1430,7 @@ mod tests {
             },
             failure: FailurePolicy::Open,
             hints: HintsConfig::Disabled,
+            max_background_refreshes: 1,
             build_id: "disabled-install-test".to_owned(),
             clock_override: None,
             coordinator_override: None,

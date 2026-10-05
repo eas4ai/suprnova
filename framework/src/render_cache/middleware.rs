@@ -508,7 +508,9 @@ pub struct RenderCacheRuntime {
     /// Keys with a background refresh in flight on this node (DATA-045).
     /// A stale hit on a key already in here serves the stale entry and
     /// starts nothing, so detached refresh work is bounded by the keys being
-    /// refreshed rather than by the rate stale hits arrive at.
+    /// refreshed rather than by the rate stale hits arrive at. The set never
+    /// holds more than `config.max_background_refreshes` keys, so the keys
+    /// being refreshed are bounded too.
     pub(crate) background_refreshes: Mutex<std::collections::BTreeSet<RenderKey>>,
 }
 
@@ -521,14 +523,19 @@ struct BackgroundRefreshClaim {
 
 impl BackgroundRefreshClaim {
     /// The claim on `key`, or `None` when a refresh of it is already in
-    /// flight here.
+    /// flight here, or when this node already runs as many background
+    /// refreshes as `max_background_refreshes` admits. Either way the caller
+    /// has served the stale entry and starts nothing (DATA-045).
     fn take(runtime: &Arc<RenderCacheRuntime>, key: &RenderKey) -> Option<Self> {
-        let inserted = runtime
+        let mut in_flight = runtime
             .background_refreshes
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key.clone());
-        inserted.then(|| Self {
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if in_flight.contains(key) || in_flight.len() >= runtime.config.max_background_refreshes {
+            return None;
+        }
+        in_flight.insert(key.clone());
+        Some(Self {
             runtime: Arc::clone(runtime),
             key: key.clone(),
         })
@@ -1125,13 +1132,17 @@ impl RenderCacheMiddleware {
 
     /// Spawns a bounded background rebuild for a stale-servable entry.
     ///
-    /// Bounded twice (DATA-045). On this node, a key with a refresh already
-    /// in flight spawns nothing, so the detached tasks are bounded by the
-    /// keys being refreshed, not by how fast stale hits arrive. Across
-    /// nodes, the refresh renders only when the coordinator admits it as
-    /// the key's leader: a waiter or a bypass would render a response no
-    /// client is waiting for, and past `max_waiters` every such task used to
-    /// run the handler at once, uncached.
+    /// Bounded three ways (DATA-045). On this node, a key with a refresh
+    /// already in flight spawns nothing, so the detached tasks are bounded by
+    /// the keys being refreshed, not by how fast stale hits arrive. The keys
+    /// being refreshed are bounded in turn by
+    /// `RenderCacheConfig::max_background_refreshes`: past it a stale hit
+    /// spawns nothing, so a burst of hits on many stale keys over a slow
+    /// handler cannot pile up renders. Across nodes, the refresh renders
+    /// only when the coordinator admits it as the key's leader: a waiter or
+    /// a bypass would render a response no client is waiting for, and past
+    /// `max_waiters` every such task used to run the handler at once,
+    /// uncached.
     fn spawn_background_rebuild(
         &self,
         runtime: Arc<RenderCacheRuntime>,
@@ -4208,6 +4219,7 @@ mod tests {
                 },
                 failure: FailurePolicy::Open,
                 hints: super::super::HintsConfig::Disabled,
+                max_background_refreshes: 1,
                 build_id: "test".to_owned(),
                 clock_override: None,
                 coordinator_override: None,

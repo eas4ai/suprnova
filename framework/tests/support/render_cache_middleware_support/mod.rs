@@ -550,6 +550,7 @@ pub async fn boot_with_render_cache() -> Arc<Harness> {
         BootL1::Disabled,
         None,
         suprnova::render_cache::HintsConfig::Disabled,
+        None,
     )
     .await
 }
@@ -569,6 +570,7 @@ pub async fn boot_with_render_cache_preserving_global_middleware_for_test() -> A
         BootL1::Disabled,
         None,
         suprnova::render_cache::HintsConfig::Disabled,
+        None,
     )
     .await
 }
@@ -589,6 +591,7 @@ pub async fn boot_with_render_cache_and_l1_for_test() -> Arc<Harness> {
         BootL1::Fresh,
         None,
         suprnova::render_cache::HintsConfig::Disabled,
+        None,
     )
     .await
 }
@@ -608,6 +611,7 @@ pub async fn boot_with_render_cache_and_l1_and_build_id_for_test(build_id: &str)
         BootL1::Fresh,
         Some(build_id.to_owned()),
         suprnova::render_cache::HintsConfig::Disabled,
+        None,
     )
     .await
 }
@@ -628,6 +632,26 @@ pub async fn boot_with_render_cache_and_hints_for_test(
         BootL1::Disabled,
         None,
         hints,
+        None,
+    )
+    .await
+}
+
+/// Boots exactly like [`boot_with_render_cache`], except the installed
+/// configuration admits at most `limit` background refreshes at once.
+///
+/// The default limit scales with the machine, far past what a test can
+/// fill with held renders; this seam sets one small enough to reach.
+pub async fn boot_with_render_cache_and_background_refresh_limit_for_test(
+    limit: usize,
+) -> Arc<Harness> {
+    boot(
+        true,
+        BootDatabase::FreshSqlite,
+        BootL1::Disabled,
+        None,
+        suprnova::render_cache::HintsConfig::Disabled,
+        Some(limit),
     )
     .await
 }
@@ -648,6 +672,7 @@ pub async fn boot_with_render_cache_on_live_server_for_test(
         BootL1::Disabled,
         None,
         suprnova::render_cache::HintsConfig::Disabled,
+        None,
     )
     .await
 }
@@ -671,6 +696,7 @@ pub async fn reboot_with_render_cache_on_the_same_database_and_l1_for_test(
         BootL1::Existing(l1_dir),
         None,
         suprnova::render_cache::HintsConfig::Disabled,
+        None,
     )
     .await
 }
@@ -693,6 +719,7 @@ pub async fn reboot_with_render_cache_on_the_same_database_and_l1_with_build_id_
         BootL1::Existing(l1_dir),
         Some(build_id.to_owned()),
         suprnova::render_cache::HintsConfig::Disabled,
+        None,
     )
     .await
 }
@@ -744,6 +771,7 @@ async fn boot(
     l1: BootL1,
     build_id: Option<String>,
     hints: suprnova::render_cache::HintsConfig,
+    max_background_refreshes: Option<usize>,
 ) -> Arc<Harness> {
     static CRYPT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     CRYPT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
@@ -1715,6 +1743,9 @@ async fn boot(
     let mut config = config;
     config.enabled = true;
     config.hints = hints;
+    if let Some(limit) = max_background_refreshes {
+        config.max_background_refreshes = limit;
+    }
     if let Some(build_id) = build_id {
         config = config.with_build_id(build_id);
     }

@@ -31,6 +31,25 @@ const DEFAULT_L1_BYTES: u64 = 1024 * 1024 * 1024;
 const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1:6379";
 /// The key namespace a Redis tier writes under when nothing overrides it.
 const DEFAULT_REDIS_PREFIX: &str = "suprnova_render:";
+/// Background refreshes a node admits per CPU it can use, when
+/// `RENDER_CACHE_MAX_BACKGROUND_REFRESHES` names no limit.
+///
+/// A refresh is a handler render, and a render spends most of its time
+/// waiting on the database or another service, so a node keeps its CPUs
+/// busy with many more refreshes in flight than it has CPUs. The limit is
+/// there to stop detached refresh tasks from growing without bound when many
+/// keys go stale together (DATA-045), not to slow down a healthy node.
+const BACKGROUND_REFRESHES_PER_CPU: usize = 32;
+
+/// The background refresh limit a node takes when nothing overrides it:
+/// [`BACKGROUND_REFRESHES_PER_CPU`] for every CPU this process can use, so
+/// a larger machine refreshes more keys at once. A platform that cannot say
+/// how many CPUs it has counts as one.
+fn default_max_background_refreshes() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .saturating_mul(BACKGROUND_REFRESHES_PER_CPU)
+}
 
 /// In-process store bounds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -279,6 +298,18 @@ pub struct RenderCacheConfig {
     pub failure: FailurePolicy,
     /// Whether credible generation hints are published and listened for.
     pub hints: HintsConfig,
+    /// The most keys this node refreshes in the background at once.
+    ///
+    /// A stale-servable hit serves the stored copy and refreshes it behind
+    /// the request, one refresh per key. Without a limit across keys, a
+    /// burst of hits on many stale keys started one detached render each,
+    /// as many as there were keys (DATA-045). Past this limit a stale hit
+    /// still serves the stored copy at once and starts no refresh; a later
+    /// hit refreshes it once a slot is free, and an entry that goes Dead
+    /// first is rebuilt in the foreground. Zero turns background refresh
+    /// off. [`Self::from_env`] reads `RENDER_CACHE_MAX_BACKGROUND_REFRESHES`
+    /// and defaults to 32 for every CPU this process can use.
+    pub max_background_refreshes: usize,
     /// Application and view build identity namespace.
     ///
     /// [`Self::from_env`] resolves this through three sources, in order:
@@ -320,6 +351,7 @@ impl PartialEq for RenderCacheConfig {
             && self.coordinator == other.coordinator
             && self.failure == other.failure
             && self.hints == other.hints
+            && self.max_background_refreshes == other.max_background_refreshes
             && self.build_id == other.build_id
     }
 }
@@ -340,6 +372,7 @@ impl std::fmt::Debug for RenderCacheConfig {
             .field("coordinator", &self.coordinator)
             .field("failure", &self.failure)
             .field("hints", &self.hints)
+            .field("max_background_refreshes", &self.max_background_refreshes)
             .field("build_id", &self.build_id)
             .field("clock_override", &self.clock_override.is_some())
             .field("coordinator_override", &self.coordinator_override.is_some())
@@ -464,6 +497,10 @@ impl RenderCacheConfig {
     /// `suprnova_render:`), `RENDER_CACHE_LEASE_MS` (default 30000), and
     /// `RENDER_CACHE_MAX_WAITERS` (default 128).
     ///
+    /// `RENDER_CACHE_MAX_BACKGROUND_REFRESHES` caps how many keys this node
+    /// refreshes in the background at once; it defaults to 32 for every CPU
+    /// the process can use. See [`Self::max_background_refreshes`].
+    ///
     /// `RENDER_CACHE_HINTS` (`disabled` or `redis`) says whether this node
     /// announces and listens for credible generation hints. It defaults to
     /// `redis` under the Redis profile and to `disabled` under the other
@@ -535,6 +572,9 @@ impl RenderCacheConfig {
             DEFAULT_MAX_WAITERS as u64,
         ))
         .unwrap_or(DEFAULT_MAX_WAITERS);
+        let max_background_refreshes = non_empty("RENDER_CACHE_MAX_BACKGROUND_REFRESHES")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(default_max_background_refreshes);
         let url = non_empty("RENDER_CACHE_REDIS_URL")
             .or_else(|| non_empty("REDIS_URL"))
             .unwrap_or_else(|| DEFAULT_REDIS_URL.to_owned());
@@ -651,6 +691,7 @@ impl RenderCacheConfig {
             l1,
             coordinator,
             hints,
+            max_background_refreshes,
             failure: if read("RENDER_CACHE_FAILURE").as_deref() == Some("closed") {
                 FailurePolicy::Closed
             } else {
@@ -794,6 +835,28 @@ mod tests {
                 prefix: "tenant_a:".to_owned(),
                 max_bytes: 1024 * 1024 * 1024,
             }
+        );
+    }
+
+    /// DATA-045: the background refresh limit scales with the CPUs this
+    /// process can use unless the variable names one, and an explicit zero
+    /// is kept as written rather than replaced by the default.
+    #[test]
+    fn the_background_refresh_limit_scales_with_the_machine_unless_set() {
+        let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        assert_eq!(parsed(&[]).max_background_refreshes, cpus * 32);
+        assert_eq!(
+            parsed(&[("RENDER_CACHE_MAX_BACKGROUND_REFRESHES", "5000")]).max_background_refreshes,
+            5_000
+        );
+        assert_eq!(
+            parsed(&[("RENDER_CACHE_MAX_BACKGROUND_REFRESHES", "0")]).max_background_refreshes,
+            0
+        );
+        assert_eq!(
+            parsed(&[("RENDER_CACHE_MAX_BACKGROUND_REFRESHES", "many")]).max_background_refreshes,
+            cpus * 32,
+            "an unparseable value falls back to the default, like every other numeric knob"
         );
     }
 

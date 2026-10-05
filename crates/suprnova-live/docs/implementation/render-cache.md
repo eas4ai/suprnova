@@ -1756,6 +1756,7 @@ L1 is not touched by an epoch advance and keeps every pre-epoch file until
 | `RENDER_CACHE_L1_DIR` | unset (L1 disabled) |
 | `RENDER_CACHE_L1_BYTES` | 1 GiB |
 | `RENDER_CACHE_FAILURE` | `open` (`closed` is the only other accepted value) |
+| `RENDER_CACHE_MAX_BACKGROUND_REFRESHES` | 32 for every CPU the process can use (`0` turns background refresh off) |
 | `APP_BUILD_ID` | the framework crate's own `CARGO_PKG_VERSION` |
 
 `APP_BUILD_ID`'s default expands at compile time inside the framework crate,
