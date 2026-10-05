@@ -169,7 +169,14 @@ pub(crate) trait Tools {
     fn verify(&self, key: &PublicKey, hash: &Digest, signature: &Signature) -> Result<()>;
     fn sign(&self, key: &SecretKey, hash: &Digest) -> Result<Signature>;
     fn generate(&self) -> Result<(SecretKey, PublicKey)>;
-    fn scan(&self, component: &ComponentFiles<'_>) -> Result<ScanReport>;
+    /// Scans with what the check knows beyond the files: the manifest's
+    /// `elements` and the views its dependencies carry, which the view
+    /// checks follow (REG-022).
+    fn scan(
+        &self,
+        component: &ComponentFiles<'_>,
+        context: &scan::ScanContext<'_>,
+    ) -> Result<ScanReport>;
     fn resolve_address(&self, spec: &str) -> Result<RemoteSpec>;
 }
 
@@ -202,8 +209,12 @@ impl Tools for Registry {
         signing::generate()
     }
 
-    fn scan(&self, component: &ComponentFiles<'_>) -> Result<ScanReport> {
-        scan::scan_component(component, scan::allowlist::embedded()?)
+    fn scan(
+        &self,
+        component: &ComponentFiles<'_>,
+        context: &scan::ScanContext<'_>,
+    ) -> Result<ScanReport> {
+        scan::scan_component_in(component, context, scan::allowlist::embedded()?)
     }
 
     fn resolve_address(&self, spec: &str) -> Result<RemoteSpec> {
@@ -776,10 +787,12 @@ fn inspect(
         plan.visited_local.insert(directory.clone());
         let mut dependency_modules = Vec::new();
         let mut importable_views = shipped_views.clone();
+        let mut dependency_views = Vec::new();
         for dependency in &component.manifest.dependencies {
             if let Some(reached) = plan.resolve(&Origin::Local, &directory, dependency) {
                 dependency_modules.extend(reached.modules);
                 importable_views.extend(reached.views);
+                dependency_views.extend(reached.sources);
             }
         }
         component_report.problems.extend(plan.problems);
@@ -805,7 +818,12 @@ fn inspect(
             dependency_modules: &dependency_modules,
             importable_views: &importable_views,
         };
-        match tools.scan(&files) {
+        let context = scan::ScanContext {
+            register: None,
+            elements: Some(&component.manifest.elements),
+            dependency_views: &dependency_views,
+        };
+        match tools.scan(&files, &context) {
             Ok(scan) => {
                 component_report.capabilities = scan.capabilities;
                 component_report
@@ -1082,6 +1100,9 @@ struct Reached {
     modules: Vec<String>,
     /// Its views, as a view includes them.
     views: Vec<String>,
+    /// Its views' sources by the same paths, for the view checks of the
+    /// component that depends on it.
+    sources: Vec<(String, String)>,
 }
 
 /// Where a dependency is written, which decides what `./` means.
@@ -1264,9 +1285,13 @@ impl<'a> Plan<'a> {
             if let Some(stem) = file.strip_suffix(".rs") {
                 reached.modules.push(format!("{namespace_module}::{stem}"));
             } else if file.ends_with(".html") {
-                reached
-                    .views
-                    .push(format!("{}-ui/{name}/{file}", self.library.namespace));
+                let path = format!("{}-ui/{name}/{file}", self.library.namespace);
+                if let Some((_, bytes)) = component.files.iter().find(|(known, _)| known == file)
+                    && let Ok(source) = std::str::from_utf8(bytes)
+                {
+                    reached.sources.push((path.clone(), source.to_owned()));
+                }
+                reached.views.push(path);
             }
         }
         Some(reached)
@@ -1361,6 +1386,7 @@ impl<'a> Plan<'a> {
             .parse_manifest(&manifest_bytes, component, &json.namespace)
             .map_err(text)?;
         let mut files = BTreeMap::new();
+        let mut view_sources = Vec::new();
         for name in &manifest.files {
             if !plain_file_name(name) {
                 return Err(format!(
@@ -1372,6 +1398,11 @@ impl<'a> Plan<'a> {
                 .file(library, &commit, &format!("{base}/{name}"))
                 .map_err(text)?;
             files.insert(name.clone(), Digest::of(&bytes));
+            if name.ends_with(".html")
+                && let Ok(source) = String::from_utf8(bytes)
+            {
+                view_sources.push((format!("{}-ui/{component}/{name}", json.namespace), source));
+            }
         }
         let signature_bytes = self
             .fetcher
@@ -1402,6 +1433,7 @@ impl<'a> Plan<'a> {
                     .push(format!("{}-ui/{component}/{name}", json.namespace));
             }
         }
+        reached.sources = view_sources;
         Ok((reached, manifest.dependencies))
     }
 }
@@ -1486,7 +1518,7 @@ mod tests {
     use crate::registry::author_key;
     use crate::registry::fetch::FakeFetcher;
     use crate::registry::library::{ComponentManifest, LibraryJson};
-    use crate::registry::scan::{ComponentFiles, Finding, ScanReport};
+    use crate::registry::scan::{ComponentFiles, Finding, ScanContext, ScanReport};
     use crate::registry::signing::{PublicKey, SecretKey, Signature};
     use crate::registry::statement::{Digest, Statement};
     use crate::registry::{Capability, RegistryError, Result};
@@ -1594,7 +1626,11 @@ mod tests {
             Ok((SecretKey::from_bytes([7u8; 32]), public))
         }
 
-        fn scan(&self, component: &ComponentFiles<'_>) -> Result<ScanReport> {
+        fn scan(
+            &self,
+            component: &ComponentFiles<'_>,
+            _context: &ScanContext<'_>,
+        ) -> Result<ScanReport> {
             let mut report = ScanReport::default();
             for (name, bytes) in component.files {
                 let text = String::from_utf8_lossy(bytes);
@@ -1944,7 +1980,11 @@ mod tests {
             fn generate(&self) -> Result<(SecretKey, PublicKey)> {
                 Fake.generate()
             }
-            fn scan(&self, _component: &ComponentFiles<'_>) -> Result<ScanReport> {
+            fn scan(
+                &self,
+                _component: &ComponentFiles<'_>,
+                _context: &ScanContext<'_>,
+            ) -> Result<ScanReport> {
                 Err(RegistryError::NotBuilt("the component scan"))
             }
             fn resolve_address(&self, spec: &str) -> Result<RemoteSpec> {

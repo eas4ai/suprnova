@@ -94,6 +94,12 @@ askama_parser = "=0.16.0"
 # The component scan tokenizes stylesheets, `style` elements and `style`
 # attributes (REG-031); already in the lock through the Live crate.
 cssparser = "0.37"
+# The component scan runs `live:check`'s view checker on a vendored
+# component's views against the contract read from its Rust syntax, without
+# compiling the application (REG-022). The Live engine crate holds the
+# checker; it is the framework's engine, not the framework, so the CLI still
+# does not depend on the `suprnova` crate.
+suprnova-live = { path = "../crates/suprnova-live", version = "3.2.1" }
 # The component scan parses a vendored script as a JavaScript module and
 # walks its syntax tree (REG-032). Pure Rust; pinned to 0.139, the newest
 # release whose MSRV (1.94) the workspace meets.

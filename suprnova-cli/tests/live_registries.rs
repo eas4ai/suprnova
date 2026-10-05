@@ -35,7 +35,7 @@ use suprnova_cli::registry::plan::{self, FileOutcome, Options, Plan, Prompter, S
 use suprnova_cli::registry::project::{
     self, InstallRecord, Journal, ProjectFile, ProjectLock, verify_installed,
 };
-use suprnova_cli::registry::scan::{self, ComponentFiles, ScanReport};
+use suprnova_cli::registry::scan::{self, ComponentFiles, ScanContext, ScanReport};
 use suprnova_cli::registry::signing::{self, PublicKey, SecretKey};
 use suprnova_cli::registry::statement::{Digest, Statement};
 use suprnova_cli::registry::{Capability, RegistryError};
@@ -348,9 +348,9 @@ impl Scanner for TestScanner {
     fn scan(
         &self,
         component: &ComponentFiles<'_>,
-        manifest: &library::ComponentManifest,
+        context: &ScanContext<'_>,
     ) -> Result<ScanReport, RegistryError> {
-        plan::AllowlistScanner.scan(component, manifest)
+        plan::AllowlistScanner.scan(component, context)
     }
 }
 
@@ -364,7 +364,7 @@ impl Scanner for MarkerScanner {
     fn scan(
         &self,
         component: &ComponentFiles<'_>,
-        _manifest: &library::ComponentManifest,
+        _context: &ScanContext<'_>,
     ) -> Result<ScanReport, RegistryError> {
         let mut report = ScanReport::default();
         for (name, bytes) in component.files {
@@ -2722,7 +2722,7 @@ fn reg_023_one_byte_changed_after_signing_is_refused() {
         fn scan(
             &self,
             _component: &ComponentFiles<'_>,
-            _manifest: &library::ComponentManifest,
+            _context: &ScanContext<'_>,
         ) -> Result<ScanReport, RegistryError> {
             panic!("an unverified component was scanned")
         }
