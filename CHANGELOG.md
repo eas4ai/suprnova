@@ -1073,7 +1073,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   bucket. Creating a role or permission and granting one succeed when two
   requests make the same one at once, on every engine. Email verification
   stamps only the address the link was mailed to, even if the address
-  changes while `verify` runs. On Postgres, a user id above `i64::MAX`
+  changes while `verify` runs; a custom provider closes the remaining
+  window by overriding `UserProvider::mark_email_verified_for`, as its docs
+  explain. `session::destroy_all_for_user` destroys only the sessions of
+  the default guard's user, so a password reset for web user 7 no longer
+  signs out admin 7, and the new `destroy_all_for_guard_user` does the same
+  for another guard; every Live membership issued under a destroyed
+  session now ends, whichever guard's user held it. On Postgres, a user id above `i64::MAX`
   binds by the column type of the table the lookup actually reads. A
   framework TOTP enrollment and a Magnetar enrollment that race each other
   leave the account with one second factor; in a tight race both answer
