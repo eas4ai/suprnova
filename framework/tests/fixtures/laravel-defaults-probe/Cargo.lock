@@ -146,7 +146,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -157,7 +157,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -735,7 +735,7 @@ version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
 dependencies = [
- "fastrand 2.4.1",
+ "fastrand",
  "gloo-timers",
  "tokio",
 ]
@@ -1394,15 +1394,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam-channel"
-version = "0.5.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82b8f8f868b36967f9606790d1903570de9ceaf870a7bf9fbbd3016d636a2cb2"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
 name = "crossbeam-deque"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1941,7 +1932,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2001,15 +1992,6 @@ dependencies = [
 
 [[package]]
 name = "fastrand"
-version = "1.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e51093e27b0797c359783294ca4f0a911c270184cb10f85783b118614a1501be"
-dependencies = [
- "instant",
-]
-
-[[package]]
-name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
@@ -2042,16 +2024,6 @@ checksum = "c0b50bfb653653f9ca9095b427bed08ab8d75a137839d9ad64eb11810d5b6393"
 dependencies = [
  "rand_core 0.6.4",
  "subtle",
-]
-
-[[package]]
-name = "filetime"
-version = "0.2.29"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
-dependencies = [
- "cfg-if",
- "libc",
 ]
 
 [[package]]
@@ -2134,17 +2106,6 @@ dependencies = [
 
 [[package]]
 name = "flume"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
-dependencies = [
- "futures-core",
- "futures-sink",
- "spin 0.9.9",
-]
-
-[[package]]
-name = "flume"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
@@ -2211,15 +2172,6 @@ name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
-
-[[package]]
-name = "fsevent-sys"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76ee7a02da4d231650c7cea31349b889be2f45ddb3ef3032d2ec8185f6313fd2"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "funty"
@@ -2765,7 +2717,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-layer",
@@ -3235,26 +3187,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inotify"
-version = "0.9.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8069d3ec154eb856955c1c0fbffefbf5f3c40a104ec912d4797314c1801abff"
-dependencies = [
- "bitflags 1.3.2",
- "inotify-sys",
- "libc",
-]
-
-[[package]]
-name = "inotify-sys"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e05c02b5e89bff3b946cedeca278abc628fe811e604f027c45a8aa3cf793d0eb"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "inout"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3270,15 +3202,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7"
 dependencies = [
  "hybrid-array",
-]
-
-[[package]]
-name = "instant"
-version = "0.1.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0242819d153cba4b4b05a5a8f2a7e9bbf97b6055b2a002b395c96b5ff3c0222"
-dependencies = [
- "cfg-if",
 ]
 
 [[package]]
@@ -3500,26 +3423,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kqueue"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eac30106d7dce88daf4a3fcb4879ea939476d5074a9b7ddd0fb97fa4bed5596a"
-dependencies = [
- "kqueue-sys",
- "libc",
-]
-
-[[package]]
-name = "kqueue-sys"
-version = "1.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07293a4e297ac234359b510362495713f75ea345d5307140414f20c69ffeb087"
-dependencies = [
- "bitflags 2.11.1",
- "libc",
-]
-
-[[package]]
 name = "laravel-defaults-probe"
 version = "0.0.0"
 dependencies = [
@@ -3545,7 +3448,7 @@ dependencies = [
  "base64 0.22.1",
  "email-encoding",
  "email_address",
- "fastrand 2.4.1",
+ "fastrand",
  "futures-io",
  "futures-util",
  "hostname",
@@ -3639,18 +3542,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
 dependencies = [
  "cc",
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
-name = "libz-sys"
-version = "1.1.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc3a226e576f50782b3305c5ccf458698f92798987f551c6a02efe8276721e22"
-dependencies = [
- "cc",
- "libc",
  "pkg-config",
  "vcpkg",
 ]
@@ -3827,18 +3718,6 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "0.8.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4a650543ca06a924e8b371db273b2756685faae30f8487da1b56505a8f78b0c"
-dependencies = [
- "libc",
- "log",
- "wasi",
- "windows-sys 0.48.0",
-]
-
-[[package]]
-name = "mio"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1"
@@ -3926,31 +3805,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "notify"
-version = "6.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6205bd8bb1e454ad2e27422015fb5e4f2bcc7e08fa8f27058670d208324a4d2d"
-dependencies = [
- "bitflags 2.11.1",
- "crossbeam-channel",
- "filetime",
- "fsevent-sys",
- "inotify",
- "kqueue",
- "libc",
- "log",
- "mio 0.8.11",
- "walkdir",
- "windows-sys 0.48.0",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4009,28 +3869,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num_enum"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d0bca838442ec211fa11de3a8b0e0e8f3a4522575b5c4c06ed722e005036f26"
-dependencies = [
- "num_enum_derive",
- "rustversion",
-]
-
-[[package]]
-name = "num_enum_derive"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
-dependencies = [
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "oid-registry"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4082,7 +3920,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 [[package]]
 name = "opendal"
 version = "0.58.0"
-source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2"
 dependencies = [
  "opendal-core",
  "opendal-layer-logging",
@@ -4097,7 +3935,7 @@ dependencies = [
 [[package]]
 name = "opendal-core"
 version = "0.58.0"
-source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4122,7 +3960,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-logging"
 version = "0.58.0"
-source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2"
 dependencies = [
  "log",
  "opendal-core",
@@ -4131,7 +3969,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-observe-metrics-common"
 version = "0.58.0"
-source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2"
 dependencies = [
  "futures",
  "http 1.4.1",
@@ -4141,7 +3979,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-prometheus-client"
 version = "0.58.0"
-source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2"
 dependencies = [
  "opendal-core",
  "opendal-layer-observe-metrics-common",
@@ -4151,7 +3989,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-retry"
 version = "0.58.0"
-source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2"
 dependencies = [
  "backon",
  "log",
@@ -4161,7 +3999,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-timeout"
 version = "0.58.0"
-source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2"
 dependencies = [
  "opendal-core",
  "tokio",
@@ -4170,7 +4008,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-tracing"
 version = "0.58.0"
-source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2"
 dependencies = [
  "futures",
  "http 1.4.1",
@@ -4181,7 +4019,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-fs"
 version = "0.58.0"
-source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2"
 dependencies = [
  "bytes",
  "log",
@@ -4194,7 +4032,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-s3"
 version = "0.58.0"
-source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4325,12 +4163,9 @@ dependencies = [
 
 [[package]]
 name = "oxideav-gif"
-version = "0.0.11"
+version = "0.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73f2d324fc3bbff4cd4456fec2d418812f9fd355e31b813b0395942893422b34"
-dependencies = [
- "oxideav-core",
-]
+checksum = "7b9580234fd328a4e8f4eb285b4322b1bddb1b32123b12bcfa3e1b56a8faf664"
 
 [[package]]
 name = "oxideav-image-filter"
@@ -4588,7 +4423,7 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "135ace3a761e564ec88c03a77317a7c6b80bb7f7135ef2544dbe054243b89737"
 dependencies = [
- "fastrand 2.4.1",
+ "fastrand",
  "phf_shared 0.13.1",
 ]
 
@@ -4975,7 +4810,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -5013,7 +4848,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -5126,55 +4961,6 @@ name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
-
-[[package]]
-name = "rdkafka"
-version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1beea247b9a7600a81d4cc33f659ce1a77e1988323d7d2809c7ed1c21f4c316d"
-dependencies = [
- "futures-channel",
- "futures-util",
- "libc",
- "log",
- "rdkafka-sys",
- "serde",
- "serde_derive",
- "serde_json",
- "slab",
- "tokio",
-]
-
-[[package]]
-name = "rdkafka-sys"
-version = "4.10.0+2.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e234cf318915c1059d4921ef7f75616b5219b10b46e9f3a511a15eb4b56a3f77"
-dependencies = [
- "libc",
- "libz-sys",
- "num_enum",
- "pkg-config",
-]
-
-[[package]]
-name = "redis"
-version = "0.25.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e46922bd01fefcfdcf58d9cd626da082bb2cde27211920dacfde6b2ecf9a35b"
-dependencies = [
- "async-trait",
- "bytes",
- "combine",
- "futures-util",
- "itoa",
- "percent-encoding",
- "pin-project-lite",
- "ryu",
- "tokio",
- "tokio-util",
- "url",
-]
 
 [[package]]
 name = "redis"
@@ -5502,7 +5288,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5570,7 +5356,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5817,122 +5603,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "sea-streamer"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b85ee94bfb9b6e4e912a38186371cf02e70a785e2e939c86f98220180b4c4baf"
-dependencies = [
- "sea-streamer-kafka",
- "sea-streamer-redis",
- "sea-streamer-runtime",
- "sea-streamer-socket",
- "sea-streamer-stdio",
- "sea-streamer-types",
-]
-
-[[package]]
-name = "sea-streamer-file"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5072bf729b4eba9bac2e0f2237a176c4dcf2b88ec708eb1969b01c56ed690c85"
-dependencies = [
- "fastrand 1.9.0",
- "flume 0.11.1",
- "lazy_static",
- "log",
- "notify",
- "sea-streamer-runtime",
- "sea-streamer-types",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
-name = "sea-streamer-kafka"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd7bd866e445443c2a1587bab2264594fa011655e5cf758c29ecd41207c1fe33"
-dependencies = [
- "lazy_static",
- "mac_address",
- "rdkafka",
- "sea-streamer-runtime",
- "sea-streamer-types",
- "tokio",
-]
-
-[[package]]
-name = "sea-streamer-redis"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31538b8afac112dd97c1cb187388810b5905b101e0309e0783cf5a762caa450c"
-dependencies = [
- "flume 0.11.1",
- "lazy_static",
- "log",
- "mac_address",
- "redis 0.25.5",
- "sea-streamer-runtime",
- "sea-streamer-types",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
-name = "sea-streamer-runtime"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e5be9d38d457fbca3cc80f68836f7981554315a1279ea4d60d618543f2170b6"
-dependencies = [
- "futures",
- "tokio",
-]
-
-[[package]]
-name = "sea-streamer-socket"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5b0a9931812d0c3b474ada5568557cca2fb735160881b8a75f31fc09398ead1"
-dependencies = [
- "sea-streamer-file",
- "sea-streamer-kafka",
- "sea-streamer-redis",
- "sea-streamer-stdio",
- "sea-streamer-types",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "sea-streamer-stdio"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a79be6d02ed74805a5ae0f3e201afd5b482c4225d2e8b80a71764db494a0cfd0"
-dependencies = [
- "flume 0.11.1",
- "lazy_static",
- "log",
- "nom 7.1.3",
- "sea-streamer-runtime",
- "sea-streamer-types",
- "thiserror 1.0.69",
- "time",
-]
-
-[[package]]
-name = "sea-streamer-types"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "971ec0f94d12ca48d82042d8b669c67be1527c5b5a44350f28d55b341173feb1"
-dependencies = [
- "futures",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "time",
- "url",
 ]
 
 [[package]]
@@ -6253,7 +5923,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6453,7 +6123,7 @@ checksum = "488e99c397a62007e4229aec669a179816339afc6d2620ca6fa420dbee2e982c"
 dependencies = [
  "atoi",
  "chrono",
- "flume 0.12.0",
+ "flume",
  "form_urlencoded",
  "futures-channel",
  "futures-core",
@@ -6556,6 +6226,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "clap",
+ "compcol",
  "comrak",
  "crypto_secretbox",
  "dashmap",
@@ -6609,18 +6280,17 @@ dependencies = [
  "percent-encoding",
  "qdrant-client",
  "rand 0.10.1",
- "redis 1.2.1",
+ "redis",
  "regex",
  "reqsign-aws-v4",
  "reqsign-core",
  "reqsign-file-read-tokio",
  "reqwest 0.13.4",
  "rust_decimal",
+ "rustix",
  "rustls",
  "sea-orm",
  "sea-orm-migration",
- "sea-streamer",
- "sea-streamer-redis",
  "secrecy",
  "serde",
  "serde_json",
@@ -6649,7 +6319,9 @@ dependencies = [
  "validator",
  "webauthn-rs",
  "writeable 0.6.3",
+ "xattr",
  "zeroize",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -6843,11 +6515,11 @@ version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
- "fastrand 2.4.1",
- "getrandom 0.4.3",
+ "fastrand",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7013,7 +6685,7 @@ checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
  "bytes",
  "libc",
- "mio 1.2.0",
+ "mio",
  "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
@@ -7834,7 +7506,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -8346,3 +8018,18 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zune-core"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.5.16-rc2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b554da611136df9905629a243ee2e9a92453e0c4476d91185133d9b9c058af15"
+dependencies = [
+ "zune-core",
+]
