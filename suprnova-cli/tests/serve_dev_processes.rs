@@ -1135,7 +1135,7 @@ fn serve_runs_the_migrations_when_it_starts_and_the_watched_backend_runs_none() 
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert_eq!(calls[0], "run --bin shop -- migrate");
     assert!(
-        calls[1].ends_with("live:wait && cargo run --bin shop -- serve --no-migrate"),
+        calls[1].ends_with("live:wait -- run --bin shop -- serve --no-migrate"),
         "a restart of the watcher must run no migration: {calls:?}"
     );
 }
@@ -1179,7 +1179,7 @@ fn a_failed_run_leaves_the_backend_to_migrate_by_itself() {
 
     assert_eq!(calls[0], "run --bin shop -- migrate");
     assert!(
-        calls[1].ends_with("live:wait && cargo run --bin shop"),
+        calls[1].ends_with("live:wait -- run --bin shop"),
         "the backend must migrate itself, and refuse to serve until it can: {calls:?}"
     );
     let stderr = fs::read_to_string(&err_path).unwrap_or_default();
@@ -1200,7 +1200,7 @@ fn migrate_always_is_the_backend_that_migrates_on_every_start() {
 
     assert_eq!(calls.len(), 1, "no run at the start: {calls:?}");
     assert!(
-        calls[0].ends_with("live:wait && cargo run --bin shop"),
+        calls[0].ends_with("live:wait -- run --bin shop"),
         "{calls:?}"
     );
 }
@@ -1218,7 +1218,7 @@ fn no_migrate_runs_no_migration_at_all() {
 
         assert_eq!(calls.len(), 1, "{flags:?}: no run at the start: {calls:?}");
         assert!(
-            calls[0].ends_with("live:wait && cargo run --bin shop -- serve --no-migrate"),
+            calls[0].ends_with("live:wait -- run --bin shop -- serve --no-migrate"),
             "{flags:?}: {calls:?}"
         );
     }
@@ -1237,7 +1237,7 @@ fn a_project_with_no_migrations_directory_is_left_to_migrate_by_itself() {
 
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert!(
-        calls[0].ends_with("live:wait && cargo run --bin shop"),
+        calls[0].ends_with("live:wait -- run --bin shop"),
         "{calls:?}"
     );
 }

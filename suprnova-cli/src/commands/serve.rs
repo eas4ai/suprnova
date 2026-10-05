@@ -1214,13 +1214,9 @@ pub fn run(
     // install holding the lock, put back every file it names before
     // anything reads the project (REG-029).
     match restore_interrupted_install(Path::new(".")) {
-        Ok(true) => ui::warning(&format!(
-            "an interrupted live:add left {}; every file it named was restored",
-            crate::registry::project::JOURNAL_FILE
-        )),
-        Ok(false) => {}
+        Ok(outcome) => report_restore(outcome),
         Err(e) => {
-            ui::error(&e);
+            ui::error(&crate::registry::printable_lines(&e));
             std::process::exit(1);
         }
     }
@@ -1583,10 +1579,15 @@ const BACKEND_WATCH_PATHS: [&str; 7] = [
 ];
 
 /// The template directories `askama.toml` names under `[general] dirs`,
-/// as plain relative paths inside the project. One that leaves the project
-/// or does not exist is left out, as a missing `-w` path would stop
-/// cargo-watch from starting; a file that does not parse names none, since
-/// the build reports it.
+/// each as `cargo watch -w` takes it: a directory inside the project as its
+/// relative path, one outside it as its canonical absolute path. A library
+/// preview reads its views from `../components` (REG-018), so a directory
+/// outside the project is watched like one inside, and watching it covers
+/// the `#[path]`-included Rust files under it too. One that does not exist
+/// is left out, as a missing `-w` path would stop cargo-watch from starting;
+/// the project root itself is left out, since watching it would watch
+/// `target/`; a file that does not parse names none, since the build
+/// reports it.
 fn askama_dirs(project: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(project.join("askama.toml")) else {
         return Vec::new();
@@ -1594,26 +1595,39 @@ fn askama_dirs(project: &Path) -> Vec<String> {
     let Ok(table) = text.parse::<toml::Table>() else {
         return Vec::new();
     };
-    table
+    let Ok(root) = std::fs::canonicalize(project) else {
+        return Vec::new();
+    };
+    let mut watched = Vec::new();
+    let dirs = table
         .get("general")
         .and_then(|general| general.get("dirs"))
         .and_then(toml::Value::as_array)
-        .map(|dirs| {
-            dirs.iter()
-                .filter_map(toml::Value::as_str)
-                .map(|dir| dir.trim_end_matches('/').to_owned())
-                .filter(|dir| {
-                    let path = Path::new(dir);
-                    !dir.is_empty()
-                        && path.is_relative()
-                        && path
-                            .components()
-                            .all(|part| matches!(part, std::path::Component::Normal(_)))
-                        && project.join(path).is_dir()
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+        .cloned()
+        .unwrap_or_default();
+    for dir in dirs.iter().filter_map(toml::Value::as_str) {
+        let Ok(canonical) = std::fs::canonicalize(project.join(dir)) else {
+            continue;
+        };
+        if !canonical.is_dir() || canonical == root {
+            continue;
+        }
+        let shown = match canonical.strip_prefix(&root) {
+            Ok(inside) => inside
+                .components()
+                .filter_map(|part| part.as_os_str().to_str())
+                .collect::<Vec<_>>()
+                .join("/"),
+            Err(_) => match canonical.to_str() {
+                Some(outside) => outside.to_owned(),
+                None => continue,
+            },
+        };
+        if !watched.contains(&shown) {
+            watched.push(shown);
+        }
+    }
+    watched
 }
 
 /// Turns off cargo-watch's `.gitignore` filtering.
@@ -1661,12 +1675,13 @@ const NO_GITIGNORE_FILTER: &str = "--no-vcs-ignores";
 /// scope to, and refusing to start would be a worse answer than a noisy
 /// watcher. `validate_suprnova_project` has already required `Cargo.toml`
 /// by the time `serve` reaches here, so it is not a case a user meets.
-/// Each build runs behind `wait`, the CLI's `live:wait`, as one shell
-/// command: `<wait> && cargo <run_cmd>`. While a `live:add` holds the
-/// project lock the wait blocks, so no build starts on a half-written
-/// install; cargo-watch restarts the waiting command on every change the
-/// install makes, and the one left running builds once the lock is
-/// released (REG-029).
+/// Each build runs through `wait`, the CLI's `live:wait`, as one shell
+/// command: `<wait> -- <run_cmd>`, which runs `cargo <run_cmd>` itself.
+/// While a `live:add` holds the project lock it waits, so no build starts
+/// on a half-written install, and the build holds a shared lock until it
+/// finishes, so no install starts mid-build. cargo-watch restarts the
+/// waiting command on every change an install makes, and the one left
+/// running builds once the lock is released (REG-029).
 fn backend_watch_args(project: &Path, run_cmd: &str, wait: &str) -> Vec<String> {
     let mut present: Vec<String> = BACKEND_WATCH_PATHS
         .into_iter()
@@ -1691,7 +1706,7 @@ fn backend_watch_args(project: &Path, run_cmd: &str, wait: &str) -> Vec<String> 
         args.push(candidate.to_string());
     }
     args.push("-s".to_string());
-    args.push(format!("{wait} && cargo {run_cmd}"));
+    args.push(format!("{wait} -- {run_cmd}"));
     args
 }
 
@@ -1731,31 +1746,56 @@ fn shell_quote(text: &str) -> Result<String, String> {
     Ok(format!("\"{text}\""))
 }
 
-/// Restores the journal an interrupted `live:add` left, under the project
-/// lock, when no install holds it. Reports whether it restored one.
-fn restore_interrupted_install(root: &Path) -> Result<bool, String> {
-    use crate::registry::project::{Journal, ProjectLock};
-    if ProjectLock::is_held(root) || !Journal::exists(root) {
-        return Ok(false);
+/// Restores the journal an install killed in this checkout left, under the
+/// project lock, when no install or build holds it. A journal from anywhere
+/// else is left alone and reported (REG-029).
+fn restore_interrupted_install(root: &Path) -> Result<crate::registry::project::Restore, String> {
+    use crate::registry::project::{Journal, ProjectLock, Restore};
+    if !Journal::exists(root) {
+        return Ok(Restore::Nothing);
     }
     // Taken so no install starts between the check and the restore. An
-    // install that took it first is restoring the journal itself.
+    // install that holds it is restoring the journal itself.
     let Ok(lock) = ProjectLock::acquire(root) else {
-        return Ok(false);
+        return Ok(Restore::Nothing);
     };
-    let restored = Journal::restore(root).map_err(|e| e.to_string())?;
+    let outcome = lock.restore_interrupted().map_err(|e| e.to_string())?;
     lock.release().map_err(|e| e.to_string())?;
-    Ok(restored)
+    Ok(outcome)
 }
 
-/// `live:wait`: returns once no `live:add` holds the project lock, after
-/// restoring the journal of one that was killed. `serve` runs it in front
-/// of every build.
-pub fn wait_for_installs() {
+/// Says what [`restore_interrupted_install`] did, escaped for the terminal.
+fn report_restore(outcome: crate::registry::project::Restore) {
+    use crate::registry::project::{JOURNAL_FILE, Restore, refused_journal};
+    match outcome {
+        Restore::Nothing => {}
+        Restore::Restored => ui::warning(&format!(
+            "an interrupted live:add left {JOURNAL_FILE}; every file it named was restored"
+        )),
+        Restore::Refused(reason) => {
+            ui::warning(&crate::registry::printable_lines(&refused_journal(&reason)))
+        }
+    }
+}
+
+/// `live:wait`: once no `live:add` holds the project lock, and after
+/// restoring the journal of one killed in this checkout, returns, or with
+/// `cargo` arguments runs `cargo <cargo>` itself.
+///
+/// The build holds a shared lock from before it starts until cargo reports
+/// the build finished, so an install cannot take the lock mid-build
+/// (REG-029); `serve` runs every build this way. The lock is released once
+/// the application starts, because `cargo run` keeps running as the
+/// server, and an install must be able to run beside a server that is up.
+/// Cargo's build messages are read from its JSON output and dropped, its
+/// diagnostics go to standard error as usual, and everything after the
+/// build, the application's own output, is passed through unchanged.
+pub fn wait_for_installs(cargo: Vec<String>) {
+    use crate::registry::project::ProjectLock;
     let root = Path::new(".");
     let mut announced = false;
-    loop {
-        if crate::registry::project::ProjectLock::is_held(root) {
+    let shared = loop {
+        if ProjectLock::is_held(root) {
             if !announced {
                 ui::info("live:add is installing; the build waits for it to finish");
                 announced = true;
@@ -1764,19 +1804,105 @@ pub fn wait_for_installs() {
             continue;
         }
         match restore_interrupted_install(root) {
-            Ok(true) => ui::warning(&format!(
-                "an interrupted live:add left {}; every file it named was restored",
-                crate::registry::project::JOURNAL_FILE
-            )),
-            Ok(false) => {}
+            Ok(outcome) => report_restore(outcome),
             Err(e) => {
-                ui::error(&e);
+                ui::error(&crate::registry::printable_lines(&e));
                 std::process::exit(1);
             }
         }
-        if !crate::registry::project::ProjectLock::is_held(root) {
+        if cargo.is_empty() {
+            if ProjectLock::is_held(root) {
+                continue;
+            }
             return;
         }
+        match ProjectLock::acquire_shared(root) {
+            Ok(Some(file)) => break file,
+            Ok(None) => thread::sleep(Duration::from_millis(200)),
+            Err(e) => {
+                ui::error(&crate::registry::printable_lines(&e.to_string()));
+                std::process::exit(1);
+            }
+        }
+    };
+    match build_under_lock(&cargo, shared) {
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            ui::error(&e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Runs `cargo <args>` with its build messages as JSON, holding `lock`
+/// until the build is over, then passes the rest of its output through.
+/// Returns cargo's exit code.
+fn build_under_lock(args: &[String], lock: std::fs::File) -> Result<i32, String> {
+    use std::io::Write as _;
+    let program = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut arguments = args.to_vec();
+    arguments.insert(
+        1.min(arguments.len()),
+        "--message-format=json-render-diagnostics".to_owned(),
+    );
+    let mut child = Command::new(&program)
+        .args(&arguments)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("cannot start cargo: {e}"))?;
+    let output = child
+        .stdout
+        .take()
+        .ok_or_else(|| "cargo's output is not readable".to_owned())?;
+    let mut reader = BufReader::new(output);
+    let mut out = std::io::stdout();
+    let mut lock = Some(lock);
+    let mut line = Vec::new();
+    while lock.is_some() {
+        line.clear();
+        let read = reader
+            .read_until(b'\n', &mut line)
+            .map_err(|e| format!("cannot read cargo's output: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        let reason = serde_json::from_slice::<serde_json::Value>(&line)
+            .ok()
+            .and_then(|message| {
+                message
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            });
+        match reason {
+            Some(reason) if reason == "build-finished" => release_build_lock(&mut lock),
+            // A build message: its diagnostics are already on standard error.
+            Some(_) => {}
+            // Not cargo's: the application is running.
+            None => {
+                release_build_lock(&mut lock);
+                out.write_all(&line)
+                    .and_then(|()| out.flush())
+                    .map_err(|e| format!("cannot write the application's output: {e}"))?;
+            }
+        }
+    }
+    release_build_lock(&mut lock);
+    std::io::copy(&mut reader, &mut out)
+        .map_err(|e| format!("cannot pass the application's output through: {e}"))?;
+    let status = child
+        .wait()
+        .map_err(|e| format!("cannot wait for cargo: {e}"))?;
+    Ok(status.code().unwrap_or(1))
+}
+
+fn release_build_lock(lock: &mut Option<std::fs::File>) {
+    if let Some(file) = lock.take() {
+        // Closing the file releases the lock too; unlocking first makes the
+        // release independent of when the handle is dropped.
+        let _ = file.unlock();
     }
 }
 
@@ -2206,7 +2332,7 @@ mod migrate_when_tests {
         let args = backend_watch_args(dir.path(), &run, "'/bin/suprnova' live:wait");
         assert_eq!(
             args.last().map(String::as_str),
-            Some("'/bin/suprnova' live:wait && cargo run --bin app -- serve --no-migrate")
+            Some("'/bin/suprnova' live:wait -- run --bin app -- serve --no-migrate")
         );
         assert_eq!(args[args.len() - 2], "-s");
     }
@@ -2305,7 +2431,7 @@ mod backend_watch_args_tests {
 
     const RUN: &str = "run --bin app";
     const WAIT: &str = "'/bin/suprnova' live:wait";
-    const SHELL: &str = "'/bin/suprnova' live:wait && cargo run --bin app";
+    const SHELL: &str = "'/bin/suprnova' live:wait -- run --bin app";
 
     #[test]
     fn a_bare_project_watches_only_what_it_actually_has() {
@@ -2326,19 +2452,27 @@ mod backend_watch_args_tests {
     #[test]
     fn the_views_are_watched_where_askama_reads_them() {
         // Askama compiles the views into the application, so a view edit,
-        // one `live:add` writes included, needs a rebuild to show.
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir(dir.path().join("src")).expect("create src");
-        std::fs::create_dir_all(dir.path().join("templates/acme-ui")).expect("templates");
-        std::fs::create_dir_all(dir.path().join("views/pages")).expect("views");
+        // one `live:add` writes included, needs a rebuild to show. A library
+        // preview reads its views from `../components`, outside its own
+        // root, and they are watched there too (REG-018).
+        let outer = tempfile::tempdir().expect("tempdir");
+        let dir = outer.path().join("preview");
+        std::fs::create_dir_all(dir.join("src")).expect("create src");
+        std::fs::create_dir_all(dir.join("templates/acme-ui")).expect("templates");
+        std::fs::create_dir_all(dir.join("views/pages")).expect("views");
+        std::fs::create_dir_all(outer.path().join("components/counter")).expect("components");
         std::fs::write(
-            dir.path().join("askama.toml"),
-            "[general]\ndirs = [\"templates\", \"views\", \"../outside\", \"missing\", \"templates/acme-ui\"]\n",
+            dir.join("askama.toml"),
+            "[general]\ndirs = [\"templates\", \"views\", \"../components\", \"missing\", \"templates/acme-ui\", \".\"]\n",
         )
         .expect("askama.toml");
+        let components = std::fs::canonicalize(outer.path().join("components"))
+            .expect("canonical")
+            .display()
+            .to_string();
 
         assert_eq!(
-            backend_watch_args(dir.path(), RUN, WAIT),
+            backend_watch_args(&dir, RUN, WAIT),
             vec![
                 "watch",
                 "-w",
@@ -2347,6 +2481,8 @@ mod backend_watch_args_tests {
                 "templates",
                 "-w",
                 "views",
+                "-w",
+                components.as_str(),
                 "-s",
                 SHELL
             ]

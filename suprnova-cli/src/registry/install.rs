@@ -15,11 +15,12 @@ use std::path::{Path, PathBuf};
 
 use super::address::ComponentAddress;
 use super::fetch::shipped_version;
+use super::library::{FileKind, namespace_module};
 use super::plan::{
     Decisions, FileOutcome, Options, Plan, component_record, decisions_from_flags, outcome_for,
 };
 use super::project::{
-    INSTALL_RECORD, InstallRecord, Journal, PROJECT_FILE, ProjectFile, ShippedRecord,
+    INSTALL_RECORD, InstallRecord, Journal, PROJECT_FILE, ProjectFile, ProjectLock, ShippedRecord,
 };
 use super::statement::Digest;
 use super::{RegistryError, Result};
@@ -32,10 +33,18 @@ use crate::secure_fs;
 pub fn apply(
     plan: &Plan,
     project: &mut ProjectFile,
+    lock: &ProjectLock,
     options: &Options,
 ) -> Result<Vec<(PathBuf, FileOutcome)>> {
     let decisions = decisions_from_flags(plan, options, project)?;
-    apply_with(plan, project, options, &decisions, &registration_edits)
+    apply_with(
+        plan,
+        project,
+        lock,
+        options,
+        &decisions,
+        &registration_edits,
+    )
 }
 
 /// The registration writer's signature: [`registration_edits`] in an
@@ -57,6 +66,7 @@ struct NamespaceEdits {
 pub fn apply_with(
     plan: &Plan,
     project: &mut ProjectFile,
+    lock: &ProjectLock,
     options: &Options,
     decisions: &Decisions,
     registrar: &Registrar<'_>,
@@ -66,6 +76,8 @@ pub fn apply_with(
     let mut outcomes = Vec::new();
     let mut install_records = Vec::with_capacity(plan.components.len());
     let mut kept_names: BTreeMap<ComponentAddress, Vec<String>> = BTreeMap::new();
+    let mut removals: Vec<PathBuf> = Vec::new();
+    let mut undeclare: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for component in &plan.components {
         let directory = component.view_directory();
         let mut record = InstallRecord::load(&root, &directory)?;
@@ -108,8 +120,34 @@ pub fn apply_with(
                         .or_default()
                         .push(name.to_owned());
                 }
+                // Only a file the library dropped is removed.
+                FileOutcome::Removed => {}
             }
             outcomes.push((path.clone(), outcome));
+        }
+        // A file the library dropped is removed when the application never
+        // edited it, its digest and module going with it; an edited one is
+        // kept, recorded as kept, and keeps its digest (REG-028).
+        for dropped in &component.dropped {
+            match dropped.outcome {
+                FileOutcome::Removed => {
+                    removals.push(dropped.destination.clone());
+                    record.digests.remove(&dropped.destination);
+                    if dropped.kind == FileKind::Rust
+                        && let Some(module) = dropped.name.strip_suffix(".rs")
+                    {
+                        undeclare
+                            .entry(namespace_module(&component.library.namespace))
+                            .or_default()
+                            .push(module.to_owned());
+                    }
+                }
+                _ => kept_names
+                    .entry(component.address.clone())
+                    .or_default()
+                    .push(dropped.name.clone()),
+            }
+            outcomes.push((dropped.destination.clone(), dropped.outcome));
         }
         install_records.push((directory, record));
     }
@@ -123,9 +161,7 @@ pub fn apply_with(
             continue;
         }
         let edits = namespaces
-            .entry(super::library::namespace_module(
-                &component.library.namespace,
-            ))
+            .entry(namespace_module(&component.library.namespace))
             .or_default();
         edits.modules.extend(component.manifest.rust_modules());
         edits
@@ -162,19 +198,39 @@ pub fn apply_with(
         }
     }
 
+    // A module whose file is removed loses its declaration; the module file
+    // is read now so one this cannot edit refuses before anything is
+    // written.
+    for module in undeclare.keys() {
+        let path = PathBuf::from("src/live").join(module).join("mod.rs");
+        if let Some(source) = read_optional(&root, &path)?
+            && syn::parse_file(&source).is_err()
+        {
+            return Err(RegistryError::Invalid(format!(
+                "{} does not parse, so live:add cannot remove the declarations of the modules this update drops ({}); nothing was written",
+                path.display(),
+                undeclare[module].join(", ")
+            )));
+        }
+        registration_paths.insert(path);
+    }
+
     let mut touched: BTreeSet<PathBuf> = writes.iter().map(|(path, _)| path.clone()).collect();
+    touched.extend(removals.iter().cloned());
     for (directory, _) in &install_records {
         touched.insert(directory.join(INSTALL_RECORD));
     }
     touched.insert(PathBuf::from(PROJECT_FILE));
     touched.extend(registration_paths.iter().cloned());
-    let journal = journal_for(&root, &touched)?;
-    journal.write(&root)?;
+    let mut journal = journal_for(&root, &touched)?;
+    lock.begin_journal(&mut journal)?;
 
     let prepared = Prepared {
         writes,
+        removals,
         install_records,
         namespaces,
+        undeclare,
         registration_paths,
         kept_names,
     };
@@ -184,18 +240,63 @@ pub fn apply_with(
             Journal::remove(&root)?;
             Ok(outcomes)
         }
-        Err(error) => {
-            let restored = journal.restore_into(&root);
-            let removed = Journal::remove(&root);
-            match (restored, removed) {
-                (Ok(()), Ok(())) => Err(error),
-                (Err(restore), _) | (Ok(()), Err(restore)) => Err(RegistryError::Io(format!(
-                    "{error}; restoring the project from {} also failed: {restore}. The journal names every file to put back.",
-                    super::project::JOURNAL_FILE
-                ))),
+        // The journal is removed only once everything it names is back; a
+        // rollback that could not put a path back keeps it, so the next
+        // `live:add` or `serve` tries again, and says which paths.
+        Err(error) => match journal.restore_into(&root) {
+            Ok(()) => {
+                Journal::remove(&root)?;
+                Err(error)
             }
-        }
+            Err(restore) => Err(RegistryError::Io(format!(
+                "{error}; the rollback could not put everything back: {restore}. {} is kept and names every file to put back; the next live:add or suprnova serve restores from it",
+                super::project::JOURNAL_FILE
+            ))),
+        },
     }
+}
+
+fn read_optional(root: &Path, path: &Path) -> Result<Option<String>> {
+    secure_fs::ensure_contained(root, path).map_err(RegistryError::Io)?;
+    match std::fs::read_to_string(root.join(path)) {
+        Ok(source) => Ok(Some(source)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(RegistryError::Io(format!(
+            "cannot read {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+/// `source` with the bodiless `mod <name>;` declarations of `modules`
+/// removed, each with the whole lines it spans.
+fn without_modules(source: &str, modules: &[String]) -> Result<String> {
+    use syn::spanned::Spanned as _;
+    let file = syn::parse_file(source).map_err(|error| {
+        RegistryError::Invalid(format!("a namespace module does not parse: {error}"))
+    })?;
+    let mut ranges: Vec<std::ops::Range<usize>> = file
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(item, syn::Item::Mod(module)
+                if module.content.is_none() && modules.iter().any(|name| module.ident == name))
+        })
+        .map(|item| {
+            let range = item.span().byte_range();
+            let start = source[..range.start].rfind('\n').map_or(0, |at| at + 1);
+            let end = source[range.end..]
+                .find('\n')
+                .map_or(source.len(), |at| range.end + at + 1);
+            start..end
+        })
+        .collect();
+    ranges.sort_by_key(|range| std::cmp::Reverse(range.start));
+    let mut edited = source.to_owned();
+    for range in ranges {
+        edited.replace_range(range, "");
+    }
+    Ok(edited)
 }
 
 fn relative_to(root: &Path, path: &Path) -> PathBuf {
@@ -226,7 +327,7 @@ fn journal_for(root: &Path, touched: &BTreeSet<PathBuf>) -> Result<Journal> {
                 }
                 for directory in missing.into_iter().rev() {
                     if created_directories.insert(directory.clone()) {
-                        journal.created.push(directory);
+                        journal.created_directories.push(directory);
                     }
                 }
                 journal.created.push(path.clone());
@@ -245,8 +346,10 @@ fn journal_for(root: &Path, touched: &BTreeSet<PathBuf>) -> Result<Journal> {
 /// Everything decided before the first write.
 struct Prepared<'a> {
     writes: Vec<(PathBuf, &'a [u8])>,
+    removals: Vec<PathBuf>,
     install_records: Vec<(PathBuf, InstallRecord)>,
     namespaces: BTreeMap<String, NamespaceEdits>,
+    undeclare: BTreeMap<String, Vec<String>>,
     registration_paths: BTreeSet<PathBuf>,
     kept_names: BTreeMap<ComponentAddress, Vec<String>>,
 }
@@ -267,6 +370,19 @@ fn write_all(
     }
     for (path, bytes) in writes {
         secure_fs::write_atomic_under(root, path, bytes).map_err(RegistryError::Io)?;
+    }
+    for path in &prepared.removals {
+        secure_fs::ensure_contained(root, path).map_err(RegistryError::Io)?;
+        match std::fs::remove_file(root.join(path)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(RegistryError::Io(format!(
+                    "cannot remove {}: {error}",
+                    path.display()
+                )));
+            }
+        }
     }
     for (module, edits) in &prepared.namespaces {
         match registrar(
@@ -297,6 +413,16 @@ fn write_all(
                     "src/live/mod.rs changed form during the install; add these lines yourself:\n{}",
                     lines.join("\n")
                 )));
+            }
+        }
+    }
+    for (module, modules) in &prepared.undeclare {
+        let path = PathBuf::from("src/live").join(module).join("mod.rs");
+        if let Some(source) = read_optional(root, &path)? {
+            let edited = without_modules(&source, modules)?;
+            if edited != source {
+                secure_fs::write_atomic_under(root, &path, edited.as_bytes())
+                    .map_err(RegistryError::Io)?;
             }
         }
     }

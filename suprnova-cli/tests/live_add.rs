@@ -169,8 +169,14 @@ fn add_manifest(
         &Clean,
     )?;
     let decisions = plan::decisions_from_flags(&plan, &options, &project)?;
-    let outcomes =
-        install::apply_with(&plan, &mut project, &options, &decisions, &no_registration)?;
+    let outcomes = install::apply_with(
+        &plan,
+        &mut project,
+        &lock,
+        &options,
+        &decisions,
+        &no_registration,
+    )?;
     lock.release()?;
     Ok(outcomes)
 }

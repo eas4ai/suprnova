@@ -22,7 +22,7 @@ use super::address::{
 use super::fetch::{Commit, EmbeddedFetcher, Fetcher, component_path, shipped_version};
 use super::library::{
     ComponentManifest, FileKind, LibraryJson, MAX_FILE_BYTES, namespace_module, parse_library_json,
-    parse_manifest, parse_shipped_manifest,
+    parse_manifest, parse_shipped_manifest, validate_file_name,
 };
 use super::project::{Approval, ComponentRecord, InstallRecord, LibraryRecord, ProjectFile};
 use super::scan::{ComponentFiles, ScanReport};
@@ -33,6 +33,9 @@ use crate::secure_fs;
 
 /// The most components one plan may hold (REG-010).
 pub const MAX_PLAN_COMPONENTS: usize = 64;
+
+/// The most bytes one plan may fetch.
+pub const MAX_PLAN_BYTES: u64 = 64 * 1024 * 1024;
 
 /// What installing a file would do (REG-012, REG-028).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +50,9 @@ pub enum FileOutcome {
     Kept,
     /// The path holds bytes no record vouches for and is kept.
     ChangedSinceRecord,
+    /// The library dropped the file, the application never edited it, and
+    /// the install removes it.
+    Removed,
 }
 
 impl FileOutcome {
@@ -60,6 +66,7 @@ impl FileOutcome {
             FileOutcome::ChangedSinceRecord => {
                 "kept, changed since the record: no install record shows it unedited (pass --force to replace)"
             }
+            FileOutcome::Removed => "removed: the library dropped it",
         }
     }
 
@@ -89,6 +96,19 @@ pub struct PlannedFile {
     pub digest: Digest,
     /// The bytes that arrived.
     pub bytes: Vec<u8>,
+}
+
+/// A file an earlier install wrote that this version no longer names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DroppedFile {
+    /// The file name the earlier version named.
+    pub name: String,
+    /// Where it sits, from the project root.
+    pub destination: PathBuf,
+    /// Its kind.
+    pub kind: FileKind,
+    /// Removed when unedited, else kept.
+    pub outcome: FileOutcome,
 }
 
 /// One component of the plan, dependencies first.
@@ -124,6 +144,10 @@ pub struct PlannedComponent {
     pub registrations: Vec<String>,
     /// Registrations to remove, as full paths.
     pub unregistrations: Vec<String>,
+    /// Files the recorded version installed that this one drops.
+    pub dropped: Vec<DroppedFile>,
+    /// What `--force` let through.
+    pub forced: Vec<String>,
 }
 
 impl PlannedComponent {
@@ -410,6 +434,7 @@ pub fn resolve_with(
         order: Vec::new(),
         pins: Vec::new(),
         namespaces: BTreeMap::new(),
+        fetched: 0,
     };
     let address = source.component_address()?;
     resolver.visit(
@@ -462,6 +487,7 @@ struct Resolver<'a> {
     order: Vec<Loaded>,
     pins: Vec<KeyPin>,
     namespaces: BTreeMap<String, LibraryAddress>,
+    fetched: u64,
 }
 
 /// A dependency's address and the version it names, if any: a `./`
@@ -617,9 +643,9 @@ impl Resolver<'_> {
         }
         let kind = library.kind()?;
         let commit = self.fetcher.resolve(library, version)?;
+        let fetcher = self.fetcher;
         let json_bytes = self
-            .fetcher
-            .file(library, &commit, "library.json")
+            .fetch(fetcher, library, &commit, "library.json")
             .map_err(|error| {
                 RegistryError::Invalid(format!(
                     "{library} at v{version} has no readable library.json at its root: {error}"
@@ -717,7 +743,7 @@ impl Resolver<'_> {
                             pinned.fingerprint()
                         ))
                     })?;
-                verify_handover(handover, &json.public_key).map_err(|error| {
+                verify_handover(handover, &json.public_key, &json.source).map_err(|error| {
                     RegistryError::Invalid(format!(
                         "{library} changed its key from {} to {}, and the handover does not verify: {error}; refusing it",
                         pinned.fingerprint(),
@@ -754,6 +780,27 @@ impl Resolver<'_> {
         Ok(())
     }
 
+    /// Fetches one file and counts it against the plan's limit (REG-009):
+    /// a plan that has fetched more than [`MAX_PLAN_BYTES`] is refused
+    /// before it fetches more.
+    fn fetch(
+        &mut self,
+        fetcher: &dyn Fetcher,
+        library: &LibraryAddress,
+        commit: &Commit,
+        path: &str,
+    ) -> Result<Vec<u8>> {
+        if self.fetched > MAX_PLAN_BYTES {
+            return Err(too_large_plan());
+        }
+        let bytes = fetcher.file(library, commit, path)?;
+        self.fetched += bytes.len() as u64;
+        if self.fetched > MAX_PLAN_BYTES {
+            return Err(too_large_plan());
+        }
+        Ok(bytes)
+    }
+
     fn load(&mut self, address: &ComponentAddress, version: &semver::Version) -> Result<Loaded> {
         self.library(&address.library, version)?;
         let library = self
@@ -770,14 +817,15 @@ impl Resolver<'_> {
         let commit = library.commit.clone();
         let json = library.json.clone();
         let json_bytes = library.json_bytes.clone();
-        let manifest_bytes = fetcher
-            .file(
+        let manifest_bytes = self
+            .fetch(
+                fetcher,
                 &address.library,
                 &commit,
                 &component_path(directory, "manifest.json"),
             )
             .map_err(|error| {
-                if shipped {
+                if shipped && !plan_too_large(&error) {
                     RegistryError::Invalid(format!(
                         "`{directory}` is not a shipped library component; shipped components: {}",
                         EmbeddedFetcher.components().join(", ")
@@ -795,8 +843,13 @@ impl Resolver<'_> {
         };
         let mut files = Vec::with_capacity(manifest.files.len());
         for name in &manifest.files {
-            let bytes = fetcher
-                .file(&address.library, &commit, &component_path(directory, name))
+            let bytes = self
+                .fetch(
+                    fetcher,
+                    &address.library,
+                    &commit,
+                    &component_path(directory, name),
+                )
                 .map_err(|error| {
                     RegistryError::Invalid(format!(
                         "{address} names {name}, which could not be read: {error}"
@@ -825,8 +878,13 @@ impl Resolver<'_> {
         let signature = if shipped {
             None
         } else {
-            let bytes = fetcher
-                .file(&address.library, &commit, &component_path(directory, "manifest.sig"))
+            let bytes = self
+                .fetch(
+                    fetcher,
+                    &address.library,
+                    &commit,
+                    &component_path(directory, "manifest.sig"),
+                )
                 .map_err(|error| {
                     RegistryError::Invalid(format!(
                         "{address} is unsigned: components/{directory}/manifest.sig could not be read ({error}); refusing it"
@@ -874,8 +932,8 @@ impl Resolver<'_> {
             let namespace = loaded.library.namespace.clone();
             let ns_module = namespace_module(&namespace);
             let shipped = address.library.is_shipped();
-            self.check_recorded_version(&loaded)?;
-            self.check_dependents(&loaded, &in_plan)?;
+            let mut forced = self.check_recorded_version(&loaded)?;
+            forced.extend(self.check_dependents(&loaded, &in_plan)?);
             for name in &loaded.manifest.files {
                 if FileKind::of(name) != Some(FileKind::Rust) {
                     continue;
@@ -909,6 +967,12 @@ impl Resolver<'_> {
                 let outcome = outcome_for(&root, &path, bytes, &record, self.options.force)?;
                 outcomes.push((kind, path, outcome));
             }
+            let dropped = self.dropped_files(&loaded, &namespace, &record)?;
+            let kept_modules: Vec<&str> = dropped
+                .iter()
+                .filter(|(file, _)| file.kind == FileKind::Rust && file.outcome.keeps())
+                .filter_map(|(file, _)| file.name.strip_suffix(".rs"))
+                .collect();
 
             let modules = loaded.manifest.rust_modules();
             let mut module_declarations = Vec::new();
@@ -924,17 +988,27 @@ impl Resolver<'_> {
                     ));
                 }
             }
-            let registrations: Vec<String> = loaded
-                .manifest
-                .register
-                .iter()
-                .map(|entry| format!("crate::live::{ns_module}::{entry}"))
-                .collect();
             let recorded: Vec<String> = self
                 .records
                 .get(&address)
                 .map(|record| record.registered.clone())
                 .unwrap_or_default();
+            // A Rust file the library dropped and the application edited
+            // stays in the build, and so do the registrations of its types.
+            let mut registrations: Vec<String> = loaded
+                .manifest
+                .register
+                .iter()
+                .map(|entry| format!("crate::live::{ns_module}::{entry}"))
+                .collect();
+            for path in &recorded {
+                let retained = kept_modules.iter().any(|module| {
+                    path.starts_with(&format!("crate::live::{ns_module}::{module}::"))
+                });
+                if retained && !registrations.contains(path) {
+                    registrations.push(path.clone());
+                }
+            }
             let unregistrations: Vec<String> = recorded
                 .iter()
                 .filter(|path| !registrations.contains(path))
@@ -987,12 +1061,20 @@ impl Resolver<'_> {
                     return Err(RegistryError::Refused(incoming.findings));
                 }
                 check_register(&address, &loaded.manifest, &incoming)?;
-                if kept_rust.is_empty() {
+                let kept_dropped: Vec<(String, Vec<u8>)> = dropped
+                    .iter()
+                    .filter(|(file, _)| file.outcome.keeps())
+                    .map(|(file, bytes)| (file.name.clone(), bytes.clone()))
+                    .collect();
+                if kept_rust.is_empty() && kept_dropped.is_empty() {
                     incoming
                 } else {
-                    // The capabilities recorded are those of the Rust that
-                    // ends up installed, so the kept files are scanned in
-                    // place of the incoming ones (REG-013).
+                    // The capabilities recorded are those of what ends up
+                    // installed (REG-013): kept Rust files are scanned in
+                    // place of the incoming ones, and every kept file the
+                    // library dropped is scanned beside them.
+                    let incoming_count = loaded.files.len();
+                    loaded.files.extend(kept_dropped);
                     let mut swapped = Vec::new();
                     for (name, path) in &kept_rust {
                         let on_disk = std::fs::read(root.join(path)).map_err(|error| {
@@ -1018,6 +1100,7 @@ impl Resolver<'_> {
                             *bytes = original;
                         }
                     }
+                    loaded.files.truncate(incoming_count);
                     let installed = installed?;
                     if !installed.accepted() {
                         return Err(RegistryError::Refused(installed.findings));
@@ -1079,6 +1162,8 @@ impl Resolver<'_> {
                 module_declarations,
                 registrations,
                 unregistrations,
+                dropped: dropped.into_iter().map(|(file, _)| file).collect(),
+                forced,
             });
         }
         let framework_version = match self.framework {
@@ -1094,27 +1179,98 @@ impl Resolver<'_> {
     }
 
     /// A downgrade, or the recorded version with other content, is refused
-    /// without `--force` (REG-026).
-    fn check_recorded_version(&self, loaded: &Loaded) -> Result<()> {
+    /// without `--force` (REG-026); with it, each is returned in those words
+    /// for the plan to show.
+    fn check_recorded_version(&self, loaded: &Loaded) -> Result<Vec<String>> {
         let Some(record) = self.records.get(&loaded.address) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
-        if self.options.force {
-            return Ok(());
-        }
+        let mut forced = Vec::new();
         if loaded.version < record.version {
-            return Err(RegistryError::Invalid(format!(
-                "{} {} is older than the {} this application records; pass --force to downgrade",
-                loaded.address, loaded.version, record.version
-            )));
+            if !self.options.force {
+                return Err(RegistryError::Invalid(format!(
+                    "{} {} is older than the {} this application records; pass --force to downgrade",
+                    loaded.address, loaded.version, record.version
+                )));
+            }
+            forced.push(format!(
+                "downgrade from {} to {}, let through by --force",
+                record.version, loaded.version
+            ));
         }
         if loaded.version == record.version && loaded.hash != record.hash {
-            return Err(RegistryError::Invalid(format!(
-                "{} {} is not what this application recorded at that version: the library changed a released version (recorded {}, fetched {}); pass --force to accept it",
-                loaded.address, loaded.version, record.hash, loaded.hash
-            )));
+            if !self.options.force {
+                return Err(RegistryError::Invalid(format!(
+                    "{} {} is not what this application recorded at that version: the library changed a released version (recorded {}, fetched {}); pass --force to accept it",
+                    loaded.address, loaded.version, record.hash, loaded.hash
+                )));
+            }
+            forced.push(format!(
+                "moved tag: {} holds other content than this application recorded (recorded {}, fetched {}), let through by --force",
+                loaded.version, record.hash, loaded.hash
+            ));
         }
-        Ok(())
+        Ok(forced)
+    }
+
+    /// Files the recorded version installed that this version no longer
+    /// names (REG-028), each with its bytes on disk: removed when the
+    /// application never edited it, or with `--force`; kept otherwise.
+    fn dropped_files(
+        &self,
+        loaded: &Loaded,
+        namespace: &str,
+        record: &InstallRecord,
+    ) -> Result<Vec<(DroppedFile, Vec<u8>)>> {
+        let root = self.project.root();
+        let mut recorded: BTreeSet<String> = BTreeSet::new();
+        if let Some(previous) = self.records.get(&loaded.address) {
+            recorded.extend(previous.files.keys().cloned());
+            recorded.extend(previous.kept.iter().cloned());
+        }
+        if let Some(previous) = self.shipped_records.get(&loaded.address) {
+            recorded.extend(previous.files.keys().cloned());
+        }
+        let mut dropped = Vec::new();
+        for name in recorded {
+            if loaded.manifest.files.contains(&name) {
+                continue;
+            }
+            let Ok(kind) = validate_file_name(&name) else {
+                continue;
+            };
+            let destination = destination(namespace, &loaded.address.component, &name, kind);
+            secure_fs::ensure_contained(root, &destination).map_err(RegistryError::Io)?;
+            let bytes = match std::fs::read(root.join(&destination)) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(RegistryError::Io(format!(
+                        "cannot read {}: {error}",
+                        destination.display()
+                    )));
+                }
+            };
+            let outcome = if self.options.force {
+                FileOutcome::Removed
+            } else {
+                match record.digest(&destination) {
+                    Some(digest) if *digest == Digest::of(&bytes) => FileOutcome::Removed,
+                    Some(_) => FileOutcome::Kept,
+                    None => FileOutcome::ChangedSinceRecord,
+                }
+            };
+            dropped.push((
+                DroppedFile {
+                    name,
+                    destination,
+                    kind,
+                    outcome,
+                },
+                bytes,
+            ));
+        }
+        Ok(dropped)
     }
 
     /// Replacing a component with a version an installed dependent did not
@@ -1123,10 +1279,8 @@ impl Resolver<'_> {
         &self,
         loaded: &Loaded,
         in_plan: &BTreeSet<ComponentAddress>,
-    ) -> Result<()> {
-        if self.options.force {
-            return Ok(());
-        }
+    ) -> Result<Vec<String>> {
+        let mut forced = Vec::new();
         for (dependent, record) in &self.records {
             if in_plan.contains(dependent) {
                 continue;
@@ -1134,14 +1288,31 @@ impl Resolver<'_> {
             if let Some(version) = record.dependencies.get(&loaded.address)
                 && *version != loaded.version
             {
-                return Err(RegistryError::Invalid(format!(
-                    "{dependent} depends on {} {version}; this plan installs {}; pass --force to replace it anyway",
-                    loaded.address, loaded.version
-                )));
+                if !self.options.force {
+                    return Err(RegistryError::Invalid(format!(
+                        "{dependent} depends on {} {version}; this plan installs {}; pass --force to replace it anyway",
+                        loaded.address, loaded.version
+                    )));
+                }
+                forced.push(format!(
+                    "replaces the {version} {dependent} depends on with {}, let through by --force",
+                    loaded.version
+                ));
             }
         }
-        Ok(())
+        Ok(forced)
     }
+}
+
+fn too_large_plan() -> RegistryError {
+    RegistryError::Invalid(format!(
+        "the plan has fetched more than {} MiB, the most one install may fetch; refusing it before fetching more",
+        MAX_PLAN_BYTES / (1024 * 1024)
+    ))
+}
+
+fn plan_too_large(error: &RegistryError) -> bool {
+    *error == too_large_plan()
 }
 
 /// Each type a `#[live]` attribute defines must be exactly one entry of
@@ -1448,6 +1619,21 @@ fn render_lines(plan: &Plan, context: Option<(&Options, &ProjectFile)>) -> Strin
                 file.destination.display(),
                 file.outcome.describe()
             ));
+        }
+        for file in &component.dropped {
+            let what = match file.outcome {
+                FileOutcome::Kept => {
+                    "kept, edited locally: the library dropped it (pass --force to remove it)"
+                }
+                FileOutcome::ChangedSinceRecord => {
+                    "kept, no install record shows it unedited: the library dropped it (pass --force to remove it)"
+                }
+                other => other.describe(),
+            };
+            out.push_str(&format!("  {}  {what}\n", file.destination.display()));
+        }
+        for line in &component.forced {
+            out.push_str(&format!("  forced      {line}\n"));
         }
         for (file, line) in &component.module_declarations {
             out.push_str(&format!("  module      {}: {line}\n", file.display()));

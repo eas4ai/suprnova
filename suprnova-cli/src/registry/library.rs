@@ -16,13 +16,17 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 
 use super::address::{SHIPPED_LIBRARY, parse_dependency, parse_published_address};
 use super::signing::{Fingerprint, KeyHandover, PublicKey, Signature};
-use super::{RegistryError, Result};
+use super::{RegistryError, Result, printable};
 
 /// The largest JSON document a library may carry (REG-002, REG-009).
 pub const MAX_JSON_BYTES: usize = 1024 * 1024;
 
 /// The largest file a manifest may name (REG-003).
 pub const MAX_FILE_BYTES: usize = 1024 * 1024;
+
+/// The most files one manifest may name. With [`MAX_FILE_BYTES`] it bounds
+/// what one component makes the CLI fetch before its signature is checked.
+pub const MAX_MANIFEST_FILES: usize = 64;
 
 /// Namespaces only the shipped library may use (REG-004).
 pub const RESERVED_NAMESPACES: [&str; 3] = ["suprnova", "sn", "live"];
@@ -146,7 +150,8 @@ pub fn parse_library_json(bytes: &[u8]) -> Result<LibraryJson> {
     let namespace = required_string(&object, "namespace", "library.json")?;
     if !valid_namespace(&namespace) {
         return Err(RegistryError::Invalid(format!(
-            "library.json namespace `{namespace}` must be one segment of lowercase letters, digits and hyphens, starting with a letter, of at most 32 bytes, whose module form is not a Rust keyword"
+            "library.json namespace `{}` must be one segment of lowercase letters, digits and hyphens, starting with a letter, of at most 32 bytes, whose module form is not a Rust keyword",
+            printable(&namespace)
         )));
     }
     if RESERVED_NAMESPACES.contains(&namespace.as_str()) {
@@ -159,13 +164,15 @@ pub fn parse_library_json(bytes: &[u8]) -> Result<LibraryJson> {
     let version_text = required_string(&object, "version", "library.json")?;
     let version = semver::Version::parse(&version_text).map_err(|error| {
         RegistryError::Invalid(format!(
-            "library.json version `{version_text}` is not semver: {error}"
+            "library.json version `{}` is not semver: {error}",
+            printable(&version_text)
         ))
     })?;
     let framework_text = required_string(&object, "framework", "library.json")?;
     let framework = semver::VersionReq::parse(&framework_text).map_err(|error| {
         RegistryError::Invalid(format!(
-            "library.json framework `{framework_text}` is not a semver requirement: {error}"
+            "library.json framework `{}` is not a semver requirement: {error}",
+            printable(&framework_text)
         ))
     })?;
     let public_key = PublicKey::parse(&required_string(&object, "publicKey", "library.json")?)?;
@@ -206,7 +213,8 @@ fn parse_handover(value: &serde_json::Value) -> Result<KeyHandover> {
     let next = required_string(object, "next", "a previousKeys entry")?;
     let to = Fingerprint::parse(&next).ok_or_else(|| {
         RegistryError::Invalid(format!(
-            "previousKeys next `{next}` is not a key fingerprint (`sha256:` and 64 lowercase hex characters)"
+            "previousKeys next `{}` is not a key fingerprint (`sha256:` and 64 lowercase hex characters)",
+            printable(&next)
         ))
     })?;
     let signature = Signature::parse_strict(&required_string(
@@ -257,7 +265,8 @@ fn manifest_from_object(
     let name = required_string(&object, "name", &label)?;
     if name != format!("{namespace}.{directory}") {
         return Err(RegistryError::Invalid(format!(
-            "{label} name `{name}` must be `{namespace}.{directory}`"
+            "{label} name `{}` must be `{namespace}.{directory}`",
+            printable(&name)
         )));
     }
     let root = optional_text(&object, "root", &label)?;
@@ -265,20 +274,29 @@ fn manifest_from_object(
         && *root != format!("{namespace}-ui/{directory}")
     {
         return Err(RegistryError::Invalid(format!(
-            "{label} root `{root}` must be `{namespace}-ui/{directory}`"
+            "{label} root `{}` must be `{namespace}-ui/{directory}`",
+            printable(root)
         )));
     }
     let files = string_list(&object, "files", &label)?;
     if files.is_empty() {
         return Err(RegistryError::Invalid(format!("{label} names no files")));
     }
+    if files.len() > MAX_MANIFEST_FILES {
+        return Err(RegistryError::Invalid(format!(
+            "{label} names {} files; a component names at most {MAX_MANIFEST_FILES}",
+            files.len()
+        )));
+    }
     let mut seen = BTreeSet::new();
     for file in &files {
-        validate_file_name(file)
-            .map_err(|reason| RegistryError::Invalid(format!("{label} file `{file}`: {reason}")))?;
+        validate_file_name(file).map_err(|reason| {
+            RegistryError::Invalid(format!("{label} file `{}`: {reason}", printable(file)))
+        })?;
         if !seen.insert(file.as_str()) {
             return Err(RegistryError::Invalid(format!(
-                "{label} names `{file}` twice"
+                "{label} names `{}` twice",
+                printable(file)
             )));
         }
     }
@@ -305,7 +323,8 @@ fn manifest_from_object(
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
         if !valid {
             return Err(RegistryError::Invalid(format!(
-                "{label} element `{element}` must start with `{prefix}` and be lowercase letters, digits and hyphens"
+                "{label} element `{}` must start with `{prefix}` and be lowercase letters, digits and hyphens",
+                printable(element)
             )));
         }
     }
@@ -323,12 +342,14 @@ fn manifest_from_object(
         });
         if !valid {
             return Err(RegistryError::Invalid(format!(
-                "{label} register `{entry}` must be `<module>::<Type>`, where `<module>` is one of its Rust files"
+                "{label} register `{}` must be `<module>::<Type>`, where `<module>` is one of its Rust files",
+                printable(entry)
             )));
         }
         if !registered.insert(entry.as_str()) {
             return Err(RegistryError::Invalid(format!(
-                "{label} registers `{entry}` twice"
+                "{label} registers `{}` twice",
+                printable(entry)
             )));
         }
     }
@@ -338,7 +359,8 @@ fn manifest_from_object(
         parse_dependency(dependency)?;
         if !depended.insert(dependency.as_str()) {
             return Err(RegistryError::Invalid(format!(
-                "{label} names the dependency `{dependency}` twice"
+                "{label} names the dependency `{}` twice",
+                printable(dependency)
             )));
         }
     }
@@ -422,7 +444,8 @@ fn refuse_unknown_keys(
     for key in object.keys() {
         if !allowed.contains(&key.as_str()) {
             return Err(RegistryError::Invalid(format!(
-                "{label} holds the key `{key}`, which is not one of {}",
+                "{label} holds the key `{}`, which is not one of {}",
+                printable(key),
                 allowed.join(", ")
             )));
         }
@@ -585,7 +608,10 @@ impl<'de> Visitor<'de> for StrictVisitor {
         let mut object = serde_json::Map::new();
         while let Some(key) = map.next_key::<String>()? {
             if object.contains_key(&key) {
-                return Err(de::Error::custom(format!("the key `{key}` appears twice")));
+                return Err(de::Error::custom(format!(
+                    "the key `{}` appears twice",
+                    printable(&key)
+                )));
             }
             let StrictValue(value) = map.next_value()?;
             object.insert(key, value);

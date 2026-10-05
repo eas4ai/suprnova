@@ -488,7 +488,7 @@ fn install_with(
     let source = address::parse(source)?;
     let plan = plan::resolve_with(&source, options, fetcher, &project, scanner)?;
     let decisions = plan::confirm(&plan, options, &project, prompter)?;
-    install::apply_with(&plan, &mut project, options, &decisions, &registrar)?;
+    install::apply_with(&plan, &mut project, &lock, options, &decisions, &registrar)?;
     lock.release()?;
     Ok(plan)
 }
@@ -2854,8 +2854,9 @@ fn reg_033_a_vouched_key_change_is_re_pinned_only_on_a_terminal() {
     let root = pinned(&old);
     add(root.path(), "acme/acme-ui/widget", &fetcher(&[&old])).expect("first");
     let new_seed = [11; 32];
-    let handover = signing::sign_handover(&SecretKey::from_bytes(SEED), &public_key(new_seed))
-        .expect("handover");
+    let handover =
+        signing::sign_handover(&SecretKey::from_bytes(SEED), &public_key(new_seed), ADDRESS)
+            .expect("handover");
     let rotated = Lib::acme().at("1.1.0").widget().signed_by(new_seed).set(
         "previousKeys",
         json!([{
@@ -2909,10 +2910,15 @@ fn reg_033_a_new_key_the_pinned_key_does_not_vouch_for_is_refused() {
     let old = Lib::acme().widget();
     let root = pinned(&old);
     let new_seed = [12; 32];
-    let stranger = signing::sign_handover(&SecretKey::from_bytes([13; 32]), &public_key(new_seed))
-        .expect("handover");
-    let misnamed = signing::sign_handover(&SecretKey::from_bytes(SEED), &public_key([14; 32]))
-        .expect("handover");
+    let stranger = signing::sign_handover(
+        &SecretKey::from_bytes([13; 32]),
+        &public_key(new_seed),
+        ADDRESS,
+    )
+    .expect("handover");
+    let misnamed =
+        signing::sign_handover(&SecretKey::from_bytes(SEED), &public_key([14; 32]), ADDRESS)
+            .expect("handover");
     for handover in [stranger, misnamed] {
         let rotated = Lib::acme().widget().signed_by(new_seed).set(
             "previousKeys",
@@ -3555,7 +3561,7 @@ fn reg_029_a_failed_write_restores_every_file_suprnova_toml_included() {
     )
     .expect("plan");
     let decisions = plan::confirm(&plan, &yes(), &project, &mut no_terminal()).expect("decisions");
-    let error = install::apply_with(&plan, &mut project, &yes(), &decisions, &failing)
+    let error = install::apply_with(&plan, &mut project, &lock, &yes(), &decisions, &failing)
         .expect_err("the second registration call fails");
     drop(lock);
     assert!(error.to_string().contains("the disk filled up"), "{error}");
@@ -3605,15 +3611,21 @@ fn reg_029_an_unrecognized_builder_reports_its_lines_and_writes_nothing() {
     )
     .expect("plan");
     let decisions = plan::confirm(&plan, &yes(), &project, &mut no_terminal()).expect("decisions");
-    let error = install::apply_with(&plan, &mut project, &yes(), &decisions, &reporting)
+    let lock = ProjectLock::acquire(root.path()).expect("lock");
+    let error = install::apply_with(&plan, &mut project, &lock, &yes(), &decisions, &reporting)
         .expect_err("reported");
+    drop(lock);
     assert!(
         error
             .to_string()
             .contains(".register::<crate::live::acme::card::Card>()"),
         "{error}"
     );
-    assert_eq!(listing(root.path()), before);
+    let after: BTreeSet<PathBuf> = listing(root.path())
+        .into_iter()
+        .filter(|path| path != Path::new(project::LOCK_FILE))
+        .collect();
+    assert_eq!(after, before);
 }
 
 /// REG-029: a second install is refused while another holds the project
@@ -3639,23 +3651,34 @@ fn reg_029_a_second_install_is_refused_while_the_lock_is_held() {
 }
 
 /// A journal as an install killed after its first write leaves it: one
-/// created file in a created directory, and `suprnova.toml` changed.
+/// created file in created directories, and `suprnova.toml` changed. The
+/// install held the lock, tied the journal to it, and died holding it.
 fn leave_a_journal(root: &Path) {
-    fs::write(root.join("suprnova.toml"), "# before the install\n").expect("prior");
-    let journal = Journal {
-        created: vec![
+    leave_a_journal_with(root, b"# before the install\n");
+}
+
+fn leave_a_journal_with(root: &Path, prior: &[u8]) {
+    fs::write(root.join("suprnova.toml"), prior).expect("prior");
+    let lock = ProjectLock::acquire(root).expect("lock");
+    let mut journal = Journal {
+        created: vec![PathBuf::from("templates/acme-ui/widget/stray.html")],
+        created_directories: vec![
+            PathBuf::from("templates"),
             PathBuf::from("templates/acme-ui"),
-            PathBuf::from("templates/acme-ui/stray.html"),
+            PathBuf::from("templates/acme-ui/widget"),
         ],
-        changed: BTreeMap::from([(
-            PathBuf::from("suprnova.toml"),
-            b"# before the install\n".to_vec(),
-        )]),
+        changed: BTreeMap::from([(PathBuf::from("suprnova.toml"), prior.to_vec())]),
+        ..Journal::default()
     };
-    journal.write(root).expect("journal");
-    fs::create_dir_all(root.join("templates/acme-ui")).expect("mkdir");
-    fs::write(root.join("templates/acme-ui/stray.html"), "<p>half</p>\n").expect("stray");
+    lock.begin_journal(&mut journal).expect("journal");
+    fs::create_dir_all(root.join("templates/acme-ui/widget")).expect("mkdir");
+    fs::write(
+        root.join("templates/acme-ui/widget/stray.html"),
+        "<p>half</p>\n",
+    )
+    .expect("stray");
     fs::write(root.join("suprnova.toml"), "# half written\n").expect("half");
+    drop(lock);
 }
 
 /// REG-029: the next `live:add` finds the journal a killed install left
@@ -3688,21 +3711,9 @@ fn reg_029_the_next_live_add_restores_a_journal_left_by_a_killed_install() {
 #[test]
 fn reg_029_serve_restores_a_journal_it_finds_with_no_lock_held() {
     let root = project();
-    leave_a_journal(root.path());
-    // A broken dev process stops serve right after the restore, before it
-    // would start any process.
-    let journal = Journal::read(root.path()).expect("read").expect("journal");
-    let mut changed = journal.changed.clone();
-    changed.insert(
-        PathBuf::from("suprnova.toml"),
-        b"[[serve.process]]\ncommand = \"true\"\n".to_vec(),
-    );
-    Journal {
-        created: journal.created,
-        changed,
-    }
-    .write(root.path())
-    .expect("journal");
+    // A broken dev process in the restored file stops serve right after
+    // the restore, before it would start any process.
+    leave_a_journal_with(root.path(), b"[[serve.process]]\ncommand = \"true\"\n");
     let output = Command::new(BIN)
         .args(["serve", "--backend-only"])
         .current_dir(root.path())
@@ -3764,4 +3775,806 @@ fn reg_029_a_second_install_plans_against_the_first_installs_records() {
             .iter()
             .all(|file| file.outcome == FileOutcome::Unchanged)
     );
+}
+
+// ===========================================================================
+// Fix round: the Tier 3 review's findings
+// ===========================================================================
+
+fn base64_of(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn journal_json(root: &Path) -> Value {
+    serde_json::from_slice(&fs::read(root.join(project::JOURNAL_FILE)).expect("journal"))
+        .expect("journal json")
+}
+
+fn write_journal_json(root: &Path, value: &Value) {
+    fs::write(
+        root.join(project::JOURNAL_FILE),
+        serde_json::to_vec(value).expect("encode"),
+    )
+    .expect("write journal");
+}
+
+/// Finding 1 (REG-029): a journal names only paths an install writes; one
+/// that names any other path is reported and never applied, even with the
+/// lock's own nonce.
+#[test]
+fn reg_029_a_journal_naming_a_path_no_install_writes_is_never_applied() {
+    let root = project();
+    leave_a_journal(root.path());
+    fs::create_dir_all(root.path().join(".git")).expect(".git");
+    fs::write(root.path().join(".git/config"), "[core]\n").expect("git config");
+    let mut value = journal_json(root.path());
+    for hostile in [
+        ".git/config",
+        "build.rs",
+        ".cargo/config.toml",
+        "Cargo.toml",
+        "src/main.rs",
+        "templates/acme-ui/stray.html",
+    ] {
+        value["changed"][hostile] = json!(base64_of(b"evil\n"));
+    }
+    write_journal_json(root.path(), &value);
+    assert!(Journal::read(root.path()).is_err());
+    let output = live_add(root.path(), &["field"]);
+    let text = combined(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("not applied"), "{text}");
+    assert_eq!(
+        fs::read_to_string(root.path().join(".git/config")).expect("git config"),
+        "[core]\n"
+    );
+    for untouched in ["build.rs", ".cargo/config.toml", "src/main.rs"] {
+        assert!(!root.path().join(untouched).exists(), "{untouched}");
+    }
+    assert!(
+        root.path()
+            .join("templates/acme-ui/widget/stray.html")
+            .exists()
+    );
+    assert!(Journal::exists(root.path()), "the journal was removed");
+}
+
+/// Finding 1 (REG-029): a journal whose nonce the lock file does not hold,
+/// as a clone or a copy would carry one, is reported and left alone by
+/// `live:add` and by `serve`.
+#[test]
+fn reg_029_a_journal_the_lock_file_does_not_vouch_for_is_reported_and_left_alone() {
+    let root = project();
+    fs::write(root.path().join("suprnova.toml"), "# mine\n").expect("project file");
+    write_journal_json(
+        root.path(),
+        &json!({
+            "nonce": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "created": [],
+            "createdDirectories": [],
+            "changed": {"suprnova.toml": base64_of(b"# theirs\n")},
+        }),
+    );
+    fs::write(
+        root.path().join(project::LOCK_FILE),
+        "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+    )
+    .expect("lock file");
+    let output = live_add(root.path(), &["field"]);
+    let text = combined(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("not applied"), "{text}");
+    let output = Command::new(BIN)
+        .args(["serve", "--backend-only"])
+        .current_dir(root.path())
+        .env("PATH", "/nonexistent")
+        .output()
+        .expect("run serve");
+    assert!(
+        combined(&output).contains("not applied"),
+        "{}",
+        combined(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("suprnova.toml")).expect("project file"),
+        "# mine\n"
+    );
+    assert!(Journal::exists(root.path()));
+}
+
+/// Finding 1 (REG-029): a lock file and journal copied together into
+/// another checkout are not the lock this machine wrote, and the journal is
+/// not applied there.
+#[cfg(unix)]
+#[test]
+fn reg_029_a_journal_copied_with_its_lock_file_is_not_applied() {
+    let original = project();
+    leave_a_journal(original.path());
+    let copy = project();
+    fs::write(copy.path().join("suprnova.toml"), "# the copy\n").expect("project file");
+    for file in [project::LOCK_FILE, project::JOURNAL_FILE] {
+        fs::copy(original.path().join(file), copy.path().join(file)).expect("copy");
+    }
+    let output = live_add(copy.path(), &["field"]);
+    assert!(!output.status.success(), "{}", combined(&output));
+    assert!(
+        combined(&output).contains("not applied"),
+        "{}",
+        combined(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(copy.path().join("suprnova.toml")).expect("project file"),
+        "# the copy\n"
+    );
+}
+
+/// Finding 1 (REG-029): the journal is read strictly (a duplicate key is
+/// refused), and a journal older than the lock file is not applied.
+#[test]
+fn reg_029_a_duplicate_key_or_a_journal_older_than_its_lock_is_not_applied() {
+    let root = project();
+    leave_a_journal(root.path());
+    let text = fs::read_to_string(root.path().join(project::JOURNAL_FILE)).expect("journal");
+    let duplicated = text.replacen(
+        "\"changed\":",
+        &format!(
+            "\"changed\":{{\"suprnova.toml\":\"{}\"}},\"changed\":",
+            base64_of(b"# evil\n")
+        ),
+        1,
+    );
+    fs::write(root.path().join(project::JOURNAL_FILE), duplicated).expect("write");
+    assert!(Journal::read(root.path()).is_err());
+    let output = live_add(root.path(), &["field"]);
+    assert!(!output.status.success(), "{}", combined(&output));
+    assert_eq!(
+        fs::read_to_string(root.path().join("suprnova.toml")).expect("read"),
+        "# half written\n"
+    );
+
+    let root = project();
+    leave_a_journal(root.path());
+    let later = std::time::SystemTime::now() + Duration::from_secs(3600);
+    fs::File::options()
+        .write(true)
+        .open(root.path().join(project::LOCK_FILE))
+        .expect("lock file")
+        .set_modified(later)
+        .expect("set mtime");
+    let output = live_add(root.path(), &["field"]);
+    assert!(!output.status.success(), "{}", combined(&output));
+    assert!(
+        combined(&output).contains("not applied"),
+        "{}",
+        combined(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("suprnova.toml")).expect("read"),
+        "# half written\n"
+    );
+}
+
+/// Finding 2 (REG-029): a rollback that cannot put a path back keeps the
+/// journal and names each path it did not restore.
+#[test]
+fn reg_029_a_failed_rollback_keeps_the_journal_and_names_what_it_did_not_restore() {
+    let library = rust_library("1.0.0", "pub struct Card;\n", "<div>Card</div>\n");
+    let root = pinned(&library);
+    let calls = RefCell::new(0);
+    let sabotage = |root: &Path,
+                    module: &str,
+                    modules: &[String],
+                    register: &[String],
+                    unregister: &[String]|
+     -> Result<RegistrationEdits, RegistryError> {
+        *calls.borrow_mut() += 1;
+        if *calls.borrow() > 1 {
+            // The view the install created becomes a directory something
+            // else wrote into, so the rollback cannot remove it.
+            let view = root.join("templates/acme-ui/card/card.html");
+            fs::remove_file(&view).expect("remove view");
+            fs::create_dir_all(&view).expect("directory");
+            fs::write(view.join("other"), "x").expect("other");
+            return Err(RegistryError::Io("the disk filled up".to_owned()));
+        }
+        registrar(root, module, modules, register, unregister)
+    };
+    let lock = ProjectLock::acquire(root.path()).expect("lock");
+    let mut project = ProjectFile::load(root.path()).expect("load");
+    let source = address::parse("acme/acme-ui/card").expect("source");
+    let plan = plan::resolve_with(
+        &source,
+        &yes(),
+        &fetcher(&[&library]),
+        &project,
+        &MarkerScanner,
+    )
+    .expect("plan");
+    let decisions = plan::confirm(&plan, &yes(), &project, &mut no_terminal()).expect("decisions");
+    let error = install::apply_with(&plan, &mut project, &lock, &yes(), &decisions, &sabotage)
+        .expect_err("fails");
+    drop(lock);
+    let message = error.to_string();
+    assert!(message.contains("the disk filled up"), "{message}");
+    assert!(
+        message.contains("templates/acme-ui/card/card.html"),
+        "the unrestored path is not named: {message}"
+    );
+    assert!(Journal::exists(root.path()), "the journal was removed");
+}
+
+fn two_module_library(version: &str, extra: Option<&str>, with_css: bool) -> Lib {
+    let mut files: Vec<(&str, &str)> = vec![
+        ("card.html", "<div>Card</div>\n"),
+        ("card.rs", "// live: Card\npub struct Card;\n"),
+    ];
+    if with_css {
+        files.push(("card.css", ".card {}\n"));
+    }
+    let mut register = vec!["card::Card"];
+    if let Some(extra) = extra {
+        files.push(("extra.rs", extra));
+        register.push("extra::Extra");
+    }
+    Lib::acme()
+        .at(version)
+        .component("card", &files)
+        .manifest("card", "register", json!(register))
+}
+
+/// Finding 3 (REG-028): files an update drops that the application never
+/// edited are removed, with their module declaration and registration, and
+/// the plan reports each removal.
+#[test]
+fn reg_028_an_update_that_drops_unedited_files_removes_them_with_their_module() {
+    let extra = "// live: Extra\npub struct Extra;\n";
+    let one = two_module_library("1.0.0", Some(extra), true);
+    let two = two_module_library("1.1.0", None, false);
+    let root = pinned(&one);
+    install_card(root.path(), &[&one], &yes()).expect("one");
+    assert!(root.path().join("src/live/acme/extra.rs").is_file());
+    let project = ProjectFile::load(root.path()).expect("load");
+    let plan = plan::resolve_with(
+        &address::parse("acme/acme-ui/card").expect("source"),
+        &yes(),
+        &fetcher(&[&one, &two]),
+        &project,
+        &MarkerScanner,
+    )
+    .expect("plan");
+    let rendered = plan::render_with(&plan, &yes(), &project);
+    for line in [
+        "templates/acme-ui/card/card.css  removed: the library dropped it",
+        "src/live/acme/extra.rs  removed: the library dropped it",
+    ] {
+        assert!(rendered.contains(line), "`{line}` not in:\n{rendered}");
+    }
+    install_card(root.path(), &[&one, &two], &yes()).expect("two");
+    assert!(!root.path().join("templates/acme-ui/card/card.css").exists());
+    assert!(!root.path().join("src/live/acme/extra.rs").exists());
+    let namespace = fs::read_to_string(root.path().join("src/live/acme/mod.rs")).expect("mod.rs");
+    assert!(!namespace.contains("pub mod extra;"), "{namespace}");
+    assert!(namespace.contains("pub mod card;"), "{namespace}");
+    let live = fs::read_to_string(root.path().join("src/live/mod.rs")).expect("mod.rs");
+    assert!(!live.contains("Extra"), "{live}");
+    let record =
+        InstallRecord::load(root.path(), Path::new("templates/acme-ui/card")).expect("record");
+    assert!(record.digest(Path::new("src/live/acme/extra.rs")).is_none());
+    assert!(
+        record
+            .digest(Path::new("templates/acme-ui/card/card.css"))
+            .is_none()
+    );
+}
+
+/// Finding 3 (REG-028, REG-013): a file an update drops that the
+/// application edited is kept, scanned, and recorded as kept with its
+/// capabilities; its module and registration stay.
+#[test]
+fn reg_028_an_update_that_drops_an_edited_file_keeps_scans_and_records_it() {
+    let one = two_module_library("1.0.0", Some("// live: Extra\npub struct Extra;\n"), false);
+    let two = two_module_library("1.1.0", None, false);
+    let root = pinned(&one);
+    install_card(root.path(), &[&one], &yes()).expect("one");
+    let extra = root.path().join("src/live/acme/extra.rs");
+    fs::write(
+        &extra,
+        "// live: Extra\n// uses: cache\npub struct Extra; // edited\n",
+    )
+    .expect("edit");
+    expect_refused(install_card(root.path(), &[&one, &two], &yes()), "`cache`");
+    let allow_cache = Options {
+        yes: true,
+        allow: BTreeSet::from([Capability::Cache]),
+        ..Options::default()
+    };
+    let plan = install_card(root.path(), &[&one, &two], &allow_cache).expect("two");
+    let dropped = &plan.components[0].dropped;
+    assert_eq!(dropped.len(), 1, "{dropped:?}");
+    assert_eq!(dropped[0].outcome, FileOutcome::Kept);
+    assert!(
+        fs::read_to_string(&extra)
+            .expect("extra")
+            .contains("edited"),
+        "the edited file was removed"
+    );
+    let record = &records(root.path())[&component("github.com/acme/acme-ui/card")];
+    assert_eq!(record.kept, vec!["extra.rs".to_owned()]);
+    assert!(record.capabilities.contains_key(&Capability::Cache));
+    assert!(!record.files.contains_key("extra.rs"));
+    let namespace = fs::read_to_string(root.path().join("src/live/acme/mod.rs")).expect("mod.rs");
+    assert!(namespace.contains("pub mod extra;"), "{namespace}");
+    let live = fs::read_to_string(root.path().join("src/live/mod.rs")).expect("mod.rs");
+    assert!(
+        live.contains("// register crate::live::acme::extra::Extra"),
+        "{live}"
+    );
+}
+
+/// Finding 3 (REG-029): removing a dropped file is journaled like any other
+/// write, so a failure after it puts the file back.
+#[test]
+fn reg_029_a_failed_update_puts_back_the_files_it_removed() {
+    let one = two_module_library("1.0.0", None, true);
+    let two = two_module_library("1.1.0", None, false);
+    let root = pinned(&one);
+    install_card(root.path(), &[&one], &yes()).expect("one");
+    let css = root.path().join("templates/acme-ui/card/card.css");
+    let before = fs::read(&css).expect("css");
+    let calls = RefCell::new(0);
+    let failing = |root: &Path,
+                   module: &str,
+                   modules: &[String],
+                   register: &[String],
+                   unregister: &[String]|
+     -> Result<RegistrationEdits, RegistryError> {
+        *calls.borrow_mut() += 1;
+        if *calls.borrow() > 1 {
+            return Err(RegistryError::Io("the disk filled up".to_owned()));
+        }
+        registrar(root, module, modules, register, unregister)
+    };
+    let lock = ProjectLock::acquire(root.path()).expect("lock");
+    let mut project = ProjectFile::load(root.path()).expect("load");
+    let plan = plan::resolve_with(
+        &address::parse("acme/acme-ui/card").expect("source"),
+        &yes(),
+        &fetcher(&[&one, &two]),
+        &project,
+        &MarkerScanner,
+    )
+    .expect("plan");
+    let decisions = plan::confirm(&plan, &yes(), &project, &mut no_terminal()).expect("decisions");
+    install::apply_with(&plan, &mut project, &lock, &yes(), &decisions, &failing)
+        .expect_err("fails");
+    assert_eq!(
+        fs::read(&css).expect("css"),
+        before,
+        "the removal was not undone"
+    );
+}
+
+/// Finding 4: untrusted text is escaped before it reaches the terminal: an
+/// OSC 52 sequence in a namespace prints as its escape, and a line break in
+/// a JSON key cannot start a line of its own.
+#[test]
+fn reg_012_untrusted_text_is_escaped_before_it_reaches_the_terminal() {
+    let root = project();
+    let tree = root.path().join("vendor/acme-ui");
+    let hostile = "acme\u{1b}]52;c;ZXZpbA==\u{7}";
+    Lib::new(ADDRESS, hostile, "1.0.0").widget().write_to(&tree);
+    let manifest = tree.join("components/widget/manifest.json");
+    let output = live_add(
+        root.path(),
+        &["--manifest", manifest.to_str().expect("utf-8"), "--yes"],
+    );
+    assert!(!output.status.success(), "{}", combined(&output));
+    let bytes = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
+    assert!(
+        !bytes.contains(&0x1b) && !bytes.contains(&0x07),
+        "a raw control character reached the terminal"
+    );
+    assert!(
+        combined(&output).contains("\\u{1b}]52"),
+        "{}",
+        combined(&output)
+    );
+
+    let manifest = serde_json::to_vec(&json!({
+        "name": "acme.widget",
+        "files": ["widget.html"],
+        "x\n  \u{2713} installed": true,
+    }))
+    .expect("json");
+    let error = library::parse_manifest(&manifest, "widget", "acme")
+        .expect_err("refused")
+        .to_string();
+    assert!(!error.contains('\n'), "{error:?}");
+}
+
+/// Finding 5 (REG-003): a manifest naming more than 64 files is refused
+/// before any of them is fetched.
+#[test]
+fn reg_003_a_manifest_naming_more_than_64_files_is_refused_before_fetching_them() {
+    let names: Vec<String> = (0..65).map(|index| format!("f{index}.css")).collect();
+    let mut files = vec!["widget.html".to_owned()];
+    files.extend(names.iter().cloned());
+    let manifest =
+        serde_json::to_vec(&json!({"name": "acme.widget", "files": files})).expect("json");
+    let error = library::parse_manifest(&manifest, "widget", "acme").expect_err("refused");
+    assert!(error.to_string().contains("64"), "{error}");
+    let mut library = Lib::acme().component("widget", &[("widget.html", "<p>W</p>\n")]);
+    library = library.manifest("widget", "files", json!(files));
+    let fake = fetcher(&[&library]);
+    let counting = Counting {
+        inner: &fake,
+        resolved: RefCell::default(),
+        commits: RefCell::default(),
+    };
+    let served = RefCell::new(Vec::new());
+    struct Logging<'a> {
+        inner: &'a dyn Fetcher,
+        served: &'a RefCell<Vec<String>>,
+    }
+    impl Fetcher for Logging<'_> {
+        fn versions(&self, l: &LibraryAddress) -> Result<Vec<semver::Version>, RegistryError> {
+            self.inner.versions(l)
+        }
+        fn resolve(
+            &self,
+            l: &LibraryAddress,
+            v: &semver::Version,
+        ) -> Result<Commit, RegistryError> {
+            self.inner.resolve(l, v)
+        }
+        fn file(&self, l: &LibraryAddress, c: &Commit, p: &str) -> Result<Vec<u8>, RegistryError> {
+            self.served.borrow_mut().push(p.to_owned());
+            self.inner.file(l, c, p)
+        }
+    }
+    let logging = Logging {
+        inner: &counting,
+        served: &served,
+    };
+    let root = pinned(&library);
+    expect_refused(resolve(root.path(), "acme/acme-ui/widget", &logging), "64");
+    assert!(
+        served.borrow().iter().all(|path| !path.ends_with(".css")),
+        "{:?}",
+        served.borrow()
+    );
+}
+
+/// A library whose one component names 64 stylesheets of 1 MiB each, served
+/// on demand, counting the bytes it serves.
+struct Heavy {
+    library_json: Vec<u8>,
+    manifest: Vec<u8>,
+    served: RefCell<u64>,
+}
+
+impl Fetcher for Heavy {
+    fn versions(&self, _: &LibraryAddress) -> Result<Vec<semver::Version>, RegistryError> {
+        Ok(vec![v("1.0.0")])
+    }
+    fn resolve(&self, _: &LibraryAddress, _: &semver::Version) -> Result<Commit, RegistryError> {
+        Ok(Commit("e".repeat(40)))
+    }
+    fn file(&self, _: &LibraryAddress, _: &Commit, path: &str) -> Result<Vec<u8>, RegistryError> {
+        let bytes = match path {
+            "library.json" => self.library_json.clone(),
+            "components/widget/manifest.json" => self.manifest.clone(),
+            "components/widget/widget.html" => b"<p>W</p>\n".to_vec(),
+            _ => vec![b' '; library::MAX_FILE_BYTES],
+        };
+        *self.served.borrow_mut() += bytes.len() as u64;
+        Ok(bytes)
+    }
+}
+
+/// Finding 5 (REG-009): a plan that would fetch more than 64 MiB is refused
+/// once it passes the limit, before it fetches more.
+#[test]
+fn reg_009_a_plan_that_fetches_more_than_64_mib_is_refused() {
+    let library = Lib::acme();
+    let mut files = vec!["widget.html".to_owned()];
+    files.extend((0..63).map(|index| format!("f{index}.css")));
+    let heavy = Heavy {
+        library_json: library.library_json_bytes(),
+        manifest: serde_json::to_vec(&json!({"name": "acme.widget", "files": files}))
+            .expect("json"),
+        served: RefCell::new(0),
+    };
+    let root = pinned(&library);
+    let error = expect_refused(resolve(root.path(), "acme/acme-ui/widget", &heavy), "MiB");
+    assert!(!error.contains("does not verify"), "{error}");
+    assert!(
+        *heavy.served.borrow() <= plan::MAX_PLAN_BYTES + MAX_RESPONSE_BYTES,
+        "{} bytes were fetched",
+        heavy.served.borrow()
+    );
+}
+
+/// Finding 6 (REG-010): a dependency a fetched manifest names must be an
+/// HTTPS address on a public host: loopback, plain HTTP, and private or
+/// link-local literals are refused, while the developer may still type a
+/// loopback source.
+#[test]
+fn reg_010_a_dependency_on_a_loopback_private_or_plain_http_address_is_refused() {
+    for hostile in [
+        "http://127.0.0.1:9000/lib/components/helper",
+        "http://example.test/lib/components/helper",
+        "https://127.0.0.1/lib/components/helper",
+        "https://localhost/lib/components/helper",
+        "https://api.localhost/lib/components/helper",
+        "https://10.0.0.5/lib/components/helper",
+        "https://172.16.0.1/lib/components/helper",
+        "https://192.168.1.1/lib/components/helper",
+        "https://169.254.169.254/lib/components/helper",
+        "https://100.64.0.1/lib/components/helper",
+        "https://0.0.0.0/lib/components/helper",
+        "https://[::1]/lib/components/helper",
+        "https://[fe80::1]/lib/components/helper",
+        "https://[fd00::1]/lib/components/helper",
+        "https://[::ffff:127.0.0.1]/lib/components/helper",
+        "https://2130706433/lib/components/helper",
+        "https://0x7f.0.0.1/lib/components/helper",
+        "https://127.1/lib/components/helper",
+    ] {
+        let manifest = serde_json::to_vec(&json!({
+            "name": "acme.widget",
+            "files": ["widget.html"],
+            "dependencies": [hostile],
+        }))
+        .expect("json");
+        assert!(
+            library::parse_manifest(&manifest, "widget", "acme").is_err(),
+            "{hostile} was admitted as a dependency"
+        );
+    }
+    for public in [
+        "https://example.test/lib/components/helper",
+        "acme/helpers/helper@1.0.0",
+        "gitlab.com/acme/helpers/helper",
+    ] {
+        let manifest = serde_json::to_vec(&json!({
+            "name": "acme.widget",
+            "files": ["widget.html"],
+            "dependencies": [public],
+        }))
+        .expect("json");
+        library::parse_manifest(&manifest, "widget", "acme").expect(public);
+    }
+    address::parse("http://127.0.0.1:9000/lib/components/helper").expect("typed source");
+}
+
+/// Finding 7 (REG-026): `--force` lets a downgrade or a moved tag through,
+/// and the plan says so in those words.
+#[test]
+fn reg_026_a_forced_downgrade_or_moved_tag_is_reported_in_the_plan() {
+    let newer = Lib::acme().at("2.0.0").widget();
+    let older = Lib::acme().at("1.0.0").widget();
+    let moved = Lib::acme()
+        .at("2.0.0")
+        .component("widget", &[("widget.html", "<div>moved</div>\n")]);
+    let root = pinned(&newer);
+    add(
+        root.path(),
+        "acme/acme-ui/widget@2.0.0",
+        &fetcher(&[&older, &newer]),
+    )
+    .expect("newer");
+    let forced = Options {
+        force: true,
+        yes: true,
+        ..Options::default()
+    };
+    let project = ProjectFile::load(root.path()).expect("load");
+    for (source, libraries, words) in [
+        (
+            "acme/acme-ui/widget@1.0.0",
+            fetcher(&[&older, &newer]),
+            "downgrade",
+        ),
+        ("acme/acme-ui/widget@2.0.0", fetcher(&[&moved]), "moved tag"),
+    ] {
+        let plan = plan::resolve_with(
+            &address::parse(source).expect("source"),
+            &forced,
+            &libraries,
+            &project,
+            &TestScanner,
+        )
+        .expect("forced plan");
+        let rendered = plan::render_with(&plan, &forced, &project);
+        assert!(rendered.contains(words), "`{words}` not in:\n{rendered}");
+        assert!(
+            plan.components[0]
+                .forced
+                .iter()
+                .any(|line| line.contains(words)),
+            "{:?}",
+            plan.components[0].forced
+        );
+    }
+}
+
+/// Finding 8 (REG-033): a handover is bound to its library: one the pinned
+/// key signed for another library does not move this library's key.
+#[test]
+fn reg_033_a_handover_signed_for_another_library_is_refused() {
+    let other = "github.com/other/acme-ui";
+    let original = Lib::new(other, "acme", "1.0.0").widget();
+    let root = pinned(&original);
+    let new_seed = [21; 32];
+    let handover =
+        signing::sign_handover(&SecretKey::from_bytes(SEED), &public_key(new_seed), ADDRESS)
+            .expect("handover for another library");
+    let replayed = Lib::new(other, "acme", "1.1.0")
+        .widget()
+        .signed_by(new_seed)
+        .set(
+            "previousKeys",
+            json!([{
+                "publicKey": handover.from.encode(),
+                "next": handover.to.as_str(),
+                "signature": handover.signature.encode(),
+            }]),
+        );
+    let mut prompter = terminal(&[true, true]);
+    let result = install_with(
+        root.path(),
+        "other/acme-ui/widget",
+        &fetcher(&[&replayed]),
+        &yes(),
+        &TestScanner,
+        &mut prompter,
+    );
+    expect_refused(result, "handover");
+    assert!(prompter.asked.is_empty(), "{:?}", prompter.asked);
+}
+
+/// Finding 8 (REG-033, REG-027): after a re-pin the former key stays
+/// recorded, so `live:check` verifies a component installed under it; a
+/// record signed by a key that is neither the pin nor a former one fails.
+#[test]
+fn reg_027_a_component_recorded_under_a_former_key_verifies_after_a_re_pin() {
+    let first = Lib::acme()
+        .widget()
+        .component("panel", &[("panel.html", "<p>Panel</p>\n")]);
+    let root = pinned(&first);
+    add(root.path(), "acme/acme-ui/widget", &fetcher(&[&first])).expect("widget");
+    add(root.path(), "acme/acme-ui/panel", &fetcher(&[&first])).expect("panel");
+    let new_seed = [22; 32];
+    let handover =
+        signing::sign_handover(&SecretKey::from_bytes(SEED), &public_key(new_seed), ADDRESS)
+            .expect("handover");
+    let rotated = Lib::acme()
+        .at("1.1.0")
+        .widget()
+        .component("panel", &[("panel.html", "<p>Panel</p>\n")])
+        .signed_by(new_seed)
+        .set(
+            "previousKeys",
+            json!([{
+                "publicKey": handover.from.encode(),
+                "next": handover.to.as_str(),
+                "signature": handover.signature.encode(),
+            }]),
+        );
+    install_with(
+        root.path(),
+        "acme/acme-ui/widget",
+        &fetcher(&[&first, &rotated]),
+        &yes(),
+        &TestScanner,
+        &mut terminal(&[true]),
+    )
+    .expect("re-pinned");
+    let verification = verify_installed(root.path()).expect("verify");
+    assert!(verification.failures.is_empty(), "{verification:?}");
+    assert_eq!(verification.verified.len(), 2);
+    let libraries = ProjectFile::load(root.path())
+        .expect("load")
+        .libraries()
+        .expect("libraries");
+    assert_eq!(
+        libraries[&LibraryAddress(ADDRESS.to_owned())].previous_keys,
+        vec![public_key(SEED)]
+    );
+
+    let panel = records(root.path())[&component("github.com/acme/acme-ui/panel")].clone();
+    let stranger = signing::sign(&SecretKey::from_bytes([23; 32]), &panel.hash)
+        .expect("sign")
+        .encode();
+    edit_record(root.path(), &panel.signature.encode(), &stranger);
+    let verification = verify_installed(root.path()).expect("verify");
+    assert_eq!(verification.failures.len(), 1, "{verification:?}");
+}
+
+/// Finding 9 (REG-027): `live:check` fails a record whose `source` is not
+/// the address its table is keyed by.
+#[test]
+fn reg_027_a_record_whose_source_differs_from_its_address_fails() {
+    let (root, _) = installed_widget();
+    edit_record(
+        root.path(),
+        "[live.components.\"github.com/acme/acme-ui/widget\"]",
+        "[live.components.\"github.com/evil/acme-ui/widget\"]",
+    );
+    pin(root.path(), "github.com/evil/acme-ui", &public_key(SEED));
+    let verification = verify_installed(root.path()).expect("verify");
+    assert_eq!(verification.failures.len(), 1, "{verification:?}");
+    assert!(
+        verification.failures[0].1.contains("source"),
+        "{verification:?}"
+    );
+}
+
+/// Finding 10 (REG-029): the command `serve` builds with holds a shared
+/// lock from before its build starts until the build finishes, so an
+/// install cannot take the lock mid-build, and releases it once the
+/// application runs.
+#[cfg(unix)]
+#[test]
+fn reg_029_the_build_holds_a_shared_lock_until_it_finishes() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = project();
+    let marks = root.path().join("marks");
+    fs::create_dir_all(&marks).expect("marks");
+    let cargo = root.path().join("fake-cargo");
+    fs::write(
+        &cargo,
+        format!(
+            "#!/bin/sh\ntouch '{m}/started'\nprintf '%s\\n' '{{\"reason\":\"compiler-artifact\",\"target\":{{\"name\":\"app\"}}}}'\nwhile [ ! -e '{m}/finish' ]; do sleep 0.05; done\nprintf '%s\\n' '{{\"reason\":\"build-finished\",\"success\":true}}'\necho \"args: $*\"\necho 'application running'\nwhile [ ! -e '{m}/stop' ]; do sleep 0.05; done\n",
+            m = marks.display()
+        ),
+    )
+    .expect("fake cargo");
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let install = ProjectLock::acquire(root.path()).expect("lock");
+    let out = root.path().join("out.txt");
+    let mut wait = Command::new(BIN)
+        .args(["live:wait", "--", "run", "--bin", "app", "--", "serve"])
+        .current_dir(root.path())
+        .env("CARGO", &cargo)
+        .stdout(fs::File::create(&out).expect("out"))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn live:wait");
+    let until = |what: &str, condition: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !condition() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(
+        !marks.join("started").exists(),
+        "the build started during an install"
+    );
+    install.release().expect("release");
+    until("the build to start", &|| marks.join("started").exists());
+    let blocked = ProjectLock::acquire(root.path());
+    assert!(blocked.is_err(), "an install took the lock mid-build");
+    fs::write(marks.join("finish"), "").expect("finish");
+    until("the application to run", &|| {
+        fs::read_to_string(&out)
+            .unwrap_or_default()
+            .contains("application running")
+    });
+    until("the lock to be released", &|| {
+        ProjectLock::acquire(root.path()).is_ok()
+    });
+    let text = fs::read_to_string(&out).expect("out");
+    assert!(
+        text.contains("args: run --message-format=json-render-diagnostics --bin app -- serve"),
+        "{text}"
+    );
+    assert!(!text.contains("compiler-artifact"), "{text}");
+    fs::write(marks.join("stop"), "").expect("stop");
+    let status = wait.wait().expect("wait");
+    assert!(status.success());
 }

@@ -4,7 +4,8 @@ mod commands;
 // fetcher, the authoring commands' primitives) is public API the binary's
 // commands never call, and a private copy would report it all as dead.
 use suprnova_cli::registry;
-mod secure_fs;
+// The same file helpers the registry writes with, from the library crate.
+use suprnova_cli::secure_fs;
 mod templates;
 pub mod ui;
 
@@ -240,7 +241,12 @@ enum Commands {
     /// Wait until no live:add holds the project lock, restoring an
     /// interrupted install first; `serve` runs it before each build
     #[command(name = "live:wait")]
-    LiveWait,
+    LiveWait {
+        /// A cargo command to run once no install holds the lock, holding a
+        /// shared lock until its build finishes (e.g. -- run --bin app)
+        #[arg(last = true)]
+        cargo: Vec<String>,
+    },
     /// Author a Live component library: scaffold it, check it, sign it
     #[command(name = "live:registry")]
     LiveRegistry {
@@ -596,8 +602,8 @@ fn main() {
                 allow,
             });
         }
-        Commands::LiveWait => {
-            commands::serve::wait_for_installs();
+        Commands::LiveWait { cargo } => {
+            commands::serve::wait_for_installs(cargo);
         }
         Commands::LiveRegistry { command } => {
             use suprnova_cli::registry::registry_commands;

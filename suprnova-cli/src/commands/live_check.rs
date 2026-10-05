@@ -83,15 +83,18 @@ fn verify_recorded_components() -> Result<(), String> {
         std::env::current_dir().map_err(|e| format!("cannot read the working directory: {e}"))?;
     let verification =
         crate::registry::project::verify_installed(&root).map_err(|e| e.to_string())?;
+    use crate::registry::printable;
     for (address, path) in &verification.changed {
-        ui::warning(&format!(
+        ui::warning(&printable(&format!(
             "{address}: {} changed since install",
             path.display()
-        ));
+        )));
     }
     if !verification.failures.is_empty() {
         for (address, reason) in &verification.failures {
-            ui::error(&format!("{address} failed verification: {reason}"));
+            ui::error(&printable(&format!(
+                "{address} failed verification: {reason}"
+            )));
         }
         return Err(format!(
             "{} recorded component(s) failed verification against their pinned keys",
