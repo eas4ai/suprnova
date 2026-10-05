@@ -3,6 +3,9 @@
 
 pub mod features;
 pub mod migration;
+#[cfg(feature = "testing")]
+#[path = "../support/mysql_time_columns.rs"]
+mod mysql_time_columns;
 // Its tests move the framework clock with `TestClock`, which exists with
 // the `testing` feature only.
 #[cfg(feature = "testing")]

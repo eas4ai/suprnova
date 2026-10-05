@@ -47,6 +47,9 @@ impl MigratorTrait for Migrator {
             // includes it so `suprnova migrate` provisions the table
             // alongside this project's own schema.
             Box::new(suprnova::features::migrations::CreateFeaturesTable),
+            // Moves a features table an older CreateFeaturesTable made on
+            // MySQL from TIMESTAMP (which stops at 2038-01-19) to DATETIME.
+            Box::new(suprnova::features::migrations::FeatureTimestampsToDatetime),
             // Phase 10A T11 - adds the columns the migrated dogfood
             // models (User, Todo) declare on top of the original
             // bare-bones schema. See the migration's module doc for
