@@ -106,6 +106,28 @@ fn argv(command: &str) -> Vec<String> {
     vec!["console".to_string(), command.to_string()]
 }
 
+/// The dispatcher holds the application's bootstrap boxed while it awaits
+/// it, as `Application::run` holds its own. Awaited inline, the bootstrap's
+/// state machine sat inside the dispatcher's, and a deep one pushed a
+/// console `main` past rustc's query depth limit in a release build
+/// ("queries overflow the depth limit!" computing the layout of `main`). A
+/// bootstrap that keeps 64 KiB across an await shows where it is held: inline,
+/// the dispatcher's future carries those bytes.
+#[test]
+fn the_dispatcher_holds_the_bootstrap_boxed() {
+    const HELD: usize = 64 * 1024;
+    let dispatch = console::dispatch_argv_with_init(argv("process-boot:services"), || async {
+        let held = [0u8; HELD];
+        tokio::task::yield_now().await;
+        std::hint::black_box(&held);
+    });
+    let size = std::mem::size_of_val(&dispatch);
+    assert!(
+        size < HELD,
+        "the dispatcher's future is {size} bytes, so it holds the bootstrap inline"
+    );
+}
+
 #[tokio::test]
 async fn a_console_command_resolves_an_injectable() {
     console::dispatch_argv_with_init(argv("process-boot:services"), || async {})
