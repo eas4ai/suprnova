@@ -15,14 +15,14 @@ distributed through git tags, not crates.io - see [Distribution
 model](installation.md#distribution-model).
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v3.2.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v3.2.1 suprnova-cli
 suprnova --version
 ```
 
 To upgrade later, pass `--force`:
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v3.2.0 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v3.2.1 suprnova-cli
 ```
 
 ## The two binaries
@@ -179,7 +179,7 @@ The most common path from "nothing installed" to "running app":
 
 ```bash
 # 1. Install the CLI
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v3.2.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v3.2.1 suprnova-cli
 
 # 2. Scaffold a project (interactive - picks Svelte by default)
 suprnova new my-app
@@ -241,7 +241,7 @@ when reporting a bug or checking whether an install took:
 
 ```bash
 suprnova --version
-# suprnova 3.2.0
+# suprnova 3.2.1
 ```
 
 Both `-v` and `-V` are accepted. Clap's generated flag offers only `-V`;
