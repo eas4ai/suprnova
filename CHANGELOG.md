@@ -1044,9 +1044,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   first-dispatch stamp, which failed that id's dispatches. `JobProcessed`
   fires whenever the job's pipeline returns without an error, as Laravel's
   worker fires it: after middleware deletes the job, then `JobAttempted`;
-  after middleware releases it, before `JobReleased`; and after a
-  debounced dispatch is dropped as superseded, between `JobDebounced` and
-  `JobAttempted`. Building a log subscriber with
+  after middleware releases it, before `JobReleased`; after a middleware
+  failure without an error; and after a debounced dispatch is dropped as
+  superseded, between `JobDebounced` and `JobAttempted`. The worker raises
+  the rest of its lifecycle events in Laravel 13.27's order for every
+  outcome too: `JobAttempted` after a retry and after a release by
+  middleware; `JobExceptionOccurred` after `JobFailed` for an error or
+  panic on the last attempt, for a job already out of attempts, and for
+  `FailOnException`; `JobFailed` before `JobTimedOut`, with no
+  `JobAttempted` after a timeout; and `JobProcessing` first for a job
+  already out of attempts. Building a log subscriber with
   `logging::build_subscriber` changes nothing until it is used: each
   subscriber writes file lines in its own format, and building no longer
   resets the default channel, so a caller that relied on that calls
