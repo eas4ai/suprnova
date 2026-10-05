@@ -1922,8 +1922,8 @@ mod tests {
     use crate::registry::statement::{Digest, Statement};
     use crate::registry::{Capability, RegistryError, Result};
 
-    /// Stands in for lane A's parsing and signing and lane B's scan, so the
-    /// authoring steps are tested on their own. A fake key's public bytes
+    /// Stands in for parsing, signing and the scan, so the authoring steps
+    /// are tested on their own. A fake key's public bytes
     /// are its secret bytes; a fake signature is the hash's bytes then the
     /// key's, so a stale hash or another key fails to verify. The fake scan
     /// reports `files` for a file naming `Storage::`, refuses a file holding

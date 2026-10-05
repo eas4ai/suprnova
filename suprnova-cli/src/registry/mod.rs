@@ -9,10 +9,6 @@
 //! verifies the signature against the key the project pinned, scans every
 //! file as data without running any of it, shows the plan, and only then
 //! writes into the application and records what arrived in `suprnova.toml`.
-//!
-//! The module tree is the interface contract the implementation lanes build
-//! against. A function that returns [`RegistryError::NotBuilt`] is a lane 0
-//! placeholder; none reaches `main`.
 
 pub mod address;
 pub mod author_key;
@@ -116,8 +112,6 @@ pub enum RegistryError {
     Io(String),
     /// A fetch failed or was refused (REG-009).
     Network(String),
-    /// A lane 0 placeholder: the named part is not built yet.
-    NotBuilt(&'static str),
 }
 
 /// Every message is escaped as it is written, so no error a registry
@@ -139,7 +133,6 @@ impl fmt::Display for RegistryError {
                 }
                 Ok(())
             }
-            RegistryError::NotBuilt(part) => write!(f, "{part} is not built yet"),
         }
     }
 }
