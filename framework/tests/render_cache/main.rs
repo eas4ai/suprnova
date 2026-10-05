@@ -7,6 +7,10 @@
 mod env_lock;
 #[path = "../support/live_dogfood_support/mod.rs"]
 mod live_dogfood_support;
+#[path = "../support/own_process.rs"]
+pub mod own_process;
+#[path = "../support/own_process_async.rs"]
+mod own_process_async;
 #[path = "../support/render_cache_feature_evaluator_support.rs"]
 mod render_cache_feature_evaluator_support;
 #[path = "../support/render_cache_live_support/mod.rs"]
