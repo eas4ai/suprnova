@@ -557,6 +557,48 @@ fn reg_022_inputs_built_to_exhaust_a_parsers_stack_are_refused() {
             "view-parse",
         ),
         (
+            "char-literal.rs",
+            format!(
+                "fn f() {{ let _c = '\"'; let x = {}1; }}",
+                "(".repeat(1_000_000)
+            ),
+            "rust-limit",
+        ),
+        (
+            "raw-string.rs",
+            format!(
+                "fn f() {{ let _s = r#\"a\"b\"#; let x = {}1; }}",
+                "(".repeat(1_000_000)
+            ),
+            "rust-limit",
+        ),
+        (
+            "nested-comment.rs",
+            format!(
+                "fn f() {{ /* /* */ \" */ let x = {}1; }}",
+                "(".repeat(1_000_000)
+            ),
+            "rust-limit",
+        ),
+        (
+            "template.js",
+            format!(
+                "const t = `${{1}}\"`; const x = {}1;",
+                "(".repeat(1_000_000)
+            ),
+            "script-limit",
+        ),
+        (
+            "regex.js",
+            format!("const r = /\"/; const x = {}1;", "(".repeat(1_000_000)),
+            "script-limit",
+        ),
+        (
+            "separator.js",
+            format!("// a comment\u{2028}const x = {}1;", "(".repeat(1_000_000)),
+            "script-limit",
+        ),
+        (
             "deep.css",
             format!(
                 ".a {{ b: {}1{}; }}",
