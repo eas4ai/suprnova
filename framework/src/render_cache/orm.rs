@@ -76,9 +76,12 @@ pub(crate) async fn advance(identities: Vec<DependencyIdentity>) -> Result<(), F
     }
     // DATA-029: carries every identity an earlier failed advance left
     // behind, so the first advance that can land repairs those missed
-    // invalidations too, instead of serving resuming over them.
+    // invalidations too, instead of serving resuming over them. `mark`
+    // says which failures those are, so a failure recorded while this
+    // advance runs is not resolved by it.
+    let (missed, mark) = super::write_side::unresolved();
     let mut carried = identities;
-    for missed in super::write_side::unresolved() {
+    for missed in missed {
         if !carried.contains(&missed) {
             carried.push(missed);
         }
@@ -102,7 +105,7 @@ pub(crate) async fn advance(identities: Vec<DependencyIdentity>) -> Result<(), F
     // identity it missed has been advanced; see
     // `super::write_side::suspend_serving`.
     match &outcome {
-        Ok(()) => super::write_side::resolve(&attempted),
+        Ok(()) => super::write_side::resolve(&attempted, mark),
         Err(_) => super::write_side::suspend_serving(&attempted),
     }
     outcome
@@ -136,7 +139,7 @@ impl Drop for UnfinishedAdvance {
 /// failure here is logged and leaves serving suspended, which is the
 /// protection the missed identities still need.
 async fn repair_unresolved() {
-    let missed = super::write_side::unresolved();
+    let (missed, _) = super::write_side::unresolved();
     if missed.is_empty() {
         return;
     }
