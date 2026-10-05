@@ -143,8 +143,10 @@ async fn a_queued_listener_finishes_before_the_console_returns() {
     );
 }
 
-/// Set while the console's supervisor runs.
-static CONSOLE_SUPERVISOR_RUNNING: AtomicBool = AtomicBool::new(false);
+/// Set once the console's supervisor has started.
+static CONSOLE_SUPERVISOR_STARTED: AtomicBool = AtomicBool::new(false);
+/// Set once the console's supervisor has seen its cancel token.
+static CONSOLE_SUPERVISOR_STOPPED: AtomicBool = AtomicBool::new(false);
 
 /// A supervisor the console's bootstrap starts: it runs until its token is
 /// cancelled.
@@ -157,9 +159,9 @@ impl Supervisor for ConsoleSupervisor {
     }
 
     async fn run(&self, cancel: tokio_util::sync::CancellationToken) -> Result<(), FrameworkError> {
-        CONSOLE_SUPERVISOR_RUNNING.store(true, Ordering::SeqCst);
+        CONSOLE_SUPERVISOR_STARTED.store(true, Ordering::SeqCst);
         cancel.cancelled().await;
-        CONSOLE_SUPERVISOR_RUNNING.store(false, Ordering::SeqCst);
+        CONSOLE_SUPERVISOR_STOPPED.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -173,27 +175,90 @@ async fn does_nothing(_args: Vec<String>) -> Result<(), FrameworkError> {
     Ok(())
 }
 
+/// Selects what [`console_supervisor_child`] does; unset, it does nothing.
+const CHILD_MODE: &str = "SUPRNOVA_CONSOLE_SUPERVISOR_CHILD";
+
+/// The body of the two tests below, in a process of its own. The
+/// supervisor registry is process-wide and refuses every spawn once one
+/// command has shut it down, so in a shared test process this supervisor
+/// would never start and a missing drain would go unnoticed.
+#[test]
+fn console_supervisor_child() {
+    let Some(mode) = std::env::var_os(CHILD_MODE) else {
+        return;
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let result = runtime.block_on(console::dispatch_argv_with_init(
+        argv("process-boot:noop"),
+        || async {
+            SupervisorRegistry::spawn(Arc::new(ConsoleSupervisor)).await;
+            for _ in 0..200 {
+                if CONSOLE_SUPERVISOR_STARTED.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        },
+    ));
+    match mode.to_str() {
+        Some("boot-failure") => assert!(result.is_err(), "the console boot fails"),
+        _ => result.expect("the command runs"),
+    }
+    assert!(
+        CONSOLE_SUPERVISOR_STARTED.load(Ordering::SeqCst),
+        "the bootstrap's supervisor ran"
+    );
+    assert!(
+        CONSOLE_SUPERVISOR_STOPPED.load(Ordering::SeqCst),
+        "the console returned with its bootstrap's supervisor still running"
+    );
+}
+
+/// Runs [`console_supervisor_child`] in `mode`, with `env` set.
+fn run_supervisor_child(mode: &str, env: &[(&str, &str)]) {
+    let mut command =
+        std::process::Command::new(std::env::current_exe().expect("current test executable"));
+    command
+        .args([
+            "--exact",
+            "process_boot::console_supervisor_child",
+            "--nocapture",
+        ])
+        .env(CHILD_MODE, mode);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().expect("spawn the child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "status: {}\nstdout:\n{stdout}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        stdout.contains("running 1 test"),
+        "child filter matched no test; stdout:\n{stdout}"
+    );
+}
+
 /// The console stops and drains the supervisors its bootstrap started
 /// before it returns. It used to return with them still running, and the
 /// end of `main` cut them off mid-work.
-///
-/// In a process where an earlier test already shut the supervisors down,
-/// the spawn is refused and nothing runs; the assertion still holds.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_console_command_drains_the_supervisors_its_bootstrap_started() {
-    console::dispatch_argv_with_init(argv("process-boot:noop"), || async {
-        SupervisorRegistry::spawn(Arc::new(ConsoleSupervisor)).await;
-        for _ in 0..100 {
-            if CONSOLE_SUPERVISOR_RUNNING.load(Ordering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the command runs");
-    assert!(
-        !CONSOLE_SUPERVISOR_RUNNING.load(Ordering::SeqCst),
-        "the console returned with its bootstrap's supervisor still running"
-    );
+#[test]
+fn a_console_command_drains_the_supervisors_its_bootstrap_started() {
+    run_supervisor_child("command", &[]);
+}
+
+/// A console whose framework boot fails after its bootstrap ran drains the
+/// supervisors that bootstrap started, as a command that ran does. The
+/// failed boot used to return before the drain. `LOG_CHANNEL` names a
+/// channel nothing defines, which fails the boot after the bootstrap.
+#[test]
+fn a_console_boot_failure_drains_the_supervisors_its_bootstrap_started() {
+    run_supervisor_child("boot-failure", &[("LOG_CHANNEL", "no-such-channel")]);
 }

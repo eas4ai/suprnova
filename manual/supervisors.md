@@ -130,7 +130,7 @@ Supervisors that ignore the token entirely will run until the 5-second window ex
 
 ### Embedders and integration tests
 
-`Server::run` calls `SupervisorRegistry::shutdown(...)` for you. So do the other subcommands of your application binary (`queue:work`, `schedule:work`, `workflow:work`, the `queue:*` commands, `down`, `up`) and your `console` binary: after the command, they cancel and drain the supervisors your bootstrap started with the same 5-second window, then wait for queued listeners. Code that calls `SupervisorRegistry::start_all()` outside those paths (embedders driving the framework from a custom binary, or integration tests that spin up supervisors directly) must also call `SupervisorRegistry::shutdown(timeout)` at teardown, or supervisor tasks will leak past the lifetime of the test:
+`Server::run` calls `SupervisorRegistry::shutdown(...)` for you. So do the other subcommands of your application binary (`queue:work`, `schedule:work`, `workflow:work`, the `queue:*` commands, `down`, `up`) and your `console` binary: after the command, and on every failure exit once your bootstrap has run, they cancel and drain the supervisors your bootstrap started with the same 5-second window, then wait for queued listeners. Code that calls `SupervisorRegistry::start_all()` outside those paths (embedders driving the framework from a custom binary, or integration tests that spin up supervisors directly) must also call `SupervisorRegistry::shutdown(timeout)` at teardown, or supervisor tasks will leak past the lifetime of the test:
 
 ```rust
 use std::time::Duration;

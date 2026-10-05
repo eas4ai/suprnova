@@ -1316,7 +1316,7 @@ where
             Ok(s) => s,
             Err(e) => {
                 eprintln!("suprnova: failed to start server: {e}");
-                std::process::exit(1);
+                process_boot::exit_after_boot(1).await;
             }
         };
 
@@ -1329,7 +1329,7 @@ where
 
         if let Err(e) = server.run().await {
             eprintln!("suprnova: server exited with error: {e}");
-            std::process::exit(1);
+            process_boot::exit_after_boot(1).await;
         }
     }
 
@@ -1569,7 +1569,7 @@ where
         // replica running every task, silently. Fail the boot instead.
         if let Err(e) = schedule.validate_single_server_locking() {
             eprintln!("suprnova: {e}");
-            std::process::exit(1);
+            process_boot::exit_after_boot(1).await;
         }
 
         println!("==============================================");
@@ -1621,14 +1621,13 @@ where
         // replica running every task, silently. Fail the boot instead.
         if let Err(e) = schedule.validate_single_server_locking() {
             eprintln!("suprnova: {e}");
-            std::process::exit(1);
+            process_boot::exit_after_boot(1).await;
         }
 
         println!("Running due scheduled tasks...");
         let (results, any_failed) = evaluate_due_once(&schedule).await;
-        // The tasks may have started queued listeners, and this process ends
-        // next, by returning or by the failure exit below, which would skip
-        // the shutdown every booted command gets after the match.
+        // The tasks may have started queued listeners; they finish before
+        // the results print.
         process_boot::finish_process().await;
         if results.is_empty() {
             println!("No tasks were due.");
@@ -1641,7 +1640,7 @@ where
             }
         }
         if any_failed {
-            std::process::exit(1);
+            process_boot::exit_after_boot(1).await;
         }
     }
 
@@ -1702,11 +1701,11 @@ where
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
                         eprintln!("Workflow worker error during drain: {e}");
-                        std::process::exit(1);
+                        process_boot::exit_after_boot(1).await;
                     }
                     Err(e) => {
                         eprintln!("Workflow worker task panicked during drain: {e}");
-                        std::process::exit(1);
+                        process_boot::exit_after_boot(1).await;
                     }
                 }
             }
@@ -1715,11 +1714,11 @@ where
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
                         eprintln!("Workflow worker error: {e}");
-                        std::process::exit(1);
+                        process_boot::exit_after_boot(1).await;
                     }
                     Err(e) => {
                         eprintln!("Workflow worker task panicked: {e}");
-                        std::process::exit(1);
+                        process_boot::exit_after_boot(1).await;
                     }
                 }
             }
@@ -1757,7 +1756,7 @@ where
             Ok(target) => (target.driver, target.label),
             Err(e) => {
                 eprintln!("suprnova: the queue worker cannot start: {e}");
-                std::process::exit(1);
+                process_boot::exit_after_boot(1).await;
             }
         };
 
@@ -1803,7 +1802,7 @@ where
                 crate::queue::worker::run_worker_on(&connection, cfg, cancel_for_worker).await
             {
                 eprintln!("suprnova: queue worker could not start: {e}");
-                std::process::exit(1);
+                process_boot::exit_after_boot(1).await;
             }
         });
 
@@ -1815,13 +1814,13 @@ where
                 cancel.cancel();
                 if let Err(e) = worker.await {
                     eprintln!("suprnova: queue worker task error during drain: {e}");
-                    std::process::exit(1);
+                    process_boot::exit_after_boot(1).await;
                 }
             }
             res = &mut worker => {
                 if let Err(e) = res {
                     eprintln!("suprnova: queue worker task error: {e}");
-                    std::process::exit(1);
+                    process_boot::exit_after_boot(1).await;
                 }
             }
         }
@@ -1859,7 +1858,7 @@ where
             PauseTarget::All => {
                 if let Err(e) = crate::queue::Queue::pause_all().await {
                     eprintln!("suprnova: failed to pause all queues: {e}");
-                    std::process::exit(1);
+                    process_boot::exit_after_boot(1).await;
                 }
                 println!("Job processing on all queues across all connections has been paused.");
             }
@@ -1868,12 +1867,12 @@ where
                     Ok(connection) => connection,
                     Err(e) => {
                         eprintln!("suprnova: {e}");
-                        std::process::exit(1);
+                        process_boot::exit_after_boot(1).await;
                     }
                 };
                 if let Err(e) = crate::queue::Queue::pause(&connection, &queue).await {
                     eprintln!("suprnova: failed to pause queue [{connection}:{queue}]: {e}");
-                    std::process::exit(1);
+                    process_boot::exit_after_boot(1).await;
                 }
                 println!("Job processing on queue [{connection}:{queue}] has been paused.");
             }
@@ -1901,12 +1900,12 @@ where
                     println!("{line}");
                 }
                 if !report.succeeded {
-                    std::process::exit(1);
+                    process_boot::exit_after_boot(1).await;
                 }
             }
             Err(e) => {
                 eprintln!("suprnova: {name}: {e}");
-                std::process::exit(1);
+                process_boot::exit_after_boot(1).await;
             }
         }
     }
@@ -1935,7 +1934,7 @@ where
             PauseTarget::All => {
                 if let Err(e) = crate::queue::Queue::resume_all().await {
                     eprintln!("suprnova: failed to resume all queues: {e}");
-                    std::process::exit(1);
+                    process_boot::exit_after_boot(1).await;
                 }
                 println!("Job processing on all queues across all connections has been resumed.");
             }
@@ -1949,7 +1948,7 @@ where
                     .unwrap_or_else(|_| connection.unwrap_or_default());
                 if let Err(e) = crate::queue::Queue::resume(&connection, &queue).await {
                     eprintln!("suprnova: failed to resume queue [{connection}:{queue}]: {e}");
-                    std::process::exit(1);
+                    process_boot::exit_after_boot(1).await;
                 }
                 println!("Job processing on queue [{connection}:{queue}] has been resumed.");
             }
@@ -2045,10 +2044,14 @@ where
     }
 
     /// [`Self::boot_process`], or report the failure and exit non-zero.
+    ///
+    /// A failure comes after the application's hook ran, so the exit goes
+    /// through [`process_boot::exit_after_boot`]: the supervisors the hook
+    /// started are stopped and drained first.
     async fn boot_or_exit(command: &str, boot: ProcessBoot, bootstrap_fn: Option<BootstrapFn>) {
         if let Err(e) = Self::boot_process(boot, bootstrap_fn).await {
             eprintln!("suprnova: {command} bootstrap error: {e}");
-            std::process::exit(1);
+            process_boot::exit_after_boot(1).await;
         }
     }
 
@@ -2119,7 +2122,7 @@ where
             }
             Err(e) => {
                 eprintln!("suprnova: failed to enter maintenance mode: {e}");
-                std::process::exit(1);
+                process_boot::exit_after_boot(1).await;
             }
         }
     }
@@ -2133,7 +2136,7 @@ where
             Ok(()) => println!("Application is now live."),
             Err(e) => {
                 eprintln!("suprnova: failed to bring the application up: {e}");
-                std::process::exit(1);
+                process_boot::exit_after_boot(1).await;
             }
         }
     }
@@ -2812,6 +2815,147 @@ mod process_exit_tests {
             String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
             "child filter matched no test; stdout:\n{}",
             String::from_utf8_lossy(&output.stdout),
+        );
+    }
+
+    /// Selects the subcommand [`failing_command_child`] runs; unset, the
+    /// child does nothing.
+    const FAILING_CHILD: &str = "SUPRNOVA_PROCESS_EXIT_FAILING_CHILD";
+    /// A storage path the failing child's bootstrap installs.
+    const FAILING_STORAGE: &str = "SUPRNOVA_PROCESS_EXIT_STORAGE";
+    /// Printed by [`ReportingSupervisor`] when it sees its cancel token.
+    const STOPPED_MARKER: &str = "reporting supervisor stopped";
+
+    static REPORTING_STARTED: AtomicBool = AtomicBool::new(false);
+
+    /// A supervisor that says on stdout when it stops: a failing command
+    /// exits the process, so the parent test reads the line instead of a
+    /// flag.
+    struct ReportingSupervisor;
+
+    #[async_trait::async_trait]
+    impl Supervisor for ReportingSupervisor {
+        fn name(&self) -> &'static str {
+            "reporting_supervisor"
+        }
+
+        async fn run(
+            &self,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<(), FrameworkError> {
+            REPORTING_STARTED.store(true, Ordering::SeqCst);
+            cancel.cancelled().await;
+            println!("{STOPPED_MARKER}");
+            Ok(())
+        }
+
+        fn restart_policy(&self) -> RestartPolicy {
+            RestartPolicy::Never
+        }
+    }
+
+    /// Runs the subcommand `FAILING_CHILD` names in a process of its own,
+    /// with a bootstrap that starts [`ReportingSupervisor`] and, when
+    /// `FAILING_STORAGE` is set, installs that storage path. The command is
+    /// expected to fail and exit the process.
+    #[test]
+    fn failing_command_child() {
+        let Some(command) = std::env::var_os(FAILING_CHILD) else {
+            return;
+        };
+        let command = command.into_string().expect("a UTF-8 subcommand");
+        let storage = std::env::var_os(FAILING_STORAGE);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            let app = Application::new().bootstrap(move || async move {
+                if let Some(storage) = storage {
+                    crate::app::paths::use_storage_path(storage);
+                }
+                SupervisorRegistry::spawn(std::sync::Arc::new(ReportingSupervisor)).await;
+                for _ in 0..200 {
+                    if REPORTING_STARTED.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert!(
+                    REPORTING_STARTED.load(Ordering::SeqCst),
+                    "the bootstrap's supervisor ran"
+                );
+            });
+            let cli = Cli::try_parse_from(["app", command.as_str()]).expect("the argv parses");
+            app.run_cli(cli).await;
+        });
+        panic!("{command} was expected to fail and exit the process");
+    }
+
+    /// Runs [`failing_command_child`] for `command` with `env` set, and
+    /// returns its exit code and stdout.
+    fn run_failing_child(command: &str, env: &[(&str, &std::ffi::OsStr)]) -> (Option<i32>, String) {
+        let mut child =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"));
+        child
+            .args([
+                "--exact",
+                "app::process_exit_tests::failing_command_child",
+                "--nocapture",
+            ])
+            .env(FAILING_CHILD, command);
+        for (key, value) in env {
+            child.env(key, value);
+        }
+        let output = child.output().expect("spawn the child");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            stdout.contains("running 1 test"),
+            "child filter matched no test; stdout:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("was expected to fail"),
+            "{command} did not fail; stdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+        (output.status.code(), stdout)
+    }
+
+    /// A command whose framework boot fails after the bootstrap ran stops
+    /// and drains the supervisors that bootstrap started before it exits.
+    /// The failure exit used to skip the drain, and the process ended with
+    /// them mid-work. `LOG_CHANNEL` names a channel nothing defines, which
+    /// fails the boot after the bootstrap.
+    #[test]
+    fn a_boot_failure_drains_the_supervisors_its_bootstrap_started() {
+        let (code, stdout) = run_failing_child(
+            "schedule:list",
+            &[("LOG_CHANNEL", std::ffi::OsStr::new("no-such-channel"))],
+        );
+        assert_eq!(code, Some(1), "stdout:\n{stdout}");
+        assert!(
+            stdout.contains(STOPPED_MARKER),
+            "the boot failure exited with the bootstrap's supervisor still running; \
+             stdout:\n{stdout}"
+        );
+    }
+
+    /// `down` that cannot record maintenance mode drains the supervisors
+    /// its bootstrap started before it exits, as a command that succeeds
+    /// does. The storage path the bootstrap installs is a file, so the
+    /// maintenance file cannot be written under it.
+    #[test]
+    fn a_failed_down_drains_the_supervisors_its_bootstrap_started() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-directory");
+        std::fs::write(&file, b"").expect("write the blocking file");
+        let (code, stdout) = run_failing_child("down", &[(FAILING_STORAGE, file.as_os_str())]);
+        assert_eq!(code, Some(1), "stdout:\n{stdout}");
+        assert!(
+            stdout.contains(STOPPED_MARKER),
+            "the failed down exited with the bootstrap's supervisor still running; \
+             stdout:\n{stdout}"
         );
     }
 }
