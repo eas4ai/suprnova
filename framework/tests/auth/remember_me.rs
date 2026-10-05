@@ -24,6 +24,9 @@
 //! - One tokio `Runtime` (`RT`) shared across the binary; the SQLx
 //!   pool is bound to the runtime that created it (mirrors
 //!   `magnetar_integration.rs`).
+//! - The connection is bound in a container scope per test
+//!   ([`in_database`]), never in the process container: the other files
+//!   of this binary bind databases of their own, with other tables.
 //! - `LocalMigrator` materialises only the `remember_tokens` and
 //!   `sessions` tables - `Auth::login_remember` writes to one and the
 //!   middleware reads from the other. We do not need users/magnetar to
@@ -44,9 +47,11 @@ use tokio::runtime::Runtime;
 
 #[cfg(feature = "testing")]
 use suprnova::auth::request_state;
+use suprnova::database::DbConnection;
 #[cfg(feature = "testing")]
 use suprnova::http::cookie::Cookie;
 use suprnova::session::SessionConfig;
+use suprnova::testing::TestContainer;
 #[cfg(feature = "testing")]
 use suprnova::{
     Auth, Authenticatable, Credentials, FrameworkError, Guard, SessionGuard, StatefulGuard,
@@ -57,18 +62,13 @@ use suprnova::{
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
 
 /// One-shot setup: install Crypt, build a shared in-memory SQLite
-/// connection registered in the global App container, run the local
-/// migrator. All tests reuse the same DB; each test inserts under a
-/// unique `user_id` to avoid cross-test interference on the verify
-/// scan.
+/// connection, run the local migrator. All tests reuse the same DB;
+/// each test inserts under a unique `user_id` to avoid cross-test
+/// interference on the verify scan.
 ///
-/// We bypass `TestDatabase` because it registers the connection in a
-/// thread-local `TestContainer`. cargo test spreads tests across
-/// worker threads, so a thread-local registration is invisible to
-/// every test except the one that wrote it. Registering directly in
-/// `App::singleton` (process-global, RwLock-backed) makes the
-/// connection visible to all worker threads.
-static SETUP: Lazy<()> = Lazy::new(|| {
+/// The connection is not published to the process container: see
+/// [`in_database`].
+static DATABASE: Lazy<DbConnection> = Lazy::new(|| {
     // Install Crypt with a fresh key. `_test_install_key` is
     // idempotent - returns false if a key already exists, which is
     // fine.
@@ -88,17 +88,35 @@ static SETUP: Lazy<()> = Lazy::new(|| {
         let conn = suprnova::database::DbConnection::connect(&config)
             .await
             .expect("connect in-memory sqlite");
-        // Migrate before publishing - every test reads through
+        // Migrate before any test binds it - every test reads through
         // `DB::connection()` and assumes the tables already exist.
         LocalMigrator::up(conn.inner(), None)
             .await
             .expect("run local migrator");
-        // Publish to the process-global App container. `App::resolve`
-        // and `DB::connection` will return this connection from every
-        // worker thread.
-        suprnova::App::singleton(conn);
-    });
+        conn
+    })
 });
+
+/// Run `test` on [`RT`] with [`DATABASE`] as the connection that
+/// `DB::connection()` resolves.
+///
+/// The connection is bound in a container scope around the test, not in
+/// the process container. The other files of this binary build in-memory
+/// databases of their own, with other tables, and the process container
+/// keeps one connection: the file that bound last would own it, and a
+/// test here would read and write that file's database. The scope binds
+/// per task, not per thread, so the binding follows the test's future
+/// wherever the runtime polls it. The test's future is boxed: these futures
+/// are large, and moving one by value into each wrapper overflowed the test
+/// thread's stack.
+fn in_database<F: std::future::Future>(test: F) -> F::Output {
+    let database = Lazy::force(&DATABASE).clone();
+    let test = Box::pin(test);
+    RT.block_on(TestContainer::scope(async move {
+        TestContainer::singleton(database);
+        test.await
+    }))
+}
 
 /// Local migrator: just the `sessions` and `remember_tokens` tables.
 /// The framework's auth/remember code does not need anything else.
@@ -769,9 +787,7 @@ async fn insert_raw_token(
 #[cfg(feature = "testing")]
 #[test]
 fn login_remember_issues_cookie_and_persists_token() {
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let user_id = "test-user-issue";
         let ttl_minutes: i64 = 60 * 24; // 1 day
 
@@ -846,9 +862,7 @@ fn login_remember_issues_cookie_and_persists_token() {
 /// user returns" path.
 #[test]
 fn remember_cookie_authenticates_after_session_expiry() {
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let user_id = "test-user-reauth";
         let ttl_minutes: i64 = 60 * 24;
 
@@ -888,9 +902,7 @@ fn remember_cookie_authenticates_after_session_expiry() {
 /// returns `Ok(None)`.
 #[test]
 fn remember_cookie_rotates_on_use() {
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let user_id = "test-user-rotate";
         let ttl_minutes: i64 = 60 * 24;
 
@@ -930,9 +942,7 @@ fn remember_cookie_rotates_on_use() {
 /// plaintext fails.
 #[test]
 fn revoke_remember_tokens_clears_all_rows_for_user() {
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let user_id = "test-user-revoke";
         let ttl_minutes: i64 = 60 * 24;
 
@@ -970,9 +980,7 @@ fn revoke_remember_tokens_clears_all_rows_for_user() {
 /// `prune_expired` then removes it.
 #[test]
 fn expired_token_rejected_and_cleaned_up_by_prune() {
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let user_id = "test-user-expired";
         let ttl_minutes: i64 = 60 * 24;
 
@@ -1013,9 +1021,7 @@ fn expired_token_rejected_and_cleaned_up_by_prune() {
 /// rows change.
 #[test]
 fn forged_cookie_does_not_authenticate() {
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let user_id = "test-user-forged";
         let ttl_minutes: i64 = 60 * 24;
 
@@ -1058,9 +1064,7 @@ fn forged_cookie_does_not_authenticate() {
 /// is not single-use under concurrency").
 #[test]
 fn verify_and_rotate_is_single_use_under_concurrency() {
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let user_id = "test-user-race";
         let ttl_minutes: i64 = 60 * 24;
 
@@ -1125,7 +1129,8 @@ fn forget_remember_cookie_clears_the_cookie() {
 #[cfg(feature = "testing")]
 #[test]
 fn remember_cookie_respects_secure_flag() {
-    Lazy::force(&SETUP);
+    // Only for the Crypt key the setup installs; no database is read.
+    Lazy::force(&DATABASE);
 
     let secure_config = SessionConfig::default(); // cookie_secure = true
     let plaintext = "any-encrypted-plaintext";
@@ -1187,9 +1192,7 @@ fn middleware_without_magnetar_engine_uses_legacy_remember_fallback() {
     use tokio::io::AsyncWriteExt;
     use tokio::sync::oneshot;
 
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let user_id = "test-user-middleware";
         let ttl_minutes: i64 = 60 * 24; // 1 day
 
@@ -1219,9 +1222,7 @@ fn middleware_without_magnetar_engine_uses_legacy_remember_fallback() {
         let mut http_bytes = Vec::new();
         http_bytes.extend_from_slice(b"GET / HTTP/1.1\r\n");
         http_bytes.extend_from_slice(b"Host: localhost\r\n");
-        http_bytes.extend_from_slice(
-            format!("Cookie: remember_me={encrypted}\r\n").as_bytes(),
-        );
+        http_bytes.extend_from_slice(format!("Cookie: remember_me={encrypted}\r\n").as_bytes());
         http_bytes.extend_from_slice(b"Content-Length: 0\r\n\r\n");
 
         let (req_tx, req_rx) = oneshot::channel::<Request>();
@@ -1239,9 +1240,7 @@ fn middleware_without_magnetar_engine_uses_legacy_remember_fallback() {
                 }
                 async {
                     std::future::pending::<()>().await;
-                    Ok::<_, Infallible>(hyper::Response::new(
-                        http_body_util::Empty::<Bytes>::new(),
-                    ))
+                    Ok::<_, Infallible>(hyper::Response::new(http_body_util::Empty::<Bytes>::new()))
                 }
             });
             let _ = http1::Builder::new()
@@ -1273,8 +1272,7 @@ fn middleware_without_magnetar_engine_uses_legacy_remember_fallback() {
         // we don't have to think about HTTPS in the test.
         let mut config = SessionConfig::default();
         config.cookie_secure = false;
-        config.remember_lifetime =
-            std::time::Duration::from_secs((ttl_minutes as u64) * 60);
+        config.remember_lifetime = std::time::Duration::from_secs((ttl_minutes as u64) * 60);
         let middleware = suprnova::SessionMiddleware::new(config);
         let response = middleware.handle(request, next).await;
 
@@ -1349,11 +1347,10 @@ fn middleware_without_magnetar_engine_uses_legacy_remember_fallback() {
         let (rotated_guard, rotated_plaintext) =
             decode_versioned_remember_carrier(&rotated_carrier);
         assert_eq!(rotated_guard, "web");
-        let third =
-            suprnova::auth::remember::verify_and_rotate(&rotated_plaintext, ttl_minutes)
-                .await
-                .expect("verify rotated plaintext")
-                .expect("rotated plaintext must match the live row");
+        let third = suprnova::auth::remember::verify_and_rotate(&rotated_plaintext, ttl_minutes)
+            .await
+            .expect("verify rotated plaintext")
+            .expect("rotated plaintext must match the live row");
         assert_eq!(third.0, user_id);
     });
 }
@@ -1361,9 +1358,7 @@ fn middleware_without_magnetar_engine_uses_legacy_remember_fallback() {
 #[cfg(feature = "testing")]
 #[test]
 fn session_guard_identity_switch_replaces_prior_browser_carrier() {
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let without_remember = exercise_session_guard_identity_switch(
             "test-user-switch-old-session-only",
             "test-user-switch-fresh-session-only",
@@ -1407,9 +1402,7 @@ fn session_guard_identity_switch_replaces_prior_browser_carrier() {
 #[cfg(feature = "testing")]
 #[test]
 fn auth_facade_login_id_identity_switch_replaces_prior_browser_carrier() {
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let outcome = exercise_session_guard_identity_switch(
             "test-user-auth-login-id-old",
             "test-user-auth-login-id-fresh",
@@ -1428,9 +1421,7 @@ fn auth_facade_login_id_identity_switch_replaces_prior_browser_carrier() {
 #[cfg(feature = "testing")]
 #[test]
 fn auth_facade_login_remember_identity_switch_replaces_prior_browser_carrier() {
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let outcome = exercise_session_guard_identity_switch(
             "test-user-auth-login-remember-old",
             "test-user-auth-login-remember-fresh",
@@ -1452,9 +1443,7 @@ fn auth_facade_login_remember_identity_switch_replaces_prior_browser_carrier() {
 #[cfg(feature = "testing")]
 #[test]
 fn auth_facade_issue_remember_cookie_replaces_prior_browser_carrier() {
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let outcome = exercise_session_guard_identity_switch(
             "test-user-auth-issue-remember-old",
             "test-user-auth-issue-remember-fresh",
@@ -1478,9 +1467,7 @@ fn auth_facade_issue_remember_cookie_replaces_prior_browser_carrier() {
 fn named_guard_remember_carrier_hydrates_only_encoded_guard() {
     use suprnova::middleware::Middleware;
 
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let user_id = "test-user-named-admin";
         let ttl_minutes: i64 = 60 * 24;
         let admin = SessionGuard::named("admin", Arc::new(NamedRememberProvider { id: user_id }))
@@ -1567,9 +1554,7 @@ fn named_guard_remember_carrier_hydrates_only_encoded_guard() {
 fn named_guard_remember_logout_revokes_only_its_selector() {
     use suprnova::middleware::Middleware;
 
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let user_id = "test-user-named-selector-logout";
         let ttl_minutes: i64 = 60 * 24;
         let web_credential = suprnova::auth::remember::issue(user_id, ttl_minutes)
@@ -1649,9 +1634,7 @@ fn named_guard_remember_logout_revokes_only_its_selector() {
 fn named_logout_does_not_revoke_an_unverified_other_user_carrier() {
     use suprnova::middleware::Middleware;
 
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let carrier_owner_id = "test-user-unverified-carrier-owner";
         let authenticated_user_id = "test-user-unverified-carrier-logout";
         let ttl_minutes: i64 = 60 * 24;
@@ -1771,9 +1754,7 @@ fn named_logout_does_not_revoke_an_unverified_other_user_carrier() {
 #[cfg(feature = "testing")]
 #[test]
 fn named_guard_logout_preserves_newer_sibling_carrier() {
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let admin_user_id = "test-user-carrier-admin";
         let web_user_id = "test-user-carrier-web";
         let ttl_minutes: i64 = 60 * 24;
@@ -1831,9 +1812,7 @@ fn named_guard_logout_preserves_newer_sibling_carrier() {
 fn named_logout_revokes_persisted_and_active_same_guard_selectors() {
     use suprnova::middleware::Middleware;
 
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let user_id = "test-user-same-guard-selector-mismatch";
         let ttl_minutes: i64 = 60 * 24;
         let retained_credential = suprnova::auth::remember::issue(user_id, ttl_minutes)
@@ -1889,9 +1868,7 @@ fn named_logout_revokes_persisted_and_active_same_guard_selectors() {
 fn logout_and_invalidate_revokes_named_guard_selectors() {
     use suprnova::middleware::Middleware;
 
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let web_user_id = "test-user-invalidate-web";
         let admin_user_id = "test-user-invalidate-admin";
         let ttl_minutes: i64 = 60 * 24;
@@ -1959,9 +1936,7 @@ fn logout_and_invalidate_revokes_named_guard_selectors() {
 fn logout_and_invalidate_revokes_persisted_and_active_named_selectors() {
     use suprnova::middleware::Middleware;
 
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let user_id = "test-user-full-invalidate-selector-mismatch";
         let ttl_minutes: i64 = 60 * 24;
         let retained_credential = suprnova::auth::remember::issue(user_id, ttl_minutes)
@@ -2028,9 +2003,7 @@ fn logout_and_invalidate_revokes_persisted_and_active_named_selectors() {
 fn request_override_does_not_change_named_remember_revocation_owner() {
     use suprnova::middleware::Middleware;
 
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let default_owner_id = "test-user-request-override-default-owner";
         let default_override_id = "test-user-request-override-default-override";
         let ttl_minutes: i64 = 60 * 24;
@@ -2196,9 +2169,7 @@ fn request_override_does_not_change_named_remember_revocation_owner() {
 fn full_invalidation_reports_ambiguous_selector_after_safe_teardown() {
     use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let ambiguous_owner_id = "test-user-ambiguous-invalidation-owner";
         let sibling_owner_id = "test-user-ambiguous-invalidation-sibling";
         let ttl_minutes: i64 = 60 * 24;
@@ -2316,9 +2287,7 @@ fn middleware_clears_forged_remember_cookie() {
     use tokio::io::AsyncWriteExt;
     use tokio::sync::oneshot;
 
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         // A forged plaintext encrypted under the legitimate key and bound
         // to the remember-me cookie's name - ciphertext valid, but no
         // matching hashed row.
@@ -2411,9 +2380,7 @@ fn middleware_clears_forged_remember_cookie() {
 fn middleware_preserves_unknown_remember_carrier_version() {
     use suprnova::middleware::Middleware;
 
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let future_carrier = concat!(
             "suprnova.remember.v2:",
             r#"{"guard":"admin","credential":"future-selector.future-verifier"}"#,
@@ -2476,9 +2443,7 @@ fn middleware_preserves_unknown_remember_carrier_version() {
 fn middleware_clears_malformed_supported_remember_carrier() {
     use suprnova::middleware::Middleware;
 
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let encrypted = Cookie::encrypted(
             suprnova::auth::remember::COOKIE_NAME,
             "suprnova.remember.v1:not-json",
@@ -2533,9 +2498,7 @@ fn middleware_clears_malformed_supported_remember_carrier() {
 fn session_guard_remember_login_replaces_malformed_carrier_clear_cookie() {
     use suprnova::middleware::Middleware;
 
-    Lazy::force(&SETUP);
-
-    RT.block_on(async {
+    in_database(async {
         let fresh_user_id = "fresh-after-malformed-carrier";
         let ttl_minutes = 60 * 24;
         let encrypted = Cookie::encrypted(
