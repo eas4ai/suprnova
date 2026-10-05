@@ -445,9 +445,17 @@ async fn drop_render_cache_schema(database: &DbConnection) {
 }
 
 async fn subscriptions_generation() -> u64 {
+    table_generation("payments_subscriptions").await
+}
+
+async fn receipts_generation() -> u64 {
+    table_generation("payments_webhook_events").await
+}
+
+async fn table_generation(name: &str) -> u64 {
     use suprnova_live::render_cache::generation::GenerationLedger as _;
 
-    let table = suprnova::render_cache::DependencyIdentity::table("payments_subscriptions");
+    let table = suprnova::render_cache::DependencyIdentity::table(name);
     suprnova::render_cache::ledger::SqlGenerationLedger::new()
         .current(&[table.digest()])
         .await
@@ -481,6 +489,60 @@ async fn serve_one(router: Router) -> (SocketAddr, tokio::task::JoinHandle<()>) 
     (addr, server)
 }
 
+/// Posts `body` to `path` and cancels the request once it parks right after
+/// the `commit` it makes for `event_id`.
+async fn deliver_and_cancel_at(
+    database: &DbConnection,
+    path: &str,
+    event_id: &str,
+    body: serde_json::Value,
+    commit: suprnova::payments::webhook_route::WebhookCommit,
+) {
+    use suprnova::payments::webhook_route::{
+        hold_webhook_commit_for_test, wait_until_webhook_commit_held_for_test,
+    };
+
+    hold_webhook_commit_for_test(event_id, commit);
+    let (addr, server) = serve_one(webhook_routes(Arc::new(database.inner().clone()))).await;
+    let client = tokio::spawn({
+        let path = path.to_owned();
+        async move { post(addr, &path, body).await }
+    });
+    wait_until_webhook_commit_held_for_test(event_id, commit).await;
+    server.abort();
+    client.abort();
+    assert!(
+        server
+            .await
+            .expect_err("the server was aborted")
+            .is_cancelled()
+    );
+    assert!(
+        client
+            .await
+            .expect_err("the client was aborted")
+            .is_cancelled()
+    );
+}
+
+/// The RenderCache schema beside the payments schema, and a fresh
+/// write-side probe so this process sees it.
+async fn with_render_cache_schema(database: &DbConnection) {
+    drop_render_cache_schema(database).await;
+    suprnova::render_cache::migration::Migration
+        .up(&SchemaManager::new(database.inner()))
+        .await
+        .expect("run the render cache migration");
+    suprnova::render_cache::RenderCache::uninstall_for_test();
+}
+
+/// Drops the RenderCache schema and resets the write-side probe, so the
+/// next test in this process probes a database without it.
+async fn without_render_cache_schema(database: &DbConnection) {
+    drop_render_cache_schema(database).await;
+    suprnova::render_cache::RenderCache::uninstall_for_test();
+}
+
 /// DATA-039 on a server engine. A delivery canceled right after its
 /// hydration commits has already advanced its mirror tables, because the
 /// advance runs inside the hydration's transaction; the retry is then
@@ -490,17 +552,9 @@ async fn hydration_advances_generations_in_its_transaction(
     database: &DbConnection,
     provider_name: &'static str,
 ) {
-    use suprnova::payments::webhook_route::{
-        hold_hydration_commit_for_test, wait_until_hydration_commit_held_for_test,
-    };
+    use suprnova::payments::webhook_route::WebhookCommit;
 
-    drop_render_cache_schema(database).await;
-    suprnova::render_cache::migration::Migration
-        .up(&SchemaManager::new(database.inner()))
-        .await
-        .expect("run the render cache migration");
-    // A fresh write-side probe, so this process sees the schema just created.
-    suprnova::render_cache::RenderCache::uninstall_for_test();
+    with_render_cache_schema(database).await;
 
     let mock = Arc::new(MockPaymentProvider::new());
     let provider: Arc<dyn PaymentProvider> = mock.clone();
@@ -526,28 +580,14 @@ async fn hydration_advances_generations_in_its_transaction(
             "customer": "cus_engines_generations",
         }}
     });
-    let held = hold_hydration_commit_for_test("evt_engines_generations_created");
-    let (addr, server) = serve_one(webhook_routes(Arc::new(database.inner().clone()))).await;
-    let client = tokio::spawn({
-        let path = path.clone();
-        let created = created.clone();
-        async move { post(addr, &path, created).await }
-    });
-    wait_until_hydration_commit_held_for_test(held).await;
-    server.abort();
-    client.abort();
-    assert!(
-        server
-            .await
-            .expect_err("the server was aborted")
-            .is_cancelled()
-    );
-    assert!(
-        client
-            .await
-            .expect_err("the client was aborted")
-            .is_cancelled()
-    );
+    deliver_and_cancel_at(
+        database,
+        &path,
+        "evt_engines_generations_created",
+        created.clone(),
+        WebhookCommit::Hydration,
+    )
+    .await;
     assert_eq!(
         subscriptions_generation().await,
         before + 1,
@@ -573,8 +613,120 @@ async fn hydration_advances_generations_in_its_transaction(
         "the duplicate advanced nothing, and the update advanced the table once"
     );
 
-    drop_render_cache_schema(database).await;
-    suprnova::render_cache::RenderCache::uninstall_for_test();
+    without_render_cache_schema(database).await;
+}
+
+/// A `subscription.created` webhook for a subscription the mock provider
+/// has never seen: its receipt is written, and its hydration fails.
+fn failing_webhook(event_id: &str) -> serde_json::Value {
+    json!({
+        "id": event_id,
+        "type": "subscription.created",
+        "data": { "object": { "id": "sub_never_registered", "customer": "cus_never_registered" } }
+    })
+}
+
+/// DATA-039 for the receipt table on a server engine. The receipt insert, a
+/// retry's error clear and the failure record each advance
+/// `payments_webhook_events` in the transaction that writes them, so a
+/// delivery canceled right after any of those commits leaves the table
+/// advanced. A receipt insert that collides with a unique index rolls back
+/// its transaction, which aborts on Postgres, and advances nothing.
+async fn receipt_writes_advance_in_their_transaction(
+    database: &DbConnection,
+    provider_name: &'static str,
+) {
+    use suprnova::payments::webhook_route::WebhookCommit;
+
+    with_render_cache_schema(database).await;
+    let provider: Arc<dyn PaymentProvider> = Arc::new(MockPaymentProvider::new());
+    PaymentProviderRegistry::bind(provider_name, provider);
+    let path = format!("/webhooks/payments/{provider_name}");
+    let before = receipts_generation().await;
+
+    deliver_and_cancel_at(
+        database,
+        &path,
+        "evt_engines_receipt_insert",
+        failing_webhook("evt_engines_receipt_insert"),
+        WebhookCommit::Receipt,
+    )
+    .await;
+    assert_eq!(
+        receipts_generation().await,
+        before + 1,
+        "the receipt insert's commit carried its advance"
+    );
+
+    deliver_and_cancel_at(
+        database,
+        &path,
+        "evt_engines_receipt_failure",
+        failing_webhook("evt_engines_receipt_failure"),
+        WebhookCommit::FailureRecord,
+    )
+    .await;
+    assert_eq!(
+        receipts_generation().await,
+        before + 3,
+        "the second receipt insert and its failure record each carried their advance"
+    );
+
+    deliver_and_cancel_at(
+        database,
+        &path,
+        "evt_engines_receipt_failure",
+        failing_webhook("evt_engines_receipt_failure"),
+        WebhookCommit::RetryClear,
+    )
+    .await;
+    assert_eq!(
+        receipts_generation().await,
+        before + 4,
+        "the retry's error clear carried its advance"
+    );
+
+    // A collision: a fresh receipt table with one receipt of this event type
+    // and a unique index on the type, so the next receipt insert collides.
+    fresh_payments_schema(database).await;
+    let addr = spawn_server(webhook_routes(Arc::new(database.inner().clone()))).await;
+    let (status, body) = post(addr, &path, failing_webhook("evt_engines_receipt_seed")).await;
+    assert_eq!(status, 503, "the seed receipt's hydration fails: {body}");
+    database
+        .inner()
+        .execute_unprepared(
+            "CREATE UNIQUE INDEX engines_receipt_type_unique \
+             ON payments_webhook_events (provider_event_type)",
+        )
+        .await
+        .expect("create a unique index the next receipt collides with");
+    let before_collision = receipts_generation().await;
+    let (status, body) = post(
+        addr,
+        &path,
+        failing_webhook("evt_engines_receipt_collision"),
+    )
+    .await;
+    assert_eq!(
+        status, 503,
+        "the collision continues into a hydration that fails: {body}"
+    );
+    assert_eq!(
+        WebhookEvent::query()
+            .filter("provider_event_id", "evt_engines_receipt_collision")
+            .count()
+            .await
+            .expect("count the colliding receipt"),
+        0,
+        "the colliding receipt rolled back"
+    );
+    assert_eq!(
+        receipts_generation().await,
+        before_collision,
+        "a receipt write that rolled back advanced nothing"
+    );
+
+    without_render_cache_schema(database).await;
 }
 
 async fn live_payments_generations(env: &str, provider_name: &'static str) {
@@ -595,6 +747,26 @@ async fn postgres_payments_hydration_advances_generations_in_its_transaction() {
 #[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
 async fn mysql_payments_hydration_advances_generations_in_its_transaction() {
     live_payments_generations("MYSQL_TEST_URL", "mock-engines-generations-mysql").await;
+}
+
+async fn live_receipt_generations(env: &str, provider_name: &'static str) {
+    let (guard, database) = connect_live(env).await;
+    fresh_payments_schema(&database).await;
+    receipt_writes_advance_in_their_transaction(&database, provider_name).await;
+    drop(guard);
+    database.inner().clone().close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
+async fn postgres_payments_receipt_writes_advance_in_their_transaction() {
+    live_receipt_generations("PG_TEST_URL", "mock-engines-receipts-postgres").await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_payments_receipt_writes_advance_in_their_transaction() {
+    live_receipt_generations("MYSQL_TEST_URL", "mock-engines-receipts-mysql").await;
 }
 
 #[tokio::test]

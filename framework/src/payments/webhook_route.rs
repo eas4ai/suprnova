@@ -67,35 +67,93 @@ fn is_unique_violation(error: &sea_orm::DbErr) -> bool {
     )
 }
 
-/// Advance the render-cache table generation for `E` after a raw
-/// `ActiveModel` write against one of the mirror entities below, issued
-/// against the bare `db: &DatabaseConnection` outside any transaction -
-/// today, only the audit-row bookkeeping in `handle_webhook_inner`
-/// (the receipt insert, the retry `process_error` clear) and `mark_failed`.
+/// Runs one write to the receipt table, `payments_webhook_events`, in a
+/// transaction of its own on `db`, and advances that table's generation in
+/// the same transaction when `changed` says the write changed a row.
 ///
-/// This is safe to call immediately, unlike the writes inside
-/// `try_hydrate`'s transaction (see [`advance_touched_mirror_tables`] for
-/// why those are collected and advanced through that transaction): there is
-/// no ambient `CURRENT_TX` to join, but there is also no OTHER transaction
-/// open on this connection for a dedicated fallback transaction to contend
-/// with, so `after_table_write`'s "open one when nothing is ambient" branch
-/// runs uncontended. Advances the table identity only (no per-row record -
-/// these entities are reached by raw `ActiveModel`, not a `Model`-trait
-/// instance with a `primary_key_value_json` to build one from). A page
-/// rendered from a payments entity already records that table as a
-/// dependency via the read collector (these are `#[suprnova::model]`
-/// entities), so leaving this uninstrumented meant a write here never
-/// invalidated a page that had already observed it.
-async fn advance_mirror_table<E: sea_orm::EntityTrait>() -> Result<(), PaymentError> {
-    crate::render_cache::orm::after_table_write(crate::database::model::entity_table_name::<E>())
+/// The receipt insert, a retry's clear of the earlier attempt's error, and
+/// the record of a failed hydration's error run before or after the
+/// hydration, outside its transaction. They used to write on `db` directly
+/// and advance afterwards, in a second transaction, so a cancellation while
+/// the write's COMMIT was being acknowledged kept the row and lost its
+/// advance (DATA-039). The write and its advance now commit or roll back as
+/// one unit, through the same transaction, the way the hydration's do; see
+/// [`advance_touched_mirror_tables`].
+///
+/// The outer error is a failure to begin, to advance or to commit, the last
+/// one under `commit_context`. The inner result is the write's own, so a
+/// caller can still tell a duplicate receipt from any other database error;
+/// when the write fails, the transaction rolls back and nothing advances.
+/// After a commit that carried an advance, anything an earlier, failed
+/// advance missed is advanced too, as `orm::atomic` does after its own.
+async fn write_receipt<T, W, Fut>(
+    db: &DatabaseConnection,
+    commit_context: &'static str,
+    write: W,
+    changed: impl FnOnce(&T) -> bool,
+) -> Result<Result<T, sea_orm::DbErr>, PaymentError>
+where
+    W: FnOnce(Arc<DatabaseTransaction>) -> Fut,
+    Fut: std::future::Future<Output = Result<T, sea_orm::DbErr>>,
+{
+    // Decided before the transaction opens, for the reason `try_hydrate`
+    // gives.
+    let advances = crate::render_cache::orm::advances_generations()
         .await
-        .map_err(|e| PaymentError::Internal(format!("{e}")))
+        .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+    let txn = Arc::new(
+        db.begin()
+            .await
+            .map_err(|e| PaymentError::database("begin tx", e))?,
+    );
+    let written = write(Arc::clone(&txn)).await;
+    let advanced = match &written {
+        Ok(value) if advances && changed(value) => advance_touched_mirror_tables(
+            &txn,
+            &[crate::database::model::entity_table_name::<
+                webhook_event::Entity,
+            >()],
+        )
+        .await
+        .map(|()| true),
+        _ => Ok(false),
+    };
+    // Dropping `txn` rolls it back, so a handle that somehow outlived the
+    // write still leaves nothing half-applied.
+    let txn = Arc::try_unwrap(txn).map_err(|_| {
+        PaymentError::Internal(
+            "webhook receipt: a transaction handle outlived its write; rolled back".into(),
+        )
+    })?;
+    let advanced = match advanced {
+        Ok(advanced) => advanced,
+        Err(e) => {
+            let _ = txn.rollback().await;
+            return Err(e);
+        }
+    };
+    match written {
+        Ok(value) => {
+            txn.commit()
+                .await
+                .map_err(|e| PaymentError::database(commit_context, e))?;
+            if advanced {
+                crate::render_cache::orm::repair_unresolved().await;
+            }
+            Ok(Ok(value))
+        }
+        Err(error) => {
+            let _ = txn.rollback().await;
+            Ok(Err(error))
+        }
+    }
 }
 
 /// Advance every payments mirror table that `try_hydrate`'s transaction
 /// touched, once, through that same transaction, just before it commits.
+/// [`write_receipt`] uses it the same way for the receipt table.
 ///
-/// Round 3 called [`advance_mirror_table`] from inside each mirror write,
+/// Round 3 advanced from inside each mirror write,
 /// while the transaction `try_hydrate` opens via `db.begin()` (a raw SeaORM
 /// transaction, not `DB::transaction`) was still open. `in_transaction()`
 /// cannot see that transaction, so every one of those calls took
@@ -122,9 +180,13 @@ async fn advance_mirror_table<E: sea_orm::EntityTrait>() -> Result<(), PaymentEr
 /// commit or roll back as one unit; a hydration that rolls back advances
 /// nothing.
 ///
-/// Table-only, same as `advance_mirror_table` - callers push
-/// `entity_table_name::<E>()` for each entity type they wrote, not a
-/// row-level identity. One advancement for every table, deduplicated.
+/// Table-only - callers push `entity_table_name::<E>()` for each entity
+/// type they wrote, not a row-level identity: these entities are reached by
+/// raw `ActiveModel`, not a `Model`-trait instance with a
+/// `primary_key_value_json` to build a record identity from. A page rendered
+/// from a payments entity records that table as a dependency through the
+/// read collector (these are `#[suprnova::model]` entities). One
+/// advancement for every table, deduplicated.
 ///
 /// The generation ledger lives on the application's primary database, so
 /// this relies on `db` being that database, which is what
@@ -242,14 +304,19 @@ async fn handle_webhook_inner(
             process_error: Set(None),
             ..Default::default()
         };
-        match record.insert(db).await {
-            Ok(_) => {
-                if let Err(e) = advance_mirror_table::<webhook_event::Entity>().await {
-                    tracing::error!(error = %e, "failed to advance render-cache generation for webhook event insert");
-                    return failure_response(500, "persist", &e);
-                }
+        let inserted = write_receipt(
+            db,
+            "commit webhook receipt",
+            |txn| async move { record.insert(txn.as_ref()).await },
+            |_| true,
+        )
+        .await;
+        match inserted {
+            Ok(Ok(_)) => {
+                #[cfg(any(test, feature = "testing"))]
+                seams::hold_point(&event.provider_event_id, WebhookCommit::Receipt).await;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 if !is_unique_violation(&e) {
                     tracing::error!(error = %e, "failed to persist webhook event");
                     return failure_response(500, "persist", &e);
@@ -260,6 +327,10 @@ async fn handle_webhook_inner(
                     "webhook receipt insertion raced; continuing to serialized hydration"
                 );
             }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to persist webhook event");
+                return failure_response(500, "persist", &e);
+            }
         }
     } else {
         // Retry: clear stale process_error from a previous failed attempt so
@@ -267,14 +338,19 @@ async fn handle_webhook_inner(
         if let Some(row) = existing {
             let mut am: webhook_event::ActiveModel = row.into();
             am.process_error = Set(None);
-            match am.update(db).await {
-                Ok(_) => {
-                    if let Err(e) = advance_mirror_table::<webhook_event::Entity>().await {
-                        tracing::error!(error = %e, "failed to advance render-cache generation for webhook event retry-clear");
-                        return failure_response(503, "hydration-failed", &e);
-                    }
+            let cleared = write_receipt(
+                db,
+                "commit webhook retry clear",
+                |txn| async move { am.update(txn.as_ref()).await },
+                |_| true,
+            )
+            .await;
+            match cleared {
+                Ok(Ok(_)) => {
+                    #[cfg(any(test, feature = "testing"))]
+                    seams::hold_point(&event.provider_event_id, WebhookCommit::RetryClear).await;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::error!(error = %e, "failed to clear stale process_error before retry");
                     let error = format!("clear stale process_error before retry: {e}");
                     if let Err(mark_error) = mark_failed(db, &event, &error).await {
@@ -283,6 +359,10 @@ async fn handle_webhook_inner(
                             "failed to record webhook retry preparation failure"
                         );
                     }
+                    return failure_response(503, "hydration-failed", &e);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to clear stale process_error before retry");
                     return failure_response(503, "hydration-failed", &e);
                 }
             }
@@ -430,7 +510,7 @@ async fn try_hydrate(
                 .await
                 .map_err(|e| PaymentError::database("commit", e))?;
             #[cfg(any(test, feature = "testing"))]
-            seams::hold_point(&event.provider_event_id).await;
+            seams::hold_point(&event.provider_event_id, WebhookCommit::Hydration).await;
             if advances {
                 // The advance committed with the rows. Anything an earlier,
                 // failed advance missed is advanced now, as `orm::atomic`
@@ -497,81 +577,101 @@ async fn apply_in_transaction(
     Ok(HydrationOutcome::Processed)
 }
 
-/// Test-only seam that parks one webhook hydration right after its
-/// transaction commits, so a test can cancel the request at the instant its
-/// rows are durable and nothing after the commit has run (DATA-039).
+/// Test-only seam that parks one webhook right after one of its commits, so
+/// a test can cancel the request at the instant that write is durable and
+/// nothing after its commit has run (DATA-039).
 ///
-/// Keyed by the provider event id, so a hydration another test runs at the
-/// same time never takes the slot.
+/// Keyed by the provider event id and the commit. Several can be armed at
+/// once and each park is reported on its own, so webhooks other tests run at
+/// the same time never take or see each other's.
 #[cfg(any(test, feature = "testing"))]
 mod seams {
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::collections::HashSet;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    static HOLD_NEXT: Mutex<Option<String>> = Mutex::new(None);
-    static HELD: AtomicU64 = AtomicU64::new(0);
-    static HELD_NOTIFY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    use super::WebhookCommit;
 
-    fn held_notify() -> &'static tokio::sync::Notify {
-        HELD_NOTIFY.get_or_init(tokio::sync::Notify::new)
-    }
+    type Key = (String, WebhookCommit);
 
-    pub(super) fn hold_next(provider_event_id: &str) -> u64 {
-        *HOLD_NEXT
+    static ARMED: OnceLock<Mutex<HashSet<Key>>> = OnceLock::new();
+    static PARKED: OnceLock<Mutex<HashSet<Key>>> = OnceLock::new();
+    static PARKED_NOTIFY: OnceLock<tokio::sync::Notify> = OnceLock::new();
+
+    fn lock(set: &'static OnceLock<Mutex<HashSet<Key>>>) -> MutexGuard<'static, HashSet<Key>> {
+        set.get_or_init(Mutex::default)
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(provider_event_id.to_owned());
-        HELD.load(Ordering::SeqCst)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    pub(super) async fn wait_until_held_past(count: u64) {
+    fn parked_notify() -> &'static tokio::sync::Notify {
+        PARKED_NOTIFY.get_or_init(tokio::sync::Notify::new)
+    }
+
+    pub(super) fn hold_next(provider_event_id: &str, commit: WebhookCommit) {
+        let key = (provider_event_id.to_owned(), commit);
+        lock(&PARKED).remove(&key);
+        lock(&ARMED).insert(key);
+    }
+
+    pub(super) async fn wait_until_held(provider_event_id: &str, commit: WebhookCommit) {
+        let key = (provider_event_id.to_owned(), commit);
         loop {
-            let notified = held_notify().notified();
-            if HELD.load(Ordering::SeqCst) > count {
+            let notified = parked_notify().notified();
+            if lock(&PARKED).remove(&key) {
                 return;
             }
             notified.await;
         }
     }
 
-    /// Parks forever when armed for `provider_event_id`; the test that
-    /// armed it cancels the request around it.
-    pub(super) async fn hold_point(provider_event_id: &str) {
-        let armed = {
-            let mut slot = HOLD_NEXT
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let matches = slot.as_deref() == Some(provider_event_id);
-            if matches {
-                slot.take();
-            }
-            matches
-        };
-        if armed {
-            HELD.fetch_add(1, Ordering::SeqCst);
-            held_notify().notify_waiters();
+    /// Parks forever when armed for `provider_event_id` and `commit`; the
+    /// test that armed it cancels the request around it.
+    pub(super) async fn hold_point(provider_event_id: &str, commit: WebhookCommit) {
+        let key = (provider_event_id.to_owned(), commit);
+        if lock(&ARMED).remove(&key) {
+            lock(&PARKED).insert(key);
+            parked_notify().notify_waiters();
             std::future::pending::<()>().await;
         }
     }
 }
 
-/// Test-only: parks the hydration of the webhook whose provider event id is
-/// `provider_event_id`, forever, right after its transaction commits, so a
-/// test can cancel the request at that instant. Returns the count of
-/// hydrations parked so far, for [`wait_until_hydration_commit_held_for_test`].
+/// Test-only: the commits of a webhook that
+/// [`hold_webhook_commit_for_test`] can park right after.
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
-pub fn hold_hydration_commit_for_test(provider_event_id: &str) -> u64 {
-    seams::hold_next(provider_event_id)
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum WebhookCommit {
+    /// The insert of the event's receipt row.
+    Receipt,
+    /// A retry's clear of the earlier attempt's error on the receipt.
+    RetryClear,
+    /// The record of a failed hydration's error on the receipt.
+    FailureRecord,
+    /// The hydration's transaction.
+    Hydration,
 }
 
-/// Test-only: waits until the hydration armed by
-/// [`hold_hydration_commit_for_test`] has parked; `before` is the count that
-/// call returned.
+/// Test-only: parks the webhook whose provider event id is
+/// `provider_event_id`, forever, right after `commit`, so a test can cancel
+/// the request at that instant. Each event and commit is armed on its own;
+/// [`wait_until_webhook_commit_held_for_test`] waits for the park.
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
-pub async fn wait_until_hydration_commit_held_for_test(before: u64) {
-    seams::wait_until_held_past(before).await;
+pub fn hold_webhook_commit_for_test(provider_event_id: &str, commit: WebhookCommit) {
+    seams::hold_next(provider_event_id, commit);
+}
+
+/// Test-only: waits until the webhook armed by
+/// [`hold_webhook_commit_for_test`] for `provider_event_id` and `commit` has
+/// parked.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub async fn wait_until_webhook_commit_held_for_test(
+    provider_event_id: &str,
+    commit: WebhookCommit,
+) {
+    seams::wait_until_held(provider_event_id, commit).await;
 }
 
 /// Dispatch a parsed [`WebhookEvent`] to the mirror-table hydration paths.
@@ -1049,18 +1149,28 @@ async fn mark_failed(
     event: &WebhookEvent,
     err_str: &str,
 ) -> Result<(), PaymentError> {
-    let updated = webhook_event::Entity::update_many()
-        .col_expr(
-            webhook_event::Column::ProcessError,
-            Expr::value(Some(err_str.to_owned())),
-        )
-        .filter(webhook_event::Column::Provider.eq(&event.provider))
-        .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
-        .filter(webhook_event::Column::ProcessedAt.is_null())
-        .exec(db)
-        .await?;
+    let message = err_str.to_owned();
+    let updated = write_receipt(
+        db,
+        "commit webhook failure record",
+        |txn| async move {
+            webhook_event::Entity::update_many()
+                .col_expr(
+                    webhook_event::Column::ProcessError,
+                    Expr::value(Some(message)),
+                )
+                .filter(webhook_event::Column::Provider.eq(&event.provider))
+                .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
+                .filter(webhook_event::Column::ProcessedAt.is_null())
+                .exec(txn.as_ref())
+                .await
+        },
+        |updated| updated.rows_affected >= 1,
+    )
+    .await??;
+    #[cfg(any(test, feature = "testing"))]
     if updated.rows_affected >= 1 {
-        advance_mirror_table::<webhook_event::Entity>().await?;
+        seams::hold_point(&event.provider_event_id, WebhookCommit::FailureRecord).await;
     }
     if updated.rows_affected == 1 {
         return Ok(());

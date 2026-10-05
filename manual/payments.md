@@ -57,7 +57,7 @@ pub fn register() -> Router {
 
 `webhook_routes(db)` returns a `Router` containing just `POST /webhooks/payments/{provider}`. Because `Router::get` and `Router::post` each return a `RouteBuilder` that converts back to `Router` via `.into()`, chaining on top of the payments router is the most direct way to compose. If you already use the `routes!{}` macro for your normal routes, drop the webhook POST into the same block - `webhook_routes` is a convenience wrapper around one `Router::new().post(...)` call.
 
-Pass the application's own database as `db`, the one `DB` and the payments models use. With [RenderCache](render-cache.md) on, each webhook advances the mirror tables' generations in the same transaction that writes the mirror rows, so a cached page that read those tables goes stale the moment the webhook commits. The generation ledger lives in that database.
+Pass the application's own database as `db`, the one `DB` and the payments models use. With [RenderCache](render-cache.md) on, every write the webhook makes - the event's receipt row, its mirror rows, and the error a failed attempt records - advances its table's generation in the same transaction that writes the row, so a cached page that read those tables goes stale the moment the write commits. The generation ledger lives in that database.
 
 Every payments type has one path, `suprnova::payments::<Type>`, for example `suprnova::payments::StartSessionRequest`. The modules that hold the request and result types are reached as `suprnova::payments::dto::<module>`; a path such as `suprnova::payments::session::StartSessionRequest` does not compile.
 
