@@ -1,6 +1,6 @@
 //! A component that reaches the file system through an alias of `std::fs`.
 use suprnova::live::{LiveComponent, live};
-use std::fs as io;
+use std::fs as io; // refused: rust-path
 
 /// Reads a file the application never agreed to.
 #[derive(LiveComponent)]

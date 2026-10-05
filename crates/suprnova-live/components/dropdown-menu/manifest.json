@@ -1,7 +1,5 @@
 {
   "name": "suprnova.dropdown-menu",
-  "version": 1,
-  "root": "suprnova-ui/dropdown-menu",
   "files": [
     "dropdown-menu.html",
     "dropdown-menu.css"

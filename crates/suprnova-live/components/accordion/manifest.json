@@ -1,7 +1,5 @@
 {
   "name": "suprnova.accordion",
-  "version": 1,
-  "root": "suprnova-ui/accordion",
   "files": [
     "accordion.html",
     "accordion.css"

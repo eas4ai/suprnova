@@ -1,7 +1,5 @@
 {
   "name": "suprnova.aspect-image",
-  "version": 1,
-  "root": "suprnova-ui/aspect-image",
   "files": [
     "aspect-image.html",
     "aspect-image.css"

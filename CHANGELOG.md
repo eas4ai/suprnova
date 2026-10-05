@@ -4,6 +4,66 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 3.3.0 - 2026-10-05
+
+### Added
+
+- **Third-party Live component libraries.** A library is a git repository
+  with one fixed tree: `library.json` at its root and, under `components/`,
+  one directory per component holding its `manifest.json`, the files the
+  manifest names and a `manifest.sig`. A component can carry the Rust of a
+  Live component as well as a view, a stylesheet and a script.
+  `suprnova live:add acme/acme-ui/counter` installs one by address from
+  GitHub, or from GitLab or Codeberg with the host first, at the newest
+  `v<semver>` tag or the one `@<version>` names; an `https://` URL of a
+  component directory and a `./path` on disk work too. Every component is
+  signed with Ed25519 over a hash of everything that arrived. The first
+  install pins the library's key in `suprnova.toml` once you confirm on a
+  terminal, and every later version must be signed by that key, or by a new
+  key the pinned one handed over to in `library.json`'s `previousKeys`.
+  Before it writes anything, `live:add` scans every view, stylesheet, script
+  and Rust file as data, runs none of it, admits only what it can classify,
+  and shows a plan of every file, module declaration, registration and
+  capability. A component reaches a database, the network, files, mail, a
+  queue, a cache, the session, the environment or a process only through
+  Suprnova's API, and you approve each of those nine capabilities by name,
+  on a terminal or with `--allow`; `--yes` confirms a plan and never
+  approves a capability or pins a key. `live:add` writes a component's Rust
+  under `src/live/<namespace>/`, registers it in your registry builder,
+  never changes `Cargo.toml` or `Cargo.lock`, and records the source,
+  version, commit, digests, hash, signature, registrations and approvals in
+  `suprnova.toml`, which `live:check` now verifies offline. An install holds
+  a lock on the project and writes a journal before its first write, so a
+  failed or killed install leaves nothing behind, and `suprnova serve`
+  waits for it before it builds (`suprnova live:wait`). Authors scaffold,
+  check and sign a library with `suprnova live:registry new`, `check` and
+  `sign`; `new` adds a `preview/` application that renders each component
+  from where it sits, and keeps the private key in your configuration
+  directory, or where `SUPRNOVA_LIBRARY_KEY` names it. Each library's
+  stylesheets and scripts are served at `/<namespace>-ui/{component}/{file}`
+  by one `Router::try_live_ui_assets_for("<namespace>")` call, which
+  `live:add` names at the library's first install. See [Installing Live
+  Components](manual/live-add.md) and [Live Component
+  Libraries](manual/live-libraries.md).
+
+### Changed
+
+- **The project file is `suprnova.toml`, all lowercase.** `suprnova serve`
+  reads its extra dev processes from `suprnova.toml`, and `live:add` keeps
+  its records there. A project that holds a `Suprnova.toml` must rename it:
+  until it does, `serve` and `live:add` refuse to run and name the rename.
+- **`live:add --manifest` installs only from a signed library tree.** A
+  third-party manifest now sits in a library tree, beside the
+  `library.json` that names its namespace and key, and installs only with a
+  valid signature. A manifest holds no `version`, and the shipped
+  components' manifests dropped theirs. Each component directory's
+  `.suprnova-installed.json` now keys its digests by the path from the
+  project root, Rust files included; `live:add` reads a record in the
+  earlier form and rewrites it.
+- **Scaffolds ignore `live:add`'s lock and journal.** The `.gitignore` of a
+  new project lists `/.suprnova-live.lock` and
+  `/.suprnova-live-journal.json`; add both lines to an existing project's.
+
 ## 3.2.1 - 2026-10-05
 
 ### Fixed

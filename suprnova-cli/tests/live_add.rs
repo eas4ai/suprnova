@@ -208,7 +208,11 @@ fn a_shipped_component_installs_as_one_directory_and_an_edit_survives_a_second_r
     )
     .expect("manifest json");
     assert_eq!(manifest["name"], "suprnova.field");
-    assert_eq!(manifest["root"], "suprnova-ui/field");
+    // The shipped manifest is in the third-party format (REG-002): it
+    // carries no version, and no root, since `suprnova-ui/field` is the
+    // root every shipped component has by default.
+    assert_eq!(manifest.get("root"), None);
+    assert_eq!(manifest.get("version"), None);
 
     let edited = format!("{shipped}\n{{# edited by the application #}}\n");
     fs::write(&view, &edited).expect("edit the view");

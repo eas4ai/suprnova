@@ -22,7 +22,7 @@ use super::address::{
 use super::fetch::{Commit, EmbeddedFetcher, Fetcher, component_path, shipped_version};
 use super::library::{
     ComponentManifest, FileKind, LibraryJson, MAX_FILE_BYTES, namespace_module, parse_library_json,
-    parse_manifest, parse_shipped_manifest, validate_file_name,
+    parse_manifest, parse_shipped_library_json, parse_shipped_manifest, validate_file_name,
 };
 use super::project::{Approval, ComponentRecord, InstallRecord, LibraryRecord, ProjectFile};
 use super::scan::{ComponentFiles, ScanReport};
@@ -116,8 +116,8 @@ pub struct DroppedFile {
 pub struct PlannedComponent {
     /// The component's canonical address.
     pub address: ComponentAddress,
-    /// The library as it arrived. For a shipped component, which has no
-    /// `library.json`, the namespace `suprnova`, the CLI's version and a
+    /// The library as it arrived. For a shipped component, the embedded
+    /// `library.json`: the namespace `suprnova`, the CLI's version and a
     /// key that is never used.
     pub library: LibraryJson,
     /// The library's version.
@@ -622,21 +622,19 @@ impl Resolver<'_> {
             return Ok(());
         }
         if library.is_shipped() {
+            // The binary serves the shipped library as the tree every library
+            // has, `library.json` included (REG-016); it is read here like any
+            // other, by the reader that admits its reserved namespace and no
+            // key, and it is never verified or checked against the framework.
+            let commit = EmbeddedFetcher.resolve(library, version)?;
+            let json_bytes = EmbeddedFetcher.file(library, &commit, "library.json")?;
+            let json = parse_shipped_library_json(&json_bytes)?;
             self.libraries.insert(
                 key,
                 LoadedLibrary {
-                    commit: Commit(String::new()),
-                    json_bytes: Vec::new(),
-                    json: LibraryJson {
-                        namespace: SHIPPED_LIBRARY.to_owned(),
-                        source: SHIPPED_LIBRARY.to_owned(),
-                        version: version.clone(),
-                        framework: semver::VersionReq::STAR,
-                        public_key: PublicKey::from_bytes([0; 32]),
-                        previous_keys: Vec::new(),
-                        title: None,
-                        description: None,
-                    },
+                    commit,
+                    json_bytes,
+                    json,
                 },
             );
             return Ok(());

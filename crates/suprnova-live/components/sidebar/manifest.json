@@ -1,7 +1,5 @@
 {
   "name": "suprnova.sidebar",
-  "version": 1,
-  "root": "suprnova-ui/sidebar",
   "files": [
     "sidebar.html",
     "sidebar.css"

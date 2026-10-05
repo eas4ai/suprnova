@@ -35,7 +35,8 @@ syn = { version = "2", features = ["full", "parsing", "visit"] }
 # `group!` prefixes. Already in the tree through `syn`. `span-locations`
 # gives each parsed token its byte range, so `live:add` and `live:registry`
 # edit `src/live/mod.rs` at the exact place `syn` found the registry
-# builder and keep every other byte (REG-005).
+# builder and keep every other byte (REG-005), and the component scan names
+# the line of every refusal (REG-022).
 proc-macro2 = { version = "1", features = ["span-locations"] }
 walkdir = "2"
 notify = "8.2"
@@ -87,6 +88,20 @@ toml_edit = "0.25"
 # rustls provider, so no second TLS crypto library enters the CLI's build.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# The component scan reads a vendored view's template expressions with
+# Askama's own parser (REG-031); the same version the Live crate pins.
+askama_parser = "=0.16.0"
+# The component scan tokenizes stylesheets, `style` elements and `style`
+# attributes (REG-031); already in the lock through the Live crate.
+cssparser = "0.37"
+# The component scan parses a vendored script as a JavaScript module and
+# walks its syntax tree (REG-032). Pure Rust; pinned to 0.139, the newest
+# release whose MSRV (1.94) the workspace meets.
+oxc_allocator = "=0.139.0"
+oxc_ast = "=0.139.0"
+oxc_parser = "=0.139.0"
+oxc_span = "=0.139.0"
+oxc_syntax = "=0.139.0"
 
 # The Live tooling helper runs in its own process group so a timeout can
 # kill everything it started, and an interrupt is forwarded to that group
