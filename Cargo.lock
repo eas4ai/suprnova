@@ -7400,6 +7400,7 @@ dependencies = [
  "regex",
  "sea-orm",
  "sea-orm-migration",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",

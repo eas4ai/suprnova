@@ -66,6 +66,9 @@ sha2 = "0.10"
 # in [dev-dependencies].
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The registry compares library versions and framework requirements
+# (`registry/`), already in the workspace lock through the framework.
+semver = "1"
 
 # The Live tooling helper runs in its own process group so a timeout can
 # kill everything it started, and an interrupt is forwarded to that group

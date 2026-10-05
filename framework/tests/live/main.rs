@@ -32,6 +32,7 @@ pub mod macro_expansion;
 pub mod multi_stream_root;
 pub mod public_api;
 pub mod public_seed_actions;
+pub mod registry_assets;
 pub mod routes;
 pub mod tooling_protocol;
 pub mod trusted_context;
