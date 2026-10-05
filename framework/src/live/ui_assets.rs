@@ -217,7 +217,7 @@ fn asset_name(value: &str) -> bool {
     let Some((stem, extension)) = value.rsplit_once('.') else {
         return false;
     };
-    component_name(stem) && matches!(extension, "css" | "js" | "html")
+    component_name(stem) && matches!(extension, "css" | "js")
 }
 
 fn closed(status: u16) -> HttpResponse {
