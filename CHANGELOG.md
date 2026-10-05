@@ -503,6 +503,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **New applications' session, remember-me and auth-flow token tables use
   `DATETIME` on MySQL**, so these columns stay writable past 2038-01-19.
   Postgres and SQLite are unchanged. This landed after the `v3.1.0` tag.
+- **The features table holds times after 2038 on MySQL.** A new
+  `features` table uses `DATETIME` on MySQL and MariaDB. Add
+  `suprnova::features::migrations::FeatureTimestampsToDatetime` after
+  `CreateFeaturesTable` in your migrator: it converts an existing
+  `TIMESTAMP` table, keeping its UTC times and defaults, and does nothing
+  on Postgres and SQLite. This landed after the `v3.1.0` tag.
 - **Two-factor needs two new migrations.** Add
   `suprnova::auth_flows::two_factor::migration_attempts` (the
   `two_factor_attempts` table) and `migration_rotation` (the
