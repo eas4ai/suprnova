@@ -539,7 +539,10 @@ it to its own implementation.
 In a view, parsed with Askama's parser:
 
 - An expression reads the component's state and calls only admitted paths
-  that carry no capability, and the framework's view helpers.
+  that carry no capability, the framework's view helpers, and the
+  component's own functions and methods that reach no capability, directly
+  or through another of its own items. A view never calls into a
+  dependency's Rust, because the scan of this component does not read it.
 - No Rust macro, no filter that is neither Askama's nor the framework's, and
   no unescaped output but `trusted_html`: no `safe`, and no `escape` or `e`
   with an escaper other than `html`.
@@ -559,9 +562,12 @@ In a script, parsed as a JavaScript module:
 - Every call resolves to a function the script defines or a standard browser
   API, including calls made through `Reflect`, `call`, `apply`, `bind`,
   getters, setters, `Proxy` traps and tagged templates.
-- No `eval` or `Function` under any spelling, no timer given a string, no
-  dynamic `import`, no static `import` from outside the component and its
-  dependencies, no `Worker`, and no `document.write` or `document.open`.
+- No `eval` or `Function` under any spelling, no timer given anything but a
+  function, no dynamic `import`, no `Worker`, and no `document.write` or
+  `document.open`.
+- A static `import` names only one of the component's own scripts or a
+  script a dependency's manifest names. A shipped component's script counts
+  only when the component depends on that shipped component.
 - No `script`, `iframe`, `object` or `embed` element created, and no element
   created by a name the scan cannot trace to a constant.
 - No HTML parsed into the document (`innerHTML`, `outerHTML`,
