@@ -627,6 +627,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   forever. `<rel>_min_as::<Decimal>()` and `<rel>_max_as::<Decimal>()` read
   a `NUMERIC` or `DECIMAL` minimum or maximum exactly on Postgres and MySQL,
   and `::<String>()` reads its decimal text.
+- **Overlapping drains of queued listeners wait for each other.** A
+  second `EventFacade::drain_queued` running while another drain held a
+  listener reported the dispatcher drained at once, so a console command
+  could return, and a shutdown could finish, with a queued listener still
+  running. It now waits for that listener, and counts it if its deadline
+  passes.
 - **Debounced jobs, queue events, log subscribers and process timeouts.**
   Overlapping debounced dispatches keep the one that armed last: each takes
   its place from an atomic counter in the cache, so a newer push is never
