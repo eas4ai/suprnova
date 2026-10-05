@@ -4,6 +4,18 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 3.2.1 - 2026-10-05
+
+### Fixed
+
+- **A console binary builds in release again.** The console dispatcher
+  awaited the application's bootstrap inline, so its whole state machine
+  sat inside the dispatcher's, next to the process boot that 3.2.0 added
+  there. A console `main` over a substantial bootstrap, the dogfood app's
+  included, failed to compile in a release build with "queries overflow
+  the depth limit!" while debug builds passed. The dispatcher now holds
+  the bootstrap boxed, as `Application::run` holds its own.
+
 ## 3.2.0 - 2026-10-04
 
 ### Added
@@ -376,14 +388,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
-- **A console binary builds in release again.** The console dispatcher
-  awaited the application's bootstrap inline, so its whole state machine
-  sat inside the dispatcher's, next to the process boot that 3.2.0 added
-  there. A console `main` over a substantial bootstrap, the dogfood app's
-  included, failed to compile in a release build with "queries overflow
-  the depth limit!" while debug builds passed. The dispatcher now holds
-  the bootstrap boxed, as `Application::run` holds its own. This landed
-  after the `v3.2.0` tag.
 - **Unsigned keys, relation min and max, and raw bindings on every engine.**
   `with_min` and `with_max` read 32- and 16-bit integer columns on Postgres,
   and dates, text and times on every database, without an error; `_min_of`
