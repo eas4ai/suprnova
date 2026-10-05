@@ -1,7 +1,5 @@
 {
   "name": "suprnova.collapsible",
-  "version": 1,
-  "root": "suprnova-ui/collapsible",
   "files": [
     "collapsible.html",
     "collapsible.css"

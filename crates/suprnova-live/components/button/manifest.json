@@ -1,7 +1,5 @@
 {
   "name": "suprnova.button",
-  "version": 1,
-  "root": "suprnova-ui/button",
   "files": [
     "button.html",
     "button.css"

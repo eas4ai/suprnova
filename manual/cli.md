@@ -91,10 +91,17 @@ each generated file looks like.
 | Command | Description |
 |---|---|
 | `suprnova live:make <name>` | Scaffold a Live component in `src/live/`, its view in `templates/live/`, and its registration in `src/live/mod.rs`. Never overwrites; `--dry-run` reports the plan. |
-| `suprnova live:add <name>` | Install a shipped Live component library component, or a third-party one with `--manifest <path>`, as one directory under `templates/<root>/`: view, stylesheet, JavaScript, and manifest. Keeps a file you edited; `--force` replaces it; `--dry-run` reports the plan. |
-| `suprnova live:check` | Check every registered Live view with the integrated checker. Reads `askama.toml` `dirs` or `templates/`; `--templates <dir>` overrides, `--allow-unproved` accepts unproved dynamic structures. |
+| `suprnova live:add <component>` | Install a Live component: a shipped name (`field`), a library address (`[<host>/]<owner>/<library>/<component>[@<version>]`), an `https://` URL of a component directory, or a `./path` to one (`--manifest <path>` too). Verifies a third-party component's signature against the key `suprnova.toml` pins, scans every file without running it, shows the plan, and asks before it writes; records the install in `suprnova.toml`. `--allow <capability>` approves a capability, `--yes` confirms the plan without a terminal (never a capability or a key), `--force` replaces edited files and accepts a downgrade or a changed release, `--dry-run` reports the plan and writes nothing. See [Installing Live Components](live-add.md). |
+| `suprnova live:registry new <namespace>` | Scaffold a component library in `./<namespace>`: `library.json`, an example component, a `preview/` application, and a signing key written to your configuration directory. See [Live Component Libraries](live-libraries.md). |
+| `suprnova live:registry check` | From a library's root, check every component as `live:add` would and list each component's capabilities. |
+| `suprnova live:registry sign` | From a library's root, check every component, then sign each one, all or nothing. Reads the key from `SUPRNOVA_LIBRARY_KEY` when set, else from your configuration directory. |
+| `suprnova live:wait` | Wait until no `live:add` holds the project lock, restoring an interrupted install first. `suprnova serve` runs it before each build. |
+| `suprnova live:check` | Verify every third-party component `suprnova.toml` records against its pinned key, offline, then check every registered Live view with the integrated checker. Reads `askama.toml` `dirs` or `templates/`; `--templates <dir>` overrides, `--allow-unproved` accepts unproved dynamic structures. |
 | `suprnova live:inspect` | Report safe Live runtime, registry, provider, and artifact state (`--json` for one JSON document). |
 | `suprnova live:assets --out <dir>` | Publish the reviewed Live runtime artifacts to `<dir>/<identity>/`, atomically; `--replace` replaces a publication whose bytes differ. |
+
+`live:add` and `live:registry` start no process: nothing a component
+carries runs while they fetch, check, sign or install it.
 
 `live:check`, `live:inspect`, and `live:assets` run inside your application:
 the CLI starts `cargo run --bin console` and reads a bounded, versioned
@@ -261,3 +268,7 @@ which is where it lived before the flag existed.
   `db:sync`, and the SeaORM workflow
 - [Console](console.md) - the per-project `console` binary, `#[command]`,
   `#[derive(Command)]`, and the three-binary asymmetry
+- [Installing Live Components](live-add.md) - `live:add`, its plan, and
+  the record in `suprnova.toml`
+- [Live Component Libraries](live-libraries.md) - `live:registry new`,
+  `check` and `sign`

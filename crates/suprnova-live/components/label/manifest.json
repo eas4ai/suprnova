@@ -1,7 +1,5 @@
 {
   "name": "suprnova.label",
-  "version": 1,
-  "root": "suprnova-ui/label",
   "files": [
     "label.html",
     "label.css"
