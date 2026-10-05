@@ -56,7 +56,7 @@ CHAPTERS = {
     "csrf": "session",
     "data": None,
     "database": "database",
-    "database-testing": "database",
+    "database-testing": REFUSE,
     "deployment": "files",
     "eloquent": "database",
     "eloquent-collections": "database",
@@ -73,7 +73,7 @@ CHAPTERS = {
     "frontend-inertia-responses": None,
     "hashing": None,
     "http-client": "network",
-    "http-tests": None,
+    "http-tests": REFUSE,
     "idempotency": "cache",
     "images": "files",
     "lifecycle": "network",
@@ -167,6 +167,12 @@ MODULES = {
     "suprnova::workflow::migrations": "database",
     "suprnova::workflow::store": "database",
     "suprnova::server": "network",
+    # Test infrastructure swaps the application's own services or clock;
+    # a component never ships it.
+    "suprnova::live::testing": REFUSE,
+    "suprnova::render_cache::testing": REFUSE,
+    "suprnova::crypto::testing": REFUSE,
+    "suprnova::database::testing": REFUSE,
 }
 
 # Item rules, by full path, for the few items whose own effect differs from
@@ -211,6 +217,19 @@ ITEMS = {
     "suprnova::Request::cookie": "session",
     "suprnova::Request::cookies": "session",
     "suprnova::Request::live_tenant": "session",
+    "suprnova::clock::TestClock": REFUSE,
+    "suprnova::clock::TestClockGuard": REFUSE,
+    "suprnova::clock::TestClockHandle": REFUSE,
+}
+
+# Item names whose effect is the same wherever they sit: a constructor that
+# reads its settings from the environment reaches the environment, whatever
+# its chapter's capability.
+NAMES = {
+    "from_env": "environment",
+    "try_from_env": "environment",
+    "from_env_prefix": "environment",
+    "detect_from_env": "environment",
 }
 
 # The crates Suprnova re-exports, by the `suprnova::` path that re-exports
@@ -266,8 +285,12 @@ def longest_rule(table, path):
 
 def decide(path, module, chapter):
     """The capability of one item, or REFUSE when the tables cannot decide."""
-    if path in ITEMS:
-        return ITEMS[path]
+    rule = longest_rule(ITEMS, path)
+    if rule is not None:
+        return rule[1]
+    name = path.rsplit("::", 1)[-1]
+    if name in NAMES:
+        return NAMES[name]
     rule = longest_rule(MODULES, module)
     if rule is not None:
         return rule[1]
