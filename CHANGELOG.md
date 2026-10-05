@@ -37,9 +37,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   failed or killed install leaves nothing behind, and `suprnova serve`
   waits for it before it builds (`suprnova live:wait`). Authors scaffold,
   check and sign a library with `suprnova live:registry new`, `check` and
-  `sign`; `new` adds a `preview/` application that renders each component
-  from where it sits, and keeps the private key in your configuration
-  directory, or where `SUPRNOVA_LIBRARY_KEY` names it. Each library's
+  `sign`, and move it to a new key with `rotate-key`; `new` adds a
+  `preview/` application that renders each component from where it sits,
+  and keeps the private key in your configuration directory, or where
+  `SUPRNOVA_LIBRARY_KEY` names it. Each library's
   stylesheets and scripts are served at `/<namespace>-ui/{component}/{file}`
   by one `Router::try_live_ui_assets_for("<namespace>")` call, which
   `live:add` names at the library's first install. See [Installing Live

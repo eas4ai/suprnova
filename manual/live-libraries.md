@@ -127,7 +127,7 @@ crates.
 | `title`, `description` | Optional text for people. |
 | `elements` | Optional. Each custom element tag the component's script defines, each starting with `<namespace>-`. |
 | `register` | Optional. Each Live component the component's Rust defines, as `<module>::<Type>`, where `<module>` is the stem of one of its `.rs` files. |
-| `dependencies` | Optional. Components to install first: a shipped component by its name (`field`), a component of the same library and version (`./date-grid`), or a full address that may carry a version (`acme/acme-base/icon@1.2.0`). |
+| `dependencies` | Optional. Components to install first: a shipped component by its name (`field`), a component of the same library and version (`./date-grid`), a repository address that may carry a version (`acme/acme-base/icon@1.2.0`), or the `https://` URL of a component on a public host. A path on disk is never a dependency. |
 
 A file's extension decides where `live:add` writes it:
 
@@ -328,8 +328,8 @@ Every digest is `sha256:` and the lowercase hex digest of the file's bytes.
 The hash is `sha256:` and the lowercase hex digest of the statement's UTF-8
 bytes. `manifest.sig` holds the Ed25519 signature, by the key `library.json`
 names, over the ASCII bytes of the hash, as the standard padded base64 of
-its 64 bytes and nothing else. A key's fingerprint is `sha256:` and the
-lowercase hex digest of the key's 32 bytes.
+its 64 bytes and nothing else, not even a final newline. A key's
+fingerprint is `sha256:` and the lowercase hex digest of the key's 32 bytes.
 
 The statement names the directory and the library's `source`, so a
 component signed under one name or address does not verify under another,
@@ -409,9 +409,45 @@ installs a component by its directory's URL,
 
 ## Change the signing key
 
-To move the library to a new key, `library.json` names the new key as
-`publicKey` and carries, in `previousKeys`, a statement from each former key
-that hands the library to the new one:
+To move the library to a new key, run `rotate-key` from the library's root:
+
+```bash
+suprnova live:registry rotate-key
+```
+
+It reads the current private key as `sign` does, from `SUPRNOVA_LIBRARY_KEY`
+or your configuration directory, and makes a new key pair. It writes the new
+private key into your configuration directory, named by its fingerprint, as
+`new` does. It updates `library.json`: `publicKey` becomes the new key, and
+`previousKeys` is rewritten as one statement per former key, each handing
+the library to the new key. The former keys are the key you are leaving and
+every key the library used before it, and each one signs its own statement:
+`rotate-key` reads each earlier key from its file in your configuration
+directory. Then it signs every component again with the new key, all or
+nothing, as `sign` does. It prints both fingerprints and the path of the new
+key file. Back up the new key file before you publish. To release under the
+new key, raise `version` and sign again, then commit and tag as for any
+release.
+
+**Keep every former key file.** An application installs a release under a
+new key only when the key it pinned vouches for that key. A library on its
+third key needs a statement from each of its two former keys, so an
+application pinned to either one can follow. When a former key's file is
+missing, `rotate-key` refuses and names the key. To go ahead without it,
+pass `--drop-key` with that key's fingerprint:
+
+```bash
+suprnova live:registry rotate-key --drop-key sha256:<fingerprint>
+```
+
+`--drop-key` leaves that key's statement out of `previousKeys`. An
+application still pinned to the dropped key then refuses every later
+release, because its pin vouches for no change, and its developer must pin
+the new key by hand. Tell your users the new key's fingerprint through a
+channel they already trust before you publish a release without a
+statement they need.
+
+After a change, `library.json` looks like this:
 
 ```json
 {
@@ -422,54 +458,40 @@ that hands the library to the new one:
   "publicKey": "ed25519:<the new key>",
   "previousKeys": [
     {
-      "publicKey": "ed25519:<the former key>",
+      "publicKey": "ed25519:<a former key>",
       "next": "sha256:<the new key's fingerprint>",
-      "signature": "<the former key's signature>"
+      "signature": "<that former key's signature>"
     }
   ]
 }
 ```
 
-`next` is the new key's fingerprint. `signature` is the former key's Ed25519
-signature over the ASCII bytes of `next`, in standard padded base64. An
-application that pinned the former key installs the new release only if the
-statement from its pinned key verifies, and re-pins only when its developer
-confirms the change on a terminal.
+`previousKeys` holds one such entry for each former key. Each former key
+signs the UTF-8 bytes of one JSON object with no whitespace,
+`{"format":"suprnova-key-handover/1","library":"<source>","next":"<fingerprint>"}`,
+where `library` is the `source` in this `library.json` and `next` is the new
+key's fingerprint. The statement names the library, so a former key that
+signs for several libraries hands over only this one. `signature` holds the
+signature in standard padded base64. The format is open, so other tooling
+can produce a statement too.
 
-Each statement names the current key, so after a second change every
-former key you have used signs the newest key's fingerprint, and
-`previousKeys` holds one statement for each. Keep every former private key
-for that. An application still pinned to a key with no statement in
-`previousKeys` refuses the release.
+An application that pinned a former key installs the new release only if
+the statement from its pinned key verifies, and it re-pins only when its
+developer confirms the change on a terminal. The application keeps the
+former key in its pin table, so the components it installed under that key
+still verify.
 
-No `live:registry` command makes a key or a statement; OpenSSL 3 makes both.
-In the directory that holds your key files, with `old` set to your current
-key file:
+A developer whose pinned key you dropped pins the new key by hand: in the
+library's table of `suprnova.toml`, set `key` to the new key and move the
+dropped key into `previous_keys`, so the components installed under it still
+verify:
 
-```bash
-umask 077
-old=<fingerprint>.key
-openssl genpkey -algorithm ed25519 -out new.pem
-public=$(openssl pkey -in new.pem -pubout -outform DER | tail -c 32 | openssl base64 -A)
-secret=$(openssl pkey -in new.pem -outform DER | tail -c 32 | openssl base64 -A)
-next=sha256:$(openssl pkey -in new.pem -pubout -outform DER | tail -c 32 | openssl dgst -sha256 -r | cut -d' ' -f1)
-printf 'suprnova-library-key/1\npublic ed25519:%s\nsecret %s\n' "$public" "$secret" > "${next#sha256:}.key"
-rm new.pem
-printf '%s' "$next" > next.txt
-signature=$({ printf '\060\056\002\001\000\060\005\006\003\053\145\160\004\042\004\040'; sed -n 's/^secret //p' "$old" | openssl base64 -d -A; } | openssl pkeyutl -sign -rawin -keyform DER -inkey /dev/stdin -in next.txt | openssl base64 -A)
-rm next.txt
-printf 'publicKey ed25519:%s\nnext %s\nsignature %s\n' "$public" "$next" "$signature"
+```toml
+[live.libraries."github.com/acme/acme-ui"]
+namespace = "acme"
+key = "ed25519:<the new key>"
+previous_keys = ["ed25519:<the dropped key>"]
 ```
-
-The script writes the new key file in the format `sign` reads, named by its
-fingerprint, and prints the values for `library.json`: the new `publicKey`,
-and the statement's `next` and `signature`. The `printf` before the former
-key's secret is the fixed prefix that makes its 32 bytes an Ed25519 private
-key OpenSSL reads. Set `publicKey`, add the statement with your former key as
-its `publicKey`, raise `version`, and sign: `sign` finds the new key by its
-fingerprint. Back up the new key file before you publish. When the library
-has changed keys before, run the `printf '%s' "$next"` and `signature=` lines
-again with `old` set to each earlier key file, and add a statement for each.
 
 ## What a pinned key proves
 

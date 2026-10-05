@@ -25,7 +25,7 @@ use super::library::{
     parse_manifest, parse_shipped_library_json, parse_shipped_manifest, validate_file_name,
 };
 use super::project::{Approval, ComponentRecord, InstallRecord, LibraryRecord, ProjectFile};
-use super::scan::{ComponentFiles, ScanReport};
+use super::scan::{ComponentFiles, ScanContext, ScanReport};
 use super::signing::{Fingerprint, PublicKey, Signature, verify, verify_handover};
 use super::statement::{Digest, Statement};
 use super::{Capability, RegistryError, Result};
@@ -273,15 +273,14 @@ impl Plan {
 }
 
 /// Scans one component as data (REG-022). The plan calls it after every
-/// component verified, with the manifest the files arrived under; tests
-/// stand a scanner of their own in.
+/// component verified, with what it knows beyond the files: the `register`
+/// and `elements` of the manifest they arrived under and the views of the
+/// components they depend on, which `live:check`'s view checks follow.
+/// Tests stand a scanner of their own in.
 pub trait Scanner {
-    /// The scan report for one component's files.
-    fn scan(
-        &self,
-        component: &ComponentFiles<'_>,
-        manifest: &ComponentManifest,
-    ) -> Result<ScanReport>;
+    /// The scan report for one component's files in that context.
+    fn scan(&self, component: &ComponentFiles<'_>, context: &ScanContext<'_>)
+    -> Result<ScanReport>;
 }
 
 /// The scan `live:add` runs: Suprnova's allowlist over every file, the Live
@@ -295,14 +294,9 @@ impl Scanner for AllowlistScanner {
     fn scan(
         &self,
         component: &ComponentFiles<'_>,
-        manifest: &ComponentManifest,
+        context: &ScanContext<'_>,
     ) -> Result<ScanReport> {
-        super::scan::scan_component_with_manifest(
-            component,
-            &manifest.register,
-            &manifest.elements,
-            super::scan::allowlist::embedded()?,
-        )
+        super::scan::scan_component_in(component, context, super::scan::allowlist::embedded()?)
     }
 }
 
@@ -939,6 +933,10 @@ impl Resolver<'_> {
         let shipped_views = shipped_views();
         let mut modules_of: BTreeMap<ComponentAddress, (String, Vec<String>, Vec<String>)> =
             BTreeMap::new();
+        // Each planned component's view sources by view path, for the view
+        // checks of the components that depend on it.
+        let mut view_sources_of: BTreeMap<ComponentAddress, Vec<(String, String)>> =
+            BTreeMap::new();
         let mut rust_owners: BTreeMap<(LibraryAddress, String), ComponentAddress> = BTreeMap::new();
         let mut components = Vec::with_capacity(order.len());
         let mut router_calls = Vec::new();
@@ -1058,13 +1056,22 @@ impl Resolver<'_> {
             } else {
                 let mut dependency_modules = Vec::new();
                 let mut importable_views = shipped_views.clone();
+                let mut dependency_views = Vec::new();
                 for dependency in &loaded.dependencies {
                     if let Some((module, rust, views)) = modules_of.get(dependency) {
                         dependency_modules
                             .extend(rust.iter().map(|name| format!("{module}::{name}")));
                         importable_views.extend(views.iter().cloned());
                     }
+                    if let Some(sources) = view_sources_of.get(dependency) {
+                        dependency_views.extend(sources.iter().cloned());
+                    }
                 }
+                let context = ScanContext {
+                    register: Some(&loaded.manifest.register),
+                    elements: Some(&loaded.manifest.elements),
+                    dependency_views: &dependency_views,
+                };
                 let incoming = scanner.scan(
                     &ComponentFiles {
                         namespace: &namespace,
@@ -1073,7 +1080,7 @@ impl Resolver<'_> {
                         dependency_modules: &dependency_modules,
                         importable_views: &importable_views,
                     },
-                    &loaded.manifest,
+                    &context,
                 )?;
                 if !incoming.accepted() {
                     return Err(RegistryError::Refused(incoming.findings));
@@ -1126,7 +1133,11 @@ impl Resolver<'_> {
                             dependency_modules: &dependency_modules,
                             importable_views: &importable_views,
                         },
-                        &installed_manifest,
+                        &ScanContext {
+                            register: Some(&installed_manifest.register),
+                            elements: Some(&installed_manifest.elements),
+                            dependency_views: &dependency_views,
+                        },
                     );
                     for (name, original) in swapped {
                         if let Some((_, bytes)) =
@@ -1152,6 +1163,19 @@ impl Resolver<'_> {
                 .map(|name| format!("{namespace}-ui/{}/{name}", address.component))
                 .collect();
             modules_of.insert(address.clone(), (ns_module.clone(), modules.clone(), views));
+            let sources: Vec<(String, String)> = loaded
+                .files
+                .iter()
+                .filter(|(name, _)| FileKind::of(name) == Some(FileKind::View))
+                .filter_map(|(name, bytes)| {
+                    let source = std::str::from_utf8(bytes).ok()?.to_string();
+                    Some((
+                        format!("{namespace}-ui/{}/{name}", address.component),
+                        source,
+                    ))
+                })
+                .collect();
+            view_sources_of.insert(address.clone(), sources);
 
             let call = if shipped {
                 (self.shipped_records.is_empty()).then(|| "try_live_ui_assets()".to_owned())
@@ -1838,7 +1862,7 @@ mod tests {
     use crate::registry::address::{self, LibraryAddress};
     use crate::registry::fetch::{Commit, FakeFetcher, Fetcher};
     use crate::registry::project::ProjectFile;
-    use crate::registry::scan::{ComponentFiles, ScanReport};
+    use crate::registry::scan::{ComponentFiles, ScanContext, ScanReport};
     use crate::registry::signing::{SecretKey, sign};
     use crate::registry::statement::{Digest, Statement};
     use crate::registry::{RegistryError, Result};
@@ -1849,7 +1873,7 @@ mod tests {
         fn scan(
             &self,
             _component: &ComponentFiles<'_>,
-            _manifest: &crate::registry::library::ComponentManifest,
+            _context: &ScanContext<'_>,
         ) -> Result<ScanReport> {
             Ok(ScanReport::default())
         }

@@ -20,7 +20,7 @@ use suprnova_cli::registry::fetch::SourceFetcher;
 use suprnova_cli::registry::install::{self, RegistrationEdits};
 use suprnova_cli::registry::plan::{self, FileOutcome, Options, Scanner};
 use suprnova_cli::registry::project::{ProjectFile, ProjectLock};
-use suprnova_cli::registry::scan::{ComponentFiles, ScanReport};
+use suprnova_cli::registry::scan::{ComponentFiles, ScanContext, ScanReport};
 use suprnova_cli::registry::signing::{self, SecretKey};
 use suprnova_cli::registry::statement::{Digest, Statement};
 
@@ -131,9 +131,9 @@ impl Scanner for Clean {
     fn scan(
         &self,
         component: &ComponentFiles<'_>,
-        manifest: &suprnova_cli::registry::library::ComponentManifest,
+        context: &ScanContext<'_>,
     ) -> Result<ScanReport, RegistryError> {
-        plan::AllowlistScanner.scan(component, manifest)
+        plan::AllowlistScanner.scan(component, context)
     }
 }
 

@@ -10,7 +10,7 @@ use oxc_ast::ast::*;
 use oxc_span::{GetSpan, Span};
 
 use super::super::Finding;
-use super::super::url::check_constant;
+use super::super::url::{check_constant, srcset_urls};
 use super::lists::{
     ADMITTED_CONSTRUCTORS, ADMITTED_GLOBALS, ADMITTED_METHODS, GLOBAL_OBJECTS, IMPLICITLY_CALLED,
     READ_ONLY_PROPERTIES, REFUSED_ELEMENTS, REFUSED_PROPERTIES, Rule, URL_ATTRIBUTES,
@@ -1530,7 +1530,8 @@ impl<'a, 'c> Walker<'a, 'c> {
             );
         }
         if URL_PROPERTIES.contains(&name.as_str()) {
-            self.url_value(value, span, &format!("`{name}`"));
+            let list = matches!(name.as_str(), "srcset" | "imageSrcset" | "ping");
+            self.url_value_in(value, span, &format!("`{name}`"), list);
         } else if name.len() > 2 && name.starts_with("on") {
             if !matches!(unparen(value), Expression::NullLiteral(_))
                 && !self.callback_safe(value, 0)
@@ -2099,10 +2100,15 @@ impl<'a, 'c> Walker<'a, 'c> {
                         && let Some(value) = value_index
                             .and_then(|index| Self::argument_expression(arguments, index))
                     {
-                        self.url_value(
+                        let list = matches!(
+                            local.as_str(),
+                            "srcset" | "imagesrcset" | "ping" | "archive"
+                        );
+                        self.url_value_in(
                             value,
                             value.span(),
                             &format!("the `{attribute}` attribute"),
+                            list,
                         );
                     }
                 }
@@ -2360,16 +2366,30 @@ impl<'a, 'c> Walker<'a, 'c> {
     }
 
     fn url_value(&mut self, value: &'a Expression<'a>, span: Span, what: &str) {
+        self.url_value_in(value, span, what, false);
+    }
+
+    /// Checks a value written where the browser loads or navigates to a URL;
+    /// a list-valued one (`srcset`, `imagesrcset`, `ping`, `archive`) has
+    /// every URL in it checked, not only the first.
+    fn url_value_in(&mut self, value: &'a Expression<'a>, span: Span, what: &str, list: bool) {
         match self.trace(value, 0) {
-            Some(urls) => {
-                for url in urls {
-                    if let Err(refusal) = check_constant(&url) {
-                        self.refuse(
-                            "script-url",
-                            span,
-                            format!("{what}: {}", refusal.describe()),
-                        );
-                        return;
+            Some(texts) => {
+                for text in texts {
+                    let urls: Vec<&str> = if list {
+                        srcset_urls(&text)
+                    } else {
+                        vec![text.as_str()]
+                    };
+                    for url in urls {
+                        if let Err(refusal) = check_constant(url) {
+                            self.refuse(
+                                "script-url",
+                                span,
+                                format!("{what}: {}", refusal.describe()),
+                            );
+                            return;
+                        }
                     }
                 }
             }

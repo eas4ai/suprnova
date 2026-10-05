@@ -1015,10 +1015,16 @@ impl ProjectLock {
         let Ok(file) = std::fs::File::open(project_root.join(LOCK_FILE)) else {
             return false;
         };
-        matches!(
-            file.try_lock_shared(),
-            Err(std::fs::TryLockError::WouldBlock)
-        )
+        match file.try_lock_shared() {
+            // The probe took a shared hold; it is let go at once rather than
+            // on close, which a duplicate descriptor in a child would delay.
+            Ok(()) => {
+                let _ = file.unlock();
+                false
+            }
+            Err(std::fs::TryLockError::WouldBlock) => true,
+            Err(std::fs::TryLockError::Error(_)) => false,
+        }
     }
 
     /// The lock file's path.
@@ -1099,6 +1105,17 @@ impl ProjectLock {
         self.file.unlock().map_err(|error| {
             RegistryError::Io(format!("cannot unlock {}: {error}", self.path.display()))
         })
+    }
+}
+
+/// Unlocks on every exit path, an error's included. Closing the file is not
+/// enough: a lock belongs to the open file, not to one descriptor, and a
+/// child process another thread spawns holds a duplicate of every
+/// descriptor until it execs, so a lock released only by closing would
+/// stay held for as long as that duplicate lives.
+impl Drop for ProjectLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
     }
 }
 
@@ -1443,6 +1460,21 @@ mod tests {
             .set_shipped(&field, &shipped("3.2.2"))
             .expect("replace");
         project.render()
+    }
+
+    /// REG-029: dropping the lock releases it on every exit path, even
+    /// while another descriptor of the lock file is open, as one a child
+    /// process inherits until it execs: closing a descriptor does not
+    /// release a lock while a duplicate of it exists.
+    #[test]
+    fn a_dropped_lock_is_released_while_a_duplicate_descriptor_is_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock = super::ProjectLock::acquire(dir.path()).expect("lock");
+        let duplicate = lock.file.try_clone().expect("duplicate descriptor");
+        drop(lock);
+        let again = super::ProjectLock::acquire(dir.path());
+        assert!(again.is_ok(), "the dropped lock is still held: {again:?}");
+        drop(duplicate);
     }
 
     #[test]

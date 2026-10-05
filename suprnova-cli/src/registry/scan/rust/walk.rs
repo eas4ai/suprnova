@@ -2195,6 +2195,10 @@ impl<'a> Walker<'a> {
                         return Ty::Api(owner_text);
                     }
                 }
+                if let Some(returned) = self.allowlist.returns(path) {
+                    let returned = returned.to_string();
+                    return self.returned_type(&returned);
+                }
                 match self.allowlist.kind(path) {
                     Some("struct" | "enum") => Ty::Api(path.clone()),
                     _ => Ty::Unknown,
@@ -2514,6 +2518,10 @@ impl<'a> Walker<'a> {
     ) -> Ty {
         if let Some(found) = self.allowlist.member(path, name) {
             let member = format!("{path}::{name}");
+            let canonical = match found {
+                Admission::Item { canonical, .. } => Some(canonical.to_string()),
+                _ => None,
+            };
             self.admit_member(found, &member, span);
             if CONTAINER_RESOLVERS.contains(&member.as_str()) {
                 return match expected {
@@ -2530,6 +2538,13 @@ impl<'a> Walker<'a> {
                     }
                 };
             }
+            if let Some(returned) = canonical
+                .as_deref()
+                .and_then(|canonical| self.allowlist.returns(canonical))
+            {
+                let returned = returned.to_string();
+                return self.returned_type(&returned);
+            }
             return Ty::Unknown;
         }
         if STD_TRAIT_METHODS.contains(&name) {
@@ -2545,6 +2560,23 @@ impl<'a> Walker<'a> {
             format!("`.{name}()` is not on the allowlist for `{path}`"),
         );
         Ty::Unknown
+    }
+
+    /// The type a Suprnova function returns, from the type the feature map
+    /// recorded for it: `std` types by name, Suprnova types by the path the
+    /// allowlist admits, and anything else unknown, so a method called on
+    /// it is still refused.
+    fn returned_type(&self, text: &str) -> Ty {
+        let mut parser = TypeText {
+            text: text.as_bytes(),
+            index: 0,
+        };
+        let ty = parser.parse(self.allowlist, 0);
+        if parser.index == parser.text.len() {
+            ty
+        } else {
+            Ty::Unknown
+        }
     }
 
     fn admit_member(&mut self, found: Admission<'_>, member: &str, span: proc_macro2::Span) {
@@ -2790,5 +2822,107 @@ fn std_constructor(full: &[String], args: &[Ty], turbofish: &[Ty], expected: Opt
         },
         (Some("Duration"), _) => Ty::std("Duration", Vec::new()),
         _ => Ty::Unknown,
+    }
+}
+
+/// A parser for the return types the feature map records: full paths with
+/// angle-bracketed arguments, `&`, tuples, slices, primitives and `_`.
+struct TypeText<'t> {
+    text: &'t [u8],
+    index: usize,
+}
+
+impl TypeText<'_> {
+    fn eat(&mut self, byte: u8) -> bool {
+        if self.text.get(self.index) == Some(&byte) {
+            self.index += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn list(&mut self, allowlist: &Allowlist, depth: usize, close: u8) -> Vec<Ty> {
+        let mut items = Vec::new();
+        if self.eat(close) {
+            return items;
+        }
+        loop {
+            items.push(self.parse(allowlist, depth + 1));
+            if self.eat(b',') {
+                continue;
+            }
+            if !self.eat(close) {
+                self.index = self.text.len() + 1;
+            }
+            return items;
+        }
+    }
+
+    fn parse(&mut self, allowlist: &Allowlist, depth: usize) -> Ty {
+        if depth > 16 {
+            self.index = self.text.len() + 1;
+            return Ty::Unknown;
+        }
+        if self.eat(b'&') {
+            return self.parse(allowlist, depth + 1);
+        }
+        if self.eat(b'(') {
+            let parts = self.list(allowlist, depth, b')');
+            return if parts.is_empty() {
+                Ty::Unit
+            } else {
+                Ty::Tuple(parts)
+            };
+        }
+        if self.eat(b'[') {
+            let parts = self.list(allowlist, depth, b']');
+            return Ty::Slice(Box::new(parts.into_iter().next().unwrap_or(Ty::Unknown)));
+        }
+        if self.text.get(self.index) == Some(&b'_')
+            && !self
+                .text
+                .get(self.index + 1)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':'))
+        {
+            self.index += 1;
+            return Ty::Unknown;
+        }
+        let start = self.index;
+        while self
+            .text
+            .get(self.index)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':'))
+        {
+            self.index += 1;
+        }
+        let path = String::from_utf8_lossy(&self.text[start..self.index]).into_owned();
+        let args = if self.eat(b'<') {
+            self.list(allowlist, depth, b'>')
+        } else {
+            Vec::new()
+        };
+        if path.is_empty() {
+            self.index = self.text.len() + 1;
+            return Ty::Unknown;
+        }
+        if PRIMITIVES.contains(&path.as_str()) {
+            return Ty::Prim(path);
+        }
+        let first = path.split("::").next().unwrap_or_default();
+        let last = path.rsplit("::").next().unwrap_or_default().to_string();
+        match first {
+            "core" | "alloc" | "std" => match last.as_str() {
+                "String" | "Vec" | "Option" | "Result" | "HashMap" | "BTreeMap" | "HashSet"
+                | "BTreeSet" | "VecDeque" | "Box" | "Rc" | "Arc" | "Cow" | "Duration"
+                | "Ordering" => Ty::Std(last, args),
+                _ => Ty::Unknown,
+            },
+            "suprnova" => match allowlist.lookup(&path) {
+                Some((canonical, item)) if !item.hidden => Ty::Api(canonical.to_string()),
+                _ => Ty::Unknown,
+            },
+            _ => Ty::Unknown,
+        }
     }
 }

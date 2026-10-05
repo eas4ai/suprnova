@@ -71,6 +71,9 @@ pub struct Allowlist {
     /// Documented items the list refuses, by every path that names them,
     /// to their canonical path.
     refused: BTreeMap<String, String>,
+    /// The type each function returns, by canonical path, as the feature
+    /// map's extractor wrote it.
+    returns: BTreeMap<String, String>,
 }
 
 impl Allowlist {
@@ -116,6 +119,7 @@ impl Allowlist {
             modules,
             kinds,
             refused,
+            returns: BTreeMap::new(),
         }
     }
 
@@ -126,6 +130,7 @@ impl Allowlist {
         let mut implements = BTreeMap::new();
         let mut kinds = BTreeMap::new();
         let mut refused = BTreeMap::new();
+        let mut returns = BTreeMap::new();
         for (index, line) in text.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
@@ -135,6 +140,9 @@ impl Allowlist {
             })?;
             if !entry.implements.is_empty() {
                 implements.insert(entry.path.clone(), entry.implements.clone());
+            }
+            if let Some(returned) = &entry.returns {
+                returns.insert(entry.path.clone(), returned.clone());
             }
             if entry.refused {
                 for alias in &entry.aliases {
@@ -160,7 +168,9 @@ impl Allowlist {
                 },
             );
         }
-        Ok(Self::assemble(items, prefixes, implements, kinds, refused))
+        let mut list = Self::assemble(items, prefixes, implements, kinds, refused);
+        list.returns = returns;
+        Ok(list)
     }
 
     /// The item a full path names, through an alias when needed.
@@ -234,6 +244,12 @@ impl Allowlist {
         self.kinds.get(canonical).map(String::as_str)
     }
 
+    /// The type a function returns, written with full paths, when the
+    /// feature map recorded it (`_` for a type that names no single type).
+    pub fn returns(&self, canonical: &str) -> Option<&str> {
+        self.returns.get(canonical).map(String::as_str)
+    }
+
     /// How many items the list holds.
     pub fn len(&self) -> usize {
         self.items.len()
@@ -257,6 +273,8 @@ struct Entry {
     refused: bool,
     aliases: Vec<String>,
     implements: Vec<String>,
+    #[serde(default)]
+    returns: Option<String>,
 }
 
 /// The effect-free part of `std` a component may name (REG-030): the

@@ -61,7 +61,8 @@ an author's tree on disk, whose `source` names where it will be published.
 Fetching follows fixed rules. Every request is HTTPS, except to a loopback
 host, and carries no credentials. A response over 2 MiB, one that takes over
 30 seconds, a redirect to another origin, and a JSON document that is not one
-object or holds a duplicate key are refused. Repository files are read raw
+object or holds a duplicate key are refused, and so is a plan that fetches
+more than 64 MiB in all. Repository files are read raw
 at the commit the tag names, never as release assets, and a redirect to
 another repository path, as a renamed repository answers, is refused with
 the new address named. Only public repositories are supported.
@@ -97,9 +98,10 @@ serve its assets: call `router.try_live_ui_assets_for("acme")` when you build th
 | `<address> <version>` | One component and the library version it comes from. Dependencies come first. |
 | `commit` | The commit the release tag resolved to. Every file of the library comes from it. |
 | `hash` | The component's verification hash. The signature was verified over it. |
-| `<path>  <outcome>` | Each file, where it lands, and what happens to it: `new`, `unchanged`, `replaced`, `kept, edited locally`, or `kept, changed since the record`. See [Updates, edits and --force](#updates-edits-and---force). |
-| `module` | A module declaration `live:add` adds, and the file it goes in. |
-| `register`, `unregister` | A Live component it registers in your registry builder, or removes because the new version no longer defines it. |
+| `<path>  <outcome>` | Each file, where it lands, and what happens to it: `new`, `unchanged`, `replaced`, `kept, edited locally`, `kept, changed since the record`, or `removed: the library dropped it`. See [Updates, edits and --force](#updates-edits-and---force). |
+| `forced` | A refusal `--force` let through: a downgrade, a released version whose content changed, or a dependency an installed component recorded at another version. |
+| `module` | A module declaration and the file it goes in. `already declared` marks one the file already holds, which `live:add` leaves as it is. |
+| `register`, `unregister` | A Live component it registers in your registry builder, or removes because the new version no longer defines it. `already registered` marks one the builder already holds. |
 | `depends on` | A dependency and the version it resolved to. |
 | `capabilities:` | Each capability the scan found the component uses, or `none`. |
 | `approval` | Each capability's approval: given at an earlier install, given by `--allow`, or needed from you. |
@@ -162,7 +164,9 @@ The first install from a library pins the key its `library.json` names, in
 that library must be signed by the pinned key. A library whose key differs
 from its pin is refused, with both fingerprints named, unless the pinned key
 handed the library to the new key: then the plan shows both fingerprints, and
-`live:add` re-pins only when you confirm on a terminal.
+`live:add` re-pins only when you confirm on a terminal. A re-pin keeps the
+former key in the library's pin table, under `previous_keys`, so the
+components you installed under the former key still verify.
 
 To install without a terminal, pin the key yourself first. Add the library's
 table to `suprnova.toml`, with the key from its `library.json`:
@@ -222,8 +226,14 @@ Each `[live.components."<address>"]` table holds exactly what arrived:
 | `capabilities` | Each capability the scan found, with how you approved it: `terminal` or `flag`. |
 | `kept` | Each file the install kept because you had edited it. |
 
+In `suprnova.toml`, a component's `capabilities`, `kept` and `commit` are
+your own record of decisions made at install time, not part of the signed
+statement, so `live:check` does not verify them and editing them by hand
+changes no provenance.
+
 Each `[live.libraries."<address>"]` table holds the namespace the library
-owns in your application and the key pinned for it. A shipped component's
+owns in your application, the `key` pinned for it, and, after a key change,
+`previous_keys`: the keys the pin replaced. A shipped component's
 table holds only the CLI's version and digests, since the shipped library is
 neither signed nor hashed:
 
@@ -363,7 +373,9 @@ install record: a file you never edited is replaced when the library changes
 it, a file you edited is kept, and the plan says which. A Rust file is judged
 the same way. When a kept Rust file belongs to a component whose new version
 registers different types, `live:add` refuses and names the file to
-reconcile. `--force` replaces every edited file.
+reconcile. A file the new version no longer names is removed when you never
+edited it, and kept when you did. `--force` replaces or removes every edited
+file.
 
 `suprnova.toml` pins the version you installed, and `live:add` guards it:
 
@@ -374,12 +386,40 @@ reconcile. `--force` replaces every edited file.
   installed component recorded names that component and is refused unless
   you pass `--force`.
 
+The plan shows each refusal `--force` let through as a `forced` line, and
+marks what the application already holds. An application that installed
+0.2.0 of the counter and goes back to 0.1.0 sees this plan:
+
+```bash
+suprnova live:add acme/acme-ui/counter@0.1.0 --force
+```
+
+```text
+framework: suprnova 3.3.0
+github.com/acme/acme-ui/counter 0.1.0
+  commit      5b0f3c9e2a7d41e8c6b1f0a9d3e5c7b2a4f6e8d0
+  hash        sha256:1f75c3d54657a2e51a102fb49b4f5e012e7124dc2aae68601012487109eee208
+  templates/acme-ui/counter/manifest.json  unchanged
+  templates/acme-ui/counter/counter.html  unchanged
+  templates/acme-ui/counter/counter.css  replaced
+  templates/acme-ui/counter/counter.js  unchanged
+  src/live/acme/counter.rs  unchanged
+  forced      downgrade from 0.2.0 to 0.1.0, let through by --force
+  module      src/live/mod.rs: pub mod acme; already declared
+  module      src/live/acme/mod.rs: pub mod counter; already declared
+  register    crate::live::acme::counter::Counter already registered
+github.com/acme/acme-ui/counter: capabilities: none
+```
+
 ## Dependencies
 
 A component's `dependencies` install first, each at most once, a cycle
-included. A bare dependency is a shipped component, `./<component>` is a
-component of the same library at the same version, and a full address
-resolves as an address you type does. A plan that needs one component at two
+included. A bare dependency is a shipped component, and `./<component>` is a
+component of the same library at the same version. Any other dependency is a
+repository address, which resolves as an address you type does, or the
+`https://` URL of a component on a public host: a manifest you fetched from
+someone else cannot point `live:add` at a path on your disk, a loopback
+address or a private network. A plan that needs one component at two
 versions is refused before anything is written, naming the components that
 require each, and a plan of more than 64 components is refused.
 
@@ -407,10 +447,12 @@ journal. When an install is killed partway, the next `live:add` or `suprnova
 serve` finds the journal with no lock held, restores from it before anything
 else, and says so.
 
-`suprnova serve` runs `suprnova live:wait` before each build. It returns at
-once unless an install holds the lock, and otherwise waits for the install
-to finish, so the dev server never builds a half-written install. Both files
-are this machine's state: a scaffold's `.gitignore` names them.
+`suprnova serve` builds through `suprnova live:wait`. It starts no build
+while an install holds the lock, and it holds a shared lock on the project
+until the build finishes, so the dev server never builds a half-written
+install and `live:add` refuses to start while a build is reading the
+project. Both files are this machine's state: a scaffold's `.gitignore` names
+them.
 
 ## Verify installed components
 

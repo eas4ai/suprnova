@@ -307,6 +307,57 @@ def _source_text(item, mode):
     return " ".join(text.split())
 
 
+def type_text(crate, ty, self_path):
+    """A type as a full-path string: each named type at the shortest public
+    path that names it (a sibling crate's at its own public path), generic
+    arguments kept, `Self` as the implementing type, and anything that names
+    no single type (a generic parameter, `impl Trait`, `dyn Trait`, a
+    projection) as `_`. The registry scan types a value a function returns
+    from it, so a method chain on a Suprnova value can be classified."""
+    if ty is None:
+        return "()"
+    if "primitive" in ty:
+        return ty["primitive"]
+    if "generic" in ty:
+        return self_path if ty["generic"] == "Self" and self_path else "_"
+    if "borrowed_ref" in ty:
+        return "&" + type_text(crate, ty["borrowed_ref"]["type"], self_path)
+    if "tuple" in ty:
+        return "(" + ",".join(type_text(crate, t, self_path) for t in ty["tuple"]) + ")"
+    if "slice" in ty:
+        return "[" + type_text(crate, ty["slice"], self_path) + "]"
+    if "array" in ty:
+        return "[" + type_text(crate, ty["array"]["type"], self_path) + "]"
+    if "resolved_path" in ty:
+        rp = ty["resolved_path"]
+        rid = str(rp.get("id")) if rp.get("id") is not None else None
+        if rid in crate.public_paths:
+            path = "::".join(crate.best(rid)[0])
+        elif rid in crate.paths:
+            p = crate.paths[rid]
+            ext = crate.ext.get(str(p["crate_id"]), {}).get("name") if p["crate_id"] != 0 else crate.name
+            parts = list(p["path"])
+            if parts and ext and parts[0] != ext:
+                parts = [ext] + parts[1:]
+            path = "::".join(parts)
+            path = SIBLING_PUBLIC.get(path, path)
+        else:
+            return "_"
+        args = (rp.get("args") or {}).get("angle_bracketed") or {}
+        types = [a["type"] for a in args.get("args") or [] if "type" in a]
+        if types:
+            path += "<" + ",".join(type_text(crate, t, self_path) for t in types) + ">"
+        return path
+    return "_"
+
+
+def returns_of(crate, item, self_path):
+    """The return type of a function item, or None for any other item."""
+    if not item or kind(item) != "function":
+        return None
+    return type_text(crate, item["inner"]["function"]["sig"].get("output"), self_path)
+
+
 def digest(text):
     return hashlib.sha256(text.encode()).hexdigest()[:16] if text else None
 
@@ -391,6 +442,8 @@ def records(crate, default_crate, enabled=None):
             target = it["inner"]["type_alias"]["type"].get("resolved_path")
             if target:
                 details["alias_of"] = target["path"]
+        if k == "function":
+            details["returns"] = returns_of(crate, it, None)
         sp = it.get("span") or {}
         rid = unique(full)
         hidden = crate.hidden(iid)
@@ -425,11 +478,15 @@ def records(crate, default_crate, enabled=None):
             mitem = by_name_span.get((name, at))
             file, _, line = at.rpartition(":") if at else (None, None, None)
             label = {"function": "fn", "assoc_const": "const", "assoc_type": "type"}[mk]
+            member_details = {"trait_item": req} if req else {}
+            returned = returns_of(crate, mitem, full if k in ("struct", "enum", "union") else None)
+            if returned is not None:
+                member_details["returns"] = returned
             out.append({"id": unique(f"{rid}::{name}"), "kind": label, "parent": rid, "family": "rust-api",
                         "hidden": mem_hidden,
                         "crate": crate.name, "module": "::".join(mod_path), "file": file or None,
                         "line": int(line) if line else None, "deprecated": bool(dep),
-                        "details": {"trait_item": req} if req else {},
+                        "details": member_details,
                         "sig_hash": digest(_source_text(mitem, "sig")),
                         "body_hash": digest(_source_text(mitem, "body"))})
 
