@@ -713,8 +713,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   payloads move.** Pinecone and the HTTP mail drivers treat a 3xx as an
   error. SQS overflow payloads live under
   `sqs-payloads/<queue>-<digest>/`, so `SQS_OVERFLOW_FLUSH_ON_CLEAR` no
-  longer deletes a same-named queue's payloads from another account or
-  region; payloads written before still read, but `clear` no longer sweeps
+  longer deletes a same-named queue's payloads from another account,
+  region or endpoint; payloads written before still read, but `clear` no longer sweeps
   them. Qdrant ids `"01"`, `"+1"` and non-canonical UUID spellings no longer
   map to the point of `"1"` or the canonical UUID, so items stored under
   such ids must be written again. A caller's version 5 UUID id is hashed
@@ -995,6 +995,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `<rel>_max_as::<Decimal>()` read a `NUMERIC` or `DECIMAL` minimum or
   maximum exactly on Postgres and MySQL, and `::<String>()` reads its
   decimal text. This landed after the `v3.1.0` tag.
+- **Debounced jobs, queue events, log subscribers and process timeouts.**
+  Overlapping debounced dispatches keep the one that armed last: each takes
+  its place from an atomic counter in the cache, so a newer push is never
+  dropped for an older `Queue::bulk`, and a stalled dispatch does not also
+  run. When max wait runs out inside one `Queue::bulk`, the bulk's last job
+  runs at once instead of being dropped as superseded. A job deleted by
+  middleware, or dropped as a superseded debounced dispatch, fires
+  `JobAttempted`, as Laravel's worker does. Building a log subscriber with
+  `logging::build_subscriber` changes nothing until it is used: each
+  subscriber writes file lines in its own format, and building no longer
+  resets the default channel, so a caller that relied on that calls
+  `check_channels`. A process timeout's kill can no longer reach a process
+  or group id that the owner reaped in the meantime. This landed after the
+  `v3.1.0` tag.
 - **Sessions and remember-me tokens restore on MySQL and MariaDB.** A
   scaffolded application's session, remember-me and auth-flow token time
   columns are `TIMESTAMP` there, and the framework read them as a type the
