@@ -1608,10 +1608,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   tables were unbounded, a JPEG could be measured at one frame header and
   decoded at another, and path and disk sources were read into memory
   before the size check. Each is now counted against the budget before the
-  memory is taken. A JPEG whose Extended XMP segments would make the
-  decoder's reassembly read more than `IMAGE_MAX_ALLOC_BYTES` is refused
-  before decoding; 100,000 stalled segments used to hold a core for
-  minutes.
+  memory is taken.
+- **A JPEG's Extended XMP cannot hold a core.** A JPEG whose Extended XMP
+  segments would make the decoder's reassembly read more than
+  `IMAGE_MAX_ALLOC_BYTES` is refused before decoding; 100,000 stalled
+  segments used to hold a core for minutes. This landed after the `v3.1.0`
+  tag.
 - **The mock payment provider refuses unsigned webhooks outside
   development.** It accepted them when the application registered a
   production or staging `AppConfig` in code with `APP_ENV` unset; it now
