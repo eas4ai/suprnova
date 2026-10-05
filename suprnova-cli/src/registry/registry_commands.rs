@@ -30,7 +30,7 @@ use super::library::{
     RESERVED_NAMESPACES,
 };
 use super::scan::{self, ComponentFiles, ScanReport};
-use super::signing::{self, Fingerprint, PublicKey, SecretKey, Signature};
+use super::signing::{self, Fingerprint, KeyHandover, PublicKey, SecretKey, Signature};
 use super::statement::{Digest, Statement};
 use super::{Capability, RegistryError, Result, author_key, registration, scaffold};
 use crate::commands::live_add::COMPONENTS;
@@ -54,14 +54,34 @@ const MAX_PLAN_COMPONENTS: usize = 64;
 /// The example component's one Live component, as its manifest names it.
 const EXAMPLE_REGISTER: &str = "counter::Counter";
 
+/// What `check`, `sign` and `rotate-key` say about an empty `source`.
+const EMPTY_SOURCE: &str =
+    "set source in library.json to the address the library will be published at";
+
 /// The version a new library starts at.
 const FIRST_VERSION: &str = "0.1.0";
 
 /// Scaffolds a library tree with one example component and a `preview/`
 /// application, makes the key pair, and says where the private key is.
+/// `library.json`'s `source` is left empty; [`new_with_source`] names it.
 pub fn new(namespace: &str, directory: &Path) -> Result<()> {
+    new_with_source(namespace, directory, None)
+}
+
+/// [`new`] with the address the library will be published at, which is
+/// what `live:registry new --source` passes. With an address the example
+/// is signed at once; without one `source` is written empty and nothing is
+/// signed, because every signature covers the address (REG-023).
+pub fn new_with_source(namespace: &str, directory: &Path, source: Option<&str>) -> Result<()> {
     let config = author_key::config_dir()?;
-    let created = create_library(namespace, directory, &config, &Registry, &HttpsFetcher)?;
+    let created = create_library(
+        namespace,
+        directory,
+        source,
+        &config,
+        &Registry,
+        &HttpsFetcher,
+    )?;
     ui::success(&format!(
         "Created the {namespace} library in {}",
         directory.display()
@@ -69,11 +89,17 @@ pub fn new(namespace: &str, directory: &Path) -> Result<()> {
     ui::hint(
         "library.json, components/counter/ (a view, a stylesheet, a script and a Live component), and preview/, an application that renders each component from where it sits",
     );
-    ui::success(&format!(
-        "Signed {} with the key {}",
-        plural(created.signed, "component"),
-        created.fingerprint
-    ));
+    if created.signed > 0 {
+        ui::success(&format!(
+            "Signed {} with the key {}",
+            plural(created.signed, "component"),
+            created.fingerprint
+        ));
+    } else {
+        ui::warning(&format!(
+            "library.json's source is empty, so nothing is signed yet: {EMPTY_SOURCE}, then run `suprnova live:registry sign`."
+        ));
+    }
     ui::br();
     ui::warning(&format!(
         "Your private signing key is at {}",
@@ -82,23 +108,21 @@ pub fn new(namespace: &str, directory: &Path) -> Result<()> {
     ui::hint(
         "Back it up and never commit it. Losing it strands every pin: an application that pinned this library's key accepts no version another key signs, and nothing else can sign one.",
     );
-    ui::hint(&format!(
-        "library.json names the library's source as {}; set it to the repository you publish at, then run `suprnova live:registry sign`.",
-        created.source
-    ));
     ui::br();
     let library = format!("cd {}", directory.display());
     let preview = format!("cd {}", directory.join(PREVIEW_DIR).display());
-    ui::panel(
-        "Next Steps",
-        &[
-            &library,
-            "suprnova live:registry check",
-            &preview,
-            "suprnova serve --backend-only",
-            "open http://localhost:8765/preview/counter",
-        ],
-    );
+    let mut steps: Vec<&str> = vec![&library];
+    if created.signed == 0 {
+        steps.push("set \"source\" in library.json");
+        steps.push("suprnova live:registry sign");
+    }
+    steps.extend([
+        "suprnova live:registry check",
+        &preview,
+        "suprnova serve --backend-only",
+        "open http://localhost:8765/preview/counter",
+    ]);
+    ui::panel("Next Steps", &steps);
     Ok(())
 }
 
@@ -108,10 +132,7 @@ pub fn check(library_root: &Path) -> Result<()> {
     let inspection = inspect(library_root, true, &Registry, &HttpsFetcher)?;
     print_report(&inspection.report);
     if inspection.report.passed() {
-        ui::success(&format!(
-            "{} pass every check live:add makes for the library",
-            plural(inspection.report.components.len(), "component")
-        ));
+        ui::success(&passed_summary(inspection.report.components.len()));
         Ok(())
     } else {
         Err(RegistryError::Invalid(format!(
@@ -146,6 +167,66 @@ pub fn sign(library_root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Hands the library to a new signing key (REG-033) and re-signs every
+/// component with it, all or nothing. Each fingerprint in `drop` is a
+/// former key whose statement is dropped because its private key file is
+/// lost.
+pub fn rotate_key(library_root: &Path, drop: &[String]) -> Result<()> {
+    let mut dropping = BTreeSet::new();
+    for text in drop {
+        let fingerprint = Fingerprint::parse(text).ok_or_else(|| {
+            RegistryError::Invalid(format!(
+                "--drop-key {text:?} is not a key fingerprint: `sha256:` and 64 lowercase hex characters, as live:registry prints them"
+            ))
+        })?;
+        dropping.insert(fingerprint);
+    }
+    let named = std::env::var_os(KEY_ENV).filter(|value| !value.is_empty());
+    let config = author_key::config_dir()?;
+    let rotated = rotate_with_key_file(
+        library_root,
+        named,
+        &config,
+        &dropping,
+        &Registry,
+        &HttpsFetcher,
+    )?;
+    ui::success(&format!(
+        "Handed the library from the key {} to the key {}",
+        rotated.former, rotated.new
+    ));
+    ui::success(&format!(
+        "Signed {} with the new key; library.json is now version {}",
+        plural(rotated.signed, "component"),
+        rotated.version
+    ));
+    for fingerprint in &rotated.vouching {
+        ui::info(&format!("{fingerprint} vouches for the new key"));
+    }
+    for key in &rotated.dropped {
+        ui::warning(&format!(
+            "Dropped the statement of {}. An application still pinned to it refuses this library until its developer pins the new key by hand: in its suprnova.toml, under [live.libraries.\"{}\"] (the library's address there), set `key = \"{}\"` and move the dropped key, \"{}\", into `previous_keys`, so the components recorded under it still verify.",
+            key.fingerprint(),
+            rotated.source,
+            rotated.new_key.encode(),
+            key.encode()
+        ));
+    }
+    ui::br();
+    ui::warning(&format!(
+        "Your new private signing key is at {}",
+        rotated.key_path.display()
+    ));
+    ui::hint(
+        "Back it up and keep every former key's file: the next rotation signs a statement with each one, so an application pinned to any of them follows. Losing the new key strands every pin.",
+    );
+    ui::hint(&format!(
+        "Commit library.json and every manifest.sig, then tag v{} to release it.",
+        rotated.version
+    ));
+    Ok(())
+}
+
 /// A full dependency address resolved to its library, component and the
 /// version it names, if any.
 pub(crate) struct RemoteSpec {
@@ -169,9 +250,22 @@ pub(crate) trait Tools {
     fn verify(&self, key: &PublicKey, hash: &Digest, signature: &Signature) -> Result<()>;
     fn sign(&self, key: &SecretKey, hash: &Digest) -> Result<Signature>;
     fn generate(&self) -> Result<(SecretKey, PublicKey)>;
+    fn sign_handover(
+        &self,
+        former: &SecretKey,
+        new_key: &PublicKey,
+        library: &str,
+    ) -> Result<KeyHandover>;
+    fn verify_handover(
+        &self,
+        handover: &KeyHandover,
+        new_key: &PublicKey,
+        library: &str,
+    ) -> Result<()>;
     /// Scans with what the check knows beyond the files: the manifest's
-    /// `elements` and the views its dependencies carry, which the view
-    /// checks follow (REG-022).
+    /// `register` and `elements`, and the views its dependencies carry,
+    /// which the view checks follow, as `live:add` scans (REG-022, REG-030,
+    /// REG-032).
     fn scan(
         &self,
         component: &ComponentFiles<'_>,
@@ -207,6 +301,24 @@ impl Tools for Registry {
 
     fn generate(&self) -> Result<(SecretKey, PublicKey)> {
         signing::generate()
+    }
+
+    fn sign_handover(
+        &self,
+        former: &SecretKey,
+        new_key: &PublicKey,
+        library: &str,
+    ) -> Result<KeyHandover> {
+        signing::sign_handover(former, new_key, library)
+    }
+
+    fn verify_handover(
+        &self,
+        handover: &KeyHandover,
+        new_key: &PublicKey,
+        library: &str,
+    ) -> Result<()> {
+        signing::verify_handover(handover, new_key, library)
     }
 
     fn scan(
@@ -268,26 +380,25 @@ impl LibraryReport {
     }
 }
 
-/// A library read and checked, with the verification hash of each component
-/// that passed.
+/// A library read and checked, with the statement of each component that
+/// passed: what its signature covers.
 struct Inspection {
     report: LibraryReport,
     library: Option<LibraryJson>,
-    hashes: Vec<(String, Digest)>,
+    statements: Vec<(String, Statement)>,
 }
 
 /// A component as its directory holds it.
 struct LocalComponent {
     manifest: ComponentManifest,
     files: Vec<(String, Vec<u8>)>,
-    hash: Digest,
+    statement: Statement,
 }
 
 /// What `new` made.
 struct Created {
     key_path: PathBuf,
     fingerprint: Fingerprint,
-    source: String,
     signed: usize,
 }
 
@@ -296,6 +407,7 @@ struct Created {
 fn create_library(
     namespace: &str,
     directory: &Path,
+    source: Option<&str>,
     config: &Path,
     tools: &dyn Tools,
     fetcher: &dyn Fetcher,
@@ -316,13 +428,19 @@ fn create_library(
     std::fs::create_dir(directory).map_err(|error| {
         RegistryError::Io(format!("cannot create {}: {error}", directory.display()))
     })?;
-    let source = format!("github.com/{namespace}/{namespace}");
+    let source = source.unwrap_or_default().to_owned();
     let outcome = write_library(namespace, &source, directory, &public)
         .and_then(|()| {
+            if source.is_empty() {
+                // Every signature covers the address, so there is nothing
+                // to sign until the author names it.
+                return Ok(0);
+            }
             let inspection = inspect(directory, false, tools, fetcher)?;
             sign_inspection(directory, &inspection, &secret, &public, tools)
         })
         .and_then(|signed| {
+            author_key::refuse_inside_library(directory, &key_path)?;
             author_key::write_key_file(&key_path, &secret, &public)?;
             Ok(signed)
         });
@@ -330,7 +448,6 @@ fn create_library(
         Ok(signed) => Ok(Created {
             key_path,
             fingerprint: public.fingerprint(),
-            source,
             signed,
         }),
         Err(error) => match std::fs::remove_dir_all(directory) {
@@ -484,6 +601,237 @@ fn write_new(path: &Path, contents: &str) -> Result<()> {
         .map_err(|error| RegistryError::Io(format!("cannot write {}: {error}", path.display())))
 }
 
+/// What `rotate-key` did.
+struct Rotated {
+    /// The key the library named before.
+    former: Fingerprint,
+    /// The key it names now.
+    new: Fingerprint,
+    /// Where the new private key is.
+    key_path: PathBuf,
+    /// The version `library.json` names now.
+    version: semver::Version,
+    /// How many components were signed with the new key.
+    signed: usize,
+    /// Each key that signed a statement naming the new key, in
+    /// `previousKeys` order.
+    vouching: Vec<Fingerprint>,
+    /// Each former key whose statement was dropped.
+    dropped: Vec<PublicKey>,
+    /// The new key, as `library.json` and a pin write it.
+    new_key: PublicKey,
+    /// The library's `source`, the address a published library is pinned
+    /// under.
+    source: String,
+}
+
+/// Hands a library to a new key (REG-033). Every former key `library.json`
+/// lists and the current key each sign a statement naming the new key,
+/// because a handover is one hop: an application pinned to any of them then
+/// follows to the new key. A former key whose private key file is not in
+/// the configuration directory is refused, by fingerprint, unless `drop`
+/// names it. Then every component is re-signed with the new key, the
+/// version advances one patch, since the same version with other signatures
+/// is a changed release that `live:add` refuses (REG-026), and the new key,
+/// `library.json` and every `manifest.sig` are written, all or none.
+fn rotate_with_key_file(
+    root: &Path,
+    named: Option<OsString>,
+    config: &Path,
+    drop: &BTreeSet<Fingerprint>,
+    tools: &dyn Tools,
+    fetcher: &dyn Fetcher,
+) -> Result<Rotated> {
+    let inspection = inspect(root, false, tools, fetcher)?;
+    let library = refuse_problems(&inspection, "rotated")?;
+    let current_fingerprint = library.public_key.fingerprint();
+    let key_path = author_key::key_file_for(root, &library.public_key, named, config)?;
+    let (current_secret, current_public) = author_key::read_key_file(&key_path)?;
+    if current_public != library.public_key {
+        return Err(RegistryError::Invalid(format!(
+            "the key at {} is {}, but library.json names {current_fingerprint}; nothing was rotated",
+            key_path.display(),
+            current_public.fingerprint()
+        )));
+    }
+
+    let mut former_keys: Vec<PublicKey> = Vec::new();
+    for handover in &library.previous_keys {
+        if handover.from != library.public_key && !former_keys.contains(&handover.from) {
+            former_keys.push(handover.from.clone());
+        }
+    }
+    let former_fingerprints: BTreeSet<Fingerprint> =
+        former_keys.iter().map(PublicKey::fingerprint).collect();
+    for fingerprint in drop {
+        if !former_fingerprints.contains(fingerprint) {
+            return Err(RegistryError::Invalid(format!(
+                "--drop-key {fingerprint} names no former key of library.json's previousKeys; nothing was rotated"
+            )));
+        }
+    }
+    let mut signers: Vec<(PublicKey, SecretKey)> = Vec::new();
+    let mut dropped: Vec<PublicKey> = Vec::new();
+    let mut missing = Vec::new();
+    for key in former_keys {
+        let fingerprint = key.fingerprint();
+        if drop.contains(&fingerprint) {
+            dropped.push(key);
+            continue;
+        }
+        let path = author_key::key_path_in(config, &key);
+        if std::fs::symlink_metadata(&path).is_err() {
+            missing.push(format!(
+                "the former key {fingerprint} has no private key file at {}",
+                path.display()
+            ));
+            continue;
+        }
+        let (secret, public) = author_key::read_key_file(&path)?;
+        if public != key {
+            return Err(RegistryError::Invalid(format!(
+                "{} holds the key {}, not {fingerprint}; nothing was rotated",
+                path.display(),
+                public.fingerprint()
+            )));
+        }
+        signers.push((key, secret));
+    }
+    if !missing.is_empty() {
+        return Err(RegistryError::Invalid(format!(
+            "{}. Each former key signs a statement naming the new key, so an application still pinned to it can follow. Restore its file, or pass --drop-key <fingerprint> to drop its statement: an application still pinned to a dropped key refuses the library until its developer pins the new key by hand. Nothing was rotated.",
+            missing.join("; ")
+        )));
+    }
+    signers.push((library.public_key.clone(), current_secret));
+
+    let (new_secret, new_public) = tools.generate()?;
+    if signers.iter().any(|(key, _)| key == &new_public) || dropped.contains(&new_public) {
+        return Err(RegistryError::Invalid(
+            "the new key is one the library already used; nothing was rotated".to_owned(),
+        ));
+    }
+    let mut handovers = Vec::new();
+    for (public, secret) in &signers {
+        let handover = tools.sign_handover(secret, &new_public, &library.source)?;
+        if &handover.from != public {
+            return Err(RegistryError::Invalid(format!(
+                "the key file for {} holds a private key that is not that key's; nothing was rotated",
+                public.fingerprint()
+            )));
+        }
+        tools.verify_handover(&handover, &new_public, &library.source)?;
+        handovers.push(handover);
+    }
+
+    let version = semver::Version::new(
+        library.version.major,
+        library.version.minor,
+        library.version.patch.saturating_add(1),
+    );
+    let bytes = rotated_library_json(root, &new_public, &handovers, &version)?;
+    let rotated = tools.parse_library_json(&bytes)?;
+    if rotated.public_key != new_public
+        || rotated.version != version
+        || rotated.previous_keys.len() != handovers.len()
+    {
+        return Err(RegistryError::Invalid(
+            "the rewritten library.json does not read back as written; nothing was rotated"
+                .to_owned(),
+        ));
+    }
+    let library_digest = Digest::of(&bytes);
+    let statements: Vec<(String, Statement)> = inspection
+        .statements
+        .iter()
+        .map(|(directory, statement)| {
+            let mut statement = statement.clone();
+            statement.library_json = library_digest.clone();
+            statement.version = version.clone();
+            (directory.clone(), statement)
+        })
+        .collect();
+    let mut writes = signature_writes(root, &statements, &new_secret, &new_public, tools)?;
+    let signed = writes.len();
+    writes.push((root.join(LIBRARY_FILE), bytes));
+
+    let new_key_path = author_key::key_path_in(config, &new_public);
+    author_key::refuse_inside_library(root, &new_key_path)?;
+    author_key::write_key_file(&new_key_path, &new_secret, &new_public)?;
+    if let Err(error) = write_all_or_nothing(&writes) {
+        // The library still names the former key, so the new one signs
+        // nothing anyone pinned: keeping it would only invite a mix-up.
+        return Err(match std::fs::remove_file(&new_key_path) {
+            Ok(()) => error,
+            Err(cleanup) => RegistryError::Io(format!(
+                "{error}; the unused new key at {} could not be removed ({cleanup})",
+                new_key_path.display()
+            )),
+        });
+    }
+    Ok(Rotated {
+        former: current_fingerprint,
+        new: new_public.fingerprint(),
+        key_path: new_key_path,
+        version,
+        signed,
+        vouching: signers.iter().map(|(key, _)| key.fingerprint()).collect(),
+        dropped,
+        new_key: new_public,
+        source: library.source.clone(),
+    })
+}
+
+/// The library's `library.json` with the new key, the handover statements
+/// and the next version; every other value is kept as written.
+fn rotated_library_json(
+    root: &Path,
+    new_key: &PublicKey,
+    handovers: &[KeyHandover],
+    version: &semver::Version,
+) -> Result<Vec<u8>> {
+    let path = root.join(LIBRARY_FILE);
+    let raw = read_regular(&path, MAX_JSON_BYTES as u64)
+        .map_err(|problem| RegistryError::Io(format!("{LIBRARY_FILE} {problem}")))?;
+    let object = library::strict_json_object(&raw)?;
+    let text = |key: &str| object.get(key).and_then(serde_json::Value::as_str);
+    let required = |key: &str| {
+        text(key)
+            .ok_or_else(|| RegistryError::Invalid(format!("{LIBRARY_FILE} has no `{key}` string")))
+    };
+    let encoded: Vec<(String, String, String)> = handovers
+        .iter()
+        .map(|handover| {
+            (
+                handover.from.encode(),
+                handover.to.as_str().to_owned(),
+                handover.signature.encode(),
+            )
+        })
+        .collect();
+    let previous_keys: Vec<scaffold::PreviousKeyText<'_>> = encoded
+        .iter()
+        .map(|(public_key, next, signature)| scaffold::PreviousKeyText {
+            public_key,
+            next,
+            signature,
+        })
+        .collect();
+    let version = version.to_string();
+    let public_key = new_key.encode();
+    Ok(scaffold::library_json_text(&scaffold::LibraryText {
+        namespace: required("namespace")?,
+        source: required("source")?,
+        version: &version,
+        framework: required("framework")?,
+        public_key: &public_key,
+        previous_keys: &previous_keys,
+        title: text("title"),
+        description: text("description"),
+    })
+    .into_bytes())
+}
+
 /// Signs every component of a library with the key file `named` names, or
 /// the library's key under `config`.
 fn sign_with_key_file(
@@ -494,7 +842,7 @@ fn sign_with_key_file(
     fetcher: &dyn Fetcher,
 ) -> Result<(Inspection, usize)> {
     let inspection = inspect(root, false, tools, fetcher)?;
-    let library = refuse_problems(&inspection)?;
+    let library = refuse_problems(&inspection, "signed")?;
     let key_path = author_key::key_file_for(root, &library.public_key, named, config)?;
     let (secret, public) = author_key::read_key_file(&key_path)?;
     let signed = sign_inspection(root, &inspection, &secret, &public, tools)?;
@@ -502,11 +850,11 @@ fn sign_with_key_file(
 }
 
 /// The library of an inspection that found nothing to refuse.
-fn refuse_problems(inspection: &Inspection) -> Result<&LibraryJson> {
+fn refuse_problems<'a>(inspection: &'a Inspection, what: &str) -> Result<&'a LibraryJson> {
     match &inspection.library {
         Some(library) if inspection.report.passed() => Ok(library),
         _ => Err(RegistryError::Invalid(format!(
-            "nothing was signed:\n{}",
+            "nothing was {what}:\n{}",
             report_lines(&inspection.report)
         ))),
     }
@@ -521,7 +869,7 @@ fn sign_inspection(
     public: &PublicKey,
     tools: &dyn Tools,
 ) -> Result<usize> {
-    let library = refuse_problems(inspection)?;
+    let library = refuse_problems(inspection, "signed")?;
     if &library.public_key != public {
         return Err(RegistryError::Invalid(format!(
             "the signing key is {}, but library.json names {}; sign with the key library.json names, or name this one there as publicKey",
@@ -529,24 +877,45 @@ fn sign_inspection(
             library.public_key.fingerprint()
         )));
     }
-    let mut signatures = Vec::new();
-    for (directory, hash) in &inspection.hashes {
-        let signature = tools.sign(secret, hash)?;
-        tools.verify(public, hash, &signature).map_err(|error| {
+    let writes = signature_writes(root, &inspection.statements, secret, public, tools)?;
+    write_all_or_nothing(&writes)?;
+    Ok(writes.len())
+}
+
+/// Signs each statement with `secret` and verifies the signature with
+/// `public`, returning each component's `manifest.sig` path and bytes; a
+/// signature that does not verify refuses them all.
+fn signature_writes(
+    root: &Path,
+    statements: &[(String, Statement)],
+    secret: &SecretKey,
+    public: &PublicKey,
+    tools: &dyn Tools,
+) -> Result<Vec<(PathBuf, Vec<u8>)>> {
+    let mut writes = Vec::new();
+    for (directory, statement) in statements {
+        let hash = statement.verification_hash();
+        let signature = tools.sign(secret, &hash)?;
+        tools.verify(public, &hash, &signature).map_err(|error| {
             RegistryError::Invalid(format!(
                 "the new signature of {directory} does not verify ({error}); nothing was signed"
             ))
         })?;
-        signatures.push((directory.clone(), signature.encode()));
+        writes.push((
+            root.join(COMPONENTS_DIR)
+                .join(directory)
+                .join(SIGNATURE_FILE),
+            signature.encode().into_bytes(),
+        ));
     }
-    write_signatures(root, &signatures)?;
-    Ok(signatures.len())
+    Ok(writes)
 }
 
-/// Writes each component's `manifest.sig`, all or none: every new file is
-/// written beside its target first, and only then moved into place; a move
-/// that fails puts back every file already moved.
-fn write_signatures(root: &Path, signatures: &[(String, String)]) -> Result<()> {
+/// Writes every file, all or none: each new file is written beside its
+/// target first, and only then moved into place; a move that fails puts
+/// back every file already moved. A target that is anything but a regular
+/// file or absent is refused before anything moves.
+fn write_all_or_nothing(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
     struct Pending {
         target: PathBuf,
         temporary: PathBuf,
@@ -558,16 +927,26 @@ fn write_signatures(root: &Path, signatures: &[(String, String)]) -> Result<()> 
         }
     }
     let mut pending: Vec<Pending> = Vec::new();
-    for (directory, signature) in signatures {
-        let dir = root.join(COMPONENTS_DIR).join(directory);
-        let target = dir.join(SIGNATURE_FILE);
+    for (target, contents) in writes {
+        let target = target.clone();
+        let Some(dir) = target.parent() else {
+            discard(&pending);
+            return Err(RegistryError::Invalid(format!(
+                "{} has no directory; nothing was written",
+                target.display()
+            )));
+        };
+        let file_name = target
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let prior = match std::fs::symlink_metadata(&target) {
             Ok(metadata) if metadata.file_type().is_file() => match std::fs::read(&target) {
                 Ok(bytes) => Some(bytes),
                 Err(error) => {
                     discard(&pending);
                     return Err(RegistryError::Io(format!(
-                        "cannot read {}: {error}; nothing was signed",
+                        "cannot read {}: {error}; nothing was written",
                         target.display()
                     )));
                 }
@@ -575,7 +954,7 @@ fn write_signatures(root: &Path, signatures: &[(String, String)]) -> Result<()> 
             Ok(_) => {
                 discard(&pending);
                 return Err(RegistryError::Invalid(format!(
-                    "{} is not a regular file; nothing was signed",
+                    "{} is not a regular file; nothing was written",
                     target.display()
                 )));
             }
@@ -583,26 +962,26 @@ fn write_signatures(root: &Path, signatures: &[(String, String)]) -> Result<()> 
             Err(error) => {
                 discard(&pending);
                 return Err(RegistryError::Io(format!(
-                    "cannot read {}: {error}; nothing was signed",
+                    "cannot read {}: {error}; nothing was written",
                     target.display()
                 )));
             }
         };
-        let temporary = dir.join(format!(".{SIGNATURE_FILE}.{}.tmp", std::process::id()));
+        let temporary = dir.join(format!(".{file_name}.{}.tmp", std::process::id()));
         let _ = std::fs::remove_file(&temporary);
         let written = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temporary)
             .and_then(|mut file| {
-                file.write_all(signature.as_bytes())?;
+                file.write_all(contents)?;
                 file.sync_all()
             });
         if let Err(error) = written {
             let _ = std::fs::remove_file(&temporary);
             discard(&pending);
             return Err(RegistryError::Io(format!(
-                "cannot write {}: {error}; nothing was signed",
+                "cannot write {}: {error}; nothing was written",
                 temporary.display()
             )));
         }
@@ -626,7 +1005,7 @@ fn write_signatures(root: &Path, signatures: &[(String, String)]) -> Result<()> 
             }
             discard(&pending[index..]);
             let outcome = if unrestored.is_empty() {
-                "every signature was put back as it was".to_owned()
+                "every file was put back as it was".to_owned()
             } else {
                 format!(
                     "these could not be put back and need attention: {}",
@@ -662,10 +1041,32 @@ fn inspect(
             return Ok(Inspection {
                 report,
                 library: None,
-                hashes: Vec::new(),
+                statements: Vec::new(),
             });
         }
     };
+    // An empty source is what `new` writes until the author names the
+    // address; every signature covers it, so it is refused by name before
+    // the parser's general refusal.
+    let empty_source = library::strict_json_object(&library_bytes)
+        .ok()
+        .and_then(|object| {
+            object
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .map(str::is_empty)
+        })
+        .unwrap_or(false);
+    if empty_source {
+        report
+            .problems
+            .push(format!("{LIBRARY_FILE}: {EMPTY_SOURCE}"));
+        return Ok(Inspection {
+            report,
+            library: None,
+            statements: Vec::new(),
+        });
+    }
     let library = match tools.parse_library_json(&library_bytes) {
         Ok(library) => library,
         Err(error) => {
@@ -673,7 +1074,7 @@ fn inspect(
             return Ok(Inspection {
                 report,
                 library: None,
-                hashes: Vec::new(),
+                statements: Vec::new(),
             });
         }
     };
@@ -687,7 +1088,7 @@ fn inspect(
         return Ok(Inspection {
             report,
             library: Some(library),
-            hashes: Vec::new(),
+            statements: Vec::new(),
         });
     }
     let directories = match component_directories(root) {
@@ -700,7 +1101,7 @@ fn inspect(
             return Ok(Inspection {
                 report,
                 library: Some(library),
-                hashes: Vec::new(),
+                statements: Vec::new(),
             });
         }
     };
@@ -818,8 +1219,10 @@ fn inspect(
             dependency_modules: &dependency_modules,
             importable_views: &importable_views,
         };
+        // The same scan `live:add` makes: the Rust held to `register`, the
+        // scripts to `elements`, and the views of its dependencies followed.
         let context = scan::ScanContext {
-            register: None,
+            register: Some(&component.manifest.register),
             elements: Some(&component.manifest.elements),
             dependency_views: &dependency_views,
         };
@@ -829,24 +1232,6 @@ fn inspect(
                 component_report
                     .problems
                     .extend(scan.findings.iter().map(ToString::to_string));
-                let defined: BTreeSet<&str> =
-                    scan.defined_components.iter().map(String::as_str).collect();
-                let declared: BTreeSet<&str> = component
-                    .manifest
-                    .register
-                    .iter()
-                    .map(String::as_str)
-                    .collect();
-                for missing in declared.difference(&defined) {
-                    component_report.problems.push(format!(
-                        "register names {missing}, which no #[live] attribute in the component's Rust defines"
-                    ));
-                }
-                for undeclared in defined.difference(&declared) {
-                    component_report.problems.push(format!(
-                        "the component's Rust defines the Live component {undeclared}, which register does not name"
-                    ));
-                }
             }
             Err(error) => component_report
                 .problems
@@ -865,13 +1250,14 @@ fn inspect(
         }
     }
 
-    let hashes = reports
+    let statements = reports
         .iter()
         .zip(&components)
         .filter_map(|(component_report, component)| match component {
-            Some(component) if component_report.problems.is_empty() => {
-                Some((component_report.directory.clone(), component.hash.clone()))
-            }
+            Some(component) if component_report.problems.is_empty() => Some((
+                component_report.directory.clone(),
+                component.statement.clone(),
+            )),
             _ => None,
         })
         .collect();
@@ -879,7 +1265,7 @@ fn inspect(
     Ok(Inspection {
         report,
         library: Some(library),
-        hashes,
+        statements,
     })
 }
 
@@ -1000,8 +1386,9 @@ fn read_component(
             .map(|(name, bytes)| (name.clone(), Digest::of(bytes)))
             .collect(),
     };
-    let hash = statement.verification_hash();
-    if signatures && let Err(problem) = verify_signature(&dir, library, &hash, tools) {
+    if signatures
+        && let Err(problem) = verify_signature(&dir, library, &statement.verification_hash(), tools)
+    {
         report.problems.push(problem);
     }
     (
@@ -1009,7 +1396,7 @@ fn read_component(
         Some(LocalComponent {
             manifest,
             files,
-            hash,
+            statement,
         }),
     )
 }
@@ -1495,6 +1882,15 @@ fn problem_count(report: &LibraryReport) -> usize {
             .sum::<usize>()
 }
 
+/// The line `check` ends with when every component passes.
+fn passed_summary(count: usize) -> String {
+    let verb = if count == 1 { "passes" } else { "pass" };
+    format!(
+        "{} {verb} every check live:add makes for the library",
+        plural(count, "component")
+    )
+}
+
 fn plural(count: usize, noun: &str) -> String {
     if count == 1 {
         format!("1 {noun}")
@@ -1512,14 +1908,17 @@ mod tests {
     use base64::engine::general_purpose::STANDARD;
 
     use super::{
-        Created, LibraryReport, RemoteSpec, Tools, create_library, inspect, sign_with_key_file,
+        Created, LibraryReport, Registry, RemoteSpec, Tools, create_library, inspect,
+        rotate_with_key_file, sign_with_key_file,
     };
     use crate::registry::address::LibraryAddress;
     use crate::registry::author_key;
     use crate::registry::fetch::FakeFetcher;
     use crate::registry::library::{ComponentManifest, LibraryJson};
     use crate::registry::scan::{ComponentFiles, Finding, ScanContext, ScanReport};
-    use crate::registry::signing::{PublicKey, SecretKey, Signature};
+    use crate::registry::signing::{
+        Fingerprint, KeyHandover, PublicKey, SecretKey, Signature, handover_statement,
+    };
     use crate::registry::statement::{Digest, Statement};
     use crate::registry::{Capability, RegistryError, Result};
 
@@ -1530,7 +1929,11 @@ mod tests {
     /// reports `files` for a file naming `Storage::`, refuses a file holding
     /// `REFUSE_ME`, and reads each `pub struct` after `#[live(` as a defined
     /// component.
-    struct Fake;
+    struct Fake {
+        seed: u8,
+    }
+
+    const FAKE: Fake = Fake { seed: 7 };
 
     fn hash_bytes(hash: &Digest) -> [u8; 32] {
         let hex = hash.as_str().trim_start_matches("sha256:");
@@ -1622,14 +2025,53 @@ mod tests {
         }
 
         fn generate(&self) -> Result<(SecretKey, PublicKey)> {
-            let public = PublicKey::parse(&format!("ed25519:{}", STANDARD.encode([7u8; 32])))?;
-            Ok((SecretKey::from_bytes([7u8; 32]), public))
+            let bytes = [self.seed; 32];
+            Ok((SecretKey::from_bytes(bytes), PublicKey::from_bytes(bytes)))
+        }
+
+        fn sign_handover(
+            &self,
+            former: &SecretKey,
+            new_key: &PublicKey,
+            library: &str,
+        ) -> Result<KeyHandover> {
+            let to = new_key.fingerprint();
+            let mut bytes = [0u8; 64];
+            bytes[..32].copy_from_slice(&hash_bytes(&Digest::of(
+                handover_statement(library, &to).as_bytes(),
+            )));
+            bytes[32..].copy_from_slice(former.bytes());
+            Ok(KeyHandover {
+                from: PublicKey::from_bytes(*former.bytes()),
+                to,
+                signature: Signature::parse(&STANDARD.encode(bytes))?,
+            })
+        }
+
+        fn verify_handover(
+            &self,
+            handover: &KeyHandover,
+            new_key: &PublicKey,
+            library: &str,
+        ) -> Result<()> {
+            let mut expected = [0u8; 64];
+            expected[..32].copy_from_slice(&hash_bytes(&Digest::of(
+                handover_statement(library, &new_key.fingerprint()).as_bytes(),
+            )));
+            expected[32..].copy_from_slice(handover.from.bytes());
+            if handover.to == new_key.fingerprint() && handover.signature.bytes() == &expected {
+                Ok(())
+            } else {
+                Err(RegistryError::Invalid(
+                    "the handover does not verify".to_owned(),
+                ))
+            }
         }
 
         fn scan(
             &self,
             component: &ComponentFiles<'_>,
-            _context: &ScanContext<'_>,
+            context: &ScanContext<'_>,
         ) -> Result<ScanReport> {
             let mut report = ScanReport::default();
             for (name, bytes) in component.files {
@@ -1661,6 +2103,31 @@ mod tests {
                             after_live = false;
                         }
                     }
+                }
+            }
+            let register = context.register.unwrap_or_default();
+            for declared in register {
+                if !report.defined_components.contains(declared) {
+                    report.findings.push(Finding {
+                        check: "fake-register",
+                        file: "manifest.json".to_owned(),
+                        line: None,
+                        message: format!(
+                            "register names {declared}, which the Rust does not define"
+                        ),
+                    });
+                }
+            }
+            for defined in &report.defined_components {
+                if context.register.is_some() && !register.contains(defined) {
+                    report.findings.push(Finding {
+                        check: "fake-register",
+                        file: "manifest.json".to_owned(),
+                        line: None,
+                        message: format!(
+                            "the Rust defines {defined}, which register does not name"
+                        ),
+                    });
                 }
             }
             Ok(report)
@@ -1700,12 +2167,22 @@ mod tests {
         created: Created,
     }
 
+    /// Where the test libraries say they are published.
+    const SOURCE: &str = "github.com/acme/acme-ui";
+
     fn library() -> Library {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("acme");
         let config = dir.path().join("config");
-        let created = create_library("acme", &root, &config, &Fake, &FakeFetcher::default())
-            .expect("live:registry new");
+        let created = create_library(
+            "acme",
+            &root,
+            Some(SOURCE),
+            &config,
+            &FAKE,
+            &FakeFetcher::default(),
+        )
+        .expect("live:registry new");
         Library {
             _dir: dir,
             root,
@@ -1715,7 +2192,7 @@ mod tests {
     }
 
     fn check(root: &Path) -> LibraryReport {
-        inspect(root, true, &Fake, &FakeFetcher::default())
+        inspect(root, true, &FAKE, &FakeFetcher::default())
             .expect("inspects")
             .report
     }
@@ -1725,7 +2202,7 @@ mod tests {
             &library.root,
             None,
             &library.config,
-            &Fake,
+            &FAKE,
             &FakeFetcher::default(),
         )
         .map(|(_, signed)| signed)
@@ -1779,7 +2256,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&library_json).expect("json");
         assert_eq!(parsed["namespace"], "acme");
         assert_eq!(parsed["version"], "0.1.0");
-        assert_eq!(parsed["source"], library.created.source.as_str());
+        assert_eq!(parsed["source"], SOURCE);
         assert_eq!(
             parsed["framework"],
             format!("^{}", env!("CARGO_PKG_VERSION")).as_str()
@@ -1935,8 +2412,15 @@ mod tests {
         for namespace in ["suprnova", "sn", "live", "Acme", "1acme", "self", "a_b"] {
             let target = dir.path().join("lib");
             assert!(
-                create_library(namespace, &target, &config, &Fake, &FakeFetcher::default())
-                    .is_err(),
+                create_library(
+                    namespace,
+                    &target,
+                    Some(SOURCE),
+                    &config,
+                    &FAKE,
+                    &FakeFetcher::default()
+                )
+                .is_err(),
                 "{namespace}"
             );
             assert!(!target.exists(), "{namespace} left a directory");
@@ -1945,7 +2429,15 @@ mod tests {
         std::fs::create_dir(&existing).expect("dir");
         std::fs::write(existing.join("keep"), "mine").expect("file");
         assert!(
-            create_library("acme", &existing, &config, &Fake, &FakeFetcher::default()).is_err()
+            create_library(
+                "acme",
+                &existing,
+                Some(SOURCE),
+                &config,
+                &FAKE,
+                &FakeFetcher::default()
+            )
+            .is_err()
         );
         assert_eq!(
             std::fs::read_to_string(existing.join("keep")).expect("kept"),
@@ -1961,7 +2453,7 @@ mod tests {
         struct ScanFails;
         impl Tools for ScanFails {
             fn parse_library_json(&self, bytes: &[u8]) -> Result<LibraryJson> {
-                Fake.parse_library_json(bytes)
+                FAKE.parse_library_json(bytes)
             }
             fn parse_manifest(
                 &self,
@@ -1969,34 +2461,57 @@ mod tests {
                 directory: &str,
                 namespace: &str,
             ) -> Result<ComponentManifest> {
-                Fake.parse_manifest(bytes, directory, namespace)
+                FAKE.parse_manifest(bytes, directory, namespace)
             }
             fn verify(&self, key: &PublicKey, hash: &Digest, signature: &Signature) -> Result<()> {
-                Fake.verify(key, hash, signature)
+                FAKE.verify(key, hash, signature)
             }
             fn sign(&self, key: &SecretKey, hash: &Digest) -> Result<Signature> {
-                Fake.sign(key, hash)
+                FAKE.sign(key, hash)
             }
             fn generate(&self) -> Result<(SecretKey, PublicKey)> {
-                Fake.generate()
+                FAKE.generate()
+            }
+            fn sign_handover(
+                &self,
+                former: &SecretKey,
+                new_key: &PublicKey,
+                library: &str,
+            ) -> Result<KeyHandover> {
+                FAKE.sign_handover(former, new_key, library)
+            }
+            fn verify_handover(
+                &self,
+                handover: &KeyHandover,
+                new_key: &PublicKey,
+                library: &str,
+            ) -> Result<()> {
+                FAKE.verify_handover(handover, new_key, library)
             }
             fn scan(
                 &self,
                 _component: &ComponentFiles<'_>,
                 _context: &ScanContext<'_>,
             ) -> Result<ScanReport> {
-                Err(RegistryError::NotBuilt("the component scan"))
+                Err(RegistryError::Io("the component scan failed".to_owned()))
             }
             fn resolve_address(&self, spec: &str) -> Result<RemoteSpec> {
-                Fake.resolve_address(spec)
+                FAKE.resolve_address(spec)
             }
         }
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("acme");
         let config = dir.path().join("config");
-        let error = create_library("acme", &root, &config, &ScanFails, &FakeFetcher::default())
-            .err()
-            .expect("refused");
+        let error = create_library(
+            "acme",
+            &root,
+            Some(SOURCE),
+            &config,
+            &ScanFails,
+            &FakeFetcher::default(),
+        )
+        .err()
+        .expect("refused");
         assert!(error.to_string().contains("scan"), "{error}");
         assert!(!root.exists());
         let keys = config.join("suprnova/library-keys");
@@ -2090,7 +2605,7 @@ mod tests {
                 ),
             )
             .expect("write");
-            let report = inspect(&library.root, false, &Fake, &FakeFetcher::default())
+            let report = inspect(&library.root, false, &FAKE, &FakeFetcher::default())
                 .expect("inspects")
                 .report;
             let counter = report
@@ -2139,7 +2654,7 @@ mod tests {
             manifest: Digest::of(manifest.as_bytes()),
             files: BTreeMap::from([("chip.html".to_owned(), Digest::of(view.as_bytes()))]),
         };
-        let signature = Fake
+        let signature = FAKE
             .sign(
                 &SecretKey::from_bytes([9u8; 32]),
                 &statement.verification_hash(),
@@ -2169,7 +2684,7 @@ mod tests {
             "\n  \"register\"",
             "\n  \"dependencies\": [\"github.com/other/other-ui/chip\"],\n  \"register\"",
         );
-        let report = inspect(&library.root, false, &Fake, &fetcher)
+        let report = inspect(&library.root, false, &FAKE, &fetcher)
             .expect("inspects")
             .report;
         assert!(report.passed(), "{}", problems(&report));
@@ -2178,7 +2693,7 @@ mod tests {
         let mut bad = signature.bytes().to_owned();
         bad[0] ^= 1;
         tampered.add_version(remote, version, files(STANDARD.encode(bad)));
-        let report = inspect(&library.root, false, &Fake, &tampered)
+        let report = inspect(&library.root, false, &FAKE, &tampered)
             .expect("inspects")
             .report;
         assert!(
@@ -2231,7 +2746,7 @@ mod tests {
                 ),
             ],
         );
-        let report = inspect(&library.root, false, &Fake, &FakeFetcher::default())
+        let report = inspect(&library.root, false, &FAKE, &FakeFetcher::default())
             .expect("inspects")
             .report;
         assert!(
@@ -2353,12 +2868,427 @@ mod tests {
             &library.root,
             Some(other.into()),
             &library.config,
-            &Fake,
+            &FAKE,
             &FakeFetcher::default(),
         )
         .err()
         .expect("refused");
         assert!(error.to_string().contains("library.json"), "{error}");
+        assert_eq!(
+            std::fs::read(component(&library).join("manifest.sig")).expect("sig"),
+            before
+        );
+    }
+
+    const PUBLISHED: &str = "github.com/acme-test/acme-ui";
+
+    /// Names where the library is published, as an author does before a
+    /// release, and signs it again.
+    fn publish_at(library: &Library, source: &str, tools: &dyn Tools) {
+        let path = library.root.join("library.json");
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        let current = json["source"].as_str().expect("source").to_owned();
+        edit(
+            &path,
+            &format!("\"source\": \"{current}\""),
+            &format!("\"source\": \"{source}\""),
+        );
+        sign_with_key_file(
+            &library.root,
+            None,
+            &library.config,
+            tools,
+            &FakeFetcher::default(),
+        )
+        .expect("signs");
+    }
+
+    /// Every file of the library, by path, with its bytes.
+    fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        walkdir::WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().to_path_buf(),
+                    std::fs::read(entry.path()).expect("read"),
+                )
+            })
+            .collect()
+    }
+
+    fn key_files(config: &Path) -> BTreeSet<PathBuf> {
+        std::fs::read_dir(config.join("suprnova/library-keys"))
+            .map(|entries| {
+                entries
+                    .filter_map(std::result::Result::ok)
+                    .map(|entry| entry.path())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn rotate(library: &Library, tools: &dyn Tools) -> Result<super::Rotated> {
+        rotate_dropping(library, tools, &[])
+    }
+
+    fn rotate_dropping(
+        library: &Library,
+        tools: &dyn Tools,
+        drop: &[Fingerprint],
+    ) -> Result<super::Rotated> {
+        rotate_with_key_file(
+            &library.root,
+            None,
+            &library.config,
+            &drop.iter().cloned().collect(),
+            tools,
+            &FakeFetcher::default(),
+        )
+    }
+
+    #[test]
+    fn reg_033_rotate_key_hands_the_library_to_a_new_key_and_re_signs_every_component() {
+        let library = real_library();
+        publish_at(&library, PUBLISHED, &Registry);
+        let former = library.created.fingerprint.clone();
+        let former_key_file = library.created.key_path.clone();
+
+        let rotated = rotate(&library, &Registry).expect("rotates");
+        assert_eq!(rotated.former, former);
+        assert_ne!(rotated.new, former);
+        assert_eq!(rotated.version, semver::Version::new(0, 1, 1));
+        assert_eq!(rotated.signed, 1);
+
+        let bytes = std::fs::read(library.root.join("library.json")).expect("library.json");
+        let json = crate::registry::library::parse_library_json(&bytes).expect("parses");
+        assert_eq!(json.public_key.fingerprint(), rotated.new);
+        assert_eq!(json.version, semver::Version::new(0, 1, 1));
+        assert_eq!(json.source, PUBLISHED);
+        let [handover] = json.previous_keys.as_slice() else {
+            panic!("one previousKeys entry: {:?}", json.previous_keys);
+        };
+        assert_eq!(handover.from.fingerprint(), former);
+        crate::registry::signing::verify_handover(handover, &json.public_key, PUBLISHED)
+            .expect("the former key vouches for the new one");
+        let text = String::from_utf8(bytes).expect("utf8");
+        assert!(
+            text.find("\"publicKey\"") < text.find("\"previousKeys\"")
+                && text.find("\"previousKeys\"") < text.find("\"title\""),
+            "{text}"
+        );
+
+        // Every component verifies against the new key.
+        let report = inspect(&library.root, true, &Registry, &FakeFetcher::default())
+            .expect("inspects")
+            .report;
+        assert!(report.passed(), "{}", problems(&report));
+
+        // The new private key is in the configuration directory under its
+        // fingerprint; the former one is kept; neither is in the library.
+        assert_eq!(
+            rotated.key_path,
+            author_key::key_path_in(&library.config, &json.public_key)
+        );
+        let (_, public) = author_key::read_key_file(&rotated.key_path).expect("new key");
+        assert_eq!(public, json.public_key);
+        assert!(former_key_file.is_file(), "the former key file is kept");
+        for (path, contents) in snapshot(&library.root) {
+            assert!(
+                !String::from_utf8_lossy(&contents).contains(author_key::KEY_FILE_FORMAT),
+                "{} holds a key file",
+                path.display()
+            );
+        }
+
+        // A handover is one hop (REG-033): after a second rotation every
+        // former key, the first included, signs a statement naming the
+        // third key, so an application still pinned to the first follows.
+        let again = rotate(&library, &Registry).expect("rotates again");
+        let json = crate::registry::library::parse_library_json(
+            &std::fs::read(library.root.join("library.json")).expect("library.json"),
+        )
+        .expect("parses");
+        assert_eq!(json.public_key.fingerprint(), again.new);
+        assert_eq!(json.version, semver::Version::new(0, 1, 2));
+        let from: Vec<Fingerprint> = json
+            .previous_keys
+            .iter()
+            .map(|handover| handover.from.fingerprint())
+            .collect();
+        assert_eq!(from, vec![former.clone(), rotated.new.clone()]);
+        for handover in &json.previous_keys {
+            assert_eq!(handover.to, again.new);
+            crate::registry::signing::verify_handover(handover, &json.public_key, PUBLISHED)
+                .expect("each former key vouches for the newest one");
+        }
+        assert_eq!(again.vouching, from);
+        let report = inspect(&library.root, true, &Registry, &FakeFetcher::default())
+            .expect("inspects")
+            .report;
+        assert!(report.passed(), "{}", problems(&report));
+    }
+
+    #[test]
+    fn reg_033_a_former_key_without_its_file_is_refused_unless_dropped() {
+        let library = real_library();
+        publish_at(&library, PUBLISHED, &Registry);
+        let first = library.created.fingerprint.clone();
+        let middle = rotate(&library, &Registry).expect("rotates").new;
+        std::fs::remove_file(&library.created.key_path).expect("lose the first key");
+        let before = snapshot(&library.root);
+        let keys = key_files(&library.config);
+        let error = rotate(&library, &Registry)
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(error.contains(first.as_str()), "{error}");
+        assert!(error.contains("--drop-key"), "{error}");
+        assert_eq!(snapshot(&library.root), before);
+        assert_eq!(key_files(&library.config), keys);
+
+        let unknown = PublicKey::from_bytes([42; 32]).fingerprint();
+        let error = rotate_dropping(&library, &Registry, std::slice::from_ref(&unknown))
+            .err()
+            .expect("an unknown key cannot be dropped")
+            .to_string();
+        assert!(error.contains(unknown.as_str()), "{error}");
+        assert!(
+            rotate_dropping(&library, &Registry, std::slice::from_ref(&middle)).is_err(),
+            "the current key is not a former key to drop"
+        );
+        assert_eq!(snapshot(&library.root), before);
+
+        let rotated =
+            rotate_dropping(&library, &Registry, std::slice::from_ref(&first)).expect("rotates");
+        assert_eq!(
+            rotated
+                .dropped
+                .iter()
+                .map(PublicKey::fingerprint)
+                .collect::<Vec<_>>(),
+            vec![first]
+        );
+        let json = crate::registry::library::parse_library_json(
+            &std::fs::read(library.root.join("library.json")).expect("library.json"),
+        )
+        .expect("parses");
+        let [handover] = json.previous_keys.as_slice() else {
+            panic!("only the middle key vouches: {:?}", json.previous_keys);
+        };
+        assert_eq!(handover.from.fingerprint(), middle);
+        crate::registry::signing::verify_handover(handover, &json.public_key, PUBLISHED)
+            .expect("verifies");
+    }
+
+    #[test]
+    fn reg_033_rotate_key_refuses_without_the_current_key_and_changes_nothing() {
+        let library = library();
+        publish_at(&library, PUBLISHED, &FAKE);
+        std::fs::remove_file(&library.created.key_path).expect("lose the key");
+        let before = snapshot(&library.root);
+        let error = rotate(&library, &Fake { seed: 11 })
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(error.contains("no key file"), "{error}");
+        assert_eq!(snapshot(&library.root), before);
+        assert!(key_files(&library.config).is_empty());
+    }
+
+    #[test]
+    fn reg_033_rotate_key_refuses_an_empty_source() {
+        let library = library();
+        edit(
+            &library.root.join("library.json"),
+            &format!("\"source\": \"{SOURCE}\""),
+            "\"source\": \"\"",
+        );
+        let before = snapshot(&library.root);
+        let keys = key_files(&library.config);
+        let error = rotate(&library, &Fake { seed: 11 })
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(error.contains(super::EMPTY_SOURCE), "{error}");
+        assert_eq!(snapshot(&library.root), before);
+        assert_eq!(key_files(&library.config), keys);
+    }
+
+    #[test]
+    fn reg_033_rotate_key_accepts_the_address_new_once_wrote_as_a_placeholder() {
+        let library = real_library();
+        let rotated = rotate(&library, &Registry).expect("rotates");
+        assert_eq!(rotated.source, "github.com/acme/acme");
+    }
+
+    #[test]
+    fn reg_018_new_without_a_source_writes_an_empty_one_and_signs_nothing_until_it_is_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("acme");
+        let config = dir.path().join("config");
+        let created = create_library("acme", &root, None, &config, &FAKE, &FakeFetcher::default())
+            .expect("live:registry new");
+        assert_eq!(created.signed, 0);
+        assert!(
+            created.key_path.is_file(),
+            "the key is written all the same"
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("library.json")).expect("read"))
+                .expect("json");
+        assert_eq!(json["source"], "");
+        let signature = root.join("components/counter/manifest.sig");
+        assert!(!signature.exists(), "nothing is signed without a source");
+        let library = Library {
+            _dir: dir,
+            root: root.clone(),
+            config: config.clone(),
+            created,
+        };
+        let report = check(&root);
+        assert!(
+            problems(&report).contains(super::EMPTY_SOURCE),
+            "{}",
+            problems(&report)
+        );
+        let error = sign(&library).expect_err("sign refuses an empty source");
+        assert!(error.to_string().contains(super::EMPTY_SOURCE), "{error}");
+        assert!(!signature.exists());
+
+        edit(
+            &root.join("library.json"),
+            "\"source\": \"\"",
+            &format!("\"source\": \"{SOURCE}\""),
+        );
+        assert_eq!(sign(&library).expect("signs"), 1);
+        let report = check(&root);
+        assert!(report.passed(), "{}", problems(&report));
+    }
+
+    #[test]
+    fn reg_033_rotate_key_refuses_when_a_component_fails_a_check() {
+        let library = library();
+        publish_at(&library, PUBLISHED, &FAKE);
+        edit(
+            &component(&library).join("counter.js"),
+            "// ",
+            "// REFUSE_ME ",
+        );
+        let before = snapshot(&library.root);
+        let keys = key_files(&library.config);
+        let error = rotate(&library, &Fake { seed: 11 })
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(error.contains("counter.js:1: [fake] refused"), "{error}");
+        assert_eq!(snapshot(&library.root), before);
+        assert_eq!(key_files(&library.config), keys);
+    }
+
+    #[test]
+    fn reg_033_a_rotation_that_cannot_write_leaves_the_former_key_in_charge() {
+        let library = library();
+        publish_at(&library, PUBLISHED, &FAKE);
+        add_component(
+            &library,
+            "zeta",
+            "",
+            &[("zeta.html", "<span class=\"acme-zeta\"></span>\n")],
+        );
+        std::fs::create_dir(library.root.join("components/zeta/manifest.sig")).expect("dir");
+        let before = snapshot(&library.root);
+        let keys = key_files(&library.config);
+        assert!(rotate(&library, &Fake { seed: 11 }).is_err());
+        assert_eq!(snapshot(&library.root), before);
+        assert_eq!(
+            key_files(&library.config),
+            keys,
+            "the new key is not kept when the library still names the former one"
+        );
+    }
+
+    #[test]
+    fn the_check_summary_agrees_in_number() {
+        assert_eq!(
+            super::passed_summary(1),
+            "1 component passes every check live:add makes for the library"
+        );
+        assert_eq!(
+            super::passed_summary(3),
+            "3 components pass every check live:add makes for the library"
+        );
+    }
+
+    /// A library `new` makes with the real tools: real keys and
+    /// signatures, the real scan and parsers.
+    fn real_library() -> Library {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("acme");
+        let config = dir.path().join("config");
+        // The address the scaffold once wrote as a placeholder: a real
+        // address of any shape is accepted.
+        let created = create_library(
+            "acme",
+            &root,
+            Some("github.com/acme/acme"),
+            &config,
+            &Registry,
+            &FakeFetcher::default(),
+        )
+        .expect("live:registry new with the real tools");
+        Library {
+            _dir: dir,
+            root,
+            config,
+            created,
+        }
+    }
+
+    #[test]
+    fn reg_018_with_the_real_tools_the_scaffold_passes_its_own_check() {
+        let library = real_library();
+        let report = inspect(&library.root, true, &Registry, &FakeFetcher::default())
+            .expect("inspects")
+            .report;
+        assert!(report.passed(), "{}", problems(&report));
+        assert!(report.components[0].capabilities.is_empty());
+    }
+
+    #[test]
+    fn reg_032_check_refuses_a_custom_element_the_manifest_does_not_declare() {
+        let library = real_library();
+        let script = component(&library).join("counter.js");
+        let original = std::fs::read_to_string(&script).expect("script");
+        std::fs::write(
+            &script,
+            format!(
+                "{original}\nif (!customElements.get(\"acme-extra\")) {{\n  customElements.define(\"acme-extra\", class extends HTMLElement {{}});\n}}\n"
+            ),
+        )
+        .expect("write");
+        let report = inspect(&library.root, false, &Registry, &FakeFetcher::default())
+            .expect("inspects")
+            .report;
+        assert!(
+            problems(&report).contains("acme-extra"),
+            "an undeclared element passed the library's own check:\n{}",
+            problems(&report)
+        );
+        let before = std::fs::read(component(&library).join("manifest.sig")).expect("sig");
+        assert!(
+            sign_with_key_file(
+                &library.root,
+                None,
+                &library.config,
+                &Registry,
+                &FakeFetcher::default()
+            )
+            .is_err()
+        );
         assert_eq!(
             std::fs::read(component(&library).join("manifest.sig")).expect("sig"),
             before

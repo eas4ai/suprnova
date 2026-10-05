@@ -44,11 +44,39 @@ enum LiveRegistryCommand {
         /// The library's namespace (e.g., acme): lowercase letters, digits
         /// and hyphens; the library is created in ./<namespace>
         namespace: String,
+        /// The address the library will be published at (e.g.,
+        /// github.com/acme/acme-ui), written as library.json's source; the
+        /// example is signed at once. Without it source is left empty and
+        /// nothing is signed until it is set.
+        #[arg(long, value_name = "ADDRESS")]
+        source: Option<String>,
     },
     /// Check every component as live:add would, and list its capabilities
     Check,
     /// Check every component, then sign each one, all or nothing
     Sign,
+    /// Hand the library to a new signing key and re-sign every component
+    ///
+    /// Reads the current private key as `sign` does (SUPRNOVA_LIBRARY_KEY or
+    /// the configuration directory), makes a new key pair, writes the new
+    /// private key to <config>/suprnova/library-keys/<fingerprint hex>.key,
+    /// names it as publicKey in library.json, and re-signs every component,
+    /// all or nothing. It advances library.json's version one patch: every
+    /// signature changes, and live:add refuses a released version whose
+    /// signed content changed, so a rotation ships as a new release. A handover is one hop,
+    /// so previousKeys is rewritten as one statement per former key, each
+    /// naming the new key: the current key signs one, and so does every
+    /// former key whose private key file is in the configuration directory
+    /// under its fingerprint. A former key whose file is missing is refused
+    /// by fingerprint unless --drop-key names it; an application still pinned
+    /// to a dropped key must pin the new key by hand. Refused when
+    /// library.json's source is empty, or when any component fails a check.
+    RotateKey {
+        /// Drop the statement of this former key, whose private key file is
+        /// lost (repeatable, one flag per key)
+        #[arg(long = "drop-key", value_name = "FINGERPRINT")]
+        drop_key: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -608,12 +636,15 @@ fn main() {
         Commands::LiveRegistry { command } => {
             use suprnova_cli::registry::registry_commands;
             let outcome = match command {
-                LiveRegistryCommand::New { namespace } => {
+                LiveRegistryCommand::New { namespace, source } => {
                     let directory = std::path::PathBuf::from(&namespace);
-                    registry_commands::new(&namespace, &directory)
+                    registry_commands::new_with_source(&namespace, &directory, source.as_deref())
                 }
                 LiveRegistryCommand::Check => registry_commands::check(std::path::Path::new(".")),
                 LiveRegistryCommand::Sign => registry_commands::sign(std::path::Path::new(".")),
+                LiveRegistryCommand::RotateKey { drop_key } => {
+                    registry_commands::rotate_key(std::path::Path::new("."), &drop_key)
+                }
             };
             if let Err(error) = outcome {
                 ui::error(&error.to_string());
@@ -1026,6 +1057,53 @@ mod tests {
                 pretend: false
             })
         ));
+    }
+
+    /// `live:registry new` takes the address the library is published at,
+    /// and leaves it out when it is not given.
+    #[test]
+    fn live_registry_new_takes_the_published_address() {
+        let parsed = |argv: &[&str]| match Cli::try_parse_from(argv) {
+            Ok(Cli {
+                command:
+                    Some(Commands::LiveRegistry {
+                        command: LiveRegistryCommand::New { namespace, source },
+                    }),
+                ..
+            }) => (namespace, source),
+            _ => panic!("`{}` must be live:registry new", argv.join(" ")),
+        };
+        assert_eq!(
+            parsed(&[
+                "suprnova",
+                "live:registry",
+                "new",
+                "acme",
+                "--source",
+                "github.com/acme/acme-ui"
+            ]),
+            (
+                "acme".to_owned(),
+                Some("github.com/acme/acme-ui".to_owned())
+            )
+        );
+        assert_eq!(
+            parsed(&["suprnova", "live:registry", "new", "acme"]),
+            ("acme".to_owned(), None)
+        );
+        assert!(
+            Cli::try_parse_from([
+                "suprnova",
+                "live:registry",
+                "rotate-key",
+                "--drop-key",
+                "a",
+                "--drop-key",
+                "b"
+            ])
+            .is_ok(),
+            "--drop-key repeats"
+        );
     }
 
     /// A subcommand invoked without a help flag still parses, or the

@@ -194,6 +194,20 @@ pub fn key_file_for(
         Some(value) => PathBuf::from(value),
         None => key_path_in(config, public),
     };
+    refuse_inside_library(library_root, &path)?;
+    std::fs::metadata(&path).map_err(|error| {
+        RegistryError::Io(format!(
+            "no key file at {}: {error}; `live:registry new` writes it, or SUPRNOVA_LIBRARY_KEY names it",
+            path.display()
+        ))
+    })?;
+    Ok(path)
+}
+
+/// Refuses a key path inside the library: by the path as given, and by
+/// where its nearest existing ancestor resolves, so neither `..` nor a link
+/// puts a key in the project. The path itself need not exist yet.
+pub fn refuse_inside_library(library_root: &Path, path: &Path) -> Result<()> {
     let absolute = |path: &Path| -> Result<PathBuf> {
         let joined = if path.is_absolute() {
             path.to_path_buf()
@@ -206,32 +220,30 @@ pub fn key_file_for(
         };
         Ok(normalize(&joined))
     };
-    let root = absolute(library_root)?;
-    let root_resolved = std::fs::canonicalize(library_root).map_err(|error| {
-        RegistryError::Io(format!(
-            "cannot resolve {}: {error}",
-            library_root.display()
-        ))
-    })?;
     let inside = || {
         RegistryError::Invalid(format!(
             "the key file {} is inside the library; keep it outside the project, in your configuration directory or where SUPRNOVA_LIBRARY_KEY names",
             path.display()
         ))
     };
-    if absolute(&path)?.starts_with(&root) {
+    let root = absolute(library_root)?;
+    let candidate = absolute(path)?;
+    if candidate.starts_with(&root) {
         return Err(inside());
     }
-    let resolved = std::fs::canonicalize(&path).map_err(|error| {
+    let root_resolved = std::fs::canonicalize(library_root).map_err(|error| {
         RegistryError::Io(format!(
-            "no key file at {}: {error}; `live:registry new` writes it, or SUPRNOVA_LIBRARY_KEY names it",
-            path.display()
+            "cannot resolve {}: {error}",
+            library_root.display()
         ))
     })?;
-    if resolved.starts_with(&root_resolved) {
+    let existing = candidate
+        .ancestors()
+        .find_map(|ancestor| std::fs::canonicalize(ancestor).ok());
+    if existing.is_some_and(|resolved| resolved.starts_with(&root_resolved)) {
         return Err(inside());
     }
-    Ok(path)
+    Ok(())
 }
 
 /// Removes `.` and folds `..` lexically, so a path cannot name the library
