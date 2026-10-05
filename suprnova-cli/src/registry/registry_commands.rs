@@ -169,19 +169,14 @@ pub(crate) trait Tools {
     fn verify(&self, key: &PublicKey, hash: &Digest, signature: &Signature) -> Result<()>;
     fn sign(&self, key: &SecretKey, hash: &Digest) -> Result<Signature>;
     fn generate(&self) -> Result<(SecretKey, PublicKey)>;
-    fn scan(&self, component: &ComponentFiles<'_>) -> Result<ScanReport>;
     /// Scans with what the check knows beyond the files: the manifest's
     /// `elements` and the views its dependencies carry, which the view
-    /// checks follow (REG-022). A stand-in that needs neither scans the
-    /// files alone.
-    fn scan_in(
+    /// checks follow (REG-022).
+    fn scan(
         &self,
         component: &ComponentFiles<'_>,
         context: &scan::ScanContext<'_>,
-    ) -> Result<ScanReport> {
-        let _ = context;
-        self.scan(component)
-    }
+    ) -> Result<ScanReport>;
     fn resolve_address(&self, spec: &str) -> Result<RemoteSpec>;
 }
 
@@ -214,11 +209,7 @@ impl Tools for Registry {
         signing::generate()
     }
 
-    fn scan(&self, component: &ComponentFiles<'_>) -> Result<ScanReport> {
-        scan::scan_component(component, scan::allowlist::embedded()?)
-    }
-
-    fn scan_in(
+    fn scan(
         &self,
         component: &ComponentFiles<'_>,
         context: &scan::ScanContext<'_>,
@@ -832,7 +823,7 @@ fn inspect(
             elements: Some(&component.manifest.elements),
             dependency_views: &dependency_views,
         };
-        match tools.scan_in(&files, &context) {
+        match tools.scan(&files, &context) {
             Ok(scan) => {
                 component_report.capabilities = scan.capabilities;
                 component_report
@@ -1527,7 +1518,7 @@ mod tests {
     use crate::registry::author_key;
     use crate::registry::fetch::FakeFetcher;
     use crate::registry::library::{ComponentManifest, LibraryJson};
-    use crate::registry::scan::{ComponentFiles, Finding, ScanReport};
+    use crate::registry::scan::{ComponentFiles, Finding, ScanContext, ScanReport};
     use crate::registry::signing::{PublicKey, SecretKey, Signature};
     use crate::registry::statement::{Digest, Statement};
     use crate::registry::{Capability, RegistryError, Result};
@@ -1635,7 +1626,11 @@ mod tests {
             Ok((SecretKey::from_bytes([7u8; 32]), public))
         }
 
-        fn scan(&self, component: &ComponentFiles<'_>) -> Result<ScanReport> {
+        fn scan(
+            &self,
+            component: &ComponentFiles<'_>,
+            _context: &ScanContext<'_>,
+        ) -> Result<ScanReport> {
             let mut report = ScanReport::default();
             for (name, bytes) in component.files {
                 let text = String::from_utf8_lossy(bytes);
@@ -1985,7 +1980,11 @@ mod tests {
             fn generate(&self) -> Result<(SecretKey, PublicKey)> {
                 Fake.generate()
             }
-            fn scan(&self, _component: &ComponentFiles<'_>) -> Result<ScanReport> {
+            fn scan(
+                &self,
+                _component: &ComponentFiles<'_>,
+                _context: &ScanContext<'_>,
+            ) -> Result<ScanReport> {
                 Err(RegistryError::NotBuilt("the component scan"))
             }
             fn resolve_address(&self, spec: &str) -> Result<RemoteSpec> {

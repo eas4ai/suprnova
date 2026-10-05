@@ -10,17 +10,17 @@
 //! replacing one never moves another.
 
 use std::collections::BTreeMap;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read as _, Seek as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
 use super::address::{ComponentAddress, LibraryAddress, SHIPPED_LIBRARY};
-use super::library::strict_json_object;
+use super::library::{strict_json, strict_json_object};
 use super::signing::{PublicKey, Signature};
 use super::statement::Digest;
-use super::{Capability, RegistryError, Result};
+use super::{Capability, RegistryError, Result, printable};
 use crate::secure_fs;
 
 /// The project file, all lowercase (REG-001).
@@ -115,6 +115,8 @@ pub struct LibraryRecord {
     pub namespace: Option<String>,
     /// The pinned key.
     pub public_key: Option<PublicKey>,
+    /// Keys pinned before a handover.
+    pub previous_keys: Vec<PublicKey>,
 }
 
 /// How a capability came to be approved.
@@ -276,11 +278,16 @@ impl ProjectFile {
             let public_key = optional_string(key, entry, "key")?
                 .map(|text| PublicKey::parse(&text))
                 .transpose()?;
+            let previous_keys = string_list(key, entry, "previous_keys")?
+                .iter()
+                .map(|text| PublicKey::parse(text))
+                .collect::<Result<Vec<_>>>()?;
             records.insert(
                 address,
                 LibraryRecord {
                     namespace,
                     public_key,
+                    previous_keys,
                 },
             );
         }
@@ -398,7 +405,9 @@ impl ProjectFile {
     }
 
     /// Sets a library's namespace and pinned key in memory, keeping what
-    /// the call does not name.
+    /// the call does not name. A key that replaces the pin, as a vouched
+    /// handover does (REG-033), moves the former key to `previous_keys`, so
+    /// a component recorded under it still verifies (REG-027).
     pub fn set_library(
         &mut self,
         library: &LibraryAddress,
@@ -410,6 +419,12 @@ impl ProjectFile {
             record.namespace = Some(namespace.to_owned());
         }
         if let Some(key) = key {
+            if let Some(former) = record.public_key.take()
+                && former != *key
+                && !record.previous_keys.contains(&former)
+            {
+                record.previous_keys.push(former);
+            }
             record.public_key = Some(key.clone());
         }
         let mut table = toml_edit::Table::new();
@@ -418,6 +433,10 @@ impl ProjectFile {
         }
         if let Some(key) = &record.public_key {
             table.insert("key", toml_edit::value(key.encode()));
+        }
+        if !record.previous_keys.is_empty() {
+            let encoded: Vec<String> = record.previous_keys.iter().map(PublicKey::encode).collect();
+            table.insert("previous_keys", string_array(&encoded));
         }
         self.put("libraries", &library.0, table)
     }
@@ -692,6 +711,22 @@ pub fn verify_installed(root: &Path) -> Result<Verification> {
     let libraries = project.libraries()?;
     for (address, record) in project.components()? {
         let library = libraries.get(&address.library);
+        let published = matches!(
+            address.library.kind(),
+            Ok(super::address::LibraryKind::Repository { .. }
+                | super::address::LibraryKind::Url { .. })
+        );
+        if published && record.source != address.library.0 {
+            verification.failures.push((
+                address.clone(),
+                format!(
+                    "its source {} is not the address {} it is recorded under",
+                    printable(&record.source),
+                    address.library
+                ),
+            ));
+            continue;
+        }
         let Some(key) = library.and_then(|library| library.public_key.as_ref()) else {
             verification.failures.push((
                 address.clone(),
@@ -718,10 +753,22 @@ pub fn verify_installed(root: &Path) -> Result<Verification> {
             ));
             continue;
         }
-        if let Err(error) = super::signing::verify(key, &hash, &record.signature) {
-            verification
-                .failures
-                .push((address.clone(), error.to_string()));
+        // The pin, or a key the pin replaced through a vouched handover:
+        // a component installed before the handover was signed by that one.
+        let former = library
+            .map(|library| library.previous_keys.as_slice())
+            .unwrap_or_default();
+        let signed = std::iter::once(key)
+            .chain(former)
+            .any(|candidate| super::signing::verify(candidate, &hash, &record.signature).is_ok());
+        if !signed {
+            verification.failures.push((
+                address.clone(),
+                format!(
+                    "its signature verifies with neither the key pinned for {} nor a key that pin replaced",
+                    address.library
+                ),
+            ));
             continue;
         }
         verification.verified.push(address.clone());
@@ -852,32 +899,106 @@ impl InstallRecord {
 
 /// The exclusive project lock `live:add` holds from before it reads the
 /// records until it finishes (REG-029); `serve` waits on it.
+///
+/// The lock file also ties a journal to this checkout. An install writes a
+/// fresh random nonce into the lock file, through the handle that holds
+/// the lock, and the same nonce into its journal. A journal is restored
+/// only when the lock file still holds its nonce, is the same file (on
+/// Unix, the same device and inode) it was written beside, and is not newer
+/// than the journal. A journal that arrived any other way, committed to a
+/// repository, copied with its lock file, or edited by hand, is reported
+/// and never applied: a checkout or a copy makes a new lock file, so the
+/// nonce or the inode cannot match.
 #[derive(Debug)]
 pub struct ProjectLock {
     path: PathBuf,
     file: std::fs::File,
+    previous: String,
+    previous_modified: Option<std::time::SystemTime>,
+}
+
+/// What the lock found of an interrupted install's journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Restore {
+    /// There was no journal.
+    Nothing,
+    /// A journal this checkout's last install left was restored.
+    Restored,
+    /// A journal was found and left alone, for the reason given; it was
+    /// not applied.
+    Refused(String),
+}
+
+/// The longest nonce the lock file holds; anything longer is not one.
+const MAX_NONCE_BYTES: u64 = 128;
+
+/// The largest journal read back. It holds the prior bytes of every file an
+/// install changes, which a plan bounds (`MAX_PLAN_BYTES`), in base64.
+const MAX_JOURNAL_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The lock file's identity: on Unix its device and inode, which a
+/// checkout or a copy cannot reproduce.
+fn lock_identity(file: &std::fs::File) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        file.metadata()
+            .ok()
+            .map(|metadata| format!("{}:{}", metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        None
+    }
 }
 
 impl ProjectLock {
-    /// Takes the lock, refusing when another `live:add` holds it.
+    /// Takes the lock, refusing when another `live:add` holds it or a
+    /// build `serve` started is reading the project.
     pub fn acquire(project_root: &Path) -> Result<Self> {
-        secure_fs::ensure_contained(project_root, Path::new(LOCK_FILE))
-            .map_err(RegistryError::Io)?;
-        let path = project_root.join(LOCK_FILE);
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|error| {
-                RegistryError::Io(format!("cannot open {}: {error}", path.display()))
-            })?;
+        let (path, file) = open_lock_file(project_root)?;
         match file.try_lock() {
-            Ok(()) => Ok(ProjectLock { path, file }),
-            Err(std::fs::TryLockError::WouldBlock) => Err(RegistryError::Declined(format!(
-                "another live:add is installing into this project (it holds {LOCK_FILE}); run this again when it finishes"
-            ))),
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(RegistryError::Declined(format!(
+                    "another live:add is installing into this project, or a build suprnova serve started is reading it (either holds {LOCK_FILE}); run this again when it finishes"
+                )));
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(RegistryError::Io(format!(
+                    "cannot lock {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+        let mut previous = String::new();
+        (&file)
+            .take(MAX_NONCE_BYTES)
+            .read_to_string(&mut previous)
+            .map_err(|error| {
+                RegistryError::Io(format!("cannot read {}: {error}", path.display()))
+            })?;
+        let previous_modified = file
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        Ok(ProjectLock {
+            path,
+            file,
+            previous: previous.trim().to_owned(),
+            previous_modified,
+        })
+    }
+
+    /// Takes a shared hold on the lock, as a build does: any number of
+    /// builds may hold it together, and no install can take it while one
+    /// does. Returns `None` when an install holds it.
+    pub fn acquire_shared(project_root: &Path) -> Result<Option<std::fs::File>> {
+        let (path, file) = open_lock_file(project_root)?;
+        match file.try_lock_shared() {
+            Ok(()) => Ok(Some(file)),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
             Err(std::fs::TryLockError::Error(error)) => Err(RegistryError::Io(format!(
                 "cannot lock {}: {error}",
                 path.display()
@@ -905,6 +1026,74 @@ impl ProjectLock {
         &self.path
     }
 
+    fn root(&self) -> &Path {
+        self.path.parent().unwrap_or(Path::new("."))
+    }
+
+    /// Ties `journal` to this lock and writes it to disk before the
+    /// install's first write: a fresh nonce goes into the lock file and the
+    /// journal, and the journal names the lock file's identity. Refuses a
+    /// journal that names a path no install writes.
+    pub fn begin_journal(&self, journal: &mut Journal) -> Result<()> {
+        journal.check_paths()?;
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).map_err(|error| {
+            RegistryError::Io(format!(
+                "the operating system's random source is unavailable: {error}"
+            ))
+        })?;
+        let nonce: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let mut file = &self.file;
+        file.set_len(0)
+            .and_then(|()| file.seek(std::io::SeekFrom::Start(0)).map(|_| ()))
+            .and_then(|()| file.write_all(nonce.as_bytes()))
+            .and_then(|()| file.sync_all())
+            .map_err(|error| {
+                RegistryError::Io(format!("cannot write {}: {error}", self.path.display()))
+            })?;
+        journal.nonce = nonce;
+        journal.lock_identity = lock_identity(&self.file);
+        journal.write(self.root())
+    }
+
+    /// Restores the journal an install killed in this checkout left, and
+    /// reports a journal from anywhere else without applying it.
+    pub fn restore_interrupted(&self) -> Result<Restore> {
+        let root = self.root();
+        if !Journal::exists(root) {
+            return Ok(Restore::Nothing);
+        }
+        let journal = match Journal::read(root) {
+            Ok(Some(journal)) => journal,
+            Ok(None) => return Ok(Restore::Nothing),
+            Err(error) => return Ok(Restore::Refused(error.to_string())),
+        };
+        if journal.nonce.is_empty() || journal.nonce != self.previous {
+            return Ok(Restore::Refused(format!(
+                "its nonce is not the one {LOCK_FILE} holds, so no install in this checkout wrote it"
+            )));
+        }
+        if journal.lock_identity != lock_identity(&self.file) {
+            return Ok(Restore::Refused(format!(
+                "{LOCK_FILE} is not the lock file it was written beside"
+            )));
+        }
+        let journal_modified = std::fs::metadata(root.join(JOURNAL_FILE))
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        if let (Some(journal_modified), Some(lock_modified)) =
+            (journal_modified, self.previous_modified)
+            && journal_modified < lock_modified
+        {
+            return Ok(Restore::Refused(format!(
+                "it is older than {LOCK_FILE}, which an install writes before its journal"
+            )));
+        }
+        journal.restore_into(root)?;
+        Journal::remove(root)?;
+        Ok(Restore::Restored)
+    }
+
     /// Releases the lock now rather than when it is dropped.
     pub fn release(self) -> Result<()> {
         self.file.unlock().map_err(|error| {
@@ -913,31 +1102,129 @@ impl ProjectLock {
     }
 }
 
+fn open_lock_file(project_root: &Path) -> Result<(PathBuf, std::fs::File)> {
+    secure_fs::ensure_contained(project_root, Path::new(LOCK_FILE)).map_err(RegistryError::Io)?;
+    let path = project_root.join(LOCK_FILE);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| RegistryError::Io(format!("cannot open {}: {error}", path.display())))?;
+    Ok((path, file))
+}
+
+/// The paths an install writes, and so the only ones a journal may name:
+/// `suprnova.toml`, `src/live/mod.rs`, a namespace module and its Rust
+/// files, and a component's view directory with its files, manifest and
+/// install record, each segment held to the closed sets the install uses.
+/// `directory` asks about a directory an install creates instead.
+pub fn install_path(path: &Path, directory: bool) -> bool {
+    use super::library::{FileKind, valid_directory_name, valid_namespace, validate_file_name};
+    let text = project_path(path);
+    if path.is_absolute() || text != path.to_string_lossy().replace('\\', "/") {
+        return false;
+    }
+    let segments: Vec<&str> = text.split('/').collect();
+    let module = |name: &str| !name.contains('-') && valid_namespace(&name.replace('_', "-"));
+    let namespace_ui = |name: &str| name.strip_suffix("-ui").is_some_and(valid_namespace);
+    if directory {
+        return match segments.as_slice() {
+            ["src"] | ["src", "live"] | ["templates"] => true,
+            ["src", "live", name] => module(name),
+            ["templates", ui] => namespace_ui(ui),
+            ["templates", ui, component] => namespace_ui(ui) && valid_directory_name(component),
+            _ => false,
+        };
+    }
+    match segments.as_slice() {
+        [PROJECT_FILE] | ["src", "live", "mod.rs"] => true,
+        ["src", "live", name, "mod.rs"] => module(name),
+        ["src", "live", name, file] => {
+            module(name) && validate_file_name(file) == Ok(FileKind::Rust)
+        }
+        ["templates", ui, component, file] => {
+            namespace_ui(ui)
+                && valid_directory_name(component)
+                && (*file == "manifest.json"
+                    || *file == INSTALL_RECORD
+                    || matches!(
+                        validate_file_name(file),
+                        Ok(FileKind::View | FileKind::Stylesheet | FileKind::Script)
+                    ))
+        }
+        _ => false,
+    }
+}
+
 /// The journal written before the first write: every path the install will
 /// change or create, with the prior bytes of each it changes (REG-029).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Journal {
-    /// Paths that will be created, directories before the files in them.
+    /// Files that will be created.
     pub created: Vec<PathBuf>,
-    /// Paths that will change, with their prior bytes.
+    /// Paths that will change, with their prior bytes; a file the install
+    /// removes is one of them.
     pub changed: BTreeMap<PathBuf, Vec<u8>>,
+    /// Directories the install creates, each before the ones inside it.
+    pub created_directories: Vec<PathBuf>,
+    /// The nonce the install wrote into the lock file.
+    pub nonce: String,
+    /// The lock file's identity when the journal was written, where the
+    /// platform gives one.
+    pub lock_identity: Option<String>,
 }
 
+const JOURNAL_KEYS: [&str; 5] = ["nonce", "lock", "created", "createdDirectories", "changed"];
+
 impl Journal {
-    /// Writes the journal into the project.
+    /// Refuses a journal that names a path no install writes.
+    fn check_paths(&self) -> Result<()> {
+        let files = self
+            .created
+            .iter()
+            .chain(self.changed.keys())
+            .filter(|path| !install_path(path, false));
+        let directories = self
+            .created_directories
+            .iter()
+            .filter(|path| !install_path(path, true));
+        let refused: Vec<String> = files
+            .chain(directories)
+            .map(|path| printable(&path.display().to_string()))
+            .collect();
+        if refused.is_empty() {
+            Ok(())
+        } else {
+            Err(RegistryError::Invalid(format!(
+                "the journal names paths no install writes: {}",
+                refused.join(", ")
+            )))
+        }
+    }
+
+    /// Writes the journal into the project, synced to disk with its
+    /// directory, so it outlives a crash of the install that wrote it.
     pub fn write(&self, project_root: &Path) -> Result<()> {
-        let created: Vec<String> = self.created.iter().map(|path| project_path(path)).collect();
+        self.check_paths()?;
+        let paths = |paths: &[PathBuf]| -> Vec<String> {
+            paths.iter().map(|path| project_path(path)).collect()
+        };
         let changed: BTreeMap<String, String> = self
             .changed
             .iter()
             .map(|(path, bytes)| (project_path(path), STANDARD.encode(bytes)))
             .collect();
         let bytes = serde_json::to_vec(&serde_json::json!({
-            "created": created,
+            "nonce": self.nonce,
+            "lock": self.lock_identity,
+            "created": paths(&self.created),
+            "createdDirectories": paths(&self.created_directories),
             "changed": changed,
         }))
         .map_err(|error| RegistryError::Io(format!("cannot encode the journal: {error}")))?;
-        secure_fs::write_atomic_under(project_root, Path::new(JOURNAL_FILE), &bytes)
+        secure_fs::write_durable_under(project_root, Path::new(JOURNAL_FILE), &bytes)
             .map_err(RegistryError::Io)
     }
 
@@ -946,13 +1233,15 @@ impl Journal {
         std::fs::symlink_metadata(project_root.join(JOURNAL_FILE)).is_ok()
     }
 
-    /// Reads the journal on disk, if there is one.
+    /// Reads the journal on disk, if there is one, strictly: one JSON object
+    /// with exactly its keys, no duplicate key, and only paths an install
+    /// writes.
     pub fn read(project_root: &Path) -> Result<Option<Self>> {
         secure_fs::ensure_contained(project_root, Path::new(JOURNAL_FILE))
             .map_err(RegistryError::Io)?;
         let path = project_root.join(JOURNAL_FILE);
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => {
                 return Err(RegistryError::Io(format!(
@@ -961,78 +1250,131 @@ impl Journal {
                 )));
             }
         };
+        let mut bytes = Vec::new();
+        file.take(MAX_JOURNAL_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| {
+                RegistryError::Io(format!("cannot read {}: {error}", path.display()))
+            })?;
         let damaged = |reason: &str| {
             RegistryError::Invalid(format!(
-                "the install journal {} is damaged: {reason}; restore the files it names by hand, then delete it",
+                "the install journal {} is refused: {reason}",
                 path.display()
             ))
         };
-        let value: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|error| damaged(&error.to_string()))?;
-        let mut journal = Journal::default();
-        for item in value
-            .get("created")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| damaged("no created list"))?
-        {
-            let path = item
-                .as_str()
-                .and_then(relative_path)
-                .ok_or_else(|| damaged("a created entry is not a path in the project"))?;
-            journal.created.push(path);
+        if bytes.len() as u64 > MAX_JOURNAL_BYTES {
+            return Err(damaged("it is larger than any install writes"));
         }
-        for (key, item) in value
+        let value = strict_json(&bytes).map_err(|error| damaged(&error.to_string()))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| damaged("it is not one JSON object"))?;
+        if let Some(key) = object
+            .keys()
+            .find(|key| !JOURNAL_KEYS.contains(&key.as_str()))
+        {
+            return Err(damaged(&format!("it holds the key `{}`", printable(key))));
+        }
+        let path_list = |key: &str| -> Result<Vec<PathBuf>> {
+            object
+                .get(key)
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| damaged(&format!("it has no `{key}` list")))?
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .and_then(relative_path)
+                        .ok_or_else(|| damaged(&format!("a `{key}` entry is not a path")))
+                })
+                .collect()
+        };
+        let mut journal = Journal {
+            created: path_list("created")?,
+            created_directories: path_list("createdDirectories")?,
+            nonce: object
+                .get("nonce")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| damaged("it has no nonce"))?
+                .to_owned(),
+            lock_identity: match object.get("lock") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(identity)) => Some(identity.clone()),
+                Some(_) => return Err(damaged("its lock is not a string")),
+            },
+            changed: BTreeMap::new(),
+        };
+        for (key, item) in object
             .get("changed")
             .and_then(serde_json::Value::as_object)
-            .ok_or_else(|| damaged("no changed map"))?
+            .ok_or_else(|| damaged("it has no `changed` map"))?
         {
-            let path = relative_path(key)
-                .ok_or_else(|| damaged("a changed entry is not a path in the project"))?;
+            let path =
+                relative_path(key).ok_or_else(|| damaged("a `changed` entry is not a path"))?;
             let bytes = item
                 .as_str()
                 .and_then(|text| STANDARD.decode(text).ok())
-                .ok_or_else(|| damaged("a changed entry holds no base64 bytes"))?;
+                .ok_or_else(|| damaged("a `changed` entry holds no base64 bytes"))?;
             journal.changed.insert(path, bytes);
         }
+        journal
+            .check_paths()
+            .map_err(|error| damaged(&error.to_string()))?;
         Ok(Some(journal))
     }
 
     /// Puts back every path the journal names: each changed file gets its
     /// prior bytes, each created file is removed, then each created
-    /// directory that is empty again.
+    /// directory that is empty again. A path it cannot put back is named in
+    /// the error, and the journal on disk is left for the next attempt.
     pub fn restore_into(&self, project_root: &Path) -> Result<()> {
+        self.check_paths()?;
         let mut failures = Vec::new();
         for (path, bytes) in &self.changed {
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+                && let Err(error) = std::fs::create_dir_all(project_root.join(parent))
+            {
+                failures.push(format!("{} ({error})", path.display()));
+                continue;
+            }
             if let Err(error) = secure_fs::write_atomic_under(project_root, path, bytes) {
-                failures.push(error);
+                failures.push(format!("{} ({error})", path.display()));
             }
         }
         for path in self.created.iter().rev() {
-            if secure_fs::ensure_contained(project_root, path).is_err() {
-                failures.push(format!("{} is not inside the project", path.display()));
+            if let Err(error) = secure_fs::ensure_contained(project_root, path) {
+                failures.push(format!("{} ({error})", path.display()));
                 continue;
             }
-            let full = project_root.join(path);
-            let Ok(entry) = std::fs::symlink_metadata(&full) else {
+            match std::fs::remove_file(project_root.join(path)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => failures.push(format!("{} ({error})", path.display())),
+            }
+        }
+        for path in self.created_directories.iter().rev() {
+            if secure_fs::ensure_contained(project_root, path).is_err() {
                 continue;
-            };
-            let removed = if entry.is_dir() {
-                match std::fs::remove_dir(&full) {
-                    // A directory something else also wrote into stays.
-                    Err(error) if error.kind() == ErrorKind::DirectoryNotEmpty => Ok(()),
-                    other => other,
-                }
-            } else {
-                std::fs::remove_file(&full)
-            };
-            if let Err(error) = removed {
-                failures.push(format!("cannot remove {}: {error}", full.display()));
+            }
+            match std::fs::remove_dir(project_root.join(path)) {
+                // A directory something else wrote into, or one a file the
+                // restore could not remove sits in, stays.
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::NotFound | ErrorKind::DirectoryNotEmpty
+                    ) => {}
+                Err(error) => failures.push(format!("{} ({error})", path.display())),
             }
         }
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(RegistryError::Io(failures.join("; ")))
+            Err(RegistryError::Io(format!(
+                "these paths were not restored: {}",
+                printable(&failures.join("; "))
+            )))
         }
     }
 
@@ -1047,16 +1389,26 @@ impl Journal {
         }
     }
 
-    /// Restores every file the journal names and removes the journal;
-    /// `live:add` and `serve` call this when they find one with no lock held.
+    /// Takes the project lock and restores the journal an install killed in
+    /// this checkout left, reporting whether it did. A journal from anywhere
+    /// else is refused and left as it is.
     pub fn restore(project_root: &Path) -> Result<bool> {
-        let Some(journal) = Journal::read(project_root)? else {
-            return Ok(false);
-        };
-        journal.restore_into(project_root)?;
-        Journal::remove(project_root)?;
-        Ok(true)
+        let lock = ProjectLock::acquire(project_root)?;
+        let outcome = lock.restore_interrupted()?;
+        lock.release()?;
+        match outcome {
+            Restore::Nothing => Ok(false),
+            Restore::Restored => Ok(true),
+            Restore::Refused(reason) => Err(RegistryError::Declined(refused_journal(&reason))),
+        }
     }
+}
+
+/// What `live:add` and `serve` say of a journal they will not apply.
+pub fn refused_journal(reason: &str) -> String {
+    format!(
+        "{JOURNAL_FILE} was not applied: {reason}. Look at what it names, put back by hand anything an interrupted install left half written, and delete it"
+    )
 }
 
 #[cfg(test)]

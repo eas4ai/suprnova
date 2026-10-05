@@ -11,7 +11,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use super::library::valid_directory_name;
-use super::{RegistryError, Result};
+use super::{RegistryError, Result, printable};
 
 /// A forge that hosts a library repository.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,7 +135,8 @@ impl LibraryAddress {
             let parsed = parse_url_base(text)?;
             if parsed != text {
                 return Err(RegistryError::Invalid(format!(
-                    "`{text}` is not a canonical library address; it is written `{parsed}`"
+                    "`{}` is not a canonical library address; it is written `{parsed}`",
+                    printable(text)
                 )));
             }
             return Ok(LibraryKind::Url {
@@ -163,7 +164,8 @@ impl LibraryAddress {
             });
         }
         Err(RegistryError::Invalid(format!(
-            "`{text}` is not a library address: expected `<host>/<owner>/<library>` in lowercase, an `https://` URL base, or an absolute path"
+            "`{}` is not a library address: expected `<host>/<owner>/<library>` in lowercase, an `https://` URL base, or an absolute path",
+            printable(text)
         )))
     }
 
@@ -182,7 +184,8 @@ pub fn parse_published_address(text: &str) -> Result<LibraryAddress> {
     match address.kind()? {
         LibraryKind::Repository { .. } | LibraryKind::Url { .. } => Ok(address),
         LibraryKind::Shipped | LibraryKind::Path { .. } => Err(RegistryError::Invalid(format!(
-            "`{text}` is not a published library address: `source` names a repository or an https:// URL base"
+            "`{}` is not a published library address: `source` names a repository or an https:// URL base",
+            printable(text)
         ))),
     }
 }
@@ -208,11 +211,12 @@ impl ComponentAddress {
     /// address, `/`, and a directory name.
     pub fn parse(text: &str) -> Result<Self> {
         let (library, component) = text.rsplit_once('/').ok_or_else(|| {
-            RegistryError::Invalid(format!("`{text}` is not a component address"))
+            RegistryError::Invalid(format!("`{}` is not a component address", printable(text)))
         })?;
         if !valid_directory_name(component) {
             return Err(RegistryError::Invalid(format!(
-                "`{text}` does not end in a component directory name"
+                "`{}` does not end in a component directory name",
+                printable(text)
             )));
         }
         let library = LibraryAddress(library.to_owned());
@@ -255,7 +259,8 @@ pub fn parse(spec: &str) -> Result<Source> {
     let component = spec.strip_prefix("suprnova.").unwrap_or(spec);
     if !valid_directory_name(component) {
         return Err(RegistryError::Invalid(format!(
-            "`{spec}` is not a shipped library component: a component name is lowercase letters, digits and hyphens"
+            "`{}` is not a shipped library component: a component name is lowercase letters, digits and hyphens",
+            printable(spec)
         )));
     }
     Ok(Source::Shipped {
@@ -268,7 +273,8 @@ fn parse_repository(spec: &str) -> Result<Source> {
         Some((path, version)) => {
             let parsed = semver::Version::parse(version).map_err(|error| {
                 RegistryError::Invalid(format!(
-                    "`@{version}` is not a semver version (it names the tag `v<version>`): {error}"
+                    "`@{}` is not a semver version (it names the tag `v<version>`): {error}",
+                    printable(version)
                 ))
             })?;
             (path, Some(parsed))
@@ -281,27 +287,31 @@ fn parse_repository(spec: &str) -> Result<Source> {
         [domain, owner, library, component] => {
             let host = Host::parse(domain).ok_or_else(|| {
                 RegistryError::Invalid(format!(
-                    "`{domain}` is not a supported host: use github.com, gitlab.com or codeberg.org, or an https:// URL"
+                    "`{}` is not a supported host: use github.com, gitlab.com or codeberg.org, or an https:// URL",
+                printable(domain)
                 ))
             })?;
             (host, *owner, *library, *component)
         }
         _ => {
             return Err(RegistryError::Invalid(format!(
-                "`{spec}` is not `[<host>/]<owner>/<library>/<component>[@<version>]`"
+                "`{}` is not `[<host>/]<owner>/<library>/<component>[@<version>]`",
+                printable(spec)
             )));
         }
     };
     for (what, segment) in [("owner", owner), ("library", library)] {
         if !valid_repository_segment(segment) {
             return Err(RegistryError::Invalid(format!(
-                "the {what} `{segment}` must be ASCII letters, digits, `-`, `_` and `.`, not starting with `.`"
+                "the {what} `{}` must be ASCII letters, digits, `-`, `_` and `.`, not starting with `.`",
+                printable(segment)
             )));
         }
     }
     if !valid_directory_name(component) {
         return Err(RegistryError::Invalid(format!(
-            "the component `{component}` must be 1 to 64 lowercase letters, digits and hyphens, neither starting nor ending with a hyphen"
+            "the component `{}` must be 1 to 64 lowercase letters, digits and hyphens, neither starting nor ending with a hyphen",
+            printable(component)
         )));
     }
     Ok(Source::Repository {
@@ -317,17 +327,20 @@ fn parse_url(spec: &str) -> Result<Source> {
     let (base, mut segments) = split_url(spec)?;
     let component = segments.pop().ok_or_else(|| {
         RegistryError::Invalid(format!(
-            "`{spec}` names no component directory: expected <base>/components/<component>"
+            "`{}` names no component directory: expected <base>/components/<component>",
+            printable(spec)
         ))
     })?;
     if segments.pop().as_deref() != Some("components") {
         return Err(RegistryError::Invalid(format!(
-            "`{spec}` is not a component directory of a library tree: expected <base>/components/<component>"
+            "`{}` is not a component directory of a library tree: expected <base>/components/<component>",
+            printable(spec)
         )));
     }
     if !valid_directory_name(&component) {
         return Err(RegistryError::Invalid(format!(
-            "the component `{component}` must be 1 to 64 lowercase letters, digits and hyphens, neither starting nor ending with a hyphen"
+            "the component `{}` must be 1 to 64 lowercase letters, digits and hyphens, neither starting nor ending with a hyphen",
+            printable(&component)
         )));
     }
     let mut library_base = base;
@@ -363,12 +376,13 @@ fn split_url(text: &str) -> Result<(String, Vec<String>)> {
         .any(|byte| matches!(byte, b'?' | b'#' | b'%' | b'@' | b'\\') || !byte.is_ascii_graphic())
     {
         return Err(RegistryError::Invalid(format!(
-            "`{text}` may carry no user, query, fragment, percent escape or space"
+            "`{}` may carry no user, query, fragment, percent escape or space",
+            printable(text)
         )));
     }
     let (scheme, rest) = text
         .split_once("://")
-        .ok_or_else(|| RegistryError::Invalid(format!("`{text}` is not a URL")))?;
+        .ok_or_else(|| RegistryError::Invalid(format!("`{}` is not a URL", printable(text))))?;
     let scheme = scheme.to_ascii_lowercase();
     let (authority, path) = match rest.split_once('/') {
         Some((authority, path)) => (authority, path),
@@ -380,12 +394,14 @@ fn split_url(text: &str) -> Result<(String, Vec<String>)> {
         "http" if is_loopback_host(&host) => 80,
         "http" => {
             return Err(RegistryError::Invalid(format!(
-                "`{text}` is plain HTTP; live:add fetches over HTTPS only, except from a loopback host"
+                "`{}` is plain HTTP; live:add fetches over HTTPS only, except from a loopback host",
+                printable(text)
             )));
         }
         _ => {
             return Err(RegistryError::Invalid(format!(
-                "`{text}` is not an https:// URL"
+                "`{}` is not an https:// URL",
+                printable(text)
             )));
         }
     };
@@ -401,7 +417,9 @@ fn split_url(text: &str) -> Result<(String, Vec<String>)> {
         for segment in path.split('/') {
             if !valid_repository_segment(segment) {
                 return Err(RegistryError::Invalid(format!(
-                    "`{text}` holds the path segment `{segment}`; a segment is ASCII letters, digits, `-`, `_` and `.`, not starting with `.`"
+                    "`{}` holds the path segment `{}`; a segment is ASCII letters, digits, `-`, `_` and `.`, not starting with `.`",
+                    printable(text),
+                    printable(segment)
                 )));
             }
             segments.push(segment.to_owned());
@@ -496,7 +514,8 @@ fn parse_path(path: &Path) -> Result<Source> {
         .to_owned();
     if !valid_directory_name(&component) {
         return Err(RegistryError::Invalid(format!(
-            "the component directory `{component}` must be 1 to 64 lowercase letters, digits and hyphens, neither starting nor ending with a hyphen"
+            "the component directory `{}` must be 1 to 64 lowercase letters, digits and hyphens, neither starting nor ending with a hyphen",
+            printable(&component)
         )));
     }
     let components = directory
@@ -589,11 +608,16 @@ pub enum Dependency {
 /// Parses one `dependencies` entry: a bare shipped name, `./<component>`,
 /// or a full repository or URL address. A path on disk is never a
 /// dependency: a library cannot reach outside itself on its user's disk.
+/// A URL dependency must be HTTPS on a public host: the manifest that names
+/// it was fetched from someone else, and must not point the developer's
+/// machine at its own loopback interface or private network. Only the
+/// source the developer types may be plain HTTP on a loopback host.
 pub fn parse_dependency(text: &str) -> Result<Dependency> {
     if let Some(sibling) = text.strip_prefix("./") {
         if !valid_directory_name(sibling) {
             return Err(RegistryError::Invalid(format!(
-                "dependency `{text}` does not name a component directory"
+                "dependency `{}` does not name a component directory",
+                printable(text)
             )));
         }
         return Ok(Dependency::Sibling(sibling.to_owned()));
@@ -601,24 +625,103 @@ pub fn parse_dependency(text: &str) -> Result<Dependency> {
     if !text.contains('/') && !text.contains('@') {
         if !valid_directory_name(text) {
             return Err(RegistryError::Invalid(format!(
-                "dependency `{text}` is not a shipped component name"
+                "dependency `{}` is not a shipped component name",
+                printable(text)
             )));
         }
         return Ok(Dependency::Shipped(text.to_owned()));
     }
     if text.starts_with("../") || text.starts_with('/') || Path::new(text).is_absolute() {
         return Err(RegistryError::Invalid(format!(
-            "dependency `{text}` is a path; a dependency is a shipped name, ./<component> or a full address"
+            "dependency `{}` is a path; a dependency is a shipped name, ./<component> or a full address",
+            printable(text)
         )));
     }
     match parse(text)? {
-        source @ (Source::Repository { .. } | Source::Url { .. }) => {
-            Ok(Dependency::Address(source))
+        source @ Source::Repository { .. } => Ok(Dependency::Address(source)),
+        Source::Url {
+            library_base,
+            component,
+        } => {
+            let host = library_base
+                .strip_prefix("https://")
+                .map(|rest| rest.split('/').next().unwrap_or_default())
+                .map(|authority| match authority.rsplit_once(':') {
+                    Some((host, port))
+                        if !host.ends_with(':') && port.bytes().all(|b| b.is_ascii_digit()) =>
+                    {
+                        host
+                    }
+                    _ => authority,
+                });
+            match host {
+                Some(host) if is_public_host(host) => Ok(Dependency::Address(Source::Url {
+                    library_base,
+                    component,
+                })),
+                _ => Err(RegistryError::Invalid(format!(
+                    "dependency `{}` is not an HTTPS address on a public host; a library may depend only on public HTTPS addresses",
+                    printable(text)
+                ))),
+            }
         }
         _ => Err(RegistryError::Invalid(format!(
-            "dependency `{text}` is not a full address"
+            "dependency `{}` is not a full address",
+            printable(text)
         ))),
     }
+}
+
+/// Whether a lowercase host, as a URL address writes it, names a public
+/// host: not `localhost` or a name under it, and not an address literal in
+/// a loopback, private, link-local, shared, unspecified, multicast or
+/// reserved range. A host whose last label is a number, or a `0x` one, is
+/// an address too in the URL standard (`2130706433` is `127.0.0.1`), so
+/// only a dotted address that parses as one is admitted, by its range.
+pub fn is_public_host(host: &str) -> bool {
+    if host == "localhost" || host.ends_with(".localhost") {
+        return false;
+    }
+    if let Some(inside) = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    {
+        return inside.parse::<std::net::Ipv6Addr>().is_ok_and(public_ipv6);
+    }
+    let last = host.rsplit('.').next().unwrap_or_default();
+    let numeric = !last.is_empty() && last.bytes().all(|byte| byte.is_ascii_digit());
+    let hexadecimal = last.len() > 1 && last[..2].eq_ignore_ascii_case("0x");
+    if numeric || hexadecimal {
+        return host.parse::<std::net::Ipv4Addr>().is_ok_and(public_ipv4);
+    }
+    true
+}
+
+fn public_ipv4(address: std::net::Ipv4Addr) -> bool {
+    let [a, b, ..] = address.octets();
+    !(address.is_loopback()
+        || address.is_private()
+        || address.is_link_local()
+        || address.is_unspecified()
+        || address.is_broadcast()
+        || address.is_multicast()
+        || a == 0
+        || (a == 100 && (64..128).contains(&b))
+        || (a == 192 && b == 0 && address.octets()[2] == 0)
+        || (a == 198 && (b == 18 || b == 19))
+        || a >= 240)
+}
+
+fn public_ipv6(address: std::net::Ipv6Addr) -> bool {
+    if let Some(v4) = address.to_ipv4() {
+        return public_ipv4(v4);
+    }
+    let first = address.segments()[0];
+    !(address.is_loopback()
+        || address.is_unspecified()
+        || address.is_multicast()
+        || (first & 0xfe00) == 0xfc00
+        || (first & 0xffc0) == 0xfe80)
 }
 
 /// Whether an owner or library segment is `<owner>`-shaped: ASCII letters,

@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 
 use crate::registry::fetch::SourceFetcher;
 use crate::registry::plan::{self, Options, TerminalPrompter};
-use crate::registry::project::{self, Journal, ProjectFile, ProjectLock};
-use crate::registry::{Capability, address, install};
+use crate::registry::project::{self, Journal, ProjectFile, ProjectLock, Restore};
+use crate::registry::{Capability, address, install, printable, printable_lines};
 use crate::ui;
 
 // The shipped library lives with the registry, which reads it; it is
@@ -44,7 +44,7 @@ pub struct Request {
 /// Runs `live:add`.
 pub fn run(request: Request) {
     if let Err(error) = run_inner(&request) {
-        ui::error(&error);
+        ui::error(&printable_lines(&error));
         std::process::exit(1);
     }
 }
@@ -130,27 +130,39 @@ fn run_inner(request: &Request) -> Result<(), String> {
         let project = ProjectFile::load(&root).map_err(|error| error.to_string())?;
         let plan = plan::resolve(&source, &options, &fetcher, &project)
             .map_err(|error| error.to_string())?;
-        print!("{}", plan::render_with(&plan, &options, &project));
+        print!(
+            "{}",
+            printable_lines(&plan::render_with(&plan, &options, &project))
+        );
         ui::info("dry run: nothing was written");
         return Ok(());
     }
 
     let lock = ProjectLock::acquire(&root).map_err(|error| error.to_string())?;
-    if Journal::restore(&root).map_err(|error| error.to_string())? {
-        ui::warning(&format!(
+    match lock
+        .restore_interrupted()
+        .map_err(|error| error.to_string())?
+    {
+        Restore::Nothing => {}
+        Restore::Restored => ui::warning(&format!(
             "an interrupted live:add left {}; every file it named was restored first",
             project::JOURNAL_FILE
-        ));
+        )),
+        Restore::Refused(reason) => return Err(project::refused_journal(&reason)),
     }
     let mut project = ProjectFile::load(&root).map_err(|error| error.to_string())?;
     let plan =
         plan::resolve(&source, &options, &fetcher, &project).map_err(|error| error.to_string())?;
-    print!("{}", plan::render_with(&plan, &options, &project));
+    print!(
+        "{}",
+        printable_lines(&plan::render_with(&plan, &options, &project))
+    );
     let decisions = plan::confirm(&plan, &options, &project, &mut TerminalPrompter)
         .map_err(|error| error.to_string())?;
     let outcomes = install::apply_with(
         &plan,
         &mut project,
+        &lock,
         &options,
         &decisions,
         &install::registration_edits,
@@ -158,14 +170,14 @@ fn run_inner(request: &Request) -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     lock.release().map_err(|error| error.to_string())?;
     for component in &plan.components {
-        ui::success(&format!(
+        ui::success(&printable(&format!(
             "installed {} under {}",
             component.address,
             component.view_directory().display()
-        ));
+        )));
     }
     for (path, outcome) in outcomes {
-        ui::label_value(&path.display().to_string(), outcome.describe());
+        ui::label_value(&printable(&path.display().to_string()), outcome.describe());
     }
     for call in &plan.router_calls {
         ui::hint(&format!(

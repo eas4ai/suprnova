@@ -19,7 +19,10 @@ impl PublicKey {
     /// Reads `ed25519:<base64>`.
     pub fn parse(text: &str) -> Result<Self> {
         let encoded = text.strip_prefix("ed25519:").ok_or_else(|| {
-            RegistryError::Invalid(format!("public key `{text}` is not `ed25519:` and base64"))
+            RegistryError::Invalid(format!(
+                "public key `{}` is not `ed25519:` and base64",
+                super::printable(text)
+            ))
         })?;
         let bytes = STANDARD.decode(encoded).map_err(|error| {
             RegistryError::Invalid(format!("public key is not standard base64: {error}"))
@@ -130,16 +133,36 @@ impl fmt::Debug for Signature {
     }
 }
 
-/// A former key vouching for the key that replaced it (REG-033): the
-/// statement signed is the new key's fingerprint.
+/// A former key vouching for the key that replaced it (REG-033). The
+/// statement signed is [`handover_statement`]: the library's `source` and
+/// the new key's fingerprint, so a handover moves one library's key and no
+/// other library's that the same former key signed for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyHandover {
     /// The former key.
     pub from: PublicKey,
     /// The fingerprint of the key it hands over to.
     pub to: Fingerprint,
-    /// The former key's signature over the ASCII bytes of `to`.
+    /// The former key's signature over the handover statement naming the
+    /// library and `to`.
     pub signature: Signature,
+}
+
+/// The format a handover statement names.
+pub const HANDOVER_FORMAT: &str = "suprnova-key-handover/1";
+
+/// What a former key signs to hand a library over to a new key: one JSON
+/// object with no whitespace, `{"format":"suprnova-key-handover/1",
+/// "library":"<source>","next":"<fingerprint>"}`, where `library` is the
+/// `source` of the `library.json` that carries the handover.
+pub fn handover_statement(library: &str, next: &Fingerprint) -> String {
+    let quoted = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned());
+    format!(
+        "{{\"format\":{},\"library\":{},\"next\":{}}}",
+        quoted(HANDOVER_FORMAT),
+        quoted(library),
+        quoted(next.as_str())
+    )
 }
 
 /// A library's private key, held by its author; never written inside the
@@ -196,9 +219,10 @@ pub fn verify(key: &PublicKey, hash: &Digest, signature: &Signature) -> Result<(
     })
 }
 
-/// Verifies a key handover: `handover.from` signed `handover.to`, and
-/// `handover.to` is `new_key`'s fingerprint.
-pub fn verify_handover(handover: &KeyHandover, new_key: &PublicKey) -> Result<()> {
+/// Verifies a key handover: `handover.from` signed the handover statement
+/// for `library` and `handover.to`, and `handover.to` is `new_key`'s
+/// fingerprint.
+pub fn verify_handover(handover: &KeyHandover, new_key: &PublicKey, library: &str) -> Result<()> {
     if handover.to != new_key.fingerprint() {
         return Err(RegistryError::Invalid(format!(
             "the handover from {} names {}, not the new key {}",
@@ -209,14 +233,15 @@ pub fn verify_handover(handover: &KeyHandover, new_key: &PublicKey) -> Result<()
     }
     verify_message(
         &handover.from,
-        handover.to.as_str().as_bytes(),
+        handover_statement(library, &handover.to).as_bytes(),
         &handover.signature,
     )
     .map_err(|reason| {
         RegistryError::Invalid(format!(
-            "the handover from {} to {} does not verify: {reason}",
+            "the handover from {} to {} for {} does not verify: {reason}",
             handover.from.fingerprint(),
-            handover.to
+            handover.to,
+            super::printable(library)
         ))
     })
 }
@@ -243,9 +268,13 @@ pub fn sign(key: &SecretKey, hash: &Digest) -> Result<Signature> {
 
 /// Signs a handover from `former` to `new_key` (REG-033): `former` signs
 /// the ASCII bytes of the new key's fingerprint.
-pub fn sign_handover(former: &SecretKey, new_key: &PublicKey) -> Result<KeyHandover> {
+pub fn sign_handover(
+    former: &SecretKey,
+    new_key: &PublicKey,
+    library: &str,
+) -> Result<KeyHandover> {
     let to = new_key.fingerprint();
-    let signature = sign_message(former, to.as_str().as_bytes());
+    let signature = sign_message(former, handover_statement(library, &to).as_bytes());
     Ok(KeyHandover {
         from: former.public_key(),
         to,
@@ -321,13 +350,25 @@ mod tests {
     fn a_handover_verifies_only_for_the_key_it_names() {
         let former = SecretKey::from_bytes([3u8; 32]);
         let new_key = SecretKey::from_bytes([4u8; 32]).public_key();
-        let handover = sign_handover(&former, &new_key).expect("handover");
-        verify_handover(&handover, &new_key).expect("verifies");
+        let handover =
+            sign_handover(&former, &new_key, "github.com/acme/acme-ui").expect("handover");
+        verify_handover(&handover, &new_key, "github.com/acme/acme-ui").expect("verifies");
         let stranger = SecretKey::from_bytes([5u8; 32]).public_key();
-        assert!(verify_handover(&handover, &stranger).is_err());
+        assert!(verify_handover(&handover, &stranger, "github.com/acme/acme-ui").is_err());
         let mut forged = handover.clone();
         forged.from = stranger;
-        assert!(verify_handover(&forged, &new_key).is_err());
+        assert!(verify_handover(&forged, &new_key, "github.com/acme/acme-ui").is_err());
+        assert!(
+            verify_handover(&handover, &new_key, "github.com/acme/other").is_err(),
+            "a handover moved another library's key"
+        );
+        assert_eq!(
+            super::handover_statement("github.com/acme/acme-ui", &new_key.fingerprint()),
+            format!(
+                "{{\"format\":\"suprnova-key-handover/1\",\"library\":\"github.com/acme/acme-ui\",\"next\":\"{}\"}}",
+                new_key.fingerprint()
+            )
+        );
         assert!(Signature::parse_strict(&format!(" {}", handover.signature.encode())).is_err());
     }
 }

@@ -120,19 +120,22 @@ pub enum RegistryError {
     NotBuilt(&'static str),
 }
 
+/// Every message is escaped as it is written, so no error a registry
+/// operation returns can carry a terminal control sequence to whoever
+/// prints it; the line breaks the CLI laid out stay.
 impl fmt::Display for RegistryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RegistryError::Invalid(message)
             | RegistryError::Declined(message)
             | RegistryError::Io(message)
-            | RegistryError::Network(message) => f.write_str(message),
+            | RegistryError::Network(message) => f.write_str(&printable_lines(message)),
             RegistryError::Refused(findings) => {
                 for (index, finding) in findings.iter().enumerate() {
                     if index > 0 {
                         f.write_str("\n")?;
                     }
-                    write!(f, "{finding}")?;
+                    f.write_str(&printable(&finding.to_string()))?;
                 }
                 Ok(())
             }
@@ -146,9 +149,53 @@ impl std::error::Error for RegistryError {}
 /// The registry's result type.
 pub type Result<T> = std::result::Result<T, RegistryError>;
 
+/// Text safe to print on a terminal: every control character, the line
+/// break included, and every Unicode control that reorders text, written as
+/// its escape (`\u{1b}`). Names, addresses, keys and messages that come from
+/// a fetched library, a project file or a server go through this before
+/// they reach the terminal, so none of them can move the cursor, set the
+/// clipboard (OSC 52), retitle the window, or start a line of its own.
+pub fn printable(text: &str) -> String {
+    escape(text, false)
+}
+
+/// [`printable`] for a message the CLI laid out in lines: the line breaks
+/// stay, every other control is escaped.
+pub fn printable_lines(text: &str) -> String {
+    escape(text, true)
+}
+
+fn escape(text: &str, keep_lines: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        let reorders = matches!(
+            character,
+            '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        );
+        if (character == '\n' && keep_lines) || !(character.is_control() || reorders) {
+            out.push(character);
+        } else {
+            out.extend(character.escape_unicode());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Capability;
+    use super::{Capability, printable, printable_lines};
+
+    #[test]
+    fn printable_text_escapes_every_control_and_reordering_character() {
+        assert_eq!(
+            printable("a\u{1b}]52;c;eA==\u{7}b"),
+            "a\\u{1b}]52;c;eA==\\u{7}b"
+        );
+        assert_eq!(printable("one\ntwo"), "one\\u{a}two");
+        assert_eq!(printable_lines("one\ntwo\r"), "one\ntwo\\u{d}");
+        assert_eq!(printable("x\u{202e}y"), "x\\u{202e}y");
+        assert_eq!(printable("caf\u{e9} \u{2713}"), "caf\u{e9} \u{2713}");
+    }
 
     #[test]
     fn every_capability_round_trips_through_its_name() {
