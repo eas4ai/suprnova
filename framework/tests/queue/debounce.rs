@@ -517,7 +517,7 @@ async fn an_actual_run_clears_the_first_dispatch_stamp() {
 
     let driver = Arc::new(MemoryQueueDriver::new());
     Queue::set_driver(driver.clone());
-    let stamp_key = "queue-debounce:queue_debounce::CompactLedger::first_dispatched_at";
+    let stamp_key = "queue-debounce-first-dispatched:queue-debounce:queue_debounce::CompactLedger:";
     Cache::forget(stamp_key).await.expect("cache");
 
     Queue::push(CompactLedger).await.expect("first");
@@ -736,7 +736,7 @@ struct StampBrokenCache {
 }
 
 fn is_stamp(key: &str) -> bool {
-    key.ends_with(":first_dispatched_at")
+    key.starts_with("queue-debounce-first-dispatched:")
 }
 
 #[async_trait]
@@ -820,7 +820,7 @@ async fn an_arming_that_fails_halfway_hands_the_window_back() {
     cache_init();
     COMPACT_RUNS.store(0, Ordering::SeqCst);
     register_job::<CompactLedger>();
-    Cache::forget("queue-debounce:queue_debounce::CompactLedger::first_dispatched_at")
+    Cache::forget("queue-debounce-first-dispatched:queue-debounce:queue_debounce::CompactLedger:")
         .await
         .expect("cache");
 
@@ -1782,7 +1782,7 @@ async fn max_wait_reached_inside_a_bulk_runs_the_bulks_last_job_at_once() {
     BULK_ROLLUP_RUNS.store(0, Ordering::SeqCst);
     BULK_ROLLUP_LAST.store(0, Ordering::SeqCst);
     register_job::<BulkRollUp>();
-    Cache::forget("queue-debounce:queue_debounce::BulkRollUp::first_dispatched_at")
+    Cache::forget("queue-debounce-first-dispatched:queue-debounce:queue_debounce::BulkRollUp:")
         .await
         .expect("cache");
 
@@ -1809,4 +1809,94 @@ async fn max_wait_reached_inside_a_bulk_runs_the_bulks_last_job_at_once() {
         3,
         "and the forced run is the bulk's last job"
     );
+}
+
+// ---------------------------------------------------------------------------
+// One id's first-dispatch stamp is never another id's owner key
+// ---------------------------------------------------------------------------
+
+/// The stamp of id `660` lived at its owner key plus `:first_dispatched_at`,
+/// which is the owner key of id `660:first_dispatched_at`. The stamp's number
+/// and the other id's token then shared one key, and whichever was written
+/// second failed the other id's dispatches.
+#[tokio::test]
+#[serial]
+async fn a_debounce_id_never_shares_a_key_with_another_ids_stamp() {
+    cache_init();
+    register_job::<SyncOrder>();
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let owner_key = "queue-debounce:queue_debounce::SyncOrder:660:first_dispatched_at";
+
+    Queue::push_debounced(
+        SyncOrder {
+            order_id: 660,
+            revision: 1,
+        },
+        DebounceOptions::new(Duration::from_millis(120)).id("660:first_dispatched_at"),
+    )
+    .await
+    .expect("the id ending in `:first_dispatched_at` is queued");
+    let token = Cache::get::<String>(owner_key)
+        .await
+        .expect("cache")
+        .expect("and has claimed its window");
+
+    Queue::push_debounced(
+        SyncOrder {
+            order_id: 660,
+            revision: 2,
+        },
+        DebounceOptions::new(Duration::from_millis(120))
+            .max_wait(Duration::from_secs(600))
+            .id("660"),
+    )
+    .await
+    .expect("id 660 stamps its burst without reading the other id's token as a stamp");
+    assert_eq!(
+        Cache::get::<String>(owner_key).await.expect("cache"),
+        Some(token),
+        "id 660's stamp did not overwrite the other id's token"
+    );
+}
+
+/// A stamp left at that key, by id `661` before stamps moved or by an
+/// upgrade, must not fail the dispatches of id `661:first_dispatched_at` for
+/// as long as the stamp lives: it is not a token, so the window is unowned.
+#[tokio::test]
+#[serial]
+async fn a_stamp_left_at_an_owner_key_does_not_block_that_id() {
+    cache_init();
+    SYNC_ORDER_RUNS.store(0, Ordering::SeqCst);
+    SYNC_ORDER_LAST_REVISION.store(0, Ordering::SeqCst);
+    register_job::<SyncOrder>();
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Cache::put(
+        "queue-debounce:queue_debounce::SyncOrder:661:first_dispatched_at",
+        &suprnova::clock::now().timestamp(),
+        Some(Duration::from_secs(900)),
+    )
+    .await
+    .expect("cache");
+
+    Queue::push_debounced(
+        SyncOrder {
+            order_id: 661,
+            revision: 1,
+        },
+        DebounceOptions::new(Duration::from_millis(120)).id("661:first_dispatched_at"),
+    )
+    .await
+    .expect("a stamp at the owner key leaves the window unowned");
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        worker_cfg(),
+        CancellationToken::new(),
+    ));
+    settle(|| SYNC_ORDER_RUNS.load(Ordering::SeqCst) > 0).await;
+    handle.abort();
+    assert_eq!(SYNC_ORDER_RUNS.load(Ordering::SeqCst), 1);
+    assert_eq!(SYNC_ORDER_LAST_REVISION.load(Ordering::SeqCst), 1);
 }
