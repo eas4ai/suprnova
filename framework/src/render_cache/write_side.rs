@@ -209,49 +209,112 @@ pub fn decision() -> WriteSideDecision {
 static SERVING_SUSPENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The identities whose advancement this process could not record after
-/// their rows committed. The next advancement that can land carries them
-/// along with its own, so the missed invalidation is repaired rather than
-/// forgotten.
-static UNRESOLVED: std::sync::Mutex<std::collections::BTreeSet<DependencyIdentity>> =
-    std::sync::Mutex::new(std::collections::BTreeSet::new());
+/// their rows committed, each with the sequence number of its latest
+/// failure. The next advancement that can land carries them along with its
+/// own, so the missed invalidation is repaired rather than forgotten.
+///
+/// The sequence number is what lets an advancement resolve only the
+/// failures it carried. An advancement that lands has covered the writes
+/// that committed before it, which are the failures recorded before it
+/// took its snapshot. A failure recorded later can belong to a write that
+/// committed after the advancement did, so it stays (DATA-029).
+static UNRESOLVED: std::sync::Mutex<Unresolved> = std::sync::Mutex::new(Unresolved {
+    recorded: 0,
+    failures: std::collections::BTreeMap::new(),
+});
 
-fn unresolved_set() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<DependencyIdentity>>
-{
+/// The state behind [`UNRESOLVED`], kept under one lock so a snapshot and
+/// its mark always agree.
+struct Unresolved {
+    /// How many failures this process has recorded; the latest one's
+    /// sequence number.
+    recorded: u64,
+    /// Each unresolved identity and the sequence number of its latest
+    /// failure.
+    failures: std::collections::BTreeMap<DependencyIdentity, u64>,
+}
+
+impl Unresolved {
+    /// Records one failure that missed `missed`, under the next sequence
+    /// number.
+    ///
+    /// The set is bounded by the most identities one representation may
+    /// observe: past that, it collapses to the broad identity every
+    /// representation observes, so one advance of it still repairs
+    /// everything the missed ones would have invalidated. The broad identity
+    /// takes this failure's sequence number, the newest, so it stands for
+    /// the newest failure it replaced.
+    fn record(&mut self, missed: &[DependencyIdentity]) {
+        self.recorded = self.recorded.saturating_add(1);
+        let sequence = self.recorded;
+        for identity in missed {
+            self.failures.insert(identity.clone(), sequence);
+        }
+        if self.failures.len() > suprnova_live::render_cache::generation::MAX_OBSERVATIONS {
+            self.failures.clear();
+            self.failures.insert(DependencyIdentity::broad(), sequence);
+        }
+    }
+
+    /// The unresolved identities, and the mark that says which failures
+    /// they are.
+    fn snapshot(&self) -> (Vec<DependencyIdentity>, UnresolvedMark) {
+        (
+            self.failures.keys().cloned().collect(),
+            UnresolvedMark(self.recorded),
+        )
+    }
+
+    /// Removes each of `advanced` whose latest failure is at or before
+    /// `mark`, and reports whether nothing is left.
+    fn resolve(&mut self, advanced: &[DependencyIdentity], mark: UnresolvedMark) -> bool {
+        for identity in advanced {
+            if self
+                .failures
+                .get(identity)
+                .is_some_and(|&sequence| sequence <= mark.0)
+            {
+                self.failures.remove(identity);
+            }
+        }
+        self.failures.is_empty()
+    }
+}
+
+/// Which failures an advancement carried: every one recorded at or before
+/// this mark. Returned by [`unresolved`] with the identities it read, and
+/// handed back to [`resolve`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct UnresolvedMark(u64);
+
+fn unresolved_set() -> std::sync::MutexGuard<'static, Unresolved> {
     UNRESOLVED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Stops serving stored entries until every one of `missed` is advanced.
-///
-/// The set is bounded by the most identities one representation may
-/// observe: past that, it collapses to the broad identity every
-/// representation observes, so one advance of it still repairs everything
-/// the missed ones would have invalidated.
+/// See `Unresolved::record` for the bound on what is kept.
 pub(crate) fn suspend_serving(missed: &[DependencyIdentity]) {
     let mut unresolved = unresolved_set();
-    unresolved.extend(missed.iter().cloned());
-    if unresolved.len() > suprnova_live::render_cache::generation::MAX_OBSERVATIONS {
-        unresolved.clear();
-        unresolved.insert(DependencyIdentity::broad());
-    }
+    unresolved.record(missed);
     SERVING_SUSPENDED.store(true, Ordering::Relaxed);
 }
 
 /// The identities a failed advancement left behind, for the next
-/// advancement to carry.
-pub(crate) fn unresolved() -> Vec<DependencyIdentity> {
-    unresolved_set().iter().cloned().collect()
+/// advancement to carry, and the mark that says which failures they are.
+pub(crate) fn unresolved() -> (Vec<DependencyIdentity>, UnresolvedMark) {
+    unresolved_set().snapshot()
 }
 
-/// `advanced` landed: they leave the unresolved set, and serving resumes
-/// once nothing is left in it.
-pub(crate) fn resolve(advanced: &[DependencyIdentity]) {
+/// `advanced` landed, carrying the failures recorded at or before `mark`:
+/// those leave the unresolved set, and serving resumes once nothing is left
+/// in it. An identity whose latest failure came after `mark` stays, because
+/// the write behind that failure may have committed after this advancement
+/// did (DATA-029).
+pub(crate) fn resolve(advanced: &[DependencyIdentity], mark: UnresolvedMark) {
     let mut unresolved = unresolved_set();
-    for identity in advanced {
-        unresolved.remove(identity);
-    }
-    if unresolved.is_empty() {
+    if unresolved.resolve(advanced, mark) {
         SERVING_SUSPENDED.store(false, Ordering::Relaxed);
     }
 }
@@ -293,5 +356,70 @@ fn enabled_override_for_test() -> Option<bool> {
         0 => Some(false),
         1 => Some(true),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The unresolved set's own rules, on a local value rather than the
+    //! process-wide one, which lookups in other tests of this binary read.
+    use super::*;
+
+    fn empty() -> Unresolved {
+        Unresolved {
+            recorded: 0,
+            failures: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// DATA-029: an advancement resolves the failures it carried and leaves
+    /// a newer failure of the same identity in place.
+    #[test]
+    fn a_failure_recorded_after_the_mark_survives_resolve() {
+        let posts = DependencyIdentity::table("posts");
+        let users = DependencyIdentity::table("users");
+        let mut unresolved = empty();
+        unresolved.record(std::slice::from_ref(&posts));
+        let (carried, mark) = unresolved.snapshot();
+        assert_eq!(carried, vec![posts.clone()]);
+
+        unresolved.record(&[posts.clone(), users.clone()]);
+        assert!(
+            !unresolved.resolve(&[posts.clone(), users.clone()], mark),
+            "both failures recorded after the mark are still unresolved"
+        );
+        let (left, newer) = unresolved.snapshot();
+        assert_eq!(left, vec![posts.clone(), users.clone()]);
+
+        assert!(
+            unresolved.resolve(&[posts, users], newer),
+            "an advancement carrying the newer failures resolves them"
+        );
+    }
+
+    /// A collapse to the broad identity takes the newest sequence number, so
+    /// an advancement that carried only the older failures cannot resolve
+    /// it.
+    #[test]
+    fn a_collapse_after_the_mark_is_not_resolved_by_the_older_advancement() {
+        let posts = DependencyIdentity::table("posts");
+        let mut unresolved = empty();
+        unresolved.record(std::slice::from_ref(&posts));
+        let (_, mark) = unresolved.snapshot();
+
+        let many: Vec<DependencyIdentity> = (0
+            ..=suprnova_live::render_cache::generation::MAX_OBSERVATIONS)
+            .map(|index| DependencyIdentity::table(&format!("table_{index}")))
+            .collect();
+        unresolved.record(&many);
+        let broad = DependencyIdentity::broad();
+        assert_eq!(unresolved.snapshot().0, vec![broad.clone()]);
+
+        assert!(
+            !unresolved.resolve(&[posts, broad.clone()], mark),
+            "the collapsed failure is newer than the mark"
+        );
+        let (_, newer) = unresolved.snapshot();
+        assert!(unresolved.resolve(&[broad], newer));
     }
 }

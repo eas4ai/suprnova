@@ -1321,6 +1321,7 @@ async fn legacy_entity_and_query_builder_reads_observe_the_table() {
     children: HasMany<CtChild>,
     tags: BelongsToMany<CtTag, CtParentTag>,
     grandchildren: HasManyThrough<CtChild, CtGrandchild>,
+    grandchild: HasOneThrough<CtChild, CtGrandchild>,
 })]
 pub struct CtParent {
     pub id: i64,
@@ -1470,6 +1471,72 @@ async fn relation_counts_aggregates_and_through_loads_observe_every_table_they_r
     ];
     for (read, observed, expected) in cases {
         for table in expected {
+            assert!(
+                observed.contains(table),
+                "{read} must record {table:?}, got {observed:?}"
+            );
+        }
+    }
+}
+
+/// DATA-033, the lazy Through reads: `get`, `first` and `count` on a
+/// `HasManyThrough`, and `get` on a `HasOneThrough`, join the intermediate
+/// table, so moving or removing an intermediate row changes what they
+/// return. Each must record the intermediate table beside the target. They
+/// recorded only the target, so an entry built from one stayed current
+/// after its intermediate rows changed.
+#[tokio::test]
+#[serial]
+async fn lazy_through_reads_observe_the_intermediate_and_the_target_table() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate_relations(&db).await;
+    let parent = CtParent::create(attrs!(name: "p")).await.expect("parent");
+    let child = CtChild::create(attrs!(ct_parent_id: parent.id, amount: 2.0))
+        .await
+        .expect("child");
+    CtGrandchild::create(attrs!(ct_child_id: child.id, amount: 3.0))
+        .await
+        .expect("grandchild");
+
+    let children = DependencyIdentity::table("ct_children");
+    let grandchildren = DependencyIdentity::table("ct_grandchildren");
+
+    let cases: Vec<(&str, Vec<DependencyIdentity>)> = vec![
+        (
+            "HasManyThrough get",
+            observed_by(async {
+                let rows = parent.grandchildren().get().await.expect("get");
+                assert_eq!(rows.len(), 1, "the join reaches the grandchild");
+            })
+            .await,
+        ),
+        (
+            "HasManyThrough first",
+            observed_by(async {
+                let row = parent.grandchildren().first().await.expect("first");
+                assert!(row.is_some(), "the join reaches the grandchild");
+            })
+            .await,
+        ),
+        (
+            "HasManyThrough count",
+            observed_by(async {
+                let count = parent.grandchildren().count().await.expect("count");
+                assert_eq!(count, 1, "the join counts the grandchild");
+            })
+            .await,
+        ),
+        (
+            "HasOneThrough get",
+            observed_by(async {
+                let row = parent.grandchild().get().await.expect("get");
+                assert!(row.is_some(), "the join reaches the grandchild");
+            })
+            .await,
+        ),
+    ];
+    for (read, observed) in cases {
+        for table in [&children, &grandchildren] {
             assert!(
                 observed.contains(table),
                 "{read} must record {table:?}, got {observed:?}"

@@ -407,12 +407,44 @@ pub(crate) async fn advance_in_dedicated_transaction(
     advance_through(&ExecutorChoice::from_tx(&tx), identities).await
 }
 
+/// Advances `identities` through `txn`, a raw SeaORM transaction its caller
+/// opened with `begin()` and still owns, so they commit or roll back with
+/// the rows that transaction wrote.
+///
+/// The payments webhook hydration writes its mirror rows through such a
+/// transaction, not a framework [`Transaction`]. It used to advance after
+/// its COMMIT, in a transaction of its own, so a cancellation while the
+/// COMMIT was being acknowledged left the rows durable and their
+/// generations where they were, with nothing recording the miss
+/// (DATA-039). Advancing through `txn` makes the two one unit, the same
+/// way `orm::atomic` makes an ORM write and its advance one unit.
+///
+/// The ledger lives on the primary database, so `txn` must be open on it;
+/// the statements are reported under the primary's connection name for
+/// that reason. Like [`advance_in_current_transaction`], this is the
+/// caller's own transaction, so a missing-table failure propagates, and
+/// the write-side decision must already be fixed: this never probes the
+/// schema from inside `txn`.
+pub(crate) async fn advance_in_raw_transaction(
+    txn: &std::sync::Arc<sea_orm::DatabaseTransaction>,
+    identities: &[DependencyIdentity],
+) -> Result<(), FrameworkError> {
+    if !super::write_side_open(true).await? {
+        return Ok(());
+    }
+    let exec = ExecutorChoice::Tx(
+        std::sync::Arc::clone(txn),
+        std::sync::Arc::from(PRIMARY_CONNECTION_NAME),
+    );
+    advance_through(&exec, identities).await
+}
+
 /// The upsert-and-log body shared by [`advance_in_current_transaction`],
-/// [`advance_in_dedicated_transaction`], and [`advance_via_handle`] (the
-/// explicit-transaction form the `Model::*_with_tx` shims and
-/// `Builder::with_tx` bulk writes need - see rulings R47 and fix1 item 3):
-/// each identity's generation row upserted and its change-log row
-/// appended, in ascending digest order.
+/// [`advance_in_dedicated_transaction`], [`advance_in_raw_transaction`],
+/// and [`advance_via_handle`] (the explicit-transaction form the
+/// `Model::*_with_tx` shims and `Builder::with_tx` bulk writes need - see
+/// rulings R47 and fix1 item 3): each identity's generation row upserted
+/// and its change-log row appended, in ascending digest order.
 ///
 /// Issues every statement directly through `exec` - never through the
 /// `DB` facade's `DB::statement` / `DB::scalar` - because `DB::statement`
@@ -509,21 +541,21 @@ async fn advance_through(
 /// that observes one of them revalidate earlier than their lease alone
 /// would have made them.
 ///
-/// # Why here, of the five ways a generation advances
+/// # Why here, of the six ways a generation advances
 ///
 /// This is the single funnel: `advance_in_current_transaction`,
-/// `advance_in_dedicated_transaction`, `advance_via_tx`,
-/// `advance_via_handle`, and `GenerationLedger::advance` all reach
-/// [`advance_through`], and nothing advances a generation without reaching
-/// it. Publishing at any one of the five would announce that one's writes
-/// and silently miss the others - and a sixth entry point added later would
-/// miss it by default, which is exactly the kind of gap nobody notices,
-/// because a missing hint changes no answer, only a latency.
+/// `advance_in_dedicated_transaction`, `advance_in_raw_transaction`,
+/// `advance_via_tx`, `advance_via_handle`, and `GenerationLedger::advance`
+/// all reach [`advance_through`], and nothing advances a generation without
+/// reaching it. Publishing at any one of the six would announce that one's
+/// writes and silently miss the others - and a seventh entry point added
+/// later would miss it by default, which is exactly the kind of gap nobody
+/// notices, because a missing hint changes no answer, only a latency.
 ///
 /// # Why publishing before the caller's commit is correct
 ///
-/// Only one of those five paths owns its own commit. The rest run inside
-/// the caller's ambient transaction, so a hint announced here can precede a
+/// Only one of those six paths owns its own commit. The rest run inside
+/// the caller's transaction, so a hint announced here can precede a
 /// rollback that means the generation never moved at all. That is not a
 /// correctness problem, and spec 18 says so in as many words: a deployment
 /// receiving forged, duplicated, reordered, or stale hints serves exactly
@@ -532,7 +564,7 @@ async fn advance_through(
 /// do anyway. The cost of a hint for a rolled-back write is one ledger read
 /// on a peer, which returns the unchanged truth. The alternative - waiting
 /// for a commit this function does not own - would mean either not
-/// announcing four paths out of five or reaching into the caller's
+/// announcing five paths out of six or reaching into the caller's
 /// transaction lifecycle, and the first is worse and the second is not this
 /// function's to do.
 ///

@@ -66,6 +66,7 @@ Choose by what you actually need to share:
 | `RENDER_CACHE_REDIS_PREFIX` | `suprnova_render:` | the key namespace both Redis cache tiers write under |
 | `RENDER_CACHE_LEASE_MS` | 30,000 | rebuild lease lifetime |
 | `RENDER_CACHE_MAX_WAITERS` | 128 | in-process waiter ceiling |
+| `RENDER_CACHE_MAX_BACKGROUND_REFRESHES` | 32 per CPU | most keys one node refreshes behind requests at once; `0` turns background refresh off |
 | `RENDER_CACHE_HINTS` | the profile's | `disabled` or `redis`; credible generation hints on `<prefix>hints`, over the endpoint above |
 | `RENDER_CACHE_FAILURE` | `open` | `open` serves the route uncached on a provider failure, `closed` answers `503` |
 | `APP_BUILD_ID` | the application's package version (see below) | namespaces every entry to the build that produced it |

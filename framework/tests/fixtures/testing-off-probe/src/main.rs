@@ -81,6 +81,8 @@ fn main() {
     let _ = suprnova::render_cache::telemetry::recorded_lookups_for_test;
     let _ = suprnova::render_cache::telemetry::reset_recorded_lookups_for_test;
     let _ = suprnova::render_cache::telemetry::decline_reason_labels_for_test;
+    let _ = suprnova::payments::webhook_route::hold_hydration_commit_for_test;
+    let _ = suprnova::payments::webhook_route::wait_until_hydration_commit_held_for_test;
 
     // --- A module gated as a whole (E0433 without `with-testing`) ---
     let _ = filesystem_testing_guard;

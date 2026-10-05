@@ -334,6 +334,11 @@ where
     ) -> Result<(String, Vec<sea_orm::Value>), FrameworkError> {
         let b_table = <B as EloquentModel>::TABLE;
         let c_table = <C as EloquentModel>::TABLE;
+        // The join selects `C` rows through `B` rows, so moving or removing
+        // a `B` row changes the result as surely as a `C` row does. The
+        // read depends on `B`'s table beside the `C` table that
+        // `__relation_source` records (DATA-033).
+        crate::render_cache::collector::observe_table_read(b_table);
         let (c_source, mut values) = Builder::<C>::__relation_source(backend, c_table)?;
         values.push(json_value_to_sea_value(&self.parent_key_value));
         let ph = crate::database::__macro_support::placeholder(backend, values.len())?;

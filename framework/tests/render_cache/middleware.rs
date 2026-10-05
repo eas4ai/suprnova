@@ -126,6 +126,64 @@ async fn stale_hits_during_a_running_background_refresh_start_no_more_refreshes(
     assert_eq!(counting_route::renders(), 2, "one background render ran");
 }
 
+/// DATA-045, across keys: a node runs at most
+/// `RenderCacheConfig::max_background_refreshes` background refreshes at
+/// once. Stale hits on many distinct keys each used to start a detached
+/// refresh, one per key with no limit across keys, so a burst over a slow
+/// handler piled up renders as fast as keys went stale. Past the limit a
+/// stale hit serves the stored copy and starts nothing, and a slot frees
+/// when a refresh finishes.
+#[cfg(feature = "testing")]
+#[tokio::test]
+#[serial_test::serial]
+async fn stale_hits_past_the_background_refresh_limit_serve_stale_and_start_nothing() {
+    use render_cache_middleware_support::boot_with_render_cache_and_background_refresh_limit_for_test;
+
+    let harness = boot_with_render_cache_and_background_refresh_limit_for_test(2).await;
+    for id in 1..=3 {
+        let cold = dispatch_get(&harness, &format!("/stale/{id}"), &[]).await;
+        assert_eq!(cold.status, StatusCode::OK);
+    }
+    assert_eq!(counting_route::renders(), 3, "three keys published");
+
+    // Inside the stale-servable band for all three. The first two stale hits
+    // each start a refresh, and each refresh is held once it renders.
+    clock(&harness).advance_ms(70_000);
+    for (id, started) in [(1, 4), (2, 5)] {
+        counting_route::hold_next_render(&harness);
+        let stale = dispatch_get(&harness, &format!("/stale/{id}"), &[]).await;
+        assert_eq!(stale.header("warning"), Some("110 - \"Response is Stale\""));
+        counting_route::wait_until_rendering_count(&harness, started).await;
+    }
+    assert_eq!(RenderCache::background_rebuilds_for_test(), 2);
+
+    let third = dispatch_get(&harness, "/stale/3", &[]).await;
+    assert_eq!(third.status, StatusCode::OK);
+    assert_eq!(
+        third.header("warning"),
+        Some("110 - \"Response is Stale\""),
+        "past the limit, the stale copy is still served at once"
+    );
+    assert_eq!(
+        RenderCache::background_rebuilds_for_test(),
+        2,
+        "two refreshes are in flight, which is the limit, so the third key starts none"
+    );
+
+    counting_route::release_render(&harness);
+    // Five leads released: three cold publishes and two background refreshes.
+    wait_until_background_finished(&harness, 5).await;
+
+    let again = dispatch_get(&harness, "/stale/3", &[]).await;
+    assert_eq!(again.header("warning"), Some("110 - \"Response is Stale\""));
+    assert_eq!(
+        RenderCache::background_rebuilds_for_test(),
+        3,
+        "a finished refresh frees its slot, so the next stale hit refreshes the third key"
+    );
+    wait_until_background_finished(&harness, 6).await;
+}
+
 /// DATA-041: the stale-on-error fallback judges the entry when the failed
 /// rebuild returns, not when the lookup began. A rebuild that outlasted the
 /// entry's stale-on-error window used to fall back to an entry that was Dead
