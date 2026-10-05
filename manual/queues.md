@@ -693,7 +693,9 @@ The [`sync` driver](#drivers) has no worker, so it runs every dispatch inline
 and nothing is ever collapsed. Laravel's sync driver behaves the same way.
 `Queue::bulk` arms each job's window in order and claims it once the driver
 accepts the batch, so a debounced burst pushed in one call collapses onto its
-last job, as separate pushes do.
+last job, as separate pushes do. When the maximum wait runs out on one job of
+the batch, the jobs after it for the same window are queued with no delay
+too, so the job that claims the window is the run the maximum wait forced.
 
 #### Why Suprnova diverges
 

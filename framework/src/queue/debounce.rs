@@ -139,14 +139,23 @@ pub(crate) fn place_key(key: &str) -> String {
 /// The place is reserved here, so jobs armed one after another in one
 /// [`Queue::bulk`](crate::queue::Queue::bulk) call are placed in order
 /// although none of them has claimed the window yet.
+///
+/// `forced` says that max wait already fired for this key earlier in the
+/// same call. `Queue::bulk` claims each window with its last job, so the jobs
+/// after the one max wait fired on belong to that forced run: they go out at
+/// once too, and leave alone the stamp it cleared. Otherwise the next job
+/// stamped a new burst, took the ordinary delay and claimed the window, the
+/// forced run was dropped as superseded, and a stream of bulks could defer
+/// the work forever.
 pub(crate) async fn acquire(
     key: &str,
     window: Duration,
     max_wait: Option<Duration>,
+    forced: bool,
 ) -> Result<Debounced, FrameworkError> {
     let ttl = lock_ttl(window);
     let place = reserve_place(key, ttl).await?;
-    let max_wait_exceeded = max_wait_exceeded(key, ttl, max_wait).await?;
+    let max_wait_exceeded = forced || max_wait_exceeded(key, ttl, max_wait).await?;
     Ok(Debounced {
         owner: format!("{place}:{}", uuid::Uuid::new_v4()),
         max_wait_exceeded,

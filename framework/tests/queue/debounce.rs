@@ -1740,3 +1740,73 @@ async fn overlapping_pushes_keep_the_one_that_armed_last() {
         "and the run is P2's, the dispatch that armed last"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Max wait reached inside one bulk forces the run the bulk claims
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Clone)]
+struct BulkRollUp {
+    revision: u32,
+}
+static BULK_ROLLUP_RUNS: AtomicU32 = AtomicU32::new(0);
+static BULK_ROLLUP_LAST: AtomicU32 = AtomicU32::new(0);
+
+#[async_trait]
+impl Job for BulkRollUp {
+    fn job_name() -> &'static str {
+        "queue_debounce::BulkRollUp"
+    }
+    fn debounce_for() -> Option<Duration> {
+        Some(Duration::from_secs(3600)) // never elapses inside this test
+    }
+    fn max_debounce_wait() -> Option<Duration> {
+        Some(Duration::from_secs(0)) // every dispatch after the first is overdue
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        BULK_ROLLUP_RUNS.fetch_add(1, Ordering::SeqCst);
+        BULK_ROLLUP_LAST.store(self.revision, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Sol review: max wait fired on the bulk's second job, which went out at
+/// once and cleared the burst's stamp. The third job stamped the burst
+/// again, took the ordinary hour-long delay and claimed the window, so the
+/// forced run was dropped as superseded and the burst waited after all. Bulks
+/// sent faster than the window could defeat max wait forever.
+#[tokio::test]
+#[serial]
+async fn max_wait_reached_inside_a_bulk_runs_the_bulks_last_job_at_once() {
+    cache_init();
+    BULK_ROLLUP_RUNS.store(0, Ordering::SeqCst);
+    BULK_ROLLUP_LAST.store(0, Ordering::SeqCst);
+    register_job::<BulkRollUp>();
+    Cache::forget("queue-debounce:queue_debounce::BulkRollUp::first_dispatched_at")
+        .await
+        .expect("cache");
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::bulk((1..=3).map(|revision| BulkRollUp { revision }).collect())
+        .await
+        .expect("bulk");
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        worker_cfg(),
+        CancellationToken::new(),
+    ));
+    settle(|| BULK_ROLLUP_RUNS.load(Ordering::SeqCst) > 0).await;
+    handle.abort();
+    assert_eq!(
+        BULK_ROLLUP_RUNS.load(Ordering::SeqCst),
+        1,
+        "max wait fired inside the bulk, so the bulk runs now, not in an hour"
+    );
+    assert_eq!(
+        BULK_ROLLUP_LAST.load(Ordering::SeqCst),
+        3,
+        "and the forced run is the bulk's last job"
+    );
+}

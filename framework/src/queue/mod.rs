@@ -634,7 +634,7 @@ impl Queue {
         // push arms it at the commit, in the same step that writes the
         // envelope, and measures its window from there. It is claimed only
         // after the write below succeeds - see `debounce`'s module docs.
-        let armed = arm_debounce::<J>(&job, &mut env, debounce.as_ref()).await?;
+        let armed = arm_debounce::<J>(&job, &mut env, debounce.as_ref(), None).await?;
         if let Some(armed) = &armed
             && (debounce.is_some()
                 || (matches!(when, AvailableAt::FromJobDelay) && J::delay().is_none()))
@@ -978,8 +978,10 @@ impl Queue {
     /// Honors [`Job::debounce_for`] as separate pushes do: each job arms its
     /// window in order, and once the driver accepts the batch each window is
     /// claimed by the last job armed for it, so a burst pushed in one call
-    /// collapses onto its last job. A job declaring both `debounce_for` and
-    /// `unique_id` is refused, as every push refuses it.
+    /// collapses onto its last job. When max wait fires on one of the jobs,
+    /// every later job for that window goes out at once too, so the job that
+    /// claims the window is the forced run. A job declaring both
+    /// `debounce_for` and `unique_id` is refused, as every push refuses it.
     pub async fn bulk<J: Job + Clone>(jobs: Vec<J>) -> Result<(), FrameworkError> {
         // Above the fake for the reason `dispatch_push` gives.
         if J::debounce_for().is_some() && jobs.iter().any(|job| job.unique_id().is_some()) {
@@ -1019,12 +1021,18 @@ impl Queue {
         // so the last job armed holds the latest place.
         let mut claims: std::collections::HashMap<String, ArmedWindow> =
             std::collections::HashMap::new();
+        // The keys whose max wait fired on a job of this call: every later
+        // job for the key is part of that forced run.
+        let mut forced: std::collections::HashSet<String> = std::collections::HashSet::new();
         for j in jobs {
             let mut env = envelope_for::<J>(&j, available_at, context.clone())?;
-            if let Some(armed) = arm_debounce::<J>(&j, &mut env, None).await? {
+            if let Some(armed) = arm_debounce::<J>(&j, &mut env, None, Some(&forced)).await? {
                 // A declared `Job::delay` outranks the window, as on a push.
                 if J::delay().is_none() {
                     env.available_at = armed.available_at;
+                }
+                if armed.max_wait_exceeded {
+                    forced.insert(armed.key.clone());
                 }
                 claims.insert(armed.key.clone(), armed);
             }
@@ -2049,6 +2057,8 @@ struct ArmedWindow {
     available_at: chrono::DateTime<chrono::Utc>,
     key: String,
     owner: String,
+    /// Whether max wait fired for this dispatch, which is queued at once.
+    max_wait_exceeded: bool,
     window: std::time::Duration,
 }
 
@@ -2076,11 +2086,13 @@ impl ArmedWindow {
 /// it will claim the window with.
 ///
 /// `Ok(None)` means the job is not debounced and the caller's `available_at`
-/// stands.
+/// stands. `forced` holds each key whose max wait fired for a job earlier in
+/// the same call; see `debounce::acquire`.
 async fn arm_debounce<J: Job>(
     job: &J,
     env: &mut Envelope,
     options: Option<&debounce::DebounceOptions>,
+    forced: Option<&std::collections::HashSet<String>>,
 ) -> Result<Option<ArmedWindow>, FrameworkError> {
     let (window, max_wait, id) = match options {
         Some(o) => (o.window, o.max_wait, o.id.clone()),
@@ -2100,7 +2112,8 @@ async fn arm_debounce<J: Job>(
     // window that cannot be represented fails before any cache round trip.
     let window_delay = chrono::Duration::from_std(window)
         .map_err(|e| FrameworkError::internal(format!("debounce window overflow: {e}")))?;
-    let armed = debounce::acquire(&key, window, max_wait).await?;
+    let forced = forced.is_some_and(|forced| forced.contains(&key));
+    let armed = debounce::acquire(&key, window, max_wait, forced).await?;
     env.debounce_id = id;
     env.debounce_owner = Some(armed.owner.clone());
     let delay = if armed.max_wait_exceeded {
@@ -2122,6 +2135,7 @@ async fn arm_debounce<J: Job>(
         available_at,
         key,
         owner: armed.owner,
+        max_wait_exceeded: armed.max_wait_exceeded,
         window,
     }))
 }
