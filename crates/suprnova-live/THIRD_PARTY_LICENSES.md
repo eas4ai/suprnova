@@ -430,16 +430,16 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | onig_sys | 69.9.3 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | onig | 6.5.3 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | opaque-debug | 0.3.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
-| Cargo | opendal-core | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4 |
-| Cargo | opendal-layer-logging | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4 |
-| Cargo | opendal-layer-observe-metrics-common | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4 |
-| Cargo | opendal-layer-prometheus-client | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4 |
-| Cargo | opendal-layer-retry | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4 |
-| Cargo | opendal-layer-timeout | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4 |
-| Cargo | opendal-layer-tracing | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4 |
-| Cargo | opendal-service-fs | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4 |
-| Cargo | opendal-service-s3 | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4 |
-| Cargo | opendal | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4 |
+| Cargo | opendal-core | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2 |
+| Cargo | opendal-layer-logging | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2 |
+| Cargo | opendal-layer-observe-metrics-common | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2 |
+| Cargo | opendal-layer-prometheus-client | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2 |
+| Cargo | opendal-layer-retry | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2 |
+| Cargo | opendal-layer-timeout | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2 |
+| Cargo | opendal-layer-tracing | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2 |
+| Cargo | opendal-service-fs | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2 |
+| Cargo | opendal-service-s3 | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2 |
+| Cargo | opendal | 0.58.0 | Workspace resolved | Apache-2.0 | git+https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495a11f40885af02c3306fec0e1fda06bc2 |
 | Cargo | openssl-macros | 0.1.1 | Workspace resolved | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | openssl-probe | 0.2.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | openssl-sys | 0.9.116 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
