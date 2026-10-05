@@ -1,7 +1,5 @@
 {
   "name": "suprnova.fieldset",
-  "version": 1,
-  "root": "suprnova-ui/fieldset",
   "files": [
     "fieldset.html",
     "fieldset.css"

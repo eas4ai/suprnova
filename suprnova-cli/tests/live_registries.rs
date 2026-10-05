@@ -836,8 +836,8 @@ fn reg_002_a_name_or_root_that_does_not_match_its_directory_is_refused() {
 }
 
 /// REG-002: every shipped manifest holds only keys a third-party manifest
-/// may. The shipped manifests' integer `version`, which the shipped tree
-/// drops in its own change, is the one key the shipped reader sets aside.
+/// may: it parses with the parser a third-party manifest goes through, so
+/// the integer `version` the shipped manifests used to carry is refused.
 #[test]
 fn reg_002_every_shipped_manifest_holds_only_keys_a_third_party_manifest_may() {
     let components =
@@ -853,11 +853,79 @@ fn reg_002_every_shipped_manifest_holds_only_keys_a_third_party_manifest_may() {
             .file_name()
             .and_then(|name| name.to_str())
             .expect("name");
-        library::parse_shipped_manifest(&fs::read(&manifest).expect("read"), name)
+        library::parse_manifest(&fs::read(&manifest).expect("read"), name, "suprnova")
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         count += 1;
     }
     assert!(count > 50, "only {count} shipped manifests");
+}
+
+/// REG-016, REG-025, REG-002: the shipped library is served in the tree a
+/// third-party author produces: `library.json` at the root, holding only
+/// keys a third-party `library.json` may, and under `components/` one
+/// directory per component, named as the asset route serves it, holding a
+/// manifest the third-party parser reads, with no `root` it does not need,
+/// and every file the manifest names.
+#[test]
+fn reg_016_the_shipped_library_is_served_in_the_tree_every_library_has() {
+    let shipped = LibraryAddress("suprnova".to_owned());
+    let fetcher = suprnova_cli::registry::fetch::EmbeddedFetcher;
+    let versions = fetcher.versions(&shipped).expect("versions");
+    assert_eq!(versions, vec![v(env!("CARGO_PKG_VERSION"))]);
+    let commit = fetcher.resolve(&shipped, &versions[0]).expect("commit");
+    let json = fetcher
+        .file(&shipped, &commit, "library.json")
+        .expect("library.json at the root");
+    let third_party_keys = [
+        "namespace",
+        "source",
+        "version",
+        "framework",
+        "publicKey",
+        "previousKeys",
+        "title",
+        "description",
+    ];
+    for key in library::strict_json_object(&json)
+        .expect("one object")
+        .keys()
+    {
+        assert!(
+            third_party_keys.contains(&key.as_str()),
+            "the shipped library.json holds `{key}`, which a third-party one may not"
+        );
+    }
+    let parsed = library::parse_shipped_library_json(&json).expect("library.json parses");
+    assert_eq!(parsed.version, versions[0]);
+    let components = fetcher.components();
+    assert!(
+        components.len() > 50,
+        "only {} components",
+        components.len()
+    );
+    for directory in components {
+        assert!(library::valid_directory_name(directory), "{directory}");
+        let manifest_bytes = fetcher
+            .file(
+                &shipped,
+                &commit,
+                &format!("components/{directory}/manifest.json"),
+            )
+            .expect(directory);
+        let manifest = library::parse_manifest(&manifest_bytes, directory, &parsed.namespace)
+            .unwrap_or_else(|error| panic!("{directory}: {error}"));
+        assert_eq!(
+            manifest.root, None,
+            "{directory} names the root every shipped component has by default"
+        );
+        for file in &manifest.files {
+            library::validate_file_name(file)
+                .unwrap_or_else(|reason| panic!("{directory}/{file}: {reason}"));
+            fetcher
+                .file(&shipped, &commit, &format!("components/{directory}/{file}"))
+                .unwrap_or_else(|error| panic!("{directory}/{file}: {error}"));
+        }
+    }
 }
 
 /// REG-003: every file lands by its kind: views, stylesheets and scripts

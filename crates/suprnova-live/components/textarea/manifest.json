@@ -1,7 +1,5 @@
 {
   "name": "suprnova.textarea",
-  "version": 1,
-  "root": "suprnova-ui/textarea",
   "files": [
     "textarea.html",
     "textarea.css"

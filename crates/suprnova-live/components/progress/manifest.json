@@ -1,7 +1,5 @@
 {
   "name": "suprnova.progress",
-  "version": 1,
-  "root": "suprnova-ui/progress",
   "files": [
     "progress.html",
     "progress.css"

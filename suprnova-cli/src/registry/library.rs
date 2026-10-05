@@ -126,6 +126,16 @@ const LIBRARY_KEYS: [&str; 8] = [
     "description",
 ];
 
+/// The shipped `library.json`'s keys: a third-party one's but the keys.
+const SHIPPED_LIBRARY_KEYS: [&str; 6] = [
+    "namespace",
+    "source",
+    "version",
+    "framework",
+    "title",
+    "description",
+];
+
 const HANDOVER_KEYS: [&str; 3] = ["publicKey", "next", "signature"];
 
 const MANIFEST_KEYS: [&str; 8] = [
@@ -156,18 +166,7 @@ pub fn parse_library_json(bytes: &[u8]) -> Result<LibraryJson> {
     }
     let source = required_string(&object, "source", "library.json")?;
     parse_published_address(&source)?;
-    let version_text = required_string(&object, "version", "library.json")?;
-    let version = semver::Version::parse(&version_text).map_err(|error| {
-        RegistryError::Invalid(format!(
-            "library.json version `{version_text}` is not semver: {error}"
-        ))
-    })?;
-    let framework_text = required_string(&object, "framework", "library.json")?;
-    let framework = semver::VersionReq::parse(&framework_text).map_err(|error| {
-        RegistryError::Invalid(format!(
-            "library.json framework `{framework_text}` is not a semver requirement: {error}"
-        ))
-    })?;
+    let (version, framework) = library_versions(&object)?;
     let public_key = PublicKey::parse(&required_string(&object, "publicKey", "library.json")?)?;
     let previous_keys = match object.get("previousKeys") {
         None => Vec::new(),
@@ -191,6 +190,57 @@ pub fn parse_library_json(bytes: &[u8]) -> Result<LibraryJson> {
         title: optional_text(&object, "title", "library.json")?,
         description: optional_text(&object, "description", "library.json")?,
     })
+}
+
+/// Parses the shipped library's `library.json` (REG-016, REG-025), which
+/// the binary embeds so the shipped library is served as the tree every
+/// library has. It holds the keys a third-party `library.json` holds but
+/// `publicKey` and `previousKeys`: the shipped library is exempt from
+/// signatures, so it names no key. Its namespace and source are both
+/// `suprnova`. The key in the result is all zeros and never used, since
+/// nothing shipped is verified.
+pub fn parse_shipped_library_json(bytes: &[u8]) -> Result<LibraryJson> {
+    let object = strict_json_object(bytes)?;
+    refuse_unknown_keys(&object, &SHIPPED_LIBRARY_KEYS, "the shipped library.json")?;
+    for key in ["namespace", "source"] {
+        let value = required_string(&object, key, "the shipped library.json")?;
+        if value != SHIPPED_LIBRARY {
+            return Err(RegistryError::Invalid(format!(
+                "the shipped library.json {key} is `{value}`, not `{SHIPPED_LIBRARY}`"
+            )));
+        }
+    }
+    let (version, framework) = library_versions(&object)?;
+    Ok(LibraryJson {
+        namespace: SHIPPED_LIBRARY.to_owned(),
+        source: SHIPPED_LIBRARY.to_owned(),
+        version,
+        framework,
+        public_key: PublicKey::from_bytes([0; 32]),
+        previous_keys: Vec::new(),
+        title: optional_text(&object, "title", "the shipped library.json")?,
+        description: optional_text(&object, "description", "the shipped library.json")?,
+    })
+}
+
+/// A `library.json`'s `version`, a semver version, and `framework`, a
+/// semver requirement (REG-025).
+fn library_versions(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(semver::Version, semver::VersionReq)> {
+    let version_text = required_string(object, "version", "library.json")?;
+    let version = semver::Version::parse(&version_text).map_err(|error| {
+        RegistryError::Invalid(format!(
+            "library.json version `{version_text}` is not semver: {error}"
+        ))
+    })?;
+    let framework_text = required_string(object, "framework", "library.json")?;
+    let framework = semver::VersionReq::parse(&framework_text).map_err(|error| {
+        RegistryError::Invalid(format!(
+            "library.json framework `{framework_text}` is not a semver requirement: {error}"
+        ))
+    })?;
+    Ok((version, framework))
 }
 
 fn parse_handover(value: &serde_json::Value) -> Result<KeyHandover> {
@@ -229,17 +279,12 @@ pub fn parse_manifest(bytes: &[u8], directory: &str, namespace: &str) -> Result<
     manifest_from_object(object, directory, namespace)
 }
 
-/// Parses a shipped component's manifest by the same rules as a
-/// third-party one. The shipped manifests still carry the integer
-/// `version` REG-002 removes; until the shipped tree drops it, that one
-/// key is set aside here, and every other key is held to the third-party
-/// format.
+/// Parses a shipped component's manifest: [`parse_manifest`] under the
+/// shipped namespace, so the shipped library is held to exactly the format
+/// a third-party author can produce (REG-002, REG-016), and its element
+/// tags keep `sn-`.
 pub fn parse_shipped_manifest(bytes: &[u8], directory: &str) -> Result<ComponentManifest> {
-    let mut object = strict_json_object(bytes)?;
-    if object.get("version").is_some_and(serde_json::Value::is_u64) {
-        object.remove("version");
-    }
-    manifest_from_object(object, directory, SHIPPED_LIBRARY)
+    parse_manifest(bytes, directory, SHIPPED_LIBRARY)
 }
 
 fn manifest_from_object(
@@ -643,9 +688,54 @@ pub fn is_rust_keyword(identifier: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileKind, is_rust_keyword, namespace_module, strict_json, strict_json_object,
-        valid_directory_name, valid_namespace, validate_file_name,
+        FileKind, is_rust_keyword, namespace_module, parse_manifest, parse_shipped_library_json,
+        parse_shipped_manifest, strict_json, strict_json_object, valid_directory_name,
+        valid_namespace, validate_file_name,
     };
+
+    /// REG-016, REG-025: the shipped library's `library.json` holds the keys
+    /// a third-party one holds but the signing key, under the shipped
+    /// namespace, and nothing else.
+    #[test]
+    fn the_shipped_library_json_is_a_library_json_without_a_key() {
+        let shipped = br#"{"namespace":"suprnova","source":"suprnova","version":"3.3.0","framework":"3.3.0"}"#;
+        let parsed = parse_shipped_library_json(shipped).expect("the shipped form");
+        assert_eq!(parsed.namespace, "suprnova");
+        assert_eq!(parsed.source, "suprnova");
+        assert_eq!(parsed.version, semver::Version::new(3, 3, 0));
+        assert!(parsed.previous_keys.is_empty());
+        for refused in [
+            r#"{"namespace":"acme","source":"suprnova","version":"3.3.0","framework":"3.3.0"}"#,
+            r#"{"namespace":"suprnova","source":"github.com/acme/acme-ui","version":"3.3.0","framework":"3.3.0"}"#,
+            r#"{"namespace":"suprnova","source":"suprnova","version":"three","framework":"3.3.0"}"#,
+            r#"{"namespace":"suprnova","source":"suprnova","version":"3.3.0"}"#,
+            r#"{"namespace":"suprnova","source":"suprnova","version":"3.3.0","framework":"3.3.0","publicKey":"ed25519:AAAA"}"#,
+            r#"{"namespace":"suprnova","source":"suprnova","version":"3.3.0","framework":"3.3.0","extra":1}"#,
+        ] {
+            assert!(
+                parse_shipped_library_json(refused.as_bytes()).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    /// REG-002: a shipped manifest is read by the third-party rules, so the
+    /// integer `version` the shipped manifests used to carry is refused like
+    /// any other key outside the set, and both readers agree on every byte.
+    #[test]
+    fn a_shipped_manifest_is_held_to_the_third_party_format() {
+        let current =
+            br#"{"name":"suprnova.field","files":["field.html","field.css"],"elements":[]}"#;
+        assert_eq!(
+            parse_shipped_manifest(current, "field").expect("the shipped format"),
+            parse_manifest(current, "field", "suprnova").expect("the third-party format")
+        );
+        let versioned = br#"{"name":"suprnova.field","version":1,"files":["field.html"]}"#;
+        let error = parse_shipped_manifest(versioned, "field")
+            .expect_err("an integer version is refused")
+            .to_string();
+        assert!(error.contains("`version`"), "{error}");
+    }
 
     #[test]
     fn namespaces_and_directory_names_are_closed() {

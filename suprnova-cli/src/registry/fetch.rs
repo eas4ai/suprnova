@@ -627,9 +627,11 @@ pub struct EmbeddedComponent {
 
 include!(concat!(env!("OUT_DIR"), "/live_components.rs"));
 
-/// The shipped library, embedded in this binary: one version, the CLI's,
-/// and no `library.json`, since the shipped library is exempt from the
-/// hash and the signature (REG-016).
+/// The shipped library, embedded in this binary as the tree every library
+/// has (REG-016, REG-025): one version, the CLI's, a `library.json` at the
+/// root ([`LIBRARY_JSON`]) and each component's directory under
+/// `components/`. It serves no `manifest.sig`, since the shipped library is
+/// exempt from the signature.
 #[derive(Debug, Default)]
 pub struct EmbeddedFetcher;
 
@@ -662,6 +664,9 @@ impl Fetcher for EmbeddedFetcher {
         let segments = checked_path(path)?;
         let not_shipped =
             || RegistryError::Invalid(format!("`{path}` is not a file of the shipped library"));
+        if segments.as_slice() == ["library.json"] {
+            return Ok(LIBRARY_JSON.as_bytes().to_vec());
+        }
         let ["components", directory, file] = segments.as_slice() else {
             return Err(not_shipped());
         };
@@ -869,8 +874,39 @@ mod tests {
         );
         assert!(
             EmbeddedFetcher
-                .file(&library, &commit, "library.json")
-                .is_err()
+                .file(&library, &commit, "components/field/manifest.sig")
+                .is_err(),
+            "the shipped library carries no signatures"
         );
+    }
+
+    /// REG-016, REG-025: the shipped library is served as the tree every
+    /// library has, `library.json` at its root included: the namespace and
+    /// source `suprnova`, the CLI's own version for the library and the
+    /// framework, and no key, since nothing shipped is signed.
+    #[test]
+    fn the_embedded_fetcher_serves_the_shipped_library_json() {
+        let library = LibraryAddress("suprnova".to_owned());
+        let commit = EmbeddedFetcher
+            .resolve(&library, &super::shipped_version())
+            .expect("commit");
+        let bytes = EmbeddedFetcher
+            .file(&library, &commit, "library.json")
+            .expect("the shipped library.json");
+        let object = crate::registry::library::strict_json_object(&bytes).expect("one object");
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(
+            serde_json::Value::Object(object),
+            serde_json::json!({
+                "namespace": "suprnova",
+                "source": "suprnova",
+                "version": version,
+                "framework": version,
+            })
+        );
+        let parsed =
+            crate::registry::library::parse_shipped_library_json(&bytes).expect("it parses");
+        assert_eq!(parsed.version, super::shipped_version());
+        assert!(parsed.framework.matches(&super::shipped_version()));
     }
 }

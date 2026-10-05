@@ -1,7 +1,5 @@
 {
   "name": "suprnova.spinner",
-  "version": 1,
-  "root": "suprnova-ui/spinner",
   "files": [
     "spinner.html",
     "spinner.css"
