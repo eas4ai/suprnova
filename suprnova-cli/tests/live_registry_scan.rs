@@ -6,8 +6,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use suprnova_cli::registry::scan::allowlist::{AllowedItem, Allowlist};
-use suprnova_cli::registry::scan::{ComponentFiles, scan_component};
+use suprnova_cli::registry::Capability;
+use suprnova_cli::registry::scan::allowlist::{self, Admission, AllowedItem, Allowlist};
+use suprnova_cli::registry::scan::{
+    ComponentFiles, ScanReport, scan_component, scan_component_with_manifest,
+};
 
 fn corpus() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/registry/bypass")
@@ -59,9 +62,571 @@ fn reg_030_std_fs_under_an_alias_is_refused_naming_the_file_and_line() {
     let finding = report
         .findings
         .iter()
-        .find(|finding| finding.file == "widget.rs")
-        .unwrap_or_else(|| panic!("no finding names widget.rs: {:?}", report.findings));
+        .find(|finding| finding.file == "widget.rs" && finding.message.contains("std::fs"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no finding names std::fs in widget.rs: {:?}",
+                report.findings
+            )
+        });
     assert!(finding.check.starts_with("rust-"), "{finding}");
     assert!(finding.message.contains("std::fs"), "{finding}");
-    assert_eq!(finding.line, Some(4), "{finding}");
+    assert_eq!(finding.line, Some(3), "{finding}");
+}
+
+/// The workspace root, two levels above this crate's manifest.
+fn workspace() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the CLI sits in the workspace")
+        .to_path_buf()
+}
+
+/// REG-030: the embedded allowlist is exactly what the generator produces
+/// from the current feature map, so an API change cannot leave a stale
+/// capability behind.
+#[test]
+fn reg_030_the_allowlist_matches_a_fresh_generation_from_the_feature_map() {
+    let output = std::process::Command::new("python3")
+        .arg(workspace().join("feature-map/tools/registry_allowlist.py"))
+        .arg("--stdout")
+        .output()
+        .expect("python3 runs the generator");
+    assert!(
+        output.status.success(),
+        "the generator failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let fresh = String::from_utf8(output.stdout).expect("the generator writes UTF-8");
+    assert!(
+        fresh == allowlist::embedded_text(),
+        "suprnova-cli/src/registry/scan/allowlist.jsonl is out of date; run feature-map/tools/registry_allowlist.py"
+    );
+}
+
+fn capability_of(list: &Allowlist, path: &str) -> Option<Capability> {
+    match list.admit(path) {
+        Some(Admission::Item { item, .. }) | Some(Admission::Prefix { item, .. }) => {
+            assert!(!item.hidden, "{path} is hidden");
+            item.capability
+        }
+        other => panic!("{path} is not admitted as an item: {other:?}"),
+    }
+}
+
+/// REG-006, REG-030: the embedded allowlist carries a capability for each
+/// effect, re-exported crates included, refuses hidden re-exports and
+/// leaves out what it cannot decide.
+#[test]
+fn reg_030_the_embedded_allowlist_carries_each_items_capability() {
+    let list = allowlist::embedded().expect("the embedded allowlist parses");
+    assert!(list.len() > 1000, "only {} items", list.len());
+    assert_eq!(
+        capability_of(list, "suprnova::Storage"),
+        Some(Capability::Files)
+    );
+    assert_eq!(
+        capability_of(list, "suprnova::filesystem::Storage"),
+        Some(Capability::Files)
+    );
+    assert_eq!(
+        capability_of(list, "suprnova::tokio::fs::read_to_string"),
+        Some(Capability::Files)
+    );
+    assert_eq!(
+        capability_of(list, "suprnova::opendal::Operator"),
+        Some(Capability::Files)
+    );
+    assert_eq!(capability_of(list, "suprnova::serde::Serialize"), None);
+    assert_eq!(
+        capability_of(list, "suprnova::csrf_token"),
+        Some(Capability::Session)
+    );
+    assert_eq!(capability_of(list, "suprnova::route"), None);
+    assert_eq!(capability_of(list, "suprnova::url::to"), None);
+    match list.admit("suprnova::inventory::submit") {
+        Some(Admission::Prefix { item, .. }) => assert!(item.hidden),
+        other => panic!("inventory is not a hidden re-export: {other:?}"),
+    }
+    assert!(list.admit("suprnova::tokio::runtime::Runtime").is_none());
+    assert!(matches!(
+        list.admit("suprnova::PasswordReset"),
+        Some(Admission::Refused { .. })
+    ));
+    assert!(list.admit("suprnova::NoSuchItem").is_none());
+    assert!(matches!(
+        list.admit("suprnova::live::LiveRegistry"),
+        Some(Admission::Item { .. })
+    ));
+}
+
+/// The accepted fixtures: components the scans must admit.
+fn accepted() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/registry/accepted")
+}
+
+/// A fixture manifest's string list under `key`.
+fn manifest_list(dir: &Path, key: &str) -> Vec<String> {
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(dir.join("manifest.json"))
+            .unwrap_or_else(|error| panic!("{}: {error}", dir.display())),
+    )
+    .expect("the fixture manifest is JSON");
+    manifest[key]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| entry.as_str().expect("a string entry").to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A fixture component: its files by manifest name, its namespace and its
+/// manifest's `register`.
+type Fixture = (Vec<(String, Vec<u8>)>, String, Vec<String>);
+
+/// Reads a fixture component's files, its namespace and `register`.
+fn fixture(dir: &Path) -> Fixture {
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(dir.join("manifest.json"))
+            .unwrap_or_else(|error| panic!("{}: {error}", dir.display())),
+    )
+    .expect("the fixture manifest is JSON");
+    let name = manifest["name"].as_str().expect("the manifest has a name");
+    let namespace = name.split('.').next().expect("a namespace").to_string();
+    let register = manifest["register"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| entry.as_str().expect("a register entry").to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut files = Vec::new();
+    for entry in manifest["files"]
+        .as_array()
+        .expect("the manifest names files")
+    {
+        let file = entry.as_str().expect("a file name");
+        files.push((
+            file.to_string(),
+            fs::read(dir.join(file)).expect("a named file"),
+        ));
+    }
+    (files, namespace, register)
+}
+
+fn scan_fixture(dir: &Path) -> ScanReport {
+    let (files, namespace, register) = fixture(dir);
+    let directory = dir
+        .file_name()
+        .expect("a directory name")
+        .to_string_lossy()
+        .into_owned();
+    let component = ComponentFiles {
+        namespace: &namespace,
+        directory: &directory,
+        files: &files,
+        dependency_modules: &[],
+        importable_views: &[],
+    };
+    let elements = manifest_list(dir, "elements");
+    scan_component_with_manifest(
+        &component,
+        &register,
+        &elements,
+        allowlist::embedded().expect("the embedded allowlist parses"),
+    )
+    .expect("the scan runs")
+}
+
+/// Each `refused: <check>` marker in a fixture: the check, the file and the
+/// line it sits on.
+fn markers(dir: &Path) -> Vec<(String, String, u32)> {
+    let (files, _, _) = fixture(dir);
+    let mut found = Vec::new();
+    for (name, bytes) in files {
+        let text = String::from_utf8_lossy(&bytes);
+        for (index, line) in text.lines().enumerate() {
+            if let Some(rest) = line.split("refused: ").nth(1) {
+                let check: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                    .collect();
+                found.push((
+                    check,
+                    name.clone(),
+                    u32::try_from(index + 1).expect("a line number"),
+                ));
+            }
+        }
+    }
+    found
+}
+
+/// REG-022, REG-030, REG-031, REG-032: every component of the bypass corpus
+/// is refused, and each refusal its fixture marks is reported with that
+/// check, file and line.
+#[test]
+fn reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line() {
+    let mut dirs: Vec<PathBuf> = fs::read_dir(corpus())
+        .expect("the corpus exists")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    dirs.sort();
+    assert!(
+        dirs.len() >= 60,
+        "the corpus holds only {} components",
+        dirs.len()
+    );
+    let mut failures = Vec::new();
+    for dir in &dirs {
+        let name = dir
+            .file_name()
+            .expect("a name")
+            .to_string_lossy()
+            .into_owned();
+        let report = scan_fixture(dir);
+        if report.accepted() {
+            failures.push(format!("{name}: admitted"));
+            continue;
+        }
+        let expected = markers(dir);
+        if expected.is_empty() {
+            failures.push(format!("{name}: the fixture marks no refusal"));
+        }
+        for (check, file, line) in expected {
+            let hit = report.findings.iter().any(|finding| {
+                finding.check == check && finding.file == file && finding.line == Some(line)
+            });
+            if !hit {
+                failures.push(format!(
+                    "{name}: no `{check}` finding at {file}:{line}; got {}",
+                    report
+                        .findings
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-006, REG-030: well-formed components are admitted, and each reports
+/// exactly the capabilities its Rust reaches.
+#[test]
+fn reg_030_accepted_components_pass_and_report_their_capabilities() {
+    let cases: &[(&str, &[Capability], &[&str])] = &[
+        ("counter", &[], &["counter::Counter"]),
+        ("tally", &[], &["tally::Tally"]),
+        ("notes", &[Capability::Files], &["notes::Notes"]),
+        (
+            "inventory",
+            &[Capability::Database],
+            &["inventory::Inventory"],
+        ),
+        ("disclosure", &[], &[]),
+    ];
+    for (name, capabilities, defined) in cases {
+        let report = scan_fixture(&accepted().join(name));
+        assert!(
+            report.accepted(),
+            "{name} was refused: {}",
+            report
+                .findings
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        let expected: std::collections::BTreeSet<Capability> =
+            capabilities.iter().copied().collect();
+        assert_eq!(report.capabilities, expected, "{name}");
+        assert_eq!(report.defined_components, *defined, "{name}");
+    }
+}
+
+/// The shipped library, embedded in the CLI from the Live crate.
+fn shipped() -> PathBuf {
+    workspace().join("crates/suprnova-live/components")
+}
+
+/// REG-016: every shipped component's views, stylesheets and scripts pass
+/// the view and script scans, as a third-party library's would.
+#[test]
+fn reg_016_every_shipped_component_passes_the_view_and_script_scans() {
+    let mut dirs: Vec<PathBuf> = fs::read_dir(shipped())
+        .expect("the shipped library exists")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.join("manifest.json").is_file())
+        .collect();
+    dirs.sort();
+    assert!(dirs.len() >= 50, "only {} shipped components", dirs.len());
+    let mut importable = Vec::new();
+    for dir in &dirs {
+        let (files, _, _) = fixture(dir);
+        let name = dir
+            .file_name()
+            .expect("a name")
+            .to_string_lossy()
+            .into_owned();
+        for (file, _) in &files {
+            if file.ends_with(".html") {
+                importable.push(format!("suprnova-ui/{name}/{file}"));
+            }
+        }
+    }
+    let mut failures = Vec::new();
+    for dir in &dirs {
+        let (files, namespace, _) = fixture(dir);
+        assert_eq!(namespace, "suprnova");
+        assert!(
+            files.iter().all(|(file, _)| !file.ends_with(".rs")),
+            "a shipped component carries Rust"
+        );
+        let directory = dir
+            .file_name()
+            .expect("a name")
+            .to_string_lossy()
+            .into_owned();
+        let component = ComponentFiles {
+            namespace: &namespace,
+            directory: &directory,
+            files: &files,
+            dependency_modules: &[],
+            importable_views: &importable,
+        };
+        let elements = manifest_list(dir, "elements");
+        let report = scan_component_with_manifest(
+            &component,
+            &[],
+            &elements,
+            allowlist::embedded().expect("the allowlist parses"),
+        )
+        .expect("the scan runs");
+        for finding in &report.findings {
+            failures.push(format!("{directory}: {finding}"));
+        }
+        assert!(
+            report.capabilities.is_empty(),
+            "{directory} reports {:?}",
+            report.capabilities
+        );
+    }
+    assert!(
+        failures.is_empty(),
+        "{} findings:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-031: the framework filters the view scan admits are exactly the ones
+/// `suprnova::view::filters` re-exports.
+#[test]
+fn reg_031_the_admitted_framework_filters_match_the_framework() {
+    let source =
+        fs::read_to_string(workspace().join("framework/src/view/mod.rs")).expect("the view module");
+    let start = source.find("pub mod filters {").expect("a filters module");
+    let end = start + source[start..].find('}').expect("its end");
+    let mut exported: Vec<&str> = source[start..end]
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("pub use suprnova_live::view::filters::")
+        })
+        .filter_map(|rest| rest.strip_suffix(';'))
+        .collect();
+    exported.sort_unstable();
+    let mut admitted = suprnova_cli::registry::scan::view::FRAMEWORK_FILTERS.to_vec();
+    admitted.sort_unstable();
+    assert_eq!(admitted, exported);
+}
+
+/// REG-022: a file built to make a parser recurse past the scan's stack is
+/// refused with a finding, and the scan returns instead of crashing.
+#[test]
+fn reg_022_inputs_built_to_exhaust_a_parsers_stack_are_refused() {
+    let cases: Vec<(&str, String, &str)> = vec![
+        (
+            "deep.rs",
+            format!(
+                "fn f() {{ let x = {}1{}; }}",
+                "(".repeat(5000),
+                ")".repeat(5000)
+            ),
+            "rust-limit",
+        ),
+        (
+            "unary.rs",
+            format!("fn f() {{ let x = {}true; }}", "!".repeat(200_000)),
+            "rust-limit",
+        ),
+        (
+            "assign.rs",
+            format!("fn f() {{ {}1; }}", "x = ".repeat(100_000)),
+            "rust-limit",
+        ),
+        (
+            "closures.rs",
+            format!("fn f() {{ let x = {}1; }}", "|| ".repeat(100_000)),
+            "rust-limit",
+        ),
+        (
+            "generic.rs",
+            format!(
+                "type T = {}u8{};",
+                "Vec<".repeat(100_000),
+                ">".repeat(100_000)
+            ),
+            "rust-limit",
+        ),
+        (
+            "ifelse.rs",
+            format!("fn f() {{ {}{{}} }}", "if x {} else ".repeat(100_000)),
+            "rust-limit",
+        ),
+        (
+            "deep.js",
+            format!("const x = {}1{};", "(".repeat(5000), ")".repeat(5000)),
+            "script-limit",
+        ),
+        (
+            "unary.js",
+            format!("const x = {}1;", "!".repeat(200_000)),
+            "script-limit",
+        ),
+        (
+            "ternary.js",
+            format!("const x = {}1;", "a ? b : ".repeat(100_000)),
+            "script-limit",
+        ),
+        (
+            "arrows.js",
+            format!("const x = {}1;", "a => ".repeat(100_000)),
+            "script-limit",
+        ),
+        (
+            "new.js",
+            format!("const x = {}X;", "new ".repeat(100_000)),
+            "script-limit",
+        ),
+        (
+            "ifelse.js",
+            format!("{}{{}}", "if (x) {} else ".repeat(100_000)),
+            "script-limit",
+        ),
+        (
+            "expr.html",
+            format!("{{{{ {}1{} }}}}", "(".repeat(5000), ")".repeat(5000)),
+            "view-parse",
+        ),
+        (
+            "deep.css",
+            format!(
+                ".a {{ b: {}1{}; }}",
+                "(".repeat(100_000),
+                ")".repeat(100_000)
+            ),
+            "view-css",
+        ),
+    ];
+    for (name, text, check) in cases {
+        let files = vec![(name.to_string(), text.into_bytes())];
+        let component = ComponentFiles {
+            namespace: "evil",
+            directory: "widget",
+            files: &files,
+            dependency_modules: &[],
+            importable_views: &[],
+        };
+        let report = scan_component(
+            &component,
+            allowlist::embedded().expect("the allowlist parses"),
+        )
+        .expect("the scan returns");
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.check == check && finding.file == name),
+            "{name}: {:?}",
+            report.findings
+        );
+    }
+}
+
+/// REG-022: a file of a type no scan reads is refused, so nothing the scan
+/// did not read is installed.
+#[test]
+fn reg_022_a_file_no_scan_reads_is_refused() {
+    let files = vec![
+        ("widget.html".to_string(), b"<p>x</p>".to_vec()),
+        ("widget.wasm".to_string(), vec![0, 97, 115, 109]),
+    ];
+    let component = ComponentFiles {
+        namespace: "evil",
+        directory: "widget",
+        files: &files,
+        dependency_modules: &[],
+        importable_views: &[],
+    };
+    let report = scan_component(
+        &component,
+        allowlist::embedded().expect("the allowlist parses"),
+    )
+    .expect("the scan runs");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.check == "scan-file" && finding.file == "widget.wasm"),
+        "{:?}",
+        report.findings
+    );
+}
+
+/// REG-030: a component may name the modules of the components it depends
+/// on, listed relative to `crate::live`, and nothing else under it.
+#[test]
+fn reg_030_dependency_modules_are_admitted_and_other_components_are_not() {
+    let rust = b"//! Uses a dependency.\n\
+use crate::live::acme::counter::Counter;\n\
+use crate::live::acme::secret::Key;\n"
+        .to_vec();
+    let files = vec![("widget.rs".to_string(), rust)];
+    let dependencies = vec!["acme::counter".to_string()];
+    let component = ComponentFiles {
+        namespace: "acme",
+        directory: "widget",
+        files: &files,
+        dependency_modules: &dependencies,
+        importable_views: &[],
+    };
+    let report = scan_component(
+        &component,
+        allowlist::embedded().expect("the allowlist parses"),
+    )
+    .expect("the scan runs");
+    let lines: Vec<Option<u32>> = report.findings.iter().map(|finding| finding.line).collect();
+    assert_eq!(lines, vec![Some(3)], "{:?}", report.findings);
+    assert!(
+        report.findings[0]
+            .message
+            .contains("crate::live::acme::secret")
+    );
 }

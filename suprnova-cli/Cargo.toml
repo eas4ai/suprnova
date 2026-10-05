@@ -32,8 +32,9 @@ console = "0.16"
 ctrlc = "3.5"
 syn = { version = "2", features = ["full", "parsing", "visit"] }
 # `generate-types --routes` walks `routes.rs` as tokens to follow nested
-# `group!` prefixes. Already in the tree through `syn`.
-proc-macro2 = "1"
+# `group!` prefixes. Already in the tree through `syn`. The registry scan
+# names the line of every refusal (REG-022), which needs `span-locations`.
+proc-macro2 = { version = "1", features = ["span-locations"] }
 walkdir = "2"
 notify = "8.2"
 dotenvy = "0.15"
@@ -69,6 +70,20 @@ serde_json = "1"
 # The registry compares library versions and framework requirements
 # (`registry/`), already in the workspace lock through the framework.
 semver = "1"
+# The component scan reads a vendored view's template expressions with
+# Askama's own parser (REG-031); the same version the Live crate pins.
+askama_parser = "=0.16.0"
+# The component scan tokenizes stylesheets, `style` elements and `style`
+# attributes (REG-031); already in the lock through the Live crate.
+cssparser = "0.37"
+# The component scan parses a vendored script as a JavaScript module and
+# walks its syntax tree (REG-032). Pure Rust; pinned to 0.139, the newest
+# release whose MSRV (1.94) the workspace meets.
+oxc_allocator = "=0.139.0"
+oxc_ast = "=0.139.0"
+oxc_parser = "=0.139.0"
+oxc_span = "=0.139.0"
+oxc_syntax = "=0.139.0"
 
 # The Live tooling helper runs in its own process group so a timeout can
 # kill everything it started, and an interrupt is forwarded to that group
