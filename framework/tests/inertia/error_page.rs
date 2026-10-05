@@ -121,12 +121,17 @@ impl Middleware for SeededSessionScope {
 
 static INSTALL: Once = Once::new();
 
-/// Install the Inertia protocol layer once for the whole binary.
+/// Install the Inertia protocol layer once for the process.
 ///
-/// `Inertia::install` writes to the process-global middleware registry,
-/// so it has to happen exactly once no matter how many tests run in
-/// parallel. `development(true)` keeps the install off the Vite manifest
-/// that a test checkout has never built.
+/// `Inertia::install` writes the process-global middleware registry, where
+/// the first registration of each middleware type wins, and, outside a
+/// `TestContainer` scope, the installed config every `InertiaResponse`
+/// starts from. Every test that reads this stack therefore runs alone in a
+/// child process (`own_process_async::delegate`): sharing the process, an
+/// install by another test would decide which version this stack checks,
+/// and this install would change what every other test renders.
+/// `development(true)` keeps the install off the Vite manifest that a test
+/// checkout has never built.
 fn install_inertia() {
     INSTALL.call_once(|| {
         Inertia::install(
@@ -339,6 +344,14 @@ fn embedded_page_object(html: &str) -> serde_json::Value {
 #[tokio::test]
 #[serial]
 async fn an_inertia_visit_denied_by_a_permission_middleware_renders_the_error_page() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "an_inertia_visit_denied_by_a_permission_middleware_renders_the_error_page",
+    )
+    .await
+    {
+        return;
+    }
     let _db = seed_member().await;
     let addr = spawn_server(router(), stack(), 2).await;
 
@@ -363,6 +376,14 @@ async fn an_inertia_visit_denied_by_a_permission_middleware_renders_the_error_pa
 #[tokio::test]
 #[serial]
 async fn a_browser_navigation_to_the_same_denial_renders_the_html_shell() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_browser_navigation_to_the_same_denial_renders_the_html_shell",
+    )
+    .await
+    {
+        return;
+    }
     let _db = seed_member().await;
     let addr = spawn_server(router(), stack(), 2).await;
 
@@ -383,6 +404,14 @@ async fn a_browser_navigation_to_the_same_denial_renders_the_html_shell() {
 
 #[tokio::test]
 async fn an_inertia_visit_to_an_unknown_route_renders_the_error_page() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "an_inertia_visit_to_an_unknown_route_renders_the_error_page",
+    )
+    .await
+    {
+        return;
+    }
     let addr = spawn_server(router(), stack(), 2).await;
 
     let (status, headers, body) = request(addr, "GET", "/no/such/page", &inertia_visit()).await;
@@ -401,6 +430,14 @@ async fn an_inertia_visit_to_an_unknown_route_renders_the_error_page() {
 #[tokio::test]
 #[serial]
 async fn a_failing_handler_renders_the_error_page_with_the_sanitized_message() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_failing_handler_renders_the_error_page_with_the_sanitized_message",
+    )
+    .await
+    {
+        return;
+    }
     let _debug = debug_off().await;
     let addr = spawn_server(router(), stack(), 2).await;
 
@@ -422,6 +459,14 @@ async fn a_failing_handler_renders_the_error_page_with_the_sanitized_message() {
 
 #[tokio::test]
 async fn a_401_answered_in_json_gets_the_page_too() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_401_answered_in_json_gets_the_page_too",
+    )
+    .await
+    {
+        return;
+    }
     let addr = spawn_server(router(), stack(), 2).await;
 
     let (status, headers, body) = request(addr, "GET", "/needs-login", &inertia_visit()).await;
@@ -441,6 +486,14 @@ async fn a_401_answered_in_json_gets_the_page_too() {
 #[tokio::test]
 #[serial]
 async fn an_api_client_asking_for_json_keeps_the_json_body() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "an_api_client_asking_for_json_keeps_the_json_body",
+    )
+    .await
+    {
+        return;
+    }
     let _db = seed_member().await;
     let addr = spawn_server(router(), stack(), 2).await;
 
@@ -487,6 +540,14 @@ async fn error_page_off_leaves_the_denial_byte_for_byte() {
 
 #[tokio::test]
 async fn a_validation_failure_still_redirects_back() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_validation_failure_still_redirects_back",
+    )
+    .await
+    {
+        return;
+    }
     let slot = suprnova::session::new_session_slot_for_test();
     slot.lock()
         .unwrap()
@@ -530,6 +591,14 @@ async fn a_validation_failure_still_redirects_back() {
 
 #[tokio::test]
 async fn a_version_mismatch_still_bounces_with_an_inertia_location() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_version_mismatch_still_bounces_with_an_inertia_location",
+    )
+    .await
+    {
+        return;
+    }
     let addr = spawn_server(router(), stack(), 2).await;
 
     let (status, headers, body) = request(
@@ -555,6 +624,9 @@ async fn a_version_mismatch_still_bounces_with_an_inertia_location() {
 
 #[tokio::test]
 async fn a_redirect_is_left_alone() {
+    if crate::own_process_async::delegate(module_path!(), "a_redirect_is_left_alone").await {
+        return;
+    }
     let addr = spawn_server(router(), stack(), 2).await;
 
     let (status, headers, body) = request(addr, "GET", "/moved", &inertia_visit()).await;
@@ -566,6 +638,14 @@ async fn a_redirect_is_left_alone() {
 
 #[tokio::test]
 async fn a_handlers_own_inertia_page_keeps_its_component_even_on_an_error_status() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_handlers_own_inertia_page_keeps_its_component_even_on_an_error_status",
+    )
+    .await
+    {
+        return;
+    }
     let addr = spawn_server(router(), stack(), 2).await;
 
     let (status, headers, body) = request(addr, "GET", "/gone", &inertia_visit()).await;
@@ -583,6 +663,14 @@ async fn a_handlers_own_inertia_page_keeps_its_component_even_on_an_error_status
 #[tokio::test]
 #[serial]
 async fn a_panicking_handler_is_out_of_reach_of_the_error_page() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_panicking_handler_is_out_of_reach_of_the_error_page",
+    )
+    .await
+    {
+        return;
+    }
     // `execute_chain_safely` (framework/src/server.rs) wraps the WHOLE
     // middleware chain in `catch_unwind`, so a panic unwinds every
     // middleware frame - this one included - before the synthesized 500
@@ -628,6 +716,14 @@ impl Middleware for RejectsLikeCsrf {
 /// binary.
 #[tokio::test]
 async fn with_the_default_placement_a_419_answered_first_is_still_raw_json() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "with_the_default_placement_a_419_answered_first_is_still_raw_json",
+    )
+    .await
+    {
+        return;
+    }
     let registry = stack().prepend(RejectsLikeCsrf).prepend(SeededSessionScope(
         suprnova::session::new_session_slot_for_test(),
     ));
@@ -676,6 +772,14 @@ fn assert_content_length_matches_body(headers: &HashMap<String, String>, body: &
 
 #[tokio::test]
 async fn a_throttled_inertia_visit_keeps_retry_after() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_throttled_inertia_visit_keeps_retry_after",
+    )
+    .await
+    {
+        return;
+    }
     let addr = spawn_server(router(), stack(), 2).await;
 
     let (status, headers, body) = request(addr, "GET", "/throttled", &inertia_visit()).await;
@@ -694,6 +798,14 @@ async fn a_throttled_inertia_visit_keeps_retry_after() {
 
 #[tokio::test]
 async fn a_throttled_browser_navigation_keeps_retry_after_too() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_throttled_browser_navigation_keeps_retry_after_too",
+    )
+    .await
+    {
+        return;
+    }
     let addr = spawn_server(router(), stack(), 2).await;
 
     let (status, headers, body) = request(addr, "GET", "/throttled", &browser_navigation()).await;
@@ -716,6 +828,14 @@ async fn a_throttled_browser_navigation_keeps_retry_after_too() {
 
 #[tokio::test]
 async fn a_401_keeps_its_challenge_and_the_rest_of_its_headers() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_401_keeps_its_challenge_and_the_rest_of_its_headers",
+    )
+    .await
+    {
+        return;
+    }
     let addr = spawn_server(router(), stack(), 2).await;
 
     let (status, headers, body) = request(addr, "GET", "/needs-login", &inertia_visit()).await;
@@ -740,6 +860,14 @@ async fn a_401_keeps_its_challenge_and_the_rest_of_its_headers() {
 
 #[tokio::test]
 async fn the_page_never_inherits_permission_to_be_cached() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "the_page_never_inherits_permission_to_be_cached",
+    )
+    .await
+    {
+        return;
+    }
     let addr = spawn_server(router(), stack(), 2).await;
 
     let (status, headers, body) = request(addr, "GET", "/cached-error", &inertia_visit()).await;
@@ -834,6 +962,14 @@ mod locale {
     #[tokio::test]
     #[serial]
     async fn an_error_page_renders_in_the_visitors_locale() {
+        if crate::own_process_async::delegate(
+            module_path!(),
+            "an_error_page_renders_in_the_visitors_locale",
+        )
+        .await
+        {
+            return;
+        }
         let _db = seed_member().await;
         let _catalogs = bind_translator_and_share();
         // Locale OUTSIDE the Inertia layer - the order the scaffold uses.
@@ -861,6 +997,14 @@ mod locale {
     #[tokio::test]
     #[serial]
     async fn locale_registered_inside_the_inertia_layer_loses_the_visitors_locale() {
+        if crate::own_process_async::delegate(
+            module_path!(),
+            "locale_registered_inside_the_inertia_layer_loses_the_visitors_locale",
+        )
+        .await
+        {
+            return;
+        }
         let _db = seed_member().await;
         let _catalogs = bind_translator_and_share();
         // Locale INSIDE the Inertia layer - `append` puts it innermost.
@@ -893,6 +1037,14 @@ mod locale {
     #[tokio::test]
     #[serial]
     async fn the_error_pages_html_shell_declares_the_visitors_language() {
+        if crate::own_process_async::delegate(
+            module_path!(),
+            "the_error_pages_html_shell_declares_the_visitors_language",
+        )
+        .await
+        {
+            return;
+        }
         let _db = seed_member().await;
         let _catalogs = bind_translator_and_share();
         let registry = stack().prepend(LocaleMiddleware::new(localization_config()));

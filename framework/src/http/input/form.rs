@@ -1,13 +1,17 @@
 //! The url-encoded reader: a form body or a query string into a typed value.
 //!
 //! It reads the pairs as Laravel's request holds them once PHP has parsed
-//! them and `ConvertEmptyStringsToNull` has run. An empty value is `null`,
-//! so it is left out. A name sent more than once keeps its last value. A
-//! name that ends in `[]` is a list, read under the name without the
-//! brackets, with its empty elements left out. A value is read as
-//! `serde_urlencoded` reads one, through the field type's `FromStr`, and a
-//! value that does not parse is recorded under its input name with the key
-//! for the field's type, as the multipart extractor files it.
+//! them and `ConvertEmptyStringsToNull` has run. An empty value is `null`:
+//! the name is still there, holding `null`, so a map or a
+//! `serde_json::Value` sees a cleared field apart from one never sent, an
+//! `Option` reads `None`, and a field that cannot hold `null` is missing.
+//! A name sent more than once keeps its last value. A name that ends in
+//! `[]` is a list, read under the name without the brackets, its empty
+//! elements `null` in their places. A value is read as `serde_urlencoded`
+//! reads one, through the field type's `FromStr`, except a `bool`, which
+//! reads what forms send, and a value that does not parse is recorded
+//! under its input name with the key for the field's type, as the
+//! multipart extractor files it.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -20,7 +24,7 @@ use super::placeholder::Placeholder;
 use super::{
     Collector, FieldError, InputError, Stop, join, record_missing_fields, struct_field_names,
 };
-use crate::http::upload::FieldFailure;
+use crate::http::upload::{FieldFailure, parse_form_bool};
 
 /// Read url-encoded `bytes` into `T`, failing field by field.
 pub(crate) fn parse_form_input<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, InputError> {
@@ -61,8 +65,8 @@ struct Form<'a> {
     /// The names a read uses, or `None` for every name.
     tracked: Option<HashSet<&'static str>>,
     /// For each indexed name that is not a list, the position of its last
-    /// pair and whether that pair has a value.
-    last: HashMap<Cow<'a, str>, (usize, bool)>,
+    /// pair.
+    last: HashMap<Cow<'a, str>, usize>,
     /// Each indexed list, by its name without the brackets.
     lists: HashMap<Cow<'a, str>, List<'a>>,
 }
@@ -73,9 +77,9 @@ struct List<'a> {
     first: usize,
     /// How many pairs the list has, null elements included.
     count: usize,
-    /// The elements that are not null, each with its index among all the
-    /// list's pairs, which names its error as the multipart extractor
-    /// names a part's.
+    /// The elements, each with its index among the list's pairs, which
+    /// names its error as the multipart extractor names a part's. An empty
+    /// element is `null`.
     items: Vec<(usize, Cow<'a, str>)>,
 }
 
@@ -102,15 +106,13 @@ impl<'a> Form<'a> {
                             count: 0,
                             items: Vec::new(),
                         });
-                        if !value.is_empty() {
-                            list.items.push((list.count, value));
-                        }
+                        list.items.push((list.count, value));
                         list.count += 1;
                     }
                 }
                 Err(name) => {
                     if form.tracks(&name) {
-                        form.last.insert(name, (at, !value.is_empty()));
+                        form.last.insert(name, at);
                     }
                 }
             }
@@ -129,13 +131,7 @@ impl<'a> Form<'a> {
         fields
             .iter()
             .copied()
-            .filter(|field| {
-                self.lists.contains_key(*field)
-                    || self
-                        .last
-                        .get(*field)
-                        .is_some_and(|&(_, has_value)| has_value)
-            })
+            .filter(|field| self.lists.contains_key(*field) || self.last.contains_key(*field))
             .collect()
     }
 }
@@ -236,8 +232,7 @@ impl<'a> Entries<'a, '_> {
                 continue;
             }
             let read_as_sent = name.ends_with("[]") || !self.form.tracks(&name);
-            let last = !read_as_sent && self.form.last.get(name.as_ref()) == Some(&(at, true));
-            if (read_as_sent && !value.is_empty()) || last {
+            if read_as_sent || self.form.last.get(name.as_ref()) == Some(&at) {
                 return Some((name, Entry::One(value)));
             }
         }
@@ -268,6 +263,10 @@ impl<'de> de::MapAccess<'de> for Entries<'_, '_> {
             return Err(de::Error::custom("a value was read before its name"));
         };
         match entry {
+            Entry::One(text) if text.is_empty() => seed.deserialize(FormNull {
+                path: &name,
+                collector: self.collector,
+            }),
             Entry::One(text) => seed.deserialize(FormValue {
                 text: &text,
                 path: Some(&name),
@@ -433,8 +432,25 @@ impl<'de> de::Deserializer<'de> for FormValue<'_, '_> {
         self.settle(FieldFailure::Format, visitor.visit_str(self.text))
     }
 
+    /// A field's `bool` reads what forms send: `1` and `0`, `true` and
+    /// `false`, `on` and `off`, as the multipart extractor reads one. A name
+    /// is read as `serde_urlencoded` reads it, `true` or `false`.
+    fn deserialize_bool<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        let parsed = match self.path {
+            Some(_) => parse_form_bool(self.text),
+            None => self.text.parse().ok(),
+        };
+        match parsed {
+            Some(value) => self.settle(FieldFailure::Boolean, visitor.visit_bool(value)),
+            None if !self.record(FieldFailure::Boolean) => Err(de::Error::invalid_value(
+                de::Unexpected::Str(self.text),
+                &"`true` or `false`",
+            )),
+            None => self.settle(FieldFailure::Boolean, visitor.visit_bool(false)),
+        }
+    }
+
     parsed! {
-        deserialize_bool: bool => visit_bool(false), Boolean;
         deserialize_i8: i8 => visit_i8(0), Integer;
         deserialize_i16: i16 => visit_i16(0), Integer;
         deserialize_i32: i32 => visit_i32(0), Integer;
@@ -529,6 +545,89 @@ impl<'de> de::VariantAccess<'de> for UnitOnly {
         _: V,
     ) -> Result<V::Value, Self::Error> {
         Err(de::Error::custom("expected unit variant"))
+    }
+}
+
+/// A value sent empty, which Laravel reads as `null`.
+///
+/// A type that can hold `null` gets it: an `Option` is `None`, and a
+/// `serde_json::Value` or a map's value is `null`. A type that cannot is a
+/// missing value, recorded as `validation-required` under `path`, and a
+/// placeholder stands in.
+struct FormNull<'v, 'c> {
+    path: &'v str,
+    collector: &'c Collector,
+}
+
+/// A type that cannot hold `null`: its field is missing.
+macro_rules! required {
+    ($($method:ident($($arg:ident: $ty:ty),*);)*) => {$(
+        fn $method<V: Visitor<'de>>(self, $($arg: $ty,)* visitor: V) -> Result<V::Value, Self::Error> {
+            self.collector.record(self.path, FieldFailure::Required);
+            de::Deserializer::$method(Placeholder, $($arg,)* visitor)
+        }
+    )*};
+}
+
+impl<'de> de::Deserializer<'de> for FormNull<'_, '_> {
+    type Error = FieldError;
+
+    /// A type read from whatever arrives, such as a `serde_json::Value`,
+    /// gets `null`; one that refuses it is missing.
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        visitor
+            .visit_unit()
+            .map_err(|error: FieldError| match error.0 {
+                Stop::Other(_) => {
+                    self.collector.record(self.path, FieldFailure::Required);
+                    FieldError::recorded()
+                }
+                _ => error,
+            })
+    }
+
+    fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        visitor.visit_none()
+    }
+
+    fn deserialize_newtype_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        visitor.visit_newtype_struct(self)
+    }
+
+    required! {
+        deserialize_bool();
+        deserialize_i8();
+        deserialize_i16();
+        deserialize_i32();
+        deserialize_i64();
+        deserialize_i128();
+        deserialize_u8();
+        deserialize_u16();
+        deserialize_u32();
+        deserialize_u64();
+        deserialize_u128();
+        deserialize_f32();
+        deserialize_f64();
+        deserialize_char();
+        deserialize_str();
+        deserialize_string();
+        deserialize_bytes();
+        deserialize_byte_buf();
+        deserialize_seq();
+        deserialize_tuple(len: usize);
+        deserialize_tuple_struct(name: &'static str, len: usize);
+        deserialize_map();
+        deserialize_struct(name: &'static str, fields: &'static [&'static str]);
+        deserialize_enum(name: &'static str, variants: &'static [&'static str]);
+        deserialize_identifier();
+    }
+
+    serde::forward_to_deserialize_any! {
+        unit unit_struct ignored_any
     }
 }
 
@@ -637,6 +736,14 @@ impl<'de> de::SeqAccess<'de> for Items<'_, '_, '_> {
             return Ok(None);
         };
         let path = join(self.path, index);
+        if text.is_empty() {
+            return seed
+                .deserialize(FormNull {
+                    path: &path,
+                    collector: self.collector,
+                })
+                .map(Some);
+        }
         seed.deserialize(FormValue {
             text,
             path: Some(&path),
@@ -687,7 +794,7 @@ mod tests {
     #[test]
     fn a_struct_reads_empty_values_repeats_and_lists_as_laravel_does() {
         let profile: Profile =
-            read("name=&name=Ada&about=x&about=&tags[]=1&tags[]=&tags%5B%5D=3").expect("a profile");
+            read("name=&name=Ada&about=x&about=&tags[]=1&tags%5B%5D=3").expect("a profile");
         assert_eq!(
             profile,
             Profile {
@@ -705,6 +812,7 @@ mod tests {
             [
                 ("name".to_string(), "validation-required".to_string()),
                 ("tags.1".to_string(), "validation-integer".to_string()),
+                ("tags.2".to_string(), "validation-required".to_string()),
                 ("tags.3".to_string(), "validation-integer".to_string()),
             ]
         );
@@ -737,16 +845,27 @@ mod tests {
 
     #[test]
     fn a_map_and_a_list_of_pairs_read_every_name() {
-        let map: BTreeMap<String, String> = read("a=1&a=2&b=&c=3").expect("a map");
+        let map: BTreeMap<String, Option<String>> = read("a=1&a=2&b=&c=3").expect("a map");
         assert_eq!(
             map,
-            BTreeMap::from([("a".into(), "2".into()), ("c".into(), "3".into())])
+            BTreeMap::from([
+                ("a".into(), Some("2".into())),
+                ("b".into(), None),
+                ("c".into(), Some("3".into())),
+            ])
         );
 
-        let value: serde_json::Value = read("q=rust&tags[]=a&tags[]=b").expect("a value");
+        let value: serde_json::Value =
+            read("q=rust&page=&tags[]=a&tags[]=&tags[]=b").expect("a value");
         assert_eq!(
             value,
-            serde_json::json!({ "q": "rust", "tags": ["a", "b"] })
+            serde_json::json!({ "q": "rust", "page": null, "tags": ["a", null, "b"] })
+        );
+
+        // A map whose values cannot be null names the cleared one.
+        assert_eq!(
+            failed_fields::<BTreeMap<String, String>>("a=1&b="),
+            [("b".to_string(), "validation-required".to_string())]
         );
 
         let pairs: Vec<(String, u32)> = read("a=1&b=2").expect("pairs");
@@ -781,6 +900,55 @@ mod tests {
             read::<BTreeMap<u32, String>>("x=a"),
             Err(InputError::Other(_))
         ));
+    }
+
+    #[test]
+    fn an_empty_value_is_a_key_holding_null() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Patch {
+            #[serde(default, deserialize_with = "cleared")]
+            bio: Option<Option<String>>,
+            #[serde(default, deserialize_with = "cleared")]
+            name: Option<Option<String>>,
+            nickname: Option<String>,
+        }
+        // A field told apart as cleared (`Some(None)`) or never sent (`None`).
+        fn cleared<'de, D: de::Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<Option<String>>, D::Error> {
+            Option::<String>::deserialize(deserializer).map(Some)
+        }
+        let patch: Patch = read("bio=&nickname=").expect("a patch");
+        assert_eq!(
+            patch,
+            Patch {
+                bio: Some(None),
+                name: None,
+                nickname: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_bool_reads_what_forms_send() {
+        #[derive(Debug, Deserialize)]
+        struct Consent {
+            terms: bool,
+        }
+        for (sent, value) in [
+            ("1", true),
+            ("0", false),
+            ("On", true),
+            ("off", false),
+            ("TRUE", true),
+        ] {
+            let consent: Consent = read(&format!("terms={sent}")).expect("a bool");
+            assert_eq!(consent.terms, value, "{sent}");
+        }
+        assert_eq!(
+            failed_fields::<Consent>("terms=yes"),
+            [("terms".to_string(), "validation-boolean".to_string())]
+        );
     }
 
     #[test]

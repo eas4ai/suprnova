@@ -267,7 +267,7 @@ mod tests {
     struct WithExtra {
         name: String,
         #[serde(flatten)]
-        extra: BTreeMap<String, String>,
+        extra: BTreeMap<String, Option<String>>,
     }
 
     #[test]
@@ -291,7 +291,10 @@ mod tests {
         let extra: WithExtra =
             parse_form_input(b"name=x&name=y&x=1&x=2&blank=").expect("a flattened struct");
         assert_eq!(extra.name, "y");
-        assert_eq!(extra.extra, BTreeMap::from([("x".into(), "2".into())]));
+        assert_eq!(
+            extra.extra,
+            BTreeMap::from([("blank".into(), None), ("x".into(), Some("2".into()))])
+        );
     }
 
     #[derive(Debug, Deserialize)]

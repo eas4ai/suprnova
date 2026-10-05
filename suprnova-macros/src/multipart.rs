@@ -349,21 +349,54 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 inner_ty,
                 failure,
                 parse,
+                nullable,
             } => {
+                // An empty part is `null`, and keeps its place in the list:
+                // `None` in a `Vec<Option<T>>`, and a missing element, under
+                // its own index, in a `Vec<T>`, which has no place for it.
+                let (element_ty, take) = if nullable {
+                    (
+                        quote! { ::core::option::Option<#inner_ty> },
+                        quote! {
+                            ::suprnova::http::upload::Taken::Value(__parsed) => {
+                                #ident.push(::core::option::Option::Some(__parsed));
+                            }
+                            ::suprnova::http::upload::Taken::Absent => {
+                                #ident.push(::core::option::Option::None);
+                            }
+                        },
+                    )
+                } else {
+                    (
+                        quote! { #inner_ty },
+                        quote! {
+                            ::suprnova::http::upload::Taken::Value(__parsed) => {
+                                #ident.push(__parsed);
+                            }
+                            ::suprnova::http::upload::Taken::Absent => {
+                                ::suprnova::http::upload::add_field_failure(
+                                    &mut __errors,
+                                    #field_name_str,
+                                    ::core::option::Option::Some(__index),
+                                    ::suprnova::http::upload::FieldFailure::Required,
+                                );
+                            }
+                        },
+                    )
+                };
                 field_arms.push(quote! {
                     #field_name_str => {
                         #next_index
-                        if let ::suprnova::http::upload::Taken::Value(__parsed) =
-                            ::suprnova::http::upload::take_text::<#inner_ty>(
-                                __value, #field_name_str, __index, #failure, #parse, &mut __errors,
-                            )
-                        {
-                            #ident.push(__parsed);
+                        match ::suprnova::http::upload::take_text::<#inner_ty>(
+                            __value, #field_name_str, __index, #failure, #parse, &mut __errors,
+                        ) {
+                            #take
+                            ::suprnova::http::upload::Taken::Invalid => {}
                         }
                     }
                 });
                 field_decls.push(quote! {
-                    let mut #ident: ::std::vec::Vec<#inner_ty> = ::std::vec::Vec::new();
+                    let mut #ident: ::std::vec::Vec<#element_ty> = ::std::vec::Vec::new();
                 });
                 struct_init.push(quote! { #ident, });
             }
@@ -569,10 +602,12 @@ enum FieldShape {
         failure: proc_macro2::TokenStream,
         parse: proc_macro2::TokenStream,
     },
+    /// `Vec<T>`, or `Vec<Option<T>>` when `nullable`: `inner_ty` is `T`.
     TextVec {
         inner_ty: proc_macro2::TokenStream,
         failure: proc_macro2::TokenStream,
         parse: proc_macro2::TokenStream,
+        nullable: bool,
     },
 }
 
@@ -616,11 +651,22 @@ fn classify(ty: &Type) -> FieldShape {
         (Some("Vec"), Some(inner)) => {
             if let Some(validator) = uploaded_file_validator(&inner) {
                 FieldShape::FileVec { validator }
+            } else if outer_segment_ident(&inner).as_deref() == Some("Option")
+                && let Some(element) = outer_segment_first_generic(&inner)
+                && uploaded_file_validator(&element).is_none()
+            {
+                FieldShape::TextVec {
+                    failure: parse_failure(&element),
+                    parse: text_parser(&element),
+                    inner_ty: quote! { #element },
+                    nullable: true,
+                }
             } else {
                 FieldShape::TextVec {
                     failure: parse_failure(&inner),
                     parse: text_parser(&inner),
                     inner_ty: quote! { #inner },
+                    nullable: false,
                 }
             }
         }

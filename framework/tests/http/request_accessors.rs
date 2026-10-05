@@ -1023,6 +1023,7 @@ struct Search {
     page: Option<u32>,
     #[serde(default)]
     tags: Vec<String>,
+    exact: Option<bool>,
 }
 
 async fn search(query: &str) -> Result<Search, suprnova::FrameworkError> {
@@ -1063,12 +1064,69 @@ async fn query_into_keeps_the_last_value_of_a_repeated_name() {
 
 #[tokio::test]
 async fn query_into_collects_a_list_name() {
-    let found = search("sort=name&tags[]=rust&tags[]=&tags%5B%5D=web")
+    let found = search("sort=name&tags[]=rust&tags%5B%5D=web")
         .await
         .expect("a name ending in [] is a list");
-    // An empty element is null and left out.
     assert_eq!(found.tags, vec!["rust".to_string(), "web".to_string()]);
 
     let found = search("sort=name").await.expect("no list at all");
     assert!(found.tags.is_empty());
+}
+
+#[tokio::test]
+async fn query_into_reads_a_bool_as_forms_send_it() {
+    for (sent, read) in [
+        ("1", true),
+        ("0", false),
+        ("on", true),
+        ("off", false),
+        ("true", true),
+    ] {
+        let found = search(&format!("sort=name&exact={sent}"))
+            .await
+            .unwrap_or_else(|error| panic!("`{sent}`: {error}"));
+        assert_eq!(found.exact, Some(read), "`{sent}`");
+    }
+}
+
+#[tokio::test]
+async fn a_query_that_does_not_read_names_each_field_in_errors() {
+    match search("sort=&page=abc&exact=maybe").await {
+        Err(suprnova::FrameworkError::Validation(errors)) => {
+            let mut keys: Vec<(&str, &str)> = errors
+                .errors
+                .iter()
+                .map(|(field, messages)| (field.as_str(), messages[0].key.as_ref()))
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    ("exact", "validation-boolean"),
+                    ("page", "validation-integer"),
+                    ("sort", "validation-required"),
+                ]
+            );
+        }
+        other => panic!("expected validation errors, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn query_into_keeps_an_empty_value_as_a_null_key() {
+    let req = build_request(
+        hyper::Request::builder()
+            .method("GET")
+            .uri("/search?q=&page=2"),
+        "",
+    )
+    .await;
+    let query: std::collections::BTreeMap<String, Option<String>> =
+        req.query_into().expect("a map of the query");
+    assert_eq!(
+        query.get("q"),
+        Some(&None),
+        "a cleared value is a key holding null"
+    );
+    assert_eq!(query.get("page"), Some(&Some("2".to_string())));
 }
