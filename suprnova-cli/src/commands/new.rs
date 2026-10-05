@@ -81,7 +81,7 @@ pub fn run(
     ui::br();
 
     if let Err(e) = create_project(
-        &project_name,
+        Path::new(&project_name),
         &package_name,
         &description,
         &author,
@@ -371,8 +371,13 @@ fn create_api_project(
     Ok(())
 }
 
-fn create_project(
-    project_name: &str,
+/// Writes the full-stack application `suprnova new` generates into
+/// `project_path`, which must not exist yet; its last component is the
+/// project name. `live:registry new` builds a library's preview application
+/// with it, so a preview is an application in exactly the form `live:add`
+/// installs into.
+pub(crate) fn create_project(
+    project_path: &Path,
     package_name: &str,
     description: &str,
     author: &str,
@@ -380,12 +385,18 @@ fn create_project(
     frontend: Frontend,
     with_portless: bool,
 ) -> Result<(), String> {
-    let project_path = Path::new(project_name);
+    let project_name = project_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("'{}' names no project", project_path.display()))?;
 
     // `symlink_metadata` sees a dangling symlink too; `exists` would follow
     // it and then create the whole tree at the link's target.
     if project_path.symlink_metadata().is_ok() {
-        return Err(format!("Directory '{}' already exists", project_name));
+        return Err(format!(
+            "Directory '{}' already exists",
+            project_path.display()
+        ));
     }
 
     // Create directory structure
