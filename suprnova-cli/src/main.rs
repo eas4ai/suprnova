@@ -45,11 +45,10 @@ enum LiveRegistryCommand {
         /// and hyphens; the library is created in ./<namespace>
         namespace: String,
         /// The address the library will be published at (e.g.,
-        /// github.com/acme/acme-ui), written as library.json's source; the
-        /// example is signed at once. Without it source is left empty and
-        /// nothing is signed until it is set.
+        /// github.com/acme/acme-ui), written as library.json's source and
+        /// covered by every signature, so the example is signed at once
         #[arg(long, value_name = "ADDRESS")]
-        source: Option<String>,
+        source: String,
     },
     /// Check every component as live:add would, and list its capabilities
     Check,
@@ -638,7 +637,7 @@ fn main() {
             let outcome = match command {
                 LiveRegistryCommand::New { namespace, source } => {
                     let directory = std::path::PathBuf::from(&namespace);
-                    registry_commands::new_with_source(&namespace, &directory, source.as_deref())
+                    registry_commands::new(&namespace, &directory, &source)
                 }
                 LiveRegistryCommand::Check => registry_commands::check(std::path::Path::new(".")),
                 LiveRegistryCommand::Sign => registry_commands::sign(std::path::Path::new(".")),
@@ -1060,10 +1059,17 @@ mod tests {
     }
 
     /// `live:registry new` takes the address the library is published at,
-    /// and leaves it out when it is not given.
+    /// and refuses to run without it: every signature covers the address.
     #[test]
-    fn live_registry_new_takes_the_published_address() {
-        let parsed = |argv: &[&str]| match Cli::try_parse_from(argv) {
+    fn live_registry_new_requires_the_published_address() {
+        let parsed = match Cli::try_parse_from([
+            "suprnova",
+            "live:registry",
+            "new",
+            "acme",
+            "--source",
+            "github.com/acme/acme-ui",
+        ]) {
             Ok(Cli {
                 command:
                     Some(Commands::LiveRegistry {
@@ -1071,39 +1077,17 @@ mod tests {
                     }),
                 ..
             }) => (namespace, source),
-            _ => panic!("`{}` must be live:registry new", argv.join(" ")),
+            _ => panic!("`live:registry new acme --source <address>` must parse"),
         };
         assert_eq!(
-            parsed(&[
-                "suprnova",
-                "live:registry",
-                "new",
-                "acme",
-                "--source",
-                "github.com/acme/acme-ui"
-            ]),
-            (
-                "acme".to_owned(),
-                Some("github.com/acme/acme-ui".to_owned())
-            )
+            parsed,
+            ("acme".to_owned(), "github.com/acme/acme-ui".to_owned())
         );
-        assert_eq!(
-            parsed(&["suprnova", "live:registry", "new", "acme"]),
-            ("acme".to_owned(), None)
-        );
-        assert!(
-            Cli::try_parse_from([
-                "suprnova",
-                "live:registry",
-                "rotate-key",
-                "--drop-key",
-                "a",
-                "--drop-key",
-                "b"
-            ])
-            .is_ok(),
-            "--drop-key repeats"
-        );
+        let error = match Cli::try_parse_from(["suprnova", "live:registry", "new", "acme"]) {
+            Err(error) => error,
+            Ok(_) => panic!("without --source the command is refused"),
+        };
+        assert!(error.to_string().contains("--source"), "{error}");
     }
 
     /// A subcommand invoked without a help flag still parses, or the

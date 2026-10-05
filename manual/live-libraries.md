@@ -25,10 +25,10 @@ cd acme
 suprnova live:registry check
 ```
 
-`--source` is the address the library will be published at, which
-`library.json` records as its `source`; see [library.json](#libraryjson).
-Without `--source`, `new` writes an empty `source`, and `check`, `sign` and
-`rotate-key` refuse until you set it in `library.json`.
+`--source` is required: the address the library will be published at,
+which `library.json` records as its `source` and every signature covers;
+see [library.json](#libraryjson). If you later empty or remove `source` by
+hand, `check`, `sign` and `rotate-key` refuse until you set it again.
 
 The argument is the library's namespace. It prefixes everything the library
 installs: views and assets under `templates/acme-ui/`, Rust under

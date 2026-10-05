@@ -62,17 +62,12 @@ const EMPTY_SOURCE: &str =
 const FIRST_VERSION: &str = "0.1.0";
 
 /// Scaffolds a library tree with one example component and a `preview/`
-/// application, makes the key pair, and says where the private key is.
-/// `library.json`'s `source` is left empty; [`new_with_source`] names it.
-pub fn new(namespace: &str, directory: &Path) -> Result<()> {
-    new_with_source(namespace, directory, None)
-}
-
-/// [`new`] with the address the library will be published at, which is
-/// what `live:registry new --source` passes. With an address the example
-/// is signed at once; without one `source` is written empty and nothing is
-/// signed, because every signature covers the address (REG-023).
-pub fn new_with_source(namespace: &str, directory: &Path, source: Option<&str>) -> Result<()> {
+/// application, signs the example, makes the key pair, and says where the
+/// private key is. `source` is the address the library will be published
+/// at, which `live:registry new --source` passes: every signature covers
+/// it (REG-023), so the tree is signed and passes `check` as generated
+/// (REG-018).
+pub fn new(namespace: &str, directory: &Path, source: &str) -> Result<()> {
     let config = author_key::config_dir()?;
     let created = create_library(
         namespace,
@@ -89,17 +84,11 @@ pub fn new_with_source(namespace: &str, directory: &Path, source: Option<&str>) 
     ui::hint(
         "library.json, components/counter/ (a view, a stylesheet, a script and a Live component), and preview/, an application that renders each component from where it sits",
     );
-    if created.signed > 0 {
-        ui::success(&format!(
-            "Signed {} with the key {}",
-            plural(created.signed, "component"),
-            created.fingerprint
-        ));
-    } else {
-        ui::warning(&format!(
-            "library.json's source is empty, so nothing is signed yet: {EMPTY_SOURCE}, then run `suprnova live:registry sign`."
-        ));
-    }
+    ui::success(&format!(
+        "Signed {} with the key {}",
+        plural(created.signed, "component"),
+        created.fingerprint
+    ));
     ui::br();
     ui::warning(&format!(
         "Your private signing key is at {}",
@@ -112,10 +101,6 @@ pub fn new_with_source(namespace: &str, directory: &Path, source: Option<&str>) 
     let library = format!("cd {}", directory.display());
     let preview = format!("cd {}", directory.join(PREVIEW_DIR).display());
     let mut steps: Vec<&str> = vec![&library];
-    if created.signed == 0 {
-        steps.push("set \"source\" in library.json");
-        steps.push("suprnova live:registry sign");
-    }
     steps.extend([
         "suprnova live:registry check",
         &preview,
@@ -407,7 +392,7 @@ struct Created {
 fn create_library(
     namespace: &str,
     directory: &Path,
-    source: Option<&str>,
+    source: &str,
     config: &Path,
     tools: &dyn Tools,
     fetcher: &dyn Fetcher,
@@ -428,14 +413,8 @@ fn create_library(
     std::fs::create_dir(directory).map_err(|error| {
         RegistryError::Io(format!("cannot create {}: {error}", directory.display()))
     })?;
-    let source = source.unwrap_or_default().to_owned();
-    let outcome = write_library(namespace, &source, directory, &public)
+    let outcome = write_library(namespace, source, directory, &public)
         .and_then(|()| {
-            if source.is_empty() {
-                // Every signature covers the address, so there is nothing
-                // to sign until the author names it.
-                return Ok(0);
-            }
             let inspection = inspect(directory, false, tools, fetcher)?;
             sign_inspection(directory, &inspection, &secret, &public, tools)
         })
@@ -2177,7 +2156,7 @@ mod tests {
         let created = create_library(
             "acme",
             &root,
-            Some(SOURCE),
+            SOURCE,
             &config,
             &FAKE,
             &FakeFetcher::default(),
@@ -2415,7 +2394,7 @@ mod tests {
                 create_library(
                     namespace,
                     &target,
-                    Some(SOURCE),
+                    SOURCE,
                     &config,
                     &FAKE,
                     &FakeFetcher::default()
@@ -2432,7 +2411,7 @@ mod tests {
             create_library(
                 "acme",
                 &existing,
-                Some(SOURCE),
+                SOURCE,
                 &config,
                 &FAKE,
                 &FakeFetcher::default()
@@ -2505,7 +2484,7 @@ mod tests {
         let error = create_library(
             "acme",
             &root,
-            Some(SOURCE),
+            SOURCE,
             &config,
             &ScanFails,
             &FakeFetcher::default(),
@@ -3126,47 +3105,21 @@ mod tests {
     }
 
     #[test]
-    fn reg_018_new_without_a_source_writes_an_empty_one_and_signs_nothing_until_it_is_set() {
+    fn reg_018_new_refuses_an_empty_source_and_leaves_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("acme");
         let config = dir.path().join("config");
-        let created = create_library("acme", &root, None, &config, &FAKE, &FakeFetcher::default())
-            .expect("live:registry new");
-        assert_eq!(created.signed, 0);
-        assert!(
-            created.key_path.is_file(),
-            "the key is written all the same"
-        );
-        let json: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(root.join("library.json")).expect("read"))
-                .expect("json");
-        assert_eq!(json["source"], "");
-        let signature = root.join("components/counter/manifest.sig");
-        assert!(!signature.exists(), "nothing is signed without a source");
-        let library = Library {
-            _dir: dir,
-            root: root.clone(),
-            config: config.clone(),
-            created,
+        let error = match create_library("acme", &root, "", &config, &FAKE, &FakeFetcher::default())
+        {
+            Err(error) => error,
+            Ok(_) => panic!("an empty source cannot be signed"),
         };
-        let report = check(&root);
-        assert!(
-            problems(&report).contains(super::EMPTY_SOURCE),
-            "{}",
-            problems(&report)
-        );
-        let error = sign(&library).expect_err("sign refuses an empty source");
         assert!(error.to_string().contains(super::EMPTY_SOURCE), "{error}");
-        assert!(!signature.exists());
-
-        edit(
-            &root.join("library.json"),
-            "\"source\": \"\"",
-            &format!("\"source\": \"{SOURCE}\""),
+        assert!(!root.exists(), "the half-written library is removed");
+        assert!(
+            !config.exists() || std::fs::read_dir(&config).expect("config").next().is_none(),
+            "no key is kept for a library that was not created"
         );
-        assert_eq!(sign(&library).expect("signs"), 1);
-        let report = check(&root);
-        assert!(report.passed(), "{}", problems(&report));
     }
 
     #[test]
@@ -3234,7 +3187,7 @@ mod tests {
         let created = create_library(
             "acme",
             &root,
-            Some("github.com/acme/acme"),
+            "github.com/acme/acme",
             &config,
             &Registry,
             &FakeFetcher::default(),
