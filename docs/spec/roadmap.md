@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: application-port-second-round
+Current: live-components-sdk
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -325,6 +325,29 @@ Requirements: PAR-041, PAR-042, PAR-043, PAR-044, PAR-045, LIVE-039
    (LIVE-039). Delivery includes a release of the GitHub provider crate
    that fills `avatar_url`. Done when the mechanisms pass on a committed
    tree, the schema ones against SQLite, Postgres and MySQL.
+
+## live-components-sdk
+
+Requirements: REG-001 to REG-033
+
+28. live-components-sdk - the Suprnova Live components SDK the developer
+   asked for on 2026-10-03 and made the primary focus of the next release
+   on 2026-10-05: third-party component libraries published as signed,
+   tagged repositories (REG-001 to REG-005, REG-023 to REG-026, REG-033);
+   `live:add` by repository address with a plan the developer confirms,
+   trust on first use, capabilities approved per install, and provenance
+   in the lowercase `suprnova.toml` (REG-006 to REG-013, REG-027, REG-028);
+   validation inside the pull that compiles and runs nothing: the hash,
+   the signature, and the AST scans of Rust, views and scripts against the
+   Suprnova and Live API, with no crates and no overrides (REG-014 to
+   REG-022, REG-029 to REG-032); each library's assets served under its
+   own root (REG-017); and the authoring commands, scaffold, checks and
+   manual chapters (REG-018 to REG-021). Delivery includes the shipped
+   library moved to the one manifest format. Done when the four
+   mechanisms pass on a committed tree: `registries`, `registries-scan`
+   (its bypass corpus refused), `registries-compile` (an installed
+   component compiles and renders in a scaffolded application) and
+   `registries-serve`.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
