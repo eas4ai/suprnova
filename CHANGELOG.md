@@ -999,7 +999,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `QueryBuilder::count` keeps the whole count under a limit and returns 0
   past an offset, `exists` asks about the rows the limit and offset leave,
   and a `Pagination::length_aware` total counts every match, as Laravel
-  does. `chunk_by_id`, `lazy_by_id`, `lazy` and `cursor` over a union visit
+  does, and `DB::table(..).count()` keeps the limit and offset the same
+  way. `QueryBuilder::offset(n).all()` and `first()` with no limit run on
+  SQLite and MySQL instead of failing with a syntax error.
+  `chunk_by_id`, `lazy_by_id`, `lazy` and `cursor` over a union visit
   each row once and finish; the cursor bounded only the first query, so the
   batches repeated forever. `<rel>_min_as::<Decimal>()` and
   `<rel>_max_as::<Decimal>()` read a `NUMERIC` or `DECIMAL` minimum or
