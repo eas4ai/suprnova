@@ -75,6 +75,6 @@ nix = { version = "=0.31.3", default-features = false, features = ["process", "s
 
 [dev-dependencies]
 # Verify generated keys round-trip through the framework's loader.
-suprnova = { path = "../framework", version = "3.1.0" }
+suprnova = { path = "../framework", version = "3.2.0" }
 # Integration tests that invoke the binary with a temp working directory.
 tempfile = "3"

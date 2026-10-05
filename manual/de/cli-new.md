@@ -141,7 +141,7 @@ Die CLI selbst wird über Git ausgeliefert, nicht über crates.io
 (Pre-Launch):
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v3.1.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v3.2.0 suprnova-cli
 ```
 
 `--force` auf demselben Befehl aktualisiert eine bestehende
