@@ -1083,7 +1083,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   promotion is not undone, on the same node or another one: a promotion
   asks the fallback again just before it publishes and after, a cancelled
   read still finishes that check, and a withdrawal deletes only the exact
-  version the promotion wrote, never a writer's newer object. On a primary
+  version the promotion wrote, never a writer's newer object. An equal
+  length no longer counts as proof that the fallback object is unchanged:
+  a fallback without an ETag, version or modification time, such as the
+  in-memory disk behind `Storage::fake()`, is checked by content, so a
+  same-size overwrite is never promoted as the old bytes. On a primary
   without versioned deletes (local, memory, and unversioned S3, Azure Blob
   and GCS) the promotion keeps its copy and logs a warning instead, so a
   delete on another node that lands between the last check and the publish
