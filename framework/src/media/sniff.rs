@@ -331,6 +331,18 @@ pub(crate) struct ZuneJpeg {
     /// XMP, ICC profile chunks, gain maps, MPF, IPTC), with the share of the
     /// lists that hold them.
     pub(crate) metadata: u64,
+    /// Bytes zune-jpeg's Extended XMP reassembly reads before the first
+    /// scan, at most.
+    ///
+    /// zune-jpeg keeps every Extended XMP segment it has met and, after
+    /// each marker that follows, sorts them and compares each one with the
+    /// first. Until a series completes, that re-reads every segment kept so
+    /// far, so the work grows with the square of the segment count: a few
+    /// megabytes of one-byte segments ask for billions of comparisons, far
+    /// more than their bytes cost in [`Self::metadata`]. This counts the
+    /// segments kept at every marker, as if none were ever dropped, at
+    /// [`ZUNE_XMP_PASS_BYTES`] each.
+    pub(crate) xmp_reads: u64,
 }
 
 /// Read a JPEG's headers the way zune-jpeg 0.5.16-rc2's
@@ -351,6 +363,8 @@ pub(crate) fn jpeg_zune(bytes: &[u8]) -> Option<ZuneJpeg> {
     let mut frame: Option<JpegFrame> = None;
     let mut adobe: Option<u8> = None;
     let mut metadata = 0u64;
+    let mut xmp_segments = 0u64;
+    let mut xmp_reads = 0u64;
     loop {
         let mut marker = *bytes.get(pos)?;
         pos += 1;
@@ -368,6 +382,12 @@ pub(crate) fn jpeg_zune(bytes: &[u8]) -> Option<ZuneJpeg> {
             }
             let (body, next) = jpeg_segment(bytes, pos)?;
             pos = next;
+            if marker == 0xE1 && tagged(body, EXTENDED_XMP) {
+                xmp_segments += 1;
+            }
+            // zune-jpeg tries the reassembly after every marker it reads,
+            // the start of scan included, over every segment it keeps.
+            xmp_reads = xmp_reads.saturating_add(xmp_segments.saturating_mul(ZUNE_XMP_PASS_BYTES));
             match marker {
                 0xC0..=0xC3 | 0xC9..=0xCB => {
                     if frame.is_some() {
@@ -388,6 +408,7 @@ pub(crate) fn jpeg_zune(bytes: &[u8]) -> Option<ZuneJpeg> {
                         frame,
                         colour,
                         metadata,
+                        xmp_reads,
                     });
                 }
                 0xE1 | 0xE2 | 0xED => {
@@ -480,20 +501,33 @@ const ZUNE_EXTENDED_XMP: u64 = 56;
 pub(crate) const ZUNE_METADATA_LISTS: u64 =
     4 * (ZUNE_ICC_CHUNK + ZUNE_GAIN_MAP + ZUNE_EXTENDED_XMP);
 
+/// What one reassembly pass reads of each Extended XMP segment zune-jpeg
+/// keeps: the segment's list entry, and its 32-byte GUID, compared with the
+/// first segment's.
+pub(crate) const ZUNE_XMP_PASS_BYTES: u64 = ZUNE_EXTENDED_XMP + 32;
+
+/// The namespace that opens an Extended XMP segment.
+const EXTENDED_XMP: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
+
+/// Whether a segment `body` opens with `prefix` and holds more after it, the
+/// test zune-jpeg classifies its APP segments by.
+fn tagged(body: &[u8], prefix: &[u8]) -> bool {
+    body.len() > prefix.len() && body.starts_with(prefix)
+}
+
 /// What zune-jpeg copies out of one APP1, APP2 or APP13 segment, as its
 /// `parse_app1`, `parse_app2` and `parse_app13` classify it. `None` where
 /// zune-jpeg errors on the segment.
 fn zune_metadata(marker: u8, body: &[u8]) -> Option<u64> {
     const EXIF: &[u8] = b"Exif\0\0";
     const XMP: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
-    const EXTENDED_XMP: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
     const ICC: &[u8] = b"ICC_PROFILE\0";
     const GAIN_MAP: &[u8] = b"urn:iso:std:iso:ts:21496:-1\0";
     const MPF: &[u8] = b"MPF\0";
     const IPTC: &[u8] = b"Photoshop 3.0\0";
     let length = body.len() as u64;
     let after = |prefix: &[u8]| length - prefix.len() as u64;
-    let tagged = |prefix: &[u8]| body.len() > prefix.len() && body.starts_with(prefix);
+    let tagged = |prefix: &[u8]| tagged(body, prefix);
     Some(match marker {
         0xE1 if tagged(EXIF) => after(EXIF),
         0xE1 if tagged(XMP) => after(XMP),
@@ -1548,6 +1582,34 @@ mod tests {
         grey.extend_from_slice(&grey_frame_header(0xC0, 7, 5));
         grey.extend_from_slice(&scan_header(1));
         assert_eq!(jpeg_zune(&grey).map(|z| z.colour), Some(JpegColour::Grey));
+    }
+
+    /// zune-jpeg re-reads every Extended XMP segment it keeps after each
+    /// marker, the segment's own and the start of scan included, so three
+    /// segments then a frame header and a scan header cost 1 + 2 + 3 + 3 + 3
+    /// segment reads. Segments of other kinds cost nothing.
+    #[test]
+    fn the_zune_walk_counts_the_extended_xmp_reassembly_reads() {
+        let mut extended = EXTENDED_XMP.to_vec();
+        extended.extend_from_slice(&[b'0'; 32]);
+        extended.extend_from_slice(&1u32.to_be_bytes());
+        extended.extend_from_slice(&1u32.to_be_bytes());
+        extended.push(0);
+        let mut jpeg = vec![0xFF, 0xD8];
+        jpeg.extend_from_slice(&segment(0xE1, b"Exif\0\0\x07"));
+        for _ in 0..3 {
+            jpeg.extend_from_slice(&segment(0xE1, &extended));
+        }
+        jpeg.extend_from_slice(&grey_frame_header(0xC0, 7, 5));
+        jpeg.extend_from_slice(&scan_header(1));
+        let zune = jpeg_zune(&jpeg).expect("zune-jpeg reads it");
+        assert_eq!(zune.xmp_reads, 12 * ZUNE_XMP_PASS_BYTES);
+
+        let mut plain = vec![0xFF, 0xD8];
+        plain.extend_from_slice(&segment(0xE1, b"Exif\0\0\x07"));
+        plain.extend_from_slice(&grey_frame_header(0xC0, 7, 5));
+        plain.extend_from_slice(&scan_header(1));
+        assert_eq!(jpeg_zune(&plain).map(|z| z.xmp_reads), Some(0));
     }
 
     #[test]

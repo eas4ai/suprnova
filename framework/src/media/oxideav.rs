@@ -261,6 +261,20 @@ impl OxideAvImageDriver {
                 config.max_alloc_bytes
             )));
         }
+        // zune-jpeg has no option to skip Extended XMP, and its reassembly
+        // costs time with the square of the segment count rather than memory
+        // with their bytes, so the estimate above cannot see it. The budget
+        // bounds the bytes those passes read instead.
+        if let Layout::Jpeg(JpegLayout::Zune(zune)) = &layout
+            && zune.xmp_reads > config.max_alloc_bytes
+        {
+            return Err(FrameworkError::param(format!(
+                "image exceeds configured decode limits: reassembling the Extended XMP \
+                 segments in this JPEG's headers reads about {} bytes, over the \
+                 IMAGE_MAX_ALLOC_BYTES limit of {}",
+                zune.xmp_reads, config.max_alloc_bytes
+            )));
+        }
         self.decode(contents, &layout, width, height, config)
     }
 

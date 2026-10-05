@@ -456,3 +456,126 @@ async fn a_stored_file_of_unknown_length_is_read_up_to_the_cap() {
         .expect_err("the stored file is larger than the cap");
     assert!(err.to_string().contains("limit"), "got: {err}");
 }
+
+/// The namespace that opens an Extended XMP segment.
+const EXTENDED_XMP: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
+
+/// The series every Extended XMP segment below belongs to.
+const XMP_GUID: &[u8; 32] = b"0123456789ABCDEF0123456789ABCDEF";
+
+/// One APP1 Extended XMP segment of the series `XMP_GUID`, which declares
+/// `total` bytes in all, holding `data` at `offset`.
+fn extended_xmp_segment(total: u32, offset: u32, data: &[u8]) -> Vec<u8> {
+    let mut body = EXTENDED_XMP.to_vec();
+    body.extend_from_slice(XMP_GUID);
+    body.extend_from_slice(&total.to_be_bytes());
+    body.extend_from_slice(&offset.to_be_bytes());
+    body.extend_from_slice(data);
+    let length = u16::try_from(body.len() + 2).expect("the segment fits its length field");
+    let mut segment = vec![0xFF, 0xE1];
+    segment.extend_from_slice(&length.to_be_bytes());
+    segment.extend_from_slice(&body);
+    segment
+}
+
+/// Segments that never complete their series: each declares one byte in all
+/// and holds it at offset 1. The gap at offset 0 keeps all of them waiting
+/// for the rest, so zune-jpeg re-reads every one after each marker.
+fn stalled_extended_xmp(count: usize) -> Vec<Vec<u8>> {
+    (0..count)
+        .map(|_| extended_xmp_segment(1, 1, &[0]))
+        .collect()
+}
+
+/// A 35x21 baseline photo with `segments` placed right after its SOI marker.
+fn photo_with(segments: Vec<Vec<u8>>) -> Vec<u8> {
+    let photo = include_bytes!("fixtures/jpeg/photo-base-420-35x21.jpg");
+    let mut jpeg = photo[..2].to_vec();
+    for segment in segments {
+        jpeg.extend_from_slice(&segment);
+    }
+    jpeg.extend_from_slice(&photo[2..]);
+    jpeg
+}
+
+/// Sol review: a JPEG whose Extended XMP segments would make zune-jpeg's
+/// reassembly re-read them all after every marker is refused before the
+/// decoder runs. 6,000 segments, under half a megabyte, cost about eighteen
+/// million segment visits; the decode used to run them all and succeed.
+#[tokio::test]
+#[serial_test::serial]
+async fn extended_xmp_that_would_be_reassembled_quadratically_is_refused() {
+    let jpeg = photo_with(stalled_extended_xmp(6_000));
+    assert!(
+        jpeg.len() < 512 * 1024,
+        "the fixture is {} bytes",
+        jpeg.len()
+    );
+
+    let err = Image::from_bytes(jpeg)
+        .dimensions()
+        .await
+        .expect_err("the reassembly work must be refused before decoding");
+    let message = err.to_string();
+    assert!(message.contains("Extended XMP"), "got: {message}");
+    assert!(message.contains("IMAGE_MAX_ALLOC_BYTES"), "got: {message}");
+}
+
+/// Sol review's trigger as written: 100,000 stalled segments in about eight
+/// megabytes, which zune-jpeg would answer with some five billion segment
+/// comparisons. The refusal comes from the header walk, so it is immediate.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_hundred_thousand_stalled_extended_xmp_segments_are_refused() {
+    let jpeg = photo_with(stalled_extended_xmp(100_000));
+
+    let err = Image::from_bytes(jpeg)
+        .dimensions()
+        .await
+        .expect_err("the reassembly work must be refused before decoding");
+    assert!(err.to_string().contains("Extended XMP"), "got: {err}");
+}
+
+/// The bound is the configured decode budget: a file the default budget
+/// admits is refused under a smaller one.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_extended_xmp_bound_follows_the_configured_budget() {
+    let jpeg = photo_with(stalled_extended_xmp(700));
+
+    assert_eq!(
+        Image::from_bytes(jpeg.clone())
+            .dimensions()
+            .await
+            .expect("the default budget admits 700 segments"),
+        (35, 21)
+    );
+
+    let _config = ConfigGuard::set(ImageConfig {
+        max_alloc_bytes: 16 * 1024 * 1024,
+        ..ImageConfig::default()
+    });
+    let err = Image::from_bytes(jpeg)
+        .dimensions()
+        .await
+        .expect_err("a 16 MiB budget does not cover their reassembly");
+    assert!(err.to_string().contains("Extended XMP"), "got: {err}");
+}
+
+/// A complete Extended XMP series, as cameras and editors write one, decodes.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_complete_extended_xmp_series_still_decodes() {
+    let chunk = vec![b'x'; 60_000];
+    let series = (0..3u32)
+        .map(|index| extended_xmp_segment(180_000, index * 60_000, &chunk))
+        .collect();
+
+    assert_eq!(
+        Image::from_bytes(photo_with(series))
+            .dimensions()
+            .await
+            .expect("a complete series decodes"),
+        (35, 21)
+    );
+}

@@ -141,7 +141,7 @@ impl ImageDriverKind {
 /// - `IMAGE_MAX_DIMENSION` - cap on width and height in pixels
 ///   (default 16384).
 /// - `IMAGE_MAX_ALLOC_BYTES` - cap on the bytes one decode may allocate
-///   (default 256 MiB).
+///   (default 1 GiB).
 ///
 /// Out-of-range values clamp with a warning rather than failing boot: a
 /// misconfigured limit should be loud, not fatal, and a limit of zero would
@@ -158,6 +158,10 @@ pub struct ImageConfig {
     /// decoders hold more than the RGBA they return, and refuses an image
     /// whose estimate is over it. The `magick` driver hands it to
     /// ImageMagick's own memory limits. Source files are capped at it too.
+    ///
+    /// The built-in driver also caps at it the bytes its JPEG decoder reads
+    /// while reassembling Extended XMP metadata, which grow with the square
+    /// of the segment count rather than with their size.
     pub max_alloc_bytes: u64,
     /// Wall-clock seconds an ImageMagick invocation may run for.
     ///
@@ -864,6 +868,26 @@ mod tests {
         assert_eq!(
             defaults.magick_timeout_secs,
             DEFAULT_IMAGE_MAGICK_TIMEOUT_SECS
+        );
+    }
+
+    /// The `ImageConfig` environment docs name the default budget the
+    /// constant holds. They still said 256 MiB after the default rose to
+    /// 1 GiB, so an operator sizing a host read the wrong limit.
+    #[test]
+    fn the_config_docs_name_the_default_alloc_budget() {
+        let source = include_str!("mod.rs");
+        let entry = source
+            .split("/// - `IMAGE_MAX_ALLOC_BYTES` - ")
+            .nth(1)
+            .and_then(|rest| rest.split(").").next())
+            .expect("the ImageConfig docs describe IMAGE_MAX_ALLOC_BYTES");
+        let entry = entry.split_whitespace().filter(|word| *word != "///");
+        let entry = entry.collect::<Vec<_>>().join(" ");
+        let gib = DEFAULT_IMAGE_MAX_ALLOC_BYTES / (1024 * 1024 * 1024);
+        assert!(
+            entry.ends_with(&format!("(default {gib} GiB")),
+            "the docs say: {entry}"
         );
     }
 
