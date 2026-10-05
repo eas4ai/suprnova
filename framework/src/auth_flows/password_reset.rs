@@ -80,10 +80,11 @@ pub struct PasswordReset;
 pub struct PasswordResetOutcome {
     /// The id of the user whose password was rotated.
     pub user_id: String,
-    /// Result of revoking every session row for `user_id` via
-    /// [`crate::session::destroy_all_for_user`]. `Ok(n)` is the number
-    /// of rows revoked - zero is a legitimate outcome (the user simply
-    /// had no other active sessions), not a failure signal on its own.
+    /// Result of revoking every session in which the default guard is
+    /// signed in as `user_id`, via [`crate::session::destroy_all_for_user`].
+    /// `Ok(n)` is the number of sessions revoked - zero is a legitimate
+    /// outcome (the user simply had no other active sessions), not a
+    /// failure signal on its own.
     pub sessions_revoked: Result<u64, FrameworkError>,
     /// Result of revoking every remember-me token row for `user_id` via
     /// [`crate::auth::remember::revoke_all_for_user`]. Same `Ok(n)` /

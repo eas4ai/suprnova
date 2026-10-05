@@ -204,10 +204,25 @@ pub trait UserProvider: Send + Sync + 'static {
     /// storage operation: `EloquentUserProvider` rereads the user under a
     /// row lock inside a transaction.
     ///
-    /// Default: compares [`verification_email`](Self::verification_email)
-    /// with `email` and calls [`mark_email_verified`](Self::mark_email_verified).
-    /// Those are two operations, so override this when the storage can make
-    /// them one.
+    /// # The default leaves a window
+    ///
+    /// The default reads the address with
+    /// [`verification_email`](Self::verification_email), compares it with
+    /// `email`, and then calls
+    /// [`mark_email_verified`](Self::mark_email_verified). Those are two
+    /// separate storage operations. An address change that commits between
+    /// them is marked verified without proof of the new mailbox: the
+    /// comparison saw the old address, and `mark_email_verified` stamps the
+    /// row whatever address it holds by then.
+    ///
+    /// A custom provider closes the window by overriding this method, not
+    /// `mark_email_verified`, so that the check and the write are one storage
+    /// operation. Two shapes do it: a conditional write, such as
+    /// `UPDATE users SET email_verified_at = ? WHERE id = ? AND email = ?`,
+    /// that reports whether it matched a row; or a reread of the user under
+    /// a row lock (`SELECT ... FOR UPDATE`) in the same transaction as the
+    /// write. Return `Ok(false)`, and write nothing, when the address is no
+    /// longer `email`.
     async fn mark_email_verified_for(&self, id: &str, email: &str) -> Result<bool, FrameworkError> {
         if self.verification_email(id).await?.as_deref() != Some(email) {
             return Ok(false);

@@ -368,14 +368,27 @@ returns the same invalid-token response, leaves the token unused, and marks
 nothing verified. The provider stamps the verification through
 `mark_email_verified_for`, which writes only while the address is still the
 one the link was sent to, so a change that lands while `verify` runs is
-refused too; the token is spent by then, and the user asks for a new link. A link sent before an upgrade to this behavior carries no
-address and is refused the same way, so the user asks for a new one.
+refused too; the token is spent by then, and the user asks for a new link. A
+link sent before an upgrade to this behavior carries no address and is
+refused the same way, so the user asks for a new one.
+
 `EloquentUserProvider` reports the `MustVerifyEmail` address, and rereads it
 under a row lock in the same transaction as the stamp. A custom provider
 reports the email of `flow_user_by_id` unless it implements
-`verification_email`. Its `mark_email_verified_for` compares that address
-and then calls `mark_email_verified`, two separate steps; implement it to
-make them one when your storage can.
+`verification_email`.
+
+A custom provider that does not implement `mark_email_verified_for` leaves a
+window. The default reads the address with `verification_email`, compares it,
+and then calls `mark_email_verified`: two separate storage operations. An
+address change that commits between them is marked verified without proof of
+the new mailbox. To close the window, implement `mark_email_verified_for`
+itself, not `mark_email_verified`, so that the check and the write are one
+storage operation: a conditional write such as
+`UPDATE users SET email_verified_at = ? WHERE id = ? AND email = ?` that
+reports whether it matched a row, or a reread under a row lock
+(`SELECT ... FOR UPDATE`) in the same transaction as the write. It returns
+`Ok(false)`, and writes nothing, when the address is no longer the one it was
+given.
 
 ### Verified-only routes: `EnsureEmailVerifiedMiddleware`
 

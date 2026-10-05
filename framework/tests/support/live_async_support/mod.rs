@@ -479,10 +479,30 @@ impl SessionStore for MemorySessionStore {
     }
 
     async fn destroy_for_user(&self, user_id: &str) -> Result<u64, FrameworkError> {
+        let guard = Auth::default_guard_name();
+        Ok(self.destroy_guard_sessions(&guard, user_id).await?.count)
+    }
+
+    /// Names the sessions it destroys, as the database driver does, so the
+    /// Live memberships they opened end with them.
+    async fn destroy_guard_sessions(
+        &self,
+        guard: &str,
+        user_id: &str,
+    ) -> Result<suprnova::DestroyedSessions, FrameworkError> {
         let mut sessions = self.sessions.lock().unwrap();
-        let before = sessions.len();
-        sessions.retain(|_, session| session.user_id.as_deref() != Some(user_id));
-        Ok((before - sessions.len()) as u64)
+        let ids: Vec<String> = sessions
+            .values()
+            .filter(|session| session.is_signed_in_as(guard, user_id))
+            .map(|session| session.id.clone())
+            .collect();
+        for id in &ids {
+            sessions.remove(id);
+        }
+        Ok(suprnova::DestroyedSessions {
+            count: ids.len() as u64,
+            ids,
+        })
     }
 
     async fn gc(&self) -> Result<u64, FrameworkError> {

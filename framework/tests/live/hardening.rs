@@ -738,6 +738,126 @@ async fn a_default_logout_never_ends_a_membership_of_a_guard_its_id_reads_like_c
     );
 }
 
+/// Persists web user 7 as the session's default-guard user, the way a
+/// login does, for a request that asks for it with `x-test-persist-web`.
+struct PersistWebSeven;
+
+#[suprnova::async_trait]
+impl suprnova::Middleware for PersistWebSeven {
+    async fn handle(&self, request: suprnova::Request, next: suprnova::Next) -> suprnova::Response {
+        if request.header("x-test-persist-web").is_some() {
+            suprnova::session::set_auth_user("7");
+        }
+        next(request).await
+    }
+}
+
+/// Destroying every session of web user 7, as a password reset does, ends
+/// the membership admin 9 holds in one of those sessions: the session is
+/// gone, so every membership issued under it ends on this node, whichever
+/// guard's principal it was issued to (LIVE-019).
+///
+/// Runs in its own process: it registers a process-wide `AuthManager` with
+/// an `admin` guard, which would change how every other test authenticates.
+#[cfg(feature = "testing")]
+#[test]
+fn destroying_a_users_sessions_ends_every_membership_they_held() {
+    crate::own_process::run_alone(
+        "hardening::destroying_a_users_sessions_ends_every_membership_they_held_child",
+    );
+}
+
+#[cfg(feature = "testing")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destroying_a_users_sessions_ends_every_membership_they_held_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let (router, _runtime) = router_and_runtime();
+    let config =
+        suprnova::AuthConfig::new("web").guard("admin", suprnova::GuardConfig::session("admins"));
+    suprnova::App::singleton(suprnova::AuthManager::new(config));
+    suprnova::Auth::register_provider("users", Arc::new(NoLookups)).expect("users provider");
+    suprnova::Auth::register_provider("admins", Arc::new(NoLookups)).expect("admins provider");
+    let store = Arc::new(MemorySessionStore::default());
+    let registry = suprnova::MiddlewareRegistry::new()
+        .append(suprnova::session::SessionMiddleware::with_store(
+            suprnova::session::SessionConfig::default(),
+            store,
+        ))
+        .append(PersistWebSeven)
+        .append(TwoGuardSignIn)
+        .append(OriginAndCsrf)
+        .append(suprnova::AuthMiddleware::optional().for_guard("admin"))
+        .append(StrictAsyncFacts);
+    let server = spawn_server_with(router, registry).await;
+
+    let both = Identity::alice().with_principal("both").anonymous();
+    let bootstrap = send(
+        server.port,
+        &both,
+        Method::GET,
+        "/session/touch",
+        &[("x-test-persist-web", "1")],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(bootstrap.status.as_u16(), 200);
+    let cookie = session_cookie(&bootstrap).expect("the session middleware set its cookie");
+    let both = both.with_cookie(&cookie);
+    let issued = issue(
+        server.port,
+        &both,
+        inventory_issue_body("sse", "doc-instance-0001"),
+    )
+    .await;
+    let credential = issued.credential.clone().expect("an SSE credential");
+    let mut stream = SseClient::open(server.port, &both, &credential, 1, &[]).await;
+    assert_eq!(stream.status.as_u16(), 200);
+    let ack = subscribe(
+        server.port,
+        &both,
+        &credential,
+        &issued,
+        "nonce-subscribe-0001",
+        1,
+    )
+    .await;
+    assert_eq!(ack.status.as_u16(), 200);
+    let streams = LiveStreams::resolve().expect("the Live streams facade resolves");
+    streams
+        .event::<StockChanged>(
+            "inventory",
+            LiveEventTarget::Island,
+            CanonicalValue::String("before-destroy".into()),
+        )
+        .await
+        .expect("publish to the admin membership");
+    assert!(
+        stream_carries(&mut stream, "before-destroy").await,
+        "positive control: admin 9's membership receives events"
+    );
+
+    let destroyed = suprnova::session::destroy_all_for_user("7")
+        .await
+        .expect("destroy web user 7's sessions");
+    assert_eq!(destroyed, 1, "the one session web user 7 is signed in to");
+
+    streams
+        .event::<StockChanged>(
+            "inventory",
+            LiveEventTarget::Island,
+            CanonicalValue::String("after-destroy".into()),
+        )
+        .await
+        .expect("publishing to a topic with no live member is not an error");
+    assert!(
+        !stream_carries(&mut stream, "after-destroy").await,
+        "the session admin 9's membership was issued under is destroyed, so the \
+         membership must end with it"
+    );
+}
+
 /// Resolves admin 9 and nobody else.
 struct AdminNine;
 
