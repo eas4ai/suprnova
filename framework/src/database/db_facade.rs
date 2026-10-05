@@ -1044,11 +1044,15 @@ impl DbTableBuilder {
     }
 
     /// Execute `SELECT COUNT(*) FROM ... WHERE ...` and return the
-    /// count. Ignores `select` / `order` / `limit` / `offset` - count
-    /// semantics don't care about those. A grouped query counts its
-    /// groups: the grouped SELECT runs as a subquery and the outer query
-    /// counts its rows, because `COUNT(*)` beside a `GROUP BY` counts each
-    /// group's rows instead.
+    /// count. The `select` list and the ordering are dropped. The limit and
+    /// offset stay on the COUNT statement, as in Laravel's
+    /// `DB::table()->count()`, so they bound the one row the count returns,
+    /// not the rows it counts: a limit of one or more keeps the whole
+    /// count, and an offset of one or more, or a limit of 0, leaves no row,
+    /// so the count is 0. A grouped query counts its groups: the grouped
+    /// SELECT runs as a subquery and the outer query counts its rows,
+    /// because `COUNT(*)` beside a `GROUP BY` counts each group's rows
+    /// instead. The limit and offset then bound the outer count's row.
     ///
     /// Uses `query_one` + `try_get` directly instead of
     /// `JsonValue::find_by_statement` because aggregate columns
@@ -1070,16 +1074,17 @@ impl DbTableBuilder {
         let backend = exec.backend();
         let mut copy = self;
         copy.order.clear();
-        copy.limit_value = None;
-        copy.offset_value = None;
+        let (limit, offset) = (copy.limit_value.take(), copy.offset_value.take());
+        let bounds = super::clauses::render_limit_offset(backend, limit, offset);
         let (sql, values) = if copy.groups.is_empty() {
             copy.select_items = vec![SelectItem::Raw("COUNT(*) AS count".into())];
-            copy.render_select(backend)?
+            let (sql, values) = copy.render_select(backend)?;
+            (format!("{sql}{bounds}"), values)
         } else {
             copy.select_items = vec![SelectItem::Raw("1 AS __suprnova_group".into())];
             let (grouped, values) = copy.render_select(backend)?;
             (
-                format!("SELECT COUNT(*) AS count FROM ({grouped}) AS __suprnova_groups"),
+                format!("SELECT COUNT(*) AS count FROM ({grouped}) AS __suprnova_groups{bounds}"),
                 values,
             )
         };

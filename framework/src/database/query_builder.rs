@@ -88,8 +88,10 @@ where
 {
     select: Select<E>,
     /// The limit and offset also set on `select`, kept here because a
-    /// SeaORM statement does not give them back, and `count` and `exists`
-    /// each place them differently (see `CountOf`).
+    /// SeaORM statement does not give them back. Every terminal writes
+    /// them itself: `all` and `first` through `render_limit_offset`, so an
+    /// offset with no limit runs on SQLite and MySQL, and `count` and
+    /// `exists` each in their own place (see `CountOf`).
     limit: Option<u64>,
     offset: Option<u64>,
 }
@@ -258,6 +260,9 @@ where
 
     /// Skip a number of results (offset)
     ///
+    /// With no limit, the query returns every row after the offset, on
+    /// every database.
+    ///
     /// # Example
     ///
     /// ```rust,no_run
@@ -301,7 +306,7 @@ where
         crate::database::model::observe_entity_read::<E>();
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
-        exec.select_all(self.select)
+        exec.select_all_bounded(self.select, self.limit, self.offset)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))
     }
@@ -336,9 +341,12 @@ where
         crate::database::model::observe_entity_read::<E>();
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
-        exec.select_one(self.select)
+        // One row past the offset, as Laravel's `first()` takes one.
+        let rows = exec
+            .select_all_bounded(self.select, Some(1), self.offset)
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        Ok(rows.into_iter().next())
     }
 
     /// Execute query and return first result or error

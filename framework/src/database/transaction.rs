@@ -850,19 +850,65 @@ impl ExecutorChoice {
     where
         E: sea_orm::EntityTrait,
     {
+        let stmt = sea_orm::QueryTrait::build(&q, self.backend());
+        self.select_all_statement::<E>(stmt).await
+    }
+
+    /// [`Self::select_all`] for a `Select<E>` whose limit and offset are
+    /// given beside it. They render as
+    /// [`render_limit_offset`](crate::database::clauses::render_limit_offset)
+    /// writes them, not as SeaORM does: SeaORM writes an offset with no
+    /// limit as a bare `OFFSET`, which SQLite and MySQL reject, while
+    /// `render_limit_offset` gives it each engine's unlimited `LIMIT`. Any
+    /// limit or offset already on `q` is dropped. The bounds are written
+    /// after the whole SELECT, so `q` carries no lock clause, which SeaORM
+    /// writes after its limit; the typed builder that calls this has no way
+    /// to set one.
+    pub(crate) async fn select_all_bounded<E>(
+        &self,
+        q: sea_orm::Select<E>,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> Result<Vec<E::Model>, sea_orm::DbErr>
+    where
+        E: sea_orm::EntityTrait,
+    {
+        use crate::database::clauses::render_limit_offset;
+        use sea_orm::QueryTrait;
+
+        let backend = self.backend();
+        let mut query = q.into_query();
+        query.reset_limit().reset_offset();
+        let mut stmt = backend.build(&query);
+        stmt.sql
+            .push_str(&render_limit_offset(backend, limit, offset));
+        self.select_all_statement::<E>(stmt).await
+    }
+
+    /// Run `stmt`, a SELECT of `E`'s rows, and materialise each row into
+    /// `E::Model`, with the observability contract of
+    /// [`Self::select_all`]: the observed SQL is `stmt`.
+    async fn select_all_statement<E>(
+        &self,
+        stmt: sea_orm::Statement,
+    ) -> Result<Vec<E::Model>, sea_orm::DbErr>
+    where
+        E: sea_orm::EntityTrait,
+    {
         if super::events::is_dispatching() || !super::events::query_observation_active() {
+            let rows = E::find().from_raw_sql(stmt);
             return match self {
-                ExecutorChoice::Tx(t, _) => q.all(t.as_ref()).await,
-                ExecutorChoice::Pool(c, _) => q.all(c.inner()).await,
+                ExecutorChoice::Tx(t, _) => rows.all(t.as_ref()).await,
+                ExecutorChoice::Pool(c, _) => rows.all(c.inner()).await,
             };
         }
-        let stmt = sea_orm::QueryTrait::build(&q, self.backend());
         let (sql, bindings) = (stmt.sql.clone(), stmt_bindings_strings(&stmt));
+        let rows = E::find().from_raw_sql(stmt);
         let conn_name = self.connection_name().to_string();
         let start = std::time::Instant::now();
         let res = match self {
-            ExecutorChoice::Tx(t, _) => q.all(t.as_ref()).await,
-            ExecutorChoice::Pool(c, _) => q.all(c.inner()).await,
+            ExecutorChoice::Tx(t, _) => rows.all(t.as_ref()).await,
+            ExecutorChoice::Pool(c, _) => rows.all(c.inner()).await,
         };
         let elapsed = start.elapsed();
         finish_query_event(

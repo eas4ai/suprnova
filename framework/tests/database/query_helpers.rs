@@ -345,6 +345,64 @@ async fn reorder_drops_earlier_orderings() {
     );
 }
 
+/// `count()` answers as Laravel's `DB::table()->count()` does when the
+/// query carries a limit or an offset. Laravel keeps them on the aggregate
+/// statement, `select count(*) as aggregate from t limit 1 offset 1`, so
+/// they bound the one row the aggregate returns, not the rows it counts: a
+/// limit of one or more keeps the whole count, and an offset of one or
+/// more, or a limit of 0, leaves no row, so the count is 0. A grouped
+/// query counts its groups, and the bounds apply to that count's row the
+/// same way. `count()` used to drop the limit and the offset, so every one
+/// of these counted all five rows. `get()` takes an offset with no limit
+/// on every engine.
+async fn count_and_reads_with_a_limit_or_offset() {
+    let count = |query: DbTableBuilder, case: &'static str| async move {
+        query
+            .count()
+            .await
+            .unwrap_or_else(|e| panic!("count {case}: {e}"))
+    };
+    assert_eq!(count(items(), "unbounded").await, 5);
+    assert_eq!(
+        count(items().limit(2), "limit(2)").await,
+        5,
+        "a limit keeps the aggregate's row"
+    );
+    assert_eq!(
+        count(items().limit(1).offset(1), "limit(1).offset(1)").await,
+        0,
+        "an offset skips the aggregate's row"
+    );
+    assert_eq!(
+        count(items().offset(10), "offset(10)").await,
+        0,
+        "a bare offset skips it on every engine"
+    );
+    assert_eq!(count(items().offset(0), "offset(0)").await, 5);
+    assert_eq!(count(items().limit(0), "limit(0)").await, 0);
+    assert_eq!(count(items().group_by("a"), "two groups").await, 2);
+    assert_eq!(
+        count(items().group_by("a").limit(1), "groups, limit(1)").await,
+        2
+    );
+    assert_eq!(
+        count(items().group_by("a").offset(1), "groups, offset(1)").await,
+        0
+    );
+
+    let rest: Vec<i64> = items()
+        .order_by_asc("id")
+        .offset(3)
+        .get()
+        .await
+        .unwrap_or_else(|e| panic!("get() past an offset: {e}"))
+        .into_vec()
+        .iter()
+        .map(|row| row.get_int("id").expect("an integer id"))
+        .collect();
+    assert_eq!(rest, vec![4, 5]);
+}
+
 async fn run_every_scenario() {
     grouped_helpers_keep_their_or_inside_parentheses().await;
     or_forms_of_the_grouped_helpers().await;
@@ -352,6 +410,7 @@ async fn run_every_scenario() {
     where_in_with_a_subquery().await;
     raw_and_null_or_forms().await;
     reorder_drops_earlier_orderings().await;
+    count_and_reads_with_a_limit_or_offset().await;
 }
 
 // ---------- SQLite ---------------------------------------------------------
@@ -396,6 +455,12 @@ async fn or_where_raw_null_and_not_null_match_raw_sql() {
 async fn reorder_drops_orderings_and_reorder_by_sets_a_new_one() {
     let _fx = seeded_sqlite().await;
     reorder_drops_earlier_orderings().await;
+}
+
+#[tokio::test]
+async fn count_follows_laravel_under_a_limit_or_offset() {
+    let _fx = seeded_sqlite().await;
+    count_and_reads_with_a_limit_or_offset().await;
 }
 
 #[tokio::test]
