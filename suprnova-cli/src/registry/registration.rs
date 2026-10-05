@@ -216,7 +216,7 @@ fn full_paths(namespace_module: &str, entries: &[String]) -> Result<Vec<String>>
                 "`{entry}` is not `<module>::<Type>` with plain identifiers"
             )));
         }
-        let path = format!("crate::live::{namespace_module}::{module}::{name}");
+        let path = format!("crate::live::{module}::{name}");
         if !paths.contains(&path) {
             paths.push(path);
         }
