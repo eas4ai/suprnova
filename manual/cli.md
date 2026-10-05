@@ -95,7 +95,8 @@ each generated file looks like.
 | `suprnova live:registry new <namespace>` | Scaffold a component library in `./<namespace>`: `library.json`, an example component, a `preview/` application, and a signing key written to your configuration directory. See [Live Component Libraries](live-libraries.md). |
 | `suprnova live:registry check` | From a library's root, check every component as `live:add` would and list each component's capabilities. |
 | `suprnova live:registry sign` | From a library's root, check every component, then sign each one, all or nothing. Reads the key from `SUPRNOVA_LIBRARY_KEY` when set, else from your configuration directory. |
-| `suprnova live:wait` | Wait until no `live:add` holds the project lock, restoring an interrupted install first. `suprnova serve` runs it before each build. |
+| `suprnova live:registry rotate-key` | From a library's root, move the library to a new signing key: make the key pair, write the new private key to your configuration directory, sign the handover with the current key, update `library.json`'s `publicKey` and `previousKeys`, and sign every component again with the new key, all or nothing. Prints both fingerprints and the new key's path. Reads the current key as `sign` does. |
+| `suprnova live:wait [-- <cargo args>]` | Wait until no `live:add` holds the project lock, restoring an interrupted install first. Given cargo arguments after `--`, run that cargo command, holding a shared lock until its build finishes so no install starts mid-build. `suprnova serve` builds this way. |
 | `suprnova live:check` | Verify every third-party component `suprnova.toml` records against its pinned key, offline, then check every registered Live view with the integrated checker. Reads `askama.toml` `dirs` or `templates/`; `--templates <dir>` overrides, `--allow-unproved` accepts unproved dynamic structures. |
 | `suprnova live:inspect` | Report safe Live runtime, registry, provider, and artifact state (`--json` for one JSON document). |
 | `suprnova live:assets --out <dir>` | Publish the reviewed Live runtime artifacts to `<dir>/<identity>/`, atomically; `--replace` replaces a publication whose bytes differ. |
@@ -271,4 +272,4 @@ which is where it lived before the flag existed.
 - [Installing Live Components](live-add.md) - `live:add`, its plan, and
   the record in `suprnova.toml`
 - [Live Component Libraries](live-libraries.md) - `live:registry new`,
-  `check` and `sign`
+  `check`, `sign` and `rotate-key`

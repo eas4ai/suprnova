@@ -166,18 +166,20 @@ When you run `suprnova serve`, the CLI:
 
    On a scaffolded full-stack project the full invocation is
    `cargo watch --no-vcs-ignores -w src -w cmd -w Cargo.toml -w Cargo.lock
-   -w .env -w lang -s '<suprnova> live:wait && cargo run --bin <package-name> -- serve --no-migrate'`,
+   -w .env -w lang -s '<suprnova> live:wait -- run --bin <package-name> -- serve --no-migrate'`,
    where `<suprnova>` is the path of the `suprnova` binary that runs `serve`,
    and `-w templates` joins the list once the project has a `templates/`
    directory.
    Under `--migrate always`, or when step 7 could not run the migrations, the
-   build command is `cargo run --bin <package-name>` and the backend migrates
-   by itself.
-   `live:wait` returns at once unless a `suprnova live:add` is installing a
-   component. While one holds the project lock it waits, so no build starts
-   on a half-written install, and the build that follows sees every file
-   the install wrote. If an install was killed partway, `live:wait` (and
-   `serve` itself, when it starts) puts back every file the install's
+   cargo command is `run --bin <package-name>` and the backend migrates by
+   itself.
+   `live:wait` runs the cargo command after `--` itself. It starts no build
+   while a `suprnova live:add` holds the project lock, so no build starts on
+   a half-written install, and the build that follows sees every file the
+   install wrote. It holds a shared lock until cargo finishes the build, so
+   `live:add` refuses to start mid-build, and releases it before the
+   application starts. If an install was killed partway, `live:wait`
+   (and `serve` itself, when it starts) puts back every file the install's
    journal names before anything is built.
    Frontend edits and the
    generated `frontend/src/types/*.ts` are outside that scope, so they

@@ -1138,7 +1138,7 @@ RenderCache's job; see [RenderCache](render-cache.md).
 |---|---|
 | `suprnova live:make <name>` | Scaffold a component and its view and register it |
 | `suprnova live:add <component>` | Install a component from the shipped library or a third-party library; see [Installing Live Components](live-add.md) |
-| `suprnova live:registry new\|check\|sign` | Scaffold, check and sign a component library; see [Live Component Libraries](live-libraries.md) |
+| `suprnova live:registry new\|check\|sign\|rotate-key` | Scaffold, check, sign and re-key a component library; see [Live Component Libraries](live-libraries.md) |
 | `suprnova live:check` | Verify every recorded third-party component offline, then prove every registered view with the integrated checker |
 | `suprnova live:inspect` | Report safe runtime, registry, provider, and artifact state |
 | `suprnova live:assets --out <dir>` | Publish the reviewed runtime artifacts atomically |
