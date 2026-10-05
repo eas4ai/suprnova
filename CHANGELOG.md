@@ -958,9 +958,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   through-relation loads refresh when those tables change, and lazy
   `HasManyThrough` `get`, `first` and `count` and `HasOneThrough` `get`
   refresh when an intermediate row changes. The payments webhook advances
-  its mirror tables in the transaction that writes them, so a request
-  cancelled during COMMIT no longer leaves them committed but cached
-  pages current.
+  its mirror tables, and its receipt insert, retry error clear and failure
+  record, in the transaction that writes them, so a request cancelled
+  during COMMIT no longer leaves them committed but cached pages current.
+  A write on a named connection that is dropped during its COMMIT
+  suspends serving until a later advance repairs it.
   `RenderCache::advance_epoch` reaches the next request even with another
   request's authority read in flight. A rebuild that fails after the
   stale-on-error window closed returns its error instead of the expired
