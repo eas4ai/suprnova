@@ -1578,10 +1578,12 @@ async fn payments_webhook_insert_and_update_advance_the_table_generation() {
 // Round 4 could only test the audit-row bookkeeping sites (1 and 13) - the
 // actual mirror-table upserts (sites 3-12) deadlocked under SQLite when
 // exercised through the real webhook route, because `advance_mirror_table`
-// ran from inside `try_hydrate`'s own open transaction. Round 5 hoists that
-// advance to run once, after the transaction commits, which removes the
-// deadlock; this test is the proof - the same insert/update scenario round 4
-// could not safely drive.
+// ran from inside `try_hydrate`'s own open transaction and opened a second
+// one. Round 5 hoisted that advance after the commit; DATA-039 then moved it
+// into the hydration's own transaction, which opens no second one, so the
+// deadlock stays gone and the rows and their advance commit together. This
+// test is the proof - the same insert/update scenario round 4 could not
+// safely drive.
 //
 // This has exactly one caller (the unconditional SQLite test right below).
 // An earlier draft also built `#[ignore]`d live-Postgres and live-MySQL
@@ -1650,7 +1652,7 @@ async fn payments_webhook_mirror_scenario(conn: Arc<sea_orm::DatabaseConnection>
         after_insert,
         Some(before.unwrap_or(0) + 1),
         "a subscription.created webhook insert must advance the payments_subscriptions table \
-         generation, once, after the hydration transaction commits"
+         generation, once, with the hydration transaction"
     );
 
     // Update path: subscription.updated finds the mirror row just inserted,
@@ -1692,6 +1694,143 @@ async fn payments_webhook_subscription_insert_and_update_advance_the_mirror_tabl
         .expect("payments + render-cache migrations should apply cleanly");
     let conn = Arc::new(db.conn().clone());
     payments_webhook_mirror_scenario(conn).await;
+}
+
+/// Serves one connection against `router` on a task the caller can abort.
+/// Unlike [`spawn_payments_server`], the request is served on that task
+/// itself, so aborting it drops the handler wherever it is parked, the way a
+/// client disconnect or a timeout drops a request.
+async fn serve_one_payments_connection(
+    router: Router,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let router = Arc::new(router);
+    let middleware = Arc::new(MiddlewareRegistry::new());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral listener");
+    let addr = listener.local_addr().expect("local_addr");
+    let server = tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let svc = service_fn(move |req: hyper::Request<Incoming>| {
+            let router = router.clone();
+            let middleware = middleware.clone();
+            async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), svc)
+            .await;
+    });
+    (addr, server)
+}
+
+/// DATA-039, payments: a webhook whose hydration is canceled once its
+/// transaction has committed leaves its mirror tables advanced. The
+/// hydration used to commit the mirror rows and the processed receipt first,
+/// and only then start the advance that guards them, so a cancellation
+/// while the COMMIT was being acknowledged left the rows durable and the
+/// tables on their old generations. The provider's retry then found the
+/// receipt processed and acknowledged it as a duplicate, so nothing ever
+/// advanced them.
+#[tokio::test]
+async fn a_payment_hydration_canceled_after_its_commit_leaves_its_tables_advanced() {
+    suprnova::render_cache::mark_installed();
+    let db = TestDatabase::fresh::<PaymentsRenderCacheMigrator>()
+        .await
+        .expect("payments + render-cache migrations should apply cleanly");
+    let conn = Arc::new(db.conn().clone());
+
+    let provider_name = "render-cache-payments-canceled-commit";
+    let mock = Arc::new(MockPaymentProvider::new());
+    let as_trait: Arc<dyn PaymentProvider> = mock.clone();
+    PaymentProviderRegistry::bind(provider_name, as_trait);
+    let sub = mock
+        .subscribe(SubscribeRequest {
+            customer_ref: "cus_render_cache_canceled".into(),
+            price_refs: vec!["price_a".into()],
+            trial_days: None,
+            idempotency_key: None,
+            metadata: None,
+        })
+        .await
+        .expect("mock subscribe");
+
+    let before = subscriptions_generation().await;
+
+    let event_id = "evt_render_cache_canceled_commit";
+    let body = Bytes::from(
+        serde_json::json!({
+            "id": event_id,
+            "type": "subscription.created",
+            "data": { "object": {
+                "id": sub.provider_subscription_id,
+                "customer": sub.provider_customer_id,
+            }}
+        })
+        .to_string(),
+    );
+    let path = format!("/webhooks/payments/{provider_name}");
+
+    // The first delivery parks right after its commit and is canceled there.
+    let held = suprnova::payments::webhook_route::hold_hydration_commit_for_test(event_id);
+    let (addr, server) = serve_one_payments_connection(webhook_routes(conn.clone())).await;
+    let client = tokio::spawn({
+        let path = path.clone();
+        let body = body.clone();
+        async move { send_payments_webhook(addr, &path, body).await }
+    });
+    suprnova::payments::webhook_route::wait_until_hydration_commit_held_for_test(held).await;
+    server.abort();
+    client.abort();
+    assert!(
+        server
+            .await
+            .expect_err("the server was aborted")
+            .is_cancelled()
+    );
+    assert!(
+        client
+            .await
+            .expect_err("the client was aborted")
+            .is_cancelled()
+    );
+
+    use suprnova::sea_orm::EntityTrait as _;
+    let mirrored = suprnova::payments::entities::subscription::Entity::find()
+        .all(conn.as_ref())
+        .await
+        .expect("read the subscription mirror");
+    assert_eq!(
+        mirrored.len(),
+        1,
+        "precondition: the canceled hydration's commit landed"
+    );
+
+    // The provider retries the delivery it never saw acknowledged.
+    let addr = spawn_payments_server(webhook_routes(conn.clone()), 1).await;
+    let (status, resp) = send_payments_webhook(addr, &path, body).await;
+    assert_eq!(
+        status.as_u16(),
+        200,
+        "the retry is acknowledged: {}",
+        String::from_utf8_lossy(&resp)
+    );
+
+    assert!(
+        subscriptions_generation().await > before,
+        "the canceled hydration committed its mirror rows, so their table generation moved"
+    );
+}
+
+async fn subscriptions_generation() -> u64 {
+    let table = DependencyIdentity::table("payments_subscriptions");
+    SqlGenerationLedger::new()
+        .current(&[table.digest()])
+        .await
+        .expect("current")
+        .get(&table)
+        .unwrap_or(0)
 }
 
 /// The evaluator chain a real application boots, over the database

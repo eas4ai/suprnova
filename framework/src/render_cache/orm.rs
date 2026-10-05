@@ -138,7 +138,11 @@ impl Drop for UnfinishedAdvance {
 /// write succeeded and must not report an older write's failure, so a
 /// failure here is logged and leaves serving suspended, which is the
 /// protection the missed identities still need.
-async fn repair_unresolved() {
+///
+/// `pub(crate)` for the payments webhook hydration, which commits its own
+/// raw transaction with its advance inside it (DATA-039) and repairs after
+/// that commit the way [`atomic`] does after its own.
+pub(crate) async fn repair_unresolved() {
     let (missed, _) = super::write_side::unresolved();
     if missed.is_empty() {
         return;
@@ -336,11 +340,9 @@ pub async fn after_bulk_write_with_handle(
     super::ledger::advance_via_handle(handle, &unkeyed_identities(table)?).await
 }
 
-/// After one operation wrote rows of several tables it cannot name rows
-/// in: the tables and their unkeyed-write identities, advanced together in
-/// one advancement, so a drop part-way can never leave some of them
-/// advanced and the rest forgotten.
-pub(crate) async fn after_table_writes(tables: &[&str]) -> Result<(), FrameworkError> {
+/// The identities [`after_table_writes_in`] advances: each table and its
+/// unkeyed-write identity, once each.
+fn table_writes_identities(tables: &[&str]) -> Result<Vec<DependencyIdentity>, FrameworkError> {
     let mut identities = Vec::with_capacity(tables.len() * 2);
     for table in tables {
         for identity in unkeyed_identities(table)? {
@@ -349,7 +351,37 @@ pub(crate) async fn after_table_writes(tables: &[&str]) -> Result<(), FrameworkE
             }
         }
     }
-    advance(identities).await
+    Ok(identities)
+}
+
+/// Whether this process advances generations, decided before a write opens
+/// a raw SeaORM transaction for [`after_table_writes_in`] (DATA-039).
+///
+/// Deciding may probe the schema, and the probe takes a pooled connection
+/// of its own. Asked from inside the transaction, it could wait on the
+/// connection the transaction already holds, so it is asked first, while
+/// the write holds nothing.
+pub(crate) async fn advances_generations() -> Result<bool, FrameworkError> {
+    super::write_side_open(false).await
+}
+
+/// After one operation wrote rows of several tables it cannot name rows
+/// in, through `txn`, the raw SeaORM transaction that wrote them: the
+/// tables and their unkeyed-write identities, advanced together in one
+/// advancement, so the rows and their advance commit or roll back as one
+/// unit (DATA-039).
+///
+/// For a writer that owns a transaction the framework did not open, which
+/// `in_transaction()` cannot see: the payments webhook hydration. Advancing
+/// after its COMMIT left a window in which a cancellation kept the rows and
+/// lost the advance. The caller asks [`advances_generations`] before it
+/// opens `txn`, and commits it after this returns, then calls
+/// [`repair_unresolved`] the way [`atomic`] does after its own commit.
+pub(crate) async fn after_table_writes_in(
+    txn: &std::sync::Arc<sea_orm::DatabaseTransaction>,
+    tables: &[&str],
+) -> Result<(), FrameworkError> {
+    super::ledger::advance_in_raw_transaction(txn, &table_writes_identities(tables)?).await
 }
 
 /// After a query-builder write on a known table (`DB::table(...).insert` /

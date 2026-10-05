@@ -40,8 +40,8 @@ use crate::payments::{
 use crate::routing::Router;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
-    QuerySelect, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, QueryFilter, QuerySelect, Set, TransactionTrait,
 };
 use std::sync::Arc;
 
@@ -75,7 +75,7 @@ fn is_unique_violation(error: &sea_orm::DbErr) -> bool {
 ///
 /// This is safe to call immediately, unlike the writes inside
 /// `try_hydrate`'s transaction (see [`advance_touched_mirror_tables`] for
-/// why those are collected and advanced separately, after commit): there is
+/// why those are collected and advanced through that transaction): there is
 /// no ambient `CURRENT_TX` to join, but there is also no OTHER transaction
 /// open on this connection for a dedicated fallback transaction to contend
 /// with, so `after_table_write`'s "open one when nothing is ambient" branch
@@ -93,7 +93,7 @@ async fn advance_mirror_table<E: sea_orm::EntityTrait>() -> Result<(), PaymentEr
 }
 
 /// Advance every payments mirror table that `try_hydrate`'s transaction
-/// touched, once, strictly after that transaction has committed.
+/// touched, once, through that same transaction, just before it commits.
 ///
 /// Round 3 called [`advance_mirror_table`] from inside each mirror write,
 /// while the transaction `try_hydrate` opens via `db.begin()` (a raw SeaORM
@@ -111,25 +111,32 @@ async fn advance_mirror_table<E: sea_orm::EntityTrait>() -> Result<(), PaymentEr
 /// 503. This is the same root shape ruling R47 fixed for `Builder::with_tx`:
 /// a transaction the ambient check cannot see.
 ///
-/// Collecting the touched tables instead and advancing once here, after
-/// `commit()` returns `Ok`, fixes the deadlock and removes an imprecision
-/// round 3 accepted rather than avoided: because this only runs on the
-/// success path, a hydration that rolls back no longer advances anything for
-/// a change that never landed.
+/// Round 5 moved the advance after `commit()`, which removed the deadlock
+/// but split the rows from their advance: a cancellation while the COMMIT
+/// was being acknowledged kept the rows and the processed receipt and lost
+/// the advance, and the provider's retry then found the receipt processed
+/// and acknowledged a duplicate, so nothing ever advanced the tables
+/// (DATA-039). The advance now runs through `txn` itself, the way an ORM
+/// write and its advance share one transaction. It opens no second
+/// transaction, so the deadlock stays gone, and the rows and their advance
+/// commit or roll back as one unit; a hydration that rolls back advances
+/// nothing.
 ///
 /// Table-only, same as `advance_mirror_table` - callers push
 /// `entity_table_name::<E>()` for each entity type they wrote, not a
-/// row-level identity.
+/// row-level identity. One advancement for every table, deduplicated.
 ///
-/// One advancement for every table, not one per table: the transaction has
-/// already committed, so a drop part-way through a loop of advances would
-/// leave the later tables on their old generations with nothing recording
-/// that they were missed. One advancement is guarded as a whole (DATA-039).
-async fn advance_touched_mirror_tables(touched: &[&'static str]) -> Result<(), PaymentError> {
+/// The generation ledger lives on the application's primary database, so
+/// this relies on `db` being that database, which is what
+/// [`webhook_routes`] documents.
+async fn advance_touched_mirror_tables(
+    txn: &Arc<DatabaseTransaction>,
+    touched: &[&'static str],
+) -> Result<(), PaymentError> {
     let mut unique: Vec<&'static str> = touched.to_vec();
     unique.sort_unstable();
     unique.dedup();
-    crate::render_cache::orm::after_table_writes(&unique)
+    crate::render_cache::orm::after_table_writes_in(txn, &unique)
         .await
         .map_err(|e| PaymentError::Internal(format!("{e}")))
 }
@@ -388,67 +395,183 @@ async fn try_hydrate(
 ) -> Result<HydrationOutcome, PaymentError> {
     let subscription_snapshot = prefetch_provider_state(provider, event).await?;
 
-    let txn = db
-        .begin()
+    // Decided before the transaction opens: deciding may probe the schema on
+    // a pooled connection of its own, which must not wait on the one this
+    // transaction is about to hold (DATA-039).
+    let advances = crate::render_cache::orm::advances_generations()
         .await
-        .map_err(|e| PaymentError::database("begin tx", e))?;
+        .map_err(|e| PaymentError::Internal(format!("{e}")))?;
 
-    // Serialize concurrent retries: lock the audit row, then re-check whether
-    // a racing attempt already finished. `lock_exclusive` emits
-    // `SELECT … FOR UPDATE` on Postgres/MySQL/MariaDB and is a documented
-    // no-op on SQLite, which serializes writers at the file level instead.
-    let locked = match webhook_event::Entity::find()
-        .filter(webhook_event::Column::Provider.eq(&event.provider))
-        .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
-        .lock_exclusive()
-        .one(&txn)
-        .await
-    {
-        Ok(row) => row,
-        Err(e) => {
-            let _ = txn.rollback().await;
-            return Err(PaymentError::database("lock audit row", e));
-        }
-    };
-    if locked.as_ref().is_some_and(|r| r.processed_at.is_some()) {
-        // A concurrent retry committed while we waited on the lock. Roll back -
-        // we have nothing to add - and report the duplicate.
-        let _ = txn.rollback().await;
-        return Ok(HydrationOutcome::AlreadyProcessed);
-    }
-
-    // Mirror tables this transaction's writes touch, collected rather than
-    // advanced immediately - see `advance_touched_mirror_tables` for why
-    // advancing from inside this transaction deadlocks.
-    let mut touched: Vec<&'static str> = Vec::new();
-
-    match process_webhook(
+    // Shared, so the generation advance can run through this transaction
+    // too; every clone is dropped before the commit takes it back.
+    let txn = Arc::new(
+        db.begin()
+            .await
+            .map_err(|e| PaymentError::database("begin tx", e))?,
+    );
+    let applied = apply_in_transaction(
         &txn,
         provider,
         event,
         subscription_snapshot.as_ref(),
-        &mut touched,
+        advances,
     )
-    .await
-    {
-        Ok(()) => match mark_processed(&txn, event, &mut touched).await {
-            Ok(()) => match txn.commit().await {
-                Ok(()) => {
-                    advance_touched_mirror_tables(&touched).await?;
-                    Ok(HydrationOutcome::Processed)
-                }
-                Err(e) => Err(PaymentError::database("commit", e)),
-            },
-            Err(e) => {
-                let _ = txn.rollback().await;
-                Err(e)
+    .await;
+    // Dropping `txn` rolls it back, so a handle that somehow outlived the
+    // writes still leaves nothing half-applied.
+    let txn = Arc::try_unwrap(txn).map_err(|_| {
+        PaymentError::Internal(
+            "webhook hydration: a transaction handle outlived its writes; rolled back".into(),
+        )
+    })?;
+    match applied {
+        Ok(HydrationOutcome::Processed) => {
+            txn.commit()
+                .await
+                .map_err(|e| PaymentError::database("commit", e))?;
+            #[cfg(any(test, feature = "testing"))]
+            seams::hold_point(&event.provider_event_id).await;
+            if advances {
+                // The advance committed with the rows. Anything an earlier,
+                // failed advance missed is advanced now, as `orm::atomic`
+                // does after its own commit.
+                crate::render_cache::orm::repair_unresolved().await;
             }
-        },
+            Ok(HydrationOutcome::Processed)
+        }
+        Ok(HydrationOutcome::AlreadyProcessed) => {
+            // A concurrent retry committed while we waited on the lock. Roll
+            // back - we have nothing to add - and report the duplicate.
+            let _ = txn.rollback().await;
+            Ok(HydrationOutcome::AlreadyProcessed)
+        }
         Err(e) => {
             let _ = txn.rollback().await;
             Err(e)
         }
     }
+}
+
+/// The body of [`try_hydrate`]'s transaction: lock and re-check the audit
+/// row, apply the mirror writes, mark the event processed, and advance the
+/// touched tables' generations, all through `txn`. Returns before any
+/// commit or rollback, which stay with the caller that owns `txn`.
+async fn apply_in_transaction(
+    txn: &Arc<DatabaseTransaction>,
+    provider: &dyn PaymentProvider,
+    event: &WebhookEvent,
+    subscription_snapshot: Option<&SubscriptionResult>,
+    advances: bool,
+) -> Result<HydrationOutcome, PaymentError> {
+    // Serialize concurrent retries: lock the audit row, then re-check whether
+    // a racing attempt already finished. `lock_exclusive` emits
+    // `SELECT … FOR UPDATE` on Postgres/MySQL/MariaDB and is a documented
+    // no-op on SQLite, which serializes writers at the file level instead.
+    let locked = webhook_event::Entity::find()
+        .filter(webhook_event::Column::Provider.eq(&event.provider))
+        .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
+        .lock_exclusive()
+        .one(txn.as_ref())
+        .await
+        .map_err(|e| PaymentError::database("lock audit row", e))?;
+    if locked.as_ref().is_some_and(|r| r.processed_at.is_some()) {
+        return Ok(HydrationOutcome::AlreadyProcessed);
+    }
+
+    // Mirror tables this transaction's writes touch, collected and advanced
+    // once, through this same transaction - see
+    // `advance_touched_mirror_tables` for why.
+    let mut touched: Vec<&'static str> = Vec::new();
+    process_webhook(
+        txn.as_ref(),
+        provider,
+        event,
+        subscription_snapshot,
+        &mut touched,
+    )
+    .await?;
+    mark_processed(txn.as_ref(), event, &mut touched).await?;
+    if advances {
+        advance_touched_mirror_tables(txn, &touched).await?;
+    }
+    Ok(HydrationOutcome::Processed)
+}
+
+/// Test-only seam that parks one webhook hydration right after its
+/// transaction commits, so a test can cancel the request at the instant its
+/// rows are durable and nothing after the commit has run (DATA-039).
+///
+/// Keyed by the provider event id, so a hydration another test runs at the
+/// same time never takes the slot.
+#[cfg(any(test, feature = "testing"))]
+mod seams {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static HOLD_NEXT: Mutex<Option<String>> = Mutex::new(None);
+    static HELD: AtomicU64 = AtomicU64::new(0);
+    static HELD_NOTIFY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+
+    fn held_notify() -> &'static tokio::sync::Notify {
+        HELD_NOTIFY.get_or_init(tokio::sync::Notify::new)
+    }
+
+    pub(super) fn hold_next(provider_event_id: &str) -> u64 {
+        *HOLD_NEXT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(provider_event_id.to_owned());
+        HELD.load(Ordering::SeqCst)
+    }
+
+    pub(super) async fn wait_until_held_past(count: u64) {
+        loop {
+            let notified = held_notify().notified();
+            if HELD.load(Ordering::SeqCst) > count {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Parks forever when armed for `provider_event_id`; the test that
+    /// armed it cancels the request around it.
+    pub(super) async fn hold_point(provider_event_id: &str) {
+        let armed = {
+            let mut slot = HOLD_NEXT
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let matches = slot.as_deref() == Some(provider_event_id);
+            if matches {
+                slot.take();
+            }
+            matches
+        };
+        if armed {
+            HELD.fetch_add(1, Ordering::SeqCst);
+            held_notify().notify_waiters();
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Test-only: parks the hydration of the webhook whose provider event id is
+/// `provider_event_id`, forever, right after its transaction commits, so a
+/// test can cancel the request at that instant. Returns the count of
+/// hydrations parked so far, for [`wait_until_hydration_commit_held_for_test`].
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn hold_hydration_commit_for_test(provider_event_id: &str) -> u64 {
+    seams::hold_next(provider_event_id)
+}
+
+/// Test-only: waits until the hydration armed by
+/// [`hold_hydration_commit_for_test`] has parked; `before` is the count that
+/// call returned.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub async fn wait_until_hydration_commit_held_for_test(before: u64) {
+    seams::wait_until_held_past(before).await;
 }
 
 /// Dispatch a parsed [`WebhookEvent`] to the mirror-table hydration paths.
@@ -963,6 +1086,11 @@ async fn mark_failed(
 }
 
 /// Mount the webhook ingress route onto an Axum-compatible Router.
+///
+/// `db` is the application's own database, the one the payments models read
+/// through `DB`. When RenderCache is on, a hydration advances the mirror
+/// tables' generations in the same transaction as the mirror rows, and the
+/// generation ledger lives in that database.
 ///
 /// ```rust,no_run
 /// use std::sync::Arc;
