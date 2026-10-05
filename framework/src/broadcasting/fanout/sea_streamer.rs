@@ -96,7 +96,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock as AsyncRwLock;
 use tokio::sync::{mpsc, oneshot};
@@ -317,22 +317,36 @@ impl Consumer {
 /// every hub of this process connected with the same stream key receives
 /// every message, in the order it was published.
 struct MemoryStream {
+    /// The key the stream is registered under, so it can unregister itself.
+    key: String,
     readers: Mutex<Vec<mpsc::UnboundedSender<Arc<[u8]>>>>,
 }
 
+/// The process's memory streams by key.
+///
+/// The registry holds them weakly: the hubs on a stream own it, and the
+/// stream leaves the registry when the last of them drops. Holding them
+/// strongly kept every stream the process ever named until it exited.
+fn memory_streams() -> &'static Mutex<HashMap<String, Weak<MemoryStream>>> {
+    static STREAMS: OnceLock<Mutex<HashMap<String, Weak<MemoryStream>>>> = OnceLock::new();
+    STREAMS.get_or_init(Default::default)
+}
+
 impl MemoryStream {
-    /// The process's stream named `key`, created on first use.
+    /// The process's stream named `key`, created when no hub holds one.
     fn named(key: &str) -> Arc<Self> {
-        static STREAMS: OnceLock<Mutex<HashMap<String, Arc<MemoryStream>>>> = OnceLock::new();
-        let mut streams = STREAMS
-            .get_or_init(Default::default)
+        let mut streams = memory_streams()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Arc::clone(streams.entry(key.to_owned()).or_insert_with(|| {
-            Arc::new(MemoryStream {
-                readers: Mutex::new(Vec::new()),
-            })
-        }))
+        if let Some(stream) = streams.get(key).and_then(Weak::upgrade) {
+            return stream;
+        }
+        let stream = Arc::new(MemoryStream {
+            key: key.to_owned(),
+            readers: Mutex::new(Vec::new()),
+        });
+        streams.insert(key.to_owned(), Arc::downgrade(&stream));
+        stream
     }
 
     /// A feed of every message published from now on.
@@ -351,6 +365,22 @@ impl MemoryStream {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .retain(|reader| reader.send(Arc::clone(&bytes)).is_ok());
+    }
+}
+
+impl Drop for MemoryStream {
+    fn drop(&mut self) {
+        let mut streams = memory_streams()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // A hub may have named the key again since the last reference to this
+        // stream went, which registers a new stream that is still in use.
+        if streams
+            .get(&self.key)
+            .is_some_and(|stream| stream.strong_count() == 0)
+        {
+            streams.remove(&self.key);
+        }
     }
 }
 
@@ -1253,6 +1283,61 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sol review: the in-process stream behind `memory://` is freed once the
+    /// last hub on it drops. The registry held every stream it ever created
+    /// until the process exited, so hubs made and dropped with distinct
+    /// stream keys grew it without bound.
+    #[tokio::test]
+    async fn a_memory_stream_is_freed_once_its_last_hub_drops() {
+        let key = format!("freed-{}", Uuid::new_v4().simple());
+        let first = SeaStreamerBroadcastHub::new("memory://", &key)
+            .await
+            .expect("a memory hub connects");
+        let second = SeaStreamerBroadcastHub::new("memory://", &key)
+            .await
+            .expect("a memory hub connects");
+        let stream = Arc::downgrade(&MemoryStream::named(&key));
+
+        drop(first);
+        assert!(
+            stream.upgrade().is_some(),
+            "the stream lives while a hub is on it"
+        );
+        drop(second);
+        // A dropped hub aborts its tasks; each lets go of the stream once the
+        // runtime next runs it.
+        for _ in 0..1_000 {
+            if stream.strong_count() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            stream.strong_count(),
+            0,
+            "the registry kept the stream after its last hub dropped"
+        );
+        assert!(
+            !memory_streams()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&key),
+            "the registry kept an entry for a stream no hub is on"
+        );
+
+        // The key names a fresh stream once it is free again, and the hub
+        // that named it reads from it.
+        let again = SeaStreamerBroadcastHub::new("memory://", &key)
+            .await
+            .expect("a memory hub connects to a key whose stream was freed");
+        let readers = MemoryStream::named(&key)
+            .readers
+            .lock()
+            .map_or(0, |readers| readers.len());
+        assert_eq!(readers, 1, "the new hub reads the stream the key names");
+        drop(again);
+    }
 
     /// A panic inside the guarded iteration must NOT propagate to the caller.
     /// This is the resilience primitive the three background tasks
