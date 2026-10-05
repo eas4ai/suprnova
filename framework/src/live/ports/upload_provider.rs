@@ -1105,16 +1105,19 @@ impl UploadProvider for SuprnovaUploadProviderRouter {
         })
     }
 
-    /// Deletes quarantined bytes, which are temporary by contract, and keeps
-    /// direct-storage bytes, which a finalizer may have adopted as its
-    /// output (ROOT-16). Either way the binding and its create metadata go.
+    /// Deletes quarantined bytes, which are temporary by contract, and hands
+    /// a direct-storage upload to the application's direct provider, which
+    /// alone can tell whether a finalizer adopted its bytes as output
+    /// (ROOT-16); the provider's default keeps them. Either way the binding
+    /// and its create metadata go.
     fn retire_after_finalization<'a>(
         &'a self,
         handle: &'a UploadHandle,
     ) -> UploadFuture<'a, Result<(), UploadError>> {
         Box::pin(async move {
-            if self.provider_for(handle) == UploadProviderMode::ReverseProxy {
-                self.reverse.cleanup(handle).await?;
+            match self.provider_for(handle) {
+                UploadProviderMode::ReverseProxy => self.reverse.cleanup(handle).await?,
+                UploadProviderMode::Direct => self.direct.retire_after_finalization(handle).await?,
             }
             self.reverse.remove_create_metadata(handle);
             self.remove_binding(handle);
