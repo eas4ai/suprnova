@@ -448,7 +448,7 @@ impl TwoFactor {
     ///
     /// Each call reserves one attempt in the second-factor counter before
     /// the code is read - the counter every proof path of this facade
-    /// shares, [`Self::complete_challenge`] included. A wrong code, a
+    /// shares, `complete_challenge` included. A wrong code, a
     /// replay or a lost claim race turns the reservation into a failed
     /// attempt. The configured number of failures inside the configured
     /// window ([`TwoFactorLockout`]: five in fifteen minutes by default)
@@ -1127,7 +1127,7 @@ impl TwoFactor {
 
     /// Clear the second-factor attempt counter for `user`, ending a
     /// lock before its window passes - the admin counterpart of
-    /// [`crate::auth_flows::BruteForce::unlock_account`] for the
+    /// `BruteForce::unlock_account` for the
     /// second factor, whose failures have a counter of their own.
     ///
     /// Returns `true` when the user was locked, and dispatches

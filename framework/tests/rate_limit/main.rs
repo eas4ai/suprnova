@@ -10,5 +10,6 @@ pub mod ip_based;
 pub mod middleware;
 pub mod production_fail_closed;
 pub mod rate_limit;
+#[cfg(feature = "testing")]
 pub mod redis;
 pub mod throttle;

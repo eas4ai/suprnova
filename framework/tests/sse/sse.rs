@@ -146,6 +146,7 @@ async fn sse_response_emits_each_event_on_its_own_frame() {
 /// IDENTITY-017: `EventSource` sends the remembered event id as UTF-8 on
 /// reconnect. An id the framework emitted with `with_id("café")` must come
 /// back from `last_event_id`, or the producer cannot resume from it.
+#[cfg(feature = "testing")]
 #[test]
 fn last_event_id_reads_a_utf8_id() {
     use suprnova::Request;

@@ -648,6 +648,7 @@ async fn typed(req: Request) -> Response {
     Ok(HttpResponse::json(json!({ "ok": true })))
 }
 
+#[cfg(feature = "localization")]
 #[tokio::test]
 async fn a_text_part_that_does_not_parse_answers_422_with_the_type_key() {
     let app = App::new(Router::new().post("/typed", typed));
@@ -748,6 +749,7 @@ fn key(errors: &ValidationErrors, field: &str) -> String {
 /// Bind a translator over the framework's English catalog plus `overrides`,
 /// an application's `lang/en/validation.ftl`, for the current
 /// `TestContainer::scope`.
+#[cfg(feature = "localization")]
 fn bind_catalog(overrides: &str) -> tempfile::TempDir {
     use suprnova::{FluentTranslator, Locale, LocalizationConfig, Translator};
 
@@ -783,6 +785,7 @@ async fn attachments(req: Request) -> Response {
     Ok(HttpResponse::json(json!({ "ok": true })))
 }
 
+#[cfg(feature = "localization")]
 #[tokio::test]
 async fn messages_come_from_the_catalog_by_key_and_an_application_overrides_them() {
     let app = App::new(
@@ -1873,6 +1876,7 @@ fn encoded_body() -> Vec<u8> {
     ])
 }
 
+#[cfg(feature = "localization")]
 #[tokio::test]
 async fn a_text_part_that_is_not_utf8_answers_422_under_its_name() {
     let app = App::new(Router::new().post("/encoded", encoded));

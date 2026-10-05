@@ -4,6 +4,7 @@
 pub mod anonymous;
 pub mod broadcast;
 pub mod database;
+#[cfg(feature = "testing")]
 pub mod database_mysql;
 pub mod database_postgres;
 pub mod database_read;
@@ -12,6 +13,7 @@ pub mod lifecycle;
 pub mod mail;
 pub mod mail_derive;
 pub mod migration;
+#[cfg(feature = "testing")]
 pub mod migration_mysql;
 pub mod notify_fake;
 pub mod queue;
