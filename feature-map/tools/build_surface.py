@@ -174,7 +174,7 @@ EXTERNAL = {
     "indexmap": "(no chapter) re-exported utility crates", "async_trait": "(no chapter) re-exported utility crates",
     "strum": "(no chapter) re-exported utility crates", "magnetar": "(no chapter) Magnetar engine API",
     # Doc-hidden re-exports that generated code names, so user crates need not depend on them.
-    "clap": "console", "tera": "notifications",
+    "clap": "console", "tera": "notifications", "form_urlencoded": "data",
     "inventory": "(no chapter) doc-hidden macro support", "serde_json": "(no chapter) doc-hidden macro support",
 }
 SIBLINGS = ("suprnova_live", "suprnova_macros", "suprnova_web_push", "magnetar")
