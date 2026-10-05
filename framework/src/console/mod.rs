@@ -209,7 +209,12 @@ where
         if let Some(entry) = find(name) {
             let booted = boot.is_some();
             if let Some(boot) = boot {
-                boot().await;
+                // Boxed, as `Application::run` holds its bootstrap: awaited
+                // inline, an application's bootstrap nests its whole state
+                // machine inside this one, and a deep one pushes the
+                // console's `main` past rustc's query depth limit in a
+                // release build.
+                Box::pin(boot()).await;
                 if let Err(e) = crate::app::process_boot::boot_after_hook(
                     crate::app::process_boot::ProcessBoot::Console,
                 )
