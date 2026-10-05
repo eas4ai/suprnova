@@ -95,6 +95,10 @@ impl Router {
     /// Installation fails when the directory cannot be read, so an
     /// application started anywhere else refuses to start instead of
     /// answering 404 for every component asset (UI-021).
+    ///
+    /// This is the one call for the shipped library's namespace, `suprnova`;
+    /// a third-party library's components are served by
+    /// [`Router::try_live_ui_assets_for`].
     pub fn try_live_ui_assets(self) -> Result<Self, FrameworkError> {
         self.try_live_ui_assets_from(
             crate::app::paths::base_path("templates").join(super::ui_assets::LIVE_UI_TEMPLATE_ROOT),
@@ -108,25 +112,54 @@ impl Router {
         self,
         root: impl Into<std::path::PathBuf>,
     ) -> Result<Self, FrameworkError> {
-        let root = root.into();
-        if let Err(error) = std::fs::read_dir(&root) {
-            return Err(FrameworkError::internal(format!(
-                "cannot read the vendored Live component directory {}: {error}; start the application from its project directory, set APP_BASE_PATH to that directory, or ship templates/suprnova-ui with the binary",
-                root.display()
-            )));
-        }
-        let assets = std::sync::Arc::new(super::ui_assets::LiveUiAssets::from_root(root));
-        let router: Router = self
-            .try_methods(
-                &LIVE_HTTP_METHODS,
-                super::ui_assets::LIVE_UI_ASSET_ROUTE,
-                move |request: crate::Request| {
-                    let assets = std::sync::Arc::clone(&assets);
-                    async move { assets.serve(request).await }
-                },
-            )?
-            .into();
-        Ok(router)
+        install_ui_assets(
+            self,
+            super::ui_assets::LIVE_UI_ASSET_ROUTE,
+            super::ui_assets::LIVE_UI_TEMPLATE_ROOT,
+            root.into(),
+        )
+    }
+
+    /// Serves the stylesheet and script of every component a third-party
+    /// library installed under `namespace`, from
+    /// `templates/<namespace>-ui/<component>/` at
+    /// `/<namespace>-ui/<component>/<file>` (REG-017), under the contract
+    /// [`Router::try_live_ui_assets`] has: closed component and file names,
+    /// `.css` and `.js` only, at most 1 MiB, with an ETag, and nothing
+    /// reached through a symbolic link below the root.
+    ///
+    /// Each library needs its own call, and `live:add` names it when it
+    /// installs the library's first component. The namespace must pass the
+    /// rule `live:add` applies (1 to 32 bytes of lowercase letters, digits
+    /// and hyphens, starting with a letter, whose module form is not a Rust
+    /// keyword), and the reserved `suprnova`, `sn` and `live` are refused:
+    /// the shipped library's one call is [`Router::try_live_ui_assets`].
+    /// Installation fails when the directory under the application base
+    /// path cannot be read, or when the namespace's route is already
+    /// installed.
+    pub fn try_live_ui_assets_for(self, namespace: &str) -> Result<Self, FrameworkError> {
+        let namespace = super::ui_assets::LibraryNamespace::parse(namespace)?;
+        let root = crate::app::paths::base_path("templates").join(namespace.template_root());
+        install_ui_assets(self, namespace.route(), namespace.template_root(), root)
+    }
+
+    /// The namespace's route over an explicit component directory, for
+    /// hosts whose template root is not the process base path, such as a
+    /// library's preview application serving its own `components/`. The
+    /// namespace is checked as [`Router::try_live_ui_assets_for`] checks it,
+    /// and installation fails when the directory cannot be read.
+    pub fn try_live_ui_assets_for_from(
+        self,
+        namespace: &str,
+        root: impl Into<std::path::PathBuf>,
+    ) -> Result<Self, FrameworkError> {
+        let namespace = super::ui_assets::LibraryNamespace::parse(namespace)?;
+        install_ui_assets(
+            self,
+            namespace.route(),
+            namespace.template_root(),
+            root.into(),
+        )
     }
 
     /// Installs the reserved namespace with application middleware on every
@@ -147,6 +180,32 @@ impl Router {
     {
         install(self, &configure(LiveRouteGuard::default()))
     }
+}
+
+/// Installs one library's asset route over `root`. A directory that cannot
+/// be read is refused at startup, naming it, so an application started
+/// away from its templates fails loudly instead of answering 404 for every
+/// asset (UI-021).
+fn install_ui_assets(
+    router: Router,
+    route: &str,
+    template_root: &str,
+    root: std::path::PathBuf,
+) -> Result<Router, FrameworkError> {
+    if let Err(error) = std::fs::read_dir(&root) {
+        return Err(FrameworkError::internal(format!(
+            "cannot read the vendored Live component directory {}: {error}; start the application from its project directory, set APP_BASE_PATH to that directory, or ship templates/{template_root} with the binary",
+            root.display()
+        )));
+    }
+    let assets = std::sync::Arc::new(super::ui_assets::LiveUiAssets::from_root(root));
+    let router: Router = router
+        .try_methods(&LIVE_HTTP_METHODS, route, move |request: crate::Request| {
+            let assets = std::sync::Arc::clone(&assets);
+            async move { assets.serve(request).await }
+        })?
+        .into();
+    Ok(router)
 }
 
 fn install(mut router: Router, guard: &LiveRouteGuard) -> Result<Router, FrameworkError> {

@@ -762,6 +762,21 @@ binary and start the application from the directory that holds it, or set
 `APP_BASE_PATH` to that directory. When the directory cannot be read, the
 application refuses to start and names it.
 
+A third-party library installs its components under its own root,
+`templates/<namespace>-ui/`, and each library takes one call of its own:
+`try_live_ui_assets_for("acme")` serves `templates/acme-ui/` at
+`/acme-ui/{component}/{file}` under the same rules, and `live:add` names
+the call when it installs the library's first component. Only stylesheets
+and scripts are served, never a view, a Rust file, a manifest or the install
+record, and never a file reached through a symbolic link below the root.
+The namespace call refuses `suprnova`, whose call is `try_live_ui_assets()`,
+and the reserved `sn` and `live`; `try_live_ui_assets_for_from(namespace,
+directory)` serves the same route from an explicit directory.
+
+```rust
+let router = router.try_live_ui_assets()?.try_live_ui_assets_for("acme")?;
+```
+
 The checker expands the macros, so `live:check` proves a library view like any
 other. The form family: field, label, input, textarea, number input,
 slider, search input, password input with reveal, checkbox and checkbox group,
