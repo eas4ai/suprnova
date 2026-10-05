@@ -1,6 +1,6 @@
 # Component registries
 
-Status: Draft
+Status: Agreed 2026-10-05
 Prefix: REG
 
 The developer asked on 2026-10-03 for a Suprnova Live components SDK:
@@ -130,7 +130,7 @@ comment, key order and table it does not own byte for byte. The manual MUST
 name `suprnova.toml` as the file.
 Falsifier: `serve` reads dev processes from a file named `Suprnova.toml`; a project holding only `Suprnova.toml` starts `serve` or runs `live:add` without naming the rename, on a case-sensitive or a case-insensitive file system; an install changes a comment or a `serve` entry in `suprnova.toml`; or a manual chapter presents `Suprnova.toml` as the file to write.
 Mechanism: `registries`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-013] `suprnova.toml` MUST be the application's provenance record.
 For each installed component, `live:add` MUST write one
@@ -150,7 +150,7 @@ version and its file digests, and no hash or signature.
 Falsifier: an installed component has no table, or a table whose fields differ from what arrived; a recorded registration differs from the line written into `src/live/`; a capability the scan found is missing from the table; an install that keeps an edited Rust file records the incoming file's capabilities in place of the kept file's, or does not name the kept file; or the table holds the digest of a file the application edited.
 Mechanism: `registries`.
 Rationale: The developer's "provenance record" in the project file; recording the signed statement's own fields is what lets REG-027 verify it again offline.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-028] `live:add` MUST keep, in `.suprnova-installed.json` in the
 component's directory under `templates/<namespace>-ui/`, the sha256 digest
@@ -164,7 +164,7 @@ new form.
 Falsifier: an edited vendored file, Rust included, is overwritten without `--force`; an unedited one is kept after the library changes it; after an edited file is kept once, a second install replaces it without `--force`; or a record in today's form is ignored.
 Mechanism: `registries`.
 Rationale: Edit detection is not provenance: what arrived (REG-013) and what was last written part ways as soon as an edited file is kept.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-027] `suprnova live:check` MUST verify every third-party component
 `suprnova.toml` records, without the network: the recorded signature
@@ -175,7 +175,7 @@ changed since install, and MUST NOT fail it.
 Falsifier: a table whose `source`, version, a digest or the signature was altered by hand passes `live:check`; a vendored file the application edited fails it; or the check makes a network request.
 Mechanism: `registries`.
 Rationale: Ruled 2026-10-05: the check lives in `live:check`, so it runs wherever `live:check` runs, the release gate included, and nobody has to remember a second command.
-Status: Draft
+Status: Agreed 2026-10-05
 
 ## Libraries and components
 
@@ -192,7 +192,7 @@ where it is published; `version` a semver version; `framework` a semver
 requirement; `publicKey` the library's signing key (REG-024).
 Falsifier: `live:add` installs from a tree with no `library.json`, with a component outside `components/`, with a component directory of 65 bytes or one ending in a hyphen, or with a `library.json` key outside that set.
 Mechanism: `registries`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-002] A component's `manifest.json` MUST be one JSON object of at
 most 1 MiB holding `name` and `files`, and optionally `root`, `title`,
@@ -205,7 +205,7 @@ format, their integer `version` removed.
 Falsifier: a manifest with a key outside that set, `cargoDependencies` included, a body of more than 1 MiB, or a `name` or `root` that does not match its directory installs, or a shipped manifest carries a key a third-party manifest could not.
 Mechanism: `registries`.
 Rationale: UI-017 holds as Agreed: a component is one directory described by one JSON manifest that names its files, and `live:add` accepts a third-party manifest in the same format; this set adds the library around it.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-003] Every file a manifest names MUST be a single file name in the
 component's directory, named once, of at most 1 MiB, and its extension
@@ -221,7 +221,7 @@ keyword, `mod` or `lib`. Two components of one library MUST NOT install
 the same path.
 Falsifier: a component installs a file outside its type's directory, a file of any other extension, a name listed twice, a stylesheet or script the asset route would not serve, `mod.rs`, or a path holding `..`, a leading dot, an uppercase letter or a separator; or a second component of the same library overwrites a Rust file the first one installed.
 Mechanism: `registries`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-004] A namespace MUST be one segment of lowercase letters, digits and
 hyphens, starting with a letter, of at most 32 bytes, whose module form
@@ -233,7 +233,7 @@ component's Rust defines MUST start with `<namespace>.`.
 Falsifier: a third-party component installs under `templates/suprnova-ui/` or `src/live/suprnova/`, uses the namespace `self`, or declares an element or defines a Live component name without its namespace prefix; or a shipped tag loses `sn-`.
 Mechanism: `registries`.
 Rationale: Refines UI-015, UI-016 and UI-018 for libraries other than the shipped one.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-005] A manifest's `register` MUST name, as `<module>::<Type>`, each
 Live component its Rust files define, relative to the library's namespace
@@ -258,7 +258,7 @@ before writing, naming the file to reconcile.
 Falsifier: a component with Rust gets its lines reported instead of written in an application `suprnova new` just generated; after a well-typed component with Rust installs into a scaffolded application, the application does not compile, the registration line names a path other than `crate::live::<namespace_module>::<module>::<Type>`, the component is not reachable through its Live route, or installing it again adds a second module declaration or registration; an unrecognized builder form gets any line written; or an update that renames a type in a kept file writes its registration.
 Mechanism: `registries-compile`.
 Rationale: UI-014 holds: the application still registers every component explicitly; the CLI writes the registration into the application's code, and nothing registers itself.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-006] A third-party component MUST reach effects only through
 Suprnova's API, and `live:add` MUST NOT add, change or remove any
@@ -275,7 +275,7 @@ component that uses no capability needs no approval.
 Falsifier: `live:add` changes `Cargo.toml`; a component installs whose Rust uses a capability the developer did not approve, or a capability the plan did not show; `--yes` alone approves a capability; a denial leaves any file written; or an update that adds a capability installs without asking.
 Mechanism: `registries`.
 Rationale: The developer, 2026-10-03: "Any capabilities should be from suprnova really" and "yeah I think we should limit them to the suprnova api", after first ruling that declared crates be approved rather than refused ("we can prompt the user to approve/deny"); the approval now covers capabilities, and no crate enters the build.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-007] A library's `framework` MUST be checked against the version of
 the `suprnova` package the application's own package depends on in
@@ -287,7 +287,7 @@ saying to run `cargo generate-lockfile`. `live:add` MUST NOT create or
 change `Cargo.lock`.
 Falsifier: a component from a library requiring `>=4.0.0` installs into an application locked to `3.0.0`, or into one with no lock whose `Cargo.toml` names the tag `v3.0.0`; an application with no lock and a framework dependency on a branch installs without the check; or `live:add` writes `Cargo.lock`.
 Mechanism: `registries`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 ## Addressing and fetching
 
@@ -315,7 +315,7 @@ A redirect that changes the repository path, as a renamed repository's
 does, MUST be refused, naming the new address.
 Falsifier: `live:add acme/acme-ui/date-picker` fetches from any host but GitHub's; a URL source fetches outside its library's base; `Acme/Acme-UI/date-picker` and `acme/acme-ui/date-picker`, a URL with and without a trailing slash, or a component directory and its `manifest.json` record two addresses; or an install follows a redirect to another repository path.
 Mechanism: `registries`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-026] A repository source MUST be fetched at a tag: `@<version>` names
 the tag `v<version>`, and with no version `live:add` MUST take the highest
@@ -332,7 +332,7 @@ one, reporting that the library changed a released version, unless
 Falsifier: an install with no version takes a branch head or a pre-release; a tag whose `library.json` says another version installs; two files of one plan come from different commits of one tag; an older signed version replaces a newer recorded one without `--force`; or a tag moved to different signed content at the recorded version installs without `--force`.
 Mechanism: `registries`.
 Rationale: Ruled 2026-10-05: the newest release tag is the default; the record in `suprnova.toml` pins the version afterwards, and the refusals above cover a downgrade or a moved tag.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-009] `live:add` MUST fetch over HTTPS only, except from a loopback
 host, MUST send no credentials, and MUST refuse a redirect to another
@@ -342,7 +342,7 @@ key. A repository's files MUST be fetched as raw files at the tag, never
 as release assets.
 Falsifier: a component installs from `http://example.test/`, after a redirect to another origin, from a 3 MiB file, from a response that stalls, or from a manifest that names `files` twice.
 Mechanism: `registries`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-010] `live:add` MUST install a component's `dependencies` before the
 component, transitively, each at most once, and MUST refuse a plan of
@@ -357,14 +357,14 @@ version other than the one an installed dependent recorded MUST name that
 dependent and be refused unless `--force` is given.
 Falsifier: a component whose dependency names it back hangs or installs twice, a chain of 65 components installs, a `./` dependency installs from another version of its library, or two parents requiring one helper at `1.0.0` and `2.0.0` install.
 Mechanism: `registries`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-011] A namespace MUST stay with the library it was first installed
 from: a component whose namespace `suprnova.toml` records for a different
 library address MUST be refused, naming both.
 Falsifier: two libraries that both claim namespace `acme`, including two on one host under different ports or paths, install into the same directories.
 Mechanism: `registries`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 ## Installing
 
@@ -378,7 +378,7 @@ without a terminal it MUST refuse unless `--yes` is given.
 Falsifier: a third-party component writes a file before the plan is shown, installs without confirmation or `--yes`, or a library that changed an installed component's script has the new script written with no report of the change.
 Mechanism: `registries`.
 Rationale: A view, a script and a Rust file are all code the application then runs, so installing a component is adding its author's code.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-029] `live:add` MUST fetch, verify and scan the whole plan,
 dependencies included, before its first write, so a watcher or editor that
@@ -396,7 +396,7 @@ MUST restore from it before anything else, and report that it did.
 build once after it is released.
 Falsifier: a dependency that fails validation leaves its parent's or its own files written; a failed write leaves component files, module declarations or record entries behind; two concurrent installs both write, or the second plans against records the first is changing; an install killed after its first write leaves files the next `live:add` or `serve` does not restore; or `serve` builds during an install.
 Mechanism: `registries`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-014] `live:add --dry-run` MUST fetch, resolve, verify, scan and
 report the whole plan, dependencies included, making the framework check
@@ -404,14 +404,14 @@ report the whole plan, dependencies included, making the framework check
 journal and the lock included.
 Falsifier: a dry run changes or creates any file, or reports a framework check other than the one an install of the same plan would make.
 Mechanism: `registries`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-015] Nothing a component carries MAY execute while `live:add`
 fetches, validates or installs it, and no code the scan did not read MAY
 enter the application's build. `live:add` MUST start no process.
 Falsifier: installing or validating a component runs any of its code, a script, a hook, a build script or a procedural macro; `live:add` starts a process; or an install adds a crate to the application's build.
 Mechanism: `registries`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 ## Validation
 
@@ -435,7 +435,7 @@ line, and MUST leave nothing behind.
 Falsifier: a component from the bypass corpus (REG-030, REG-031, REG-032) installs; a finding can be overridden; validation compiles or runs any of the component's code or the application; or validation leaves files on disk.
 Mechanism: `registries-scan`.
 Rationale: The developer asked for "an intelligent scan"; a list of refused names is bypassed by any spelling it does not list (a macro, a re-export, a computed property), so the scan lists what is admitted, limited to Suprnova's API by the developer's ruling. Still proposed: no overrides, the allowlist's exact entries, and that a model's review, if any, never decides an install. Ruled 2026-10-05: the crates Suprnova re-exports count as its API through the `suprnova::` path only, each reported in the plan as the capability it carries.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-030] In Rust, parsed with `syn`, a component MAY name only its own
 items, the modules of the components it depends on, the documented public
@@ -462,7 +462,7 @@ data, as `render_chart` builds a chart's. Each type a
 with `<namespace>.` (REG-004).
 Falsifier: a component installs that expands a `macro_rules!` into a file read, names a crate Suprnova does not re-export or a `#[doc(hidden)]` re-export such as `inventory`, includes a file through `#[path]`, `mod x;` or `include_str!`, reads `env!`, reaches files through `suprnova::tokio::fs` without the files capability in the plan, names `std::fs` under any alias, resolves a database connection from the container without the database capability in the plan, constructs a `TrustedHtml`, or defines a Live component its manifest does not declare.
 Mechanism: `registries-scan`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-031] In a view, parsed with Askama's parser, an expression MAY read
 the component's state and call only paths REG-030 admits that carry no
@@ -486,8 +486,8 @@ CSS, MUST hold no `@import`, and every resource it names, `url()`,
 included, MUST stay on the application's origin, or be refused.
 Falsifier: a component installs whose view holds `include_str!`, a call that carries a capability, a custom filter, `escape("none")`, an include of an application template or of a file its manifest does not name, an inline `script` element, a `base` or `meta` element, an `onclick` attribute, a `javascript:` link, a form whose `action` or an image whose `src` leaves the application's origin, or a `style` attribute loading a resource from another origin; or whose stylesheet imports or loads a resource from another origin, `image-set()` included.
 Mechanism: `registries-scan`.
-Rationale: Ruled 2026-10-05: a non-constant URL may come from a value the application passes in (as `account-menu` takes its links and form action) or from the framework's URL helpers (`route`, `url::to`, `Storage::url`), and never from a value the component computes itself. The developer named a future component registry on suprnova.app as a possible allowed source once it exists, with the same signature verification; it is not in this scope.
-Status: Draft
+Rationale: Ruled 2026-10-05: a non-constant URL may come from a value the application passes in (as `account-menu` takes its links and form action) or from the framework's URL helpers that carry no capability (`route`, `url::to`), and never from a value the component computes itself; a storage URL reaches a view as a value the application passes. The developer named a future component registry on suprnova.app as a possible allowed source once it exists, with the same signature verification; it is not in this scope.
+Status: Agreed 2026-10-05
 
 [REG-032] In a script, parsed as a JavaScript module, every call MUST
 resolve to a function the script defines or a standard browser API, and a
@@ -515,7 +515,7 @@ constant that stays on the application's origin; no `javascript:` or
 have a constant name the manifest declares.
 Falsifier: a component installs whose script calls `window["ev" + "al"]`, `Reflect.apply(Function, ...)` or `Function.prototype.constructor`, passes a string to `setTimeout`, calls `setAttribute("onclick", ...)`, sets `img.src` to a computed cross-origin URL or `location` to a `javascript:` URL, creates a `script` element, assigns `innerHTML`, calls `createContextualFragment`, or defines an undeclared element; or a shipped script fails the scan.
 Mechanism: `registries-scan`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-033] A library MUST be able to change its signing key: `library.json`
 names the new key as `publicKey` and carries, as `previousKeys`, a
@@ -529,7 +529,7 @@ statement MUST be refused as REG-024 says.
 Falsifier: a library whose new key is not vouched for by the pinned key installs; a vouched change re-pins under `--yes` or without a terminal; or a vouched change is refused.
 Mechanism: `registries`.
 Rationale: The developer accepted this on 2026-10-05. The pinned key proves continuity of control (the manual's words in the documentation requirement), so only that key can hand control to the next.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-023] Every component's verification hash MUST be `sha256:` and the
 lowercase hex sha256 digest of its statement: the UTF-8 bytes of one JSON
@@ -554,7 +554,7 @@ not where it sits. The manual MUST publish
 one statement, its hash, a key and a signature as a test vector.
 Falsifier: a component whose `library.json`, manifest or any file changed by one byte after signing installs; a component signed under one directory name installs when another was requested; a fork that keeps the author's `library.json`, files and signatures installs from the fork's address; or the manual's test vector does not verify.
 Mechanism: `registries`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-024] Every component from a library other than the shipped one MUST
 carry in `manifest.sig` an Ed25519 signature, over the ASCII bytes of its
@@ -568,12 +568,13 @@ key `suprnova.toml` pins for that library under
 with no pinned key MUST pin the key `library.json` names, once the
 developer confirms the plan that shows it on a terminal; `--yes` MUST NOT
 pin a new key, and a developer MAY pin one by hand beforehand. A library
-whose key differs from its pin MUST be refused, naming both fingerprints.
-An unsigned component or a bad signature MUST be refused.
+whose key differs from its pin MUST be refused, naming both fingerprints,
+unless its former key vouches for the new one (REG-033). An unsigned
+component or a bad signature MUST be refused.
 Falsifier: a component installs unsigned, with a signature from another key, or from a library whose `library.json` key differs from its pin; a new key is pinned under `--yes` with no terminal; or a component signed by `live:registry sign` fails to verify.
 Mechanism: `registries`.
 Rationale: The developer asked whether a user must register something first; trust on first use answers it, and he accepted it on 2026-10-05 ("Yes I am accepting your recommendations"). Key rotation is REG-033.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-016] The shipped library MUST be the built-in library, embedded in
 the binary in the tree and manifest format of REG-025 and REG-002, and the
@@ -581,7 +582,7 @@ only source exempt from REG-022, REG-023 and REG-024. Every shipped
 component MUST still pass the scan of REG-031 and REG-032.
 Falsifier: a shipped component installs from a format a third-party author cannot produce in a library tree, or a shipped view, stylesheet or script fails the scan.
 Mechanism: `registries-scan`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 ## Serving
 
@@ -594,7 +595,7 @@ directory), through one explicit router call per namespace.
 component.
 Falsifier: `templates/acme-ui/widget/widget.js` is installed and `/acme-ui/widget/widget.js` answers 404 after the documented call, or the route serves a view, a Rust file, an install record or `suprnova.toml`.
 Mechanism: `registries-serve`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 ## Authoring
 
@@ -610,7 +611,7 @@ pin. As generated the tree MUST pass `live:check`, `live:registry check`
 and its own tests, and hold no `TODO`.
 Falsifier: the scaffold fails one of those checks or its tests, contains a `TODO`, writes the private key inside the project, or needs a file copied for an edit under `components/` to show in the preview.
 Mechanism: `registries-compile`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-019] `suprnova live:registry check` MUST fail on any component
 `live:add` would refuse for a reason the library alone decides: its tree,
@@ -622,7 +623,7 @@ the preview application does not register under that name, and MUST list
 each component's capabilities as `live:add` will show them.
 Falsifier: `sign` signs a component that `live:add` then refuses for a reason the library decides, a bare dependency is satisfied by the library's own component, a `register` entry the preview never registered passes, or `check` lists capabilities other than those `live:add` shows.
 Mechanism: `registries`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 [REG-020] `suprnova live:registry sign` MUST run every check `check`
 runs except verifying the signatures it is about to replace, then sign
@@ -635,7 +636,7 @@ and key MUST sign to the same bytes. A named file MUST be a regular file
 inside its component's directory (UI-023).
 Falsifier: `sign` follows a symbolic link out of a component directory, writes some signatures when one component is invalid, refuses to re-sign a component edited after it was signed, reads a key from inside the project, or signs the same tree to different bytes; or `check` passes a stale signature.
 Mechanism: `registries`.
-Status: Draft
+Status: Agreed 2026-10-05
 
 ## Documentation
 
@@ -647,7 +648,7 @@ rendered by its own island, with its provenance in `suprnova.toml`, in the
 chapter shape the manual requires. They MUST list the capabilities and
 what each allows, and MUST say what a pinned key proves:
 that later versions come from whoever held the key at the first install,
-not who that is.
+or whoever that holder handed it to (REG-033), not who that is.
 Falsifier: following a chapter's commands in order does not produce a signed, tagged library, or an installed, served component an island renders; or a chapter presents a key pinned on first use as proof of the publisher's identity.
 Mechanism: `registries-compile`.
-Status: Draft
+Status: Agreed 2026-10-05
