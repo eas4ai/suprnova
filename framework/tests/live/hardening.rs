@@ -5,6 +5,13 @@
 //! agreed behavior, so each fails on the tree the audit examined and passes
 //! once its fix lands. The mechanism under `.cairn/mechanisms/live-*` runs
 //! exactly one of these by name; the test name is the contract there.
+//!
+//! The tests drive the shared fixture of `live_async_support`, which binds
+//! its Live registry and runtime in the process container, so each runs
+//! serially with the other tests of this binary that bind them. A test that
+//! redefines the fixture's `orders` gate runs alone in a child process (see
+//! `own_process`): the gate registry is process-wide, and every other test
+//! of the fixture authorizes through that gate.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,8 +34,16 @@ use suprnova::{Gate, LiveComponent, live};
 /// retired. The audit (ASTRA-01) redefined a stream's Gate to deny, saw a
 /// new subscription refused with 403, and still received an event
 /// published afterwards on the existing stream.
+#[test]
+fn revoked_gate_ends_delivery() {
+    crate::own_process::run_alone("hardening::revoked_gate_ends_delivery_child");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn revoked_gate_ends_delivery() {
+async fn revoked_gate_ends_delivery_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     let (router, _runtime) = router_and_runtime();
     let server = spawn_server(router).await;
     let alice = Identity::alice();
@@ -112,6 +127,7 @@ async fn stream_carries(stream: &mut SseClient, marker: &str) -> bool {
 /// `Auth::logout_and_invalidate`, and an event published afterwards must
 /// never reach the old stream (the open clause of LIVE-016).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
 async fn revoked_session_ends_delivery() {
     let (router, _runtime) = router_and_runtime();
     let store = Arc::new(MemorySessionStore::default());
@@ -184,6 +200,7 @@ async fn revoked_session_ends_delivery() {
 /// session row and id and only clears the signed-in user; the memberships
 /// that session opened for that user must still end with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
 async fn plain_logout_ends_delivery() {
     let (router, _runtime) = router_and_runtime();
     let store = Arc::new(MemorySessionStore::default());
@@ -731,6 +748,7 @@ async fn a_named_guard_that_fails_its_magnetar_check_ends_its_memberships_child(
 /// session row is removed from the shared store directly, the clock passes
 /// ten seconds, and a publish must not reach the membership.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
 async fn stale_store_session_ends_delivery() {
     let (router, _runtime, clock) = router_and_runtime_with_clock();
     let server = spawn_server(router).await;
@@ -869,8 +887,16 @@ async fn required_transaction_is_refused_until_real() {
 /// against a delayed authorizer would all pass the count check before any
 /// inserted; this test holds every request at the authorizer and releases
 /// them together.
+#[test]
+fn issuance_cap_holds_under_concurrency() {
+    crate::own_process::run_alone("hardening::issuance_cap_holds_under_concurrency_child");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn issuance_cap_holds_under_concurrency() {
+async fn issuance_cap_holds_under_concurrency_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     const BURST: usize = 513;
     const LIMIT: usize = 512;
     let replies = delayed_issuance_burst(BURST, LIMIT, "doc-instance-limit").await;
@@ -909,8 +935,16 @@ async fn issuance_cap_holds_under_concurrency() {
 /// credential store must keep each one's secret rather than the last one
 /// minted, or the earlier requests answer 403 `async_authority_invalid` from
 /// the connect that issuance performs.
+#[test]
+fn concurrent_issuance_keeps_every_credential() {
+    crate::own_process::run_alone("hardening::concurrent_issuance_keeps_every_credential_child");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_issuance_keeps_every_credential() {
+async fn concurrent_issuance_keeps_every_credential_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     const BURST: usize = 512;
     let replies = delayed_issuance_burst(BURST, BURST, "doc-instance-credentials").await;
     let histogram = status_histogram(&replies);
