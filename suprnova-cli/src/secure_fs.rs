@@ -86,7 +86,15 @@ pub fn write_generated<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> 
 /// one, never a partial write, and a link at the destination is replaced
 /// rather than written through.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
-    ensure_contained(Path::new("."), path)?;
+    write_atomic_under(Path::new("."), path, contents)
+}
+
+/// [`write_atomic`] for a path relative to `root` rather than to the working
+/// directory: the same containment check from `root`, the same temporary
+/// sibling and rename.
+pub fn write_atomic_under(root: &Path, relative: &Path, contents: &[u8]) -> Result<(), String> {
+    ensure_contained(root, relative)?;
+    let path = &root.join(relative);
     let parent = path.parent().ok_or_else(|| {
         format!(
             "Refusing to write {}: it has no parent directory",

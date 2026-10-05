@@ -208,8 +208,16 @@ pub(crate) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("live:make <name>", "Scaffold a Live component and view"),
             ("live:check", "Check Live views with the integrated checker"),
             (
-                "live:add <name>",
-                "Vendor a suprnova-ui component into the project",
+                "live:registry new|check|sign",
+                "Author a signed Live component library",
+            ),
+            (
+                "live:add <component>",
+                "Vendor a component from the shipped or a third-party library",
+            ),
+            (
+                "live:wait",
+                "Wait for an install in progress (serve runs it before a build)",
             ),
             ("live:inspect", "Report safe Live runtime state"),
             (

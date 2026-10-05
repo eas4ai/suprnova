@@ -78,7 +78,7 @@ impl RestartBackoff {
     }
 }
 
-/// Colors auto-assigned to `Suprnova.toml` dev processes that don't set
+/// Colors auto-assigned to `suprnova.toml` dev processes that don't set
 /// one, rotating so several unstyled entries stay visually distinct.
 /// Skips magenta/cyan - those are the backend/frontend prefixes.
 const DEV_PROCESS_PALETTE: [console::Color; 4] = [
@@ -108,7 +108,7 @@ fn color_from_name(name: &str) -> Option<console::Color> {
     }
 }
 
-/// One extra dev process declared in the project's `Suprnova.toml`, run
+/// One extra dev process declared in the project's `suprnova.toml`, run
 /// alongside the backend and frontend under `suprnova serve`. Suprnova's
 /// answer to Laravel's `DevCommands::register($command, $name)`: Laravel
 /// registers from inside the same PHP process that then execs the
@@ -123,7 +123,7 @@ struct DevProcessConfig {
     color: console::Color,
 }
 
-/// Load `[[serve.process]]` entries from `Suprnova.toml` at `path`. A
+/// Load `[[serve.process]]` entries from `suprnova.toml` at `path`. A
 /// missing file means "nothing configured" (`Ok(vec![])`) - most projects
 /// will never have one. A file that exists but is malformed, or has a
 /// broken entry, is a hard error: silently skipping it would start
@@ -140,7 +140,7 @@ fn load_dev_processes(path: &Path) -> Result<Vec<DevProcessConfig>, String> {
 fn parse_dev_processes(content: &str) -> Result<Vec<DevProcessConfig>, String> {
     let table: toml::Table = content
         .parse()
-        .map_err(|e| format!("Suprnova.toml is not valid TOML: {e}"))?;
+        .map_err(|e| format!("suprnova.toml is not valid TOML: {e}"))?;
 
     let Some(entries) = table
         .get("serve")
@@ -158,7 +158,7 @@ fn parse_dev_processes(content: &str) -> Result<Vec<DevProcessConfig>, String> {
             for key in table.keys() {
                 if !KNOWN_PROCESS_KEYS.contains(&key.as_str()) {
                     return Err(format!(
-                        "Suprnova.toml: serve.process[{i}] has an unknown key \"{key}\"; \
+                        "suprnova.toml: serve.process[{i}] has an unknown key \"{key}\"; \
                          expected one of: {}",
                         KNOWN_PROCESS_KEYS.join(", ")
                     ));
@@ -176,13 +176,13 @@ fn parse_dev_processes(content: &str) -> Result<Vec<DevProcessConfig>, String> {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
-                format!("Suprnova.toml: serve.process[{i}] is missing a non-empty `name`")
+                format!("suprnova.toml: serve.process[{i}] is missing a non-empty `name`")
             })?
             .to_string();
 
         if !seen.insert(name.clone()) {
             return Err(format!(
-                "Suprnova.toml: duplicate serve.process name \"{name}\""
+                "suprnova.toml: duplicate serve.process name \"{name}\""
             ));
         }
 
@@ -192,7 +192,7 @@ fn parse_dev_processes(content: &str) -> Result<Vec<DevProcessConfig>, String> {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
-                format!("Suprnova.toml: serve.process \"{name}\" is missing a non-empty `command`")
+                format!("suprnova.toml: serve.process \"{name}\" is missing a non-empty `command`")
             })?
             .to_string();
 
@@ -202,14 +202,14 @@ fn parse_dev_processes(content: &str) -> Result<Vec<DevProcessConfig>, String> {
                 .as_array()
                 .ok_or_else(|| {
                     format!(
-                        "Suprnova.toml: serve.process \"{name}\" `args` must be an array of strings"
+                        "suprnova.toml: serve.process \"{name}\" `args` must be an array of strings"
                     )
                 })?
                 .iter()
                 .map(|a| {
                     a.as_str().map(str::to_string).ok_or_else(|| {
                         format!(
-                            "Suprnova.toml: serve.process \"{name}\" `args` must all be strings"
+                            "suprnova.toml: serve.process \"{name}\" `args` must all be strings"
                         )
                     })
                 })
@@ -219,7 +219,7 @@ fn parse_dev_processes(content: &str) -> Result<Vec<DevProcessConfig>, String> {
         let color = match entry.get("color").and_then(|v| v.as_str()) {
             Some(color_name) => color_from_name(color_name).ok_or_else(|| {
                 format!(
-                    "Suprnova.toml: serve.process \"{name}\" has an unknown color \"{color_name}\"; \
+                    "suprnova.toml: serve.process \"{name}\" has an unknown color \"{color_name}\"; \
                      expected one of: black, red, green, yellow, blue, magenta, cyan, white"
                 )
             })?,
@@ -294,7 +294,7 @@ enum TypesArtifact {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum DevEvent {
-    /// A process (backend, frontend, or a `Suprnova.toml` entry) was
+    /// A process (backend, frontend, or a `suprnova.toml` entry) was
     /// spawned for the first time this session.
     Started { ts: String, name: String, pid: u32 },
     /// One line of a child's stdout or stderr. Carried as a field
@@ -873,7 +873,7 @@ fn decide_panes(
 /// Version requirement for the `cargo-watch` we install on demand.
 ///
 /// Bounded to a major version because `serve` drives it as
-/// `cargo watch -x <cmd>` - a flag whose meaning is not guaranteed across
+/// `cargo watch -s <cmd>` - a flag whose meaning is not guaranteed across
 /// a major bump. Unbounded, `cargo install cargo-watch` takes whatever is
 /// newest, so a future release could break `suprnova serve` on machines
 /// that happened to install it that day, with nothing in this repo
@@ -1202,10 +1202,34 @@ pub fn run(
         ui::hint("No frontend/package.json found - serving the backend only.");
     }
 
-    // Extra dev processes from the project's Suprnova.toml (Laravel's
+    // The project file is `suprnova.toml`; a project holding only the old
+    // capitalized name is refused with the rename, on a case-insensitive
+    // file system too, by its directory entry (REG-001).
+    if let Err(e) = crate::registry::project::refuse_legacy_project_file(Path::new(".")) {
+        ui::error(&e.to_string());
+        std::process::exit(1);
+    }
+
+    // A `live:add` killed after its first write left a journal; with no
+    // install holding the lock, put back every file it names before
+    // anything reads the project (REG-029).
+    match restore_interrupted_install(Path::new(".")) {
+        Ok(true) => ui::warning(&format!(
+            "an interrupted live:add left {}; every file it named was restored",
+            crate::registry::project::JOURNAL_FILE
+        )),
+        Ok(false) => {}
+        Err(e) => {
+            ui::error(&e);
+            std::process::exit(1);
+        }
+    }
+
+    // Extra dev processes from the project's suprnova.toml (Laravel's
     // `DevCommands::register`). Loaded early so a malformed file fails
     // fast, before any real process is spawned.
-    let dev_processes = match load_dev_processes(Path::new("Suprnova.toml")) {
+    let dev_processes = match load_dev_processes(Path::new(crate::registry::project::PROJECT_FILE))
+    {
         Ok(procs) => procs,
         Err(e) => {
             ui::error(&e);
@@ -1333,7 +1357,7 @@ pub fn run(
         }
     }
 
-    // Extra dev processes declared in Suprnova.toml. Always run,
+    // Extra dev processes declared in suprnova.toml. Always run,
     // independent of --backend-only/--frontend-only - a queue worker or
     // log tailer isn't "the frontend" or "the backend".
     for proc in &dev_processes {
@@ -1422,7 +1446,15 @@ pub fn run(
         };
 
         let run_cmd = backend_run_command(&package_name, backend_migrates_itself);
-        let watch_args = backend_watch_args(Path::new("."), &run_cmd);
+        let wait = match install_wait_command() {
+            Ok(wait) => wait,
+            Err(e) => {
+                ui::error(&e);
+                manager.shutdown_all();
+                std::process::exit(1);
+            }
+        };
+        let watch_args = backend_watch_args(Path::new("."), &run_cmd, &wait);
         let watch_args: Vec<&str> = watch_args.iter().map(String::as_str).collect();
         if let Err(e) = manager.spawn_with_prefix(
             "cargo",
@@ -1535,7 +1567,54 @@ fn report_startup_generation(count: usize, unit: &str, path: &Path, wrote: bool)
 /// `Localization::bootstrap`, which compiles every `lang/<locale>/*.ftl`
 /// catalog into the translator - neither is re-read at request time, so a
 /// change to either only takes effect on a restart.
-const BACKEND_WATCH_PATHS: [&str; 6] = ["src", "cmd", "Cargo.toml", "Cargo.lock", ".env", "lang"];
+///
+/// `templates/` holds the Askama views, which are compiled into the
+/// application, so a view edit - one `live:add` writes included - takes
+/// effect only after a rebuild. A project that points Askama elsewhere
+/// with `askama.toml`'s `dirs` has those watched too ([`askama_dirs`]).
+const BACKEND_WATCH_PATHS: [&str; 7] = [
+    "src",
+    "cmd",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".env",
+    "lang",
+    "templates",
+];
+
+/// The template directories `askama.toml` names under `[general] dirs`,
+/// as plain relative paths inside the project. One that leaves the project
+/// or does not exist is left out, as a missing `-w` path would stop
+/// cargo-watch from starting; a file that does not parse names none, since
+/// the build reports it.
+fn askama_dirs(project: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(project.join("askama.toml")) else {
+        return Vec::new();
+    };
+    let Ok(table) = text.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    table
+        .get("general")
+        .and_then(|general| general.get("dirs"))
+        .and_then(toml::Value::as_array)
+        .map(|dirs| {
+            dirs.iter()
+                .filter_map(toml::Value::as_str)
+                .map(|dir| dir.trim_end_matches('/').to_owned())
+                .filter(|dir| {
+                    let path = Path::new(dir);
+                    !dir.is_empty()
+                        && path.is_relative()
+                        && path
+                            .components()
+                            .all(|part| matches!(part, std::path::Component::Normal(_)))
+                        && project.join(path).is_dir()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// Turns off cargo-watch's `.gitignore` filtering.
 ///
@@ -1576,29 +1655,129 @@ const NO_GITIGNORE_FILTER: &str = "--no-vcs-ignores";
 /// [`NO_GITIGNORE_FILTER`] is added only when `.env` is one of the watched
 /// paths, so the flag never appears without the reason it exists.
 ///
-/// With no candidate present at all the result is a bare `cargo watch -x`,
+/// With no candidate present at all the result is a bare `cargo watch -s`,
 /// which watches the whole project root. That is the pre-scoping behaviour
 /// and it is chosen rather than stumbled into: there is nothing left to
 /// scope to, and refusing to start would be a worse answer than a noisy
 /// watcher. `validate_suprnova_project` has already required `Cargo.toml`
 /// by the time `serve` reaches here, so it is not a case a user meets.
-fn backend_watch_args(project: &Path, run_cmd: &str) -> Vec<String> {
-    let present: Vec<&str> = BACKEND_WATCH_PATHS
+/// Each build runs behind `wait`, the CLI's `live:wait`, as one shell
+/// command: `<wait> && cargo <run_cmd>`. While a `live:add` holds the
+/// project lock the wait blocks, so no build starts on a half-written
+/// install; cargo-watch restarts the waiting command on every change the
+/// install makes, and the one left running builds once the lock is
+/// released (REG-029).
+fn backend_watch_args(project: &Path, run_cmd: &str, wait: &str) -> Vec<String> {
+    let mut present: Vec<String> = BACKEND_WATCH_PATHS
         .into_iter()
         .filter(|candidate| project.join(candidate).exists())
+        .map(str::to_owned)
         .collect();
+    for dir in askama_dirs(project) {
+        let inside_a_watched_root = present
+            .iter()
+            .any(|watched| dir == *watched || dir.starts_with(&format!("{watched}/")));
+        if !inside_a_watched_root {
+            present.push(dir);
+        }
+    }
 
     let mut args = vec!["watch".to_string()];
-    if present.contains(&".env") {
+    if present.iter().any(|watched| watched == ".env") {
         args.push(NO_GITIGNORE_FILTER.to_string());
     }
     for candidate in present {
         args.push("-w".to_string());
         args.push(candidate.to_string());
     }
-    args.push("-x".to_string());
-    args.push(run_cmd.to_string());
+    args.push("-s".to_string());
+    args.push(format!("{wait} && cargo {run_cmd}"));
     args
+}
+
+/// The shell command that waits for any `live:add` to finish: this CLI's
+/// own path, quoted for the shell cargo-watch runs commands in.
+fn install_wait_command() -> Result<String, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("cannot find the suprnova executable to wait for installs: {e}"))?;
+    let text = exe.to_str().ok_or_else(|| {
+        format!(
+            "the suprnova executable's path {} is not UTF-8, so serve cannot wait for live:add before a build",
+            exe.display()
+        )
+    })?;
+    Ok(format!("{} live:wait", shell_quote(text)?))
+}
+
+/// Quotes a path for `sh -c`: single quotes, each embedded quote closed,
+/// escaped and reopened.
+#[cfg(not(windows))]
+fn shell_quote(text: &str) -> Result<String, String> {
+    if text.contains('\n') {
+        return Err(format!("the path {text:?} holds a line break"));
+    }
+    Ok(format!("'{}'", text.replace('\'', "'\\''")))
+}
+
+/// Quotes a path for `cmd /C`: double quotes, refusing the characters
+/// `cmd` would still expand or end the quote at.
+#[cfg(windows)]
+fn shell_quote(text: &str) -> Result<String, String> {
+    if text.contains('"') || text.contains('%') || text.contains('\n') {
+        return Err(format!(
+            "the suprnova executable's path {text} holds a quote, a percent sign or a line break, so serve cannot wait for live:add before a build"
+        ));
+    }
+    Ok(format!("\"{text}\""))
+}
+
+/// Restores the journal an interrupted `live:add` left, under the project
+/// lock, when no install holds it. Reports whether it restored one.
+fn restore_interrupted_install(root: &Path) -> Result<bool, String> {
+    use crate::registry::project::{Journal, ProjectLock};
+    if ProjectLock::is_held(root) || !Journal::exists(root) {
+        return Ok(false);
+    }
+    // Taken so no install starts between the check and the restore. An
+    // install that took it first is restoring the journal itself.
+    let Ok(lock) = ProjectLock::acquire(root) else {
+        return Ok(false);
+    };
+    let restored = Journal::restore(root).map_err(|e| e.to_string())?;
+    lock.release().map_err(|e| e.to_string())?;
+    Ok(restored)
+}
+
+/// `live:wait`: returns once no `live:add` holds the project lock, after
+/// restoring the journal of one that was killed. `serve` runs it in front
+/// of every build.
+pub fn wait_for_installs() {
+    let root = Path::new(".");
+    let mut announced = false;
+    loop {
+        if crate::registry::project::ProjectLock::is_held(root) {
+            if !announced {
+                ui::info("live:add is installing; the build waits for it to finish");
+                announced = true;
+            }
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        match restore_interrupted_install(root) {
+            Ok(true) => ui::warning(&format!(
+                "an interrupted live:add left {}; every file it named was restored",
+                crate::registry::project::JOURNAL_FILE
+            )),
+            Ok(false) => {}
+            Err(e) => {
+                ui::error(&e);
+                std::process::exit(1);
+            }
+        }
+        if !crate::registry::project::ProjectLock::is_held(root) {
+            return;
+        }
+    }
 }
 
 /// Watches `src/migrations` and says that a migration changed and was not
@@ -2024,12 +2203,12 @@ mod migrate_when_tests {
         std::fs::create_dir(dir.path().join("src")).expect("create src");
 
         let run = backend_run_command("app", false);
-        let args = backend_watch_args(dir.path(), &run);
+        let args = backend_watch_args(dir.path(), &run, "'/bin/suprnova' live:wait");
         assert_eq!(
             args.last().map(String::as_str),
-            Some("run --bin app -- serve --no-migrate")
+            Some("'/bin/suprnova' live:wait && cargo run --bin app -- serve --no-migrate")
         );
-        assert_eq!(args[args.len() - 2], "-x");
+        assert_eq!(args[args.len() - 2], "-s");
     }
 
     fn shell(script: &str) -> ProcessSpec {
@@ -2125,6 +2304,8 @@ mod backend_watch_args_tests {
     use super::*;
 
     const RUN: &str = "run --bin app";
+    const WAIT: &str = "'/bin/suprnova' live:wait";
+    const SHELL: &str = "'/bin/suprnova' live:wait && cargo run --bin app";
 
     #[test]
     fn a_bare_project_watches_only_what_it_actually_has() {
@@ -2137,8 +2318,38 @@ mod backend_watch_args_tests {
 
         // No `.env`, so no reason to disable gitignore filtering either.
         assert_eq!(
-            backend_watch_args(dir.path(), RUN),
-            vec!["watch", "-w", "src", "-w", "Cargo.toml", "-x", RUN]
+            backend_watch_args(dir.path(), RUN, WAIT),
+            vec!["watch", "-w", "src", "-w", "Cargo.toml", "-s", SHELL]
+        );
+    }
+
+    #[test]
+    fn the_views_are_watched_where_askama_reads_them() {
+        // Askama compiles the views into the application, so a view edit,
+        // one `live:add` writes included, needs a rebuild to show.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("src")).expect("create src");
+        std::fs::create_dir_all(dir.path().join("templates/acme-ui")).expect("templates");
+        std::fs::create_dir_all(dir.path().join("views/pages")).expect("views");
+        std::fs::write(
+            dir.path().join("askama.toml"),
+            "[general]\ndirs = [\"templates\", \"views\", \"../outside\", \"missing\", \"templates/acme-ui\"]\n",
+        )
+        .expect("askama.toml");
+
+        assert_eq!(
+            backend_watch_args(dir.path(), RUN, WAIT),
+            vec![
+                "watch",
+                "-w",
+                "src",
+                "-w",
+                "templates",
+                "-w",
+                "views",
+                "-s",
+                SHELL
+            ]
         );
     }
 
@@ -2152,7 +2363,7 @@ mod backend_watch_args_tests {
         std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").expect("create main.rs");
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("create manifest");
 
-        let args = backend_watch_args(dir.path(), RUN);
+        let args = backend_watch_args(dir.path(), RUN, WAIT);
         assert!(!args.iter().any(|a| a == "cmd"), "{args:?}");
         assert!(args.iter().any(|a| a == "src"), "{args:?}");
     }
@@ -2168,7 +2379,7 @@ mod backend_watch_args_tests {
         std::fs::create_dir(dir.path().join("lang")).expect("create lang");
 
         assert_eq!(
-            backend_watch_args(dir.path(), RUN),
+            backend_watch_args(dir.path(), RUN, WAIT),
             vec![
                 "watch",
                 "--no-vcs-ignores",
@@ -2184,8 +2395,8 @@ mod backend_watch_args_tests {
                 ".env",
                 "-w",
                 "lang",
-                "-x",
-                RUN
+                "-s",
+                SHELL
             ]
         );
     }
@@ -2203,7 +2414,7 @@ mod backend_watch_args_tests {
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("create manifest");
 
         assert_eq!(
-            backend_watch_args(dir.path(), RUN),
+            backend_watch_args(dir.path(), RUN, WAIT),
             vec![
                 "watch",
                 "-w",
@@ -2212,8 +2423,8 @@ mod backend_watch_args_tests {
                 "cmd",
                 "-w",
                 "Cargo.toml",
-                "-x",
-                RUN
+                "-s",
+                SHELL
             ]
         );
     }
@@ -2222,15 +2433,15 @@ mod backend_watch_args_tests {
     fn a_directory_with_nothing_to_scope_to_falls_back_to_an_unscoped_watch() {
         // Pinned as a decision rather than left as an accident: with no
         // candidate present there is nothing to scope to, and a bare
-        // `cargo watch -x` (which watches the project root) beats
+        // `cargo watch -s` (which watches the project root) beats
         // refusing to start. `validate_suprnova_project` has already
         // required `Cargo.toml` before `serve` gets here, so a user does
         // not meet this.
         let dir = tempfile::tempdir().expect("tempdir");
 
         assert_eq!(
-            backend_watch_args(dir.path(), RUN),
-            vec!["watch", "-x", RUN],
+            backend_watch_args(dir.path(), RUN, WAIT),
+            vec!["watch", "-s", SHELL],
             "no candidates means no -w, and no gitignore flag either"
         );
     }
@@ -2341,7 +2552,7 @@ mod backend_watch_args_tests {
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("create manifest");
         std::fs::create_dir_all(dir.path().join("frontend/src/types")).expect("create frontend");
 
-        let args = backend_watch_args(dir.path(), RUN);
+        let args = backend_watch_args(dir.path(), RUN, WAIT);
         assert!(
             !args.iter().any(|a| a.contains("frontend")),
             "frontend must stay out of the backend watch scope: {args:?}"
@@ -2441,7 +2652,7 @@ mod restart_backoff_tests {
 
 #[cfg(test)]
 mod dev_process_config_tests {
-    //! T15. `Suprnova.toml`'s `[[serve.process]]` array - the declarative
+    //! T15. `suprnova.toml`'s `[[serve.process]]` array - the declarative
     //! registry a project uses in place of Laravel's `DevCommands::register`.
 
     use super::{DevProcessConfig, parse_dev_processes};
