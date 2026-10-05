@@ -260,8 +260,9 @@ struct Entry {
 }
 
 /// The effect-free part of `std` a component may name (REG-030): the
-/// prelude's types and traits, collections, formatting, and nothing that
-/// reaches files, the network, the environment, processes or threads.
+/// prelude's types and traits, collections, formatting, the async
+/// vocabulary (`Future`, `Pin`, `Poll`), and nothing that reaches files,
+/// the network, the environment, processes or threads.
 pub const STD_ALLOWED: &[&str] = &[
     "std::array",
     "std::borrow",
@@ -273,6 +274,7 @@ pub const STD_ALLOWED: &[&str] = &[
     "std::convert",
     "std::default",
     "std::fmt",
+    "std::future",
     "std::hash",
     "std::iter",
     "std::marker",
@@ -283,11 +285,13 @@ pub const STD_ALLOWED: &[&str] = &[
     "std::num",
     "std::ops",
     "std::option",
+    "std::pin",
     "std::primitive",
     "std::result",
     "std::slice",
     "std::str",
     "std::string",
+    "std::task",
     "std::vec",
     "std::boxed",
     "std::rc",
