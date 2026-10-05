@@ -62,6 +62,8 @@
     - [Server-Sent Events](sse.md)
     - [WebSockets](websockets.md)
     - [Live](live.md)
+    - [Installing Live Components](live-add.md)
+    - [Live Component Libraries](live-libraries.md)
     - [RenderCache](render-cache.md)
     - [RenderCache Representations](render-cache-representations.md)
     - [RenderCache Generations](render-cache-generations.md)

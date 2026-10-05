@@ -1,7 +1,5 @@
 {
   "name": "suprnova.description-list",
-  "version": 1,
-  "root": "suprnova-ui/description-list",
   "files": [
     "description-list.html",
     "description-list.css"

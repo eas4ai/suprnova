@@ -57,10 +57,6 @@
    "class": "verified",
    "evidence": "A dated historical fact: API stability from 1.0.0; releases are git tags (CHANGELOG.md)."
   },
-  "Both are idempotent against an already-applied database (the v1 uses `CREATE TABLE IF NOT EXISTS`; the v2 is a column add).": {
-   "class": "noise",
-   "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
-  },
   "CACHE_REDIS_TEST_URL": {
    "class": "test_suite",
    "evidence": "Read only by the framework's own tests (framework/tests/cache/*, idempotency); cache.md describes running the framework's test suite."
@@ -692,6 +688,66 @@
   "where!": {
    "class": "noise",
    "evidence": "Both passages say there is no `where!` macro and name the constraint methods instead (framework/src/routing/params.rs:31 `where_methods!` defines `where_number`, `where_pattern`, ...); the statement is correct."
+  },
+  "O_NOFOLLOW": {
+   "class": "noise",
+   "evidence": "A libc open(2) flag named in filesystem.md's explanation of the check-then-open race, not a Suprnova item."
+  },
+  "include!": {
+   "class": "noise",
+   "evidence": "A Rust macro that live-libraries.md lists as one the component scan refuses (REG-030, suprnova-cli/src/registry/scan/rust/attrs.rs), not a Suprnova item."
+  },
+  "macro_rules!": {
+   "class": "noise",
+   "evidence": "A Rust macro that live-libraries.md lists as one the component scan refuses (REG-030, suprnova-cli/src/registry/scan/rust/attrs.rs), not a Suprnova item."
+  },
+  "suprnova live:registry --drop-key": {
+   "class": "noise",
+   "evidence": "`--drop-key` is a repeatable flag of the nested subcommand `suprnova live:registry rotate-key` (suprnova-cli/src/main.rs; `suprnova live:registry rotate-key --help` lists it). cli_surface.py reads one subcommand level, so the checker folds the nested command's flags into `live:registry`."
+  },
+  "suprnova live:registry --source": {
+   "class": "noise",
+   "evidence": "`--source` is a flag of the nested subcommand `suprnova live:registry new` (suprnova-cli/src/main.rs; `suprnova live:registry new --help` lists it). cli_surface.py reads one subcommand level, so the checker folds the nested command's flags into `live:registry`."
+  },
+  "A flag the table does not hold yet renders the default compiled into `is_enabled!`, and the first rule stored for it changes that answer, so the read depends on it all the same.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "Inside a `DB::transaction` they read through that transaction, so they see the rows it has written and not yet committed, as every other query in the closure does.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "Laravel's `save` inserts a model that does not exist yet and writes the new key into it.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "The migrations are idempotent against an already-applied database (the v1, the attempt table and the rotation table use `CREATE TABLE IF NOT EXISTS`; the v2 is a column add).": {
+   "class": "noise",
+   "evidence": "Not a claim about the code's state in time: v1 and v2 name the schema versions of the auth migrations (crates/suprnova-magnetar/src/migration), and `CREATE TABLE IF NOT EXISTS` is what they run."
+  },
+  "`LIVE_UPLOAD_MAX_PENDING_BYTES` :: Bytes across the files one page, and one visitor on the server, has selected and not yet finished.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "`LIVE_UPLOAD_MAX_PENDING_BYTES` :: Bytes across the files selected and not yet finished": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "`LIVE_UPLOAD_MAX_PENDING_FILES` :: Files one page, and one visitor on the server, has selected and not yet finished.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "`LIVE_UPLOAD_MAX_PENDING_FILES` :: Files selected and not yet finished": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "`replica.save()` refuses it: the replica has no row yet, and its reset key would name another row.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "`save()` refuses a replica: it has no row yet, and its reset key would name another row.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
   }
  }
 }

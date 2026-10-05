@@ -741,12 +741,17 @@ suprnova live:add password-input
 
 `live:add` records the digest of every file it writes, so a later run
 replaces a file you never edited when the library changes it, keeps a file
-you edited, and says so; `--force` replaces an edited file too. A third-party
-component installs from its own manifest with `--manifest`, under its own
-root, and each file it names must be a regular file inside the manifest's
-directory, never a symbolic link. Call the macros from your views, serve the
-vendored stylesheet and script with `try_live_ui_assets()`, and link them
-from the document:
+you edited, and says so; `--force` replaces an edited file too. It records
+each install in `suprnova.toml` at the project root. A third-party component
+installs from its library's signed tree by address, such as
+`suprnova live:add acme/acme-ui/counter`, from an `https://` URL, or from a
+`./path` on disk, under its library's own root; `--manifest <path>` names a
+component on disk too. It can carry Rust, which `live:add` writes under
+`src/live/` and registers. [Installing Live Components](live-add.md) covers
+the plan, capabilities, key pins and the record, and [Live Component
+Libraries](live-libraries.md) covers writing a library. Call the macros from
+your views, serve the vendored stylesheet and script with
+`try_live_ui_assets()`, and link them from the document:
 
 ```html
 {% import "suprnova-ui/field/field.html" as field %}
@@ -761,6 +766,21 @@ application base path on each request, so ship that directory with the
 binary and start the application from the directory that holds it, or set
 `APP_BASE_PATH` to that directory. When the directory cannot be read, the
 application refuses to start and names it.
+
+A third-party library installs its components under its own root,
+`templates/<namespace>-ui/`, and each library takes one call of its own:
+`try_live_ui_assets_for("acme")` serves `templates/acme-ui/` at
+`/acme-ui/{component}/{file}` under the same rules, and `live:add` names
+the call when it installs the library's first component. Only stylesheets
+and scripts are served, never a view, a Rust file, a manifest or the install
+record, and never a file reached through a symbolic link below the root.
+The namespace call refuses `suprnova`, whose call is `try_live_ui_assets()`,
+and the reserved `sn` and `live`; `try_live_ui_assets_for_from(namespace,
+directory)` serves the same route from an explicit directory.
+
+```rust
+let router = router.try_live_ui_assets()?.try_live_ui_assets_for("acme")?;
+```
 
 The checker expands the macros, so `live:check` proves a library view like any
 other. The form family: field, label, input, textarea, number input,
@@ -1117,6 +1137,8 @@ RenderCache's job; see [RenderCache](render-cache.md).
 | Command | Purpose |
 |---|---|
 | `suprnova live:make <name>` | Scaffold a component and its view and register it |
-| `suprnova live:check` | Prove every registered view with the integrated checker |
+| `suprnova live:add <component>` | Install a component from the shipped library or a third-party library; see [Installing Live Components](live-add.md) |
+| `suprnova live:registry new\|check\|sign\|rotate-key` | Scaffold, check, sign and re-key a component library; see [Live Component Libraries](live-libraries.md) |
+| `suprnova live:check` | Verify every recorded third-party component offline, then prove every registered view with the integrated checker |
 | `suprnova live:inspect` | Report safe runtime, registry, provider, and artifact state |
 | `suprnova live:assets --out <dir>` | Publish the reviewed runtime artifacts atomically |

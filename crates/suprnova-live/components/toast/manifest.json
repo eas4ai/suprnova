@@ -1,7 +1,5 @@
 {
   "name": "suprnova.toast",
-  "version": 1,
-  "root": "suprnova-ui/toast",
   "files": [
     "toast.html",
     "toast.css",

@@ -86,7 +86,28 @@ pub fn write_generated<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> 
 /// one, never a partial write, and a link at the destination is replaced
 /// rather than written through.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
-    ensure_contained(Path::new("."), path)?;
+    write_atomic_under(Path::new("."), path, contents)
+}
+
+/// [`write_atomic`] for a path relative to `root` rather than to the working
+/// directory: the same containment check from `root`, the same temporary
+/// sibling and rename.
+pub fn write_atomic_under(root: &Path, relative: &Path, contents: &[u8]) -> Result<(), String> {
+    write_under(root, relative, contents, false)
+}
+
+/// [`write_atomic_under`] that also reaches the disk before it returns: the
+/// bytes are synced before the rename and the directory after it, so a
+/// crash or a power cut leaves either the previous file or the whole new
+/// one. For a file that must survive the process that writes it, as an
+/// install journal must.
+pub fn write_durable_under(root: &Path, relative: &Path, contents: &[u8]) -> Result<(), String> {
+    write_under(root, relative, contents, true)
+}
+
+fn write_under(root: &Path, relative: &Path, contents: &[u8], durable: bool) -> Result<(), String> {
+    ensure_contained(root, relative)?;
+    let path = &root.join(relative);
     let parent = path.parent().ok_or_else(|| {
         format!(
             "Refusing to write {}: it has no parent directory",
@@ -106,7 +127,9 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
         .create_new(true)
         .open(&tmp)
         .map_err(|e| format!("Failed to create temporary file {}: {e}", tmp.display()))?;
-    if let Err(e) = std::io::Write::write_all(&mut handle, contents) {
+    let written = std::io::Write::write_all(&mut handle, contents)
+        .and_then(|()| if durable { handle.sync_all() } else { Ok(()) });
+    if let Err(e) = written {
         drop(handle);
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("Failed to write {}: {e}", tmp.display()));
@@ -119,7 +142,28 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
             tmp.display(),
             path.display()
         )
-    })
+    })?;
+    if durable {
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+/// Syncs a directory's entries to disk, so a rename into it survives a
+/// crash. Windows cannot open a directory for this and orders the rename
+/// itself, so there it is a no-op.
+fn sync_directory(directory: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(directory)
+            .and_then(|handle| handle.sync_all())
+            .map_err(|e| format!("Failed to sync {}: {e}", directory.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = directory;
+    }
+    Ok(())
 }
 
 /// Reject a path that escapes `root`, or that traverses a symlink on the

@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-arrow-constructor",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

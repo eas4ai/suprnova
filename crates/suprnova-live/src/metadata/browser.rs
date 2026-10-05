@@ -32,6 +32,11 @@ pub trait EffectPayloadMetadata {
     const VERSION: u16;
 }
 
+/// The payload type recorded by metadata read from a component's source
+/// rather than built from its compiled payload type. Nothing can be of this
+/// type, so no delivered payload ever matches such metadata.
+enum SourceDeclaredPayload {}
+
 /// Stable validated identity of one browser event payload contract.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PayloadContractIdentity(BrowserOperationName);
@@ -128,6 +133,56 @@ impl EventMetadata {
         })
     }
 
+    /// Builds metadata from an event payload contract read from a
+    /// component's source rather than from its compiled payload type, so
+    /// the view checker can check a vendored component without compiling
+    /// it (REG-022). The delivery contract is a component event's, as
+    /// [`EventMetadata::from_payload`] gives it. The payload type is
+    /// unknown: nothing can deliver an event through this metadata.
+    #[doc(hidden)]
+    pub fn from_source_contract(
+        name: &str,
+        version: u16,
+        payload_contract: &str,
+        schema: BrowserPayloadSchema,
+    ) -> Result<Self, MetadataError> {
+        Ok(Self {
+            name: BrowserOperationName::parse(name)
+                .map_err(|_| MetadataError::new(MetadataErrorKind::InvalidIdentity))?,
+            version: valid_payload_version(version)?,
+            payload_type: TypeId::of::<SourceDeclaredPayload>(),
+            payload_contract: PayloadContractIdentity::parse(payload_contract)
+                .map_err(|_| MetadataError::new(MetadataErrorKind::InvalidIdentity))?,
+            schema,
+            source: EventSource::Component,
+            targets: BoundedTargets::new(vec![EventTarget::SelfIsland])?,
+            order: EventOrder::PerSourceSequence,
+            cycle: EventCyclePolicy::ForbidRepeatedIsland,
+            maximum_fanout: NonZeroU16::MIN,
+        })
+    }
+
+    /// Turns source-read event metadata into a stream event's, with the
+    /// targets and fanout its stream declares, as a stream's generated
+    /// metadata has them.
+    #[doc(hidden)]
+    pub fn into_stream_contract(
+        mut self,
+        targets: BoundedTargets,
+        maximum_fanout: u16,
+    ) -> Result<Self, MetadataError> {
+        let maximum_fanout = NonZeroU16::new(maximum_fanout)
+            .filter(|fanout| fanout.get() <= MAX_EVENT_FANOUT)
+            .ok_or_else(|| MetadataError::new(MetadataErrorKind::InvalidEventFanout))?;
+        if usize::from(maximum_fanout.get()) < targets.as_slice().len() {
+            return Err(MetadataError::new(MetadataErrorKind::InvalidEventFanout));
+        }
+        self.source = EventSource::Stream;
+        self.targets = targets;
+        self.maximum_fanout = maximum_fanout;
+        Ok(self)
+    }
+
     /// Returns the stable browser event identity.
     #[must_use]
     pub const fn name(&self) -> &BrowserOperationName {
@@ -221,6 +276,20 @@ impl EffectMetadata {
                 .map_err(|_| MetadataError::new(MetadataErrorKind::InvalidIdentity))?,
             version: valid_payload_version(T::VERSION)?,
             payload_type: TypeId::of::<T>(),
+        })
+    }
+
+    /// Builds metadata from an effect payload contract read from a
+    /// component's source rather than from its compiled payload type, so
+    /// the view checker can check a vendored component without compiling
+    /// it (REG-022). Nothing can deliver an effect through this metadata.
+    #[doc(hidden)]
+    pub fn from_source_contract(name: &str, version: u16) -> Result<Self, MetadataError> {
+        Ok(Self {
+            name: BrowserOperationName::parse(name)
+                .map_err(|_| MetadataError::new(MetadataErrorKind::InvalidIdentity))?,
+            version: valid_payload_version(version)?,
+            payload_type: TypeId::of::<SourceDeclaredPayload>(),
         })
     }
 
@@ -351,5 +420,58 @@ mod tests {
 
         assert!(!format!("{identity:?}").contains(DEBUG_PAYLOAD_SENTINEL));
         assert!(!format!("{metadata:?}").contains(DEBUG_PAYLOAD_SENTINEL));
+    }
+
+    #[test]
+    fn source_read_event_metadata_carries_the_declared_contract_but_matches_no_payload() {
+        let compiled =
+            EventMetadata::from_payload::<RegisteredPayload>().expect("registered payload");
+        let read = EventMetadata::from_source_contract(
+            RegisteredPayload::NAME,
+            RegisteredPayload::VERSION,
+            RegisteredPayload::PAYLOAD_CONTRACT,
+            RegisteredPayload::SCHEMA,
+        )
+        .expect("source-read payload");
+
+        assert_eq!(read.name(), compiled.name());
+        assert_eq!(read.version(), compiled.version());
+        assert_eq!(read.payload_contract(), compiled.payload_contract());
+        assert_eq!(read.schema(), compiled.schema());
+        assert_eq!(read.source(), compiled.source());
+        assert_eq!(read.targets(), compiled.targets());
+        assert_eq!(read.maximum_fanout(), compiled.maximum_fanout());
+        assert!(!read.matches_payload::<RegisteredPayload>());
+    }
+
+    #[test]
+    fn source_read_stream_event_metadata_validates_its_fanout() {
+        let read = EventMetadata::from_source_contract(
+            "streamed",
+            1,
+            "streamed",
+            BrowserPayloadSchema::Json,
+        )
+        .expect("source-read payload");
+        let two = BoundedTargets::new(vec![EventTarget::SelfIsland, EventTarget::Document])
+            .expect("two targets");
+        let refused = read
+            .clone()
+            .into_stream_contract(two.clone(), 1)
+            .expect_err("a fanout below the targets");
+        assert_eq!(refused.kind(), MetadataErrorKind::InvalidEventFanout);
+        let stream = read
+            .into_stream_contract(two, 2)
+            .expect("a covering fanout");
+        assert_eq!(stream.source(), EventSource::Stream);
+        assert_eq!(stream.maximum_fanout().get(), 2);
+    }
+
+    #[test]
+    fn source_read_effect_metadata_refuses_a_zero_version() {
+        let refused = EffectMetadata::from_source_contract("effect", 0).expect_err("version zero");
+        assert_eq!(refused.kind(), MetadataErrorKind::InvalidVersion);
+        let read = EffectMetadata::from_source_contract("effect", 2).expect("an effect");
+        assert_eq!(read.version(), 2);
     }
 }

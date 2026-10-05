@@ -1,7 +1,5 @@
 {
   "name": "suprnova.badge",
-  "version": 1,
-  "root": "suprnova-ui/badge",
   "files": [
     "badge.html",
     "badge.css"

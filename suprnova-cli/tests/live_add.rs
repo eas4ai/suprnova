@@ -1,22 +1,37 @@
 //! `live:add` installs a library component from its manifest into one
 //! directory under `templates/`, never overwrites an edited file, replaces an
 //! unedited one when the shipped file changes, and accepts a third-party
-//! manifest in the same format whose files are regular files in its directory
-//! (Cairn UI-017, UI-022, UI-023).
+//! component in the same manifest format, from a library tree whose files are
+//! regular files in their directories (Cairn UI-017, UI-022, UI-023).
+//!
+//! A third-party install runs the scan (REG-022). Where a test reaches the
+//! scan it drives the install through the registry's own API, with the scan
+//! `live:add` runs and no registration writer, since these components carry
+//! no Rust; where a refusal comes first it drives the binary.
 
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use sha2::Digest as _;
+use suprnova_cli::registry::RegistryError;
+use suprnova_cli::registry::address::{self, LibraryAddress};
+use suprnova_cli::registry::fetch::SourceFetcher;
+use suprnova_cli::registry::install::{self, RegistrationEdits};
+use suprnova_cli::registry::plan::{self, FileOutcome, Options, Scanner};
+use suprnova_cli::registry::project::{ProjectFile, ProjectLock};
+use suprnova_cli::registry::scan::{ComponentFiles, ScanContext, ScanReport};
+use suprnova_cli::registry::signing::{self, SecretKey};
+use suprnova_cli::registry::statement::{Digest, Statement};
 
 const BIN: &str = env!("CARGO_BIN_EXE_suprnova");
+const SEED: [u8; 32] = [5; 32];
 
 fn project() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("tempdir");
     fs::write(
         tmp.path().join("Cargo.toml"),
-        "[package]\nname = \"demo-app\"\nversion = \"0.1.0\"\n",
+        "[package]\nname = \"demo-app\"\nversion = \"0.1.0\"\n\n[dependencies]\nsuprnova = { git = \"https://github.com/eas4ai/suprnova.git\", tag = \"v3.2.1\" }\n",
     )
     .expect("manifest");
     tmp
@@ -39,6 +54,140 @@ fn combined(output: &Output) -> String {
     )
 }
 
+/// The path-keyed install record entry for one installed file (REG-028).
+fn record_entry(path: &str, bytes: &[u8]) -> (String, serde_json::Value) {
+    (
+        path.to_owned(),
+        serde_json::Value::String(Digest::of(bytes).to_string()),
+    )
+}
+
+/// Writes a signed library tree with one component, `widget`, under
+/// `<project>/vendor/acme-ui`, and returns its manifest's path.
+fn vendor_library(root: &Path, namespace: &str, version: &str, view: &str) -> PathBuf {
+    let library_root = root.join("vendor/acme-ui");
+    let component = library_root.join("components/widget");
+    fs::create_dir_all(&component).expect("vendor dir");
+    let secret = SecretKey::from_bytes(SEED);
+    let library_json = serde_json::to_vec_pretty(&serde_json::json!({
+        "namespace": namespace,
+        "source": "github.com/acme/acme-ui",
+        "version": version,
+        "framework": ">=3.0.0",
+        "publicKey": secret.public_key().encode(),
+    }))
+    .expect("library.json");
+    let manifest = serde_json::to_vec_pretty(&serde_json::json!({
+        "name": format!("{namespace}.widget"),
+        "root": format!("{namespace}-ui/widget"),
+        "files": ["widget.html", "widget.css"],
+    }))
+    .expect("manifest");
+    let css = b".acme-widget { display: block; }\n";
+    fs::write(library_root.join("library.json"), &library_json).expect("library.json");
+    fs::write(component.join("manifest.json"), &manifest).expect("manifest");
+    fs::write(component.join("widget.html"), view).expect("view");
+    fs::write(component.join("widget.css"), css).expect("css");
+    let statement = Statement {
+        library: "github.com/acme/acme-ui".to_owned(),
+        version: semver::Version::parse(version).expect("semver"),
+        component: "widget".to_owned(),
+        library_json: Digest::of(&library_json),
+        manifest: Digest::of(&manifest),
+        files: BTreeMap::from([
+            ("widget.css".to_owned(), Digest::of(css)),
+            ("widget.html".to_owned(), Digest::of(view.as_bytes())),
+        ]),
+    };
+    let signature = signing::sign(&secret, &statement.verification_hash()).expect("sign");
+    fs::write(component.join("manifest.sig"), signature.encode()).expect("signature");
+    component.join("manifest.json")
+}
+
+fn project_with_vendor(namespace: &str) -> tempfile::TempDir {
+    let project = project();
+    vendor_library(project.path(), namespace, "1.0.0", "<div>Widget</div>\n");
+    project
+}
+
+/// Pins the vendored library's key by hand, as a developer may (REG-024).
+fn pin_vendor(root: &Path) {
+    let library = fs::canonicalize(root.join("vendor/acme-ui")).expect("canonical");
+    let mut project = ProjectFile::load(root).expect("load");
+    project
+        .set_library(
+            &LibraryAddress(library.to_str().expect("utf-8").to_owned()),
+            None,
+            Some(&SecretKey::from_bytes(SEED).public_key()),
+        )
+        .expect("pin");
+    project.save().expect("save");
+}
+
+/// The scan `live:add` runs, with Suprnova's embedded allowlist.
+struct Clean;
+
+impl Scanner for Clean {
+    fn scan(
+        &self,
+        component: &ComponentFiles<'_>,
+        context: &ScanContext<'_>,
+    ) -> Result<ScanReport, RegistryError> {
+        plan::AllowlistScanner.scan(component, context)
+    }
+}
+
+fn no_registration(
+    _: &Path,
+    _: &str,
+    _: &[String],
+    _: &[String],
+    _: &[String],
+) -> Result<RegistrationEdits, RegistryError> {
+    Ok(RegistrationEdits::Write(Vec::new()))
+}
+
+/// `live:add --manifest <manifest> --yes` through the registry, with the
+/// stand-in scan.
+fn add_manifest(
+    root: &Path,
+    manifest: &Path,
+) -> Result<Vec<(PathBuf, FileOutcome)>, RegistryError> {
+    let options = Options {
+        yes: true,
+        ..Options::default()
+    };
+    let lock = ProjectLock::acquire(root)?;
+    let mut project = ProjectFile::load(root)?;
+    let source = address::parse(manifest.to_str().expect("utf-8"))?;
+    let plan = plan::resolve_with(
+        &source,
+        &options,
+        &SourceFetcher::default(),
+        &project,
+        &Clean,
+    )?;
+    let decisions = plan::decisions_from_flags(&plan, &options, &project)?;
+    let outcomes = install::apply_with(
+        &plan,
+        &mut project,
+        &lock,
+        &options,
+        &decisions,
+        &no_registration,
+    )?;
+    lock.release()?;
+    Ok(outcomes)
+}
+
+fn outcome(outcomes: &[(PathBuf, FileOutcome)], path: &str) -> FileOutcome {
+    outcomes
+        .iter()
+        .find(|(candidate, _)| candidate == Path::new(path))
+        .map(|(_, outcome)| *outcome)
+        .unwrap_or_else(|| panic!("{path} is not in {outcomes:?}"))
+}
+
 #[test]
 fn a_shipped_component_installs_as_one_directory_and_an_edit_survives_a_second_run() {
     let project = project();
@@ -58,7 +207,11 @@ fn a_shipped_component_installs_as_one_directory_and_an_edit_survives_a_second_r
     )
     .expect("manifest json");
     assert_eq!(manifest["name"], "suprnova.field");
-    assert_eq!(manifest["root"], "suprnova-ui/field");
+    // The shipped manifest is in the third-party format (REG-002): it
+    // carries no version, and no root, since `suprnova-ui/field` is the
+    // root every shipped component has by default.
+    assert_eq!(manifest.get("root"), None);
+    assert_eq!(manifest.get("version"), None);
 
     let edited = format!("{shipped}\n{{# edited by the application #}}\n");
     fs::write(&view, &edited).expect("edit the view");
@@ -98,119 +251,81 @@ fn a_dry_run_writes_nothing_and_an_unknown_name_is_refused() {
 fn a_third_party_manifest_installs_under_its_own_root_and_may_not_claim_the_library_root() {
     let project = project();
     let root = project.path();
-    let vendor = project.path().join("vendor/acme-widget");
-    fs::create_dir_all(&vendor).expect("vendor dir");
-    fs::write(
-        vendor.join("manifest.json"),
-        "{\n  \"name\": \"acme.widget\",\n  \"version\": 1,\n  \"root\": \"acme-ui/widget\",\n  \"files\": [\"widget.html\", \"widget.css\"],\n  \"elements\": []\n}\n",
-    )
-    .expect("manifest");
-    fs::write(
-        vendor.join("widget.html"),
-        "{% macro widget(name) %}<div class=\"acme-widget\">{{ name }}</div>{% endmacro %}\n",
-    )
-    .expect("view");
-    fs::write(
-        vendor.join("widget.css"),
-        ".acme-widget { display: block; }\n",
-    )
-    .expect("css");
-
-    let installed = add(
+    let manifest = vendor_library(
         root,
-        &[
-            "--manifest",
-            vendor.join("manifest.json").to_str().expect("utf-8"),
-        ],
+        "acme",
+        "1.0.0",
+        "<div class=\"acme-widget\">Widget</div>\n",
     );
-    assert!(installed.status.success(), "{}", combined(&installed));
+    pin_vendor(root);
+    add_manifest(root, &manifest).expect("installs");
     let directory = root.join("templates/acme-ui/widget");
     for file in ["manifest.json", "widget.html", "widget.css"] {
         assert!(directory.join(file).is_file(), "{file} installed");
     }
 
-    fs::write(
-        vendor.join("manifest.json"),
-        "{\n  \"name\": \"acme.widget\",\n  \"version\": 1,\n  \"root\": \"suprnova-ui/widget\",\n  \"files\": [\"widget.html\"],\n  \"elements\": []\n}\n",
-    )
-    .expect("manifest");
+    let reserved = project_with_vendor("suprnova");
     let refused = add(
-        root,
+        reserved.path(),
         &[
             "--manifest",
-            vendor.join("manifest.json").to_str().expect("utf-8"),
+            "vendor/acme-ui/components/widget/manifest.json",
+            "--yes",
         ],
     );
     assert!(!refused.status.success());
-    assert!(combined(&refused).contains("reserved for the shipped library"));
-    assert!(!root.join("templates/suprnova-ui").exists());
-}
-
-fn vendor_widget(root: &Path, view: &str) -> std::path::PathBuf {
-    let vendor = root.join("vendor/acme-widget");
-    fs::create_dir_all(&vendor).expect("vendor dir");
-    fs::write(
-        vendor.join("manifest.json"),
-        "{\n  \"name\": \"acme.widget\",\n  \"version\": 1,\n  \"root\": \"acme-ui/widget\",\n  \"files\": [\"widget.html\", \"widget.css\"],\n  \"elements\": []\n}\n",
-    )
-    .expect("manifest");
-    fs::write(vendor.join("widget.html"), view).expect("view");
-    fs::write(
-        vendor.join("widget.css"),
-        ".acme-widget { display: block; }\n",
-    )
-    .expect("css");
-    vendor.join("manifest.json")
-}
-
-fn add_manifest(root: &Path, manifest: &Path) -> Output {
-    add(root, &["--manifest", manifest.to_str().expect("utf-8")])
+    assert!(
+        combined(&refused).contains("reserved for the shipped library"),
+        "{}",
+        combined(&refused)
+    );
+    assert!(!reserved.path().join("templates/suprnova-ui").exists());
 }
 
 #[test]
 fn ui_022_an_unedited_older_install_is_replaced_and_an_edited_one_is_kept() {
     let project = project();
     let root = project.path();
-    let older = "{% macro widget(name) %}<div>{{ name }}</div>{% endmacro %}\n";
-    let newer =
-        "{% macro widget(name) %}<div class=\"acme-widget\">{{ name }}</div>{% endmacro %}\n";
-    let manifest = vendor_widget(root, older);
-    let installed = add_manifest(root, &manifest);
-    assert!(installed.status.success(), "{}", combined(&installed));
+    let older = "<div>Widget</div>\n";
+    let newer = "<div class=\"acme-widget\">Widget</div>\n";
+    let manifest = vendor_library(root, "acme", "1.0.0", older);
+    pin_vendor(root);
+    add_manifest(root, &manifest).expect("installs");
     let view = root.join("templates/acme-ui/widget/widget.html");
     assert_eq!(fs::read_to_string(&view).expect("view"), older);
 
-    fs::write(root.join("vendor/acme-widget/widget.html"), newer).expect("newer view");
-    let upgraded = add_manifest(root, &manifest);
-    assert!(upgraded.status.success(), "{}", combined(&upgraded));
+    vendor_library(root, "acme", "1.1.0", newer);
+    let upgraded = add_manifest(root, &manifest).expect("upgrades");
     assert_eq!(
         fs::read_to_string(&view).expect("view"),
         newer,
-        "an unedited file follows the shipped file"
+        "an unedited file follows the library"
     );
-    let report = combined(&upgraded);
-    assert!(report.contains("replaced"), "{report}");
-    assert!(!report.contains("edited locally"), "{report}");
+    assert_eq!(
+        outcome(&upgraded, "templates/acme-ui/widget/widget.html"),
+        FileOutcome::Replaced
+    );
 
-    let edited = format!("{newer}{{# edited by the application #}}\n");
+    let edited = format!("{newer}<!-- edited by the application -->\n");
     fs::write(&view, &edited).expect("edit the view");
-    fs::write(root.join("vendor/acme-widget/widget.html"), older).expect("another shipped view");
-    let kept = add_manifest(root, &manifest);
-    assert!(kept.status.success(), "{}", combined(&kept));
+    vendor_library(root, "acme", "1.2.0", older);
+    let kept = add_manifest(root, &manifest).expect("keeps the edit");
     assert_eq!(
         fs::read_to_string(&view).expect("view"),
         edited,
         "the edit survives"
     );
-    let report = combined(&kept);
-    assert!(report.contains("kept, edited locally"), "{report}");
+    assert_eq!(
+        outcome(&kept, "templates/acme-ui/widget/widget.html"),
+        FileOutcome::Kept
+    );
 
     // The edit stays known across runs: a second run still keeps it.
-    let again = add_manifest(root, &manifest);
-    assert!(
-        combined(&again).contains("kept, edited locally"),
-        "{}",
-        combined(&again)
+    vendor_library(root, "acme", "1.3.0", newer);
+    let again = add_manifest(root, &manifest).expect("keeps it again");
+    assert_eq!(
+        outcome(&again, "templates/acme-ui/widget/widget.html"),
+        FileOutcome::Kept
     );
 }
 
@@ -231,11 +346,8 @@ fn ui_022_a_shipped_file_installed_from_an_older_release_is_replaced() {
     let mut record: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&fs::read_to_string(&record_path).expect("install record"))
             .expect("record json");
-    let digest: String = sha2::Sha256::digest(older.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    record.insert("field.html".to_owned(), serde_json::Value::String(digest));
+    let (key, value) = record_entry("templates/suprnova-ui/field/field.html", older.as_bytes());
+    record.insert(key, value);
     fs::write(&record_path, serde_json::to_vec(&record).expect("encode")).expect("record");
 
     let upgraded = add(root, &["field"]);
@@ -298,11 +410,11 @@ fn data_007_a_chart_vendored_before_the_token_classes_takes_them_from_live_add()
     let mut record: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&fs::read_to_string(&record_path).expect("install record"))
             .expect("record json");
-    let digest: String = sha2::Sha256::digest(CHART_CSS_BEFORE_DATA_007.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    record.insert("chart.css".to_owned(), serde_json::Value::String(digest));
+    let (key, value) = record_entry(
+        "templates/suprnova-ui/chart/chart.css",
+        CHART_CSS_BEFORE_DATA_007.as_bytes(),
+    );
+    record.insert(key, value);
     fs::write(&record_path, serde_json::to_vec(&record).expect("encode")).expect("record");
 
     let upgraded = add(root, &["chart"]);
@@ -371,45 +483,47 @@ fn ui_022_a_damaged_install_record_is_refused_and_named() {
 }
 
 #[test]
-fn ui_022_a_run_that_stops_partway_still_vouches_for_the_files_it_wrote() {
+fn ui_022_a_run_that_stops_partway_writes_nothing_and_the_next_run_installs() {
     let project = project();
     let root = project.path();
-    let manifest = vendor_widget(
-        root,
-        "{% macro widget(name) %}<div>{{ name }}</div>{% endmacro %}\n",
-    );
-    // The stylesheet's target is a directory, so the run stops at it, after
-    // the manifest and the view are written.
+    let manifest = vendor_library(root, "acme", "1.0.0", "<div>Widget</div>\n");
+    pin_vendor(root);
+    // The stylesheet's destination is a directory, so the run stops at it
+    // before it writes anything, the manifest and the view included.
     let target = root.join("templates/acme-ui/widget");
     fs::create_dir_all(target.join("widget.css")).expect("blocking directory");
-    let stopped = add_manifest(root, &manifest);
-    assert!(!stopped.status.success(), "{}", combined(&stopped));
+    assert!(add_manifest(root, &manifest).is_err());
+    assert!(!target.join("widget.html").exists());
+    assert!(!target.join("manifest.json").exists());
     fs::remove_dir(target.join("widget.css")).expect("unblock");
 
-    let newer =
-        "{% macro widget(name) %}<div class=\"acme-widget\">{{ name }}</div>{% endmacro %}\n";
-    fs::write(root.join("vendor/acme-widget/widget.html"), newer).expect("newer view");
-    let upgraded = add_manifest(root, &manifest);
-    assert!(upgraded.status.success(), "{}", combined(&upgraded));
+    add_manifest(root, &manifest).expect("the next run installs");
     assert_eq!(
         fs::read_to_string(target.join("widget.html")).expect("view"),
-        newer,
-        "the view written before the stop is replaced: {}",
-        combined(&upgraded)
+        "<div>Widget</div>\n"
     );
 }
 
 #[test]
-fn ui_023_a_manifest_named_in_the_working_directory_installs() {
-    let project = project();
-    let root = project.path();
-    let vendored = vendor_widget(root, "{% macro widget(name) %}{{ name }}{% endmacro %}\n");
-    for file in ["manifest.json", "widget.html", "widget.css"] {
-        fs::copy(vendored.with_file_name(file), root.join(file)).expect("copy to the project");
-    }
-    let installed = add(root, &["--manifest", "manifest.json"]);
-    assert!(installed.status.success(), "{}", combined(&installed));
-    assert!(root.join("templates/acme-ui/widget/widget.css").is_file());
+fn ui_023_a_manifest_named_by_a_relative_path_is_read_from_the_working_directory() {
+    // A relative `--manifest` path is a path source from the working
+    // directory. The library's reserved namespace is refused only once its
+    // library.json was found and read there.
+    let project = project_with_vendor("sn");
+    let output = add(
+        project.path(),
+        &[
+            "--manifest",
+            "vendor/acme-ui/components/widget/manifest.json",
+            "--yes",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(
+        combined(&output).contains("the namespace `sn` is reserved"),
+        "{}",
+        combined(&output)
+    );
 }
 
 #[cfg(unix)]
@@ -417,14 +531,15 @@ fn ui_023_a_manifest_named_in_the_working_directory_installs() {
 fn ui_023_a_third_party_file_that_is_a_symbolic_link_is_refused() {
     let project = project();
     let root = project.path();
-    let manifest = vendor_widget(root, "{% macro widget(name) %}{{ name }}{% endmacro %}\n");
+    let manifest = vendor_library(root, "acme", "1.0.0", "<div>Widget</div>\n");
     let secret = root.join("secret.key");
     fs::write(&secret, "not a template\n").expect("secret");
-    let script = root.join("vendor/acme-widget/widget.css");
-    fs::remove_file(&script).expect("drop the stylesheet");
-    std::os::unix::fs::symlink(&secret, &script).expect("link outside the directory");
+    let stylesheet = manifest.with_file_name("widget.css");
+    fs::remove_file(&stylesheet).expect("drop the stylesheet");
+    std::os::unix::fs::symlink(&secret, &stylesheet).expect("link outside the directory");
 
-    let refused = add_manifest(root, &manifest);
+    let manifest_arg = manifest.to_str().expect("utf-8");
+    let refused = add(root, &["--manifest", manifest_arg, "--yes"]);
     assert!(!refused.status.success(), "{}", combined(&refused));
     assert!(
         combined(&refused).contains("symbolic link"),
@@ -437,16 +552,17 @@ fn ui_023_a_third_party_file_that_is_a_symbolic_link_is_refused() {
     );
 
     // A link that stays inside the directory is refused the same way.
-    fs::remove_file(&script).expect("drop the link");
-    fs::write(
-        root.join("vendor/acme-widget/real.css"),
-        ".acme-widget {}\n",
-    )
-    .expect("real");
-    std::os::unix::fs::symlink(root.join("vendor/acme-widget/real.css"), &script)
-        .expect("link inside the directory");
-    let refused = add_manifest(root, &manifest);
+    fs::remove_file(&stylesheet).expect("drop the link");
+    let real = manifest.with_file_name("real.css");
+    fs::write(&real, ".acme-widget {}\n").expect("real");
+    std::os::unix::fs::symlink(&real, &stylesheet).expect("link inside the directory");
+    let refused = add(root, &["--manifest", manifest_arg, "--yes"]);
     assert!(!refused.status.success(), "{}", combined(&refused));
+    assert!(
+        combined(&refused).contains("symbolic link"),
+        "{}",
+        combined(&refused)
+    );
     assert!(
         !root.join("templates/acme-ui").exists(),
         "nothing installed"

@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-write-stdout",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}
