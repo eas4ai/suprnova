@@ -435,9 +435,11 @@ impl JobMiddleware for FailOnException {
             Ok(outcome) => Ok(outcome),
             Err(err) => {
                 if (self.matcher)(&err) {
-                    Ok(JobOutcome::Failed {
-                        reason: err.to_string(),
-                    })
+                    // Laravel's fails the job and rethrows, so the attempt
+                    // ends in this error; the worker reads it from here.
+                    let reason = err.to_string();
+                    crate::queue::worker::failed_by_error(err);
+                    Ok(JobOutcome::Failed { reason })
                 } else {
                     Err(err)
                 }

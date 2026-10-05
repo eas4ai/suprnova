@@ -1442,14 +1442,14 @@ as a `String` since `FrameworkError` doesn't derive `Clone`.
 | `JobQueued` | after the driver accepts |
 | `UniqueJobSkipped` | `push_unique` suppressed a duplicate inside the `unique_for` window |
 | `JobDebounced` | the worker dropped an envelope a newer debounced dispatch superseded |
-| `JobProcessing` | worker popped, about to dispatch |
-| `JobProcessed` | the attempt returned without an error: the handler returned `Ok`, middleware deleted the job or released it back to the queue (before `JobReleased`), or the worker dropped it as superseded (after `JobDebounced`) |
-| `JobAttempted` | every terminal settlement (success, fail, timeout, deleted by middleware, dropped as superseded by a newer debounced dispatch) |
-| `JobExceptionOccurred` | handler returned `Err`, will retry |
-| `JobReleasedAfterException` | retry-after-error re-enqueue happened |
-| `JobReleased` | middleware-driven release (no failure) |
-| `JobFailed` | dead-lettered |
-| `JobTimedOut` | per-attempt timeout exceeded |
+| `JobProcessing` | first in every attempt on a worker, before the max-attempts check, the debounce check and the middleware |
+| `JobProcessed` | the attempt returned without an error: the handler returned `Ok`, middleware deleted the job, released it (before `JobReleased`) or failed it without an error (after `JobFailed`), or the worker dropped it as superseded (after `JobDebounced`) |
+| `JobAttempted` | last in every attempt the worker settles, whatever the outcome; not after a timeout |
+| `JobExceptionOccurred` | the attempt ended in an error or a panic: before `JobReleasedAfterException` when retried, after `JobFailed` when the error failed the job (last attempt, attempts already exhausted, `FailOnException`) |
+| `JobReleasedAfterException` | the job was put back after an error, before `JobAttempted` |
+| `JobReleased` | middleware put the job back without spending an attempt, after `JobProcessed` |
+| `JobFailed` | the job failed: an error on its last attempt, attempts already exhausted, a timeout that fails it (before `JobTimedOut`), or middleware |
+| `JobTimedOut` | the attempt ran past its timeout; no `JobAttempted` follows, as Laravel's worker exits there |
 | `Looping` | every loop iteration (before the pop) |
 | `WorkerStarting` / `WorkerStopping` | once per worker lifetime |
 | `WorkerInterrupted` | `Queue::restart()` signal observed |

@@ -162,14 +162,13 @@ async fn job_timed_out_event_carries_the_jobs_timeout_budget() {
         "the event must report the budget the job declared, not a default"
     );
     assert_eq!(timed_out[0].job.job_name, "queue_events::SlowJob");
-    // DRIVERS-054: a timed-out attempt that settles terminally is an attempt.
-    let attempted = dispatched::<JobAttempted>(|_| true);
-    assert_eq!(
-        attempted.len(),
-        1,
-        "a dead-lettered timeout must fire JobAttempted"
+    // Laravel 13.27 kills the worker in its timeout handler, before the
+    // `finally` that raises JobAttempted runs, so a timed-out attempt raises
+    // none; see `lifecycle::worker_timeout_that_fails_the_job`.
+    assert!(
+        dispatched::<JobAttempted>(|_| true).is_empty(),
+        "a timeout raises no JobAttempted"
     );
-    assert_eq!(attempted[0].job.job_name, "queue_events::SlowJob");
 }
 
 // ---- JobAttempted fires for every terminal settlement (DRIVERS-054) -------
