@@ -328,7 +328,7 @@ Requirements: PAR-041, PAR-042, PAR-043, PAR-044, PAR-045, LIVE-039
 
 ## live-components-sdk
 
-Requirements: REG-001 to REG-033
+Requirements: REG-001, REG-002, REG-003, REG-004, REG-005, REG-006, REG-007, REG-008, REG-009, REG-010, REG-011, REG-012, REG-013, REG-014, REG-015, REG-016, REG-017, REG-018, REG-019, REG-020, REG-021, REG-022, REG-023, REG-024, REG-025, REG-026, REG-027, REG-028, REG-029, REG-030, REG-031, REG-032, REG-033
 
 28. live-components-sdk - the Suprnova Live components SDK the developer
    asked for on 2026-10-03 and made the primary focus of the next release
