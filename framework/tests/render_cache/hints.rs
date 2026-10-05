@@ -19,6 +19,13 @@
 //!
 //! Gated on the `testing` feature like `bypass.rs` and for the same
 //! reason: the seams these drive only exist in the library under it.
+//!
+//! Each test that reads the hint telemetry runs alone in a child process
+//! (see `own_process_async`). That telemetry is process-wide, and so is the
+//! runtime these tests install with a hint channel: under plain `cargo
+//! test`, any other test's write that advances a generation meanwhile
+//! publishes a hint into that channel and records an outcome the assertion
+//! here did not expect.
 #![cfg(feature = "testing")]
 
 use suprnova::StatusCode;
@@ -79,6 +86,14 @@ fn deliver(digests: &[[u8; 32]]) {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_hint_naming_an_observed_digest_makes_the_next_lookup_revalidate_earlier() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_hint_naming_an_observed_digest_makes_the_next_lookup_revalidate_earlier",
+    )
+    .await
+    {
+        return;
+    }
     telemetry::reset_recorded_hints_for_test();
     let harness = boot_with_render_cache_and_hints_for_test(HintsConfig::Disabled).await;
 
@@ -134,6 +149,11 @@ async fn a_hint_naming_an_observed_digest_makes_the_next_lookup_revalidate_earli
 #[tokio::test]
 #[serial_test::serial]
 async fn no_hint_makes_a_refused_entry_serve() {
+    if crate::own_process_async::delegate(module_path!(), "no_hint_makes_a_refused_entry_serve")
+        .await
+    {
+        return;
+    }
     telemetry::reset_recorded_hints_for_test();
     let harness = boot_with_render_cache_and_hints_for_test(HintsConfig::Disabled).await;
 
@@ -174,6 +194,14 @@ async fn no_hint_makes_a_refused_entry_serve() {
 #[tokio::test]
 #[serial_test::serial]
 async fn an_oversized_payload_is_dropped_before_it_is_queued() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "an_oversized_payload_is_dropped_before_it_is_queued",
+    )
+    .await
+    {
+        return;
+    }
     telemetry::reset_recorded_hints_for_test();
     let oversized = vec![b'a'; 1024 * 1024];
     assert_eq!(
@@ -209,6 +237,14 @@ async fn an_oversized_payload_is_dropped_before_it_is_queued() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_message_over_the_digest_bound_is_dropped_whole() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_message_over_the_digest_bound_is_dropped_whole",
+    )
+    .await
+    {
+        return;
+    }
     telemetry::reset_recorded_hints_for_test();
     let harness = boot_with_render_cache_and_hints_for_test(HintsConfig::Disabled).await;
 
@@ -247,6 +283,14 @@ async fn a_message_over_the_digest_bound_is_dropped_whole() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_hint_naming_nothing_this_node_holds_is_ignored() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_hint_naming_nothing_this_node_holds_is_ignored",
+    )
+    .await
+    {
+        return;
+    }
     telemetry::reset_recorded_hints_for_test();
     let harness = boot_with_render_cache_and_hints_for_test(HintsConfig::Disabled).await;
 
@@ -293,6 +337,11 @@ async fn a_hint_naming_nothing_this_node_holds_is_ignored() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_hint_never_extends_or_creates_a_lease() {
+    if crate::own_process_async::delegate(module_path!(), "a_hint_never_extends_or_creates_a_lease")
+        .await
+    {
+        return;
+    }
     telemetry::reset_recorded_hints_for_test();
     let harness = boot_with_render_cache_and_hints_for_test(HintsConfig::Disabled).await;
 
@@ -405,6 +454,14 @@ async fn a_dead_hint_channel_behaves_exactly_like_hints_switched_off() {
 #[tokio::test]
 #[serial_test::serial]
 async fn an_unreachable_hint_channel_degrades_in_telemetry_and_not_in_the_response() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "an_unreachable_hint_channel_degrades_in_telemetry_and_not_in_the_response",
+    )
+    .await
+    {
+        return;
+    }
     telemetry::reset_recorded_hints_for_test();
     let closed = redis_config_on_a_closed_port();
     let harness = boot_with_render_cache_and_hints_for_test(HintsConfig::Redis {
