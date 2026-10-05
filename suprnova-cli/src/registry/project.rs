@@ -55,7 +55,7 @@ pub fn refuse_legacy_project_file(root: &Path) -> Result<()> {
             current = true;
         }
     }
-    if legacy && current {
+    if legacy && !current {
         return Err(RegistryError::Invalid(format!(
             "the project file is `{PROJECT_FILE}`, all lowercase; rename `{LEGACY_PROJECT_FILE}` to `{PROJECT_FILE}`"
         )));
