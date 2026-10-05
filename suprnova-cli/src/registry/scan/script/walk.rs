@@ -1900,6 +1900,30 @@ impl<'a, 'c> Walker<'a, 'c> {
         }
     }
 
+    /// Whether a timer's handler is a function: [`Self::callback_safe`]
+    /// without the `null` and `undefined` it allows for an optional
+    /// callback, because REG-032 refuses a timer given anything but a
+    /// function, and a `null` handler is the shape a string handler takes
+    /// once the scan cannot read it.
+    fn timer_handler_safe(&self, value: &Expression<'a>, depth: usize) -> bool {
+        if depth > MAX_TRACE_DEPTH {
+            return false;
+        }
+        match unparen(value) {
+            Expression::NullLiteral(_) => false,
+            Expression::Identifier(reference) if reference.name == "undefined" => false,
+            Expression::ConditionalExpression(conditional) => {
+                self.timer_handler_safe(&conditional.consequent, depth + 1)
+                    && self.timer_handler_safe(&conditional.alternate, depth + 1)
+            }
+            Expression::LogicalExpression(logical) => {
+                self.timer_handler_safe(&logical.left, depth + 1)
+                    && self.timer_handler_safe(&logical.right, depth + 1)
+            }
+            other => self.callback_safe(other, depth),
+        }
+    }
+
     /// Whether a value passed where it will be called is a function the
     /// script defines or a standard browser function whose arguments need
     /// no checking.
@@ -2060,7 +2084,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                 }
             }
             Rule::Timer => match Self::argument_expression(arguments, 0) {
-                Some(argument) if self.callback_safe(argument, 0) => {}
+                Some(argument) if self.timer_handler_safe(argument, 0) => {}
                 Some(argument) => self.refuse(
                     "script-timer",
                     argument.span(),
