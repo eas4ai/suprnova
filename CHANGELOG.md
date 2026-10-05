@@ -415,23 +415,33 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 ### Changed
 
 - **Empty form fields are null, and a repeated name keeps its last value.**
-  In a `MultipartRequest` and in url-encoded `FormRequest`, `req.form()`
-  and `req.input()`, an empty field now counts as missing, as Laravel's
-  default `ConvertEmptyStringsToNull` makes it: a required `String` fails
-  and an `Option` is `None`, where an empty value used to pass as `""` or
-  fail to parse as a number. A field name sent more than once keeps its
-  last value, where multipart kept the first part (even an empty one) and
-  url-encoded forms answered 422 for a duplicate field; names ending in
-  `[]` still collect every value. A url-encoded or JSON field that is
-  missing or does not parse answers as a validation failure naming every
-  such field (`validation-required`, `validation-integer` and the like),
-  where it was a bare 422 with no `errors`, so an Inertia form gets the
-  usual redirect with each error under its input. `Request::query_into`
-  follows the same rules: an empty value is null, a repeated name keeps its
-  last value, and a name ending in `[]` fills a `Vec` field. A form that
-  sends `_token` more than once is checked against the last one, as Laravel
-  reads it. The requests manual lists what still differs from Laravel. This
-  landed after the `v3.1.0` tag.
+  In a `MultipartRequest` and in url-encoded `FormRequest`, `req.form()`,
+  `req.input()` and `Request::query_into`, an empty field is now a key
+  holding null, as Laravel's default `ConvertEmptyStringsToNull` leaves it:
+  a required `String` fails, an `Option` is `None`, a `#[serde(default)]`
+  field is null, and a map or `serde_json::Value` keeps the key, so it can
+  tell a cleared field from one never sent. An empty value used to pass as
+  `""` or fail to parse as a number. A `HashMap<String, String>` target now
+  fails on an empty field; use `Option<String>` values or
+  `serde_json::Value`. A list keeps a null element in its place: `None` in
+  a `Vec<Option<T>>`, and `validation-required` under its index, such as
+  `ids.1`, in a `Vec<T>`. `#[derive(MultipartRequest)]` accepts
+  `Vec<Option<T>>`, and a list of files still leaves out an empty file
+  input. A field name sent more than once keeps its last value, where
+  multipart kept the first part (even an empty one) and url-encoded forms
+  answered 422 for a duplicate field; names ending in `[]` still collect
+  every value. A url-encoded or query `bool` reads `1`/`0`, `true`/`false`
+  and `on`/`off` in any case, as a multipart one does; JSON stays strict
+  `true`/`false`. A url-encoded, JSON or query field that is missing or
+  does not parse answers as a validation failure naming every such field
+  (`validation-required`, `validation-integer` and the like), where it was
+  a bare 422 with no `errors`, so an Inertia form gets the usual redirect
+  with each error under its input. CSRF checks the form's `_token` (its
+  last value) before `X-CSRF-TOKEN` and `X-XSRF-TOKEN`, as Laravel orders
+  them, and an empty or `0` value counts as absent; a form body larger than
+  64 KiB has its `_token` read up to the server's request body limit, where
+  it used to fail CSRF. The requests and CSRF manuals list what still
+  differs from Laravel. This landed after the `v3.1.0` tag.
 - **The session, remember-me, auth-flow token and ceremony entities read
   whole rows on every column type.** Their time fields are the new public
   `suprnova::StoredDateTime`, which reads `DATETIME`, `TIMESTAMP`,
