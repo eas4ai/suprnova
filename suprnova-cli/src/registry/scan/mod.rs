@@ -4,6 +4,8 @@
 //! admits what it can classify and refuses everything else.
 
 pub mod allowlist;
+mod check;
+mod contract;
 mod limits;
 pub mod rust;
 pub mod script;
@@ -97,7 +99,34 @@ pub fn scan_component(
     component: &ComponentFiles<'_>,
     allowlist: &allowlist::Allowlist,
 ) -> Result<ScanReport> {
-    on_scan_stack(|| scan_on_this_thread(component, allowlist, None, None))
+    scan_component_in(component, &ScanContext::default(), allowlist)
+}
+
+/// What a caller knows about a component beyond its own files.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScanContext<'a> {
+    /// The manifest's `register`: when given, the Live components the Rust
+    /// defines must be exactly these (REG-005, REG-030).
+    pub register: Option<&'a [String]>,
+    /// The manifest's `elements`: when given, every element a script
+    /// defines must be one of these (REG-032).
+    pub elements: Option<&'a [String]>,
+    /// The source of each view the components it depends on carry, by view
+    /// path (`<namespace>-ui/<directory>/<file>`), so the view checker can
+    /// follow an include of one. The shipped library's views come from the
+    /// CLI itself.
+    pub dependency_views: &'a [(String, String)],
+}
+
+/// Scans a component with what the caller knows about it: the three scans,
+/// the manifest checks the context asks for, and `live:check`'s view checks
+/// against the contract read from the component's Rust (REG-022).
+pub fn scan_component_in(
+    component: &ComponentFiles<'_>,
+    context: &ScanContext<'_>,
+    allowlist: &allowlist::Allowlist,
+) -> Result<ScanReport> {
+    on_scan_stack(|| scan_on_this_thread(component, allowlist, context))
 }
 
 /// Scans a component as [`scan_component`] does and checks that the Live
@@ -110,7 +139,11 @@ pub fn scan_component_with_register(
     register: &[String],
     allowlist: &allowlist::Allowlist,
 ) -> Result<ScanReport> {
-    on_scan_stack(|| scan_on_this_thread(component, allowlist, Some(register), None))
+    let context = ScanContext {
+        register: Some(register),
+        ..ScanContext::default()
+    };
+    scan_component_in(component, &context, allowlist)
 }
 
 /// Scans a component as [`scan_component_with_register`] does, and also
@@ -122,7 +155,12 @@ pub fn scan_component_with_manifest(
     elements: &[String],
     allowlist: &allowlist::Allowlist,
 ) -> Result<ScanReport> {
-    on_scan_stack(|| scan_on_this_thread(component, allowlist, Some(register), Some(elements)))
+    let context = ScanContext {
+        register: Some(register),
+        elements: Some(elements),
+        ..ScanContext::default()
+    };
+    scan_component_in(component, &context, allowlist)
 }
 
 fn on_scan_stack<F>(scan: F) -> Result<ScanReport>
@@ -146,8 +184,7 @@ where
 fn scan_on_this_thread(
     component: &ComponentFiles<'_>,
     allowlist: &allowlist::Allowlist,
-    register: Option<&[String]>,
-    elements: Option<&[String]>,
+    context: &ScanContext<'_>,
 ) -> Result<ScanReport> {
     let mut report = ScanReport::default();
     for (name, _) in component.files {
@@ -166,12 +203,19 @@ fn scan_on_this_thread(
     let (rust_report, defined) = rust::scan_detailed(component, allowlist)?;
     report.merge(rust_report);
     report.merge(view::scan(component, allowlist)?);
-    report.merge(script::scan_with_elements(component, elements)?);
-    if let Some(register) = register {
+    report.merge(script::scan_with_elements(component, context.elements)?);
+    if let Some(register) = context.register {
         report
             .findings
             .extend(register_findings(&defined, register));
     }
+    let contracts = contract::read(component);
+    report.findings.extend(check::check_views(
+        component,
+        &contracts,
+        context.dependency_views,
+    ));
+    report.findings.extend(contracts.findings);
     Ok(report)
 }
 

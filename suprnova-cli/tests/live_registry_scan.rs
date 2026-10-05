@@ -339,6 +339,11 @@ fn reg_030_accepted_components_pass_and_report_their_capabilities() {
             &["inventory::Inventory"],
         ),
         ("disclosure", &[], &[]),
+        (
+            "feed",
+            &[Capability::Files, Capability::Network],
+            &["feed::Feed"],
+        ),
     ];
     for (name, capabilities, defined) in cases {
         let report = scan_fixture(&accepted().join(name));
@@ -697,4 +702,68 @@ fn reg_016_every_shipped_component_passes_the_scan() {
         "shipped components fail the scan:\n{}",
         refused.join("\n")
     );
+}
+
+/// REG-018, REG-022: the example component `live:registry new` scaffolds
+/// passes every scan, `live:check`'s view checks included, against the
+/// contract read from its Rust.
+#[test]
+fn reg_022_the_scaffolded_example_component_passes_the_scan_and_the_view_checks() {
+    for namespace in ["acme", "acme-ui-kit"] {
+        let rendered = suprnova_cli::registry::scaffold::example_component(namespace);
+        let manifest: serde_json::Value = serde_json::from_str(
+            &rendered
+                .iter()
+                .find(|(name, _)| *name == "manifest.json")
+                .expect("a manifest")
+                .1,
+        )
+        .expect("the manifest is JSON");
+        let files: Vec<(String, Vec<u8>)> = rendered
+            .iter()
+            .filter(|(name, _)| *name != "manifest.json")
+            .map(|(name, text)| ((*name).to_string(), text.clone().into_bytes()))
+            .collect();
+        let strings = |key: &str| -> Vec<String> {
+            manifest[key]
+                .as_array()
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter_map(|entry| entry.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let register = strings("register");
+        let elements = strings("elements");
+        let component = ComponentFiles {
+            namespace,
+            directory: "counter",
+            files: &files,
+            dependency_modules: &[],
+            importable_views: &[],
+        };
+        let report = scan_component_with_manifest(
+            &component,
+            &register,
+            &elements,
+            allowlist::embedded().expect("the allowlist parses"),
+        )
+        .expect("the scan runs");
+        assert!(
+            report.accepted(),
+            "{namespace}: {}",
+            report
+                .findings
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        assert_eq!(
+            report.defined_components,
+            vec!["counter::Counter".to_string()]
+        );
+    }
 }

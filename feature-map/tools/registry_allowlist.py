@@ -373,6 +373,20 @@ def build():
             entry["capability"] = None
         entry["aliases"] = sorted(set(entry["aliases"]) | set(paths[1:]) - {canonical})
         entry["implements"] = sorted(set(entry["implements"]) | set(implements))
+        # An enum's variants are named through it and carry its capability.
+        if record["kind"] == "enum":
+            for variant in (record.get("details") or {}).get("variants") or []:
+                variant_path = f"{canonical}::{variant}"
+                items.setdefault(variant_path, {
+                    "path": variant_path,
+                    "kind": "variant",
+                    "capability": entry["capability"],
+                    "hidden": entry["hidden"],
+                    "aliases": sorted(f"{path}::{variant}" for path in paths[1:]),
+                    "implements": [],
+                    "prefix": False,
+                    "refused": entry["refused"],
+                })
     hidden_crates = {
         strip_suffix(r["id"])
         for r in rust

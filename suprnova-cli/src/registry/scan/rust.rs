@@ -129,6 +129,11 @@ pub(crate) fn scan_detailed(
     Ok((report, walker.defined.clone()))
 }
 
+/// The 1-based line a span starts on, for findings outside the walker.
+pub(crate) fn line_of_span(span: proc_macro2::Span) -> Option<u32> {
+    modules::line_of(span)
+}
+
 fn finding(check: &'static str, file: &str, line: Option<u32>, message: String) -> Finding {
     Finding {
         check,

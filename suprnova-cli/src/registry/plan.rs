@@ -25,7 +25,7 @@ use super::library::{
     parse_manifest, parse_shipped_library_json, parse_shipped_manifest,
 };
 use super::project::{Approval, ComponentRecord, InstallRecord, LibraryRecord, ProjectFile};
-use super::scan::{ComponentFiles, ScanReport};
+use super::scan::{ComponentFiles, ScanContext, ScanReport};
 use super::signing::{Fingerprint, PublicKey, Signature, verify, verify_handover};
 use super::statement::{Digest, Statement};
 use super::{Capability, RegistryError, Result};
@@ -253,6 +253,19 @@ impl Plan {
 pub trait Scanner {
     /// The scan report for one component's files.
     fn scan(&self, component: &ComponentFiles<'_>) -> Result<ScanReport>;
+
+    /// The scan report for one component's files, given what the plan
+    /// knows beyond them: its manifest's `elements` and the views of the
+    /// components it depends on, which `live:check`'s view checks follow
+    /// (REG-022). A scanner that needs none of it scans the files alone.
+    fn scan_in(
+        &self,
+        component: &ComponentFiles<'_>,
+        context: &ScanContext<'_>,
+    ) -> Result<ScanReport> {
+        let _ = context;
+        self.scan(component)
+    }
 }
 
 /// The scan `live:add` runs: Suprnova's allowlist over every file.
@@ -262,6 +275,14 @@ pub struct AllowlistScanner;
 impl Scanner for AllowlistScanner {
     fn scan(&self, component: &ComponentFiles<'_>) -> Result<ScanReport> {
         super::scan::scan_component(component, super::scan::allowlist::embedded()?)
+    }
+
+    fn scan_in(
+        &self,
+        component: &ComponentFiles<'_>,
+        context: &ScanContext<'_>,
+    ) -> Result<ScanReport> {
+        super::scan::scan_component_in(component, context, super::scan::allowlist::embedded()?)
     }
 }
 
@@ -864,6 +885,10 @@ impl Resolver<'_> {
         let shipped_views = shipped_views();
         let mut modules_of: BTreeMap<ComponentAddress, (String, Vec<String>, Vec<String>)> =
             BTreeMap::new();
+        // Each planned component's view sources by view path, for the view
+        // checks of the components that depend on it.
+        let mut view_sources_of: BTreeMap<ComponentAddress, Vec<(String, String)>> =
+            BTreeMap::new();
         let mut rust_owners: BTreeMap<(LibraryAddress, String), ComponentAddress> = BTreeMap::new();
         let mut components = Vec::with_capacity(order.len());
         let mut router_calls = Vec::new();
@@ -967,20 +992,32 @@ impl Resolver<'_> {
             } else {
                 let mut dependency_modules = Vec::new();
                 let mut importable_views = shipped_views.clone();
+                let mut dependency_views = Vec::new();
                 for dependency in &loaded.dependencies {
                     if let Some((module, rust, views)) = modules_of.get(dependency) {
                         dependency_modules
                             .extend(rust.iter().map(|name| format!("{module}::{name}")));
                         importable_views.extend(views.iter().cloned());
                     }
+                    if let Some(sources) = view_sources_of.get(dependency) {
+                        dependency_views.extend(sources.iter().cloned());
+                    }
                 }
-                let incoming = scanner.scan(&ComponentFiles {
-                    namespace: &namespace,
-                    directory: &address.component,
-                    files: &loaded.files,
-                    dependency_modules: &dependency_modules,
-                    importable_views: &importable_views,
-                })?;
+                let context = ScanContext {
+                    register: None,
+                    elements: Some(&loaded.manifest.elements),
+                    dependency_views: &dependency_views,
+                };
+                let incoming = scanner.scan_in(
+                    &ComponentFiles {
+                        namespace: &namespace,
+                        directory: &address.component,
+                        files: &loaded.files,
+                        dependency_modules: &dependency_modules,
+                        importable_views: &importable_views,
+                    },
+                    &context,
+                )?;
                 if !incoming.accepted() {
                     return Err(RegistryError::Refused(incoming.findings));
                 }
@@ -1002,13 +1039,16 @@ impl Resolver<'_> {
                             swapped.push((name.clone(), std::mem::replace(bytes, on_disk)));
                         }
                     }
-                    let installed = scanner.scan(&ComponentFiles {
-                        namespace: &namespace,
-                        directory: &address.component,
-                        files: &loaded.files,
-                        dependency_modules: &dependency_modules,
-                        importable_views: &importable_views,
-                    });
+                    let installed = scanner.scan_in(
+                        &ComponentFiles {
+                            namespace: &namespace,
+                            directory: &address.component,
+                            files: &loaded.files,
+                            dependency_modules: &dependency_modules,
+                            importable_views: &importable_views,
+                        },
+                        &context,
+                    );
                     for (name, original) in swapped {
                         if let Some((_, bytes)) =
                             loaded.files.iter_mut().find(|(file, _)| *file == name)
@@ -1032,6 +1072,19 @@ impl Resolver<'_> {
                 .map(|name| format!("{namespace}-ui/{}/{name}", address.component))
                 .collect();
             modules_of.insert(address.clone(), (ns_module.clone(), modules.clone(), views));
+            let sources: Vec<(String, String)> = loaded
+                .files
+                .iter()
+                .filter(|(name, _)| FileKind::of(name) == Some(FileKind::View))
+                .filter_map(|(name, bytes)| {
+                    let source = std::str::from_utf8(bytes).ok()?.to_string();
+                    Some((
+                        format!("{namespace}-ui/{}/{name}", address.component),
+                        source,
+                    ))
+                })
+                .collect();
+            view_sources_of.insert(address.clone(), sources);
 
             let call = if shipped {
                 (self.shipped_records.is_empty()).then(|| "try_live_ui_assets()".to_owned())
