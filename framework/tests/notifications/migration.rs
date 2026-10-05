@@ -4,7 +4,9 @@
 
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use sea_orm_migration::prelude::*;
-use suprnova::notifications::migrations::CreateNotificationsTable;
+use suprnova::notifications::migrations::{
+    CreateNotificationsTable, NotificationTimestampsToDatetime,
+};
 
 async fn sqlite() -> DatabaseConnection {
     Database::connect("sqlite::memory:").await.unwrap()
@@ -31,6 +33,67 @@ async fn the_migration_has_a_stable_dated_name() {
         CreateNotificationsTable.name(),
         "m20260516_000001_create_notifications_table"
     );
+}
+
+#[tokio::test]
+async fn the_upgrade_migration_has_a_stable_dated_name() {
+    assert_eq!(
+        NotificationTimestampsToDatetime.name(),
+        "m20261004_000001_notifications_timestamps_to_datetime"
+    );
+}
+
+/// The upgrade only alters MySQL and MariaDB tables. On SQLite it leaves
+/// the table, its columns and its rows alone, runs again harmlessly, and
+/// its `down` changes nothing either.
+#[tokio::test]
+async fn the_upgrade_changes_nothing_outside_mysql() {
+    let db = sqlite().await;
+    let manager = SchemaManager::new(&db);
+    CreateNotificationsTable.up(&manager).await.unwrap();
+    db.execute_unprepared(
+        "INSERT INTO notifications \
+         (id, type, notifiable_type, notifiable_id, data, read_at, created_at, updated_at) \
+         VALUES ('00000000-0000-0000-0000-000000000001', 'OrderShipped', 'users', '42', \
+         '{}', NULL, '2040-06-01 12:00:00', '2040-06-01 12:00:00')",
+    )
+    .await
+    .expect("store a row");
+    let schema = || async {
+        db.query_one_raw(Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT sql FROM sqlite_master WHERE name = 'notifications'".to_string(),
+        ))
+        .await
+        .unwrap()
+        .expect("the table exists")
+        .try_get_by_index::<String>(0)
+        .unwrap()
+    };
+    let before = schema().await;
+
+    NotificationTimestampsToDatetime.up(&manager).await.unwrap();
+    NotificationTimestampsToDatetime
+        .up(&manager)
+        .await
+        .expect("a second up is harmless");
+    NotificationTimestampsToDatetime
+        .down(&manager)
+        .await
+        .unwrap();
+
+    assert_eq!(schema().await, before, "the table is unchanged");
+    let created_at: String = db
+        .query_one_raw(Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT created_at FROM notifications".to_string(),
+        ))
+        .await
+        .unwrap()
+        .expect("the row survives")
+        .try_get_by_index(0)
+        .unwrap();
+    assert_eq!(created_at, "2040-06-01 12:00:00");
 }
 
 #[tokio::test]
