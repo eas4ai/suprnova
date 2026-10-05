@@ -645,7 +645,26 @@ pub struct Probe {
     pub amount: f64,
 }
 
+/// Creates the RenderCache tables beside a test's own.
+///
+/// These tests seed rows through the model API and check what the reads
+/// record. Every other test in this binary installs RenderCache, which is
+/// process-wide, so under plain `cargo test` a seeding write here often
+/// runs with the write side open and advances generations. An installed
+/// process always has the RenderCache schema, so each database here has it
+/// too: the seeding writes then succeed whether or not another test has
+/// installed RenderCache by the time they run.
+async fn render_cache_schema(db: &TestDatabase) {
+    use sea_orm_migration::{MigrationTrait as _, SchemaManager};
+
+    suprnova::render_cache::migration::Migration
+        .up(&SchemaManager::new(db.conn()))
+        .await
+        .expect("create the render cache tables");
+}
+
 async fn migrate(db: &TestDatabase) {
+    render_cache_schema(db).await;
     db.execute_unprepared(
         r#"CREATE TABLE render_cache_collector_probe (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1357,6 +1376,7 @@ pub struct CtParentTag {
 }
 
 async fn migrate_relations(db: &TestDatabase) {
+    render_cache_schema(db).await;
     for sql in [
         "CREATE TABLE ct_parents (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
         "CREATE TABLE ct_children (id INTEGER PRIMARY KEY AUTOINCREMENT, \
@@ -1592,6 +1612,7 @@ pub struct CtmLabelable {
 #[serial]
 async fn morph_relation_counts_and_aggregates_observe_every_table_they_read() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    render_cache_schema(&db).await;
     for sql in [
         "CREATE TABLE ctm_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, \
          title TEXT NOT NULL, score REAL NOT NULL)",

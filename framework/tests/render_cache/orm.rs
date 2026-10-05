@@ -24,6 +24,9 @@ use render_cache_support::{Author, Book, Post, Tag, Trashable, Widget, boot};
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
 use suprnova::attrs;
 use suprnova::eloquent::{MassPrunable, prune_one};
+use suprnova::payments::webhook_route::{
+    WebhookCommit, hold_webhook_commit_for_test, wait_until_webhook_commit_held_for_test,
+};
 use suprnova::payments::{
     MockPaymentProvider, PaymentProvider, PaymentProviderRegistry, SubscribeRequest, Subscription,
     webhook_routes,
@@ -1773,28 +1776,14 @@ async fn a_payment_hydration_canceled_after_its_commit_leaves_its_tables_advance
     let path = format!("/webhooks/payments/{provider_name}");
 
     // The first delivery parks right after its commit and is canceled there.
-    let held = suprnova::payments::webhook_route::hold_hydration_commit_for_test(event_id);
-    let (addr, server) = serve_one_payments_connection(webhook_routes(conn.clone())).await;
-    let client = tokio::spawn({
-        let path = path.clone();
-        let body = body.clone();
-        async move { send_payments_webhook(addr, &path, body).await }
-    });
-    suprnova::payments::webhook_route::wait_until_hydration_commit_held_for_test(held).await;
-    server.abort();
-    client.abort();
-    assert!(
-        server
-            .await
-            .expect_err("the server was aborted")
-            .is_cancelled()
-    );
-    assert!(
-        client
-            .await
-            .expect_err("the client was aborted")
-            .is_cancelled()
-    );
+    deliver_and_cancel_at(
+        &conn,
+        &path,
+        event_id,
+        body.clone(),
+        WebhookCommit::Hydration,
+    )
+    .await;
 
     use suprnova::sea_orm::EntityTrait as _;
     let mirrored = suprnova::payments::entities::subscription::Entity::find()
@@ -1824,13 +1813,172 @@ async fn a_payment_hydration_canceled_after_its_commit_leaves_its_tables_advance
 }
 
 async fn subscriptions_generation() -> u64 {
-    let table = DependencyIdentity::table("payments_subscriptions");
+    table_generation("payments_subscriptions").await
+}
+
+async fn receipts_generation() -> u64 {
+    table_generation("payments_webhook_events").await
+}
+
+async fn table_generation(name: &str) -> u64 {
+    let table = DependencyIdentity::table(name);
     SqlGenerationLedger::new()
         .current(&[table.digest()])
         .await
         .expect("current")
         .get(&table)
         .unwrap_or(0)
+}
+
+/// Sends `body` to `path` and cancels the request once it parks right after
+/// the `commit` it makes for `event_id`.
+async fn deliver_and_cancel_at(
+    conn: &Arc<sea_orm::DatabaseConnection>,
+    path: &str,
+    event_id: &str,
+    body: Bytes,
+    commit: WebhookCommit,
+) {
+    hold_webhook_commit_for_test(event_id, commit);
+    let (addr, server) = serve_one_payments_connection(webhook_routes(conn.clone())).await;
+    let client = tokio::spawn({
+        let path = path.to_owned();
+        async move { send_payments_webhook(addr, &path, body).await }
+    });
+    wait_until_webhook_commit_held_for_test(event_id, commit).await;
+    server.abort();
+    client.abort();
+    assert!(
+        server
+            .await
+            .expect_err("the server was aborted")
+            .is_cancelled()
+    );
+    assert!(
+        client
+            .await
+            .expect_err("the client was aborted")
+            .is_cancelled()
+    );
+}
+
+/// A database with the payments and RenderCache schemas, and a mock
+/// provider bound under `provider_name` that knows no subscription, so a
+/// `subscription.created` webhook fails its hydration.
+async fn receipts_fixture(
+    provider_name: &'static str,
+) -> (TestDatabase, Arc<sea_orm::DatabaseConnection>) {
+    suprnova::render_cache::mark_installed();
+    let db = TestDatabase::fresh::<PaymentsRenderCacheMigrator>()
+        .await
+        .expect("payments + render-cache migrations should apply cleanly");
+    let conn = Arc::new(db.conn().clone());
+    let provider: Arc<dyn PaymentProvider> = Arc::new(MockPaymentProvider::new());
+    PaymentProviderRegistry::bind(provider_name, provider);
+    (db, conn)
+}
+
+/// A `subscription.created` webhook for a subscription the mock provider
+/// has never seen: its receipt is written, and its hydration fails.
+fn failing_webhook(event_id: &str) -> Bytes {
+    Bytes::from(
+        serde_json::json!({
+            "id": event_id,
+            "type": "subscription.created",
+            "data": { "object": {
+                "id": "sub_never_registered",
+                "customer": "cus_never_registered",
+            }}
+        })
+        .to_string(),
+    )
+}
+
+/// DATA-039, the receipt insert: a webhook canceled right after its receipt
+/// row commits leaves `payments_webhook_events` advanced. The insert used to
+/// commit on its own and advance afterwards, in a second transaction, so a
+/// cancellation while the COMMIT was being acknowledged kept the receipt and
+/// lost its advance.
+#[tokio::test]
+async fn a_webhook_canceled_after_its_receipt_insert_commits_leaves_the_receipt_table_advanced() {
+    let provider_name = "render-cache-receipt-insert";
+    let (_db, conn) = receipts_fixture(provider_name).await;
+    let before = receipts_generation().await;
+
+    let event_id = "evt_render_cache_receipt_insert";
+    deliver_and_cancel_at(
+        &conn,
+        &format!("/webhooks/payments/{provider_name}"),
+        event_id,
+        failing_webhook(event_id),
+        WebhookCommit::Receipt,
+    )
+    .await;
+
+    assert_eq!(
+        receipts_generation().await,
+        before + 1,
+        "the receipt insert's commit carried its advance"
+    );
+}
+
+/// DATA-039, the failure record: a webhook canceled right after its failed
+/// hydration's error is recorded on the receipt leaves the receipt table
+/// advanced for both writes. The failure record used to commit on its own
+/// and advance afterwards.
+#[tokio::test]
+async fn a_webhook_canceled_after_its_failure_record_commits_leaves_the_receipt_table_advanced() {
+    let provider_name = "render-cache-receipt-failure";
+    let (_db, conn) = receipts_fixture(provider_name).await;
+    let before = receipts_generation().await;
+
+    let event_id = "evt_render_cache_receipt_failure";
+    deliver_and_cancel_at(
+        &conn,
+        &format!("/webhooks/payments/{provider_name}"),
+        event_id,
+        failing_webhook(event_id),
+        WebhookCommit::FailureRecord,
+    )
+    .await;
+
+    assert_eq!(
+        receipts_generation().await,
+        before + 2,
+        "the receipt insert and the failure record each carried their advance"
+    );
+}
+
+/// DATA-039, the retry's error clear: a retry canceled right after it clears
+/// the earlier attempt's error from the receipt leaves the receipt table
+/// advanced. The clear used to commit on its own and advance afterwards.
+#[tokio::test]
+async fn a_retry_canceled_after_its_error_clear_commits_leaves_the_receipt_table_advanced() {
+    let provider_name = "render-cache-receipt-retry";
+    let (_db, conn) = receipts_fixture(provider_name).await;
+    let path = format!("/webhooks/payments/{provider_name}");
+    let event_id = "evt_render_cache_receipt_retry";
+
+    // The first delivery runs to the end: receipt, failed hydration, error.
+    let addr = spawn_payments_server(webhook_routes(conn.clone()), 1).await;
+    let (status, _) = send_payments_webhook(addr, &path, failing_webhook(event_id)).await;
+    assert_eq!(status.as_u16(), 503, "precondition: the hydration failed");
+    let after_first = receipts_generation().await;
+
+    deliver_and_cancel_at(
+        &conn,
+        &path,
+        event_id,
+        failing_webhook(event_id),
+        WebhookCommit::RetryClear,
+    )
+    .await;
+
+    assert_eq!(
+        receipts_generation().await,
+        after_first + 1,
+        "the retry's error clear carried its advance"
+    );
 }
 
 /// The evaluator chain a real application boots, over the database
@@ -2609,11 +2757,11 @@ async fn cancel_at_the_advance<F>(write: F)
 where
     F: std::future::Future,
 {
-    let before = suprnova::render_cache::RenderCache::hold_next_advance_for_test("d039_rows");
+    suprnova::render_cache::RenderCache::hold_next_advance_for_test("d039_rows");
     tokio::select! {
         biased;
         _ = write => panic!("the advance was parked, so the write cannot have finished"),
-        () = suprnova::render_cache::RenderCache::wait_until_advance_held_for_test(before) => {}
+        () = suprnova::render_cache::RenderCache::wait_until_advance_held_for_test("d039_rows") => {}
     }
 }
 

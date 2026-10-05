@@ -646,6 +646,78 @@ async fn an_older_advance_never_resolves_a_newer_failure_of_the_same_identity() 
     );
 }
 
+/// CACHE-009, a cancel during a named-connection write's COMMIT: a write
+/// on a named connection commits its row on that connection and only then
+/// advances on the primary, so a drop of the write after its row is durable
+/// and before its advance starts used to leave nothing behind. Serving went
+/// on from entries whose generations never covered the row. The write now
+/// records a pending suspension before its row write starts, so that drop
+/// leaves serving suspended until a later advance repairs it.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_named_connection_write_canceled_during_its_commit_leaves_serving_suspended() {
+    let harness = boot_with_render_cache().await;
+    let aux = hardening_aux_connection().await;
+
+    let warm = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(warm.status, StatusCode::OK);
+    let renders_after_warm = counting_route::renders();
+    let hit = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(hit.body, warm.body);
+    assert_eq!(
+        counting_route::renders(),
+        renders_after_warm,
+        "precondition: the entry is served"
+    );
+
+    // The row write returns, and the write is dropped before anything after
+    // it runs: the same state a drop while its COMMIT was acknowledged leaves.
+    RenderCache::hold_next_advance_for_test("markers");
+    tokio::select! {
+        biased;
+        _ = DB::table("markers")
+            .on(aux)
+            .filter("id", 1)
+            .update(attrs! { marker: "canceled" }) => {
+            panic!("the advance was parked, so the write cannot have finished")
+        }
+        () = RenderCache::wait_until_advance_held_for_test("markers") => {}
+    }
+    let rows = DB::select_on(aux, "SELECT marker FROM markers WHERE id = 1", Vec::new())
+        .await
+        .expect("read the aux marker");
+    assert_eq!(
+        rows.first()
+            .map(|row| row.get_string("marker").expect("the marker column")),
+        Some("canceled".to_owned()),
+        "precondition: the canceled write's row committed"
+    );
+
+    let renders_before = counting_route::renders();
+    let after = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(after.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        renders_before + 1,
+        "the canceled write never advanced, so the stored entry is not served"
+    );
+
+    // The next advancement that lands repairs it, and serving resumes.
+    User::create(attrs! { name: "repairs the canceled write" })
+        .await
+        .expect("a primary write whose advancement succeeds");
+    let rebuilt = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(rebuilt.status, StatusCode::OK);
+    let renders_after_rebuild = counting_route::renders();
+    let served = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(served.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        renders_after_rebuild,
+        "once the repair lands, stored entries are served again"
+    );
+}
+
 /// CACHE-005: a response's content coding is stored with its body and
 /// replayed on every hit. The audit (ASTRA-04) saw gzip bytes replayed
 /// without `Content-Encoding`, so a browser parsed compressed bytes as
