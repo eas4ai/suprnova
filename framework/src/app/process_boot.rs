@@ -105,6 +105,19 @@ pub(crate) async fn finish_process() {
     crate::events::drain_queued_at_shutdown().await;
 }
 
+/// End a booted process that failed, with `code`, after [`finish_process`]
+/// and a flush of the file log channels.
+///
+/// `std::process::exit` lets no task finish. A command whose boot or work
+/// failed after the application's bootstrap started its supervisors used to
+/// exit straight away and cut them off, while the same command succeeding
+/// drained them. Every exit after the bootstrap hook goes through here.
+pub(crate) async fn exit_after_boot(code: i32) -> ! {
+    finish_process().await;
+    crate::logging::Log::flush();
+    std::process::exit(code)
+}
+
 /// Every runtime driver, in the order `Server::run` boots them.
 ///
 /// `report_failures` turns a driver that does not come up into a warning

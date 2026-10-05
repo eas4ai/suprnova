@@ -654,6 +654,17 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-04 -- The framework host recovers a degraded delivery lane only
+  with proof. It replays from the subscription's log every envelope the lane
+  missed after its position, which the browser then receives in order; when
+  the log has evicted one of them, it retires the document transport, so the
+  browser reconnects and its renewal from the position it holds replays what
+  remains or is refused. The host used to re-baseline the lane at its
+  delivery cursor through the authoritative-refresh recovery without any
+  refresh, and the stream went on past envelopes the browser never received
+  (audit ROOT-37, delivery path). Refreshes that coalesce in the document
+  queue are replayed the same way, so they still bound the queue but no
+  longer drop positions from the stream.
 - 2026-10-04 -- An SSE record that overtakes its membership's acknowledgment is
   held, not a physical authorization failure. The framework host commits an SSE
   membership, wakes its delivery loop, and only then answers the control, so a

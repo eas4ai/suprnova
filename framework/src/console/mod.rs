@@ -164,10 +164,11 @@ pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
 /// resolves the same services and reaches the same drivers a queued job
 /// does. A driver that does not come up is reported on stderr and does
 /// not stop the command, which may use none of them; a worker refuses to
-/// start instead. After the handler returns, the dispatcher stops the
-/// supervisors the bootstrap started (up to five seconds) and waits for
-/// the queued event listeners still running (up to ten), because the
-/// console's runtime ends when `main` returns and would cut them off.
+/// start instead. After the handler returns, and when the framework boot
+/// fails after the bootstrap ran, the dispatcher stops the supervisors the
+/// bootstrap started (up to five seconds) and waits for the queued event
+/// listeners still running (up to ten), because the console's runtime ends
+/// when `main` returns and would cut them off.
 ///
 /// None of it runs unless clap matches a real registered subcommand -
 /// help, version, missing-subcommand, and parse-error paths all skip
@@ -214,6 +215,9 @@ where
                 )
                 .await
                 {
+                    // The bootstrap already ran and may have started
+                    // supervisors: they are drained as after a command.
+                    crate::app::process_boot::finish_process().await;
                     let error = FrameworkError::internal(format!("console bootstrap failed: {e}"));
                     io::error_line(format!("error: {}", error.message()));
                     crate::logging::Log::flush();
