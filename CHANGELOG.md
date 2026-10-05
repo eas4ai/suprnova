@@ -1010,9 +1010,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   its place from an atomic counter in the cache, so a newer push is never
   dropped for an older `Queue::bulk`, and a stalled dispatch does not also
   run. When max wait runs out inside one `Queue::bulk`, the bulk's last job
-  runs at once instead of being dropped as superseded. A job deleted by
-  middleware, or dropped as a superseded debounced dispatch, fires
-  `JobAttempted`, as Laravel's worker does. Building a log subscriber with
+  runs at once instead of being dropped as superseded. A debounce id ending
+  in `:first_dispatched_at` no longer shares a cache key with another id's
+  first-dispatch stamp, which failed that id's dispatches. A job deleted by
+  middleware fires `JobProcessed` and `JobAttempted`, and one dropped as a
+  superseded debounced dispatch fires `JobAttempted`, as Laravel's worker
+  does. Building a log subscriber with
   `logging::build_subscriber` changes nothing until it is used: each
   subscriber writes file lines in its own format, and building no longer
   resets the default channel, so a caller that relied on that calls
