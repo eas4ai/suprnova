@@ -2757,11 +2757,11 @@ async fn cancel_at_the_advance<F>(write: F)
 where
     F: std::future::Future,
 {
-    let before = suprnova::render_cache::RenderCache::hold_next_advance_for_test("d039_rows");
+    suprnova::render_cache::RenderCache::hold_next_advance_for_test("d039_rows");
     tokio::select! {
         biased;
         _ = write => panic!("the advance was parked, so the write cannot have finished"),
-        () = suprnova::render_cache::RenderCache::wait_until_advance_held_for_test(before) => {}
+        () = suprnova::render_cache::RenderCache::wait_until_advance_held_for_test("d039_rows") => {}
     }
 }
 

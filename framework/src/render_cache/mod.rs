@@ -1191,23 +1191,21 @@ impl RenderCache {
 
     /// Test-only: parks the next generation advancement that names
     /// `table`, forever, so a test can cancel the write that started it
-    /// between its row write and its advance. Returns the count of
-    /// advancements parked so far, for
-    /// [`Self::wait_until_advance_held_for_test`].
+    /// between its row write and its advance. Each table is armed on its
+    /// own, so tests that run at the same time do not disarm each other;
+    /// [`Self::wait_until_advance_held_for_test`] waits for the park.
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
-    pub fn hold_next_advance_for_test(table: &str) -> u64 {
+    pub fn hold_next_advance_for_test(table: &str) {
         orm::seams::hold_next(table);
-        orm::seams::held()
     }
 
-    /// Test-only: waits until an advancement armed by
-    /// [`Self::hold_next_advance_for_test`] has parked; `before` is the
-    /// count that call returned.
+    /// Test-only: waits until the advancement armed for `table` by
+    /// [`Self::hold_next_advance_for_test`] has parked.
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
-    pub async fn wait_until_advance_held_for_test(before: u64) {
-        orm::seams::wait_until_held_past(before).await;
+    pub async fn wait_until_advance_held_for_test(table: &str) {
+        orm::seams::wait_until_held(table).await;
     }
 
     /// Test-only: renders `digests` as a hint message body. Handing it more

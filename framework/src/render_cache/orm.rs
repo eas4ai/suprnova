@@ -74,6 +74,8 @@ pub(crate) async fn advance(identities: Vec<DependencyIdentity>) -> Result<(), F
     if !DB::is_connected() {
         return Ok(());
     }
+    #[cfg(any(test, feature = "testing"))]
+    seams::hold_point(&identities).await;
     // DATA-029: carries every identity an earlier failed advance left
     // behind, so the first advance that can land repairs those missed
     // invalidations too, instead of serving resuming over them. `mark`
@@ -92,8 +94,6 @@ pub(crate) async fn advance(identities: Vec<DependencyIdentity>) -> Result<(), F
     // timeout, a `select!` - would leave it ahead of its generations with
     // nothing to say so. The guard suspends serving for them instead.
     let unfinished = UnfinishedAdvance(Some(attempted.clone()));
-    #[cfg(any(test, feature = "testing"))]
-    seams::hold_point(&attempted).await;
     let outcome = DB::transaction(move |_tx| {
         Box::pin(async move { super::ledger::advance_in_dedicated_transaction(&carried).await })
     })
@@ -172,6 +172,19 @@ pub(crate) async fn repair_unresolved() {
 /// split commit this closes: a row durable, its advance rolled back, and
 /// the old representation still current.
 ///
+/// A named-connection write is also guarded before its row write starts.
+/// Its row commits on its own connection, and its advance only starts once
+/// that write has returned, so a drop of this future while the row's COMMIT
+/// is in flight, or between it and the advance, used to leave the row
+/// durable with nothing recording it. The guard records the broad identity,
+/// which every representation observes, because which identities the write
+/// will advance is only known once it has run. Dropped before `write`
+/// returns, it suspends serving until a later advance carries that identity;
+/// once `write` returns, its own advance has landed or recorded its own
+/// failure, and the guard stands down. A `write` that returns an error is
+/// taken to have committed nothing, so an ordinary failed write does not
+/// suspend serving.
+///
 /// `write` is a closure returning a future rather than a future, because
 /// whether to open a transaction is decided here, before the future is
 /// built inside it.
@@ -184,13 +197,15 @@ where
     Fut: std::future::Future<Output = Result<T, FrameworkError>>,
     T: Send,
 {
-    let on_primary = connection.is_none_or(|name| name == crate::database::PRIMARY_CONNECTION_NAME);
-    let shareable = !in_transaction()
-        && on_primary
-        && DB::is_connected()
-        && super::write_side_open(false).await?;
-    if !shareable {
+    if in_transaction() || !DB::is_connected() || !super::write_side_open(false).await? {
         return write().await;
+    }
+    let on_primary = connection.is_none_or(|name| name == crate::database::PRIMARY_CONNECTION_NAME);
+    if !on_primary {
+        let pending = UnfinishedAdvance(Some(vec![DependencyIdentity::broad()]));
+        let outcome = write().await;
+        pending.finish();
+        return outcome;
     }
     let outcome = DB::transaction_ambient(write).await;
     if outcome.is_ok() {
@@ -464,40 +479,46 @@ pub async fn after_row_write_with_handle(
 /// Test-only seam that parks one advancement, so a test can cancel the
 /// write that started it at the instant between its row write and its
 /// generation advance (DATA-039).
+///
+/// Holds one armed park per table and reports each table's park on its
+/// own, so tests that run at the same time never take or see each other's.
 #[cfg(any(test, feature = "testing"))]
 pub(crate) mod seams {
+    use std::collections::BTreeSet;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     use suprnova_live::render_cache::generation::DependencyIdentity;
 
-    /// The table whose next advancement parks, if one is armed.
-    static HOLD_NEXT: Mutex<Option<DependencyIdentity>> = Mutex::new(None);
-    static HELD: AtomicU64 = AtomicU64::new(0);
-    static HELD_NOTIFY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    /// Table identities whose next advancement parks.
+    static ARMED: Mutex<BTreeSet<DependencyIdentity>> = Mutex::new(BTreeSet::new());
+    /// Table identities whose armed advancement has parked.
+    static PARKED: Mutex<BTreeSet<DependencyIdentity>> = Mutex::new(BTreeSet::new());
+    static PARKED_NOTIFY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
 
-    fn held_notify() -> &'static tokio::sync::Notify {
-        HELD_NOTIFY.get_or_init(tokio::sync::Notify::new)
+    fn parked_notify() -> &'static tokio::sync::Notify {
+        PARKED_NOTIFY.get_or_init(tokio::sync::Notify::new)
+    }
+
+    fn lock(
+        set: &'static Mutex<BTreeSet<DependencyIdentity>>,
+    ) -> std::sync::MutexGuard<'static, BTreeSet<DependencyIdentity>> {
+        set.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Parks the next advancement that names `table`'s table identity.
     pub(crate) fn hold_next(table: &str) {
-        *HOLD_NEXT
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(DependencyIdentity::table(table));
+        let identity = DependencyIdentity::table(table);
+        lock(&PARKED).remove(&identity);
+        lock(&ARMED).insert(identity);
     }
 
-    /// How many advancements have parked so far.
-    pub(crate) fn held() -> u64 {
-        HELD.load(Ordering::SeqCst)
-    }
-
-    /// Waits until more than `count` advancements have parked.
-    pub(crate) async fn wait_until_held_past(count: u64) {
+    /// Waits until the advancement armed for `table` has parked.
+    pub(crate) async fn wait_until_held(table: &str) {
+        let identity = DependencyIdentity::table(table);
         loop {
-            let notified = held_notify().notified();
-            if HELD.load(Ordering::SeqCst) > count {
+            let notified = parked_notify().notified();
+            if lock(&PARKED).remove(&identity) {
                 return;
             }
             notified.await;
@@ -508,20 +529,19 @@ pub(crate) mod seams {
     /// armed it cancels the write around it.
     pub(crate) async fn hold_point(identities: &[DependencyIdentity]) {
         let armed = {
-            let mut slot = HOLD_NEXT
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let matches = slot
-                .as_ref()
-                .is_some_and(|table| identities.contains(table));
-            if matches {
-                slot.take();
+            let mut armed = lock(&ARMED);
+            let hit = identities
+                .iter()
+                .find(|identity| armed.contains(*identity))
+                .cloned();
+            if let Some(identity) = &hit {
+                armed.remove(identity);
             }
-            matches
+            hit
         };
-        if armed {
-            HELD.fetch_add(1, Ordering::SeqCst);
-            held_notify().notify_waiters();
+        if let Some(identity) = armed {
+            lock(&PARKED).insert(identity);
+            parked_notify().notify_waiters();
             std::future::pending::<()>().await;
         }
     }
