@@ -1,4 +1,4 @@
-use suprnova::content::{DocsBuildConfig, build_docs};
+use suprnova::content::{DocsBuildConfig, DocsChapter, build_docs};
 
 #[tokio::test]
 async fn docs_builder_emits_catalog_and_rewrites_markdown_links() {
@@ -133,4 +133,57 @@ async fn docs_builder_accepts_one_chapter_listed_twice() {
     let slugs: Vec<&str> = catalog.chapters.iter().map(|c| c.slug.as_str()).collect();
     assert_eq!(slugs, ["frontend", "pages", "frontend"]);
     assert!(out.join("frontend.json").exists());
+}
+
+/// Sol review, DRIVERS-009: a chapter listed twice has one place in the
+/// reading order, its first listing, and every catalog entry for it agrees
+/// with its `<slug>.json`. Each listing used to take the neighbours of its
+/// own position and rewrite the chapter's file, so the first entry pointed
+/// one way, `frontend.json` another, and `pages` led back to `frontend`.
+#[tokio::test]
+async fn a_chapter_listed_twice_has_one_place_in_the_reading_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let out = tmp.path().join("out");
+    write(
+        &src.join("documentation.md"),
+        "- [Frontend](frontend.md)\n- [Pages](pages.md)\n- [Overview](./frontend.md)\n",
+    )
+    .await;
+    write(&src.join("frontend.md"), "# Frontend\n").await;
+    write(&src.join("pages.md"), "# Pages\n").await;
+
+    let catalog = build_docs(DocsBuildConfig {
+        source_dir: src.clone(),
+        output_dir: out.clone(),
+        toc_file: src.join("documentation.md"),
+    })
+    .await
+    .expect("one chapter listed twice still builds");
+
+    let chapter = |slug: &str| {
+        let json = std::fs::read_to_string(out.join(format!("{slug}.json"))).unwrap();
+        serde_json::from_str::<DocsChapter>(&json).unwrap()
+    };
+    let frontend = chapter("frontend");
+    assert_eq!(
+        (frontend.previous.as_deref(), frontend.next.as_deref()),
+        (None, Some("pages"))
+    );
+    let pages = chapter("pages");
+    assert_eq!(
+        (pages.previous.as_deref(), pages.next.as_deref()),
+        (Some("frontend"), None),
+        "the reading order does not lead back to a chapter it has already passed"
+    );
+    for entry in &catalog.chapters {
+        let file = chapter(&entry.slug);
+        assert_eq!(
+            (&entry.previous, &entry.next),
+            (&file.previous, &file.next),
+            "the catalog entry for {} disagrees with {}.json",
+            entry.slug,
+            entry.slug
+        );
+    }
 }
