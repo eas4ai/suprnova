@@ -35,18 +35,17 @@ const SHIPPED_NAMESPACE: &str = "suprnova";
 const RESERVED_NAMESPACES: [&str; 3] = [SHIPPED_NAMESPACE, "sn", "live"];
 /// The longest namespace REG-004 admits, in bytes.
 const MAX_NAMESPACE_BYTES: usize = 32;
-/// Rust keywords plus `lib`, `main` and `build`: `live:add` writes a
+/// Rust keywords plus `lib`: `live:add` writes a
 /// library's Rust under `src/live/<namespace_module>/`, so no library holds
 /// a namespace whose module form is one of these (REG-003, REG-004). The
 /// list is the CLI's, so the router admits exactly the namespaces
 /// `live:add` can install.
-const MODULE_KEYWORDS: [&str; 56] = [
+const MODULE_KEYWORDS: [&str; 54] = [
     "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for",
     "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
     "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
     "while", "async", "await", "dyn", "abstract", "become", "box", "do", "final", "macro",
     "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "gen", "union", "lib",
-    "main", "build",
 ];
 
 /// A third-party library's namespace that passed REG-004's rule, with the

@@ -90,10 +90,15 @@ impl fmt::Display for Fingerprint {
 pub struct Signature([u8; 64]);
 
 impl Signature {
-    /// Reads the base64 `manifest.sig` holds, surrounding whitespace
-    /// excluded.
+    /// Reads the base64 `manifest.sig` holds, and nothing else: REG-024
+    /// gives the file no trailing newline and no other byte.
     pub fn parse(text: &str) -> Result<Self> {
-        let bytes = STANDARD.decode(text.trim()).map_err(|error| {
+        if text.trim() != text {
+            return Err(RegistryError::Invalid(
+                "a signature is base64 with nothing around it".to_owned(),
+            ));
+        }
+        let bytes = STANDARD.decode(text).map_err(|error| {
             RegistryError::Invalid(format!("signature is not standard base64: {error}"))
         })?;
         let bytes: [u8; 64] = bytes
@@ -102,14 +107,9 @@ impl Signature {
         Ok(Signature(bytes))
     }
 
-    /// Reads a signature written with nothing around it, as a JSON value
-    /// holds one (REG-033).
+    /// The same as [`Signature::parse`]: every signature the registry reads,
+    /// in `manifest.sig` or a JSON value (REG-033), has nothing around it.
     pub fn parse_strict(text: &str) -> Result<Self> {
-        if text.trim() != text {
-            return Err(RegistryError::Invalid(
-                "a signature is base64 with nothing around it".to_owned(),
-            ));
-        }
         Signature::parse(text)
     }
 
@@ -292,8 +292,12 @@ mod tests {
         assert!(PublicKey::parse("rsa:AAAA").is_err());
         let signature = Signature([9u8; 64]);
         assert_eq!(
-            Signature::parse(&format!("{}\n", signature.encode())).expect("parses"),
+            Signature::parse(&signature.encode()).expect("parses"),
             signature
+        );
+        assert!(
+            Signature::parse(&format!("{}\n", signature.encode())).is_err(),
+            "a trailing newline is not part of a signature"
         );
         assert!(Signature::parse("AAAA").is_err());
     }

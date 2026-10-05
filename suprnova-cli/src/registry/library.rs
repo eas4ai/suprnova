@@ -629,13 +629,13 @@ pub fn valid_directory_name(name: &str) -> bool {
 
 /// Whether an identifier is a Rust keyword, `mod` or `lib` (REG-003).
 pub fn is_rust_keyword(identifier: &str) -> bool {
-    const KEYWORDS: [&str; 56] = [
+    const KEYWORDS: [&str; 54] = [
         "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
         "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
         "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
         "use", "where", "while", "async", "await", "dyn", "abstract", "become", "box", "do",
         "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
-        "gen", "union", "lib", "main", "build",
+        "gen", "union", "lib",
     ];
     KEYWORDS.contains(&identifier)
 }
