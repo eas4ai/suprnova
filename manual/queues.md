@@ -219,10 +219,12 @@ SQS_OVERFLOW_FLUSH_ON_CLEAR=false         # true deletes the files on Queue::cle
 ```
 
 The files go under `sqs-payloads/<queue>-<digest>/` on the disk, where the
-digest is 16 hexadecimal digits of the SHA-256 of the full queue URL, so
-two queues with one name in different accounts or regions never share a
-directory and `SQS_OVERFLOW_FLUSH_ON_CLEAR` deletes only the cleared queue's
-files. The server does not boot when overflow is on and the disk is not
+digest is 16 hexadecimal digits of the SHA-256 of the endpoint, the region
+and the full queue URL. Two queues with one name in different accounts or
+regions, or one queue URL served by two endpoints (two ElasticMQ or
+LocalStack instances, or LocalStack's per-region queues), never share a
+directory, and `SQS_OVERFLOW_FLUSH_ON_CLEAR` deletes only the cleared
+queue's files. The server does not boot when overflow is on and the disk is not
 registered. A file is deleted only when the driver knows no message points
 at it any more, so a send that times out, a send that is refused after an
 earlier try timed out or met a fault of the service (5xx), or a settlement
@@ -691,7 +693,9 @@ The [`sync` driver](#drivers) has no worker, so it runs every dispatch inline
 and nothing is ever collapsed. Laravel's sync driver behaves the same way.
 `Queue::bulk` arms each job's window in order and claims it once the driver
 accepts the batch, so a debounced burst pushed in one call collapses onto its
-last job, as separate pushes do.
+last job, as separate pushes do. When the maximum wait runs out on one job of
+the batch, the jobs after it for the same window are queued with no delay
+too, so the job that claims the window is the run the maximum wait forced.
 
 #### Why Suprnova diverges
 
@@ -1440,7 +1444,7 @@ as a `String` since `FrameworkError` doesn't derive `Clone`.
 | `JobDebounced` | the worker dropped an envelope a newer debounced dispatch superseded |
 | `JobProcessing` | worker popped, about to dispatch |
 | `JobProcessed` | handler returned `Ok` |
-| `JobAttempted` | every terminal settlement (success, fail, timeout) |
+| `JobAttempted` | every terminal settlement (success, fail, timeout, deleted by middleware, dropped as superseded by a newer debounced dispatch) |
 | `JobExceptionOccurred` | handler returned `Err`, will retry |
 | `JobReleasedAfterException` | retry-after-error re-enqueue happened |
 | `JobReleased` | middleware-driven release (no failure) |

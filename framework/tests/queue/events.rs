@@ -12,7 +12,7 @@ use suprnova::events::{EventFacade, Listener};
 use suprnova::queue::events::{JobAttempted, JobFailed, JobTimedOut};
 use suprnova::queue::events::{JobProcessed, JobProcessing, JobQueued, WorkerStarting};
 use suprnova::queue::{
-    Job, MemoryQueueDriver, Queue,
+    Job, MemoryQueueDriver, Queue, QueueDriver,
     worker::{WorkerConfig, register_job, run_worker},
 };
 use tokio_util::sync::CancellationToken;
@@ -217,4 +217,69 @@ async fn job_attempted_fires_when_a_job_fails_terminally() {
         "a terminal failure is a settled attempt and must fire JobAttempted"
     );
     assert_eq!(attempted[0].job.job_name, "queue_events::AlwaysFailsJob");
+}
+
+/// Settles every attempt as deleted, without running the handler.
+struct DropTheJob;
+
+#[async_trait]
+impl suprnova::queue::middleware::JobMiddleware for DropTheJob {
+    async fn handle(
+        &self,
+        _env: suprnova::queue::Envelope,
+        _next: suprnova::queue::middleware::Next,
+    ) -> Result<suprnova::queue::JobOutcome, FrameworkError> {
+        Ok(suprnova::queue::JobOutcome::Deleted)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct DeletedByMiddlewareJob;
+
+#[async_trait]
+impl Job for DeletedByMiddlewareJob {
+    fn job_name() -> &'static str {
+        "queue_events::DeletedByMiddlewareJob"
+    }
+    fn middleware() -> Vec<Arc<dyn suprnova::queue::middleware::JobMiddleware>> {
+        vec![Arc::new(DropTheJob)]
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+/// Sol review of DRIVERS-054: a job that middleware deletes is acknowledged
+/// and gone, a terminal settlement like any other, but the worker logged it
+/// without firing JobAttempted.
+#[tokio::test]
+#[serial]
+async fn job_attempted_fires_when_middleware_deletes_the_job() {
+    register_job::<DeletedByMiddlewareJob>();
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let _events = EventFacade::fake();
+    Queue::push(DeletedByMiddlewareJob).await.unwrap();
+
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(30),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(1),
+        queues: Vec::new(),
+    };
+    run_worker(driver.clone(), cfg, CancellationToken::new()).await;
+
+    assert_eq!(driver.size().await.unwrap(), 0, "the deleted job is gone");
+    let attempted = dispatched::<JobAttempted>(|_| true);
+    assert_eq!(
+        attempted.len(),
+        1,
+        "a deletion is a settled attempt and must fire JobAttempted"
+    );
+    assert_eq!(
+        attempted[0].job.job_name,
+        "queue_events::DeletedByMiddlewareJob"
+    );
 }

@@ -925,6 +925,16 @@ async fn run_labelled_worker(
                 id = %env.id,
                 "queue job superseded by a newer debounced dispatch"
             );
+            // Dropping it settles the attempt for good, so it is reported as
+            // one; Laravel's worker fires `JobAttempted` for it too.
+            let _ = in_attempt(
+                job_scope.clone(),
+                job_context.clone(),
+                EventFacade::dispatch(queue_events::JobAttempted {
+                    job: identity_pre.clone(),
+                }),
+            )
+            .await;
             processed += 1;
             if let Some(max) = cfg.max_jobs
                 && processed >= max
@@ -1036,7 +1046,7 @@ async fn run_labelled_worker(
                     if sweep_unique_lock {
                         release_unique_lock_if_held(&env).await;
                     }
-                    handle_deleted(&*driver, &res.token, &env, &deps).await;
+                    handle_deleted(&*driver, &res.token, &env, &connection, &deps).await;
                 }
                 DispatchOutcome::Failed(e) => {
                     if sweep_unique_lock {
@@ -1342,10 +1352,14 @@ async fn handle_completed(
 ///
 /// A batch saw this member, so its pending count must move before the queue
 /// reservation is acknowledged even though the handler itself never ran.
+///
+/// The deletion is a terminal settlement like a success or a failure, so it
+/// fires `JobAttempted` once the reservation is acknowledged.
 async fn handle_deleted(
     driver: &dyn QueueDriver,
     token: &crate::queue::driver::ReservationToken,
     env: &Envelope,
+    connection: &str,
     deps: &SettlementDeps,
 ) {
     if let Some(batch_id) = env.batch_id.as_deref()
@@ -1379,6 +1393,10 @@ async fn handle_deleted(
         settlement_failure(driver, env, "ack", "deleted", &e);
     }
     tracing::debug!(job = %env.job_name, id = %env.id, "queue job dropped by middleware");
+    let _ = EventFacade::dispatch(queue_events::JobAttempted {
+        job: queue_events::JobIdentity::from_env(env, connection),
+    })
+    .await;
 }
 
 /// Push-then-ack settlement for drivers that answer [`QueueDriver::settle`]
@@ -2271,6 +2289,7 @@ mod tests {
             &driver,
             &ReservationToken(Uuid::new_v4()),
             &env,
+            "test",
             &SettlementDeps {
                 failed_store: None,
                 batches: Some(repo),
@@ -2996,8 +3015,22 @@ mod tests {
             batches: Some(repo),
         };
 
-        handle_deleted(&driver, &ReservationToken(Uuid::new_v4()), &env, &deps).await;
-        handle_deleted(&driver, &ReservationToken(Uuid::new_v4()), &env, &deps).await;
+        handle_deleted(
+            &driver,
+            &ReservationToken(Uuid::new_v4()),
+            &env,
+            "test",
+            &deps,
+        )
+        .await;
+        handle_deleted(
+            &driver,
+            &ReservationToken(Uuid::new_v4()),
+            &env,
+            "test",
+            &deps,
+        )
+        .await;
 
         assert_eq!(
             callback_hits.load(Ordering::SeqCst),

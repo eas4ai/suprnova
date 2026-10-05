@@ -73,8 +73,9 @@
 //! its payload, and acknowledging one cannot leave the other unreadable.
 //!
 //! The payloads of a queue live under `sqs-payloads/<name>-<digest>/`, where
-//! the digest is of the whole queue URL, so same-named queues in different
-//! accounts or regions never share a directory.
+//! the digest is of the endpoint, the region and the whole queue URL, so
+//! same-named queues in different accounts or regions, and queues with one
+//! URL behind different endpoints, never share a directory.
 
 use crate::error::FrameworkError;
 use crate::filesystem::Storage;
@@ -312,6 +313,9 @@ pub struct SqsQueueDriver {
     client: reqwest::Client,
     /// The URL requests are posted to, with a trailing `/`.
     endpoint: String,
+    /// The region requests are signed for. With the endpoint, it names the
+    /// service a queue URL is resolved by; see `queue_key`.
+    region: String,
     signer: Signer<Credential>,
     prefix: Option<String>,
     /// A queue name, or a queue URL.
@@ -557,6 +561,7 @@ impl SqsQueueDriver {
         let driver = Self {
             client,
             endpoint,
+            region,
             signer,
             prefix: config.prefix.filter(|prefix| !prefix.trim().is_empty()),
             queue: config.queue,
@@ -920,7 +925,7 @@ impl SqsQueueDriver {
                 "SQS: could not read the overflow payload '{path}' to copy it: {error}"
             ))
         })?;
-        let copy = overflow_path(queue_url);
+        let copy = overflow_path(&self.queue_key(queue_url));
         operator.write(&copy, bytes).await.map_err(|error| {
             FrameworkError::internal(format!(
                 "SQS: could not write a copy of the overflow payload: {error}"
@@ -937,6 +942,12 @@ impl SqsQueueDriver {
             delay: message.delay,
             pointer: Some(copy),
         })
+    }
+
+    /// The overflow directory name of the queue at `queue_url`, as this
+    /// driver reaches it. See [`queue_key`].
+    fn queue_key(&self, queue_url: &str) -> String {
+        queue_key(&self.endpoint, &self.region, queue_url)
     }
 
     /// Point every message of `messages` that carries an overflow payload
@@ -966,7 +977,7 @@ impl SqsQueueDriver {
             .map_err(|error| FrameworkError::internal(format!("SQS: encode the job: {error}")))?;
         let (body, pointer) = match &self.overflow {
             Some(overflow) if overflow.always || body.len() >= MAX_MESSAGE_BYTES => {
-                let path = overflow_path(queue_url);
+                let path = overflow_path(&self.queue_key(queue_url));
                 overflow
                     .operator()?
                     .write(&path, body.into_bytes())
@@ -1428,7 +1439,7 @@ impl QueueDriver for SqsQueueDriver {
             .as_ref()
             .filter(|overflow| overflow.flush_on_clear)
         {
-            let directory = format!("{OVERFLOW_ROOT}/{}/", queue_key(&url));
+            let directory = format!("{OVERFLOW_ROOT}/{}/", self.queue_key(&url));
             overflow
                 .operator()?
                 .delete_with(&directory)
@@ -1477,13 +1488,10 @@ fn delay_secs(available_at: DateTime<Utc>) -> u64 {
     }
 }
 
-/// A new, unique path for an overflow payload of the queue at `queue_url`.
-fn overflow_path(queue_url: &str) -> String {
-    format!(
-        "{OVERFLOW_ROOT}/{}/{}.json",
-        queue_key(queue_url),
-        Uuid::new_v4()
-    )
+/// A new, unique path for an overflow payload of the queue whose directory
+/// name is `queue_key`.
+fn overflow_path(queue_key: &str) -> String {
+    format!("{OVERFLOW_ROOT}/{queue_key}/{}.json", Uuid::new_v4())
 }
 
 /// The body of a message that points at the overflow payload at `path`.
@@ -1585,15 +1593,21 @@ fn batch_request(queue_url: &str, chunk: &[Outgoing]) -> Value {
     json!({ "QueueUrl": queue_url, "Entries": entries })
 }
 
-/// A directory name for the queue at `queue_url`: its last path segment,
-/// with anything but letters, digits, `-` and `_` replaced, then `-` and the
-/// first 16 hexadecimal digits of the SHA-256 of the whole URL.
+/// A directory name for the queue at `queue_url`, reached through
+/// `endpoint` in `region`: the URL's last path segment, with anything but
+/// letters, digits, `-` and `_` replaced, then `-` and the first 16
+/// hexadecimal digits of the SHA-256 of the endpoint, the region and the
+/// whole URL.
 ///
 /// The name alone is not the queue: two accounts, or two regions, each have
 /// a queue named `jobs`, and drivers for both can overflow onto one disk.
-/// `clear` with `flush_on_clear` deletes this directory, so it must hold the
-/// payloads of this queue and of no other.
-fn queue_key(queue_url: &str) -> String {
+/// Nor is the URL: it is resolved by the service at the endpoint, so two
+/// ElasticMQ instances can each answer to one URL, and LocalStack keeps a
+/// queue per region behind one URL. `clear` with `flush_on_clear` deletes
+/// this directory, so it must hold the payloads of this queue and of no
+/// other. Each part goes into the digest after its length, so two different
+/// triples never make one input.
+fn queue_key(endpoint: &str, region: &str, queue_url: &str) -> String {
     let url = queue_url.trim_end_matches('/');
     let name: String = url
         .rsplit('/')
@@ -1608,7 +1622,12 @@ fn queue_key(queue_url: &str) -> String {
             }
         })
         .collect();
-    let digest = hex::encode(&Sha256::digest(url.as_bytes())[..8]);
+    let mut hasher = Sha256::new();
+    for part in [endpoint.trim_end_matches('/'), region, url] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let digest = hex::encode(&hasher.finalize()[..8]);
     format!("{name}-{digest}")
 }
 
@@ -1631,32 +1650,67 @@ mod tests {
         assert_eq!(seconds(Duration::ZERO, 900), 0);
     }
 
+    const ENDPOINT: &str = "https://sqs.us-east-1.amazonaws.com/";
+
     #[test]
     fn the_queue_key_is_the_last_segment_and_a_digest_of_the_url() {
-        let key = queue_key("https://sqs.us-east-1.amazonaws.com/1/jobs-prod");
+        let key = queue_key(
+            ENDPOINT,
+            "us-east-1",
+            "https://sqs.us-east-1.amazonaws.com/1/jobs-prod",
+        );
         assert!(key.starts_with("jobs-prod-"), "{key}");
         assert_eq!(key.len(), "jobs-prod-".len() + 16, "{key}");
         assert!(
-            queue_key("http://localhost:9324/queue/a.b").starts_with("a_b-"),
+            queue_key(ENDPOINT, "us-east-1", "http://localhost:9324/queue/a.b").starts_with("a_b-"),
             "the name keeps its sanitizing"
         );
         assert_eq!(
             key,
-            queue_key("https://sqs.us-east-1.amazonaws.com/1/jobs-prod/"),
-            "a trailing slash is the same queue"
+            queue_key(
+                "https://sqs.us-east-1.amazonaws.com",
+                "us-east-1",
+                "https://sqs.us-east-1.amazonaws.com/1/jobs-prod/"
+            ),
+            "a trailing slash is the same queue, and the same endpoint"
         );
     }
 
     #[test]
     fn same_named_queues_elsewhere_get_different_keys() {
-        let key = queue_key("https://sqs.us-east-1.amazonaws.com/1/jobs");
+        let key = queue_key(
+            ENDPOINT,
+            "us-east-1",
+            "https://sqs.us-east-1.amazonaws.com/1/jobs",
+        );
         for other in [
             "https://sqs.us-east-1.amazonaws.com/2/jobs",
             "https://sqs.us-west-2.amazonaws.com/1/jobs",
             "http://localhost:9324/queue/jobs",
         ] {
-            assert_ne!(key, queue_key(other), "{other}");
+            assert_ne!(key, queue_key(ENDPOINT, "us-east-1", other), "{other}");
         }
+    }
+
+    #[test]
+    fn one_queue_url_at_another_endpoint_or_region_gets_another_key() {
+        let url = "http://localhost:4566/000000000000/jobs";
+        let key = queue_key("http://localhost:4566/", "us-east-1", url);
+        assert_ne!(
+            key,
+            queue_key("http://localhost:4567/", "us-east-1", url),
+            "another endpoint"
+        );
+        assert_ne!(
+            key,
+            queue_key("http://localhost:4566/", "eu-west-1", url),
+            "another region"
+        );
+        assert_ne!(
+            queue_key("http://a", "bc", url),
+            queue_key("http://ab", "c", url),
+            "the parts cannot run together"
+        );
     }
 
     #[test]

@@ -67,6 +67,16 @@ pub(crate) static STDERR_MIN: AtomicU8 = AtomicU8::new(8);
 /// again, as Laravel resolves a forgotten channel on its next use.
 static DEFAULT_FORGOTTEN: AtomicBool = AtomicBool::new(false);
 
+/// Set once a default channel has been chosen, by the boot's
+/// `check_channels`, an install, `Log::set_default_channel`, or the first
+/// event that found none chosen and took `LOG_CHANNEL`.
+static DEFAULT_CHOSEN: AtomicBool = AtomicBool::new(false);
+
+/// Set by the first event that takes `LOG_CHANNEL` as the default, so that
+/// neither another thread nor an event raised while resolving it starts a
+/// second resolution.
+static DEFAULT_TAKING: AtomicBool = AtomicBool::new(false);
+
 fn read() -> RwLockReadGuard<'static, Registry> {
     REGISTRY
         .read()
@@ -260,6 +270,16 @@ fn stream_minimum(
 /// Make `name` the default channel: the one `tracing` events go to.
 pub(crate) fn set_default(name: &str) -> Result<(), FrameworkError> {
     let leaves = resolve_named(name, 0)?;
+    install_default(&mut write(), name, leaves);
+    Ok(())
+}
+
+/// Whether `name` is a channel that can be the default, without making it so.
+pub(crate) fn resolves(name: &str) -> Result<(), FrameworkError> {
+    resolve_named(name, 0).map(|_| ())
+}
+
+fn install_default(registry: &mut Registry, name: &str, leaves: Vec<Leaf>) {
     let stdout = stream_minimum(&leaves, |leaf| match leaf {
         Leaf::Stdout(level) => Some(*level),
         _ => None,
@@ -268,18 +288,43 @@ pub(crate) fn set_default(name: &str) -> Result<(), FrameworkError> {
         Leaf::Stderr(level) => Some(*level),
         _ => None,
     });
-    let mut registry = write();
     STDOUT_ON.store(stdout.is_some(), Ordering::Relaxed);
     STDOUT_MIN.store(level_code(stdout.flatten()), Ordering::Relaxed);
     STDERR_ON.store(stderr.is_some(), Ordering::Relaxed);
     STDERR_MIN.store(level_code(stderr.flatten()), Ordering::Relaxed);
     registry.default = Some(name.to_owned());
     registry.default_leaves = leaves;
-    Ok(())
+    DEFAULT_CHOSEN.store(true, Ordering::Release);
+}
+
+/// Make `LOG_CHANNEL` the default channel, or stdout when it does not
+/// resolve, if no default has been chosen yet. [`Log::default_channel`]
+/// already reports `LOG_CHANNEL` until one is, so a subscriber installed
+/// without the boot sends its events where that says, while building the
+/// subscriber itself chooses nothing.
+fn take_default_if_unchosen() {
+    if DEFAULT_CHOSEN.load(Ordering::Acquire) || DEFAULT_TAKING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let configured = configured_default();
+    let taken = match resolve_named(&configured, 0) {
+        Ok(leaves) => Some((configured, leaves)),
+        Err(_) => resolve_named("stdout", 0)
+            .ok()
+            .map(|leaves| ("stdout".to_owned(), leaves)),
+    };
+    if let Some((name, leaves)) = taken {
+        let mut registry = write();
+        // A default chosen while this one resolved stands.
+        if registry.default.is_none() {
+            install_default(&mut registry, &name, leaves);
+        }
+    }
 }
 
 /// The sinks of the default channel that are not the standard streams.
 pub(crate) fn default_sinks() -> Vec<(Arc<dyn LogSink>, Option<LogLevel>)> {
+    take_default_if_unchosen();
     if DEFAULT_FORGOTTEN.swap(false, Ordering::Relaxed) {
         refresh_default();
     }
@@ -296,6 +341,7 @@ pub(crate) fn default_sinks() -> Vec<(Arc<dyn LogSink>, Option<LogLevel>)> {
 /// Whether a `tracing` event at `level` goes to standard output (or, with
 /// `stderr`, standard error) as part of the default channel.
 pub(crate) fn stream_enabled(stderr: bool, level: &tracing::Level) -> bool {
+    take_default_if_unchosen();
     let (on, minimum) = if stderr {
         (&STDERR_ON, &STDERR_MIN)
     } else {

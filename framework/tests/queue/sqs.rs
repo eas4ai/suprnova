@@ -750,6 +750,65 @@ async fn flush_on_clear_keeps_the_payloads_of_a_same_named_queue_elsewhere() {
     assert_eq!(reservation.envelope.payload, sent.payload);
 }
 
+/// Sol review of DRIVERS-063: the directory's digest covered the queue URL
+/// alone. Two services that answer to one queue URL from different
+/// endpoints, such as two ElasticMQ instances, overflowed into one
+/// directory, and clearing one deleted the payloads of the other.
+#[tokio::test]
+async fn flush_on_clear_keeps_the_payloads_of_the_same_queue_url_at_another_endpoint() {
+    let _env = lock_env_async().await;
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    let first = FakeSqs::start(&[&url("default")]).await;
+    let second = FakeSqs::start(&[&url("default")]).await;
+    configure(&first);
+    let _storage = overflow_on();
+    set_env("SQS_OVERFLOW_FLUSH_ON_CLEAR", Some("true"));
+    let cleared = driver();
+    set_env("SQS_ENDPOINT", Some(&second.endpoint));
+    let other = driver();
+
+    cleared.push(large_envelope()).await.unwrap();
+    let sent = large_envelope();
+    other.push(sent.clone()).await.unwrap();
+    assert_eq!(stored_payloads().await, 2);
+
+    cleared.clear().await.unwrap();
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "only the payload of the cleared endpoint's queue is gone"
+    );
+    let reservation = other
+        .pop(VISIBILITY)
+        .await
+        .expect("the other endpoint's job can still be read")
+        .expect("and it is there");
+    assert_eq!(reservation.envelope.payload, sent.payload);
+}
+
+/// The region half: LocalStack keeps one queue per region behind one
+/// endpoint and one queue URL, so the region names the queue too.
+#[tokio::test]
+async fn flush_on_clear_keeps_the_payloads_of_the_same_queue_url_in_another_region() {
+    let (_env, _restore, _fake) = setup!("default");
+    let _storage = overflow_on();
+    set_env("SQS_OVERFLOW_FLUSH_ON_CLEAR", Some("true"));
+    let cleared = driver();
+    set_env("AWS_DEFAULT_REGION", Some("eu-west-1"));
+    let other = driver();
+
+    cleared.push(large_envelope()).await.unwrap();
+    other.push(large_envelope()).await.unwrap();
+    assert_eq!(stored_payloads().await, 2);
+
+    cleared.clear().await.unwrap();
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "only the payload of the cleared region's queue is gone"
+    );
+}
+
 #[tokio::test]
 async fn clear_keeps_the_stored_payloads_without_flush_on_clear() {
     let (_env, _restore, _fake) = setup!("default");

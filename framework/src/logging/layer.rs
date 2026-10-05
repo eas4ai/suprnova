@@ -4,10 +4,10 @@
 use super::channel::{LogLevel, LogRecord};
 use super::config::{LogConfig, LogFormat};
 use super::facade::{
-    configured_default, default_sinks, set_default, stream_enabled, validate_environment,
+    configured_default, default_sinks, resolves, set_default, stream_enabled, validate_environment,
 };
 use super::init::build_env_filter;
-use super::sinks::{replace_placeholders, set_format};
+use super::sinks::{replace_placeholders, set_format, write_in};
 use crate::error::FrameworkError;
 use tracing::Subscriber;
 use tracing::field::{Field, Visit};
@@ -37,6 +37,15 @@ pub fn check_channels() -> Result<(), FrameworkError> {
         .map_err(|error| FrameworkError::internal(format!("LOG_CHANNEL is '{name}': {error}")))
 }
 
+/// [`check_channels`] without its effect: the settings are checked, and the
+/// default channel stays as it is.
+fn validate_channels() -> Result<(), FrameworkError> {
+    validate_environment()?;
+    let name = configured_default();
+    resolves(&name)
+        .map_err(|error| FrameworkError::internal(format!("LOG_CHANNEL is '{name}': {error}")))
+}
+
 /// Make the channel `LOG_CHANNEL` names the default if it can be, and
 /// stdout otherwise. A subscriber installed before the application's
 /// bootstrap uses this: the bootstrap may define the channel, and the boot
@@ -62,7 +71,8 @@ pub(crate) fn adopt_installed(config: &LogConfig) {
 
 /// The output layers: `tracing`'s own formatter for standard output and
 /// standard error, each on while the default channel includes it, and the
-/// layer that writes events to the default channel's other sinks.
+/// layer that writes events to the default channel's other sinks, in
+/// `config.format` like the standard streams.
 ///
 /// Building them changes nothing outside them; [`adopt_installed`] applies
 /// the configuration once they are installed.
@@ -114,19 +124,27 @@ where
             ),
         ),
     };
-    vec![stdout, stderr, Box::new(ChannelLayer)]
+    vec![
+        stdout,
+        stderr,
+        Box::new(ChannelLayer {
+            format: config.format,
+        }),
+    ]
 }
 
 /// Build the subscriber the server installs, without installing it: the
-/// `LOG_LEVEL` filter and the output layers, with the default channel
-/// checked and set first. For an application that installs its own, or a
-/// test that installs one for a thread with
-/// `tracing::subscriber::with_default`.
+/// `LOG_LEVEL` filter and the output layers, with the log settings checked
+/// first. For an application that installs its own, or a test that installs
+/// one for a thread with `tracing::subscriber::with_default`.
 ///
-/// The channels are process-wide, not the subscriber's: building it makes
-/// the channel `LOG_CHANNEL` names the default and `config.format` the
-/// format of the file, syslog and driver lines for the whole process, as
-/// installing it would. Build it only to use it.
+/// Building it changes nothing outside it. Its file and driver lines are in
+/// `config.format`, as its standard-stream lines are, and the subscriber
+/// already installed keeps its own format. Its events go to the process's
+/// default channel: the channel `LOG_CHANNEL` names until something chooses
+/// another. The boot makes that choice with [`check_channels`]; call it too
+/// when the subscriber is installed outside the boot and something may have
+/// moved the default since.
 ///
 /// # Errors
 ///
@@ -134,10 +152,9 @@ where
 pub fn build_subscriber(
     config: LogConfig,
 ) -> Result<impl Subscriber + Send + Sync + 'static, FrameworkError> {
-    check_channels()?;
+    validate_channels()?;
     let registry = tracing_subscriber::registry().with(build_env_filter(&config.level));
     let layers = output_layers(&config);
-    set_format(config.format);
     Ok(registry.with(layers))
 }
 
@@ -145,7 +162,10 @@ pub fn build_subscriber(
 /// standard streams: files, syslog, the application's drivers. An event's
 /// record carries the fields of the spans it is in, the request span's
 /// `request_id` among them, as the stdout formatter shows them.
-struct ChannelLayer;
+struct ChannelLayer {
+    /// The format of the file lines this subscriber writes.
+    format: LogFormat,
+}
 
 /// The fields a span was created or recorded with, kept for its events.
 #[derive(Default)]
@@ -232,13 +252,15 @@ where
             message: replace_placeholders(&fields.message, &fields.context),
             context: fields.context,
         };
-        for (sink, minimum) in sinks {
-            if level.passes(minimum) {
-                // Each sink reports its own failure once on stderr, a
-                // driver's through its `ReportedSink`.
-                let _ = sink.write(&record);
+        write_in(self.format, || {
+            for (sink, minimum) in sinks {
+                if level.passes(minimum) {
+                    // Each sink reports its own failure once on stderr, a
+                    // driver's through its `ReportedSink`.
+                    let _ = sink.write(&record);
+                }
             }
-        }
+        });
     }
 }
 

@@ -17,9 +17,18 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// The format of the lines the sinks write: `LOG_FORMAT`, set when the
-/// subscriber is built and read from the environment before that.
+/// The format of the lines the sinks write for [`Log`](super::Log):
+/// `LOG_FORMAT`, set when the framework installs its subscriber and read
+/// from the environment before that.
 static FORMAT: RwLock<Option<LogFormat>> = RwLock::new(None);
+
+thread_local! {
+    /// The format of the subscriber whose event this thread is writing, so
+    /// its lines match its own standard-stream lines. Each subscriber
+    /// carries its format rather than setting `FORMAT`, so building one
+    /// changes nothing for the subscriber already installed.
+    static WRITING_FOR: std::cell::Cell<Option<LogFormat>> = const { std::cell::Cell::new(None) };
+}
 
 pub(crate) fn set_format(format: LogFormat) {
     *FORMAT
@@ -27,7 +36,24 @@ pub(crate) fn set_format(format: LogFormat) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(format);
 }
 
+/// Run `write` with the lines it writes in `format`, the format of the
+/// subscriber the event came through.
+pub(crate) fn write_in<R>(format: LogFormat, write: impl FnOnce() -> R) -> R {
+    /// Puts back the format of an outer write, however `write` ends.
+    struct Restore(Option<LogFormat>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            WRITING_FOR.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(WRITING_FOR.with(|cell| cell.replace(Some(format))));
+    write()
+}
+
 fn format() -> LogFormat {
+    if let Some(format) = WRITING_FOR.with(std::cell::Cell::get) {
+        return format;
+    }
     FORMAT
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
