@@ -29,6 +29,22 @@ struct Cli {
     version: (),
 }
 
+/// The verbs of `live:registry`, each run from a library's root but `new`.
+#[derive(Subcommand)]
+enum LiveRegistryCommand {
+    /// Scaffold a library: library.json, an example component, a preview
+    /// application, and a signing key kept outside the project
+    New {
+        /// The library's namespace (e.g., acme): lowercase letters, digits
+        /// and hyphens; the library is created in ./<namespace>
+        namespace: String,
+    },
+    /// Check every component as live:add would, and list its capabilities
+    Check,
+    /// Check every component, then sign each one, all or nothing
+    Sign,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Create a new Suprnova project
@@ -203,6 +219,12 @@ enum Commands {
         /// Report what would be written without touching the project
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Author a Live component library: scaffold it, check it, sign it
+    #[command(name = "live:registry")]
+    LiveRegistry {
+        #[command(subcommand)]
+        command: LiveRegistryCommand,
     },
     /// Check every registered Live view with the integrated checker
     #[command(name = "live:check")]
@@ -543,6 +565,21 @@ fn main() {
             dry_run,
         } => {
             commands::live_add::run(name, manifest, force, dry_run);
+        }
+        Commands::LiveRegistry { command } => {
+            use suprnova_cli::registry::registry_commands;
+            let outcome = match command {
+                LiveRegistryCommand::New { namespace } => {
+                    let directory = std::path::PathBuf::from(&namespace);
+                    registry_commands::new(&namespace, &directory)
+                }
+                LiveRegistryCommand::Check => registry_commands::check(std::path::Path::new(".")),
+                LiveRegistryCommand::Sign => registry_commands::sign(std::path::Path::new(".")),
+            };
+            if let Err(error) = outcome {
+                ui::error(&error.to_string());
+                std::process::exit(1);
+            }
         }
         Commands::LiveCheck {
             templates,

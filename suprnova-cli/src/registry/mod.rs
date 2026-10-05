@@ -15,6 +15,7 @@
 //! placeholder; none reaches `main`.
 
 pub mod address;
+pub mod author_key;
 pub mod fetch;
 pub mod install;
 pub mod library;
@@ -22,6 +23,7 @@ pub mod plan;
 pub mod project;
 pub mod registration;
 pub mod registry_commands;
+pub mod scaffold;
 pub mod scan;
 pub mod signing;
 pub mod statement;

@@ -75,7 +75,7 @@ pub fn live_component(snake: &str, pascal: &str, component_name: &str, view: &st
 /// from the template and the values, and joins them into a string of
 /// exactly the output's length. A chain of `replace` calls copied the
 /// whole template once per placeholder.
-fn render_placeholders(template: &str, values: &[(&str, &str)]) -> String {
+pub(crate) fn render_placeholders(template: &str, values: &[(&str, &str)]) -> String {
     let mut pieces: Vec<&str> = Vec::new();
     let mut rest = template;
     while let Some(at) = rest.find('{') {
