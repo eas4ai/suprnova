@@ -98,8 +98,12 @@ pub async fn destroy_all_for_user(user_id: &str) -> Result<u64, crate::error::Fr
         }
     };
     // Every Live membership the user's sessions opened ends with them on
-    // this node (LIVE-019).
-    crate::live::revocation::principal_sessions_destroyed(user_id).await;
+    // this node (LIVE-019). `user_id` is a default-guard id, and those
+    // memberships were issued to its bare principal.
+    crate::live::revocation::principal_sessions_destroyed(&crate::auth::Auth::bare_principal(
+        user_id,
+    ))
+    .await;
     Ok(destroyed)
 }
 

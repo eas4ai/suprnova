@@ -172,4 +172,24 @@ pub trait TwoFactorStore: Send + Sync {
     /// whether a row was removed, so hosts fire their disabled notification
     /// only on a true transition.
     async fn delete_enrollment(&self, actor: &CredentialActor) -> Result<bool>;
+
+    /// Withdraw the initial enrollment [`Self::begin_enrollment`] just
+    /// stored, only while it is unconfirmed and still holds `expected_secret`.
+    /// Returns whether a row was removed.
+    ///
+    /// [`TwoFactorService::enroll`](super::TwoFactorService::enroll) calls
+    /// it when the account's other second factor (see
+    /// [`OtherSecondFactor`](super::OtherSecondFactor)) appeared while it
+    /// enrolled, so the account keeps one factor system. The condition and
+    /// the delete belong in one statement: a delete without it could remove
+    /// a factor a later enrollment confirmed meanwhile.
+    ///
+    /// Default: removes nothing and returns `false`, because a store that
+    /// cannot make the delete conditional must not guess. The enrollment
+    /// then still answers the conflict, and its pending row stays until
+    /// [`Self::delete_enrollment`] removes it.
+    async fn withdraw_enrollment(&self, user_id: &str, expected_secret: &[u8]) -> Result<bool> {
+        let _ = (user_id, expected_secret);
+        Ok(false)
+    }
 }

@@ -291,8 +291,9 @@ pub async fn pusher_channel_auth(req: Request) -> Response {
 ///
 /// The user is the route's: the user of the guard the last
 /// `AuthMiddleware` checked, as its bare id for the default guard and as
-/// `<guard>:<id>` for any other. A presence member's `user_id` from
-/// [`pusher_channel_auth`] follows the same rule.
+/// `<guard>:<id>` for any other. A default-guard id that holds a `:` gets a
+/// leading `:`, so it never reads as another guard's user. A presence
+/// member's `user_id` from [`pusher_channel_auth`] follows the same rule.
 pub async fn pusher_user_auth(req: Request) -> Response {
     let auth = bound_auth()?;
     let req = req.buffer_body(AUTH_BODY_LIMIT).await?;

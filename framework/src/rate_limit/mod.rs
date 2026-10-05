@@ -288,7 +288,22 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
 
 use crate::Request;
 use crate::http::{HttpResponse, Response};
+use std::cell::RefCell;
 use std::sync::Arc;
+
+tokio::task_local! {
+    /// The identity buckets [`identity_key`] names beside the key it
+    /// returns, collected while [`RateLimitMiddleware`] computes one
+    /// request's key.
+    ///
+    /// The key function returns one string, the bucket an ambiguous request
+    /// shares with every other one. That request must also be refused by,
+    /// and counted against, the bucket of each identity it names, or an
+    /// address whose own bucket is spent gets one more attempt through the
+    /// shared bucket. The middleware opens this scope around the key
+    /// function and acquires every bucket collected in it.
+    static NAMED_BUCKETS: RefCell<Vec<String>>;
+}
 
 /// Build a rate-limit key that identifies the **account being acted on**,
 /// not the caller acting on it.
@@ -332,6 +347,12 @@ use std::sync::Arc;
 /// limit. The same address in both places, after normalisation, is one
 /// identity.
 ///
+/// Inside [`RateLimitMiddleware`], an ambiguous request is also refused by,
+/// and counted against, the bucket of each identity it names. Otherwise the
+/// shared bucket would be an extra quota: once an address had spent its
+/// own bucket, a request adding a decoy beside it would still get through.
+/// Called anywhere else, this function only returns the shared key.
+///
 /// # Normalisation and hashing
 ///
 /// The value is trimmed and lowercased, because `Alice@Example.com` and
@@ -373,15 +394,18 @@ use std::sync::Arc;
 /// ```
 pub fn identity_key(request: &Request, field: &str, prefix: &str) -> String {
     match read_identity(request, field) {
-        Identity::Named(value) => {
-            format!(
-                "{prefix}:{field}:{}",
-                hashed_identity(&normalise_identity(&value))
-            )
-        }
+        Identity::Named(value) => named_identity_key(prefix, field, &value),
         // Two different identities - one bucket for every such request,
-        // so a varying decoy cannot open fresh ones.
-        Identity::Ambiguous => format!("{prefix}:{field}-ambiguous"),
+        // so a varying decoy cannot open fresh ones. The middleware also
+        // acquires the bucket of each identity named.
+        Identity::Ambiguous { query, body } => {
+            let named = [
+                named_identity_key(prefix, field, &query),
+                named_identity_key(prefix, field, &body),
+            ];
+            let _ = NAMED_BUCKETS.try_with(|buckets| buckets.borrow_mut().extend(named));
+            format!("{prefix}:{field}-ambiguous")
+        }
         // No identity to key on - fall back to the caller, so the request
         // is still throttled by *something*. The `-absent` marker keeps
         // this out of any co-mounted per-IP limiter's bucket.
@@ -390,6 +414,15 @@ pub fn identity_key(request: &Request, field: &str, prefix: &str) -> String {
             request.ip().unwrap_or_else(|| "anon".into())
         ),
     }
+}
+
+/// The bucket of the identity `value` names in `field`: normalised, then
+/// hashed (see [`identity_key`]).
+fn named_identity_key(prefix: &str, field: &str, value: &str) -> String {
+    format!(
+        "{prefix}:{field}:{}",
+        hashed_identity(&normalise_identity(value))
+    )
 }
 
 /// Does this request name an identity to key on?
@@ -425,7 +458,12 @@ enum Identity {
     /// One identity: from the query string, the body, or both agreeing.
     Named(String),
     /// The query string and the body name two different identities.
-    Ambiguous,
+    Ambiguous {
+        /// The identity the query string names.
+        query: String,
+        /// The identity the body names.
+        body: String,
+    },
     /// Neither place names one.
     Absent,
 }
@@ -444,7 +482,7 @@ fn read_identity(request: &Request, field: &str) -> Identity {
     let body = present(body_field(request, field));
     match (query, body) {
         (Some(query), Some(body)) if normalise_identity(&query) != normalise_identity(&body) => {
-            Identity::Ambiguous
+            Identity::Ambiguous { query, body }
         }
         (Some(value), _) | (None, Some(value)) => Identity::Named(value),
         (None, None) => Identity::Absent,
@@ -796,59 +834,66 @@ where
             return next(request).await;
         }
 
-        let key = (self.key_fn)(&request);
-        match self.limiter.try_acquire(&key, &self.config).await {
-            Ok(true) => {
-                let mut request = request;
-                request.record_live_security_check(
-                    crate::live::attestation::SecurityCheck::RateLimit,
-                    None,
-                );
-                next(request).await
-            }
-            Ok(false) => {
-                // Compute how long the caller must wait before trying again.
-                let secs = self
-                    .limiter
-                    .retry_after(&key, &self.config)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                Err(HttpResponse::text("429 Too Many Requests")
-                    .status(429)
-                    .header("retry-after", secs.to_string()))
-            }
-            // The limiter backend itself errored (e.g. Redis unreachable) -
-            // it could not make a decision. Behavior is governed by the
-            // configured `BackendErrorPolicy`. Either way the error is now
-            // logged (it was previously swallowed silently): `warn` when
-            // failing open since it self-limits to backend outages, `error`
-            // when failing closed since that path actively rejects live
-            // traffic.
-            Err(e) => match self.on_backend_error {
-                BackendErrorPolicy::FailOpen => {
-                    tracing::warn!(
-                        error = %e,
-                        key = %key,
-                        "rate limiter backend error; failing open (request passed through)"
-                    );
-                    next(request).await
+        // The key, then every identity bucket `identity_key` named for an
+        // ambiguous request (see `NAMED_BUCKETS`). The request passes only
+        // when each bucket admits it, and the first refusal decides.
+        let (key, named) = NAMED_BUCKETS.sync_scope(RefCell::new(Vec::new()), || {
+            let key = (self.key_fn)(&request);
+            (key, NAMED_BUCKETS.with(RefCell::take))
+        });
+        for key in std::iter::once(key).chain(named) {
+            match self.limiter.try_acquire(&key, &self.config).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    // Compute how long the caller must wait before trying again.
+                    let secs = self
+                        .limiter
+                        .retry_after(&key, &self.config)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    return Err(HttpResponse::text("429 Too Many Requests")
+                        .status(429)
+                        .header("retry-after", secs.to_string()));
                 }
-                BackendErrorPolicy::FailClosed => {
-                    tracing::error!(
-                        error = %e,
-                        key = %key,
-                        "rate limiter backend error; failing closed with 503"
-                    );
-                    Err(HttpResponse::text("503 Service Unavailable")
-                        .status(503)
-                        .header("retry-after", "1")
-                        .with_error_report_from(&e))
+                // The limiter backend itself errored (e.g. Redis unreachable) -
+                // it could not make a decision. Behavior is governed by the
+                // configured `BackendErrorPolicy`. Either way the error is now
+                // logged (it was previously swallowed silently): `warn` when
+                // failing open since it self-limits to backend outages, `error`
+                // when failing closed since that path actively rejects live
+                // traffic.
+                Err(e) => {
+                    return match self.on_backend_error {
+                        BackendErrorPolicy::FailOpen => {
+                            tracing::warn!(
+                                error = %e,
+                                key = %key,
+                                "rate limiter backend error; failing open (request passed through)"
+                            );
+                            next(request).await
+                        }
+                        BackendErrorPolicy::FailClosed => {
+                            tracing::error!(
+                                error = %e,
+                                key = %key,
+                                "rate limiter backend error; failing closed with 503"
+                            );
+                            Err(HttpResponse::text("503 Service Unavailable")
+                                .status(503)
+                                .header("retry-after", "1")
+                                .with_error_report_from(&e))
+                        }
+                    };
                 }
-            },
+            }
         }
+        let mut request = request;
+        request
+            .record_live_security_check(crate::live::attestation::SecurityCheck::RateLimit, None);
+        next(request).await
     }
 }
 

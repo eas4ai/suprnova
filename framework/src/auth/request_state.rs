@@ -40,10 +40,12 @@
 //! [`crate::Auth`] and are mirrored only from the configured default guard.
 //!
 //! An identity read through a named guard is recorded for the render cache
-//! as that guard's principal (see `Auth::guard_principal`): the bare id for
-//! the default guard, `<guard>:<id>` for any other. The render cache keys a
-//! page by the default guard's identity, so a page built from another
-//! guard's user never matches that key and is never stored under it.
+//! as that guard's principal (see `Auth::guard_principal`): the bare
+//! principal of the id for the default guard (see `Auth::bare_principal`),
+//! `<guard>:<id>` for any other. The render cache keys a page by the default
+//! guard's principal, so a page built from another guard's user never
+//! matches that key and is never stored under it. The default guard's own
+//! reads record its bare principal too, through `observe_default_identity`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -165,9 +167,21 @@ pub(crate) fn set_current_user(user: Arc<dyn Authenticatable>) {
 pub(crate) fn current_user() -> Option<Arc<dyn Authenticatable>> {
     let user = read_state(|state| state.current_user.clone()).flatten();
     if let Some(user) = &user {
-        crate::render_cache::collector::observe_principal_value(&user.get_auth_identifier());
+        observe_default_identity(&user.get_auth_identifier());
     }
     user
+}
+
+/// Records `id`, the request's generic user, which belongs to the default
+/// guard, as that guard's principal: its bare principal, the value the
+/// render-cache key is built from. Costs nothing outside a render-cache
+/// collector scope.
+pub(crate) fn observe_default_identity(id: &str) {
+    if crate::render_cache::collector::is_active() {
+        crate::render_cache::collector::observe_principal_value(
+            &super::guard::Auth::bare_principal(id),
+        );
+    }
 }
 
 fn is_default_guard(guard: &str) -> bool {
@@ -721,7 +735,7 @@ pub(crate) fn current_user_id() -> Option<String> {
     })
     .flatten();
     if let Some(id) = &id {
-        crate::render_cache::collector::observe_principal_value(id);
+        observe_default_identity(id);
     }
     id
 }
@@ -756,7 +770,7 @@ pub(crate) fn has_current_user() -> bool {
     })
     .unwrap_or((false, None));
     if let Some(id) = &material {
-        crate::render_cache::collector::observe_principal_value(id);
+        observe_default_identity(id);
     }
     has
 }
@@ -777,7 +791,7 @@ pub(crate) fn via_remember() -> bool {
     })
     .unwrap_or((false, None));
     if let Some(id) = &material {
-        crate::render_cache::collector::observe_principal_value(id);
+        observe_default_identity(id);
     }
     via
 }

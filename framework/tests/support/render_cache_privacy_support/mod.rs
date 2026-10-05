@@ -135,7 +135,9 @@ impl suprnova::Middleware for LoginHeader {
 
 /// The name of the non-default guard this suite signs in on. Scoped to this
 /// file so it cannot collide with a guard another test binary registers.
-const NAMED_GUARD: &str = "privacy-suite-admin-guard";
+/// Public so a test can build a default-guard id that reads like this
+/// guard's principal.
+pub const NAMED_GUARD: &str = "privacy-suite-admin-guard";
 
 /// A `UserProvider` whose `retrieve_by_id` is never exercised: the named
 /// guard's user is set directly through `set_user`, which the guard's own

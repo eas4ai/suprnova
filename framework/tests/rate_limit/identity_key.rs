@@ -681,3 +681,77 @@ async fn a_json_field_that_is_no_string_names_nobody() {
         );
     }
 }
+
+/// IDENTITY-012: an ambiguous request names two identities, and the
+/// handler acts on one of them. It is refused by the bucket of each one.
+/// With a quota of one, an ordinary request spends the victim's bucket; a
+/// request that adds a decoy beside the victim's address must not get
+/// through on the separate bucket that ambiguous requests share, whichever
+/// place holds the decoy.
+#[tokio::test]
+async fn an_ambiguous_request_is_refused_by_a_named_identity_whose_bucket_is_spent() {
+    let mw = RateLimitMiddleware::new(limiter(), one_per_window(), |req| {
+        identity_key(req, "email", "issuance")
+    })
+    .key_reads_body(4096);
+
+    let addr = spawn_server(echo_router(mw), 6).await;
+
+    let (spent, _) = post_form(addr, "/issue", "email=victim@example.com").await;
+    let (decoy_in_query, _) = post_form(
+        addr,
+        "/issue?email=decoy-1@example.com",
+        "email=victim@example.com",
+    )
+    .await;
+    let (decoy_in_body, _) = post_form(
+        addr,
+        "/issue?email=victim@example.com",
+        "email=decoy-2@example.com",
+    )
+    .await;
+
+    assert_eq!(spent, 200);
+    assert_eq!(
+        decoy_in_query, 429,
+        "the victim's bucket is spent; a query decoy must not buy another attempt"
+    );
+    assert_eq!(
+        decoy_in_body, 429,
+        "the victim's bucket is spent; a body decoy must not buy another attempt"
+    );
+}
+
+/// IDENTITY-012: an ambiguous request that gets through is counted against
+/// the bucket of each identity it names, so it spends the same budget an
+/// ordinary request for either address would.
+#[tokio::test]
+async fn an_ambiguous_request_counts_against_each_identity_it_names() {
+    let mw = RateLimitMiddleware::new(limiter(), one_per_window(), |req| {
+        identity_key(req, "email", "issuance")
+    })
+    .key_reads_body(4096);
+
+    let addr = spawn_server(echo_router(mw), 6).await;
+
+    let (ambiguous, _) = post_form(
+        addr,
+        "/issue?email=first@example.com",
+        "email=second@example.com",
+    )
+    .await;
+    let (first, _) = post_form(addr, "/issue", "email=first@example.com").await;
+    let (second, _) = post_form(addr, "/issue", "email=second@example.com").await;
+    let (other, _) = post_form(addr, "/issue", "email=third@example.com").await;
+
+    assert_eq!(ambiguous, 200);
+    assert_eq!(
+        first, 429,
+        "the ambiguous request named first@ and spent its bucket"
+    );
+    assert_eq!(
+        second, 429,
+        "the ambiguous request named second@ and spent its bucket"
+    );
+    assert_eq!(other, 200, "an address it did not name keeps its budget");
+}

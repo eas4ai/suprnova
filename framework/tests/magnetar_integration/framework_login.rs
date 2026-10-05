@@ -1247,6 +1247,42 @@ async fn framework_totp_enrollment_is_refused_while_a_magnetar_factor_exists() {
     }
 }
 
+/// A Magnetar enrollment can land after `TwoFactor::enroll` checked for
+/// one, the way a concurrent request's does. A trigger lands it with the
+/// framework's own write. The framework enrollment must then withdraw and
+/// answer 409, so the account holds one pending factor, not two that
+/// neither system could confirm.
+#[tokio::test]
+async fn a_magnetar_enrollment_that_lands_during_framework_enrollment_wins_alone() {
+    let account = setup().await;
+    let trigger = format!("magnetar_enrolls_meanwhile_{}", account.id);
+    magnetar_sql(&format!(
+        "CREATE TRIGGER {trigger} AFTER INSERT ON two_factor_credentials \
+         WHEN NEW.user_id = '{id}' \
+         BEGIN INSERT INTO auth_two_factor \
+         (user_id, secret, enrollment_auth_epoch, rotation_pending) \
+         VALUES (NEW.user_id, X'00', 0, 0); END",
+        id = account.id
+    ))
+    .await;
+
+    let outcome = TwoFactor::enroll(&account).await;
+    magnetar_sql(&format!("DROP TRIGGER {trigger}")).await;
+
+    assert!(
+        matches!(&outcome, Err(error) if error.status_code() == 409),
+        "{:?}",
+        outcome.map(|_| ())
+    );
+    let framework_totp = suprnova::magnetar_integration::engine::FrameworkTotpEnrollment;
+    assert!(
+        !magnetar::two_factor::OtherSecondFactor::enrolled_or_pending(&framework_totp, &account.id)
+            .await
+            .expect("read the framework TOTP"),
+        "the framework enrollment withdrew; the Magnetar one holds the account alone"
+    );
+}
+
 /// A Magnetar factor that appears between the framework enrollment and its
 /// confirmation stops the confirmation, so two enrollments racing each other
 /// cannot both end confirmed.

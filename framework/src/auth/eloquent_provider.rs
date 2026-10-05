@@ -288,6 +288,25 @@ where
         Ok(())
     }
 
+    async fn mark_email_verified_for(&self, id: &str, email: &str) -> Result<bool, FrameworkError> {
+        let column = self
+            .identifier_column
+            .clone()
+            .unwrap_or_else(|| M::primary_key_name().to_string());
+        let id = (self.id_parser)(id);
+        let email = email.to_owned();
+        // One transaction, so the reread and the write see one row state; an
+        // ambient one already gives that, and `DB::transaction` refuses to
+        // nest.
+        if crate::database::after_commit::in_transaction() {
+            return mark_verified_while_address_is::<M>(column, id, email).await;
+        }
+        crate::database::DB::transaction(move |_transaction| {
+            Box::pin(mark_verified_while_address_is::<M>(column, id, email))
+        })
+        .await
+    }
+
     async fn set_password(&self, id: &str, hashed: &str) -> Result<(), FrameworkError> {
         // Absent id → no-op.
         if let Some(user) = self.find_by_identifier(id).await? {
@@ -305,6 +324,49 @@ where
             .map(|u| u.is_email_verified())
             .unwrap_or(false))
     }
+}
+
+/// Stamps the verification of the user whose `column` holds `id`, only while
+/// its `MustVerifyEmail` address is still `email`. Runs inside a transaction.
+///
+/// The user is reread with `FOR UPDATE`, so on Postgres and MySQL an address
+/// change waits for this transaction or is already visible to it, and the
+/// stamp never lands on an address the link was not mailed to. SQLite has no
+/// row locks; its transaction refuses a write over a change committed after
+/// the reread, which fails the verification instead.
+async fn mark_verified_while_address_is<M>(
+    column: String,
+    id: Value,
+    email: String,
+) -> Result<bool, FrameworkError>
+where
+    M: Model + MustVerifyEmail + From<<M::Entity as EntityTrait>::Model> + EagerLoadDispatch,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + FromQueryResult
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    let Some(user) = M::query()
+        .filter(column, id)
+        .lock_for_update()
+        .first()
+        .await?
+    else {
+        return Ok(false);
+    };
+    if MustVerifyEmail::email(&user) != email {
+        return Ok(false);
+    }
+    write_changed_columns(user, |user| {
+        user.set_email_verified_at(Some(crate::clock::now()));
+    })
+    .await?;
+    Ok(true)
 }
 
 /// Persist the columns `change` alters on a loaded `user`, and no others.
