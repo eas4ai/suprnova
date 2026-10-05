@@ -1692,8 +1692,8 @@ Common options:
 | Option                     | Relation kinds                | Purpose |
 |----------------------------|-------------------------------|---------|
 | `fk = "..."`               | every kind with a child FK    | Column on the CHILD pointing at the parent. Default = `<snake(parent_struct)>_id`. |
-| `lk = "..."`               | one/many kinds                | Column on the PARENT used as the join key. Default = `"id"`. |
-| `related_key = "..."`      | `BelongsToMany`, `MorphToMany` | The related-side PK COLUMN name. Default = `"id"`. Required when the related model uses a non-`id` PK. |
+| `lk = "..."`               | one/many kinds                | Column on the PARENT used as the join key. Default = the parent model's primary key. |
+| `related_key = "..."`      | `BelongsToMany`, `MorphToMany` | The related-side COLUMN the pivot's related key holds. Default = the related model's primary key. |
 | `with_pivot = ["...", ...]` | `BelongsToMany`, `MorphToMany` | Extra columns on the pivot to surface in the join. |
 | `with_timestamps`          | `BelongsToMany`, `MorphToMany` | Stamp `created_at` / `updated_at` on attach/sync. |
 | `with_default = \|\| { ... }` | `BelongsTo`                 | Closure producing a default when the FK is null OR the parent is missing. |
@@ -1702,6 +1702,31 @@ Common options:
 | `targets = [T1, T2, ...]`  | `MorphTo`                     | The list of concrete morph targets. The macro emits a `<Name>Morph` enum at the declaration site with one variant per target plus `Unknown(String, serde_json::Value)`. |
 | `target_morph_type = "..."` | `MorphedByMany`              | The morph-type string identifying the target family on the pivot. |
 | `pivot_table`, `pivot_foreign_key`, `pivot_related_key` | `BelongsToMany`, `MorphToMany` | Pivot-side column / table overrides when the defaults don't fit. |
+
+### Why Suprnova diverges: default foreign key names
+
+A default foreign key column always ends in `_id`. Laravel ends it in
+the parent model's primary key name instead (`getForeignKey()` is the
+snake-cased class name, `_`, and `getKeyName()`), so the two agree for
+the usual `id` key and differ for any other. `BelongsTo` differs in the
+name as well: Laravel takes it from the relation, Suprnova from the
+target model.
+
+| Relation | Suprnova default | Laravel default |
+|----------|------------------|-----------------|
+| `HasOne`, `HasMany` on a parent keyed by `uuid` | `user_id` | `user_uuid` |
+| `BelongsTo` declared as `author: BelongsTo<User>` | `user_id` (the target model) | `author_id` (the relation name) |
+| `BelongsToMany` pivot keys | `<snake(model)>_id` | `<snake(model)>_<primary key>` |
+| Through `first_key` / `second_key` | `<snake(model)>_id` | `<snake(model)>_<primary key>` |
+
+Most schemas name the column `<model>_id` whatever the parent's key is
+called, as Laravel's own `$table->foreignUuid('user_id')` does, so the
+default matches the column you would write. The join column on
+the other side already follows the model: `lk`, `related_key` and the
+owner key default to the model's primary key. When you mirror a
+Laravel schema whose columns follow Laravel's rule, name them with
+`fk = "..."`, `pivot_foreign_key`, `pivot_related_key`, `first_key` or
+`second_key`.
 
 ### `HasOne<R>` and `BelongsTo<R>`
 
