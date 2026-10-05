@@ -145,10 +145,13 @@ When you run `suprnova serve`, the CLI:
    `src/migrations` directory.
 8. Spawns `cargo watch` for the backend, scoped with `-w` to the paths the
    server is actually built from: `src/`, `cmd/`, `Cargo.toml`,
-   `Cargo.lock`, `.env`, and `lang/`. `cmd/` is where the full-stack
-   scaffold puts the server binary's `main.rs`; the `--api` scaffold puts
-   it in `src/` and has no `cmd/`. Each path is passed only when it
-   exists, because cargo-watch refuses to start on a `-w` path that
+   `Cargo.lock`, `.env`, `lang/`, and `templates/`, plus each template
+   directory inside the project that `askama.toml` names under
+   `[general] dirs`. Views are compiled into the server, so a view edit,
+   one `live:add` writes included, rebuilds it. `cmd/` is where the
+   full-stack scaffold puts the server binary's `main.rs`; the `--api`
+   scaffold puts it in `src/` and has no `cmd/`. Each path is passed only
+   when it exists, because cargo-watch refuses to start on a `-w` path that
    doesn't - a project that hasn't been built yet has no `Cargo.lock`, and
    it's picked up on the next `serve`.
 
@@ -156,7 +159,7 @@ When you run `suprnova serve`, the CLI:
    `.gitignore` to explicitly named `-w` roots, not just to its own
    project walk, and the scaffold gitignores `.env` - so without that flag
    `-w .env` watches nothing at all. It can't widen what restarts the
-   backend, because `-w` has already narrowed that to the six paths above,
+   backend, because `-w` has already narrowed that to the paths above,
    and the only gitignored things inside them are `.env` and (on `--api`)
    `Cargo.lock`, both watched on purpose. `target/`, `node_modules`, and
    the rest sit outside every watched root either way.
@@ -164,7 +167,9 @@ When you run `suprnova serve`, the CLI:
    On a scaffolded full-stack project the full invocation is
    `cargo watch --no-vcs-ignores -w src -w cmd -w Cargo.toml -w Cargo.lock
    -w .env -w lang -s '<suprnova> live:wait && cargo run --bin <package-name> -- serve --no-migrate'`,
-   where `<suprnova>` is the path of the `suprnova` binary that runs `serve`.
+   where `<suprnova>` is the path of the `suprnova` binary that runs `serve`,
+   and `-w templates` joins the list once the project has a `templates/`
+   directory.
    Under `--migrate always`, or when step 7 could not run the migrations, the
    build command is `cargo run --bin <package-name>` and the backend migrates
    by itself.
@@ -248,12 +253,12 @@ solves. See the corresponding row in
 ## Hot reload
 
 **Backend.** `cargo watch` is the loop, scoped to the paths the server is
-built from. It rebuilds and restarts on a change under `src/` or `cmd/`,
-to `Cargo.toml`, `Cargo.lock`, or `.env`, or under `lang/` - `.env` is read
-once by `Config::init` at boot and the Fluent catalogs once at bootstrap,
-so a change to either only takes effect on a restart. `.env` is watched
-through `--no-vcs-ignores`, without which your `.gitignore` would hide it
-from the watcher. Saving a component,
+built from. It rebuilds and restarts on a change under `src/`, `cmd/` or
+`templates/`, to `Cargo.toml`, `Cargo.lock`, or `.env`, or under `lang/` -
+`.env` is read once by `Config::init` at boot and the Fluent catalogs once
+at bootstrap, so a change to either only takes effect on a restart. `.env`
+is watched through `--no-vcs-ignores`, without which your `.gitignore`
+would hide it from the watcher. Saving a frontend component,
 or regenerating `frontend/src/types/inertia-props.ts`, is outside that
 scope and leaves the backend running. Cold rebuilds after touching a heavy
 crate can take several seconds; incremental changes in a single file are

@@ -2767,6 +2767,137 @@ fn reg_023_a_component_signed_under_another_directory_name_is_refused() {
     );
 }
 
+/// The manual chapter that publishes the test vector (REG-023).
+const VECTOR_CHAPTER: &str = "manual/live-libraries.md";
+
+/// The test vector the manual publishes, read from the first fenced block
+/// after its `### Test vector` heading: one `<name> <value>` line each for
+/// `statement`, `hash`, `publicKey` and `signature`.
+fn manual_test_vector() -> BTreeMap<String, String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(VECTOR_CHAPTER);
+    let chapter =
+        fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    let section = chapter
+        .split_once("\n### Test vector\n")
+        .map(|(_, section)| section)
+        .unwrap_or_else(|| panic!("{VECTOR_CHAPTER} has no `### Test vector` section"));
+    let block = section
+        .split_once("```text\n")
+        .and_then(|(_, rest)| rest.split_once("\n```"))
+        .map(|(block, _)| block)
+        .unwrap_or_else(|| panic!("the test vector section has no ```text block"));
+    let mut vector = BTreeMap::new();
+    for line in block.lines() {
+        let (name, value) = line
+            .split_once(' ')
+            .unwrap_or_else(|| panic!("a vector line is `<name> <value>`: {line}"));
+        assert!(
+            vector
+                .insert(name.to_owned(), value.trim_start().to_owned())
+                .is_none(),
+            "the vector names {name} twice"
+        );
+    }
+    assert_eq!(
+        vector.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["hash", "publicKey", "signature", "statement"],
+        "the vector holds exactly a statement, its hash, a key and a signature"
+    );
+    vector
+}
+
+/// REG-023: the manual's test vector verifies with this code: the
+/// statement is in its one canonical spelling, the hash is its sha256, and
+/// the signature is the key's over the hash's ASCII bytes. A vector that
+/// went stale, or a change to the statement's spelling, fails here.
+#[test]
+fn reg_023_the_manuals_test_vector_verifies() {
+    let vector = manual_test_vector();
+    let statement_text = &vector["statement"];
+    let value: Value = serde_json::from_str(statement_text).expect("the statement is JSON");
+    let text = |key: &str| {
+        value[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("the statement has no `{key}` string"))
+            .to_owned()
+    };
+    let digest = |text: String| Digest::parse(&text).unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(text("format"), "suprnova-component/1");
+    let statement = Statement {
+        library: text("library"),
+        version: v(&text("version")),
+        component: text("component"),
+        library_json: digest(text("libraryJson")),
+        manifest: digest(text("manifest")),
+        files: value["files"]
+            .as_object()
+            .expect("files")
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    digest(value.as_str().expect("a digest").to_owned()),
+                )
+            })
+            .collect(),
+    };
+    assert_eq!(
+        statement.canonical_json(),
+        *statement_text,
+        "the manual's statement is not in its canonical spelling"
+    );
+    let hash = statement.verification_hash();
+    assert_eq!(hash, Digest::of(statement_text.as_bytes()));
+    assert_eq!(hash.as_str(), vector["hash"], "the manual's hash");
+    let key = PublicKey::parse(&vector["publicKey"]).expect("the manual's key");
+    let signature =
+        signing::Signature::parse_strict(&vector["signature"]).expect("the manual's signature");
+    signing::verify(&key, &hash, &signature).expect("the manual's signature verifies");
+    let other = Digest::of(format!("{statement_text} ").as_bytes());
+    assert!(
+        signing::verify(&key, &other, &signature).is_err(),
+        "the signature verifies over another hash"
+    );
+}
+
+/// REG-021, REG-027: the provenance record the consumer chapter shows is a
+/// real one: written into a project, it verifies as `live:check` verifies
+/// it, against the key it pins, and the plan the chapter shows names the
+/// same hash.
+#[test]
+fn reg_021_the_manuals_example_record_verifies_as_live_check_verifies_it() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../manual/live-add.md");
+    let chapter =
+        fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    let section = chapter
+        .split_once("\n## The provenance record\n")
+        .map(|(_, section)| section)
+        .expect("the chapter has a `## The provenance record` section");
+    let record = section
+        .split_once("```toml\n")
+        .and_then(|(_, rest)| rest.split_once("\n```"))
+        .map(|(block, _)| format!("{block}\n"))
+        .expect("the section shows a record");
+    let root = project();
+    fs::write(root.path().join("suprnova.toml"), &record).expect("suprnova.toml");
+    let verification = verify_installed(root.path()).expect("verify");
+    assert_eq!(verification.failures, Vec::new(), "{record}");
+    assert_eq!(
+        verification.verified,
+        vec![component("github.com/acme/acme-ui/counter")]
+    );
+    let recorded = records(root.path());
+    let hash = recorded[&component("github.com/acme/acme-ui/counter")]
+        .hash
+        .to_string();
+    assert!(
+        chapter.contains(&format!("  hash        {hash}\n")),
+        "the chapter's plan shows another hash than its record"
+    );
+}
+
 /// REG-023: a fork that keeps the author's `library.json`, files and
 /// signatures is refused from the fork's address.
 #[test]

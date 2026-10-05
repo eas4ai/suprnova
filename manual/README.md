@@ -47,6 +47,8 @@ glossaries. Corrections are welcome in either repo.
 | **Deploy to production** | [Deployment](deployment.md) |
 | **Use named HTTPS dev URLs (passkeys, secure cookies)** | [HTTPS Dev URLs](dev-tls.md) |
 | **Add social login or Sign in with Apple** | [OAuth & Passwordless Login](oauth.md) |
+| **Install a Live component from a third-party library** | [Installing Live Components](live-add.md) |
+| **Publish a Live component library** | [Live Component Libraries](live-libraries.md) |
 | **Cache a route's response automatically** | [RenderCache](render-cache.md) |
 | **Understand when a cached page stops being current** | [RenderCache Generations](render-cache-generations.md) |
 | **Share one cache across several nodes** | [RenderCache Deployment](render-cache-deployment.md) |
