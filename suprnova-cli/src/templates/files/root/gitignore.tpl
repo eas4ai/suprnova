@@ -27,3 +27,8 @@ frontend/bootstrap/ssr
 # password-reset and email-verification tokens, so keep them out of
 # version control.
 storage/mail/
+
+# live:add's lock and the journal it writes while it installs - this
+# machine's state, never the project's.
+/.suprnova-live.lock
+/.suprnova-live-journal.json

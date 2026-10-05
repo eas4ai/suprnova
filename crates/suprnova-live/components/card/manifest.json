@@ -1,7 +1,5 @@
 {
   "name": "suprnova.card",
-  "version": 1,
-  "root": "suprnova-ui/card",
   "files": [
     "card.html",
     "card.css"

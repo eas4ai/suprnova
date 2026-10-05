@@ -67,7 +67,9 @@ for d in sorted(p for p in (LIVE / "components").iterdir() if (p / "manifest.jso
     body = "".join((d / f).read_text() for f in man["files"])
     recs.append({**base, "id": man["name"], "kind": "component", "module": "component library",
                  "file": rel_m, "line": 1,
-                 "details": {"files": man["files"], "installs_to": man["root"], "elements": man.get("elements", [])},
+                 # A manifest names `root` only when it differs from `<namespace>-ui/<directory>`.
+                 "details": {"files": man["files"], "installs_to": man.get("root", f"suprnova-ui/{d.name}"),
+                             "elements": man.get("elements", [])},
                  "sig_hash": digest(man), "body_hash": digest(body)})
     components += 1
     for f in man["files"]:

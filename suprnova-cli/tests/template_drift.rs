@@ -644,6 +644,29 @@ fn scaffold_gitignore_does_not_exclude_the_lockfile() {
     }
 }
 
+/// `live:add` keeps its lock at the project root between installs and
+/// writes its journal there while one runs (REG-029). Both are this
+/// machine's state, never the project's, so every scaffold ignores them:
+/// a committed journal would make the next clone restore files from it.
+#[test]
+fn scaffold_gitignore_excludes_the_live_add_lock_and_journal() {
+    use suprnova_cli::registry::project::{JOURNAL_FILE, LOCK_FILE};
+    for template in [
+        "src/templates/files/root/gitignore.tpl",
+        "src/templates/files/api/.gitignore.tpl",
+    ] {
+        let gitignore = read(template);
+        for file in [LOCK_FILE, JOURNAL_FILE] {
+            assert!(
+                gitignore
+                    .lines()
+                    .any(|line| line.trim() == format!("/{file}")),
+                "{template} does not ignore /{file}"
+            );
+        }
+    }
+}
+
 /// The printed `docker run` must publish the port the image actually
 /// exposes. It said 8080 while the Dockerfile set SERVER_PORT=8765 and
 /// EXPOSED 8765, so following the printed command gave a container that

@@ -1,7 +1,5 @@
 {
   "name": "suprnova.header-bar",
-  "version": 1,
-  "root": "suprnova-ui/header-bar",
   "files": [
     "header-bar.html",
     "header-bar.css"

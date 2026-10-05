@@ -130,7 +130,7 @@ When you run `suprnova serve`, the CLI:
 5. Installs `cargo-watch` via `cargo install --locked --version "^8.5"
    cargo-watch` if it isn't on the PATH yet (one-time, with an
    "Installing..." notice). Skipped under `--frontend-only`.
-   The version is bounded because `serve` drives `cargo watch -x`, whose
+   The version is bounded because `serve` drives `cargo watch -s`, whose
    meaning is not guaranteed across a major bump; `--locked` builds the
    dependency tree cargo-watch published rather than re-resolving it at
    install time. A command that installs software as a side effect of
@@ -145,10 +145,13 @@ When you run `suprnova serve`, the CLI:
    `src/migrations` directory.
 8. Spawns `cargo watch` for the backend, scoped with `-w` to the paths the
    server is actually built from: `src/`, `cmd/`, `Cargo.toml`,
-   `Cargo.lock`, `.env`, and `lang/`. `cmd/` is where the full-stack
-   scaffold puts the server binary's `main.rs`; the `--api` scaffold puts
-   it in `src/` and has no `cmd/`. Each path is passed only when it
-   exists, because cargo-watch refuses to start on a `-w` path that
+   `Cargo.lock`, `.env`, `lang/`, and `templates/`, plus each template
+   directory inside the project that `askama.toml` names under
+   `[general] dirs`. Views are compiled into the server, so a view edit,
+   one `live:add` writes included, rebuilds it. `cmd/` is where the
+   full-stack scaffold puts the server binary's `main.rs`; the `--api`
+   scaffold puts it in `src/` and has no `cmd/`. Each path is passed only
+   when it exists, because cargo-watch refuses to start on a `-w` path that
    doesn't - a project that hasn't been built yet has no `Cargo.lock`, and
    it's picked up on the next `serve`.
 
@@ -156,23 +159,35 @@ When you run `suprnova serve`, the CLI:
    `.gitignore` to explicitly named `-w` roots, not just to its own
    project walk, and the scaffold gitignores `.env` - so without that flag
    `-w .env` watches nothing at all. It can't widen what restarts the
-   backend, because `-w` has already narrowed that to the six paths above,
+   backend, because `-w` has already narrowed that to the paths above,
    and the only gitignored things inside them are `.env` and (on `--api`)
    `Cargo.lock`, both watched on purpose. `target/`, `node_modules`, and
    the rest sit outside every watched root either way.
 
    On a scaffolded full-stack project the full invocation is
    `cargo watch --no-vcs-ignores -w src -w cmd -w Cargo.toml -w Cargo.lock
-   -w .env -w lang -x 'run --bin <package-name> -- serve --no-migrate'`.
+   -w .env -w lang -s '<suprnova> live:wait -- run --bin <package-name> -- serve --no-migrate'`,
+   where `<suprnova>` is the path of the `suprnova` binary that runs `serve`,
+   and `-w templates` joins the list once the project has a `templates/`
+   directory.
    Under `--migrate always`, or when step 7 could not run the migrations, the
-   command is `run --bin <package-name>` and the backend migrates by itself.
+   cargo command is `run --bin <package-name>` and the backend migrates by
+   itself.
+   `live:wait` runs the cargo command after `--` itself. It starts no build
+   while a `suprnova live:add` holds the project lock, so no build starts on
+   a half-written install, and the build that follows sees every file the
+   install wrote. It holds a shared lock until cargo finishes the build, so
+   `live:add` refuses to start mid-build, and releases it before the
+   application starts. If an install was killed partway, `live:wait`
+   (and `serve` itself, when it starts) puts back every file the install's
+   journal names before anything is built.
    Frontend edits and the
    generated `frontend/src/types/*.ts` are outside that scope, so they
    never restart the backend.
 9. Spawns `npm run dev` in `frontend/` for Vite, which gives you HMR for
    Svelte/React/Vue components and Tailwind classes. Skipped under
    `--backend-only`, and when the project has no frontend.
-10. Spawns every extra process declared in the project's `Suprnova.toml`
+10. Spawns every extra process declared in the project's `suprnova.toml`
    (see [Extra dev processes](#extra-dev-processes) below), each with its
    own `[name]` prefix - queue workers, log tailers, anything else you'd
    otherwise juggle in another terminal.
@@ -198,7 +213,7 @@ When you run `suprnova serve`, the CLI:
 
 `Ctrl+C` signals the manager to set its shutdown flag, kill every child,
 and exit. If a child exits on its own - a Rust compile error too severe
-for `cargo watch` to recover, a crashed Vite process, a `Suprnova.toml`
+for `cargo watch` to recover, a crashed Vite process, a `suprnova.toml`
 process that failed - it's respawned after a short backoff (200ms,
 doubling on each consecutive crash, capped at 5s; a process that stayed
 up 30s resets the climb) instead of tearing the session down. Pass
@@ -235,17 +250,17 @@ underlying job - one scriptable, real-time event stream - ships as
 the deliberate no, not a gap - a second interaction model and a second
 library to keep working across terminals for a problem this page already
 solves. See the corresponding row in
-[Parity](parity.md#what-we-won-t-ship-and-why).
+[Parity](parity.md#what-we-wont-ship-and-why).
 
 ## Hot reload
 
 **Backend.** `cargo watch` is the loop, scoped to the paths the server is
-built from. It rebuilds and restarts on a change under `src/` or `cmd/`,
-to `Cargo.toml`, `Cargo.lock`, or `.env`, or under `lang/` - `.env` is read
-once by `Config::init` at boot and the Fluent catalogs once at bootstrap,
-so a change to either only takes effect on a restart. `.env` is watched
-through `--no-vcs-ignores`, without which your `.gitignore` would hide it
-from the watcher. Saving a component,
+built from. It rebuilds and restarts on a change under `src/`, `cmd/` or
+`templates/`, to `Cargo.toml`, `Cargo.lock`, or `.env`, or under `lang/` -
+`.env` is read once by `Config::init` at boot and the Fluent catalogs once
+at bootstrap, so a change to either only takes effect on a restart. `.env`
+is watched through `--no-vcs-ignores`, without which your `.gitignore`
+would hide it from the watcher. Saving a frontend component,
 or regenerating `frontend/src/types/inertia-props.ts`, is outside that
 scope and leaves the backend running. Cold rebuilds after touching a heavy
 crate can take several seconds; incremental changes in a single file are
@@ -309,7 +324,7 @@ Two cases leave the backend to migrate by itself, as it does under
 
 `suprnova serve` always runs the backend and Vite, but most projects have
 more than two things to keep running - a queue worker, a log tailer, a
-mail-catcher. Declare them in a `Suprnova.toml` at the project root and
+mail-catcher. Declare them in a `suprnova.toml` at the project root and
 `serve` spawns, prefixes, and auto-restarts them right alongside the
 backend and frontend:
 
@@ -329,8 +344,10 @@ args = ["-f", "storage/logs/app.log"]
 Each entry needs `name` and `command`; `args` defaults to none, `color`
 defaults to one of green/yellow/blue/white assigned in declaration order
 (or pick one of the eight named `console` colors - black, red, green,
-yellow, blue, magenta, cyan, white). Names must be unique. `Suprnova.toml`
-is entirely optional; a project without one runs exactly as before.
+yellow, blue, magenta, cyan, white). Names must be unique. `suprnova.toml`
+is entirely optional; a project without one runs exactly as before. The
+name is all lowercase: `serve` refuses a project that holds only a
+`Suprnova.toml`, and asks you to rename it.
 
 ### Why Suprnova diverges
 
@@ -341,7 +358,7 @@ inside the same process that already booted the application.
 `suprnova serve` is a separate binary from your app; it never links or
 runs your Rust code, and only ever shells out to `cargo watch` and `npm`.
 There's no application boot to hook into, so registration has to be data
-the CLI reads rather than a call your code makes - hence `Suprnova.toml`
+the CLI reads rather than a call your code makes - hence `suprnova.toml`
 instead of a `DevProcesses::register()` API.
 
 ## JSON output
@@ -354,7 +371,7 @@ field:
 
 | `type` | Fields | Meaning |
 |---|---|---|
-| `started` | `ts`, `name`, `pid` | A process (backend, frontend, the `migrate` run, or a `Suprnova.toml` entry) was spawned for the first time. |
+| `started` | `ts`, `name`, `pid` | A process (backend, frontend, the `migrate` run, or a `suprnova.toml` entry) was spawned for the first time. |
 | `output` | `ts`, `name`, `stream` (`"stdout"` or `"stderr"`), `line` | One line of a child's output, carried as a field rather than passed through raw. |
 | `exited` | `ts`, `name`, `code` (nullable) | A process exited. `code` is `null` if it was killed by a signal rather than returning a status. |
 | `restart_scheduled` | `ts`, `name`, `delay_ms` | A crashed process will be respawned after `delay_ms` (see the backoff schedule above). |
@@ -440,7 +457,7 @@ regeneration to once every 500 ms. If a change isn't showing up:
 
 ### A process keeps crash-looping
 
-If a child - backend, frontend, or a `Suprnova.toml` entry - can't start
+If a child - backend, frontend, or a `suprnova.toml` entry - can't start
 (bad code, a missing binary, a port conflict), it respawns on the backoff
 schedule described above instead of stopping. Look at the `[name]` lines
 right before each "respawning in …ms" notice for the real error (a rustc

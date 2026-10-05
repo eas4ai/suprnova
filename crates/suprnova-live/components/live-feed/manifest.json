@@ -1,7 +1,5 @@
 {
   "name": "suprnova.live-feed",
-  "version": 1,
-  "root": "suprnova-ui/live-feed",
   "files": [
     "live-feed.html",
     "live-feed.css"

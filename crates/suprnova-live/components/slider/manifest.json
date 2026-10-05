@@ -1,7 +1,5 @@
 {
   "name": "suprnova.slider",
-  "version": 1,
-  "root": "suprnova-ui/slider",
   "files": [
     "slider.html",
     "slider.css"

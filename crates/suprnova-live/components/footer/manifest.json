@@ -1,7 +1,5 @@
 {
   "name": "suprnova.footer",
-  "version": 1,
-  "root": "suprnova-ui/footer",
   "files": [
     "footer.html",
     "footer.css"

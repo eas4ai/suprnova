@@ -1,7 +1,5 @@
 {
   "name": "suprnova.radio-group",
-  "version": 1,
-  "root": "suprnova-ui/radio-group",
   "files": [
     "radio-group.html",
     "radio-group.css"

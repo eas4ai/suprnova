@@ -1,5 +1,11 @@
 mod commands;
-mod secure_fs;
+// The registry is the library's module, reached through the library crate
+// rather than compiled a second time into the binary: much of it (the test
+// fetcher, the authoring commands' primitives) is public API the binary's
+// commands never call, and a private copy would report it all as dead.
+use suprnova_cli::registry;
+// The same file helpers the registry writes with, from the library crate.
+use suprnova_cli::secure_fs;
 mod templates;
 pub mod ui;
 
@@ -27,6 +33,50 @@ struct Cli {
         action = clap::ArgAction::Version
     )]
     version: (),
+}
+
+/// The verbs of `live:registry`, each run from a library's root but `new`.
+#[derive(Subcommand)]
+enum LiveRegistryCommand {
+    /// Scaffold a library: library.json, an example component, a preview
+    /// application, and a signing key kept outside the project
+    New {
+        /// The library's namespace (e.g., acme): lowercase letters, digits
+        /// and hyphens; the library is created in ./<namespace>
+        namespace: String,
+        /// The address the library will be published at (e.g.,
+        /// github.com/acme/acme-ui), written as library.json's source; the
+        /// example is signed at once. Without it source is left empty and
+        /// nothing is signed until it is set.
+        #[arg(long, value_name = "ADDRESS")]
+        source: Option<String>,
+    },
+    /// Check every component as live:add would, and list its capabilities
+    Check,
+    /// Check every component, then sign each one, all or nothing
+    Sign,
+    /// Hand the library to a new signing key and re-sign every component
+    ///
+    /// Reads the current private key as `sign` does (SUPRNOVA_LIBRARY_KEY or
+    /// the configuration directory), makes a new key pair, writes the new
+    /// private key to <config>/suprnova/library-keys/<fingerprint hex>.key,
+    /// names it as publicKey in library.json, and re-signs every component,
+    /// all or nothing. It advances library.json's version one patch: every
+    /// signature changes, and live:add refuses a released version whose
+    /// signed content changed, so a rotation ships as a new release. A handover is one hop,
+    /// so previousKeys is rewritten as one statement per former key, each
+    /// naming the new key: the current key signs one, and so does every
+    /// former key whose private key file is in the configuration directory
+    /// under its fingerprint. A former key whose file is missing is refused
+    /// by fingerprint unless --drop-key names it; an application still pinned
+    /// to a dropped key must pin the new key by hand. Refused when
+    /// library.json's source is empty, or when any component fails a check.
+    RotateKey {
+        /// Drop the statement of this former key, whose private key file is
+        /// lost (repeatable, one flag per key)
+        #[arg(long = "drop-key", value_name = "FINGERPRINT")]
+        drop_key: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -189,20 +239,47 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Install a Live component library component from its manifest
+    /// Install a Live component from the shipped library or a third-party one
     #[command(name = "live:add")]
     LiveAdd {
-        /// Shipped component to install (e.g., field, password-input)
+        /// The component: a shipped name (e.g., field),
+        /// [<host>/]<owner>/<library>/<component>[@<version>], an https://
+        /// URL of a component directory, or a ./path to one on disk
         name: Option<String>,
-        /// Install a third-party component from this manifest instead
+        /// Install the component whose manifest.json is at this path in a
+        /// library tree on disk
         #[arg(long)]
         manifest: Option<std::path::PathBuf>,
-        /// Replace a file the application has edited
+        /// Replace a file the application has edited, and accept a
+        /// downgrade or a release whose content changed
         #[arg(long)]
         force: bool,
-        /// Report what would be written without touching the project
+        /// Fetch, verify, scan and report the plan without writing anything
         #[arg(long)]
         dry_run: bool,
+        /// Confirm a third-party plan without a terminal; approves no
+        /// capability and pins no key
+        #[arg(long)]
+        yes: bool,
+        /// Approve a capability the component uses (repeatable): database,
+        /// network, files, mail, queue, cache, session, environment, process
+        #[arg(long = "allow", value_name = "CAPABILITY")]
+        allow: Vec<String>,
+    },
+    /// Wait until no live:add holds the project lock, restoring an
+    /// interrupted install first; `serve` runs it before each build
+    #[command(name = "live:wait")]
+    LiveWait {
+        /// A cargo command to run once no install holds the lock, holding a
+        /// shared lock until its build finishes (e.g. -- run --bin app)
+        #[arg(last = true)]
+        cargo: Vec<String>,
+    },
+    /// Author a Live component library: scaffold it, check it, sign it
+    #[command(name = "live:registry")]
+    LiveRegistry {
+        #[command(subcommand)]
+        command: LiveRegistryCommand,
     },
     /// Check every registered Live view with the integrated checker
     #[command(name = "live:check")]
@@ -541,8 +618,38 @@ fn main() {
             manifest,
             force,
             dry_run,
+            yes,
+            allow,
         } => {
-            commands::live_add::run(name, manifest, force, dry_run);
+            commands::live_add::run(commands::live_add::Request {
+                name,
+                manifest,
+                force,
+                dry_run,
+                yes,
+                allow,
+            });
+        }
+        Commands::LiveWait { cargo } => {
+            commands::serve::wait_for_installs(cargo);
+        }
+        Commands::LiveRegistry { command } => {
+            use suprnova_cli::registry::registry_commands;
+            let outcome = match command {
+                LiveRegistryCommand::New { namespace, source } => {
+                    let directory = std::path::PathBuf::from(&namespace);
+                    registry_commands::new_with_source(&namespace, &directory, source.as_deref())
+                }
+                LiveRegistryCommand::Check => registry_commands::check(std::path::Path::new(".")),
+                LiveRegistryCommand::Sign => registry_commands::sign(std::path::Path::new(".")),
+                LiveRegistryCommand::RotateKey { drop_key } => {
+                    registry_commands::rotate_key(std::path::Path::new("."), &drop_key)
+                }
+            };
+            if let Err(error) = outcome {
+                ui::error(&error.to_string());
+                std::process::exit(1);
+            }
         }
         Commands::LiveCheck {
             templates,
@@ -950,6 +1057,53 @@ mod tests {
                 pretend: false
             })
         ));
+    }
+
+    /// `live:registry new` takes the address the library is published at,
+    /// and leaves it out when it is not given.
+    #[test]
+    fn live_registry_new_takes_the_published_address() {
+        let parsed = |argv: &[&str]| match Cli::try_parse_from(argv) {
+            Ok(Cli {
+                command:
+                    Some(Commands::LiveRegistry {
+                        command: LiveRegistryCommand::New { namespace, source },
+                    }),
+                ..
+            }) => (namespace, source),
+            _ => panic!("`{}` must be live:registry new", argv.join(" ")),
+        };
+        assert_eq!(
+            parsed(&[
+                "suprnova",
+                "live:registry",
+                "new",
+                "acme",
+                "--source",
+                "github.com/acme/acme-ui"
+            ]),
+            (
+                "acme".to_owned(),
+                Some("github.com/acme/acme-ui".to_owned())
+            )
+        );
+        assert_eq!(
+            parsed(&["suprnova", "live:registry", "new", "acme"]),
+            ("acme".to_owned(), None)
+        );
+        assert!(
+            Cli::try_parse_from([
+                "suprnova",
+                "live:registry",
+                "rotate-key",
+                "--drop-key",
+                "a",
+                "--drop-key",
+                "b"
+            ])
+            .is_ok(),
+            "--drop-key repeats"
+        );
     }
 
     /// A subcommand invoked without a help flag still parses, or the
