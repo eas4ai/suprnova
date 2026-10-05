@@ -27,6 +27,7 @@ pub mod fake_parity;
 pub mod fault_injection;
 pub mod inspection_api;
 pub mod introspection;
+pub mod lifecycle;
 pub mod memory;
 pub mod middleware_pipeline;
 #[path = "../support/own_process.rs"]

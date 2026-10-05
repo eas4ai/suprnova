@@ -352,6 +352,63 @@ pub async fn run_through_middleware(env: Envelope) -> Result<JobOutcome, Framewo
     crate::container::scope::run_in_new_scope(job).await
 }
 
+tokio::task_local! {
+    /// The error a middleware failed the current attempt for.
+    ///
+    /// [`FailOnException`](crate::queue::FailOnException) turns an error into
+    /// `JobOutcome::Failed` and puts the error here: Laravel's fails the job
+    /// and rethrows, so the attempt settles as one that ended in an error
+    /// (`JobExceptionOccurred`), not as one whose pipeline returned
+    /// (`JobProcessed`).
+    static FAILED_BY_ERROR: std::cell::RefCell<Option<FrameworkError>>;
+}
+
+/// Record that a middleware failed the current attempt because of `error`.
+/// Outside an attempt, as when a test calls a middleware directly, the
+/// error is dropped.
+pub(crate) fn failed_by_error(error: FrameworkError) {
+    let _ = FAILED_BY_ERROR.try_with(|slot| *slot.borrow_mut() = Some(error));
+}
+
+/// Run one attempt's `pipeline` with room for [`failed_by_error`], and return
+/// its result with the error a middleware failed the job for, if one did.
+pub(crate) async fn attempt_recording_failure<F>(pipeline: F) -> (F::Output, Option<FrameworkError>)
+where
+    F: std::future::Future,
+{
+    FAILED_BY_ERROR
+        .scope(std::cell::RefCell::new(None), async move {
+            let output = pipeline.await;
+            let failed_by = FAILED_BY_ERROR.with(|slot| slot.borrow_mut().take());
+            (output, failed_by)
+        })
+        .await
+}
+
+/// One attempt as the worker catches it: the pipeline's result with the
+/// error a middleware failed the job for, or the panic that ended it.
+type CaughtAttempt = Result<
+    (Result<JobOutcome, FrameworkError>, Option<FrameworkError>),
+    Box<dyn std::any::Any + Send>,
+>;
+
+/// What a caught attempt amounts to: its outcome, and the error a middleware
+/// failed it for. A panic is an error, as a thrown exception is to Laravel's
+/// worker.
+fn dispatch_outcome(caught: CaughtAttempt) -> (DispatchOutcome, Option<FrameworkError>) {
+    match caught {
+        Ok((Ok(outcome), failed_by)) => (DispatchOutcome::Settled(outcome), failed_by),
+        Ok((Err(e), _)) => (DispatchOutcome::Failed(e), None),
+        Err(panic_payload) => (
+            DispatchOutcome::Failed(FrameworkError::internal(format!(
+                "job panicked: {}",
+                crate::server::panic_payload_message(&panic_payload)
+            ))),
+            None,
+        ),
+    }
+}
+
 /// The middleware pipeline of [`run_through_middleware`], without the
 /// context scope around it. The worker calls this inside the scope it
 /// opened for the whole attempt.
@@ -846,6 +903,16 @@ async fn run_labelled_worker(
         // and its lifecycle events, and dropped when the attempt settles.
         let job_scope = crate::container::scope::ContainerScope::new();
 
+        let identity_pre = queue_events::JobIdentity::from_env(&env, &connection);
+        let _ = in_attempt(
+            job_scope.clone(),
+            job_context.clone(),
+            EventFacade::dispatch(queue_events::JobProcessing {
+                job: identity_pre.clone(),
+            }),
+        )
+        .await;
+
         // Spend the budget *before* running, not only when settling.
         //
         // Every other dead-letter decision happens after the handler
@@ -869,20 +936,34 @@ async fn run_labelled_worker(
                 "queue job exhausted its attempts without ever settling - \
                  dead-lettering before it takes another worker down"
             );
-            in_attempt(
-                job_scope.clone(),
-                job_context.clone(),
-                handle_dead_letter(
+            // After `JobProcessing`, as Laravel's `process` raises it before
+            // `markJobAsFailedIfAlreadyExceedsMaxAttempts`. That fails the job
+            // and throws, so `JobExceptionOccurred` and `JobAttempted` follow.
+            let reason = "attempts exhausted without settlement; the previous workers did not \
+                          survive this job";
+            in_attempt(job_scope.clone(), job_context.clone(), async {
+                if handle_dead_letter(
                     &*driver,
                     &res.token,
                     &env,
                     &connection,
-                    "attempts exhausted without settlement; the previous workers did not \
-                     survive this job",
+                    reason,
                     false,
                     &SettlementDeps::current(),
-                ),
-            )
+                )
+                .await
+                {
+                    let _ = EventFacade::dispatch(queue_events::JobExceptionOccurred {
+                        job: identity_pre.clone(),
+                        exception: reason.to_owned(),
+                    })
+                    .await;
+                    let _ = EventFacade::dispatch(queue_events::JobAttempted {
+                        job: identity_pre.clone(),
+                    })
+                    .await;
+                }
+            })
             .await;
             processed += 1;
             if let Some(max) = cfg.max_jobs
@@ -893,16 +974,6 @@ async fn run_labelled_worker(
             }
             continue;
         }
-
-        let identity_pre = queue_events::JobIdentity::from_env(&env, &connection);
-        let _ = in_attempt(
-            job_scope.clone(),
-            job_context.clone(),
-            EventFacade::dispatch(queue_events::JobProcessing {
-                job: identity_pre.clone(),
-            }),
-        )
-        .await;
 
         // Laravel checks this in `CallQueuedHandler::call`, after the worker
         // has fired `JobProcessing` and before the middleware pipeline - so a
@@ -964,30 +1035,16 @@ async fn run_labelled_worker(
         let dispatch_fut = AssertUnwindSafe(in_attempt(
             job_scope.clone(),
             job_context.clone(),
-            run_pipeline(env_for_dispatch),
+            attempt_recording_failure(run_pipeline(env_for_dispatch)),
         ))
         .catch_unwind();
 
-        let outcome = match timeout_opt {
+        let (outcome, failed_by_error) = match timeout_opt {
             Some(t) => match tokio::time::timeout(t, dispatch_fut).await {
-                Ok(Ok(Ok(o))) => DispatchOutcome::Settled(o),
-                Ok(Ok(Err(e))) => DispatchOutcome::Failed(e),
-                Ok(Err(panic_payload)) => {
-                    DispatchOutcome::Failed(FrameworkError::internal(format!(
-                        "job panicked: {}",
-                        crate::server::panic_payload_message(&panic_payload)
-                    )))
-                }
-                Err(_elapsed) => DispatchOutcome::TimedOut(t),
+                Ok(caught) => dispatch_outcome(caught),
+                Err(_elapsed) => (DispatchOutcome::TimedOut(t), None),
             },
-            None => match dispatch_fut.await {
-                Ok(Ok(o)) => DispatchOutcome::Settled(o),
-                Ok(Err(e)) => DispatchOutcome::Failed(e),
-                Err(panic_payload) => DispatchOutcome::Failed(FrameworkError::internal(format!(
-                    "job panicked: {}",
-                    crate::server::panic_payload_message(&panic_payload)
-                ))),
-            },
+            None => dispatch_outcome(dispatch_fut.await),
         };
 
         // Resolve the process-global settlement registries once, at settlement
@@ -1040,7 +1097,7 @@ async fn run_labelled_worker(
                     if sweep_unique_lock {
                         release_unique_lock_if_held(&env).await;
                     }
-                    handle_dead_letter(
+                    if handle_dead_letter(
                         &*driver,
                         &res.token,
                         &env,
@@ -1049,7 +1106,30 @@ async fn run_labelled_worker(
                         false,
                         &deps,
                     )
-                    .await;
+                    .await
+                    {
+                        if failed_by_error.is_some() {
+                            // `FailOnException` fails the job and rethrows
+                            // (FailOnException.php:59-62): the attempt ended
+                            // in an error.
+                            let _ = EventFacade::dispatch(queue_events::JobExceptionOccurred {
+                                job: identity_pre.clone(),
+                                exception: reason.clone(),
+                            })
+                            .await;
+                        } else {
+                            // A middleware failed the job and returned, so the
+                            // pipeline returned without an error.
+                            let _ = EventFacade::dispatch(queue_events::JobProcessed {
+                                job: identity_pre.clone(),
+                            })
+                            .await;
+                        }
+                        let _ = EventFacade::dispatch(queue_events::JobAttempted {
+                            job: identity_pre.clone(),
+                        })
+                        .await;
+                    }
                 }
                 DispatchOutcome::Settled(JobOutcome::Deleted) => {
                     if sweep_unique_lock {
@@ -1062,7 +1142,10 @@ async fn run_labelled_worker(
                         release_unique_lock_if_held(&env).await;
                     }
                     if env.attempts >= env.max_tries {
-                        handle_dead_letter(
+                        // Laravel fails the job before it raises
+                        // JobExceptionOccurred (Worker.php:631, :644), and
+                        // releases nothing for a failed job.
+                        if handle_dead_letter(
                             &*driver,
                             &res.token,
                             &env,
@@ -1071,7 +1154,18 @@ async fn run_labelled_worker(
                             false,
                             &deps,
                         )
-                        .await;
+                        .await
+                        {
+                            let _ = EventFacade::dispatch(queue_events::JobExceptionOccurred {
+                                job: identity_pre.clone(),
+                                exception: e.to_string(),
+                            })
+                            .await;
+                            let _ = EventFacade::dispatch(queue_events::JobAttempted {
+                                job: identity_pre.clone(),
+                            })
+                            .await;
+                        }
                     } else {
                         let _ = EventFacade::dispatch(queue_events::JobExceptionOccurred {
                             job: identity_pre.clone(),
@@ -1100,15 +1194,27 @@ async fn run_labelled_worker(
                                     delay_secs: delay.as_secs(),
                                 })
                                 .await;
+                            // Laravel's `process` raises JobAttempted in its
+                            // `finally` for a retried attempt too.
+                            let _ = EventFacade::dispatch(queue_events::JobAttempted {
+                                job: identity_pre.clone(),
+                            })
+                            .await;
                         }
                     }
                 }
                 DispatchOutcome::TimedOut(t) => {
-                    let _ = EventFacade::dispatch(queue_events::JobTimedOut {
+                    // Laravel's alarm handler fails the job first, then raises
+                    // JobTimedOut, then kills the worker process
+                    // (Worker.php:309-326), so its `process` never reaches the
+                    // `finally` that raises JobAttempted. This worker drops
+                    // the attempt and keeps running, and raises the same
+                    // events: JobFailed when the timeout fails the job, then
+                    // JobTimedOut, and no JobAttempted.
+                    let timed_out = queue_events::JobTimedOut {
                         job: identity_pre.clone(),
                         timeout: t,
-                    })
-                    .await;
+                    };
                     let exhausted = env.fail_on_timeout || env.attempts >= env.max_tries;
                     if exhausted {
                         // A stalled middleware times out the whole pipeline, so the
@@ -1135,7 +1241,9 @@ async fn run_labelled_worker(
                             &deps,
                         )
                         .await;
+                        let _ = EventFacade::dispatch(timed_out).await;
                     } else {
+                        let _ = EventFacade::dispatch(timed_out).await;
                         let delay = next_delay(&env.backoff, env.attempts, None);
                         tracing::warn!(
                             job = %env.job_name,
@@ -1518,6 +1626,12 @@ async fn handle_released(
         reason: reason.into(),
     })
     .await;
+    // Laravel's `process` raises JobAttempted in its `finally` for a released
+    // attempt too.
+    let _ = EventFacade::dispatch(queue_events::JobAttempted {
+        job: queue_events::JobIdentity::from_env(env, connection),
+    })
+    .await;
     tracing::debug!(
         job = %env.job_name,
         id = %env.id,
@@ -1577,6 +1691,11 @@ fn terminal_batch_phase(batch: &crate::queue::batch::Batch) -> BatchPhase {
     }
 }
 
+///
+/// Returns whether the job was settled and `JobFailed` raised. The events
+/// that follow depend on why the job failed, so the caller raises them; it
+/// raises none when this returns `false`, because the reservation was left
+/// for visibility expiry to redeliver.
 async fn handle_dead_letter(
     driver: &dyn QueueDriver,
     token: &crate::queue::driver::ReservationToken,
@@ -1585,7 +1704,7 @@ async fn handle_dead_letter(
     reason: &str,
     is_timeout: bool,
     deps: &SettlementDeps,
-) {
+) -> bool {
     tracing::error!(
         job = %env.job_name,
         id = %env.id,
@@ -1625,7 +1744,7 @@ async fn handle_dead_letter(
                     "queue failed-jobs store rejected the record; reservation left intact \
                      for visibility-expiry redelivery"
                 );
-                return;
+                return false;
             }
         }
         None => {
@@ -1671,14 +1790,14 @@ async fn handle_dead_letter(
             Ok(counts) => counts,
             Err(e) => {
                 settlement_failure(driver, env, "record_failed_job", outcome, &e);
-                return;
+                return false;
             }
         };
         let batch = match repo.find(batch_id).await {
             Ok(batch) => batch,
             Err(e) => {
                 settlement_failure(driver, env, "find", outcome, &e);
-                return;
+                return false;
             }
         };
         if let Some(batch) = batch {
@@ -1690,13 +1809,13 @@ async fn handle_dead_letter(
                 && let Err(e) = repo.cancel(batch_id).await
             {
                 settlement_failure(driver, env, "cancel", outcome, &e);
-                return;
+                return false;
             }
             if counts.pending_jobs == 0
                 && let Err(e) = claim_and_fire_terminal_callbacks(repo.as_ref(), batch).await
             {
                 settlement_failure(driver, env, "claim_terminal_callbacks", outcome, &e);
-                return;
+                return false;
             }
         }
     }
@@ -1706,18 +1825,13 @@ async fn handle_dead_letter(
         settlement_failure(driver, env, "ack", outcome, &ack_err);
     }
 
-    // 4. Observation only - never gates the settlement. `JobAttempted` fires
-    // for every terminal settlement, a failure and a timeout as much as a
-    // success, so an observer accounting for settled attempts sees this one.
+    // 4. Observation only - never gates the settlement.
     let _ = EventFacade::dispatch(queue_events::JobFailed {
         job: queue_events::JobIdentity::from_env(env, connection),
         exception: reason.to_string(),
     })
     .await;
-    let _ = EventFacade::dispatch(queue_events::JobAttempted {
-        job: queue_events::JobIdentity::from_env(env, connection),
-    })
-    .await;
+    true
 }
 
 fn settlement_failure(
