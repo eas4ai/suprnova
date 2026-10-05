@@ -645,24 +645,32 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
                      number, as Laravel's `withMin` attribute holds it. A \
                      date or a time reads from the ISO 8601 text serde \
                      writes for it, so `T` can be the chrono type of the \
-                     column. `None` when `with_min` was not called for this \
-                     column, the group was empty, or the value does not \
-                     read as `T`."]
+                     column. A decimal reads exactly as \
+                     `rust_decimal::Decimal`, from its text, and as the \
+                     nearest `f64` as `f64`. `None` when `with_min` was not \
+                     called for this column, the group was empty, or the \
+                     value does not read as `T`."]
             pub fn #min_as_fn<T: ::suprnova::serde::de::DeserializeOwned>(
                 &self,
                 col: &str,
             ) -> ::core::option::Option<T> {
-                let key = ::suprnova::eloquent::relations::aggregate_value_cache_key(
-                    &::suprnova::eloquent::relations::aggregate_cache_key(
-                        #name_str,
-                        ::suprnova::AggregateKind::Min,
-                        col,
-                    ),
+                let key = ::suprnova::eloquent::relations::aggregate_cache_key(
+                    #name_str,
+                    ::suprnova::AggregateKind::Min,
+                    col,
                 );
-                self.__eager
-                    .get_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(&key)
-                    .and_then(|value| value.clone())
-                    .and_then(|value| ::suprnova::serde_json::from_value(value).ok())
+                let value = self
+                    .__eager
+                    .get_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                        &::suprnova::eloquent::relations::aggregate_value_cache_key(&key),
+                    )
+                    .and_then(|value| value.as_ref());
+                let number = self
+                    .__eager
+                    .get_aggregate::<::core::option::Option<f64>>(&key)
+                    .copied()
+                    .flatten();
+                ::suprnova::database::column_value::__relation_aggregate_as::<T>(value, number)
             }
 
             #[doc = "Read the `with_max((\"...\", col))` aggregate as `T`, \
@@ -671,17 +679,23 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
                 &self,
                 col: &str,
             ) -> ::core::option::Option<T> {
-                let key = ::suprnova::eloquent::relations::aggregate_value_cache_key(
-                    &::suprnova::eloquent::relations::aggregate_cache_key(
-                        #name_str,
-                        ::suprnova::AggregateKind::Max,
-                        col,
-                    ),
+                let key = ::suprnova::eloquent::relations::aggregate_cache_key(
+                    #name_str,
+                    ::suprnova::AggregateKind::Max,
+                    col,
                 );
-                self.__eager
-                    .get_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(&key)
-                    .and_then(|value| value.clone())
-                    .and_then(|value| ::suprnova::serde_json::from_value(value).ok())
+                let value = self
+                    .__eager
+                    .get_aggregate::<::core::option::Option<::suprnova::serde_json::Value>>(
+                        &::suprnova::eloquent::relations::aggregate_value_cache_key(&key),
+                    )
+                    .and_then(|value| value.as_ref());
+                let number = self
+                    .__eager
+                    .get_aggregate::<::core::option::Option<f64>>(&key)
+                    .copied()
+                    .flatten();
+                ::suprnova::database::column_value::__relation_aggregate_as::<T>(value, number)
             }
 
             #with_where_block

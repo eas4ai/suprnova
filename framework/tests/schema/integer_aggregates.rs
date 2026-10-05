@@ -464,6 +464,123 @@ async fn sqlite_relation_min_max_read_every_column() {
     relation_min_max_read_every_column(&connect_sqlite().await).await;
 }
 
+/// `<rel>_min_as::<Decimal>` and `<rel>_max_as::<Decimal>` read the exact
+/// minimum and maximum of a `DECIMAL(30, 2)` column on Postgres and MySQL,
+/// `12345678901234567.89` and `12345678901234567.91`, which no `f64` holds.
+/// They used to read the nearest `f64`, 12345678901234568, because the
+/// value was kept as a JSON float. `min_as::<f64>` and `_min_of` still read
+/// the nearest `f64`, `min_as::<String>` reads the decimal's text, as
+/// Laravel's `withMin` attribute holds it, and a whole minimum still reads
+/// as an integer. SQLite stores the column as a real, so there `Decimal`
+/// reads that real, and 7.00 is the real 7.0, not an integer.
+pub async fn relation_min_max_keep_exact_decimals(conn: &DatabaseConnection) {
+    create_entries(conn).await;
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(conn.clone()));
+    let money = IaOwner::create(attrs! { name: "money" })
+        .await
+        .expect("create the money owner");
+    let small = IaOwner::create(attrs! { name: "small" })
+        .await
+        .expect("create the small owner");
+    run(
+        conn,
+        &format!(
+            "INSERT INTO ia_entries (ia_owner_id, amount, hits, small, ratio, weight, tag, price) \
+             VALUES ({m}, 0, 0, 0, 0, 0, 'money', 12345678901234567.89), \
+             ({m}, 0, 0, 0, 0, 0, 'money', 12345678901234567.91), \
+             ({s}, 0, 0, 0, 0, 0, 'small', 7.00), \
+             ({s}, 0, 0, 0, 0, 0, 'small', 9.50)",
+            m = money.id,
+            s = small.id
+        ),
+    )
+    .await
+    .expect("insert the decimal rows");
+
+    let owners = IaOwner::query()
+        .with_min(("entries", "price"))
+        .with_max(("entries", "price"))
+        .order_by_asc("id")
+        .get()
+        .await
+        .expect("relation min and max over a decimal column");
+    let [money, small] = owners.as_slice() else {
+        panic!("two owners, got {}", owners.len());
+    };
+    let decimal = |text: &str| Decimal::from_str(text).expect("a decimal");
+    let nearest_min = 12345678901234567.89_f64;
+    let nearest_max = 12345678901234567.91_f64;
+
+    assert_eq!(money.entries_min_of("price"), Some(Some(nearest_min)));
+    assert_eq!(money.entries_max_of("price"), Some(Some(nearest_max)));
+    assert_eq!(
+        money.entries_min_as::<f64>("price"),
+        Some(nearest_min),
+        "min_as::<f64> reads the nearest f64"
+    );
+    if conn.get_database_backend() == DbBackend::Sqlite {
+        assert_eq!(
+            money.entries_min_as::<Decimal>("price"),
+            Some(decimal(&nearest_min.to_string())),
+            "SQLite stores the column as a real, and the minimum is that real"
+        );
+    } else {
+        assert_eq!(
+            money.entries_min_as::<Decimal>("price"),
+            Some(decimal("12345678901234567.89")),
+            "the exact minimum"
+        );
+        assert_eq!(
+            money.entries_max_as::<Decimal>("price"),
+            Some(decimal("12345678901234567.91")),
+            "the exact maximum"
+        );
+        assert_eq!(
+            money.entries_min_as::<String>("price").as_deref(),
+            Some("12345678901234567.89"),
+            "the decimal's text, as Laravel's attribute holds it"
+        );
+        assert_eq!(
+            small.entries_min_as::<i64>("price"),
+            Some(7),
+            "a whole minimum reads as an integer"
+        );
+    }
+
+    assert_eq!(
+        small.entries_max_as::<Decimal>("price"),
+        Some(decimal("9.5"))
+    );
+    assert_eq!(small.entries_max_as::<f64>("price"), Some(9.5));
+    assert_eq!(
+        small.entries_max_as::<i64>("price"),
+        None,
+        "a fraction does not read as an integer"
+    );
+
+    drop_tables(conn, TABLES).await;
+}
+
+#[tokio::test]
+async fn sqlite_relation_min_max_keep_exact_decimals() {
+    relation_min_max_keep_exact_decimals(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_relation_min_max_keep_exact_decimals() {
+    relation_min_max_keep_exact_decimals(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_relation_min_max_keep_exact_decimals() {
+    relation_min_max_keep_exact_decimals(&connect_mysql().await).await;
+}
+
 #[tokio::test]
 #[serial]
 #[ignore = "requires disposable Postgres at PG_TEST_URL"]

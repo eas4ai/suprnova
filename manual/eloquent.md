@@ -2273,8 +2273,10 @@ The macro emits matching accessors on each model:
   `Option<T>`: the minimum or maximum read as `T`, whatever the column's
   type, as Laravel's `withMax('posts', 'created_at')` attribute holds
   it. A date or a time reads from its ISO 8601 text, so `T` can be the
-  chrono type of the column. `None` when the call was not made, the
-  group was empty, or the value doesn't read as `T`.
+  chrono type of the column. A `numeric` / `DECIMAL` minimum on Postgres
+  or MySQL reads exactly as `rust_decimal::Decimal`, as the nearest value
+  as `f64`, and as its decimal text as `String`. `None` when the call was
+  not made, the group was empty, or the value doesn't read as `T`.
 
 The accessors are the ergonomic surface - read through them rather
 than reaching into `__eager.get_aggregate::<T>(...)` directly. They
