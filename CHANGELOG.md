@@ -828,7 +828,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   existing API app on Postgres converts them with the `ALTER TABLE` in the
   CLI chapter. The notifications and RenderCache ledger migrations create
   `DATETIME`, so writes keep working after 2038-01-19 on MySQL; tables
-  created before keep `TIMESTAMP` and still work. A remember-me, auth-flow
+  created before keep `TIMESTAMP` and still work, and the new
+  `NotificationTimestampsToDatetime` migration moves an existing MySQL or
+  MariaDB `notifications` table to `DATETIME`, keeping its UTC times. A
+  remember-me, auth-flow
   token or ceremony lifetime too large for a date is an error instead of a
   panic. This landed after the `v3.1.0` tag.
 - **Generated routes and types, Inertia props and JSON:API.**
@@ -868,8 +871,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   goes on when a driver cannot boot, and waits for queued listeners before
   it exits. Workers, the queue and maintenance commands and console
   commands cancel and drain the supervisors the bootstrap started before
-  they exit, with the same 5-second grace as `serve`; `down`, `up` and `schedule:list` run the application's
-  bootstrap hook. `schedule:work` stops on SIGTERM while an inline task
+  they exit, with the same 5-second grace as `serve`, and so does any
+  command or console that fails after the bootstrap ran; `down`, `up` and
+  `schedule:list` run the application's bootstrap hook, and the hook's
+  docs name the migration commands that skip it. `schedule:work` stops on SIGTERM while an inline task
   runs, stopping a task still running after the 30-second grace. A
   panicking `Terminable` hook no longer skips the hooks after it, and a
   graceful shutdown waits up to 5 seconds for hooks still running.
@@ -959,9 +964,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   scan the whole store. SQL Live record cleanup no longer deletes a fresh
   instance or reservation another node just created. Renewing an async
   subscription from an evicted position is refused, so the membership
-  degrades instead of claiming continuity. The Live tooling helper's
-  timeout ends the call even when a process it started keeps its output
-  open. This landed after the `v3.1.0` tag.
+  degrades instead of claiming continuity, and a degraded delivery lane
+  replays what it missed from the subscription's log, or retires the
+  transport when the log no longer holds it, instead of streaming on past
+  the gap. A finalized direct-storage upload is retired through the
+  application's direct upload provider when cleanup reclaims it. The Live
+  tooling helper's timeout ends the call even when a process it started
+  keeps its output open or the helper wrote a complete exchange and kept
+  running. This landed after the `v3.1.0` tag.
 - **Query builder, pagination and Eloquent.** Paginating, ordering and
   taking `first` of a union works on every engine, and `total` counts its
   rows; as in Laravel, ordering, limit and offset set before `union` apply
