@@ -1443,7 +1443,7 @@ as a `String` since `FrameworkError` doesn't derive `Clone`.
 | `UniqueJobSkipped` | `push_unique` suppressed a duplicate inside the `unique_for` window |
 | `JobDebounced` | the worker dropped an envelope a newer debounced dispatch superseded |
 | `JobProcessing` | worker popped, about to dispatch |
-| `JobProcessed` | handler returned `Ok`, or middleware deleted the job |
+| `JobProcessed` | the attempt returned without an error: the handler returned `Ok`, middleware deleted the job or released it back to the queue (before `JobReleased`), or the worker dropped it as superseded (after `JobDebounced`) |
 | `JobAttempted` | every terminal settlement (success, fail, timeout, deleted by middleware, dropped as superseded by a newer debounced dispatch) |
 | `JobExceptionOccurred` | handler returned `Err`, will retry |
 | `JobReleasedAfterException` | retry-after-error re-enqueue happened |

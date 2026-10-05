@@ -2026,3 +2026,130 @@ async fn redis_place_counter_reserves_each_place_once_and_expires() {
     );
     assert_eq!(SYNC_ORDER_LAST_REVISION.load(Ordering::SeqCst), 4);
 }
+
+// ---------------------------------------------------------------------------
+// A dropped envelope reports itself as Laravel's worker does
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Clone)]
+struct OrderedSupersession {
+    dispatch: u32,
+}
+static ORDERED_RUNS: AtomicU32 = AtomicU32::new(0);
+
+#[async_trait]
+impl Job for OrderedSupersession {
+    fn job_name() -> &'static str {
+        "queue_debounce::OrderedSupersession"
+    }
+    fn debounce_for() -> Option<Duration> {
+        Some(Duration::from_millis(120))
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        ORDERED_RUNS.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// The lifecycle events of `OrderedSupersession`, by envelope, in the order
+/// the worker fired them.
+static ORDERED_FIRED: std::sync::Mutex<Vec<(uuid::Uuid, &'static str)>> =
+    std::sync::Mutex::new(Vec::new());
+
+struct RecordOrder;
+
+fn record_order(job: &suprnova::queue::events::JobIdentity, name: &'static str) {
+    if job.job_name == "queue_debounce::OrderedSupersession" {
+        ORDERED_FIRED.lock().unwrap().push((job.id, name));
+    }
+}
+
+#[async_trait]
+impl suprnova::events::Listener<JobDebounced> for RecordOrder {
+    async fn handle(&self, event: &JobDebounced) -> Result<(), FrameworkError> {
+        record_order(&event.job, "debounced");
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl suprnova::events::Listener<suprnova::queue::events::JobProcessed> for RecordOrder {
+    async fn handle(
+        &self,
+        event: &suprnova::queue::events::JobProcessed,
+    ) -> Result<(), FrameworkError> {
+        record_order(&event.job, "processed");
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl suprnova::events::Listener<suprnova::queue::events::JobAttempted> for RecordOrder {
+    async fn handle(
+        &self,
+        event: &suprnova::queue::events::JobAttempted,
+    ) -> Result<(), FrameworkError> {
+        record_order(&event.job, "attempted");
+        Ok(())
+    }
+}
+
+/// Laravel deletes a superseded debounced job inside its pipeline, which
+/// then returns without throwing, so the worker fires JobDebounced, then
+/// JobProcessed, then JobAttempted for it. The worker fired no JobProcessed.
+#[tokio::test]
+#[serial]
+async fn a_dropped_envelope_fires_debounced_processed_and_attempted_in_that_order() {
+    cache_init();
+    ORDERED_RUNS.store(0, Ordering::SeqCst);
+    ORDERED_FIRED.lock().unwrap().clear();
+    register_job::<OrderedSupersession>();
+    EventFacade::listen::<JobDebounced, _>(Arc::new(RecordOrder)).await;
+    EventFacade::listen::<suprnova::queue::events::JobProcessed, _>(Arc::new(RecordOrder)).await;
+    EventFacade::listen::<suprnova::queue::events::JobAttempted, _>(Arc::new(RecordOrder)).await;
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::push(OrderedSupersession { dispatch: 1 })
+        .await
+        .expect("first");
+    Queue::push(OrderedSupersession { dispatch: 2 })
+        .await
+        .expect("second");
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        worker_cfg(),
+        CancellationToken::new(),
+    ));
+    settle(|| ORDERED_RUNS.load(Ordering::SeqCst) > 0).await;
+    handle.abort();
+    EventFacade::forget::<JobDebounced>();
+    EventFacade::forget::<suprnova::queue::events::JobProcessed>();
+    EventFacade::forget::<suprnova::queue::events::JobAttempted>();
+
+    let fired = ORDERED_FIRED.lock().unwrap().clone();
+    let of = |id: uuid::Uuid| -> Vec<&'static str> {
+        fired
+            .iter()
+            .filter(|(fired_for, _)| *fired_for == id)
+            .map(|(_, name)| *name)
+            .collect()
+    };
+    let dropped = fired
+        .iter()
+        .find(|(_, name)| *name == "debounced")
+        .map(|(id, _)| *id)
+        .expect("one envelope was dropped as superseded");
+    let survivor = fired
+        .iter()
+        .map(|(id, _)| *id)
+        .find(|id| *id != dropped)
+        .expect("and one ran");
+    assert_eq!(
+        of(dropped),
+        ["debounced", "processed", "attempted"],
+        "the dropped envelope reports as Laravel's worker does"
+    );
+    assert_eq!(of(survivor), ["processed", "attempted"]);
+}
