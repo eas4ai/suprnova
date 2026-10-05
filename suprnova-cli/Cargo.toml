@@ -32,8 +32,11 @@ console = "0.16"
 ctrlc = "3.5"
 syn = { version = "2", features = ["full", "parsing", "visit"] }
 # `generate-types --routes` walks `routes.rs` as tokens to follow nested
-# `group!` prefixes. Already in the tree through `syn`.
-proc-macro2 = "1"
+# `group!` prefixes. Already in the tree through `syn`. `span-locations`
+# gives each parsed token its byte range, so `live:add` and `live:registry`
+# edit `src/live/mod.rs` at the exact place `syn` found the registry
+# builder and keep every other byte (REG-005).
+proc-macro2 = { version = "1", features = ["span-locations"] }
 walkdir = "2"
 notify = "8.2"
 dotenvy = "0.15"

@@ -23,6 +23,16 @@ pub fn apply(
 /// application's `src/live/mod.rs` and namespace module, by parsing them
 /// with `syn` (REG-005). Returns the new source of each file, or the lines
 /// to add when the builder form is not the scaffold's.
+///
+/// `modules` are the module names to declare in
+/// `src/live/<namespace_module>/mod.rs`. Each entry of `register` and
+/// `unregister` is a manifest entry, `<module>::<Type>`, or the full path
+/// `crate::live::<namespace_module>::<module>::<Type>` it stands for; the
+/// registration line always writes the full path. Every path in
+/// [`RegistrationEdits::Write`] is relative to `project_root`, and only a
+/// file whose source changes is listed, so a second install of the same
+/// component writes nothing. A name that is not a plain identifier, or a
+/// path outside the namespace module, is refused before anything is read.
 pub fn registration_edits(
     project_root: &Path,
     namespace_module: &str,
@@ -30,14 +40,13 @@ pub fn registration_edits(
     register: &[String],
     unregister: &[String],
 ) -> Result<RegistrationEdits> {
-    let _ = (
+    super::registration::edits(
         project_root,
         namespace_module,
         modules,
         register,
         unregister,
-    );
-    Err(RegistryError::NotBuilt("registration edits"))
+    )
 }
 
 /// The outcome of planning registrations.
