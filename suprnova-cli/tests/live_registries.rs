@@ -6,10 +6,11 @@
 //! Most tests drive the registry's own API with an in-memory library
 //! (`Lib`), a [`FakeFetcher`], a scripted prompter and a registration
 //! writer standing in for the `syn` one (REG-005, its own mechanism). The
-//! scan is the real one where a test needs a clean component to pass it
-//! (`TestScanner`); a test that needs a capability uses `MarkerScanner`,
-//! which reads a `// uses: <capability>` line, so the approval flow is
-//! tested apart from the scanner that will find capabilities in Rust. The
+//! scan is the one `live:add` runs where a test needs a clean component to
+//! pass it (`TestScanner`); a test that needs a capability uses
+//! `MarkerScanner`, which reads a `// uses: <capability>` line, so the
+//! approval flow is tested apart from the scanner that finds capabilities
+//! in Rust. The
 //! HTTPS client is tested against a loopback server that stands in for a
 //! library host and for the three forges.
 
@@ -34,7 +35,6 @@ use suprnova_cli::registry::plan::{self, FileOutcome, Options, Plan, Prompter, S
 use suprnova_cli::registry::project::{
     self, InstallRecord, Journal, ProjectFile, ProjectLock, verify_installed,
 };
-use suprnova_cli::registry::scan::allowlist::Allowlist;
 use suprnova_cli::registry::scan::{self, ComponentFiles, ScanReport};
 use suprnova_cli::registry::signing::{self, PublicKey, SecretKey};
 use suprnova_cli::registry::statement::{Digest, Statement};
@@ -339,18 +339,18 @@ fn pinned(library: &Lib) -> tempfile::TempDir {
 // Stand-ins: the scan, the prompter, the registration writer.
 // ---------------------------------------------------------------------------
 
-/// The real scan with an empty test allowlist. Until the scanners land
-/// (lane B) `scan_component` is a placeholder, and a clean component
-/// (views without expressions, a stylesheet, no Rust or scripts) stands
-/// for itself; once they land these tests run the real scan.
+/// The scan `live:add` runs, with Suprnova's embedded allowlist and the
+/// manifest checks (REG-022, REG-030, REG-031, REG-032), for tests whose
+/// components carry no Rust and need no capability.
 struct TestScanner;
 
 impl Scanner for TestScanner {
-    fn scan(&self, component: &ComponentFiles<'_>) -> Result<ScanReport, RegistryError> {
-        match scan::scan_component(component, &Allowlist::default()) {
-            Err(RegistryError::NotBuilt(_)) => Ok(ScanReport::default()),
-            other => other,
-        }
+    fn scan(
+        &self,
+        component: &ComponentFiles<'_>,
+        manifest: &library::ComponentManifest,
+    ) -> Result<ScanReport, RegistryError> {
+        plan::AllowlistScanner.scan(component, manifest)
     }
 }
 
@@ -361,7 +361,11 @@ impl Scanner for TestScanner {
 struct MarkerScanner;
 
 impl Scanner for MarkerScanner {
-    fn scan(&self, component: &ComponentFiles<'_>) -> Result<ScanReport, RegistryError> {
+    fn scan(
+        &self,
+        component: &ComponentFiles<'_>,
+        _manifest: &library::ComponentManifest,
+    ) -> Result<ScanReport, RegistryError> {
         let mut report = ScanReport::default();
         for (name, bytes) in component.files {
             if !name.ends_with(".rs") {
@@ -2715,7 +2719,11 @@ fn reg_024_the_fixture_library_is_signed_by_its_fixture_key() {
 fn reg_023_one_byte_changed_after_signing_is_refused() {
     struct NeverScanner;
     impl Scanner for NeverScanner {
-        fn scan(&self, _component: &ComponentFiles<'_>) -> Result<ScanReport, RegistryError> {
+        fn scan(
+            &self,
+            _component: &ComponentFiles<'_>,
+            _manifest: &library::ComponentManifest,
+        ) -> Result<ScanReport, RegistryError> {
             panic!("an unverified component was scanned")
         }
     }
@@ -4776,4 +4784,121 @@ fn reg_029_the_build_holds_a_shared_lock_until_it_finishes() {
     fs::write(marks.join("stop"), "").expect("stop");
     let status = wait.wait().expect("wait");
     assert!(status.success());
+}
+
+/// Item 13 (REG-004, REG-032): the plan's scan checks every element a
+/// script defines against the manifest's `elements`, so the corpus
+/// component that defines an undeclared element is refused by `live:add`'s
+/// own scanner, with the check, the file and the line named.
+#[test]
+fn reg_004_a_script_defining_an_element_the_manifest_does_not_declare_is_refused() {
+    let corpus = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/registry/bypass/script-define-undeclared");
+    let read = |name: &str| fs::read_to_string(corpus.join(name)).expect(name);
+    let library = Lib::new(ADDRESS, "evil", "1.0.0")
+        .component(
+            "widget",
+            &[
+                ("widget.html", &read("widget.html")),
+                ("widget.js", &read("widget.js")),
+            ],
+        )
+        .manifest("widget", "elements", json!(["evil-widget"]));
+    let root = pinned(&library);
+    let project = ProjectFile::load(root.path()).expect("load");
+    let error = plan::resolve(
+        &address::parse("acme/acme-ui/widget").expect("source"),
+        &yes(),
+        &fetcher(&[&library]),
+        &project,
+    )
+    .expect_err("an undeclared element was admitted");
+    let message = error.to_string();
+    assert!(
+        message.contains("widget.js:2") && message.contains("evil-other"),
+        "{message}"
+    );
+}
+
+const SCAFFOLD_LIVE_MOD: &str = "use suprnova::live::{LiveRegistry, RegistryError};\n\n/// Builds the registry of every Live component in this application.\npub fn registry() -> Result<LiveRegistry, RegistryError> {\n    let registry = LiveRegistry::builder()\n        .build();\n    Ok(registry)\n}\n";
+
+/// Item 12 (REG-012): a repeat install's plan shows the module declarations
+/// and registrations that already exist as already declared and already
+/// registered, not as lines it would add.
+#[test]
+fn reg_012_a_repeat_plan_shows_existing_modules_and_registrations_as_such() {
+    let library = rust_library("1.0.0", "pub struct Card;\n", "<div>Card</div>\n");
+    let root = pinned(&library);
+    fs::create_dir_all(root.path().join("src/live")).expect("src/live");
+    fs::write(root.path().join("src/live/mod.rs"), SCAFFOLD_LIVE_MOD).expect("mod.rs");
+    let source = address::parse("acme/acme-ui/card").expect("source");
+    let plan_of = || {
+        let project = ProjectFile::load(root.path()).expect("load");
+        let plan = plan::resolve_with(
+            &source,
+            &yes(),
+            &fetcher(&[&library]),
+            &project,
+            &MarkerScanner,
+        )
+        .expect("plan");
+        let rendered = plan::render_with(&plan, &yes(), &project);
+        (plan, project, rendered)
+    };
+    let (plan, mut project, first) = plan_of();
+    assert!(
+        !first.contains("already declared") && !first.contains("already registered"),
+        "{first}"
+    );
+    let lock = ProjectLock::acquire(root.path()).expect("lock");
+    let decisions = plan::confirm(&plan, &yes(), &project, &mut no_terminal()).expect("decisions");
+    install::apply_with(
+        &plan,
+        &mut project,
+        &lock,
+        &yes(),
+        &decisions,
+        &install::registration_edits,
+    )
+    .expect("installs with the real registration writer");
+    drop(lock);
+    let (_, _, again) = plan_of();
+    for line in [
+        "module      src/live/mod.rs: pub mod acme; already declared",
+        "module      src/live/acme/mod.rs: pub mod card; already declared",
+        "register    crate::live::acme::card::Card already registered",
+    ] {
+        assert!(again.contains(line), "`{line}` not in:\n{again}");
+    }
+}
+
+/// Finding 1 (REG-029): the nonce alone decides too: a journal beside the
+/// very lock file it was written with, whose nonce that lock file no longer
+/// holds, is not applied.
+#[test]
+fn reg_029_a_journal_whose_nonce_the_lock_file_no_longer_holds_is_not_applied() {
+    let root = project();
+    leave_a_journal(root.path());
+    // Rewritten in place, so the lock file keeps its identity.
+    fs::write(
+        root.path().join(project::LOCK_FILE),
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .expect("another nonce");
+    let journal_time = fs::metadata(root.path().join(project::JOURNAL_FILE))
+        .and_then(|metadata| metadata.modified())
+        .expect("journal time");
+    fs::File::options()
+        .write(true)
+        .open(root.path().join(project::LOCK_FILE))
+        .expect("lock file")
+        .set_modified(journal_time - Duration::from_secs(60))
+        .expect("set mtime");
+    let output = live_add(root.path(), &["field"]);
+    assert!(!output.status.success(), "{}", combined(&output));
+    assert!(combined(&output).contains("nonce"), "{}", combined(&output));
+    assert_eq!(
+        fs::read_to_string(root.path().join("suprnova.toml")).expect("read"),
+        "# half written\n"
+    );
 }

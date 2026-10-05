@@ -5,9 +5,9 @@
 //! regular files in their directories (Cairn UI-017, UI-022, UI-023).
 //!
 //! A third-party install runs the scan (REG-022). Where a test reaches the
-//! scan it drives the install through the registry's own API with a stand-in
-//! for the scan until the scanners land; where a refusal comes first it
-//! drives the binary.
+//! scan it drives the install through the registry's own API, with the scan
+//! `live:add` runs and no registration writer, since these components carry
+//! no Rust; where a refusal comes first it drives the binary.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -20,8 +20,7 @@ use suprnova_cli::registry::fetch::SourceFetcher;
 use suprnova_cli::registry::install::{self, RegistrationEdits};
 use suprnova_cli::registry::plan::{self, FileOutcome, Options, Scanner};
 use suprnova_cli::registry::project::{ProjectFile, ProjectLock};
-use suprnova_cli::registry::scan::allowlist::Allowlist;
-use suprnova_cli::registry::scan::{self, ComponentFiles, ScanReport};
+use suprnova_cli::registry::scan::{ComponentFiles, ScanReport};
 use suprnova_cli::registry::signing::{self, SecretKey};
 use suprnova_cli::registry::statement::{Digest, Statement};
 
@@ -125,16 +124,16 @@ fn pin_vendor(root: &Path) {
     project.save().expect("save");
 }
 
-/// The real scan with an empty allowlist; until the scanners land the scan
-/// is a placeholder, and these clean components stand for themselves.
+/// The scan `live:add` runs, with Suprnova's embedded allowlist.
 struct Clean;
 
 impl Scanner for Clean {
-    fn scan(&self, component: &ComponentFiles<'_>) -> Result<ScanReport, RegistryError> {
-        match scan::scan_component(component, &Allowlist::default()) {
-            Err(RegistryError::NotBuilt(_)) => Ok(ScanReport::default()),
-            other => other,
-        }
+    fn scan(
+        &self,
+        component: &ComponentFiles<'_>,
+        manifest: &suprnova_cli::registry::library::ComponentManifest,
+    ) -> Result<ScanReport, RegistryError> {
+        plan::AllowlistScanner.scan(component, manifest)
     }
 }
 

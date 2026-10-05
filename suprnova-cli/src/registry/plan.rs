@@ -273,19 +273,36 @@ impl Plan {
 }
 
 /// Scans one component as data (REG-022). The plan calls it after every
-/// component verified; tests stand a scanner of their own in.
+/// component verified, with the manifest the files arrived under; tests
+/// stand a scanner of their own in.
 pub trait Scanner {
     /// The scan report for one component's files.
-    fn scan(&self, component: &ComponentFiles<'_>) -> Result<ScanReport>;
+    fn scan(
+        &self,
+        component: &ComponentFiles<'_>,
+        manifest: &ComponentManifest,
+    ) -> Result<ScanReport>;
 }
 
-/// The scan `live:add` runs: Suprnova's allowlist over every file.
+/// The scan `live:add` runs: Suprnova's allowlist over every file, the Live
+/// components the Rust defines checked against the manifest's `register`
+/// (REG-005, REG-030), and every element a script defines checked against
+/// its `elements` (REG-004, REG-032).
 #[derive(Debug, Default)]
 pub struct AllowlistScanner;
 
 impl Scanner for AllowlistScanner {
-    fn scan(&self, component: &ComponentFiles<'_>) -> Result<ScanReport> {
-        super::scan::scan_component(component, super::scan::allowlist::embedded()?)
+    fn scan(
+        &self,
+        component: &ComponentFiles<'_>,
+        manifest: &ComponentManifest,
+    ) -> Result<ScanReport> {
+        super::scan::scan_component_with_manifest(
+            component,
+            &manifest.register,
+            &manifest.elements,
+            super::scan::allowlist::embedded()?,
+        )
     }
 }
 
@@ -1048,13 +1065,16 @@ impl Resolver<'_> {
                         importable_views.extend(views.iter().cloned());
                     }
                 }
-                let incoming = scanner.scan(&ComponentFiles {
-                    namespace: &namespace,
-                    directory: &address.component,
-                    files: &loaded.files,
-                    dependency_modules: &dependency_modules,
-                    importable_views: &importable_views,
-                })?;
+                let incoming = scanner.scan(
+                    &ComponentFiles {
+                        namespace: &namespace,
+                        directory: &address.component,
+                        files: &loaded.files,
+                        dependency_modules: &dependency_modules,
+                        importable_views: &importable_views,
+                    },
+                    &loaded.manifest,
+                )?;
                 if !incoming.accepted() {
                     return Err(RegistryError::Refused(incoming.findings));
                 }
@@ -1084,13 +1104,30 @@ impl Resolver<'_> {
                             swapped.push((name.clone(), std::mem::replace(bytes, on_disk)));
                         }
                     }
-                    let installed = scanner.scan(&ComponentFiles {
-                        namespace: &namespace,
-                        directory: &address.component,
-                        files: &loaded.files,
-                        dependency_modules: &dependency_modules,
-                        importable_views: &importable_views,
-                    });
+                    // What stays installed registers what the incoming
+                    // manifest does and the types of the kept dropped files.
+                    let mut installed_manifest = loaded.manifest.clone();
+                    let prefix = format!("crate::live::{ns_module}::");
+                    for path in &registrations {
+                        if let Some(entry) = path.strip_prefix(&prefix)
+                            && !installed_manifest
+                                .register
+                                .iter()
+                                .any(|known| known == entry)
+                        {
+                            installed_manifest.register.push(entry.to_owned());
+                        }
+                    }
+                    let installed = scanner.scan(
+                        &ComponentFiles {
+                            namespace: &namespace,
+                            directory: &address.component,
+                            files: &loaded.files,
+                            dependency_modules: &dependency_modules,
+                            importable_views: &importable_views,
+                        },
+                        &installed_manifest,
+                    );
                     for (name, original) in swapped {
                         if let Some((_, bytes)) =
                             loaded.files.iter_mut().find(|(file, _)| *file == name)
@@ -1574,6 +1611,15 @@ fn render_lines(plan: &Plan, context: Option<(&Options, &ProjectFile)>) -> Strin
     let records = context
         .and_then(|(_, project)| project.components().ok())
         .unwrap_or_default();
+    // What the application's registry already registers, so a repeat
+    // install says so rather than listing it as a line it would add.
+    let registered = context
+        .and_then(|(_, project)| {
+            super::registration::registered_components(project.root())
+                .ok()
+                .flatten()
+        })
+        .unwrap_or_default();
     if plan.has_third_party() {
         out.push_str(&format!("framework: suprnova {}\n", plan.framework_version));
     }
@@ -1634,10 +1680,22 @@ fn render_lines(plan: &Plan, context: Option<(&Options, &ProjectFile)>) -> Strin
             out.push_str(&format!("  forced      {line}\n"));
         }
         for (file, line) in &component.module_declarations {
-            out.push_str(&format!("  module      {}: {line}\n", file.display()));
+            let state = match context {
+                Some((_, project)) if declared(project.root(), file, line) => " already declared",
+                _ => "",
+            };
+            out.push_str(&format!(
+                "  module      {}: {line}{state}\n",
+                file.display()
+            ));
         }
         for path in &component.registrations {
-            out.push_str(&format!("  register    {path}\n"));
+            let state = if registered.contains(path) {
+                " already registered"
+            } else {
+                ""
+            };
+            out.push_str(&format!("  register    {path}{state}\n"));
         }
         for path in &component.unregistrations {
             out.push_str(&format!("  unregister  {path}\n"));
@@ -1713,6 +1771,29 @@ pub fn capability_list(capabilities: &BTreeSet<Capability>) -> String {
     }
 }
 
+/// Whether `file` under `root` already declares the module a plan line
+/// `pub mod <name>;` names, as a bodiless `mod <name>;` item.
+fn declared(root: &Path, file: &Path, line: &str) -> bool {
+    let Some(name) = line
+        .strip_prefix("pub mod ")
+        .and_then(|rest| rest.strip_suffix(';'))
+    else {
+        return false;
+    };
+    if secure_fs::ensure_contained(root, file).is_err() {
+        return false;
+    }
+    let Ok(source) = std::fs::read_to_string(root.join(file)) else {
+        return false;
+    };
+    let Ok(parsed) = syn::parse_file(&source) else {
+        return false;
+    };
+    parsed.items.iter().any(|item| {
+        matches!(item, syn::Item::Mod(module) if module.content.is_none() && module.ident == name)
+    })
+}
+
 /// The record a third-party component's install writes (REG-013): what
 /// arrived, what it registered, the approvals, and the files it kept.
 pub fn component_record(
@@ -1765,7 +1846,11 @@ mod tests {
     struct Accept;
 
     impl Scanner for Accept {
-        fn scan(&self, _component: &ComponentFiles<'_>) -> Result<ScanReport> {
+        fn scan(
+            &self,
+            _component: &ComponentFiles<'_>,
+            _manifest: &crate::registry::library::ComponentManifest,
+        ) -> Result<ScanReport> {
             Ok(ScanReport::default())
         }
     }
