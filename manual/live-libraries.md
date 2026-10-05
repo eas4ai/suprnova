@@ -418,13 +418,34 @@ suprnova live:registry rotate-key
 It reads the current private key as `sign` does, from `SUPRNOVA_LIBRARY_KEY`
 or your configuration directory, and makes a new key pair. It writes the new
 private key into your configuration directory, named by its fingerprint, as
-`new` does. With the current key it signs a statement that hands the library
-to the new key. It updates `library.json`: `publicKey` becomes the new key,
-and `previousKeys` gains an entry for the former key. Then it signs every
-component again with the new key, all or nothing, as `sign` does. It prints
-both fingerprints and the path of the new key file. Back up the new key file
-before you publish. To release under the new key, raise `version` and sign
-again, then commit and tag as for any release.
+`new` does. It updates `library.json`: `publicKey` becomes the new key, and
+`previousKeys` is rewritten as one statement per former key, each handing
+the library to the new key. The former keys are the key you are leaving and
+every key the library used before it, and each one signs its own statement:
+`rotate-key` reads each earlier key from its file in your configuration
+directory. Then it signs every component again with the new key, all or
+nothing, as `sign` does. It prints both fingerprints and the path of the new
+key file. Back up the new key file before you publish. To release under the
+new key, raise `version` and sign again, then commit and tag as for any
+release.
+
+**Keep every former key file.** An application installs a release under a
+new key only when the key it pinned vouches for that key. A library on its
+third key needs a statement from each of its two former keys, so an
+application pinned to either one can follow. When a former key's file is
+missing, `rotate-key` refuses and names the key. To go ahead without it,
+pass `--drop-key` with that key's fingerprint:
+
+```bash
+suprnova live:registry rotate-key --drop-key sha256:<fingerprint>
+```
+
+`--drop-key` leaves that key's statement out of `previousKeys`. An
+application still pinned to the dropped key then refuses every later
+release, because its pin vouches for no change, and its developer must pin
+the new key by hand. Tell your users the new key's fingerprint through a
+channel they already trust before you publish a release without a
+statement they need.
 
 After a change, `library.json` looks like this:
 
@@ -437,15 +458,16 @@ After a change, `library.json` looks like this:
   "publicKey": "ed25519:<the new key>",
   "previousKeys": [
     {
-      "publicKey": "ed25519:<the former key>",
+      "publicKey": "ed25519:<a former key>",
       "next": "sha256:<the new key's fingerprint>",
-      "signature": "<the former key's signature>"
+      "signature": "<that former key's signature>"
     }
   ]
 }
 ```
 
-The former key signs the UTF-8 bytes of one JSON object with no whitespace,
+`previousKeys` holds one such entry for each former key. Each former key
+signs the UTF-8 bytes of one JSON object with no whitespace,
 `{"format":"suprnova-key-handover/1","library":"<source>","next":"<fingerprint>"}`,
 where `library` is the `source` in this `library.json` and `next` is the new
 key's fingerprint. The statement names the library, so a former key that
@@ -453,14 +475,23 @@ signs for several libraries hands over only this one. `signature` holds the
 signature in standard padded base64. The format is open, so other tooling
 can produce a statement too.
 
-An application that pinned the former key installs the new release only if
+An application that pinned a former key installs the new release only if
 the statement from its pinned key verifies, and it re-pins only when its
 developer confirms the change on a terminal. The application keeps the
 former key in its pin table, so the components it installed under that key
-still verify. A statement must come from the key the application pinned:
-an application still pinned to a key from before an earlier change refuses
-the release until `previousKeys` holds a statement from that key that names
-the new one. Keep every former key file for that.
+still verify.
+
+A developer whose pinned key you dropped pins the new key by hand: in the
+library's table of `suprnova.toml`, set `key` to the new key and move the
+dropped key into `previous_keys`, so the components installed under it still
+verify:
+
+```toml
+[live.libraries."github.com/acme/acme-ui"]
+namespace = "acme"
+key = "ed25519:<the new key>"
+previous_keys = ["ed25519:<the dropped key>"]
+```
 
 ## What a pinned key proves
 
