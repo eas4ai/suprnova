@@ -1354,7 +1354,10 @@ async fn handle_completed(
 /// reservation is acknowledged even though the handler itself never ran.
 ///
 /// The deletion is a terminal settlement like a success or a failure, so it
-/// fires `JobAttempted` once the reservation is acknowledged.
+/// fires `JobAttempted` once the reservation is acknowledged. It fires
+/// `JobProcessed` first, as Laravel's worker does for any job whose pipeline
+/// returned without an error: the middleware chose to drop the job, and
+/// nothing failed.
 async fn handle_deleted(
     driver: &dyn QueueDriver,
     token: &crate::queue::driver::ReservationToken,
@@ -1393,6 +1396,10 @@ async fn handle_deleted(
         settlement_failure(driver, env, "ack", "deleted", &e);
     }
     tracing::debug!(job = %env.job_name, id = %env.id, "queue job dropped by middleware");
+    let _ = EventFacade::dispatch(queue_events::JobProcessed {
+        job: queue_events::JobIdentity::from_env(env, connection),
+    })
+    .await;
     let _ = EventFacade::dispatch(queue_events::JobAttempted {
         job: queue_events::JobIdentity::from_env(env, connection),
     })

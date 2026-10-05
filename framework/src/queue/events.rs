@@ -95,11 +95,13 @@ impl Event for JobProcessing {
     }
 }
 
-/// Fired after a successful run. Mirrors
-/// `Illuminate\Queue\Events\JobProcessed`.
+/// Fired after an attempt that settled without an error: the handler
+/// returned `Ok`, or middleware deleted the job. Mirrors
+/// `Illuminate\Queue\Events\JobProcessed`, which Laravel's worker raises
+/// whenever the job's pipeline returns without throwing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobProcessed {
-    /// Identity of the job that completed successfully.
+    /// Identity of the job whose attempt settled without an error.
     pub job: JobIdentity,
 }
 
@@ -114,7 +116,7 @@ impl Event for JobProcessed {
 /// superseded debounced dispatch - not retry). Mirrors
 /// `Illuminate\Queue\Events\JobAttempted`. Distinct from [`JobProcessed`]:
 /// `JobAttempted` fires for every terminal settlement, while
-/// `JobProcessed` only fires on a clean success.
+/// `JobProcessed` fires only when the attempt settled without an error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobAttempted {
     /// Identity of the job whose attempt just settled.
