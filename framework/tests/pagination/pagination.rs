@@ -479,6 +479,66 @@ async fn sqlite_typed_counts_follow_laravel() {
     typed_counts_follow_laravel(Database::connect("sqlite::memory:").await.unwrap()).await;
 }
 
+/// A typed read with an offset and no limit runs on every engine, as
+/// Laravel's `skip(4)->get()` does. SQLite and MySQL accept `OFFSET` only
+/// after a `LIMIT`, and the typed builder used to write the offset alone,
+/// so `all()` failed there with a syntax error. `first()` and the
+/// `DB::table` builder take the same offset.
+async fn typed_reads_take_an_offset_with_no_limit(conn: sea_orm::DatabaseConnection) {
+    use suprnova::DB;
+    use suprnova::database::QueryBuilder;
+    seed_counted(&conn).await;
+    let _guard = TestContainer::fake();
+    install_db(conn.clone());
+    let ordered = || QueryBuilder::<counted::Entity>::new().order_by_asc(counted::Column::Id);
+    let ids = |rows: Vec<counted::Model>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+
+    let rest = ordered()
+        .offset(4)
+        .all()
+        .await
+        .unwrap_or_else(|e| panic!("all() past an offset: {e}"));
+    assert_eq!(ids(rest), vec![5, 6]);
+    let bounded = ordered()
+        .offset(4)
+        .limit(1)
+        .all()
+        .await
+        .unwrap_or_else(|e| panic!("all() with an offset and a limit: {e}"));
+    assert_eq!(ids(bounded), vec![5]);
+    let first = ordered()
+        .offset(4)
+        .first()
+        .await
+        .unwrap_or_else(|e| panic!("first() past an offset: {e}"));
+    assert_eq!(first.map(|row| row.id), Some(5));
+    let none = ordered()
+        .offset(6)
+        .first()
+        .await
+        .unwrap_or_else(|e| panic!("first() past every row: {e}"));
+    assert_eq!(none, None);
+
+    let rows = DB::table("typed_counts")
+        .order_by_asc("id")
+        .offset(4)
+        .get()
+        .await
+        .unwrap_or_else(|e| panic!("DB::table get() past an offset: {e}"))
+        .into_vec();
+    let facade: Vec<i64> = rows
+        .iter()
+        .map(|row| row.get_int("id").expect("an integer id"))
+        .collect();
+    assert_eq!(facade, vec![5, 6]);
+}
+
+#[tokio::test]
+async fn sqlite_typed_reads_take_an_offset_with_no_limit() {
+    typed_reads_take_an_offset_with_no_limit(Database::connect("sqlite::memory:").await.unwrap())
+        .await;
+}
+
 /// DATA-020: the Inertia scroll metadata names the query parameter the
 /// paginator reads, so infinite scroll asks for `posts_page=2`, not
 /// `page=2`.
@@ -673,6 +733,28 @@ async fn live_mysql_typed_counts_follow_laravel() {
         .await
         .expect("MySQL test DB not reachable - check MYSQL_TEST_URL");
     typed_counts_follow_laravel(conn).await;
+}
+
+#[tokio::test]
+#[ignore = "requires live Postgres; run with --ignored postgres"]
+async fn live_postgres_typed_reads_take_an_offset_with_no_limit() {
+    let url = std::env::var("PG_TEST_URL")
+        .expect("set PG_TEST_URL to a disposable Postgres - this test DROPs and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("Postgres test DB not reachable - check PG_TEST_URL");
+    typed_reads_take_an_offset_with_no_limit(conn).await;
+}
+
+#[tokio::test]
+#[ignore = "requires live MySQL; run with --ignored mysql"]
+async fn live_mysql_typed_reads_take_an_offset_with_no_limit() {
+    let url = std::env::var("MYSQL_TEST_URL")
+        .expect("set MYSQL_TEST_URL to a disposable MySQL - this test DROPs and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("MySQL test DB not reachable - check MYSQL_TEST_URL");
+    typed_reads_take_an_offset_with_no_limit(conn).await;
 }
 
 // --- IntoInertiaScroll wiring ---
