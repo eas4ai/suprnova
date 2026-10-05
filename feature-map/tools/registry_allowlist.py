@@ -23,6 +23,7 @@ Usage:
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -326,10 +327,41 @@ def module_of(record, path):
     return path.rsplit("::", 1)[0]
 
 
+PATH_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+")
+
+
+def suprnova_names(rust, by_id):
+    """Every path a sibling crate's item is reachable by, mapped to the
+    `suprnova::` path that re-exports it, so a return type a sibling
+    crate's path names reads as the Suprnova item the scan admits."""
+    names = {}
+    for record in rust:
+        if record["crate"] == "suprnova" or record.get("parent"):
+            continue
+        paths = suprnova_paths(record, by_id)
+        if not paths:
+            continue
+        own = [strip_suffix(record["id"]), *(record.get("also") or [])]
+        own.append(f'{record.get("module")}::{strip_suffix(record["id"]).rsplit("::", 1)[-1]}')
+        for path in own:
+            names.setdefault(path, paths[0])
+    return names
+
+
+def returned(record, names):
+    """A function's return type with every sibling-crate path rewritten to
+    its `suprnova::` path, or None when the record carries none."""
+    text = (record.get("details") or {}).get("returns")
+    if text is None:
+        return None
+    return PATH_TOKEN.sub(lambda match: names.get(match.group(0), match.group(0)), text)
+
+
 def build():
     records = [json.loads(line) for line in SURFACE.read_text().splitlines() if line.strip()]
     rust = [r for r in records if r.get("family") == "rust-api" and r.get("kind") != "argument"]
     by_id = {r["id"]: r for r in rust}
+    names = suprnova_names(rust, by_id)
     items = {}
     for record in rust:
         paths = suprnova_paths(record, by_id)
@@ -359,6 +391,7 @@ def build():
                 "implements": [],
                 "prefix": record["kind"] == "reexport",
                 "refused": refused,
+                "returns": returned(record, names),
             }
             items[canonical] = entry
         else:
@@ -415,6 +448,7 @@ def build():
             "refused": entry["refused"],
             "aliases": entry["aliases"],
             "implements": entry["implements"],
+            **({"returns": entry["returns"]} if entry.get("returns") is not None else {}),
         }, separators=(",", ":")))
     return "\n".join(lines) + "\n"
 

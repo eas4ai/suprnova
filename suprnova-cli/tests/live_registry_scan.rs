@@ -154,6 +154,22 @@ fn reg_030_the_embedded_allowlist_carries_each_items_capability() {
         Some(Admission::Refused { .. })
     ));
     assert!(list.admit("suprnova::NoSuchItem").is_none());
+    // Sibling-crate re-exports count through their `suprnova::` paths: the
+    // chart renderer is admitted, and so is the TrustedHtml type, whose
+    // constructors the Rust scan refuses on its own.
+    assert_eq!(
+        capability_of(list, "suprnova::live::charts::render_chart"),
+        None
+    );
+    assert_eq!(capability_of(list, "suprnova::view::TrustedHtml"), None);
+    assert_eq!(
+        capability_of(list, "suprnova::view::filters::live_key"),
+        None
+    );
+    assert_eq!(
+        capability_of(list, "suprnova::live::UploadScan::Disabled"),
+        None
+    );
     assert!(matches!(
         list.admit("suprnova::live::LiveRegistry"),
         Some(Admission::Item { .. })
@@ -766,4 +782,117 @@ fn reg_022_the_scaffolded_example_component_passes_the_scan_and_the_view_checks(
             vec!["counter::Counter".to_string()]
         );
     }
+}
+
+/// One allowlist line, as the generator writes it.
+fn allowlist_line(
+    path: &str,
+    kind: &str,
+    capability: Option<&str>,
+    returns: Option<&str>,
+) -> String {
+    let mut line = serde_json::json!({
+        "path": path,
+        "kind": kind,
+        "capability": capability,
+        "hidden": false,
+        "prefix": false,
+        "refused": false,
+        "aliases": [],
+        "implements": [],
+    });
+    if let Some(returns) = returns {
+        line["returns"] = serde_json::Value::String(returns.to_string());
+    }
+    line.to_string()
+}
+
+/// REG-030: with the return types the feature map records, a method chain
+/// on a value a Suprnova function returns is classified by the method it
+/// reaches on that type, with that method's capability, and a method the
+/// type does not have is still refused.
+#[test]
+fn reg_030_a_chain_on_a_suprnova_return_value_is_typed_from_the_recorded_return_types() {
+    let lines = [
+        allowlist_line("suprnova::live::LiveComponent", "proc macro", None, None),
+        allowlist_line("suprnova::live::live", "proc macro", None, None),
+        allowlist_line("suprnova::live::UploadPolicy", "struct", None, None),
+        allowlist_line(
+            "suprnova::live::UploadPolicy::builder",
+            "fn",
+            None,
+            Some("suprnova::live::UploadPolicyBuilder"),
+        ),
+        allowlist_line("suprnova::live::UploadPolicyBuilder", "struct", None, None),
+        allowlist_line(
+            "suprnova::live::UploadPolicyBuilder::maximum_files",
+            "fn",
+            None,
+            Some("suprnova::live::UploadPolicyBuilder"),
+        ),
+        allowlist_line(
+            "suprnova::live::UploadPolicyBuilder::build",
+            "fn",
+            None,
+            Some("suprnova::live::UploadPolicy"),
+        ),
+        allowlist_line("suprnova::Storage", "struct", Some("files"), None),
+        allowlist_line(
+            "suprnova::Storage::disk",
+            "fn",
+            Some("files"),
+            Some("core::result::Result<suprnova::Disk,suprnova::FrameworkError>"),
+        ),
+        allowlist_line("suprnova::Disk", "struct", Some("files"), None),
+        allowlist_line("suprnova::Disk::delete", "fn", Some("files"), Some("()")),
+    ];
+    let list = Allowlist::parse(&lines.join("\n")).expect("the test allowlist parses");
+    let scan = |body: &str| {
+        let rust = format!(
+            "//! A chain.\nuse suprnova::live::UploadPolicy;\n\n/// The chain.\npub fn chain() {{\n    {body}\n}}\n"
+        );
+        let files = vec![("widget.rs".to_string(), rust.into_bytes())];
+        let component = ComponentFiles {
+            namespace: "acme",
+            directory: "widget",
+            files: &files,
+            dependency_modules: &[],
+            importable_views: &[],
+        };
+        scan_component(&component, &list).expect("the scan runs")
+    };
+    let builder = scan("let _policy = UploadPolicy::builder().maximum_files(1).build();");
+    assert!(builder.accepted(), "{:?}", builder.findings);
+    assert!(builder.capabilities.is_empty());
+    let disk = scan("let _ = suprnova::Storage::disk(\"public\").map(|disk| disk.delete(\"x\"));");
+    assert!(disk.accepted(), "{:?}", disk.findings);
+    assert_eq!(
+        disk.capabilities,
+        std::iter::once(Capability::Files).collect()
+    );
+    let unknown = scan("let _ = UploadPolicy::builder().evil();");
+    assert!(
+        unknown
+            .findings
+            .iter()
+            .any(|finding| finding.check == "rust-method" && finding.message.contains("evil")),
+        "{:?}",
+        unknown.findings
+    );
+}
+
+/// The feature map extractor's own tests: the return types the chain
+/// typing above reads.
+#[test]
+fn reg_030_the_feature_map_extractor_records_return_types() {
+    let output = std::process::Command::new("python3")
+        .arg("-B")
+        .arg(workspace().join("feature-map/tools/test_rust_api.py"))
+        .output()
+        .expect("python3 runs the extractor tests");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
