@@ -461,6 +461,36 @@ impl TxHandle {
 
 // ---- ExecutorChoice -----------------------------------------------------
 
+/// What [`ExecutorChoice::select_count`] counts, which decides where a
+/// query's limit and offset go. The variants follow the three ways
+/// Laravel counts a query, which treat those bounds differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CountOf {
+    /// Laravel's `count()`: the limit and offset stay on the aggregate
+    /// statement, so they bound the one row the aggregate returns, not
+    /// the rows it counts. A limit of one or more keeps the whole count;
+    /// an offset of one or more, or a limit of 0, leaves no row, and the
+    /// count is 0.
+    Matches {
+        /// The query's `LIMIT`.
+        limit: Option<u64>,
+        /// The query's `OFFSET`.
+        offset: Option<u64>,
+    },
+    /// Laravel's `getCountForPagination()`: every matching row, with the
+    /// query's own limit and offset dropped, because a page replaces them
+    /// with its own.
+    AllMatches,
+    /// The rows the bounded query returns, as Laravel's `exists()` asks
+    /// about them: `select exists(select * ... limit 1 offset 1)`.
+    Rows {
+        /// The query's `LIMIT`.
+        limit: Option<u64>,
+        /// The query's `OFFSET`.
+        offset: Option<u64>,
+    },
+}
+
 /// Internal dispatch helper. Every terminal method that used to call
 /// `DB::connection()?` now calls [`ExecutorChoice::resolve`] (or
 /// [`ExecutorChoice::resolve_with_override`] for builders carrying a
@@ -886,30 +916,48 @@ impl ExecutorChoice {
     }
 
     /// Execute a SeaORM-built `Select<E>` as a `COUNT(*)` and return the
-    /// total matching row count. See [`Self::select_all`] for the
+    /// count `of` asks for. See [`Self::select_all`] for the
     /// observability contract.
     ///
-    /// The statement is the one SeaORM's `PaginatorTrait::count` runs -
-    /// the SELECT without its ordering, wrapped in
-    /// `SELECT COUNT(*) AS num_items FROM (...)` - built here and run
-    /// through [`Self::query_one`], so an observer sees the COUNT that
-    /// ran, not the SELECT it was built from.
-    #[doc(hidden)]
-    pub async fn select_count<E>(&self, q: sea_orm::Select<E>) -> Result<u64, sea_orm::DbErr>
+    /// The statement is the SELECT without its ordering, limit and
+    /// offset, wrapped in `SELECT COUNT(*) AS num_items FROM (...)`, with
+    /// the limit and offset of `of` put back where that count needs them.
+    /// It is built here and run through [`Self::query_one`], so an
+    /// observer sees the COUNT that ran, not the SELECT it was built
+    /// from. The limit and offset render as
+    /// [`render_limit_offset`](crate::database::clauses::render_limit_offset)
+    /// writes them, so an offset with no limit runs on SQLite and MySQL
+    /// too. No row back is a count of 0, as when an offset skips the
+    /// aggregate's one row.
+    pub(crate) async fn select_count<E>(
+        &self,
+        q: sea_orm::Select<E>,
+        of: CountOf,
+    ) -> Result<u64, sea_orm::DbErr>
     where
         E: sea_orm::EntityTrait,
         E::Model: Send + Sync,
     {
+        use crate::database::clauses::render_limit_offset;
         use sea_orm::QueryTrait;
-        use sea_orm::sea_query::{Expr, SelectStatement};
 
+        let backend = self.backend();
         let mut inner = q.into_query();
-        inner.clear_order_by();
-        let count = SelectStatement::new()
-            .expr(Expr::cust("COUNT(*) AS num_items"))
-            .from_subquery(inner, "sub_query")
-            .to_owned();
-        let stmt = self.backend().build(&count);
+        inner.clear_order_by().reset_limit().reset_offset();
+        let mut stmt = backend.build(&inner);
+        let (inside, outside) = match of {
+            CountOf::Matches { limit, offset } => {
+                (String::new(), render_limit_offset(backend, limit, offset))
+            }
+            CountOf::AllMatches => (String::new(), String::new()),
+            CountOf::Rows { limit, offset } => {
+                (render_limit_offset(backend, limit, offset), String::new())
+            }
+        };
+        stmt.sql = format!(
+            "SELECT COUNT(*) AS num_items FROM ({}{inside}) AS sub_query{outside}",
+            stmt.sql
+        );
         match self.query_one(stmt).await? {
             Some(row) => Ok(u64::try_from(row.try_get::<i64>("", "num_items")?).unwrap_or(0)),
             None => Ok(0),

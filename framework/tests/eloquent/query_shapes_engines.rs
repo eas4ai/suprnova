@@ -439,6 +439,64 @@ async fn cursor_pages_walk_the_whole_union() {
     Context::test_clear_query();
 }
 
+/// The keyset walks `chunk_by_id` and `lazy_by_id` bound the whole union
+/// with their cursor, so every row comes once and the walk ends. The
+/// cursor used to filter the first query only: after 1 and 2, the batch of
+/// `b UNION a` was 1 and 2 again, forever. A walk stops here after a few
+/// batches, so the old behavior fails the test instead of hanging it.
+async fn keyset_walks_cover_the_whole_union() {
+    use std::sync::{Arc, Mutex};
+
+    const MOST_BATCHES: usize = 4;
+    let b_or_a = || items().filter("grp", "b").union(items().filter("grp", "a"));
+
+    async fn chunked(query: Builder<QsItem>) -> Vec<Vec<i64>> {
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&batches);
+        let walked = query
+            .chunk_by_id(2, move |batch| {
+                let sink = Arc::clone(&sink);
+                async move {
+                    let mut batches = sink.lock().unwrap_or_else(|e| e.into_inner());
+                    batches.push(batch.iter().map(|row| row.id).collect::<Vec<_>>());
+                    if batches.len() > MOST_BATCHES {
+                        return Err(FrameworkError::internal("the walk repeats its batches"));
+                    }
+                    Ok(())
+                }
+            })
+            .await;
+        let batches = batches.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Err(e) = walked {
+            panic!("chunk_by_id over a union: {e}; batches {batches:?}");
+        }
+        batches
+    }
+
+    async fn streamed(query: Builder<QsItem>) -> Vec<i64> {
+        let mut stream = query.lazy_by_id(2);
+        let mut seen = Vec::new();
+        while let Some(row) = stream.next().await {
+            let row = row.unwrap_or_else(|e| panic!("lazy_by_id over a union: {e}"));
+            seen.push(row.id);
+            assert!(
+                seen.len() <= MOST_BATCHES * 2,
+                "the stream repeats its rows: {seen:?}"
+            );
+        }
+        seen
+    }
+
+    assert_eq!(chunked(b_or_a()).await, vec![vec![1, 2], vec![3, 4]]);
+    assert_eq!(streamed(b_or_a()).await, vec![1, 2, 3, 4]);
+    // The union's own offset and limit still bound the walk.
+    assert_eq!(
+        chunked(b_or_a().skip(1).limit(3)).await,
+        vec![vec![2, 3], vec![4]]
+    );
+    assert_eq!(streamed(b_or_a().skip(1).limit(3)).await, vec![2, 3, 4]);
+}
+
 // ---------- SQLite ------------------------------------------------------------
 
 async fn seeded_sqlite() -> Fixture {
@@ -488,6 +546,12 @@ async fn sqlite_aggregates_when_no_row_comes_back() {
 async fn sqlite_cursor_pages_walk_the_whole_union() {
     let _fx = seeded_sqlite().await;
     cursor_pages_walk_the_whole_union().await;
+}
+
+#[tokio::test]
+async fn sqlite_keyset_walks_cover_the_whole_union() {
+    let _fx = seeded_sqlite().await;
+    keyset_walks_cover_the_whole_union().await;
 }
 
 // ---------- Live engines ----------------------------------------------------
@@ -614,6 +678,14 @@ async fn postgres_cursor_pages_walk_the_whole_union() {
 }
 
 #[tokio::test]
+#[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
+async fn postgres_keyset_walks_cover_the_whole_union() {
+    let fx = live("PG_TEST_URL", DatabaseBackend::Postgres).await;
+    keyset_walks_cover_the_whole_union().await;
+    finish(fx).await;
+}
+
+#[tokio::test]
 #[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
 async fn mysql_aggregates_when_no_row_comes_back() {
     let fx = live("MYSQL_TEST_URL", DatabaseBackend::MySql).await;
@@ -627,5 +699,13 @@ async fn mysql_aggregates_when_no_row_comes_back() {
 async fn mysql_cursor_pages_walk_the_whole_union() {
     let fx = live("MYSQL_TEST_URL", DatabaseBackend::MySql).await;
     cursor_pages_walk_the_whole_union().await;
+    finish(fx).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_keyset_walks_cover_the_whole_union() {
+    let fx = live("MYSQL_TEST_URL", DatabaseBackend::MySql).await;
+    keyset_walks_cover_the_whole_union().await;
     finish(fx).await;
 }

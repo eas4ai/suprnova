@@ -5559,15 +5559,7 @@ where
             // in the renderer. Every PK variant we care about (Int /
             // BigInt / Uuid / String) round-trips losslessly.
             let boundary_json = crate::eloquent::model::sea_value_to_json_loose(boundary);
-            if q.unions.is_empty() {
-                q = q.filter_op(pk, op, boundary_json);
-            } else {
-                // On the first query alone, the cursor would leave every
-                // other arm unbounded, and their rows before the cursor
-                // would come back on every page.
-                q.union_filters
-                    .push(WhereTerm::Op(pk.to_string(), op.to_string(), boundary_json));
-            }
+            q = q.keyset_bound(pk, op, boundary_json);
         }
 
         let mut rows: Vec<M> = q.limit(per_page + 1).get().await?.into_vec();
@@ -5707,7 +5699,9 @@ where
     /// rows and repeat others. An `OFFSET` skips that many rows once,
     /// before the first batch; every later batch starts at the cursor. A
     /// `LIMIT` caps the rows the whole walk visits, as in Laravel's
-    /// `chunkById`; each batch takes `n` or what the limit leaves.
+    /// `chunkById`; each batch takes `n` or what the limit leaves. A union
+    /// is walked as one result: the cursor bounds the rows of every query
+    /// in it, so each row comes once.
     ///
     /// ## Key types
     ///
@@ -5794,7 +5788,7 @@ where
             }
             let mut q = walk.clone().limit(size);
             match cursor.take() {
-                Some(after) => q = q.filter_op(pk, ">", after),
+                Some(after) => q = q.keyset_bound(pk, ">", after),
                 None if bounds.skip > 0 => q.offset = Some(bounds.skip),
                 None => {}
             }
@@ -6033,7 +6027,7 @@ where
                 }
                 let mut q = walk.clone().limit(size);
                 match cursor.take() {
-                    Some(after) => q = q.filter_op(pk, ">", after),
+                    Some(after) => q = q.keyset_bound(pk, ">", after),
                     None if bounds.skip > 0 => q.offset = Some(bounds.skip),
                     None => {}
                 }
@@ -6110,6 +6104,24 @@ where
                 "the column is stored as neither an integer nor a string",
             )),
         }
+    }
+
+    /// Bound the rows by the keyset cursor, `pk <op> boundary`, for
+    /// [`Self::cursor_paginate`], [`Self::chunk_by_id`] and
+    /// [`Self::lazy_by_id`].
+    ///
+    /// A union is bounded as a whole, through `union_filters` on the
+    /// derived table it is written as. On the first query alone, the
+    /// cursor would leave every other arm unbounded, so their rows before
+    /// the cursor would come back in every page or batch, and a walk
+    /// would never end.
+    fn keyset_bound(mut self, pk: &str, op: &str, boundary: Value) -> Self {
+        if self.unions.is_empty() {
+            return self.filter_op(pk, op, boundary);
+        }
+        self.union_filters
+            .push(WhereTerm::Op(pk.to_string(), op.to_string(), boundary));
+        self
     }
 
     /// The cursor to carry past `batch`: the primary key of its last

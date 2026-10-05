@@ -405,6 +405,11 @@ treats a builder: it drops an `ORDER BY` the `Select` already has and
 orders by the keyset column alone, and it applies the `Select`'s
 `OFFSET` to the first page only.
 
+`Pagination::length_aware` treats the `Select` the way `paginate` does,
+as in Laravel: it drops a `LIMIT` and an `OFFSET` the `Select` already
+has, so the total counts every matching row and the page takes its own
+limit and offset.
+
 Routing rules match the Eloquent builder. An ambient
 `DB::transaction` is honoured (both the COUNT and the page query run on
 the transaction's connection), and a registered `__read_replica__`

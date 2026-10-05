@@ -190,8 +190,12 @@ impl Number {
         exact.ok_or_else(|| DbErr::Type(format!("{self} does not fit in a Decimal exactly")))
     }
 
-    /// The number as JSON: an integer exactly when JSON holds it, anything
-    /// else as the nearest `f64`, and a NaN or an infinity as `null`.
+    /// The number as JSON: an integer exactly when JSON holds it, a real
+    /// as the nearest `f64` (a NaN or an infinity as `null`), and any other
+    /// `numeric` / `DECIMAL` as its exact decimal text. A JSON float would
+    /// round `12345678901234567.89` to the nearest `f64`, and a `Decimal`
+    /// read from it would be that rounded value; read from the text, it is
+    /// exact. The text is also what Laravel's `withMin` attribute holds.
     fn to_json(&self) -> serde_json::Value {
         match self {
             Self::Integer(n) => i64::try_from(*n)
@@ -204,7 +208,7 @@ impl Number {
                 match (n.is_integer(), n.to_i64(), n.to_u64()) {
                     (true, Some(whole), _) => serde_json::Value::from(whole),
                     (true, None, Some(whole)) => serde_json::Value::from(whole),
-                    _ => float_json(n.to_f64().unwrap_or(f64::NAN)),
+                    _ => serde_json::Value::String(n.to_plain_string()),
                 }
             }
         }
@@ -306,10 +310,36 @@ pub struct __RelationAggregate {
     /// The value as the nearest `f64`, when the database answered a number.
     pub number: Option<f64>,
     /// The value as JSON, whatever its type: a number, text, or a date or
-    /// a time as the ISO 8601 text serde writes for it. This is what
-    /// `<rel>_min_as` and `<rel>_max_as` read, so the minimum or maximum of
-    /// a date column is usable as Laravel's `withMax` attribute is.
+    /// a time as the ISO 8601 text serde writes for it. A `numeric` /
+    /// `DECIMAL` that is not a 64-bit integer is its exact decimal text.
+    /// This is what `<rel>_min_as` and `<rel>_max_as` read, through
+    /// [`__relation_aggregate_as`], so the minimum or maximum of a date
+    /// column is usable as Laravel's `withMax` attribute is.
     pub value: Option<serde_json::Value>,
+}
+
+/// Reads a relation minimum or maximum as `T`, for the `<rel>_min_as` and
+/// `<rel>_max_as` accessors `#[suprnova::model]` generates.
+///
+/// `value` is the aggregate as JSON and `number` its nearest `f64`, both
+/// as [`__relation_aggregate`] stored them. `T` reads `value` first, so a
+/// `Decimal` reads a decimal's exact text, and a date reads its ISO 8601
+/// text. A `T` that does not read text, such as `f64`, then reads the
+/// nearest `f64`, which a decimal has. `None` when there is no value, or
+/// `T` reads neither.
+///
+/// **Not part of the public API.** It is `pub` because that generated code
+/// calls it.
+#[doc(hidden)]
+pub fn __relation_aggregate_as<T: serde::de::DeserializeOwned>(
+    value: Option<&serde_json::Value>,
+    number: Option<f64>,
+) -> Option<T> {
+    let value = value?;
+    serde_json::from_value(value.clone()).ok().or_else(|| {
+        let nearest = serde_json::Number::from_f64(number?)?;
+        serde_json::from_value(serde_json::Value::Number(nearest)).ok()
+    })
 }
 
 /// Reads a relation aggregate at `column`, whatever type the database
@@ -384,6 +414,39 @@ mod tests {
         assert_eq!(exact(Number::Real(f64::INFINITY)), None);
         assert_eq!(exact(decimal("0.12345678901234567890123456789")), None);
         assert_eq!(decimal("1.750").to_string(), "1.75");
+    }
+
+    #[test]
+    fn a_relation_min_or_max_keeps_a_decimal_exact() {
+        let decimal = |text: &str| Number::Decimal(text.parse().expect("a decimal"));
+        assert_eq!(
+            decimal("12345678901234567.890").to_json(),
+            serde_json::json!("12345678901234567.89")
+        );
+        assert_eq!(decimal("65.000").to_json(), serde_json::json!(65));
+        assert_eq!(
+            decimal("1e30").to_json(),
+            serde_json::json!("1000000000000000000000000000000")
+        );
+
+        let min = decimal("12345678901234567.89");
+        let (value, number) = (min.to_json(), min.nearest_f64().ok());
+        let read = |value: Option<&serde_json::Value>| {
+            (
+                __relation_aggregate_as::<Decimal>(value, number),
+                __relation_aggregate_as::<f64>(value, number),
+                __relation_aggregate_as::<i64>(value, number),
+            )
+        };
+        assert_eq!(
+            read(Some(&value)),
+            (
+                Some(Decimal::from_str_exact("12345678901234567.89").expect("a decimal")),
+                Some(12345678901234567.89),
+                None
+            )
+        );
+        assert_eq!(read(None), (None, None, None), "no value, nothing to read");
     }
 
     #[test]

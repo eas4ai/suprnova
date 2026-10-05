@@ -350,6 +350,135 @@ async fn pagination_cursor_applies_an_offset_to_the_first_page_only() {
     assert_eq!(seen, vec![3, 4, 5, 6, 7, 8]);
 }
 
+// The typed counts get a table of their own, so the live tests below never
+// drop the `items` table another live test is reading.
+mod counted {
+    use sea_orm::DeriveEntityModel;
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "typed_counts")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: i32,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Six rows in `typed_counts`, in a table made fresh for the run.
+async fn seed_counted(conn: &sea_orm::DatabaseConnection) {
+    let backend = conn.get_database_backend();
+    conn.execute_raw(Statement::from_string(
+        backend,
+        "DROP TABLE IF EXISTS typed_counts".to_string(),
+    ))
+    .await
+    .unwrap();
+    conn.execute(&Schema::new(backend).create_table_from_entity(counted::Entity))
+        .await
+        .unwrap();
+    for id in 1..=6 {
+        counted::ActiveModel { id: Set(id) }
+            .insert(conn)
+            .await
+            .unwrap();
+    }
+}
+
+/// A typed count and a length-aware total answer as Laravel's do when the
+/// query carries a limit or an offset.
+///
+/// Laravel's `count()` keeps the limit and offset on the aggregate
+/// statement, `select count(*) as aggregate from t limit 1 offset 1`. They
+/// bound the one row the aggregate returns, not the rows it counts: a limit
+/// of one or more keeps the whole count, an offset of one or more skips it,
+/// and the count is then 0. Its `exists()` asks about the bounded rows, so
+/// the second row exists. Its `getCountForPagination()` drops the limit and
+/// the offset, so a page's total is every matching row. Both typed paths
+/// used to count the bounded subset instead: 2 for `limit(2)`, 1 for
+/// `limit(1).offset(1)`, and a total of 2 under `limit(2)`. A bare offset
+/// failed outright on SQLite and MySQL.
+async fn typed_counts_follow_laravel(conn: sea_orm::DatabaseConnection) {
+    use suprnova::database::QueryBuilder;
+    seed_counted(&conn).await;
+    let _guard = TestContainer::fake();
+    install_db(conn.clone());
+    let typed = QueryBuilder::<counted::Entity>::new;
+    let count = |query: QueryBuilder<counted::Entity>, case: &'static str| async move {
+        query
+            .count()
+            .await
+            .unwrap_or_else(|e| panic!("count {case}: {e}"))
+    };
+
+    assert_eq!(count(typed(), "unbounded").await, 6);
+    assert_eq!(
+        count(typed().limit(2), "limit(2)").await,
+        6,
+        "a limit keeps the aggregate's row"
+    );
+    assert_eq!(
+        count(typed().limit(1).offset(1), "limit(1).offset(1)").await,
+        0,
+        "an offset skips the aggregate's row"
+    );
+    assert_eq!(
+        count(typed().offset(10), "offset(10)").await,
+        0,
+        "a bare offset skips it on every engine"
+    );
+    assert_eq!(count(typed().offset(0), "offset(0)").await, 6);
+    assert_eq!(count(typed().limit(0), "limit(0)").await, 0);
+
+    let exists = |query: QueryBuilder<counted::Entity>, case: &'static str| async move {
+        query
+            .exists()
+            .await
+            .unwrap_or_else(|e| panic!("exists {case}: {e}"))
+    };
+    assert!(
+        exists(typed().limit(1).offset(1), "limit(1).offset(1)").await,
+        "the second row exists"
+    );
+    assert!(
+        exists(typed().offset(5), "offset(5)").await,
+        "the sixth row exists"
+    );
+    assert!(
+        !exists(typed().offset(6), "offset(6)").await,
+        "no row lies past the sixth"
+    );
+    assert!(!exists(typed().limit(0), "limit(0)").await);
+
+    use sea_orm::QuerySelect;
+    let page = Pagination::length_aware::<counted::Entity>(
+        counted::Entity::find().limit(2).offset(1),
+        4,
+        2,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("a page of a bounded query: {e}"));
+    assert_eq!(
+        page.total, 6,
+        "the total ignores the query's limit and offset"
+    );
+    assert_eq!(page.last_page, 2);
+    assert_eq!(
+        page.data.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![5, 6],
+        "the page replaces the query's limit and offset"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_typed_counts_follow_laravel() {
+    typed_counts_follow_laravel(Database::connect("sqlite::memory:").await.unwrap()).await;
+}
+
 /// DATA-020: the Inertia scroll metadata names the query parameter the
 /// paginator reads, so infinite scroll asks for `posts_page=2`, not
 /// `page=2`.
@@ -521,6 +650,29 @@ async fn live_mysql_cursor_walks_with_typed_int_boundary() {
     assert_eq!(visited.len(), 25);
     assert_eq!(visited.first(), Some(&1));
     assert_eq!(visited.last(), Some(&25));
+}
+
+#[tokio::test]
+#[ignore = "requires live Postgres; run with --ignored postgres"]
+async fn live_postgres_typed_counts_follow_laravel() {
+    // Required, not defaulted: `seed_counted` drops and recreates its table.
+    let url = std::env::var("PG_TEST_URL")
+        .expect("set PG_TEST_URL to a disposable Postgres - this test DROPs and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("Postgres test DB not reachable - check PG_TEST_URL");
+    typed_counts_follow_laravel(conn).await;
+}
+
+#[tokio::test]
+#[ignore = "requires live MySQL; run with --ignored mysql"]
+async fn live_mysql_typed_counts_follow_laravel() {
+    let url = std::env::var("MYSQL_TEST_URL")
+        .expect("set MYSQL_TEST_URL to a disposable MySQL - this test DROPs and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("MySQL test DB not reachable - check MYSQL_TEST_URL");
+    typed_counts_follow_laravel(conn).await;
 }
 
 // --- IntoInertiaScroll wiring ---
