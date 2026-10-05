@@ -277,7 +277,10 @@ if still_running > 0 {
 Drain returns the count still running when the deadline elapsed (`0`
 = fully drained). Stragglers past the deadline are aborted so
 shutdown cannot hang. Stragglers include listeners dispatched while the
-drain was waiting and listeners still waiting for a slot.
+drain was waiting and listeners still waiting for a slot. Two drains can
+run at once, such as your own and the process's at shutdown: each one
+waits for every listener still running, counts it at its deadline, and
+aborts only the listeners it took.
 
 ## Bridging events to broadcasting
 
