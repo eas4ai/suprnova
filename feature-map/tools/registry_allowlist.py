@@ -176,9 +176,14 @@ MODULES = {
     "suprnova::database::testing": REFUSE,
 }
 
-# Item rules, by full path, for the few items whose own effect differs from
-# their module's: writes into the container, flash data and the auth state a
-# request carries.
+# Item rules, by full path, for items whose own effect differs from their
+# module's or their type's: writes into the container or the application's
+# global middleware and shared props, which are refused, and methods that
+# reach an effect on a type whose other members do not (a redirect that
+# writes the session, a response that opens a file, a URL helper that signs
+# with the application key). A method takes its module from its type, not
+# from the file that holds its impl block, so such a method needs a rule
+# here; a rule on a type covers every member under it.
 ITEMS = {
     "suprnova::App::bind": REFUSE,
     "suprnova::App::bind_factory": REFUSE,
@@ -221,6 +226,110 @@ ITEMS = {
     "suprnova::clock::TestClock": REFUSE,
     "suprnova::clock::TestClockGuard": REFUSE,
     "suprnova::clock::TestClockHandle": REFUSE,
+    # Global registration: rewrites the application for every request,
+    # as a container binding does.
+    "suprnova::register_global_middleware": REFUSE,
+    "suprnova::prepend_global_middleware": REFUSE,
+    "suprnova::register_middleware_group": REFUSE,
+    "suprnova::register_middleware_alias": REFUSE,
+    "suprnova::middleware::register_middleware_alias_with_args": REFUSE,
+    "suprnova::clear_middleware_alias": REFUSE,
+    "suprnova::clear_middleware_group": REFUSE,
+    "suprnova::middleware::clear_middleware_priority_for_test": REFUSE,
+    "suprnova::append_middleware_priority": REFUSE,
+    "suprnova::prepend_middleware_priority": REFUSE,
+    "suprnova::register_terminable": REFUSE,
+    "suprnova::data::registry::register": REFUSE,
+    "suprnova::InertiaRegistry::share_lazy": REFUSE,
+    "suprnova::InertiaRegistry::share_once": REFUSE,
+    "suprnova::InertiaRegistry::share_value": REFUSE,
+    # Reads its settings from the environment when built by `default`, which
+    # has no path of its own.
+    "suprnova::InertiaConfig": "environment",
+    # Reaches session on its own path.
+    "suprnova::Redirect::back": "session",
+    "suprnova::Redirect::refresh": "session",
+    "suprnova::Redirect::guest": "session",
+    "suprnova::Redirect::intended": "session",
+    "suprnova::Redirect::set_intended_url": "session",
+    "suprnova::Redirect::with": "session",
+    "suprnova::Redirect::with_input": "session",
+    "suprnova::Redirect::with_errors": "session",
+    "suprnova::Redirect::with_errors_bag": "session",
+    "suprnova::Redirect::preserve_fragment": "session",
+    "suprnova::Redirect::without_cookie": "session",
+    "suprnova::Redirect::without_cookies": "session",
+    "suprnova::RedirectRouteBuilder::flash": "session",
+    "suprnova::RedirectRouteBuilder::with_input": "session",
+    "suprnova::RedirectRouteBuilder::with_errors": "session",
+    "suprnova::RedirectRouteBuilder::with_errors_bag": "session",
+    "suprnova::RedirectRouteBuilder::preserve_fragment": "session",
+    "suprnova::RedirectRouteBuilder::without_cookie": "session",
+    "suprnova::RedirectRouteBuilder::without_cookies": "session",
+    "suprnova::HttpResponse::without_cookie": "session",
+    "suprnova::HttpResponse::without_cookies": "session",
+    "suprnova::ResponseExt::without_cookie": "session",
+    "suprnova::ResponseExt::without_cookies": "session",
+    "suprnova::url::previous": "session",
+    "suprnova::InertiaResponse::resolve": "session",
+    "suprnova::InertiaResponse::try_with": "session",
+    "suprnova::InertiaResponse::try_always": "session",
+    "suprnova::InertiaResponse::try_flash": "session",
+    "suprnova::InertiaResponse::try_merge_with": "session",
+    "suprnova::InertiaResponse::try_scroll": "session",
+    "suprnova::InertiaResponse::try_scroll_wrapped": "session",
+    "suprnova::InertiaVersionMiddleware": "session",
+    "suprnova::LocaleMiddleware": "session",
+    # Reaches environment on its own path.
+    "suprnova::LocaleMiddleware::from_env": "environment",
+    # Reaches session on its own path.
+    "suprnova::live::action::flash_intent": "session",
+    "suprnova::live::action::FlashIntent": "session",
+    "suprnova::live::LiveDocument::mount": "session",
+    "suprnova::live::current_tenant": "session",
+    "suprnova::authorization::__authorize_handler": "session",
+    "suprnova::authorization::__authorize_handler_type": "session",
+    # Reaches environment on its own path.
+    "suprnova::EventDispatcher::new": "environment",
+    "suprnova::InertiaConfig::new": "environment",
+    "suprnova::hashing::default_driver": "environment",
+    "suprnova::hash": "environment",
+    "suprnova::verify": "environment",
+    "suprnova::needs_rehash": "environment",
+    "suprnova::hashing::hash_async": "environment",
+    "suprnova::hashing::verify_async": "environment",
+    "suprnova::url::signed_route": "environment",
+    "suprnova::url::temporary_signed_route": "environment",
+    "suprnova::url::signed_url": "environment",
+    "suprnova::url::has_valid_signature": "environment",
+    "suprnova::url::signature_has_not_expired": "environment",
+    "suprnova::url::signature_verdict": "environment",
+    "suprnova::Redirect::signed_route": "environment",
+    "suprnova::Redirect::temporary_signed_route": "environment",
+    "suprnova::FrameworkError::into_json_api_response": "environment",
+    "suprnova::live::production_ledger_limits": "environment",
+    # Reaches files on its own path.
+    "suprnova::HttpResponse::file": "files",
+    "suprnova::HttpResponse::download": "files",
+    "suprnova::InertiaConfig::vite_manifest": "files",
+    "suprnova::VersionResolver::resolve": "files",
+    "suprnova::Inertia::install": "files",
+    "suprnova::Router::try_live_ui_assets": "files",
+    "suprnova::Router::try_live_ui_assets_from": "files",
+    "suprnova::Router::try_live_ui_assets_for": "files",
+    "suprnova::Router::try_live_ui_assets_for_from": "files",
+    "suprnova::Lang::reload": "files",
+    "suprnova::Translator::reload": "files",
+    "suprnova::Translator::reload_if_stale": "files",
+    "suprnova::profiling::start": "files",
+    "suprnova::profiling::HeapProfile": "files",
+    # Reaches network on its own path.
+    "suprnova::Password::uncompromised": "network",
+    "suprnova::Password::uncompromised_with_threshold": "network",
+    "suprnova::HibpVerifier": "network",
+    # Reaches database on its own path.
+    "suprnova::live::verify_ledger_backend": "database",
+    "suprnova::live::verify_ledger_driver_for_test": "database",
 }
 
 # Item names whose effect is the same wherever they sit: a constructor that

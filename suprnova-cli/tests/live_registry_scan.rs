@@ -356,6 +356,75 @@ fn reg_031_a_view_may_not_call_a_dependencys_function() {
     );
 }
 
+/// REG-006: every public API that reaches one of the nine effects carries
+/// its capability, including methods that live on an otherwise effect-free
+/// type (a redirect that writes the session, a response that opens a file),
+/// and an API that rewrites the application for every request is refused
+/// like a container binding.
+#[test]
+fn reg_006_effectful_methods_on_effect_free_types_carry_their_capability() {
+    let list = allowlist::embedded().expect("the embedded allowlist parses");
+    let carries = [
+        ("suprnova::Redirect::set_intended_url", Capability::Session),
+        ("suprnova::Redirect::back", Capability::Session),
+        ("suprnova::Redirect::with", Capability::Session),
+        (
+            "suprnova::HttpResponse::without_cookie",
+            Capability::Session,
+        ),
+        ("suprnova::url::previous", Capability::Session),
+        ("suprnova::live::LiveDocument::mount", Capability::Session),
+        ("suprnova::HttpResponse::download", Capability::Files),
+        ("suprnova::HttpResponse::file", Capability::Files),
+        (
+            "suprnova::Router::try_live_ui_assets_for",
+            Capability::Files,
+        ),
+        ("suprnova::hash", Capability::Environment),
+        ("suprnova::url::signed_route", Capability::Environment),
+        ("suprnova::InertiaConfig::new", Capability::Environment),
+        ("suprnova::InertiaConfig", Capability::Environment),
+        ("suprnova::Password::uncompromised", Capability::Network),
+        (
+            "suprnova::live::verify_ledger_backend",
+            Capability::Database,
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (path, capability) in carries {
+        let found = match list.admit(path) {
+            Some(Admission::Item { item, .. }) | Some(Admission::Prefix { item, .. }) => {
+                item.capability
+            }
+            _ => match list.member(
+                path.rsplit_once("::").expect("a member path").0,
+                path.rsplit_once("::").expect("a member path").1,
+            ) {
+                Some(Admission::Item { item, .. }) | Some(Admission::Prefix { item, .. }) => {
+                    item.capability
+                }
+                _ => None,
+            },
+        };
+        if found != Some(capability) {
+            wrong.push(format!("{path}: {found:?}, not {capability:?}"));
+        }
+    }
+    for path in [
+        "suprnova::register_global_middleware",
+        "suprnova::prepend_global_middleware",
+        "suprnova::register_middleware_group",
+        "suprnova::register_terminable",
+        "suprnova::data::registry::register",
+        "suprnova::InertiaRegistry::share_value",
+    ] {
+        if !matches!(list.admit(path), Some(Admission::Refused { .. })) {
+            wrong.push(format!("{path} is admitted"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// REG-022, REG-030, REG-031, REG-032: every component of the bypass corpus
 /// is refused, and each refusal its fixture marks is reported with that
 /// check, file and line.
