@@ -15,15 +15,26 @@
 //! guard so validation runs on every boot. Installation remains
 //! idempotent (only the first boot calls `init_with_keyring`).
 //!
-//! This file is a separate test binary so the pre-installed key
-//! doesn't leak into other tests in the same process. The pre-install
-//! happens once at the top of the test before `Server::from_config`
-//! runs.
+//! The test pre-installs a key, which must be the first install in the
+//! process: the key ring keeps the first key for the life of the
+//! process, and the other tests of this binary install their own. So
+//! the test runs alone in a child process (see `own_process`), where its
+//! install is the first.
 
 use suprnova::{Router, Server};
 
 #[test]
 fn production_validation_runs_even_when_crypt_is_pre_initialized() {
+    crate::own_process::run_alone(
+        "boot_validation_always_runs::production_validation_runs_even_when_crypt_is_pre_initialized_child",
+    );
+}
+
+#[test]
+fn production_validation_runs_even_when_crypt_is_pre_initialized_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     let _env = crate::env_lock::lock_env();
     // Pre-install a transient key, simulating a test fixture or earlier
     // boot that already populated `CRYPT_RING`.
@@ -31,10 +42,10 @@ fn production_validation_runs_even_when_crypt_is_pre_initialized() {
     let installed = suprnova::crypto::_test_install_key(key);
     assert!(
         installed,
-        "this test must run before any other Crypt installer in this binary"
+        "this test must run before any other Crypt installer in its process"
     );
 
-    // SAFETY: this is the only test in this binary; no concurrency.
+    // SAFETY: this is the only test in its process; no concurrency.
     // The unsafe is for the documented platform race on getenv that
     // doesn't apply at boot.
     unsafe {
@@ -65,7 +76,7 @@ fn production_validation_runs_even_when_crypt_is_pre_initialized() {
     );
 
     // Cleanup so other tooling that inspects the env doesn't see
-    // APP_ENV=production lingering. SAFETY: only test in this binary.
+    // APP_ENV=production lingering. SAFETY: only test in its process.
     unsafe {
         std::env::remove_var("APP_ENV");
     }

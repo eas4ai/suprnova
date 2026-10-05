@@ -1,10 +1,10 @@
 //! Integration tests for [`suprnova::DatabaseUserProvider`] against a
 //! real `users` table in in-memory SQLite.
 //!
-//! Follows the `tests/remember_me.rs` setup pattern: a shared runtime
-//! (sqlx pools die with their runtime), a process-global connection
-//! registered in `App`, and a local migrator for just the table under
-//! test.
+//! Follows the `remember_me.rs` setup pattern: a shared runtime (sqlx
+//! pools die with their runtime), a connection bound in a container scope
+//! per test ([`in_database`]), and a local migrator for just the table
+//! under test.
 
 use once_cell::sync::Lazy;
 use sea_orm::{ActiveModelTrait, Set};
@@ -12,13 +12,15 @@ use sea_orm_migration::MigratorTrait;
 use sea_orm_migration::prelude::*;
 use tokio::runtime::Runtime;
 
+use suprnova::database::DbConnection;
+use suprnova::testing::TestContainer;
 use suprnova::{Credentials, DatabaseUserProvider, UserProvider};
 
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
 
-/// One-shot: register a shared in-memory SQLite connection, migrate a
+/// One-shot: connect a shared in-memory SQLite database, migrate a
 /// `users` table, and seed one user (`a@b.com` / `secret`, not admin).
-static SETUP: Lazy<()> = Lazy::new(|| {
+static DATABASE: Lazy<DbConnection> = Lazy::new(|| {
     RT.block_on(async {
         let config = suprnova::database::DatabaseConfig::builder()
             .url("sqlite::memory:")
@@ -32,11 +34,9 @@ static SETUP: Lazy<()> = Lazy::new(|| {
         LocalMigrator::up(conn.inner(), None)
             .await
             .expect("run local migrator");
-        suprnova::App::singleton(conn);
 
         // Seed: id 1, a@b.com, bcrypt("secret"), not admin.
         let hash = suprnova::hash("secret").expect("hash password");
-        let conn = suprnova::DB::connection().expect("db connection");
         users::ActiveModel {
             email: Set("a@b.com".to_string()),
             password: Set(hash),
@@ -46,8 +46,27 @@ static SETUP: Lazy<()> = Lazy::new(|| {
         .insert(conn.inner())
         .await
         .expect("seed user");
-    });
+        conn
+    })
 });
+
+/// Run `test` on [`RT`] with [`DATABASE`] as the connection that
+/// `DB::connection()` resolves.
+///
+/// The connection is bound in a container scope around the test, not in
+/// the process container. The other files of this binary build in-memory
+/// databases of their own, without this `users` table, and the process
+/// container keeps one connection: the file that bound last would own it.
+/// The test's future is boxed so the wrappers move a pointer rather than the
+/// whole future.
+fn in_database<F: std::future::Future>(test: F) -> F::Output {
+    let database = Lazy::force(&DATABASE).clone();
+    let test = Box::pin(test);
+    RT.block_on(TestContainer::scope(async move {
+        TestContainer::singleton(database);
+        test.await
+    }))
+}
 
 struct LocalMigrator;
 
@@ -131,8 +150,7 @@ fn provider() -> DatabaseUserProvider {
 
 #[test]
 fn retrieve_by_id_resolves_known_and_unknown() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_database(async {
         let p = provider();
         let user = p.retrieve_by_id("1").await.unwrap().expect("user 1 exists");
         assert_eq!(user.get_auth_identifier(), "1");
@@ -144,8 +162,7 @@ fn retrieve_by_id_resolves_known_and_unknown() {
 
 #[test]
 fn retrieve_by_credentials_matches_on_email() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_database(async {
         let p = provider();
         let found = p
             .retrieve_by_credentials(&Credentials::password("a@b.com", "ignored").as_value())
@@ -166,8 +183,7 @@ fn retrieve_by_credentials_matches_on_email() {
 
 #[test]
 fn validate_credentials_checks_the_password_hash() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_database(async {
         let p = provider();
         let user = p.retrieve_by_id("1").await.unwrap().unwrap();
 
@@ -196,8 +212,7 @@ fn validate_credentials_checks_the_password_hash() {
 // lookup would filter `is_admin = true` and find nobody.
 #[test]
 fn credential_allowlist_ignores_non_allowlisted_keys() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_database(async {
         let p = provider();
         let creds = Credentials::new()
             .insert("email", "a@b.com")
@@ -215,8 +230,7 @@ fn credential_allowlist_ignores_non_allowlisted_keys() {
 // A credential map with no allowlisted key must not match the first row.
 #[test]
 fn retrieve_by_credentials_with_no_allowlisted_key_returns_none() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_database(async {
         let p = provider();
         let creds = Credentials::new().insert("is_admin", true).as_value();
         assert!(p.retrieve_by_credentials(&creds).await.unwrap().is_none());
@@ -226,8 +240,7 @@ fn retrieve_by_credentials_with_no_allowlisted_key_returns_none() {
 // A custom credential allowlist enables login by an alternate column.
 #[test]
 fn custom_credential_columns_allow_alternate_lookup() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
+    in_database(async {
         // "id" is not normally a credential column; allow it explicitly.
         let p = DatabaseUserProvider::new("users").credential_columns(["email", "id"]);
         let creds = Credentials::new().insert("id", 1).as_value();

@@ -1,4 +1,11 @@
 //! Request-to-request regressions for the session guard's login commit boundary.
+//!
+//! Each test runs alone in a child process (see `own_process`). It counts the
+//! `Login` and `Authenticated` events through listeners on the process-wide
+//! dispatcher, which every login in the process reaches, and it binds a
+//! process-wide database that lacks `remember_tokens`. Beside the other files
+//! of this binary, their logins add to its counts, their databases replace
+//! its own, and its failing listeners run on their logins.
 
 #![cfg(feature = "testing")]
 
@@ -302,6 +309,16 @@ impl Listener<Authenticated> for AuthenticatedRecorder {
 
 #[test]
 fn remember_issue_failure_is_a_successful_non_remembered_login() {
+    crate::own_process::run_alone(
+        "session_commit_boundary::remember_issue_failure_is_a_successful_non_remembered_login_child",
+    );
+}
+
+#[test]
+fn remember_issue_failure_is_a_successful_non_remembered_login_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
@@ -366,6 +383,16 @@ fn remember_issue_failure_is_a_successful_non_remembered_login() {
 
 #[test]
 fn synchronous_listener_failure_does_not_reverse_committed_login() {
+    crate::own_process::run_alone(
+        "session_commit_boundary::synchronous_listener_failure_does_not_reverse_committed_login_child",
+    );
+}
+
+#[test]
+fn synchronous_listener_failure_does_not_reverse_committed_login_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
     RT.block_on(async {
         let _serial = TEST_LOCK.lock().await;
