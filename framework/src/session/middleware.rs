@@ -1563,10 +1563,10 @@ impl SessionMiddleware {
                     // that user end here on this node (LIVE-021). Without
                     // this, they kept receiving events until their
                     // subscription expired.
-                    if let Some(principal) = lost_user_id {
+                    if let Some(user_id) = lost_user_id {
                         crate::live::revocation::session_deauthenticated(
                             session.id.as_bytes(),
-                            &principal,
+                            &crate::auth::Auth::bare_principal(&user_id),
                         )
                         .await;
                     }
@@ -2772,7 +2772,7 @@ fn session_identity(field: SessionIdentityField<'_>) -> Option<String> {
     if let Some(identity) = &identity {
         match field {
             SessionIdentityField::DefaultGuardUser => {
-                crate::render_cache::collector::observe_principal_value(identity);
+                crate::auth::request_state::observe_default_identity(identity);
             }
             // Another guard's identifier is that guard's principal, not the
             // default guard's: the key is built from the default guard, so

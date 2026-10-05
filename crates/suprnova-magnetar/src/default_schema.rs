@@ -1772,6 +1772,18 @@ pub mod sql_two_factor {
             })
             .await
         }
+
+        async fn withdraw_enrollment(&self, user_id: &str, expected_secret: &[u8]) -> Result<bool> {
+            let withdrawn = two_factor::Entity::delete_many()
+                .filter(two_factor::Column::UserId.eq(user_id.to_owned()))
+                .filter(two_factor::Column::Secret.eq(expected_secret.to_vec()))
+                .filter(two_factor::Column::ConfirmedAt.is_null())
+                .filter(two_factor::Column::RotationPending.eq(false))
+                .exec(&self.0)
+                .await
+                .map_err(db_error)?;
+            Ok(withdrawn.rows_affected == 1)
+        }
     }
 }
 

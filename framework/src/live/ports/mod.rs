@@ -29,7 +29,9 @@ pub(crate) mod validation;
 /// The principal a Live Gate is asked about: the user of the route's guard,
 /// by the rule of `Auth::route_principal`. The bare id for the default
 /// guard, so the string an application's Live gates receive there is the
-/// one they always received; `<guard>:<id>` behind any other guard.
+/// one they always received; `<guard>:<id>` behind any other guard. A
+/// default-guard id that holds a `:` gets a leading `:` (see
+/// `Auth::bare_principal`), so it never reads as another guard's user.
 ///
 /// `None` when the route's guard has no user, and when it cannot be
 /// resolved (a misconfigured guard, which the route's `AuthMiddleware`

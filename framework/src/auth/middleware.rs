@@ -161,14 +161,10 @@ impl Middleware for AuthMiddleware {
                         // has an id space of its own, so its name keeps its
                         // user `7` apart from web user `7`.
                         //
-                        // The default guard's user attests its bare id, so a
-                        // user id of the form `<guard>:<id>` would attest the
-                        // same principal as that guard's user. The manager
-                        // refuses a `:` in the name of every guard that
-                        // attests its name, which keeps two such guards
-                        // apart; an application whose user ids can contain
-                        // `:` names its guards so that no id starts with
-                        // `<guard>:`.
+                        // The default guard's user attests its bare
+                        // principal, which never reads `<guard>:<id>`: an id
+                        // with a `:` gets a leading `:` (see
+                        // `Auth::bare_principal`).
                         let id = user.get_auth_identifier();
                         guard_principal = Some(Auth::guard_principal(name, &id));
                         true
@@ -206,10 +202,11 @@ impl Middleware for AuthMiddleware {
             // Authentication proof belongs to this middleware's successful
             // branch. Merely carrying a session value or Authorization header
             // never mints principal evidence.
-            if let Some(principal_id) = guard_principal
-                .or_else(crate::auth::request_state::current_user_id)
-                .or_else(Auth::id)
-            {
+            if let Some(principal_id) = guard_principal.or_else(|| {
+                crate::auth::request_state::current_user_id()
+                    .or_else(Auth::id)
+                    .map(|id| Auth::bare_principal(&id))
+            }) {
                 request.record_live_security_check(
                     crate::live::attestation::SecurityCheck::Principal,
                     Some(principal_id.as_bytes()),
@@ -773,6 +770,58 @@ mod custom_guard_principal_tests {
         let web = AuthMiddleware::new().for_guard("web");
         let named_default = attested_with_guards(web, &[("web", "7"), ("admin", "9")]).await;
         assert_eq!(named_default, attested("7"));
+    }
+
+    // A default-guard user whose id reads like another guard's principal is
+    // not that guard's user. Web user `admin:9` and admin user `9` are two
+    // principals, whichever route attests them, and Live gates, Pusher and
+    // the route's memberships, which read `Auth::route_principal`, see two
+    // different strings. A default id without `:` keeps its bare value.
+    #[tokio::test]
+    async fn a_default_id_shaped_like_a_qualified_principal_is_a_principal_of_its_own() {
+        let _scope = TestContainer::fake();
+        install_session_guards();
+        let admin =
+            attested_with_guards(AuthMiddleware::new().for_guard("admin"), &[("admin", "9")]).await;
+        assert_eq!(admin, attested("admin:9"));
+
+        let named_default = attested_with_guards(
+            AuthMiddleware::new().for_guard("web"),
+            &[("web", "admin:9")],
+        )
+        .await;
+        assert!(named_default.is_some());
+        assert_ne!(named_default, admin);
+        let unnamed_default =
+            attested_with_guards(AuthMiddleware::new(), &[("web", "admin:9")]).await;
+        assert!(unnamed_default.is_some());
+        assert_ne!(unnamed_default, admin);
+        let generic_user = attested_through(AuthMiddleware::new(), Some("admin:9")).await;
+        assert!(generic_user.is_some());
+        assert_ne!(generic_user, admin);
+
+        let bare = attested_with_guards(AuthMiddleware::new(), &[("web", "7")]).await;
+        assert_eq!(bare, attested("7"));
+
+        let route_principal =
+            |guard: Option<&'static str>, signed_in: (&'static str, &'static str)| async move {
+                crate::auth::request_state::scope(async move {
+                    let user: Arc<dyn Authenticatable> = Arc::new(Named(signed_in.1));
+                    Auth::guard(signed_in.0).unwrap().set_user(user).await;
+                    crate::auth::request_state::set_route_guard(guard.map(str::to_owned));
+                    Auth::route_principal().await.unwrap()
+                })
+                .await
+            };
+        let admin_principal = route_principal(Some("admin"), ("admin", "9")).await;
+        assert_eq!(admin_principal.as_deref(), Some("admin:9"));
+        let web_principal = route_principal(None, ("web", "admin:9")).await;
+        assert!(web_principal.is_some());
+        assert_ne!(web_principal, admin_principal);
+        assert_eq!(
+            route_principal(None, ("web", "7")).await.as_deref(),
+            Some("7")
+        );
     }
 
     // The default guard's user sits in the request's generic slot. A route

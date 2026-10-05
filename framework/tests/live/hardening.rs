@@ -400,7 +400,13 @@ impl suprnova::Middleware for TwoGuardSignIn {
                 .set_user(Arc::new(GuardUser("7")))
                 .await;
         }
-        if principal == "both" {
+        // A web user whose id reads like admin 9's principal.
+        if principal == "colliding" {
+            suprnova::Auth::guard("web")?
+                .set_user(Arc::new(GuardUser("admin:9")))
+                .await;
+        }
+        if matches!(principal, "both" | "colliding") {
             suprnova::Auth::guard("admin")?
                 .set_user(Arc::new(GuardUser("9")))
                 .await;
@@ -612,6 +618,123 @@ async fn a_second_guard_route_subscribes_and_delivers_as_its_own_principal_child
     assert!(
         !stream_carries(&mut stream, "after-admin-logout").await,
         "an event published after the admin logout reached the admin's stream"
+    );
+}
+
+/// A default-guard user whose id is literally `admin:9` is not admin 9. Its
+/// plain logout ends the memberships issued to it, never the membership admin
+/// 9 holds in the same session: a membership is keyed by its principal, and
+/// the two principals must differ.
+///
+/// Runs in its own process: it registers a process-wide `AuthManager` with
+/// an `admin` guard, which would change how every other test authenticates.
+#[cfg(feature = "testing")]
+#[test]
+fn a_default_logout_never_ends_a_membership_of_a_guard_its_id_reads_like() {
+    crate::own_process::run_alone(
+        "hardening::a_default_logout_never_ends_a_membership_of_a_guard_its_id_reads_like_child",
+    );
+}
+
+#[cfg(feature = "testing")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_default_logout_never_ends_a_membership_of_a_guard_its_id_reads_like_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let (router, _runtime) = router_and_runtime();
+    let config =
+        suprnova::AuthConfig::new("web").guard("admin", suprnova::GuardConfig::session("admins"));
+    suprnova::App::singleton(suprnova::AuthManager::new(config));
+    suprnova::Auth::register_provider("users", Arc::new(NoLookups)).expect("users provider");
+    suprnova::Auth::register_provider("admins", Arc::new(NoLookups)).expect("admins provider");
+    Gate::define::<String, String>(
+        "live:tests.async-inventory.stream.inventory",
+        |principal, _| {
+            INVENTORY_GATE_PRINCIPALS
+                .lock()
+                .expect("gate principals")
+                .push(principal.clone());
+            true
+        },
+    );
+    let store = Arc::new(MemorySessionStore::default());
+    let registry = suprnova::MiddlewareRegistry::new()
+        .append(suprnova::session::SessionMiddleware::with_store(
+            suprnova::session::SessionConfig::default(),
+            store,
+        ))
+        .append(TwoGuardSignIn)
+        .append(OriginAndCsrf)
+        .append(suprnova::AuthMiddleware::optional().for_guard("admin"))
+        .append(StrictAsyncFacts);
+    let server = spawn_server_with(router, registry).await;
+
+    let colliding = Identity::alice().with_principal("colliding").anonymous();
+    let bootstrap = send(
+        server.port,
+        &colliding,
+        Method::GET,
+        "/session/touch",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(bootstrap.status.as_u16(), 200);
+    let cookie = session_cookie(&bootstrap).expect("the session middleware set its cookie");
+    let colliding = colliding.with_cookie(&cookie);
+    let issued = issue(
+        server.port,
+        &colliding,
+        inventory_issue_body("sse", "doc-instance-0001"),
+    )
+    .await;
+    let asked = inventory_gate_principals();
+    assert!(
+        !asked.is_empty() && asked.iter().all(|principal| principal == "admin:9"),
+        "the route's guard is `admin`: admin 9 is the principal - {asked:?}"
+    );
+    let credential = issued.credential.clone().expect("an SSE credential");
+    let mut stream = SseClient::open(server.port, &colliding, &credential, 1, &[]).await;
+    assert_eq!(stream.status.as_u16(), 200);
+    let ack = subscribe(
+        server.port,
+        &colliding,
+        &credential,
+        &issued,
+        "nonce-subscribe-0001",
+        1,
+    )
+    .await;
+    assert_eq!(ack.status.as_u16(), 200);
+
+    let logout = send(
+        server.port,
+        &colliding,
+        Method::POST,
+        "/session/logout-plain",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(
+        logout.status.as_u16(),
+        200,
+        "the default guard's logout failed: {}",
+        String::from_utf8_lossy(&logout.body)
+    );
+    LiveStreams::resolve()
+        .expect("the Live streams facade resolves")
+        .event::<StockChanged>(
+            "inventory",
+            LiveEventTarget::Island,
+            CanonicalValue::String("after-web-logout".into()),
+        )
+        .await
+        .expect("publish to the admin membership");
+    assert!(
+        stream_carries(&mut stream, "after-web-logout").await,
+        "the logout of web user `admin:9` ended the membership of admin 9"
     );
 }
 

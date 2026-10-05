@@ -925,8 +925,17 @@ async fn run_labelled_worker(
                 id = %env.id,
                 "queue job superseded by a newer debounced dispatch"
             );
-            // Dropping it settles the attempt for good, so it is reported as
-            // one; Laravel's worker fires `JobAttempted` for it too.
+            // Laravel deletes the job inside its pipeline, which returns
+            // without throwing, so its worker fires `JobProcessed` and then
+            // `JobAttempted`: the drop settles the attempt for good.
+            let _ = in_attempt(
+                job_scope.clone(),
+                job_context.clone(),
+                EventFacade::dispatch(queue_events::JobProcessed {
+                    job: identity_pre.clone(),
+                }),
+            )
+            .await;
             let _ = in_attempt(
                 job_scope.clone(),
                 job_context.clone(),
@@ -1354,7 +1363,10 @@ async fn handle_completed(
 /// reservation is acknowledged even though the handler itself never ran.
 ///
 /// The deletion is a terminal settlement like a success or a failure, so it
-/// fires `JobAttempted` once the reservation is acknowledged.
+/// fires `JobAttempted` once the reservation is acknowledged. It fires
+/// `JobProcessed` first, as Laravel's worker does for any job whose pipeline
+/// returned without an error: the middleware chose to drop the job, and
+/// nothing failed.
 async fn handle_deleted(
     driver: &dyn QueueDriver,
     token: &crate::queue::driver::ReservationToken,
@@ -1393,6 +1405,10 @@ async fn handle_deleted(
         settlement_failure(driver, env, "ack", "deleted", &e);
     }
     tracing::debug!(job = %env.job_name, id = %env.id, "queue job dropped by middleware");
+    let _ = EventFacade::dispatch(queue_events::JobProcessed {
+        job: queue_events::JobIdentity::from_env(env, connection),
+    })
+    .await;
     let _ = EventFacade::dispatch(queue_events::JobAttempted {
         job: queue_events::JobIdentity::from_env(env, connection),
     })
@@ -1490,6 +1506,12 @@ async fn handle_released(
         settlement_failure(driver, env, "release", "released", &e);
         return;
     }
+    // The pipeline returned without an error, so `JobProcessed` comes first,
+    // then `JobReleased`, the order Laravel's worker raises them in.
+    let _ = EventFacade::dispatch(queue_events::JobProcessed {
+        job: queue_events::JobIdentity::from_env(env, connection),
+    })
+    .await;
     let _ = EventFacade::dispatch(queue_events::JobReleased {
         job: queue_events::JobIdentity::from_env(env, connection),
         delay_secs: delay.as_secs(),

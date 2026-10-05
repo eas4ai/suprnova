@@ -1761,7 +1761,8 @@ fn mount_limit(
 /// `principal` is the route's (see `ports::route_principal`): a bare id
 /// behind the default guard, and `<guard>:<id>` behind another guard, whose
 /// `:` keeps it out of the topic, so a `:principal` topic never resolves to
-/// another guard's user.
+/// another guard's user. A default-guard id with a `:` is `:<id>`, which
+/// stays out of the topic too.
 fn trusted_mount_parameters(
     request: &Request,
     principal: &str,

@@ -21,13 +21,15 @@ use suprnova::live::testing::{
     run_upload_cleanup_for_test,
 };
 use suprnova::live::{
-    BoundedHeaders, CanonicalValue, DirectPartReference, DirectTransferInstruction, DurableUpload,
-    DurableUploadId, FailedFinalize, FinalizeRequest, FinalizeToken, LiveComponent, LiveConfig,
-    LiveDocument, LiveMount, LiveRegistry, LiveUploadHost, MountFlags, PreparedFinalize,
-    ReadUpload, ScanDisposition, ScanInput, TransferMethod, TrustedProviderOrigin,
-    TrustedProviderUrl, UnixMillis, UploadFinalizer, UploadFuture, UploadHandle, UploadLimitConfig,
-    UploadLimits, UploadPart, UploadPolicy, UploadProvider, UploadReplacement, UploadScan,
-    UploadScanFailure, UploadScanner, UploadType, live,
+    BoundedHeaders, CanonicalValue, ChunkReceipt, DirectPartReference, DirectTransferInstruction,
+    DirectUploadProvider, DurableUpload, DurableUploadId, FailedFinalize, FinalizeRequest,
+    FinalizeToken, IntegrityEvidence, LiveComponent, LiveConfig, LiveDocument, LiveMount,
+    LiveRegistry, LiveUploadHost, MountFlags, PrepareTransfer, PreparedFinalize, QuarantineBytes,
+    ReadUpload, ReportDirectPart, ScanDisposition, ScanInput, TransferMethod, TransferPlan,
+    TrustedProviderOrigin, TrustedProviderUrl, UnixMillis, UploadError, UploadFinalizer,
+    UploadFuture, UploadHandle, UploadLimitConfig, UploadLimits, UploadPart, UploadPolicy,
+    UploadProvider, UploadReplacement, UploadScan, UploadScanFailure, UploadScanner, UploadType,
+    VerifyTransfer, live,
 };
 use suprnova::view::{AssetSet, DocumentResponseIntent, TrustedHtml, ViewName};
 use suprnova::{
@@ -2937,15 +2939,8 @@ async fn a_finalized_upload_is_reclaimed_when_its_window_closes() {
     assert_eq!(finalizer.durable_outputs(), 1);
 }
 
-/// ROOT-16: a finalizer may keep direct-storage bytes as its durable output,
-/// and the framework cannot tell whether it did. Reclaiming a finalized
-/// direct upload therefore drops the record and keeps the provider's bytes.
-#[tokio::test]
-#[serial_test::serial]
-async fn reclaiming_a_finalized_direct_upload_keeps_the_provider_bytes() {
-    ensure_crypt();
-    let _container = TestContainer::fake();
-    let clock = Arc::new(AdjustableTestClock::new(1_700_000_000_000));
+/// The direct provider every direct-mode upload test here stores into.
+fn direct_conformance_provider() -> (Arc<DirectProviderConformanceAdapter>, TrustedProviderOrigin) {
     let origin = TrustedProviderOrigin::parse("https://uploads.example.test")
         .expect("trusted direct origin");
     let direct = Arc::new(
@@ -2955,9 +2950,24 @@ async fn reclaiming_a_finalized_direct_upload_keeps_the_provider_bytes() {
         )
         .expect("direct conformance provider"),
     );
+    (direct, origin)
+}
+
+/// Uploads one PNG in direct mode through `installed`, the direct provider
+/// the host is given, whose bytes land in `direct`; finalizes it; and runs
+/// cleanup once its window has passed. Returns the upload's handle and bytes.
+async fn finalize_and_reclaim_a_direct_upload(
+    direct: Arc<DirectProviderConformanceAdapter>,
+    installed: Arc<dyn DirectUploadProvider>,
+    origin: TrustedProviderOrigin,
+    name: &str,
+) -> (UploadHandle, Bytes) {
+    ensure_crypt();
+    let _container = TestContainer::fake();
+    let clock = Arc::new(AdjustableTestClock::new(1_700_000_000_000));
     let (router, runtime) = semantic_router_and_runtime_with(
         LiveUploadHost::new()
-            .with_direct_provider(direct.clone())
+            .with_direct_provider(installed)
             .with_finalizer(Arc::new(TestUploadFinalizer::default())),
         Some(Arc::clone(&clock)),
     );
@@ -2972,11 +2982,11 @@ async fn reclaiming_a_finalized_direct_upload_keeps_the_provider_bytes() {
             "field": "avatar",
             "file": {
                 "lastModified": 1,
-                "name": "kept-direct-avatar.png",
+                "name": format!("{name}.png"),
                 "size": bytes.len(),
                 "type": "image/png"
             },
-            "idempotency_key": "create-kept-direct-avatar",
+            "idempotency_key": format!("create-{name}"),
             "island": {
                 "component": "tests.upload-route-component",
                 "documentKey": "avatar-document",
@@ -3048,7 +3058,7 @@ async fn reclaiming_a_finalized_direct_upload_keeps_the_provider_bytes() {
         json!({
             "expected_revision": "1",
             "handle": handle,
-            "idempotency_key": "report-kept-direct-avatar-0",
+            "idempotency_key": format!("report-{name}-0"),
             "operation": "report_direct_part",
             "part": 0,
             "protocol_version": 1,
@@ -3064,7 +3074,7 @@ async fn reclaiming_a_finalized_direct_upload_keeps_the_provider_bytes() {
         json!({
             "expected_revision": "4",
             "handle": handle,
-            "idempotency_key": "complete-kept-direct-avatar",
+            "idempotency_key": format!("complete-{name}"),
             "operation": "complete",
             "protocol_version": 1,
             "whole_checksum": checksum
@@ -3091,9 +3101,125 @@ async fn reclaiming_a_finalized_direct_upload_keeps_the_provider_bytes() {
     assert_eq!(report.claimed(), 1);
     assert_eq!(report.reclaimed(), 1);
     assert!(report.residue_is_empty());
-    let parsed = UploadHandle::parse(&handle).expect("direct upload handle");
-    let kept = UploadProvider::read(direct.as_ref(), ReadUpload::new(&parsed, 0, bytes.len()))
+    (
+        UploadHandle::parse(&handle).expect("direct upload handle"),
+        bytes,
+    )
+}
+
+/// ROOT-16: a finalizer may keep direct-storage bytes as its durable output,
+/// and the framework cannot tell whether it did. Reclaiming a finalized
+/// direct upload through a provider that keeps the default retirement
+/// therefore drops the record and keeps the provider's bytes.
+#[tokio::test]
+#[serial_test::serial]
+async fn reclaiming_a_finalized_direct_upload_keeps_the_provider_bytes() {
+    let (direct, origin) = direct_conformance_provider();
+    let (handle, bytes) = finalize_and_reclaim_a_direct_upload(
+        Arc::clone(&direct),
+        direct.clone(),
+        origin,
+        "kept-direct-avatar",
+    )
+    .await;
+    let kept = UploadProvider::read(direct.as_ref(), ReadUpload::new(&handle, 0, bytes.len()))
         .await
         .expect("the direct provider still holds the finalized bytes");
     assert_eq!(&kept[..], &bytes[..]);
+}
+
+/// A direct provider that owns its retirement: it counts each call and
+/// deletes the bytes, as a provider whose objects are only ever temporary
+/// would. Everything else goes to the conformance adapter.
+struct RetiringDirectProvider {
+    inner: Arc<DirectProviderConformanceAdapter>,
+    retired: AtomicUsize,
+}
+
+impl UploadProvider for RetiringDirectProvider {
+    fn prepare<'a>(
+        &'a self,
+        request: PrepareTransfer<'a>,
+    ) -> UploadFuture<'a, Result<TransferPlan, UploadError>> {
+        self.inner.prepare(request)
+    }
+
+    fn verify<'a>(
+        &'a self,
+        request: VerifyTransfer<'a>,
+    ) -> UploadFuture<'a, Result<IntegrityEvidence, UploadError>> {
+        self.inner.verify(request)
+    }
+
+    fn read<'a>(
+        &'a self,
+        request: ReadUpload<'a>,
+    ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>> {
+        self.inner.read(request)
+    }
+
+    fn cancel<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>> {
+        self.inner.cancel(handle)
+    }
+
+    fn expire<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>> {
+        self.inner.expire(handle)
+    }
+
+    fn cleanup<'a>(
+        &'a self,
+        handle: &'a UploadHandle,
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        self.inner.cleanup(handle)
+    }
+
+    fn retire_after_finalization<'a>(
+        &'a self,
+        handle: &'a UploadHandle,
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        self.retired.fetch_add(1, Ordering::SeqCst);
+        self.inner.cleanup(handle)
+    }
+}
+
+impl DirectUploadProvider for RetiringDirectProvider {
+    fn report_part<'a>(
+        &'a self,
+        request: ReportDirectPart<'a>,
+    ) -> UploadFuture<'a, Result<ChunkReceipt, UploadError>> {
+        self.inner.report_part(request)
+    }
+}
+
+/// Only the direct provider can tell whether its bytes became durable
+/// output, so reclaiming a finalized direct upload asks it, through
+/// `retire_after_finalization`. The router used to skip the direct
+/// provider and report the reclaim done, leaving the objects or
+/// bookkeeping a provider retires there behind.
+#[tokio::test]
+#[serial_test::serial]
+async fn reclaiming_a_finalized_direct_upload_retires_it_through_the_direct_provider() {
+    let (direct, origin) = direct_conformance_provider();
+    let retiring = Arc::new(RetiringDirectProvider {
+        inner: Arc::clone(&direct),
+        retired: AtomicUsize::new(0),
+    });
+    let (handle, bytes) = finalize_and_reclaim_a_direct_upload(
+        direct.clone(),
+        retiring.clone(),
+        origin,
+        "retired-direct-avatar",
+    )
+    .await;
+    assert_eq!(
+        retiring.retired.load(Ordering::SeqCst),
+        1,
+        "the reclaim retired the upload through the application's direct provider"
+    );
+    assert!(
+        UploadProvider::read(direct.as_ref(), ReadUpload::new(&handle, 0, bytes.len()))
+            .await
+            .is_err(),
+        "the provider's own retirement deleted the bytes"
+    );
 }

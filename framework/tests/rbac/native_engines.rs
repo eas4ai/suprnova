@@ -115,3 +115,28 @@ async fn postgres_rbac_models_read_and_write_native_timestamps() {
 async fn mysql_rbac_models_read_and_write_native_timestamps() {
     live_rbac_models("MYSQL_TEST_URL").await;
 }
+
+/// IDENTITY-021 on a real engine: every create and grant converges when
+/// another connection inserts the same row between the helper's check and
+/// its insert (see `concurrent_grants`).
+async fn live_grants_converge(env: &str, probe: super::concurrent_grants::LockProbe) {
+    let url = std::env::var(env).expect("explicit disposable database URL required");
+    super::concurrent_grants::race_against_a_held_row(&url, probe, || async {
+        let (guard, database) = connect_live(env).await;
+        super::postgres::fresh_rbac_schema(&database).await;
+        (guard, database)
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
+async fn postgres_every_grant_converges_when_a_concurrent_request_inserts_first() {
+    live_grants_converge("PG_TEST_URL", super::concurrent_grants::LockProbe::Postgres).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_every_grant_converges_when_a_concurrent_request_inserts_first() {
+    live_grants_converge("MYSQL_TEST_URL", super::concurrent_grants::LockProbe::MySql).await;
+}

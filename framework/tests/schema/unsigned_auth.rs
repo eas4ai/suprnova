@@ -465,3 +465,105 @@ async fn postgres_a_u64_keyed_user_signs_in_on_every_database() {
 async fn mysql_a_u64_keyed_user_signs_in_on_every_database() {
     a_u64_keyed_user_signs_in_on_every_database(&connect_mysql().await).await;
 }
+
+/// `DatabaseUserProvider` reads the type of the identifier column, for an
+/// id above `i64::MAX`, from the table its lookup reads: on Postgres, the
+/// first schema of the search path that holds the table. A table of the same
+/// name in a later schema, with another column type, must not decide the
+/// bind. Each case puts the table the lookup reads in `ua_b_read` and the
+/// shadowed one in `ua_a_shadowed`, with the two column types both ways
+/// round and created in both orders, so the shadowed table comes first by
+/// name and, in some case, by creation. It fails while the type comes from
+/// whichever table information_schema lists first: a text bind against a
+/// numeric column, or a number against a text column, is an error.
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_a_large_id_binds_by_the_table_the_lookup_reads() {
+    use sea_orm::{ConnectOptions, Database};
+
+    let url = std::env::var("PG_TEST_URL").expect("set PG_TEST_URL to a disposable Postgres");
+    // One connection, so the search path set on it holds for every query.
+    let mut options = ConnectOptions::new(url);
+    options
+        .max_connections(1)
+        .min_connections(1)
+        .connect_timeout(Duration::from_secs(5))
+        .acquire_timeout(Duration::from_secs(5));
+    let conn = Database::connect(options)
+        .await
+        .expect("Postgres test database must be reachable");
+    let exec = |sql: String| {
+        let conn = conn.clone();
+        async move {
+            conn.execute_raw(Statement::from_string(DbBackend::Postgres, sql.clone()))
+                .await
+                .unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+    };
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(conn.clone()));
+
+    for (read_type, shadowed_type) in [("NUMERIC(20,0)", "TEXT"), ("TEXT", "NUMERIC(20,0)")] {
+        for read_first in [false, true] {
+            exec("DROP SCHEMA IF EXISTS ua_a_shadowed CASCADE".into()).await;
+            exec("DROP SCHEMA IF EXISTS ua_b_read CASCADE".into()).await;
+            exec("CREATE SCHEMA ua_a_shadowed".into()).await;
+            exec("CREATE SCHEMA ua_b_read".into()).await;
+            let read = format!("CREATE TABLE ua_b_read.ua_codes (code {read_type}, label TEXT)");
+            let shadowed =
+                format!("CREATE TABLE ua_a_shadowed.ua_codes (code {shadowed_type}, label TEXT)");
+            let (first, second) = if read_first {
+                (read, shadowed)
+            } else {
+                (shadowed, read)
+            };
+            exec(first).await;
+            exec(second).await;
+            for (schema, label) in [("ua_b_read", "read"), ("ua_a_shadowed", "shadowed")] {
+                exec(format!(
+                    "INSERT INTO {schema}.ua_codes (code, label) \
+                     VALUES ('18446744073709551615', '{label}')"
+                ))
+                .await;
+            }
+            exec("SET search_path = ua_b_read, ua_a_shadowed, public".into()).await;
+
+            let case = format!(
+                "read column {read_type}, shadowed column {shadowed_type}, read table created \
+                 {}",
+                if read_first { "first" } else { "second" }
+            );
+            let user = DatabaseUserProvider::new("ua_codes")
+                .identifier_column("code")
+                .retrieve_by_id(&u64::MAX.to_string())
+                .await
+                .unwrap_or_else(|error| panic!("{case}: the lookup failed: {error}"))
+                .unwrap_or_else(|| panic!("{case}: the user in the table the lookup reads"));
+            let label = user
+                .as_any()
+                .downcast_ref::<suprnova::GenericUser>()
+                .and_then(|user| user.attribute("label"))
+                .and_then(|label| label.as_str().map(str::to_owned));
+            assert_eq!(label.as_deref(), Some("read"), "{case}");
+
+            // A schema-qualified name reads that schema's table, and its type.
+            let user = DatabaseUserProvider::new("ua_a_shadowed.ua_codes")
+                .identifier_column("code")
+                .retrieve_by_id(&u64::MAX.to_string())
+                .await
+                .unwrap_or_else(|error| panic!("{case}: the qualified lookup failed: {error}"))
+                .unwrap_or_else(|| panic!("{case}: the user in the named schema"));
+            let label = user
+                .as_any()
+                .downcast_ref::<suprnova::GenericUser>()
+                .and_then(|user| user.attribute("label"))
+                .and_then(|label| label.as_str().map(str::to_owned));
+            assert_eq!(label.as_deref(), Some("shadowed"), "{case}, qualified");
+
+            exec("RESET search_path".into()).await;
+        }
+    }
+    exec("DROP SCHEMA IF EXISTS ua_a_shadowed CASCADE".into()).await;
+    exec("DROP SCHEMA IF EXISTS ua_b_read CASCADE".into()).await;
+}

@@ -676,6 +676,16 @@ changed, the promotion discards its unpublished bytes. When the second one
 does, the promotion withdraws the copy it published. A cancelled read still
 finishes that check.
 
+Each check compares the fallback object's ETag or version, or its
+modification time and length. A length alone never counts: a same-size
+overwrite keeps it. A fallback that reports none of the others - the
+in-memory disk, and so `Storage::fake()` - is checked by content instead. The
+promotion hashes the bytes it streams, and each check reads the object again
+and compares hashes, so a promotion from such a fallback reads the object up
+to three times. A modification time is only as fine as the fallback records
+it, so a same-size overwrite within one tick of a local disk's clock reads as
+unchanged.
+
 A withdrawal never deletes a writer's object. It removes only the exact copy
 the promotion wrote, and that needs a primary that names each write by version
 and can delete one version, such as an S3 bucket with versioning enabled. On

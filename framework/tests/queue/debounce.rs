@@ -517,7 +517,7 @@ async fn an_actual_run_clears_the_first_dispatch_stamp() {
 
     let driver = Arc::new(MemoryQueueDriver::new());
     Queue::set_driver(driver.clone());
-    let stamp_key = "queue-debounce:queue_debounce::CompactLedger::first_dispatched_at";
+    let stamp_key = "queue-debounce-first-dispatched:queue-debounce:queue_debounce::CompactLedger:";
     Cache::forget(stamp_key).await.expect("cache");
 
     Queue::push(CompactLedger).await.expect("first");
@@ -736,7 +736,7 @@ struct StampBrokenCache {
 }
 
 fn is_stamp(key: &str) -> bool {
-    key.ends_with(":first_dispatched_at")
+    key.starts_with("queue-debounce-first-dispatched:")
 }
 
 #[async_trait]
@@ -820,7 +820,7 @@ async fn an_arming_that_fails_halfway_hands_the_window_back() {
     cache_init();
     COMPACT_RUNS.store(0, Ordering::SeqCst);
     register_job::<CompactLedger>();
-    Cache::forget("queue-debounce:queue_debounce::CompactLedger::first_dispatched_at")
+    Cache::forget("queue-debounce-first-dispatched:queue-debounce:queue_debounce::CompactLedger:")
         .await
         .expect("cache");
 
@@ -1782,7 +1782,7 @@ async fn max_wait_reached_inside_a_bulk_runs_the_bulks_last_job_at_once() {
     BULK_ROLLUP_RUNS.store(0, Ordering::SeqCst);
     BULK_ROLLUP_LAST.store(0, Ordering::SeqCst);
     register_job::<BulkRollUp>();
-    Cache::forget("queue-debounce:queue_debounce::BulkRollUp::first_dispatched_at")
+    Cache::forget("queue-debounce-first-dispatched:queue-debounce:queue_debounce::BulkRollUp:")
         .await
         .expect("cache");
 
@@ -1809,4 +1809,347 @@ async fn max_wait_reached_inside_a_bulk_runs_the_bulks_last_job_at_once() {
         3,
         "and the forced run is the bulk's last job"
     );
+}
+
+// ---------------------------------------------------------------------------
+// One id's first-dispatch stamp is never another id's owner key
+// ---------------------------------------------------------------------------
+
+/// The stamp of id `660` lived at its owner key plus `:first_dispatched_at`,
+/// which is the owner key of id `660:first_dispatched_at`. The stamp's number
+/// and the other id's token then shared one key, and whichever was written
+/// second failed the other id's dispatches.
+#[tokio::test]
+#[serial]
+async fn a_debounce_id_never_shares_a_key_with_another_ids_stamp() {
+    cache_init();
+    register_job::<SyncOrder>();
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let owner_key = "queue-debounce:queue_debounce::SyncOrder:660:first_dispatched_at";
+
+    Queue::push_debounced(
+        SyncOrder {
+            order_id: 660,
+            revision: 1,
+        },
+        DebounceOptions::new(Duration::from_millis(120)).id("660:first_dispatched_at"),
+    )
+    .await
+    .expect("the id ending in `:first_dispatched_at` is queued");
+    let token = Cache::get::<String>(owner_key)
+        .await
+        .expect("cache")
+        .expect("and has claimed its window");
+
+    Queue::push_debounced(
+        SyncOrder {
+            order_id: 660,
+            revision: 2,
+        },
+        DebounceOptions::new(Duration::from_millis(120))
+            .max_wait(Duration::from_secs(600))
+            .id("660"),
+    )
+    .await
+    .expect("id 660 stamps its burst without reading the other id's token as a stamp");
+    assert_eq!(
+        Cache::get::<String>(owner_key).await.expect("cache"),
+        Some(token),
+        "id 660's stamp did not overwrite the other id's token"
+    );
+}
+
+/// A stamp left at that key, by id `661` before stamps moved or by an
+/// upgrade, must not fail the dispatches of id `661:first_dispatched_at` for
+/// as long as the stamp lives: it is not a token, so the window is unowned.
+#[tokio::test]
+#[serial]
+async fn a_stamp_left_at_an_owner_key_does_not_block_that_id() {
+    cache_init();
+    SYNC_ORDER_RUNS.store(0, Ordering::SeqCst);
+    SYNC_ORDER_LAST_REVISION.store(0, Ordering::SeqCst);
+    register_job::<SyncOrder>();
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Cache::put(
+        "queue-debounce:queue_debounce::SyncOrder:661:first_dispatched_at",
+        &suprnova::clock::now().timestamp(),
+        Some(Duration::from_secs(900)),
+    )
+    .await
+    .expect("cache");
+
+    Queue::push_debounced(
+        SyncOrder {
+            order_id: 661,
+            revision: 1,
+        },
+        DebounceOptions::new(Duration::from_millis(120)).id("661:first_dispatched_at"),
+    )
+    .await
+    .expect("a stamp at the owner key leaves the window unowned");
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        worker_cfg(),
+        CancellationToken::new(),
+    ));
+    settle(|| SYNC_ORDER_RUNS.load(Ordering::SeqCst) > 0).await;
+    handle.abort();
+    assert_eq!(SYNC_ORDER_RUNS.load(Ordering::SeqCst), 1);
+    assert_eq!(SYNC_ORDER_LAST_REVISION.load(Ordering::SeqCst), 1);
+}
+
+// ---------------------------------------------------------------------------
+// The place counter on the Redis cache store
+// ---------------------------------------------------------------------------
+
+/// Where the Redis test runs: `REDIS_TEST_URL`, which the gate sets to its
+/// own database, or else a database no other suite on this machine uses.
+fn debounce_redis_url() -> String {
+    std::env::var("REDIS_TEST_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/7".to_owned())
+}
+
+/// The place counter against Redis: `Cache::increment` reserves each place,
+/// `Cache::touch` gives the counter a TTL, and a counter that lapsed while a
+/// claim lives continues past that claim rather than restarting below it.
+#[tokio::test]
+#[serial]
+#[ignore = "needs Redis: REDIS_TEST_URL, or redis://127.0.0.1:6379/7"]
+async fn redis_place_counter_reserves_each_place_once_and_expires() {
+    use redis::AsyncCommands;
+    use suprnova::cache::{CacheConfig, CacheDriver, RedisCache};
+
+    SYNC_ORDER_RUNS.store(0, Ordering::SeqCst);
+    SYNC_ORDER_LAST_REVISION.store(0, Ordering::SeqCst);
+    register_job::<SyncOrder>();
+    let url = debounce_redis_url();
+    // A prefix of this run's own: no flush, and nothing another run wrote.
+    let prefix = format!("debounce-place-test-{}:", uuid::Uuid::new_v4().simple());
+    let store = RedisCache::connect(&CacheConfig {
+        driver: CacheDriver::Redis,
+        url: url.clone(),
+        prefix: prefix.clone(),
+        default_ttl: 0,
+        sweep_interval: 0,
+    })
+    .await
+    .expect("connect to the test Redis");
+    let _container = TestContainer::fake();
+    TestContainer::bind::<dyn CacheStore>(Arc::new(store));
+    let mut redis =
+        redis::aio::ConnectionManager::new(redis::Client::open(url.as_str()).expect("a Redis URL"))
+            .await
+            .expect("a direct Redis connection");
+    // A run that failed before its cleanup left its keys, the counter
+    // without a TTL among them when the TTL is what failed. Only this test
+    // writes under this prefix.
+    let leftovers: Vec<String> = redis
+        .keys("debounce-place-test-*")
+        .await
+        .expect("list earlier runs' keys");
+    if !leftovers.is_empty() {
+        let _: i64 = redis
+            .del(leftovers)
+            .await
+            .expect("remove earlier runs' keys");
+    }
+    let counter =
+        format!("{prefix}queue-debounce-place:queue-debounce:queue_debounce::SyncOrder:670");
+    let owner = format!("{prefix}queue-debounce:queue_debounce::SyncOrder:670");
+    let owner_place = |token: String| {
+        let token: String = serde_json::from_str(&token).expect("a JSON string token");
+        token
+            .split_once(':')
+            .and_then(|(place, _)| place.parse::<u64>().ok())
+            .expect("a placed token")
+    };
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    for revision in 1..=3 {
+        Queue::push(SyncOrder {
+            order_id: 670,
+            revision,
+        })
+        .await
+        .expect("push");
+    }
+    let reserved: i64 = redis.get(&counter).await.expect("read the counter");
+    assert_eq!(reserved, 3, "three dispatches, three places");
+    let ttl: i64 = redis.pttl(&counter).await.expect("read the counter's TTL");
+    assert!(
+        ttl > 0 && ttl <= 300_000,
+        "the counter expires with the window's token TTL, not never: {ttl} ms"
+    );
+    let claimed: String = redis.get(&owner).await.expect("read the claim");
+    assert_eq!(
+        owner_place(claimed),
+        3,
+        "the last dispatch holds the window"
+    );
+
+    // The counter lapses while the claim still lives.
+    let _: i64 = redis.del(&counter).await.expect("drop the counter");
+    Queue::push(SyncOrder {
+        order_id: 670,
+        revision: 4,
+    })
+    .await
+    .expect("push after the counter lapsed");
+    let claimed: String = redis.get(&owner).await.expect("read the claim");
+    assert_eq!(
+        owner_place(claimed),
+        4,
+        "a restarted counter moves past the live claim instead of reusing place 1"
+    );
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        worker_cfg(),
+        CancellationToken::new(),
+    ));
+    settle(|| SYNC_ORDER_RUNS.load(Ordering::SeqCst) > 0).await;
+    handle.abort();
+    let keys: Vec<String> = redis
+        .keys(format!("{prefix}*"))
+        .await
+        .expect("list this run's keys");
+    if !keys.is_empty() {
+        let _: i64 = redis.del(keys).await.expect("remove this run's keys");
+    }
+    assert_eq!(
+        SYNC_ORDER_RUNS.load(Ordering::SeqCst),
+        1,
+        "four dispatches against Redis collapse into one run"
+    );
+    assert_eq!(SYNC_ORDER_LAST_REVISION.load(Ordering::SeqCst), 4);
+}
+
+// ---------------------------------------------------------------------------
+// A dropped envelope reports itself as Laravel's worker does
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Clone)]
+struct OrderedSupersession {
+    dispatch: u32,
+}
+static ORDERED_RUNS: AtomicU32 = AtomicU32::new(0);
+
+#[async_trait]
+impl Job for OrderedSupersession {
+    fn job_name() -> &'static str {
+        "queue_debounce::OrderedSupersession"
+    }
+    fn debounce_for() -> Option<Duration> {
+        Some(Duration::from_millis(120))
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        ORDERED_RUNS.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// The lifecycle events of `OrderedSupersession`, by envelope, in the order
+/// the worker fired them.
+static ORDERED_FIRED: std::sync::Mutex<Vec<(uuid::Uuid, &'static str)>> =
+    std::sync::Mutex::new(Vec::new());
+
+struct RecordOrder;
+
+fn record_order(job: &suprnova::queue::events::JobIdentity, name: &'static str) {
+    if job.job_name == "queue_debounce::OrderedSupersession" {
+        ORDERED_FIRED.lock().unwrap().push((job.id, name));
+    }
+}
+
+#[async_trait]
+impl suprnova::events::Listener<JobDebounced> for RecordOrder {
+    async fn handle(&self, event: &JobDebounced) -> Result<(), FrameworkError> {
+        record_order(&event.job, "debounced");
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl suprnova::events::Listener<suprnova::queue::events::JobProcessed> for RecordOrder {
+    async fn handle(
+        &self,
+        event: &suprnova::queue::events::JobProcessed,
+    ) -> Result<(), FrameworkError> {
+        record_order(&event.job, "processed");
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl suprnova::events::Listener<suprnova::queue::events::JobAttempted> for RecordOrder {
+    async fn handle(
+        &self,
+        event: &suprnova::queue::events::JobAttempted,
+    ) -> Result<(), FrameworkError> {
+        record_order(&event.job, "attempted");
+        Ok(())
+    }
+}
+
+/// Laravel deletes a superseded debounced job inside its pipeline, which
+/// then returns without throwing, so the worker fires JobDebounced, then
+/// JobProcessed, then JobAttempted for it. The worker fired no JobProcessed.
+#[tokio::test]
+#[serial]
+async fn a_dropped_envelope_fires_debounced_processed_and_attempted_in_that_order() {
+    cache_init();
+    ORDERED_RUNS.store(0, Ordering::SeqCst);
+    ORDERED_FIRED.lock().unwrap().clear();
+    register_job::<OrderedSupersession>();
+    EventFacade::listen::<JobDebounced, _>(Arc::new(RecordOrder)).await;
+    EventFacade::listen::<suprnova::queue::events::JobProcessed, _>(Arc::new(RecordOrder)).await;
+    EventFacade::listen::<suprnova::queue::events::JobAttempted, _>(Arc::new(RecordOrder)).await;
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::push(OrderedSupersession { dispatch: 1 })
+        .await
+        .expect("first");
+    Queue::push(OrderedSupersession { dispatch: 2 })
+        .await
+        .expect("second");
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        worker_cfg(),
+        CancellationToken::new(),
+    ));
+    settle(|| ORDERED_RUNS.load(Ordering::SeqCst) > 0).await;
+    handle.abort();
+    EventFacade::forget::<JobDebounced>();
+    EventFacade::forget::<suprnova::queue::events::JobProcessed>();
+    EventFacade::forget::<suprnova::queue::events::JobAttempted>();
+
+    let fired = ORDERED_FIRED.lock().unwrap().clone();
+    let of = |id: uuid::Uuid| -> Vec<&'static str> {
+        fired
+            .iter()
+            .filter(|(fired_for, _)| *fired_for == id)
+            .map(|(_, name)| *name)
+            .collect()
+    };
+    let dropped = fired
+        .iter()
+        .find(|(_, name)| *name == "debounced")
+        .map(|(id, _)| *id)
+        .expect("one envelope was dropped as superseded");
+    let survivor = fired
+        .iter()
+        .map(|(id, _)| *id)
+        .find(|id| *id != dropped)
+        .expect("and one ran");
+    assert_eq!(
+        of(dropped),
+        ["debounced", "processed", "attempted"],
+        "the dropped envelope reports as Laravel's worker does"
+    );
+    assert_eq!(of(survivor), ["processed", "attempted"]);
 }

@@ -233,7 +233,8 @@ it ran, in terms you will recognize:
   material too, recorded as `<guard>:<id>`. The key's `Principal` dimension
   is the default guard's identity, so a page built from another guard's
   user never matches it and is never stored, even when both guards name
-  the same id. A hit skips the route's own `AuthMiddleware`, so such a page
+  the same id. A default-guard id that holds a `:` is keyed as `:<id>`, so
+  web user `admin:9` never matches admin `9` either. A hit skips the route's own `AuthMiddleware`, so such a page
   would otherwise reach a visitor who holds only the default guard's
   sign-in.
 - **You read an identity, on a route that does not declare `Principal`.**

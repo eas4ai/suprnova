@@ -214,7 +214,12 @@ impl EmailVerification {
     /// [`verification_email`](crate::auth::UserProvider::verification_email))
     /// is no longer that mailbox, `verify` refuses the token and leaves it
     /// unused. A token issued before tokens carried their mailbox is refused
-    /// the same way; the user asks for a new link.
+    /// the same way; the user asks for a new link. The stamp itself goes
+    /// through
+    /// [`mark_email_verified_for`](crate::auth::UserProvider::mark_email_verified_for),
+    /// which writes only while the address is still that mailbox, so an
+    /// address change that lands while `verify` runs is refused too, with
+    /// the token already spent.
     ///
     /// Fires [`crate::auth_flows::events::EmailVerified`] on success. The
     /// event dispatch is best-effort: a listener panic or transient dispatcher
@@ -231,8 +236,8 @@ impl EmailVerification {
     /// - [`crate::FrameworkError::bad_request`] (400) when the token is
     ///   invalid, already consumed, or expired, or was mailed to an address
     ///   the account no longer has.
-    /// - Whatever the provider returns from `mark_email_verified` when the
-    ///   storage layer fails.
+    /// - Whatever the provider returns from `mark_email_verified_for` when
+    ///   the storage layer fails.
     /// - The "no provider configured" error from the active-user-provider
     ///   resolver when no `UserProvider` is registered.
     pub async fn verify(token: &str) -> Result<String, FrameworkError> {
@@ -248,12 +253,15 @@ impl EmailVerification {
             ));
         }
         let provider = crate::Auth::route_user_provider()?;
-        let current_email = provider.verification_email(&actor_user_id).await?;
-        if !current_email.is_some_and(|email| bound_to_mailbox(token, &email)) {
+        let Some(mailbox) = provider
+            .verification_email(&actor_user_id)
+            .await?
+            .filter(|email| bound_to_mailbox(token, email))
+        else {
             return Err(FrameworkError::bad_request(
                 "invalid or expired verification token",
             ));
-        }
+        };
         let user_id = TokenStore::consume(token, TokenPurpose::EmailVerification)
             .await?
             .ok_or_else(|| FrameworkError::bad_request("invalid or expired verification token"))?;
@@ -262,7 +270,14 @@ impl EmailVerification {
                 "invalid or expired verification token",
             ));
         }
-        provider.mark_email_verified(&user_id).await?;
+        // The address can change after the read above. The provider stamps
+        // the verification only while it is still the mailbox the link was
+        // mailed to.
+        if !provider.mark_email_verified_for(&user_id, &mailbox).await? {
+            return Err(FrameworkError::bad_request(
+                "invalid or expired verification token",
+            ));
+        }
         // Intentionally discard the dispatch error - verification has already
         // committed; a downstream listener failure must not surface as a
         // verification failure to the caller. The dispatcher itself logs

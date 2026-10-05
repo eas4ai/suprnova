@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
-//! A component identity and a view path that contain `test_support`, and
-//! development crate names inside string literals of an action body, are
-//! the application's own text, not generated runtime paths.
+//! A component identity and a view path that contain `test_support`,
+//! development crate names inside string literals of an action body, and a
+//! field or argument whose name starts with `suprnova_live`, are the
+//! application's own names, not generated runtime paths.
 
 use suprnova::live::{LiveComponent, live};
 
@@ -10,6 +11,7 @@ use suprnova::live::{LiveComponent, live};
 #[live(name = "test_support.page", view = "live/test_support/page.html")]
 pub struct Page {
     count: u64,
+    suprnova_live_count: u64,
 }
 
 #[live]
@@ -18,6 +20,11 @@ impl Page {
     pub fn record(&mut self) {
         let origin = "suprnova_live macro_fixture test_support suprnova-live-macros";
         self.count = origin.len() as u64;
+    }
+
+    #[action]
+    pub fn bump(&mut self, suprnova_live_step: u64) {
+        self.suprnova_live_count += suprnova_live_step;
     }
 }
 

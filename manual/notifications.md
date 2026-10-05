@@ -215,13 +215,15 @@ The second argument is the recipient's polymorphic type tag (what you
 store in `notifiable_type` so you can query inbox rows back later). The
 recipient's `route_for("database")` becomes the `notifiable_id`.
 
-The framework ships the table as a migration,
-`suprnova::notifications::migrations::CreateNotificationsTable`. Register
-it in your app's `Migrator`:
+The framework ships the table as migrations in
+`suprnova::notifications::migrations`. Register both in your app's
+`Migrator`, in this order:
 
 ```rust
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
-use suprnova::notifications::migrations::CreateNotificationsTable;
+use suprnova::notifications::migrations::{
+    CreateNotificationsTable, NotificationTimestampsToDatetime,
+};
 
 pub struct Migrator;
 
@@ -230,6 +232,7 @@ impl MigratorTrait for Migrator {
         vec![
             // ... your app's migrations ...
             Box::new(CreateNotificationsTable),
+            Box::new(NotificationTimestampsToDatetime),
         ]
     }
 }
@@ -238,6 +241,17 @@ impl MigratorTrait for Migrator {
 Then run `suprnova migrate` and the table appears. Until the `Migrator`
 lists the migration, the channel's first insert fails on the missing
 table.
+
+`NotificationTimestampsToDatetime` matters on MySQL and MariaDB.
+`CreateNotificationsTable` creates `read_at`, `created_at` and
+`updated_at` as `DATETIME`, but earlier versions of it created them as
+`TIMESTAMP`, as a table made by hand or by Laravel's notifications
+migration has them. MySQL's `TIMESTAMP` refuses any time after
+2038-01-19 03:14:07 UTC, so every notification written after that fails.
+The upgrade converts each of those columns that is still `TIMESTAMP` to
+`DATETIME`, keeping its nullability and the stored UTC times. It changes
+nothing on Postgres or SQLite, on a column that is already `DATETIME`, or
+when it runs again, and its `down` leaves the columns `DATETIME`.
 
 #### Reading the inbox
 
@@ -720,6 +734,7 @@ surprising under concurrent load.
 | `NotificationSending`, `NotificationSent`, `NotificationFailed` | `suprnova::` |
 | `set_dispatcher`, `register_notification_factory` | `suprnova::notifications::` |
 | `all_for`, `unread_for`, `read_for`, `mark_as_read`, `mark_as_unread`, `mark_all_as_read`, `delete_for` | `suprnova::notifications::` |
+| `CreateNotificationsTable`, `NotificationTimestampsToDatetime` | `suprnova::notifications::migrations::` |
 | `assert_sent`, `assert_sent_named`, `assert_sent_times`, `assert_sent_to`, `assert_sent_to_on`, `assert_nothing_sent`, `assert_nothing_sent_to`, `assert_count`, `recorded_notifications` | `suprnova::notifications::` |
 | `#[derive(NotificationMailable)]` | `suprnova::` |
 

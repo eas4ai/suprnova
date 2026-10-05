@@ -357,8 +357,7 @@ let first: Option<DynamicRow> = DB::table("audit_log")
     .first()
     .await?;
 
-// Just the count (clears any select/order/limit/offset before
-// rendering - count semantics don't care about those).
+// Just the count (drops any select list and ordering).
 let n: u64 = DB::table("audit_log")
     .filter("actor_id", 42i64)
     .count()
@@ -366,6 +365,11 @@ let n: u64 = DB::table("audit_log")
 ```
 
 On a query with `group_by`, `count()` returns the number of groups.
+
+A limit or an offset stays on the count, as in Laravel, where it bounds
+the one row the count returns rather than the rows it counts.
+`limit(10).count()` counts every match, and `offset(1).count()` returns
+0, because the offset skips the count's only row.
 
 `get()` returns `Collection<DynamicRow>` - the same collection wrapper
 typed models use, with the same `.iter()`, `.len()`, `.into_vec()`

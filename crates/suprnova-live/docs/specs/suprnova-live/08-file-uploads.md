@@ -327,6 +327,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-04 -- The framework host retires a finalized direct-storage upload
+  through the application's direct provider and its
+  `UploadProvider::retire_after_finalization`, as the cleanup rules above
+  require. Its upload router used to skip the direct provider and report the
+  reclaim done, so whatever a provider retires there, temporary objects or
+  its own bookkeeping, stayed behind. The provider's default still keeps the
+  bytes, and quarantined reverse-proxy bytes are still deleted.
 - 2026-10-04 -- Reclaimed finalized and stalled uploads (audit ROOT-16), on
   the owner's confirmation of 2026-10-04 16:29 ("yes temp files should be
   cleaned up"): temporary and uncommitted upload bytes are cleaned up,

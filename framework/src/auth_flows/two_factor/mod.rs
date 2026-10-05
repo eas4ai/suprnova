@@ -158,7 +158,12 @@ impl TwoFactor {
     /// Also `409` while the account has a second factor in the installed
     /// Magnetar engine, confirmed or waiting for its confirmation: each
     /// factor system refuses the sign-ins that do not verify it, so an
-    /// account with both could sign in by no path.
+    /// account with both could sign in by no path. The engine can enroll
+    /// after that check, the way a concurrent request does, so `enroll` asks
+    /// again once its enrollment is written and withdraws it with the same
+    /// `409` when the engine's factor is there. Of two enrollments that both
+    /// wrote one, the later check of at least one sees the other, so the
+    /// account never keeps both.
     pub async fn enroll<U: TwoFactorUser>(user: &U) -> Result<EnrollmentResponse, FrameworkError> {
         // The attempt and rotation tables key the user id in 255
         // characters on every engine. Refuse a longer id here rather than
@@ -174,7 +179,11 @@ impl TwoFactor {
         // confirmed row in the same statement that replaces a pending one,
         // so a confirmation cannot land between a check and the write.
         let (response, encrypted_secret, encrypted_recovery) = Self::new_secret(user)?;
-        write_enrollment_row(user.user_id(), encrypted_secret, encrypted_recovery).await?;
+        write_enrollment_row(user.user_id(), encrypted_secret.clone(), encrypted_recovery).await?;
+        if let Err(refusal) = refuse_magnetar_second_factor(user.user_id()).await {
+            withdraw_enrollment_row(user.user_id(), &encrypted_secret).await?;
+            return Err(refusal);
+        }
         Ok(response)
     }
 
@@ -1194,6 +1203,27 @@ fn names_missing_credentials_table(message: &str) -> bool {
         && (message.contains("no such table")
             || message.contains("does not exist")
             || message.contains("doesn't exist"))
+}
+
+/// Remove the unconfirmed enrollment [`write_enrollment_row`] just wrote,
+/// for `enroll` when the Magnetar engine's factor appeared while it ran.
+///
+/// Conditional on the row being unconfirmed and still holding
+/// `encrypted_secret`, in the one statement, so it never removes a factor
+/// that was confirmed, or replaced by another enrollment, meanwhile.
+async fn withdraw_enrollment_row(
+    user_id: &str,
+    encrypted_secret: &str,
+) -> Result<(), FrameworkError> {
+    let db = DB::connection()?;
+    entity::Entity::delete_many()
+        .filter(entity::Column::UserId.eq(user_id))
+        .filter(entity::Column::Secret.eq(encrypted_secret))
+        .filter(entity::Column::ConfirmedAt.is_null())
+        .exec(db.inner())
+        .await
+        .map_err(|e| FrameworkError::internal(format!("two_factor withdraw: {e}")))?;
+    Ok(())
 }
 
 /// Persist the secret and recovery codes of a new, unconfirmed enrollment.

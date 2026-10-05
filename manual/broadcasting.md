@@ -894,8 +894,10 @@ route's user>}` for pusher-js user authentication and answers `403` for
 a guest. The route's user is the user of the guard the last
 `AuthMiddleware` checked: the bare id for the default guard, as
 `Auth::id()` reports it, and `<guard>:<id>` behind
-`AuthMiddleware::for_guard(..)` naming another guard. A user of another
-guard in the same session never stands in for it.
+`AuthMiddleware::for_guard(..)` naming another guard. A default-guard id
+that holds a `:` gets a leading `:`, so web user `admin:9` is `:admin:9`
+and never admin `9`. A user of another guard in the same session never
+stands in for it.
 
 ### Connect with Laravel Echo
 

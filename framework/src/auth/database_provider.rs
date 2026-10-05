@@ -153,46 +153,55 @@ impl DatabaseUserProvider {
     /// two databases the column's type is read, for such an id only, and a
     /// text column gets the digits. SQLite compares the digits itself, by
     /// the column's affinity.
+    ///
+    /// The type comes from the table the lookup reads, and no other. On
+    /// Postgres `to_regclass` resolves the lookup's own quoted name, so an
+    /// unqualified table is the first one the search path holds, as for the
+    /// query itself; a table of the same name in a later schema, whose
+    /// column may have another type, never decides the bind. MySQL has no
+    /// search path: an unqualified table is the current database's.
     async fn bind_large_id(&self, n: u64) -> Result<SeaValue, FrameworkError> {
         let backend = DB::connection()?.inner().get_database_backend();
-        let (schema, table) = match self.table.split_once('.') {
-            Some((schema, table)) => (Some(schema), table),
-            None => (None, self.table.as_str()),
-        };
-        let (sql, schema_test) = match (backend, schema) {
-            (sea_orm::DbBackend::Postgres, Some(_)) => {
-                ("CAST(data_type AS TEXT)", "table_schema = $3")
-            }
-            (sea_orm::DbBackend::Postgres, None) => (
-                "CAST(data_type AS TEXT)",
-                "table_schema = ANY (current_schemas(false))",
+        let (sql, values) = match backend {
+            sea_orm::DbBackend::Postgres => (
+                "SELECT format_type(a.atttypid, a.atttypmod) AS data_type \
+                 FROM pg_catalog.pg_attribute a \
+                 WHERE a.attrelid = to_regclass($1) AND a.attname = $2 \
+                 AND a.attnum > 0 AND NOT a.attisdropped"
+                    .to_owned(),
+                vec![
+                    SeaValue::from(crate::database::clauses::quote_identifier(
+                        backend,
+                        &self.table,
+                    )),
+                    SeaValue::from(self.identifier_column.clone()),
+                ],
             ),
-            (sea_orm::DbBackend::MySql, Some(_)) => ("CAST(data_type AS CHAR)", "table_schema = ?"),
-            (sea_orm::DbBackend::MySql, None) => {
-                ("CAST(data_type AS CHAR)", "table_schema = DATABASE()")
+            sea_orm::DbBackend::MySql => {
+                let (schema_test, schema) = match self.table.split_once('.') {
+                    Some((schema, table)) => ("table_schema = ?", Some((schema, table))),
+                    None => ("table_schema = DATABASE()", None),
+                };
+                let table = schema.map_or(self.table.as_str(), |(_, table)| table);
+                let mut values = vec![
+                    SeaValue::from(table.to_owned()),
+                    SeaValue::from(self.identifier_column.clone()),
+                ];
+                if let Some((schema, _)) = schema {
+                    values.push(SeaValue::from(schema.to_owned()));
+                }
+                (
+                    format!(
+                        "SELECT CAST(data_type AS CHAR) AS data_type \
+                         FROM information_schema.columns \
+                         WHERE table_name = ? AND column_name = ? AND {schema_test}"
+                    ),
+                    values,
+                )
             }
             _ => return Ok(SeaValue::BigUnsigned(Some(n))),
         };
-        let (table_ph, column_ph) = if backend == sea_orm::DbBackend::Postgres {
-            ("$1", "$2")
-        } else {
-            ("?", "?")
-        };
-        let mut values = vec![
-            SeaValue::from(table.to_owned()),
-            SeaValue::from(self.identifier_column.clone()),
-        ];
-        if let Some(schema) = schema {
-            values.push(SeaValue::from(schema.to_owned()));
-        }
-        let rows = DB::select(
-            &format!(
-                "SELECT {sql} AS data_type FROM information_schema.columns \
-                 WHERE table_name = {table_ph} AND column_name = {column_ph} AND {schema_test}"
-            ),
-            values,
-        )
-        .await?;
+        let rows = DB::select(&sql, values).await?;
         let text = rows
             .first()
             .and_then(|row| row.get_string("data_type").ok())

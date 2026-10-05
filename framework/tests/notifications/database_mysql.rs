@@ -88,7 +88,7 @@ enum Notifications {
 
 /// A connection with `notifications` as older versions of the migration
 /// created it: every time column `.timestamp()`.
-async fn legacy_table() -> DatabaseConnection {
+pub(crate) async fn legacy_table() -> DatabaseConnection {
     let db = connect().await;
     db.execute_unprepared("DROP TABLE IF EXISTS notifications")
         .await

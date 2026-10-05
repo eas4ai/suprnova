@@ -245,6 +245,14 @@ impl TwoFactorService {
     ///
     /// Also refused, with a conflict on [`OTHER_SECOND_FACTOR`], while the
     /// service's [`OtherSecondFactor`] reports a factor for the account.
+    ///
+    /// The other system can enroll after that check, the way a concurrent
+    /// request does, and two pending factors would leave the account with
+    /// one that neither system could confirm. So `enroll` asks again once
+    /// its enrollment is stored, and withdraws it with the same conflict when
+    /// the other factor is there (see [`TwoFactorStore::withdraw_enrollment`]).
+    /// Of two enrollments that both stored one, the later check of at least
+    /// one sees the other, so the account never keeps both.
     pub async fn enroll(&self, actor: &CredentialActor) -> Result<EnrollmentResponse> {
         self.refuse_other_second_factor(actor.user_id()).await?;
         let prepared = self.prepare_enrollment(actor.user_id()).await?;
@@ -262,6 +270,12 @@ impl TwoFactorService {
                 message: "2FA enrollment already exists; rotation requires proof via re_enroll"
                     .to_owned(),
             });
+        }
+        if let Err(refusal) = self.refuse_other_second_factor(actor.user_id()).await {
+            self.store
+                .withdraw_enrollment(actor.user_id(), &prepared.secret_ciphertext)
+                .await?;
+            return Err(refusal);
         }
         Ok(prepared.response)
     }

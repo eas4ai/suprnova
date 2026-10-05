@@ -15,7 +15,9 @@
 //! - The timestamps are `DATETIME` (`timestamp` on Postgres) without a
 //!   zone; the channel writes UTC. Not MySQL's `TIMESTAMP`, which refuses
 //!   any time after 2038-01-19. Tables this migration created before have
-//!   `TIMESTAMP` there, and the read helpers read both.
+//!   `TIMESTAMP` there; the read helpers read both, and
+//!   [`NotificationTimestampsToDatetime`](super::NotificationTimestampsToDatetime)
+//!   converts them.
 
 use sea_orm_migration::prelude::*;
 

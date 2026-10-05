@@ -95,6 +95,13 @@ Views are Askama templates. The template root is `templates/` unless an
 </div>
 ```
 
+The view sees every field that is not secret by its name, such as
+`{{ count }}`, and the component itself as `component`, so
+`{{ component.total() }}` calls a method. A field may be named `component`
+too: the view then reads the field as `component` and the component as
+`component_`, or as the first of `component__`, `component___`, and so on
+that no field takes.
+
 Directives use the closed `live:` grammar: `live:click`, `live:submit`,
 `live:model`, `live:upload`, `live:key`, `live:loading`, and the rest of the
 documented set. The checker proves every directive against the component:
@@ -377,7 +384,9 @@ Gated actions, uploads, subscriptions and the principal of an asynchronous
 membership read the route's user: the user of the guard the last
 `AuthMiddleware` on the Live routes checked. The principal string your Live
 gates receive is the bare id for the default guard, as `Auth::id()` reports
-it, so a default-guard application sees the value it always saw. Behind
+it, so a default-guard application sees the value it always saw. The one
+exception is an id that holds a `:`: it gets a leading `:`, so web user
+`admin:9` reaches your gates as `:admin:9` and never as admin `9`. Behind
 `AuthMiddleware::for_guard(..)` naming any other guard - a second session
 guard, a token guard, or a guard of your application (see
 [Authentication](authentication.md)) - it is `<guard>:<id>`, such as

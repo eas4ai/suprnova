@@ -2571,6 +2571,63 @@ impl OtherSecondFactor for FixedOtherSecondFactor {
     }
 }
 
+/// A second factor kept outside the service that appears once the service
+/// has checked for it: absent at the first question, present after.
+struct OtherSecondFactorAfterTheCheck {
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl OtherSecondFactor for OtherSecondFactorAfterTheCheck {
+    async fn enrolled_or_pending(&self, _user_id: &str) -> magnetar::Result<bool> {
+        Ok(self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0)
+    }
+}
+
+/// The other system's enrollment can land after `enroll` checked for it,
+/// the way a concurrent request's does. Both would then hold a pending
+/// factor that neither could confirm. The enrollment that sees the other
+/// one after its own write withdraws it and answers the conflict, so the
+/// account keeps one.
+#[tokio::test]
+async fn an_enrollment_withdraws_when_the_other_factor_lands_after_its_check() {
+    let world = factor_world().await;
+    let user_id = registered_user(&world).await;
+    let actor = credential_actor(&world, &user_id).await;
+    let service = TwoFactorService::new(
+        Arc::new(storage_schema::sql_two_factor::SqlTwoFactorStore(
+            world.db.clone(),
+        )),
+        world.storage.clone(),
+        world.second_factor_lockout.clone(),
+        Arc::new(AeadEncryptor::new([21; 32])),
+        TwoFactorConfig::default(),
+    )
+    .with_other_second_factor(Arc::new(OtherSecondFactorAfterTheCheck {
+        asked: std::sync::atomic::AtomicUsize::new(0),
+    }));
+
+    let outcome = service.enroll(&actor).await;
+
+    assert!(
+        matches!(
+            &outcome,
+            Err(magnetar::Error::Conflict { resource, .. })
+                if resource == magnetar::two_factor::OTHER_SECOND_FACTOR
+        ),
+        "{:?}",
+        outcome.map(|_| ())
+    );
+    assert!(
+        storage_schema::sql_two_factor::SqlTwoFactorStore(world.db.clone())
+            .find_enrollment(&user_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the withdrawn enrollment leaves no row"
+    );
+}
+
 /// An account has one second-factor system, not both: each refuses the
 /// sign-ins that do not verify it, so an account with both could sign in by
 /// no path. While the other system holds a factor for the account, enrolling
