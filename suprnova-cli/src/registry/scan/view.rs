@@ -5,7 +5,7 @@
 mod css;
 mod markup;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use askama_parser::node::Lit;
@@ -16,7 +16,7 @@ use askama_parser::{
 use super::allowlist::{Admission, Allowlist, STD_ALLOWED};
 use super::url::{UrlRefusal, check_constant, names_another_origin};
 use super::{ComponentFiles, ScanReport};
-use crate::registry::Result;
+use crate::registry::{Capability, Result};
 use markup::{Dynamic, Markup, Sink};
 
 pub use markup::{REFUSED_ATTRIBUTES, REFUSED_ELEMENTS, URL_ATTRIBUTES};
@@ -140,10 +140,18 @@ struct Context<'a> {
     rust_modules: BTreeSet<String>,
     own_methods: BTreeSet<String>,
     dependency_modules: Vec<String>,
+    /// What each own function, method, static and const reaches, its own
+    /// body and every own item it names joined in (REG-031).
+    reaches: BTreeMap<String, BTreeSet<Capability>>,
 }
 
-/// Scans the component's views and stylesheets.
-pub fn scan(component: &ComponentFiles<'_>, allowlist: &Allowlist) -> Result<ScanReport> {
+/// Scans the component's views and stylesheets. `item_capabilities` is
+/// what the Rust scan found each own item reaches in its own body.
+pub fn scan(
+    component: &ComponentFiles<'_>,
+    allowlist: &Allowlist,
+    item_capabilities: &BTreeMap<String, BTreeSet<Capability>>,
+) -> Result<ScanReport> {
     let mut views: BTreeSet<String> = component
         .files
         .iter()
@@ -163,6 +171,7 @@ pub fn scan(component: &ComponentFiles<'_>, allowlist: &Allowlist) -> Result<Sca
         rust_modules,
         own_methods: own_methods(component),
         dependency_modules: component.dependency_modules.to_vec(),
+        reaches: reaches(component, item_capabilities),
     };
     let mut report = ScanReport::default();
     for (name, bytes) in component.files {
@@ -227,6 +236,154 @@ fn own_methods(component: &ComponentFiles<'_>) -> BTreeSet<String> {
         }
     }
     methods
+}
+
+/// Joins each own item's capabilities with those of every own item it
+/// names, until nothing changes. A name is matched to every item that could
+/// carry it: a method of that name, or a free item whose path ends in it.
+/// The match is by name, so it can only over-count, which refuses a call
+/// rather than admitting one.
+fn reaches(
+    component: &ComponentFiles<'_>,
+    item_capabilities: &BTreeMap<String, BTreeSet<Capability>>,
+) -> BTreeMap<String, BTreeSet<Capability>> {
+    let namespace_module = component.namespace.replace('-', "_");
+    let mut names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (name, bytes) in component.files {
+        let Some(stem) = name.strip_suffix(".rs") else {
+            continue;
+        };
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            continue;
+        };
+        if super::limits::check(text, super::limits::Language::Rust).is_err() {
+            continue;
+        }
+        let Ok(file) = syn::parse_file(text) else {
+            continue;
+        };
+        let mut collector = NameCollector {
+            module: vec![
+                "crate".to_string(),
+                "live".to_string(),
+                namespace_module.clone(),
+                stem.to_string(),
+            ],
+            keys: Vec::new(),
+            names: &mut names,
+        };
+        syn::visit::Visit::visit_file(&mut collector, &file);
+    }
+    let mut reached = item_capabilities.clone();
+    loop {
+        let mut changed = false;
+        let keys: Vec<String> = reached.keys().cloned().collect();
+        for key in &keys {
+            let mut joined = reached.get(key).cloned().unwrap_or_default();
+            for name in names.get(key).into_iter().flatten() {
+                for other in &keys {
+                    if other == name || other.ends_with(&format!("::{name}")) {
+                        joined.extend(reached.get(other).into_iter().flatten().copied());
+                    }
+                }
+            }
+            if reached.get(key) != Some(&joined) {
+                reached.insert(key.clone(), joined);
+                changed = true;
+            }
+        }
+        if !changed {
+            return reached;
+        }
+    }
+}
+
+/// Every name each own item's body uses as a path or a method, keyed as
+/// the Rust scan keys the item.
+struct NameCollector<'n> {
+    module: Vec<String>,
+    keys: Vec<String>,
+    names: &'n mut BTreeMap<String, BTreeSet<String>>,
+}
+
+impl NameCollector<'_> {
+    fn free_key(&self, ident: &syn::Ident) -> String {
+        format!("{}::{}", self.module.join("::"), ident_text(ident))
+    }
+
+    fn with_key(&mut self, key: String, visit: impl FnOnce(&mut Self)) {
+        self.names.entry(key.clone()).or_default();
+        self.keys.push(key);
+        visit(self);
+        self.keys.pop();
+    }
+
+    fn record(&mut self, name: String) {
+        for key in &self.keys {
+            self.names
+                .entry(key.clone())
+                .or_default()
+                .insert(name.clone());
+        }
+    }
+}
+
+fn ident_text(ident: &syn::Ident) -> String {
+    let text = ident.to_string();
+    text.strip_prefix("r#").map(str::to_string).unwrap_or(text)
+}
+
+impl<'ast> syn::visit::Visit<'ast> for NameCollector<'_> {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        self.module.push(ident_text(&item.ident));
+        syn::visit::visit_item_mod(self, item);
+        self.module.pop();
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        let key = self.free_key(&item.sig.ident);
+        self.with_key(key, |collector| syn::visit::visit_item_fn(collector, item));
+    }
+
+    fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+        let key = self.free_key(&item.ident);
+        self.with_key(key, |collector| {
+            syn::visit::visit_item_static(collector, item)
+        });
+    }
+
+    fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+        let key = self.free_key(&item.ident);
+        self.with_key(key, |collector| {
+            syn::visit::visit_item_const(collector, item)
+        });
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        let key = ident_text(&item.sig.ident);
+        self.with_key(key, |collector| {
+            syn::visit::visit_impl_item_fn(collector, item)
+        });
+    }
+
+    fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
+        let key = ident_text(&item.sig.ident);
+        self.with_key(key, |collector| {
+            syn::visit::visit_trait_item_fn(collector, item)
+        });
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        if let Some(last) = path.segments.last() {
+            self.record(ident_text(&last.ident));
+        }
+        syn::visit::visit_path(self, path);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        self.record(ident_text(&call.method));
+        syn::visit::visit_expr_method_call(self, call);
+    }
 }
 
 fn scan_view(text: &str, context: &Context<'_>, sink: &mut Sink) {
@@ -789,6 +946,36 @@ impl Walker<'_, '_> {
     /// Classifies a path a view names: an item of Suprnova's API that
     /// carries no capability, the component's own Rust, a dependency's
     /// module, or the effect-free part of `std`.
+    /// What calling or reading an own item named this way reaches: the
+    /// item at the full path, and every method or free item whose name is
+    /// the path's last segment.
+    fn own_reach(&self, text: &str) -> BTreeSet<Capability> {
+        let last = text.rsplit("::").next().unwrap_or(text);
+        let mut found = BTreeSet::new();
+        for (key, capabilities) in &self.context.reaches {
+            if key == text || key == last || key.ends_with(&format!("::{last}")) {
+                found.extend(capabilities.iter().copied());
+            }
+        }
+        found
+    }
+
+    /// Refuses a call or read of an own item that reaches a capability.
+    fn refuse_reach(&mut self, text: &str, span: askama_parser::Span, call: bool) {
+        let reached = self.own_reach(text);
+        if !reached.is_empty() {
+            let names: Vec<String> = reached.iter().map(ToString::to_string).collect();
+            self.refuse(
+                if call { "view-call" } else { "view-path" },
+                span,
+                format!(
+                    "`{text}` reaches the {} capability through the component's Rust; a view may call only what carries none",
+                    names.join(", ")
+                ),
+            );
+        }
+    }
+
     fn value_path(&mut self, names: &[&str], span: askama_parser::Span, call: bool) -> Info {
         let text = names.join("::");
         let refused = |walker: &mut Self, message: String| {
@@ -856,7 +1043,17 @@ impl Walker<'_, '_> {
                     let prefix = format!("crate::live::{module}");
                     text == prefix || text.starts_with(&format!("{prefix}::"))
                 });
-                if own || dependency {
+                if own {
+                    self.refuse_reach(&text, span, call);
+                    Info::default()
+                } else if dependency && call {
+                    refused(
+                        self,
+                        format!(
+                            "`{text}` calls a dependency's Rust, which this scan does not read, so it cannot show the call carries no capability"
+                        ),
+                    )
+                } else if dependency {
                     Info::default()
                 } else {
                     refused(
@@ -1110,6 +1307,8 @@ impl Walker<'_, '_> {
                                     "`{name}()` calls a method the component's Rust does not define"
                                 ),
                             );
+                        } else {
+                            self.refuse_reach(name, span, true);
                         }
                         Info {
                             literal,
@@ -1144,6 +1343,8 @@ impl Walker<'_, '_> {
                                 span,
                                 format!("`.{}()` is not a method a view may call", *method.name),
                             );
+                        } else if self.context.own_methods.contains(*method.name) {
+                            self.refuse_reach(&method.name, span, true);
                         }
                         Info {
                             literal,

@@ -205,9 +205,13 @@ fn scan_on_this_thread(
             });
         }
     }
-    let (rust_report, defined) = rust::scan_detailed(component, allowlist)?;
+    let rust::Detailed {
+        report: rust_report,
+        defined,
+        item_capabilities,
+    } = rust::scan_detailed(component, allowlist)?;
     report.merge(rust_report);
-    report.merge(view::scan(component, allowlist)?);
+    report.merge(view::scan(component, allowlist, &item_capabilities)?);
     report.merge(script::scan_with_elements(component, context.elements)?);
     if let Some(register) = context.register {
         report

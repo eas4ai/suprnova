@@ -326,6 +326,36 @@ fn reg_032_a_static_import_may_name_only_the_scripts_its_dependencies_carry() {
     );
 }
 
+/// REG-031: a view calls nothing the scan cannot show carries no
+/// capability, so a call into a dependency's Rust, whose functions this
+/// scan does not read, is refused.
+#[test]
+fn reg_031_a_view_may_not_call_a_dependencys_function() {
+    let files = vec![(
+        "widget.html".to_string(),
+        b"<p>{{ crate::live::evil::helper::token() }}</p>\n".to_vec(),
+    )];
+    let dependency_modules = vec!["evil::helper".to_string()];
+    let component = ComponentFiles {
+        namespace: "evil",
+        directory: "widget",
+        files: &files,
+        dependency_modules: &dependency_modules,
+        importable_views: &[],
+        importable_scripts: &[],
+    };
+    let report =
+        scan_component(&component, allowlist::embedded().expect("allowlist")).expect("scan");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.check == "view-call" && finding.line == Some(1)),
+        "{:?}",
+        report.findings
+    );
+}
+
 /// REG-022, REG-030, REG-031, REG-032: every component of the bypass corpus
 /// is refused, and each refusal its fixture marks is reported with that
 /// check, file and line.
