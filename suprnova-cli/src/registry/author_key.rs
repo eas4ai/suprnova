@@ -58,12 +58,9 @@ pub fn config_dir_from(
         )
     };
     if cfg!(windows) {
-        let _ = (xdg_config_home, home);
         return absolute(app_data).ok_or_else(missing);
     }
-    let _ = app_data;
     if cfg!(target_os = "macos") {
-        let _ = xdg_config_home;
         return absolute(home)
             .map(|home| home.join("Library/Application Support"))
             .ok_or_else(missing);

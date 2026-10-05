@@ -322,10 +322,13 @@ fn create_library(
             source,
             signed,
         }),
-        Err(error) => {
-            let _ = std::fs::remove_dir_all(directory);
-            Err(error)
-        }
+        Err(error) => match std::fs::remove_dir_all(directory) {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(RegistryError::Io(format!(
+                "{error}; {} could not be removed ({cleanup}) and holds a partial library",
+                directory.display()
+            ))),
+        },
     }
 }
 
@@ -600,15 +603,27 @@ fn write_signatures(root: &Path, signatures: &[(String, String)]) -> Result<()> 
     }
     for (index, item) in pending.iter().enumerate() {
         if let Err(error) = std::fs::rename(&item.temporary, &item.target) {
+            let mut unrestored = Vec::new();
             for moved in pending[..index].iter().rev() {
-                let _ = match &moved.prior {
+                let restored = match &moved.prior {
                     Some(bytes) => std::fs::write(&moved.target, bytes),
                     None => std::fs::remove_file(&moved.target),
                 };
+                if let Err(restore) = restored {
+                    unrestored.push(format!("{} ({restore})", moved.target.display()));
+                }
             }
             discard(&pending[index..]);
+            let outcome = if unrestored.is_empty() {
+                "every signature was put back as it was".to_owned()
+            } else {
+                format!(
+                    "these could not be put back and need attention: {}",
+                    unrestored.join(", ")
+                )
+            };
             return Err(RegistryError::Io(format!(
-                "cannot write {}: {error}; every signature was put back as it was",
+                "cannot write {}: {error}; {outcome}",
                 item.target.display()
             )));
         }
@@ -1944,14 +1959,9 @@ mod tests {
             .expect("refused");
         assert!(error.to_string().contains("scan"), "{error}");
         assert!(!root.exists());
-        assert!(
-            !config.join("suprnova/library-keys").exists() || {
-                std::fs::read_dir(config.join("suprnova/library-keys"))
-                    .expect("dir")
-                    .next()
-                    .is_none()
-            }
-        );
+        let keys = config.join("suprnova/library-keys");
+        let kept = std::fs::read_dir(&keys).map_or(0, |entries| entries.count());
+        assert_eq!(kept, 0, "a key was kept for a library that does not exist");
     }
 
     #[test]
