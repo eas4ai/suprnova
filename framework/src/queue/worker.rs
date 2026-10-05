@@ -925,8 +925,17 @@ async fn run_labelled_worker(
                 id = %env.id,
                 "queue job superseded by a newer debounced dispatch"
             );
-            // Dropping it settles the attempt for good, so it is reported as
-            // one; Laravel's worker fires `JobAttempted` for it too.
+            // Laravel deletes the job inside its pipeline, which returns
+            // without throwing, so its worker fires `JobProcessed` and then
+            // `JobAttempted`: the drop settles the attempt for good.
+            let _ = in_attempt(
+                job_scope.clone(),
+                job_context.clone(),
+                EventFacade::dispatch(queue_events::JobProcessed {
+                    job: identity_pre.clone(),
+                }),
+            )
+            .await;
             let _ = in_attempt(
                 job_scope.clone(),
                 job_context.clone(),
@@ -1497,6 +1506,12 @@ async fn handle_released(
         settlement_failure(driver, env, "release", "released", &e);
         return;
     }
+    // The pipeline returned without an error, so `JobProcessed` comes first,
+    // then `JobReleased`, the order Laravel's worker raises them in.
+    let _ = EventFacade::dispatch(queue_events::JobProcessed {
+        job: queue_events::JobIdentity::from_env(env, connection),
+    })
+    .await;
     let _ = EventFacade::dispatch(queue_events::JobReleased {
         job: queue_events::JobIdentity::from_env(env, connection),
         delay_secs: delay.as_secs(),
