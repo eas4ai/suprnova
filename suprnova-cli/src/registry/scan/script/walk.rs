@@ -60,7 +60,10 @@ pub(super) struct Binding<'a> {
 #[derive(Default)]
 pub(super) struct Facts<'a> {
     pub bindings: Vec<Binding<'a>>,
-    pub class_methods: BTreeSet<&'a str>,
+    /// The methods each class the script defines carries, by the offset
+    /// of the class: its body's methods and function-valued fields, and the
+    /// functions its methods assign to `this`.
+    pub instance_methods: HashMap<u32, BTreeSet<&'a str>>,
     pub private_methods: BTreeSet<&'a str>,
     pub tainted: BTreeSet<&'a str>,
     pub written_globals: BTreeSet<String>,
@@ -100,6 +103,7 @@ pub(super) struct Walker<'a, 'c> {
     scopes: Vec<HashMap<&'a str, Bid>>,
     next_id: usize,
     this_is_instance: Vec<bool>,
+    classes: Vec<&'a Class<'a>>,
     depth: usize,
 }
 
@@ -120,6 +124,7 @@ impl<'a, 'c> Walker<'a, 'c> {
             scopes: Vec::new(),
             next_id: 0,
             this_is_instance: vec![false],
+            classes: Vec::new(),
             depth: 0,
         }
     }
@@ -793,6 +798,12 @@ impl<'a, 'c> Walker<'a, 'c> {
     }
 
     fn class(&mut self, class: &'a Class<'a>) {
+        self.classes.push(class);
+        self.class_body(class);
+        self.classes.pop();
+    }
+
+    fn class_body(&mut self, class: &'a Class<'a>) {
         if !class.decorators.is_empty() {
             self.refuse(
                 "script-construct",
@@ -889,13 +900,32 @@ impl<'a, 'c> Walker<'a, 'c> {
             }
             PropertyKey::StaticIdentifier(identifier) => {
                 if callable {
-                    self.facts.class_methods.insert(identifier.name.as_str());
+                    self.instance_method(identifier.name.as_str());
                 } else {
                     self.facts.tainted.insert(identifier.name.as_str());
                 }
             }
             _ => {}
         }
+    }
+
+    /// Records a method of the class being walked.
+    fn instance_method(&mut self, name: &'a str) {
+        if let Some(class) = self.classes.last() {
+            self.facts
+                .instance_methods
+                .entry(class.span.start)
+                .or_default()
+                .insert(name);
+        }
+    }
+
+    /// Whether a class the script defines carries a method.
+    fn class_defines(&self, class: &Class<'a>, name: &str) -> bool {
+        self.facts
+            .instance_methods
+            .get(&class.span.start)
+            .is_some_and(|methods| methods.contains(name))
     }
 
     /// A value stored under a name the browser calls on its own must be a
@@ -1465,7 +1495,7 @@ impl<'a, 'c> Walker<'a, 'c> {
         if let MemberExpression::StaticMemberExpression(static_member) = member {
             let name = static_member.property.name.as_str();
             if callable && matches!(unparen(member.object()), Expression::ThisExpression(_)) {
-                self.facts.class_methods.insert(name);
+                self.instance_method(name);
             } else if !callable {
                 self.facts.tainted.insert(name);
             }
@@ -1688,7 +1718,10 @@ impl<'a, 'c> Walker<'a, 'c> {
             // `super.name()` calls the parent class, a browser API for an
             // element, so it keeps the API's rules.
             Expression::Super(_) => false,
-            Expression::ThisExpression(_) => self.facts.class_methods.contains(name),
+            Expression::ThisExpression(_) => self
+                .classes
+                .last()
+                .is_some_and(|class| self.class_defines(class, name)),
             Expression::Identifier(reference) => {
                 let Some(id) = self.lookup(reference.name.as_str()) else {
                     return false;
@@ -1701,12 +1734,11 @@ impl<'a, 'c> Walker<'a, 'c> {
                 }
                 match binding.init.map(unparen) {
                     Some(Expression::NewExpression(new)) => match unparen(&new.callee) {
-                        Expression::Identifier(class) => {
-                            self.lookup(class.name.as_str())
-                                .and_then(|class_id| self.binding(class_id))
-                                .is_some_and(|class_binding| class_binding.class.is_some())
-                                && self.facts.class_methods.contains(name)
-                        }
+                        Expression::Identifier(class) => self
+                            .lookup(class.name.as_str())
+                            .and_then(|class_id| self.binding(class_id))
+                            .and_then(|class_binding| class_binding.class)
+                            .is_some_and(|class| self.class_defines(class, name)),
                         _ => false,
                     },
                     Some(Expression::ObjectExpression(object)) => {
