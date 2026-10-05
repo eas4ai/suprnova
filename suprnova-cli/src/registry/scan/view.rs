@@ -5,7 +5,7 @@
 mod css;
 mod markup;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use askama_parser::node::Lit;
@@ -14,6 +14,7 @@ use askama_parser::{
 };
 
 use super::allowlist::{Admission, Allowlist, STD_ALLOWED};
+use super::url::{UrlRefusal, check_constant, names_another_origin};
 use super::{ComponentFiles, ScanReport};
 use crate::registry::Result;
 use markup::{Dynamic, Markup, Sink};
@@ -97,12 +98,39 @@ const MAX_PATHS: usize = 64;
 /// waiting for the body's markup states to settle.
 const MAX_LOOP_PASSES: usize = 8;
 
-/// What an expression is, as far as a URL attribute cares.
-#[derive(Debug, Clone, Copy, Default)]
+/// What an expression is, as far as the markup it lands in cares.
+#[derive(Debug, Clone, Default)]
 struct Info {
-    /// A bare state read or a call to a capability-free allowlist item.
+    /// A state read, a value the application passes in, or a call to a
+    /// capability-free allowlist helper whose constant arguments stay on
+    /// the application's origin (REG-031).
     url_source: bool,
+    /// Its output is written unescaped: `caller()`, `json` and
+    /// `trusted_html`.
+    raw: bool,
+    /// Its value, when it is a constant string.
+    constant: Option<String>,
+    /// It holds a string literal anywhere.
+    literal: bool,
+    /// The template variable it reads, for a bare read or a field of one.
+    var: Option<String>,
 }
+
+/// One `{% call %}`, checked once the whole template is walked, when the
+/// role of each macro parameter is known.
+struct CallSite {
+    scope: Option<String>,
+    name: String,
+    args: Vec<(Option<String>, Info)>,
+    span: askama_parser::Span,
+}
+
+/// A macro the template defines: its parameters, their defaults, and the
+/// positions of the parameters it writes into a URL attribute.
+type MacroShape = (Vec<String>, Vec<Option<Info>>, BTreeSet<usize>);
+
+/// Askama filters whose output is written unescaped.
+const RAW_FILTERS: &[&str] = &["json", "tojson", "trusted_html", "safe"];
 
 /// What the view scan knows about the component.
 struct Context<'a> {
@@ -145,6 +173,7 @@ pub fn scan(component: &ComponentFiles<'_>, allowlist: &Allowlist) -> Result<Sca
         let mut sink = Sink {
             file: name.clone(),
             findings: Vec::new(),
+            url_vars: Vec::new(),
         };
         match std::str::from_utf8(bytes) {
             Ok(text) if is_view => scan_view(text, &context, &mut sink),
@@ -162,6 +191,7 @@ pub(crate) fn check_css_text(file: &str, text: &str, line: u32) -> Vec<super::Fi
     let mut sink = Sink {
         file: file.to_string(),
         findings: Vec::new(),
+        url_vars: Vec::new(),
     };
     css::check(text, line, &mut sink);
     sink.findings
@@ -242,12 +272,16 @@ fn scan_view(text: &str, context: &Context<'_>, sink: &mut Sink) {
             suppress_by_default,
             check_expressions: !suppress_by_default,
             imports: BTreeSet::new(),
+            locals: HashMap::new(),
+            macros: HashMap::new(),
+            calls: Vec::new(),
         };
         let mut paths = vec![Markup::new()];
         walker.nodes(ast.nodes(), &mut paths);
         for markup in &mut paths {
             markup.finish(walker.sink);
         }
+        walker.check_calls();
     }
 }
 
@@ -264,6 +298,12 @@ struct Walker<'a, 'b> {
     suppress_by_default: bool,
     check_expressions: bool,
     imports: BTreeSet<String>,
+    /// Template-local names and whether each holds a URL source.
+    locals: HashMap<String, bool>,
+    /// Each macro this template defines: its parameters, their defaults,
+    /// and the parameters it writes into a URL attribute.
+    macros: HashMap<String, MacroShape>,
+    calls: Vec<CallSite>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -454,10 +494,18 @@ impl Walker<'_, '_> {
             Node::Expr(_, expr) => {
                 let info = self.expr(expr);
                 let line = self.line(expr.span());
+                if info.raw {
+                    self.require_data(
+                        paths,
+                        expr.span(),
+                        "unescaped output (`caller()`, `json` or `trusted_html`)",
+                    );
+                }
                 for markup in paths.iter_mut() {
                     markup.dynamic(
                         Dynamic {
                             url_source: info.url_source,
+                            var: info.var.clone(),
                             line,
                         },
                         self.sink,
@@ -478,21 +526,37 @@ impl Walker<'_, '_> {
                         ),
                     );
                 }
+                let mut args = Vec::new();
                 for arg in call.args.iter().flatten() {
-                    self.expr(arg);
+                    let named = match &***arg {
+                        Expr::NamedArgument(name, _) => Some(name.to_string()),
+                        _ => None,
+                    };
+                    args.push((named, self.expr(arg)));
                 }
+                self.calls.push(CallSite {
+                    scope: call.scope.as_ref().map(|scope| scope.to_string()),
+                    name: call.name.to_string(),
+                    args,
+                    span: call.span(),
+                });
                 self.fragment(&call.nodes);
             }
             Node::Let(let_node) => {
                 self.target(&let_node.var);
-                match &let_node.val {
-                    LetValueOrBlock::Value(value) => {
-                        self.expr(value);
+                let source = match &let_node.val {
+                    LetValueOrBlock::Value(value) => self.expr(value).url_source,
+                    LetValueOrBlock::Block { nodes, .. } => {
+                        self.fragment(nodes);
+                        false
                     }
-                    LetValueOrBlock::Block { nodes, .. } => self.fragment(nodes),
-                }
+                };
+                self.bind_target(&let_node.var, source);
             }
             Node::Compound(compound) => {
+                if let Expr::Var(name) = &**compound.op.lhs {
+                    self.locals.insert((*name).to_string(), false);
+                }
                 self.expr(&compound.op.lhs);
                 self.expr(&compound.op.rhs);
             }
@@ -505,7 +569,10 @@ impl Walker<'_, '_> {
                             if let Some(target) = &test.target {
                                 self.target(target);
                             }
-                            self.expr(&test.expr);
+                            let source = self.expr(&test.expr).url_source;
+                            if let Some(target) = &test.target {
+                                self.bind_target(target, source);
+                            }
                         }
                         None => exhaustive = true,
                     }
@@ -514,11 +581,12 @@ impl Walker<'_, '_> {
                 self.branches(paths, &bodies, exhaustive, if_node.span());
             }
             Node::Match(match_node) => {
-                self.expr(&match_node.expr);
+                let source = self.expr(&match_node.expr).url_source;
                 let mut bodies: Vec<&[Box<Node<'_>>]> = Vec::new();
                 for arm in &match_node.arms {
                     for target in &arm.target {
                         self.target(target);
+                        self.bind_target(target, source);
                     }
                     bodies.push(&arm.nodes);
                 }
@@ -526,7 +594,8 @@ impl Walker<'_, '_> {
             }
             Node::Loop(loop_node) => {
                 self.target(&loop_node.var);
-                self.expr(&loop_node.iter);
+                let source = self.expr(&loop_node.iter).url_source;
+                self.bind_target(&loop_node.var, source);
                 if let Some(cond) = &loop_node.cond {
                     self.expr(cond);
                 }
@@ -552,16 +621,44 @@ impl Walker<'_, '_> {
                 self.imports.insert(import.scope.to_string());
             }
             Node::Macro(macro_node) => {
-                for arg in &macro_node.args {
-                    if let Some(default) = &arg.default {
-                        self.expr(default);
+                let params: Vec<String> = macro_node
+                    .args
+                    .iter()
+                    .map(|arg| arg.name.to_string())
+                    .collect();
+                let defaults: Vec<Option<Info>> = macro_node
+                    .args
+                    .iter()
+                    .map(|arg| arg.default.as_ref().map(|default| self.expr(default)))
+                    .collect();
+                let outer = std::mem::take(&mut self.sink.url_vars);
+                let shadowed: Vec<(String, Option<bool>)> = params
+                    .iter()
+                    .map(|param| (param.clone(), self.locals.remove(param)))
+                    .collect();
+                self.fragment(&macro_node.nodes);
+                for (param, previous) in shadowed {
+                    if let Some(previous) = previous {
+                        self.locals.insert(param, previous);
                     }
                 }
-                self.fragment(&macro_node.nodes);
+                let used = std::mem::replace(&mut self.sink.url_vars, outer);
+                let roles: BTreeSet<usize> = used
+                    .iter()
+                    .filter_map(|var| params.iter().position(|param| param == var))
+                    .collect();
+                self.macros
+                    .insert(macro_node.name.to_string(), (params, defaults, roles));
             }
             Node::Raw(raw) => self.lit(&raw.lit, paths),
             Node::FilterBlock(block) => {
-                self.filter(&block.filters, block.span());
+                if self.filter(&block.filters, block.span()).raw {
+                    self.require_data(
+                        paths,
+                        block.span(),
+                        "a filter block whose output is unescaped",
+                    );
+                }
                 self.nodes(&block.nodes, paths);
             }
         }
@@ -574,6 +671,81 @@ impl Walker<'_, '_> {
                 span,
                 format!("`{kind} \"{path}\"` names a template that is neither one of the component's views, one its dependencies carry, nor a shipped view"),
             );
+        }
+    }
+
+    /// Records each name a target binds and whether it holds a URL source;
+    /// a name bound twice keeps the stricter reading.
+    fn bind_target(&mut self, target: &Target<'_>, source: bool) {
+        let mut names = Vec::new();
+        target_names(target, &mut names);
+        for name in names {
+            let entry = self.locals.entry(name).or_insert(source);
+            *entry = *entry && source;
+        }
+    }
+
+    /// Checks every `{% call %}` once each macro's URL parameters are known:
+    /// a value a local macro writes into a URL attribute must be a URL
+    /// source or a constant on the application's origin, and a string
+    /// passed to an imported macro, whose parameters the scan cannot see,
+    /// must not name another origin.
+    fn check_calls(&mut self) {
+        let calls = std::mem::take(&mut self.calls);
+        for call in calls {
+            match &call.scope {
+                None => {
+                    let Some((params, defaults, roles)) = self.macros.get(&call.name).cloned()
+                    else {
+                        continue;
+                    };
+                    for role in roles {
+                        let param = params.get(role).cloned().unwrap_or_default();
+                        let arg = call
+                            .args
+                            .iter()
+                            .find(|(named, _)| named.as_deref() == Some(param.as_str()))
+                            .or_else(|| call.args.get(role).filter(|(named, _)| named.is_none()))
+                            .map(|(_, info)| info.clone())
+                            .or_else(|| defaults.get(role).cloned().flatten());
+                        let Some(arg) = arg else {
+                            continue;
+                        };
+                        let refused = match &arg.constant {
+                            Some(constant) => {
+                                check_constant(constant).err().map(UrlRefusal::describe)
+                            }
+                            None if arg.url_source => None,
+                            None => Some("the value is one the component computes"),
+                        };
+                        if let Some(reason) = refused {
+                            self.refuse_markup(
+                                "view-url",
+                                call.span,
+                                format!("`{}` writes its `{param}` argument into a URL attribute: {reason}", call.name),
+                            );
+                        }
+                    }
+                }
+                Some(scope) => {
+                    for (_, arg) in &call.args {
+                        let refused = match &arg.constant {
+                            Some(constant) => names_another_origin(constant),
+                            None => arg.literal && !arg.url_source,
+                        };
+                        if refused {
+                            self.refuse_markup(
+                                "view-url",
+                                call.span,
+                                format!(
+                                    "`{scope}::{}` is passed a string that may name another origin or a computed one; a macro the scan cannot see may write it into a URL",
+                                    call.name
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -636,7 +808,10 @@ impl Walker<'_, '_> {
                             ),
                         )
                     } else {
-                        Info { url_source: call }
+                        Info {
+                            url_source: call,
+                            ..Info::default()
+                        }
                     }
                 }
                 Some(Admission::Prefix { item, root }) => {
@@ -653,7 +828,10 @@ impl Walker<'_, '_> {
                             ),
                         )
                     } else {
-                        Info { url_source: call }
+                        Info {
+                            url_source: call,
+                            ..Info::default()
+                        }
                     }
                 }
                 Some(Admission::Module) => Info::default(),
@@ -728,7 +906,9 @@ impl Walker<'_, '_> {
         }
     }
 
-    fn filter(&mut self, filter: &Filter<'_>, span: askama_parser::Span) {
+    /// Checks a filter, its name and its arguments, and reports whether its
+    /// output is unescaped.
+    fn filter(&mut self, filter: &Filter<'_>, span: askama_parser::Span) -> Info {
         let names: Vec<&str> = match &filter.name {
             askama_parser::PathOrIdentifier::Identifier(name) => vec![**name],
             askama_parser::PathOrIdentifier::Path(path) => {
@@ -778,18 +958,31 @@ impl Walker<'_, '_> {
                 format!("the filter `{name}` is neither Askama's own nor the framework's"),
             );
         }
+        let mut literal = false;
         for argument in &filter.arguments {
-            self.expr(argument);
+            literal |= self.expr(argument).literal;
+        }
+        Info {
+            raw: RAW_FILTERS.contains(&name),
+            literal,
+            ..Info::default()
         }
     }
 
     fn expr(&mut self, expr: &WithSpan<Box<Expr<'_>>>) -> Info {
         let span = expr.span();
         match &***expr {
-            Expr::BoolLit(_) | Expr::NumLit(..) | Expr::StrLit(_) | Expr::CharLit(_) => {
-                Info::default()
-            }
-            Expr::Var(_) => Info { url_source: true },
+            Expr::StrLit(literal) => Info {
+                constant: Some(unescape(literal.content)),
+                literal: true,
+                ..Info::default()
+            },
+            Expr::BoolLit(_) | Expr::NumLit(..) | Expr::CharLit(_) => Info::default(),
+            Expr::Var(name) => Info {
+                url_source: self.locals.get(*name).copied().unwrap_or(true),
+                var: Some((*name).to_string()),
+                ..Info::default()
+            },
             Expr::Path(path) => {
                 for component in path {
                     if let Some(generics) = &component.generics {
@@ -799,62 +992,115 @@ impl Walker<'_, '_> {
                 let names: Vec<&str> = path.iter().map(|component| *component.name).collect();
                 self.value_path(&names, span, false)
             }
-            Expr::Array(items) | Expr::Tuple(items) | Expr::Concat(items) => {
+            Expr::Concat(items) => {
+                let mut constant = Some(String::new());
+                let mut literal = false;
                 for item in items {
-                    self.expr(item);
+                    let info = self.expr(item);
+                    literal |= info.literal;
+                    constant = match (constant, info.constant) {
+                        (Some(mut text), Some(part)) => {
+                            text.push_str(&part);
+                            Some(text)
+                        }
+                        _ => None,
+                    };
                 }
-                Info::default()
+                Info {
+                    constant,
+                    literal,
+                    ..Info::default()
+                }
+            }
+            Expr::Array(items) | Expr::Tuple(items) => {
+                let mut literal = false;
+                for item in items {
+                    literal |= self.expr(item).literal;
+                }
+                Info {
+                    literal,
+                    ..Info::default()
+                }
             }
             Expr::ArrayRepeat(item, count) => {
-                self.expr(item);
-                self.expr(count);
-                Info::default()
+                let literal = self.expr(item).literal | self.expr(count).literal;
+                Info {
+                    literal,
+                    ..Info::default()
+                }
             }
             Expr::AssociatedItem(base, item) => {
                 let base = self.expr(base);
                 if let Some(generics) = &item.generics {
                     self.generics(generics);
                 }
-                base
+                Info {
+                    url_source: base.url_source,
+                    var: base.var,
+                    literal: base.literal,
+                    ..Info::default()
+                }
             }
             Expr::Index(base, index) => {
-                self.expr(base);
-                self.expr(index);
-                Info::default()
+                let literal = self.expr(base).literal | self.expr(index).literal;
+                Info {
+                    literal,
+                    ..Info::default()
+                }
             }
-            Expr::Filter(filter) => {
-                self.filter(filter, span);
-                Info::default()
-            }
+            Expr::Filter(filter) => self.filter(filter, span),
             Expr::As(inner, _) | Expr::Unary(_, inner) | Expr::Try(inner) => {
-                self.expr(inner);
-                Info::default()
+                let literal = self.expr(inner).literal;
+                Info {
+                    literal,
+                    ..Info::default()
+                }
             }
             Expr::Group(inner) => self.expr(inner),
             Expr::NamedArgument(_, value) => self.expr(value),
             Expr::BinOp(binary) => {
-                self.expr(&binary.lhs);
-                self.expr(&binary.rhs);
-                Info::default()
+                let literal = self.expr(&binary.lhs).literal | self.expr(&binary.rhs).literal;
+                Info {
+                    literal,
+                    ..Info::default()
+                }
             }
             Expr::Range(range) => {
+                let mut literal = false;
                 if let Some(lhs) = &range.lhs {
-                    self.expr(lhs);
+                    literal |= self.expr(lhs).literal;
                 }
                 if let Some(rhs) = &range.rhs {
-                    self.expr(rhs);
+                    literal |= self.expr(rhs).literal;
                 }
-                Info::default()
+                Info {
+                    literal,
+                    ..Info::default()
+                }
             }
             Expr::Call(call) => {
                 if let Some(generics) = &call.generics {
                     self.generics(generics);
                 }
-                for argument in &call.args {
-                    self.expr(argument);
-                }
+                let args: Vec<Info> = call
+                    .args
+                    .iter()
+                    .map(|argument| self.expr(argument))
+                    .collect();
+                let literal = args.iter().any(|arg| arg.literal);
+                // A URL helper's constant arguments must stay on the
+                // application's origin: `url::to` returns an absolute URL
+                // it is given unchanged.
+                let constants_stay = args.iter().all(|arg| {
+                    arg.constant
+                        .as_deref()
+                        .is_none_or(|constant| check_constant(constant).is_ok())
+                });
                 match &**call.path {
-                    Expr::Var("caller") => Info::default(),
+                    Expr::Var("caller") => Info {
+                        raw: true,
+                        ..Info::default()
+                    },
                     Expr::Var(name) => {
                         if !self.context.own_methods.contains(*name as &str) {
                             self.refuse(
@@ -865,7 +1111,10 @@ impl Walker<'_, '_> {
                                 ),
                             );
                         }
-                        Info::default()
+                        Info {
+                            literal,
+                            ..Info::default()
+                        }
                     }
                     Expr::Path(path) => {
                         for component in path {
@@ -875,7 +1124,12 @@ impl Walker<'_, '_> {
                         }
                         let names: Vec<&str> =
                             path.iter().map(|component| *component.name).collect();
-                        self.value_path(&names, span, true)
+                        let info = self.value_path(&names, span, true);
+                        Info {
+                            url_source: info.url_source && constants_stay,
+                            literal,
+                            ..Info::default()
+                        }
                     }
                     Expr::AssociatedItem(receiver, method) => {
                         self.expr(receiver);
@@ -891,7 +1145,10 @@ impl Walker<'_, '_> {
                                 format!("`.{}()` is not a method a view may call", *method.name),
                             );
                         }
-                        Info::default()
+                        Info {
+                            literal,
+                            ..Info::default()
+                        }
                     }
                     _ => {
                         self.refuse(
@@ -916,23 +1173,32 @@ impl Walker<'_, '_> {
                 Info::default()
             }
             Expr::Struct(structure) => {
-                self.expr(&structure.path);
+                let mut literal = self.expr(&structure.path).literal;
                 for field in &structure.fields {
                     if let Some(value) = &field.value {
-                        self.expr(value);
+                        literal |= self.expr(value).literal;
                     }
                 }
                 if let Some(base) = &structure.base {
-                    self.expr(base);
+                    literal |= self.expr(base).literal;
                 }
-                Info::default()
+                Info {
+                    literal,
+                    ..Info::default()
+                }
             }
             Expr::LetCond(cond) => {
                 if let Some(target) = &cond.target {
                     self.target(target);
                 }
-                self.expr(&cond.expr);
-                Info::default()
+                let info = self.expr(&cond.expr);
+                if let Some(target) = &cond.target {
+                    self.bind_target(target, info.url_source);
+                }
+                Info {
+                    literal: info.literal,
+                    ..Info::default()
+                }
             }
             Expr::IsDefined(_)
             | Expr::IsNotDefined(_)
@@ -940,4 +1206,75 @@ impl Walker<'_, '_> {
             | Expr::ArgumentPlaceholder => Info::default(),
         }
     }
+}
+
+/// The names a template target binds.
+fn target_names(target: &Target<'_>, out: &mut Vec<String>) {
+    match target {
+        Target::Name(name) => out.push((**name).to_string()),
+        Target::Tuple(tuple) => {
+            for part in &tuple.1 {
+                target_names(part, out);
+            }
+        }
+        Target::Struct(structure) => {
+            for field in &structure.1 {
+                target_names(&field.dest, out);
+            }
+        }
+        Target::Array(items) | Target::OrChain(items) => {
+            for item in items.iter() {
+                target_names(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A Rust string literal's content with its escapes resolved, as the
+/// compiled template will hold it.
+fn unescape(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut chars = content.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('0') => out.push('\0'),
+            Some('x') => {
+                let hex: String = chars.by_ref().take(2).collect();
+                if let Ok(value) = u8::from_str_radix(&hex, 16) {
+                    out.push(char::from(value));
+                }
+            }
+            Some('u') => {
+                let mut hex = String::new();
+                if chars.peek() == Some(&'{') {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if c == '}' {
+                            break;
+                        }
+                        hex.push(c);
+                    }
+                }
+                if let Some(c) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    out.push(c);
+                }
+            }
+            Some('\n') => {
+                while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                    chars.next();
+                }
+            }
+            Some(other) => out.push(other),
+            None => {}
+        }
+    }
+    out
 }

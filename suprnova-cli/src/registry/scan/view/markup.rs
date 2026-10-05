@@ -79,6 +79,9 @@ pub(crate) struct Sink {
     pub file: String,
     /// The refusals so far.
     pub findings: Vec<Finding>,
+    /// The template variables that supplied a URL attribute, so a macro
+    /// parameter used as a URL is checked at each call site.
+    pub url_vars: Vec<String>,
 }
 
 impl Sink {
@@ -101,6 +104,8 @@ pub(crate) struct Dynamic {
     /// Whether the value may stand as a URL: a bare state read or a call
     /// to a capability-free allowlist helper.
     pub url_source: bool,
+    /// The template variable the value reads, when it reads one.
+    pub var: Option<String>,
     /// The line of the expression.
     pub line: u32,
 }
@@ -656,6 +661,9 @@ fn check_url_attribute(tag: &Tag, attribute: &Attribute, sink: &mut Sink) {
             Piece::Text(_) => {}
             Piece::Dynamic(dynamic) => {
                 seen_dynamic = true;
+                if let Some(var) = &dynamic.var {
+                    sink.url_vars.push(var.clone());
+                }
                 if !dynamic.url_source {
                     refuse(
                         sink,

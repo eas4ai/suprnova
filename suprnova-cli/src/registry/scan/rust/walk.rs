@@ -520,8 +520,31 @@ impl<'a> Walker<'a> {
             let Some(entry) = self.module_at(&module) else {
                 return full;
             };
-            if entry.defs.contains_key(&name) {
-                return full;
+            if let Some(def) = entry.defs.get(&name) {
+                // `Alias::item` names an item of the aliased type: follow
+                // the alias, so `type H = TrustedHtml; H::framework_static`
+                // is classified as the constructor it is.
+                let target = match def {
+                    Def::Alias(ty) if full.len() > module.len() + 1 => match &**ty {
+                        syn::Type::Path(type_path) if type_path.qself.is_none() => {
+                            let decl = UseDecl {
+                                segments: segments(&type_path.path),
+                                leading_colon: type_path.path.leading_colon.is_some(),
+                                line: None,
+                            };
+                            self.resolve_use(&module, &decl, 0).ok()
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let Some(target) = target else {
+                    return full;
+                };
+                let rest: Path = full[module.len() + 1..].to_vec();
+                full = target;
+                full.extend(rest);
+                continue;
             }
             let replacement = if let Some(decl) = entry.uses.get(&name) {
                 self.resolve_use(&module, decl, 0).ok()
@@ -2394,7 +2417,10 @@ impl<'a> Walker<'a> {
             }
             Ty::Own(path) => self.own_method(path, name, args, turbofish, span),
             Ty::Api(path) if path.starts_with("dependency:") => Ty::Unknown,
-            Ty::Api(path) => self.api_method(path, name, span, expected),
+            Ty::Api(path) => {
+                let expected = turbofish.or(expected);
+                self.api_method(path, name, span, expected)
+            }
             Ty::Bounded(bounds) => {
                 self.check_bounded_member(bounds, name, span);
                 Ty::Unknown

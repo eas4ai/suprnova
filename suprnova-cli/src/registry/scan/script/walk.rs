@@ -1094,7 +1094,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                 }
             }
             Expression::TaggedTemplateExpression(tagged) => {
-                if !self.resolves_callee(&tagged.tag, 0) {
+                if !self.callback_safe(&tagged.tag, 0) {
                     self.refuse(
                         "script-call",
                         tagged.span,
@@ -1485,6 +1485,13 @@ impl<'a, 'c> Walker<'a, 'c> {
                 format!("assigning `{name}` on the global object replaces a browser API"),
             );
         }
+        if IMPLICITLY_CALLED.contains(&name.as_str()) && !self.callback_safe(value, 0) {
+            self.refuse(
+                "script-call",
+                span,
+                format!("`{name}` is called by the browser itself, so its value must be a function the script defines"),
+            );
+        }
         if prototype_chain(member.object()) {
             self.refuse(
                 "script-prototype",
@@ -1579,7 +1586,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                 );
                 return;
             }
-            if let Some(rule) = self.callee_rule(target) {
+            for rule in self.callee_rules(target) {
                 match name {
                     "call" => {
                         let shifted: Vec<&'a Argument<'a>> =
@@ -1603,27 +1610,72 @@ impl<'a, 'c> Walker<'a, 'c> {
             );
             return;
         }
-        if let Some(rule) = self.callee_rule(callee) {
-            let arguments: Vec<&'a Argument<'a>> = call.arguments.iter().collect();
+        let arguments: Vec<&'a Argument<'a>> = call.arguments.iter().collect();
+        for rule in self.callee_rules(callee) {
             self.apply_rule(rule, callee, &arguments, call.span);
         }
     }
 
     /// The argument rule of an admitted callee, when it has one.
     fn callee_rule(&self, callee: &Expression<'a>) -> Option<Rule> {
+        self.callee_rules(callee).into_iter().next()
+    }
+
+    /// The argument rules of every admitted function a callee may evaluate
+    /// to: a sequence's last expression, both sides of a conditional or a
+    /// logical expression, a bound function's target.
+    fn callee_rules(&self, callee: &Expression<'a>) -> Vec<Rule> {
         match unparen(callee) {
             Expression::Identifier(reference) if self.lookup(reference.name.as_str()).is_none() => {
-                rule_for(reference.name.as_str())
+                rule_for(reference.name.as_str()).into_iter().collect()
             }
-            other => {
-                let member = other.as_member_expression()?;
-                let name = member.static_property_name()?;
-                if self.script_method(member, name) {
-                    return None;
-                }
-                rule_for(name)
+            Expression::SequenceExpression(sequence) => sequence
+                .expressions
+                .last()
+                .map(|last| self.callee_rules(last))
+                .unwrap_or_default(),
+            Expression::ConditionalExpression(conditional) => {
+                let mut rules = self.callee_rules(&conditional.consequent);
+                rules.extend(self.callee_rules(&conditional.alternate));
+                rules
             }
+            Expression::LogicalExpression(logical) => {
+                let mut rules = self.callee_rules(&logical.left);
+                rules.extend(self.callee_rules(&logical.right));
+                rules
+            }
+            Expression::ChainExpression(chain) => match &chain.expression {
+                ChainElement::CallExpression(call) => self.bound_rules(call),
+                other => other
+                    .as_member_expression()
+                    .map(|member| self.member_rules(member))
+                    .unwrap_or_default(),
+            },
+            Expression::CallExpression(call) => self.bound_rules(call),
+            other => other
+                .as_member_expression()
+                .map(|member| self.member_rules(member))
+                .unwrap_or_default(),
         }
+    }
+
+    fn bound_rules(&self, call: &CallExpression<'a>) -> Vec<Rule> {
+        match unparen(&call.callee).as_member_expression() {
+            Some(member) if member.static_property_name() == Some("bind") => {
+                self.callee_rules(member.object())
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn member_rules(&self, member: &MemberExpression<'a>) -> Vec<Rule> {
+        let Some(name) = member.static_property_name() else {
+            return Vec::new();
+        };
+        if self.script_method(member, name) {
+            return Vec::new();
+        }
+        rule_for(name).into_iter().collect()
     }
 
     /// Whether a member call names a method the script defines on an object
@@ -1633,9 +1685,10 @@ impl<'a, 'c> Walker<'a, 'c> {
             return false;
         }
         match unparen(member.object()) {
-            Expression::ThisExpression(_) | Expression::Super(_) => {
-                self.facts.class_methods.contains(name)
-            }
+            // `super.name()` calls the parent class, a browser API for an
+            // element, so it keeps the API's rules.
+            Expression::Super(_) => false,
+            Expression::ThisExpression(_) => self.facts.class_methods.contains(name),
             Expression::Identifier(reference) => {
                 let Some(id) = self.lookup(reference.name.as_str()) else {
                     return false;
@@ -1998,7 +2051,10 @@ impl<'a, 'c> Walker<'a, 'c> {
                     let lower = attribute.to_ascii_lowercase();
                     let local = lower.rsplit(':').next().unwrap_or(&lower).to_string();
                     if local.starts_with("on")
-                        || matches!(local.as_str(), "srcdoc" | "style")
+                        || matches!(
+                            local.as_str(),
+                            "srcdoc" | "style" | "http-equiv" | "content"
+                        )
                         || lower == "xml:base"
                     {
                         self.refuse(
@@ -2131,6 +2187,11 @@ impl<'a, 'c> Walker<'a, 'c> {
                     );
                 }
             }
+            Rule::Keyframes => {
+                if let Some(keyframes) = Self::argument_expression(arguments, 0) {
+                    self.keyframes(keyframes, span);
+                }
+            }
             Rule::StyleProperty => {
                 let Some(name) = Self::argument_expression(arguments, 0) else {
                     return;
@@ -2152,6 +2213,79 @@ impl<'a, 'c> Walker<'a, 'c> {
                         name.span(),
                         "`setProperty` with a property name that is not a constant".to_string(),
                     ),
+                }
+            }
+        }
+    }
+
+    /// Checks the keyframes `animate` is given: a literal object, or a
+    /// literal array of them, whose properties that name a resource hold
+    /// constants the CSS scan admits.
+    fn keyframes(&mut self, keyframes: &'a Expression<'a>, span: Span) {
+        let frames: Vec<&'a ObjectExpression<'a>> = match unparen(keyframes) {
+            Expression::ObjectExpression(object) => vec![&**object],
+            Expression::ArrayExpression(array) => {
+                let mut frames = Vec::new();
+                for element in &array.elements {
+                    match element.as_expression().map(unparen) {
+                        Some(Expression::ObjectExpression(object)) => frames.push(&**object),
+                        _ => {
+                            self.refuse(
+                                "script-css",
+                                span,
+                                "`animate` keyframes that are not literal objects".to_string(),
+                            );
+                            return;
+                        }
+                    }
+                }
+                frames
+            }
+            _ => {
+                self.refuse(
+                    "script-css",
+                    span,
+                    "`animate` keyframes that are not literal objects".to_string(),
+                );
+                return;
+            }
+        };
+        for frame in frames {
+            for property in &frame.properties {
+                let ObjectPropertyKind::ObjectProperty(property) = property else {
+                    self.refuse(
+                        "script-css",
+                        span,
+                        "a spread in `animate` keyframes".to_string(),
+                    );
+                    continue;
+                };
+                let Some(name) = property.key.static_name().filter(|_| !property.computed) else {
+                    self.refuse(
+                        "script-css",
+                        property.span,
+                        "a computed property in `animate` keyframes".to_string(),
+                    );
+                    continue;
+                };
+                let css = kebab(&name);
+                if !URL_CSS_PROPERTIES.contains(&css.as_str()) && !css.starts_with("--") {
+                    continue;
+                }
+                match unparen(&property.value) {
+                    Expression::ArrayExpression(values) => {
+                        for value in &values.elements {
+                            match value.as_expression() {
+                                Some(value) => self.css_value(value, property.span, Some(&css)),
+                                None => self.refuse(
+                                    "script-css",
+                                    property.span,
+                                    "a keyframe value the scan cannot read".to_string(),
+                                ),
+                            }
+                        }
+                    }
+                    value => self.css_value(value, property.span, Some(&css)),
                 }
             }
         }

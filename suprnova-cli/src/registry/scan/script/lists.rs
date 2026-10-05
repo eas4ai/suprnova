@@ -450,6 +450,8 @@ pub const READ_ONLY_PROPERTIES: &[&str] = &[
     "cookie",
     "baseVal",
     "animVal",
+    "content",
+    "httpEquiv",
     "text",
 ];
 
@@ -586,6 +588,9 @@ pub enum Rule {
     Define,
     /// `style.setProperty(name, value)`.
     StyleProperty,
+    /// `element.animate(keyframes)`: a keyframe may set a CSS property that
+    /// names a resource.
+    Keyframes,
 }
 
 /// The argument rules, by method or global function name.
@@ -629,6 +634,7 @@ pub const ARGUMENT_RULES: &[(&str, Rule)] = &[
     ("replace", Rule::Navigate),
     ("define", Rule::Define),
     ("setProperty", Rule::StyleProperty),
+    ("animate", Rule::Keyframes),
 ];
 
 /// The argument rules of constructors, by name.

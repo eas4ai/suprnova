@@ -78,6 +78,33 @@ pub(crate) fn check_constant(value: &str) -> Result<(), UrlRefusal> {
     }
 }
 
+/// Whether a constant names a resource on another origin or runs script:
+/// `javascript:`, `data:`, `vbscript:`, a network path, or a scheme that
+/// fetches (`http`, `https`, `ws`, `wss`, `ftp`, `file`, `blob`). A string
+/// passed where the scan cannot tell whether it becomes a URL is refused
+/// only when it is one of these, so a label such as `Note: ...` still
+/// passes.
+pub(crate) fn names_another_origin(value: &str) -> bool {
+    match check_constant(value) {
+        Ok(()) => false,
+        Err(UrlRefusal::Javascript | UrlRefusal::Data | UrlRefusal::NetworkPath) => true,
+        Err(UrlRefusal::Scheme) => matches!(
+            scheme(&normalized(value)).as_deref(),
+            Some(
+                "http"
+                    | "https"
+                    | "ws"
+                    | "wss"
+                    | "ftp"
+                    | "file"
+                    | "blob"
+                    | "vbscript"
+                    | "filesystem"
+            )
+        ),
+    }
+}
+
 /// Whether a constant prefix already fixes a URL to the application's
 /// origin, whatever follows it: a path from the root, a relative path whose
 /// first segment ends before any colon, a query or a fragment.
