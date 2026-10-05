@@ -71,8 +71,9 @@ the new address named. Only public repositories are supported.
 
 Before it writes anything, `live:add` fetches, verifies and scans the whole
 plan, dependencies included, and prints it. This is the plan for a first
-install of the example component of a library `live:registry new acme`
-scaffolded and published at `github.com/acme/acme-ui`:
+install of the example component of a library that
+`live:registry new acme --source github.com/acme/acme-ui` scaffolded and that
+was published at that address:
 
 ```text
 framework: suprnova 3.3.0

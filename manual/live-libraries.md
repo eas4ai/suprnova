@@ -20,10 +20,15 @@ installs from your library.
 preview application, and a signing key:
 
 ```bash
-suprnova live:registry new acme
+suprnova live:registry new acme --source github.com/acme/acme-ui
 cd acme
 suprnova live:registry check
 ```
+
+`--source` is the address the library will be published at, which
+`library.json` records as its `source`; see [library.json](#libraryjson).
+Without `--source`, `new` writes an empty `source`, and `check`, `sign` and
+`rotate-key` refuse until you set it in `library.json`.
 
 The argument is the library's namespace. It prefixes everything the library
 installs: views and assets under `templates/acme-ui/`, Rust under
@@ -38,7 +43,8 @@ now; [The private key](#the-private-key) says why.
 
 ## The library tree
 
-`live:registry new acme` writes this tree into `./acme`:
+`live:registry new acme --source github.com/acme/acme-ui` writes this tree
+into `./acme`:
 
 ```text
 acme/
@@ -61,8 +67,7 @@ where it sits. The library sits at the repository's root: `live:add` reads
 
 ### library.json
 
-`library.json` is one JSON object. This is the one `new` writes, with
-`source` set:
+`library.json` is one JSON object. This is the one `new` wrote above:
 
 ```json
 {
@@ -81,15 +86,12 @@ It holds the keys in this table and no others:
 | Key | Holds |
 |---|---|
 | `namespace` | The namespace every component installs under. |
-| `source` | The library's address where you publish it: `github.com/<owner>/<repository>`, `gitlab.com/<owner>/<repository>` or `codeberg.org/<owner>/<repository>`, all lowercase, or the `https://` URL of the tree. `live:add` refuses a library whose `source` is not the address it fetched it from, so a fork that copies your files and signatures cannot install as yours. |
+| `source` | The library's address where you publish it: `github.com/<owner>/<repository>`, `gitlab.com/<owner>/<repository>` or `codeberg.org/<owner>/<repository>`, all lowercase, or the `https://` URL of the tree. `new --source` writes it; without `--source` it is empty, and `check`, `sign` and `rotate-key` refuse until you set it. `live:add` refuses a library whose `source` is not the address it fetched it from, so a fork that copies your files and signatures cannot install as yours. |
 | `version` | The release, a semver version. It must equal the release tag: version `0.1.0` is the tag `v0.1.0`. |
 | `framework` | A semver requirement on the `suprnova` version of the application. `live:add` refuses an application its requirement does not admit. `new` writes `^` and the version of the CLI that scaffolded the library. |
 | `publicKey` | The library's signing key, `ed25519:` and the base64 of its 32 bytes. |
 | `previousKeys` | Optional. A statement from each former key that hands the library to `publicKey`; see [Change the signing key](#change-the-signing-key). |
 | `title`, `description` | Optional text for people. |
-
-`new` sets `source` to `github.com/<namespace>/<namespace>`. Set it to the
-repository you publish at before your first release, then sign again.
 
 ### manifest.json
 
@@ -423,11 +425,13 @@ private key into your configuration directory, named by its fingerprint, as
 the library to the new key. The former keys are the key you are leaving and
 every key the library used before it, and each one signs its own statement:
 `rotate-key` reads each earlier key from its file in your configuration
-directory. Then it signs every component again with the new key, all or
+directory. It also raises the patch part of `version`, from `1.0.0` to
+`1.0.1`: a rotation changes the signed content of every component, and
+`live:add` refuses content that changed at a version an application
+recorded. Then it signs every component again with the new key, all or
 nothing, as `sign` does. It prints both fingerprints and the path of the new
-key file. Back up the new key file before you publish. To release under the
-new key, raise `version` and sign again, then commit and tag as for any
-release.
+key file. Back up the new key file, then commit the result and tag the new
+version as for any release.
 
 **Keep every former key file.** An application installs a release under a
 new key only when the key it pinned vouches for that key. A library on its
@@ -453,7 +457,7 @@ After a change, `library.json` looks like this:
 {
   "namespace": "acme",
   "source": "github.com/acme/acme-ui",
-  "version": "1.1.0",
+  "version": "1.0.1",
   "framework": "^3.3.0",
   "publicKey": "ed25519:<the new key>",
   "previousKeys": [
