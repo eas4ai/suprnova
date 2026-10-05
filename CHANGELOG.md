@@ -464,10 +464,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   either one recovers an account that already has both. A custom host
   attaches `FrameworkTotpEnrollment` to its `TwoFactorService` through
   `with_other_second_factor`. This landed after the `v3.1.0` tag.
-- **Live field and argument names must be ASCII and at most 128 bytes**,
-  and a view-visible field named `component` is a compile error. Such
-  names used to panic at registration or fail later. This landed after the
-  `v3.1.0` tag.
+- **Live field and argument names must be ASCII and at most 128 bytes.**
+  Such names used to panic at registration or fail later. A view-visible
+  field may be named `component`; the view then reaches the component as
+  `component_` (or the first of `component__`, `component___` that no field
+  takes). A field or argument may be named like `suprnova_live_count`. This
+  landed after the `v3.1.0` tag.
 - **Cron steps count from the first value.** `*/N` in the day-of-month and
   month fields counts from 1, as cron and Laravel do, so `*/2` means odd
   days and schedules using it shift; the timezone display now agrees with
@@ -743,16 +745,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   million samples. This landed after the `v3.1.0` tag.
 
 - **Guard names, verification links and the default auth schema.** A guard
-  name other than the default session or token guard may not contain `:`,
-  because a non-default guard's principal is now `<guard>:<id>`. A token
+  name other than the default session or token guard may not contain `:`
+  or be empty, because a non-default guard's principal is now
+  `<guard>:<id>`, and a default-guard id that contains `:` is now the
+  principal `:<id>` in Live gates, uploads, subscriptions and memberships,
+  Pusher's `user_id` and the RenderCache key, so `admin:9` on the default
+  guard is never guard `admin`'s user 9. Ids without `:` are unchanged. A token
   guard other than the default no longer copies its user into the default
   `Auth` view, so `Auth::has_user()` stays false for it. Email verification
   links issued before this change are refused and must be sent again. The
   default auth schema enforces one account per email with a unique index,
   so a migration over an `app_users` table that already holds duplicate
   emails stops with an error until they are merged. New, with defaults:
-  `TokenGuard::named` and `UserProvider::verification_email`. This landed
-  after the `v3.1.0` tag.
+  `TokenGuard::named`, `UserProvider::verification_email`,
+  `UserProvider::mark_email_verified_for` and
+  `TwoFactorStore::withdraw_enrollment`. This landed after the `v3.1.0`
+  tag.
 
 ### Fixed
 
@@ -1044,6 +1052,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   is freed when its last hub drops instead of staying registered until the
   process exits. The `ImageConfig` docs give the real 1 GiB default for
   `IMAGE_MAX_ALLOC_BYTES`. This landed after the `v3.1.0` tag.
+- **Rate-limit identities, RBAC races, email verification and second
+  factors.** A request that names more than one identity in its query or
+  body is also refused by, and counted against, each identity's own
+  bucket. Creating a role or permission and granting one succeed when two
+  requests make the same one at once, on every engine. Email verification
+  stamps only the address the link was mailed to, even if the address
+  changes while `verify` runs. On Postgres, a user id above `i64::MAX`
+  binds by the column type of the table the lookup actually reads. A
+  framework TOTP enrollment and a Magnetar enrollment that race each other
+  leave the account with one second factor; in a tight race both answer
+  409 and the user enrolls again. This landed after the `v3.1.0` tag.
 - **Sessions and remember-me tokens restore on MySQL and MariaDB.** A
   scaffolded application's session, remember-me and auth-flow token time
   columns are `TIMESTAMP` there, and the framework read them as a type the
