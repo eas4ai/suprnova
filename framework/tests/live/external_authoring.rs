@@ -8,6 +8,16 @@ fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/live-authoring")
 }
 
+/// The fixture is its own workspace with a gitignored `Cargo.lock`. One
+/// left by an older checkout can pin a dependency the framework no longer
+/// allows, and Cargo refuses to resolve rather than move it, so the
+/// fixture starts from the workspace's own lock and resolves the versions
+/// the framework is built and tested with.
+fn seed_lockfile(fixture: &Path) {
+    let workspace_lock = Path::new(env!("CARGO_MANIFEST_DIR")).join("../Cargo.lock");
+    fs::copy(workspace_lock, fixture.join("Cargo.lock")).expect("seed the fixture lockfile");
+}
+
 fn cargo_check(target: &str, target_dir: &Path) -> Output {
     Command::new(env!("CARGO"))
         .args(["check", "--quiet", target])
@@ -56,6 +66,7 @@ fn external_view_authoring_is_downstream_only_and_fail_closed() {
         assert!(!source.contains(forbidden), "source named {forbidden}");
     }
 
+    seed_lockfile(&fixture);
     let target = fresh_target();
     let output = cargo_check("--lib", target.path());
     assert!(
