@@ -113,15 +113,23 @@ pub(crate) fn lock_ttl(window: Duration) -> Duration {
 }
 
 /// The companion key holding the unix timestamp of the burst's first dispatch.
+///
+/// A prefix that no owner key starts with, as for [`place_key`]. A debounce
+/// id is free text, so the stamp's old key, `{key}:first_dispatched_at`, was
+/// the owner key of the id `{id}:first_dispatched_at`: the stamp's number and
+/// that id's token shared one key, and whichever came second failed the
+/// other id's dispatches. A stamp written under the old key is no longer
+/// read, so a burst that spans the upgrade measures its maximum wait from
+/// its first dispatch after it.
 pub(crate) fn first_dispatched_key(key: &str) -> String {
-    format!("{key}:first_dispatched_at")
+    format!("queue-debounce-first-dispatched:{key}")
 }
 
 /// The companion key counting the places handed out for `key`.
 ///
-/// A prefix, where the stamp above takes a suffix: a debounce id is free
-/// text, so `{key}:place` could be another id's owner key, and an owner token
-/// written over the counter would fail every later increment for that id.
+/// A prefix that no owner key starts with: a debounce id is free text, so
+/// `{key}:place` could be another id's owner key, and an owner token written
+/// over the counter would fail every later increment for that id.
 pub(crate) fn place_key(key: &str) -> String {
     format!("queue-debounce-place:{key}")
 }
@@ -273,8 +281,16 @@ async fn max_wait_exceeded(
 }
 
 /// The token currently owning `key`, or `None` when the window has lapsed.
+///
+/// A value that is not a token is no owner either. A stamp written under
+/// the old stamp key of another id can sit here until it expires (see
+/// [`first_dispatched_key`]), and reading it as an error would fail every
+/// dispatch of this id until then. The first claim overwrites it.
 pub(crate) async fn current_owner(key: &str) -> Result<Option<String>, FrameworkError> {
-    Cache::get::<String>(key).await
+    Ok(match Cache::get::<serde_json::Value>(key).await? {
+        Some(serde_json::Value::String(token)) => Some(token),
+        _ => None,
+    })
 }
 
 /// Start a fresh max-wait window for `key`, leaving the owner token alone.
@@ -332,10 +348,25 @@ mod tests {
     }
 
     #[test]
-    fn the_timestamp_key_hangs_off_the_owner_key() {
+    fn no_owner_key_is_a_companion_key() {
+        let owner = "queue-debounce:SyncOrder:42";
         assert_eq!(
-            first_dispatched_key("queue-debounce:SyncOrder:42"),
-            "queue-debounce:SyncOrder:42:first_dispatched_at"
+            first_dispatched_key(owner),
+            "queue-debounce-first-dispatched:queue-debounce:SyncOrder:42"
+        );
+        assert_eq!(
+            place_key(owner),
+            "queue-debounce-place:queue-debounce:SyncOrder:42"
+        );
+        // Every owner key starts `queue-debounce:`, which neither companion
+        // prefix does, whatever the id holds.
+        for companion in [first_dispatched_key(owner), place_key(owner)] {
+            assert!(!companion.starts_with("queue-debounce:"), "{companion}");
+        }
+        assert_ne!(
+            first_dispatched_key(owner),
+            place_key(owner),
+            "the two companions of one key differ"
         );
     }
 }

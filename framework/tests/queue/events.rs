@@ -283,3 +283,37 @@ async fn job_attempted_fires_when_middleware_deletes_the_job() {
         "queue_events::DeletedByMiddlewareJob"
     );
 }
+
+/// Laravel fires JobProcessed whenever the job's pipeline returns without an
+/// exception, a deletion by middleware included. The worker fired it only
+/// for a job its handler completed.
+#[tokio::test]
+#[serial]
+async fn job_processed_fires_when_middleware_deletes_the_job() {
+    register_job::<DeletedByMiddlewareJob>();
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let _events = EventFacade::fake();
+    Queue::push(DeletedByMiddlewareJob).await.unwrap();
+
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(30),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(1),
+        queues: Vec::new(),
+    };
+    run_worker(driver.clone(), cfg, CancellationToken::new()).await;
+
+    let processed = dispatched::<JobProcessed>(|_| true);
+    assert_eq!(
+        processed.len(),
+        1,
+        "a job middleware deleted is processed, as in Laravel"
+    );
+    assert_eq!(
+        processed[0].job.job_name,
+        "queue_events::DeletedByMiddlewareJob"
+    );
+}
