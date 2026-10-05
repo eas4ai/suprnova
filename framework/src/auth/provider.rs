@@ -193,6 +193,29 @@ pub trait UserProvider: Send + Sync + 'static {
         ))
     }
 
+    /// Mark a user's email verified only while `email` is still its
+    /// verification address, and report whether it did.
+    ///
+    /// [`crate::auth_flows::EmailVerification::verify`] reads the address
+    /// through [`verification_email`](Self::verification_email), checks that
+    /// the link was mailed to it, and then calls this. The address can
+    /// change in between, and a write that ignored it would verify a mailbox
+    /// the link never reached. So the check and the write belong in one
+    /// storage operation: `EloquentUserProvider` rereads the user under a
+    /// row lock inside a transaction.
+    ///
+    /// Default: compares [`verification_email`](Self::verification_email)
+    /// with `email` and calls [`mark_email_verified`](Self::mark_email_verified).
+    /// Those are two operations, so override this when the storage can make
+    /// them one.
+    async fn mark_email_verified_for(&self, id: &str, email: &str) -> Result<bool, FrameworkError> {
+        if self.verification_email(id).await?.as_deref() != Some(email) {
+            return Ok(false);
+        }
+        self.mark_email_verified(id).await?;
+        Ok(true)
+    }
+
     /// Set a user's password hash. Default: unsupported.
     async fn set_password(&self, _id: &str, _hashed: &str) -> Result<(), FrameworkError> {
         Err(FrameworkError::internal(

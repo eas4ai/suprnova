@@ -386,6 +386,83 @@ async fn a_link_sent_to_one_mailbox_never_verifies_another() {
     assert!(reload_user_one().await.is_email_verified());
 }
 
+/// IDENTITY-023: the address can change after `verify` read the mailbox and
+/// before it stamps the verification. A trigger on the token's consumption
+/// lands that change exactly there. The link proved `grace@x.com` only, so
+/// the account, now at `unproven@x.com`, must stay unverified.
+///
+/// A user of its own, because `send_link` allows three mails an hour per
+/// address and the tests above spend ada's.
+#[tokio::test]
+#[serial]
+async fn an_address_changed_while_verify_runs_is_never_marked_verified() {
+    use sea_orm::ConnectionTrait;
+
+    let _env = crate::env_lock::lock_env_async().await;
+    let h = setup().await;
+    let hash = suprnova::hash("secret").expect("hash");
+    h._db
+        .conn()
+        .execute_unprepared(&format!(
+            "INSERT INTO users (id, email, password) VALUES (2, 'grace@x.com', '{hash}')"
+        ))
+        .await
+        .expect("seed grace");
+    let reload_grace = || async {
+        let user = EloquentUserProvider::<TestUser>::new()
+            .retrieve_by_id("2")
+            .await
+            .expect("by id")
+            .expect("grace exists");
+        user.as_any()
+            .downcast_ref::<TestUser>()
+            .expect("TestUser")
+            .clone()
+    };
+
+    let fake = suprnova::mail::Mail::fake();
+    EmailVerification::send_link(&reload_grace().await, "https://app.test/verify")
+        .await
+        .expect("send_link");
+    let captured = fake.captured();
+    let text = captured[0].text.as_deref().expect("text body");
+    let link = text
+        .lines()
+        .find(|l| l.contains("token="))
+        .expect("token link");
+    let token = link.rsplit("token=").next().expect("token").trim();
+
+    h._db
+        .conn()
+        .execute_unprepared(
+            "CREATE TRIGGER address_changes_mid_verify AFTER UPDATE ON auth_flow_tokens \
+             BEGIN UPDATE users SET email = 'unproven@x.com' WHERE id = 2; END",
+        )
+        .await
+        .expect("create the trigger");
+    let slot = suprnova::session::new_session_slot_for_test();
+    let outcome = suprnova::session::session_scope_for_test(slot, async {
+        suprnova::session::set_auth_user("2");
+        EmailVerification::verify(token).await
+    })
+    .await;
+
+    let grace = reload_grace().await;
+    assert_eq!(
+        grace.email, "unproven@x.com",
+        "the trigger changed the address while verify ran"
+    );
+    assert!(
+        !grace.is_email_verified(),
+        "a link sent to grace@x.com must not verify unproven@x.com, however the change \
+         interleaves - verify returned {outcome:?}"
+    );
+    assert!(
+        outcome.is_err(),
+        "verify must report that nothing was verified"
+    );
+}
+
 /// Verify `token` behind `AuthMiddleware::new().for_guard("admin")`, with
 /// `web` signed in on the default guard and `admin` on the `admin` guard.
 async fn verify_behind_admin_guard(

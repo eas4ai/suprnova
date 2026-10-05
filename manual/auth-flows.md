@@ -365,11 +365,17 @@ digest of that address, and `verify` compares it with the account's current
 verification address, which the provider's `verification_email` reports.
 When the account changed its address after the link was sent, `verify`
 returns the same invalid-token response, leaves the token unused, and marks
-nothing verified. A link sent before an upgrade to this behavior carries no
+nothing verified. The provider stamps the verification through
+`mark_email_verified_for`, which writes only while the address is still the
+one the link was sent to, so a change that lands while `verify` runs is
+refused too; the token is spent by then, and the user asks for a new link. A link sent before an upgrade to this behavior carries no
 address and is refused the same way, so the user asks for a new one.
-`EloquentUserProvider` reports the `MustVerifyEmail` address. A custom
-provider reports the email of `flow_user_by_id` unless it implements
-`verification_email`.
+`EloquentUserProvider` reports the `MustVerifyEmail` address, and rereads it
+under a row lock in the same transaction as the stamp. A custom provider
+reports the email of `flow_user_by_id` unless it implements
+`verification_email`. Its `mark_email_verified_for` compares that address
+and then calls `mark_email_verified`, two separate steps; implement it to
+make them one when your storage can.
 
 ### Verified-only routes: `EnsureEmailVerifiedMiddleware`
 
