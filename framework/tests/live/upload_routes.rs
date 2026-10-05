@@ -520,7 +520,10 @@ fn semantic_router_and_runtime_with(
     clock: Option<Arc<AdjustableTestClock>>,
 ) -> (Arc<Router>, suprnova::live::LiveRuntime) {
     App::init();
-    App::singleton(upload_host);
+    // The host goes in the caller's test container, never the process
+    // container: a runtime assembled later in the process, by a test that
+    // binds no host, would take this one's finalizer and providers.
+    TestContainer::singleton(upload_host);
     App::singleton(
         LiveRegistry::builder()
             .register::<UploadRouteComponent>()
@@ -2015,9 +2018,9 @@ async fn large_chunks_and_exact_retries_preserve_revision_and_provider_order() {
     ensure_crypt();
     let _container = TestContainer::fake();
     // A configured 256 KiB chunk (`LIVE_UPLOAD_CHUNK_BYTES`), so one byte over
-    // it is refused before the body is read.
-    App::init();
-    App::singleton(
+    // it is refused before the body is read. Bound in this test's container,
+    // never the process container, so later tests keep the default.
+    TestContainer::singleton(
         LiveConfig::builder()
             .upload_chunk_bytes(256 * 1024)
             .build()
@@ -2273,9 +2276,9 @@ async fn aggregate_declared_bytes_are_reserved_per_scope_before_provider_work() 
     ensure_crypt();
     let _container = TestContainer::fake();
     // Configured pending bytes (`LIVE_UPLOAD_MAX_PENDING_BYTES`) of 256 MiB:
-    // four 64 MiB files fill them.
-    App::init();
-    App::singleton(
+    // four 64 MiB files fill them. Bound in this test's container, never the
+    // process container, so later tests keep the default.
+    TestContainer::singleton(
         LiveConfig::builder()
             .upload_max_file_bytes(64 * 1024 * 1024)
             .upload_max_pending_bytes(256 * 1024 * 1024)
@@ -2758,8 +2761,9 @@ async fn upload_status(
 async fn finalized_uploads_release_their_slots_when_finalization_commits() {
     ensure_crypt();
     let _container = TestContainer::fake();
-    App::init();
-    App::singleton(
+    // Bound in this test's container, never the process container, so later
+    // tests keep the default.
+    TestContainer::singleton(
         LiveConfig::builder()
             .upload_max_active(2)
             .upload_max_pending_files(2)
