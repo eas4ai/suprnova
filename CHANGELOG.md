@@ -933,18 +933,28 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   while cached pages stayed current; the write and its advance now share
   one transaction. An unrelated successful write no longer resumes serving
   pages whose invalidation failed: the missed invalidation is applied
-  first. A process that wrote before installing RenderCache advances
+  first, and an advance that lands clears only the failures recorded
+  before it began, so a newer failure for the same tables keeps pages
+  suspended until a later advance covers it. A process that wrote before installing RenderCache advances
   generations after the install. Pages rendered with a flag's compiled
   default refresh when the first rule for that flag is stored, and a page
   rendered during `set_flag` or `reload` no longer stays cached with the
   old answer. `DB::unprepared`, `DB::statement` and `statement_on` with a
   batch that begins with `SELECT` invalidate cached pages. Pages built from
   `EntityExt` or `QueryBuilder` reads, relation counts and aggregates, or
-  through-relation loads refresh when those tables change.
+  through-relation loads refresh when those tables change, and lazy
+  `HasManyThrough` `get`, `first` and `count` and `HasOneThrough` `get`
+  refresh when an intermediate row changes. The payments webhook advances
+  its mirror tables in the transaction that writes them, so a request
+  cancelled during COMMIT no longer leaves them committed but cached
+  pages current.
   `RenderCache::advance_epoch` reaches the next request even with another
   request's authority read in flight. A rebuild that fails after the
   stale-on-error window closed returns its error instead of the expired
-  entry, a node runs at most one background refresh per key, a cancelled
+  entry, a node runs at most one background refresh per key and at most
+  `RENDER_CACHE_MAX_BACKGROUND_REFRESHES` across keys (new, default 32 per
+  CPU, 0 turns background refresh off; past it a stale hit serves the
+  stored copy and starts nothing), a cancelled
   L1 publish can no longer overwrite a newer entry, and L1 sweeps no longer
   scan the whole store. SQL Live record cleanup no longer deletes a fresh
   instance or reservation another node just created. Renewing an async
