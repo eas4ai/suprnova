@@ -10,7 +10,9 @@
 //!
 //! Each test runs the shipped migration, drives the webhook route with the
 //! mock provider, and creates, reads and updates a row of every mirror table
-//! through the model API.
+//! through the model API. The hydration tests add the RenderCache schema and
+//! prove a webhook advances its mirror tables' generations in the transaction
+//! that writes the mirror rows, on each engine (DATA-039).
 //!
 //! ```text
 //! PG_TEST_URL=postgres://... cargo test -p suprnova --test payments -- \
@@ -422,6 +424,177 @@ async fn live_payments(env: &str, provider_name: &'static str) {
     mirrors_create_read_update().await;
     drop(guard);
     database.inner().clone().close().await.unwrap();
+}
+
+/// The RenderCache tables, dropped before and after the hydration test so
+/// a run starts clean and the next test in the process finds none.
+const RENDER_CACHE_TABLES: [&str; 3] = [
+    "suprnova_render_generation_log",
+    "suprnova_render_generations",
+    "suprnova_render_epochs",
+];
+
+async fn drop_render_cache_schema(database: &DbConnection) {
+    for table in RENDER_CACHE_TABLES {
+        database
+            .inner()
+            .execute_unprepared(&format!("DROP TABLE IF EXISTS {table}"))
+            .await
+            .expect("drop a leftover render cache table");
+    }
+}
+
+async fn subscriptions_generation() -> u64 {
+    use suprnova_live::render_cache::generation::GenerationLedger as _;
+
+    let table = suprnova::render_cache::DependencyIdentity::table("payments_subscriptions");
+    suprnova::render_cache::ledger::SqlGenerationLedger::new()
+        .current(&[table.digest()])
+        .await
+        .expect("read the generation ledger")
+        .get(&table)
+        .unwrap_or(0)
+}
+
+/// Serves one connection on a task the caller can abort, so aborting it
+/// drops the request's handler wherever it is parked.
+async fn serve_one(router: Router) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let router = Arc::new(router);
+    let middleware = Arc::new(MiddlewareRegistry::new());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral listener");
+    let addr = listener.local_addr().expect("local_addr");
+    let server = tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let svc = service_fn(move |req: hyper::Request<Incoming>| {
+            let router = router.clone();
+            let middleware = middleware.clone();
+            async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), svc)
+            .await;
+    });
+    (addr, server)
+}
+
+/// DATA-039 on a server engine. A delivery canceled right after its
+/// hydration commits has already advanced its mirror tables, because the
+/// advance runs inside the hydration's transaction; the retry is then
+/// acknowledged as a duplicate. A second, uncanceled delivery advances the
+/// table once more.
+async fn hydration_advances_generations_in_its_transaction(
+    database: &DbConnection,
+    provider_name: &'static str,
+) {
+    use suprnova::payments::webhook_route::{
+        hold_hydration_commit_for_test, wait_until_hydration_commit_held_for_test,
+    };
+
+    drop_render_cache_schema(database).await;
+    suprnova::render_cache::migration::Migration
+        .up(&SchemaManager::new(database.inner()))
+        .await
+        .expect("run the render cache migration");
+    // A fresh write-side probe, so this process sees the schema just created.
+    suprnova::render_cache::RenderCache::uninstall_for_test();
+
+    let mock = Arc::new(MockPaymentProvider::new());
+    let provider: Arc<dyn PaymentProvider> = mock.clone();
+    PaymentProviderRegistry::bind(provider_name, provider);
+    let path = format!("/webhooks/payments/{provider_name}");
+    let sub = mock
+        .subscribe(SubscribeRequest {
+            customer_ref: "cus_engines_generations".into(),
+            price_refs: vec!["price_basic".into()],
+            trial_days: None,
+            idempotency_key: None,
+            metadata: None,
+        })
+        .await
+        .expect("mock subscribe");
+    let before = subscriptions_generation().await;
+
+    let created = json!({
+        "id": "evt_engines_generations_created",
+        "type": "subscription.created",
+        "data": { "object": {
+            "id": sub.provider_subscription_id,
+            "customer": "cus_engines_generations",
+        }}
+    });
+    let held = hold_hydration_commit_for_test("evt_engines_generations_created");
+    let (addr, server) = serve_one(webhook_routes(Arc::new(database.inner().clone()))).await;
+    let client = tokio::spawn({
+        let path = path.clone();
+        let created = created.clone();
+        async move { post(addr, &path, created).await }
+    });
+    wait_until_hydration_commit_held_for_test(held).await;
+    server.abort();
+    client.abort();
+    assert!(
+        server
+            .await
+            .expect_err("the server was aborted")
+            .is_cancelled()
+    );
+    assert!(
+        client
+            .await
+            .expect_err("the client was aborted")
+            .is_cancelled()
+    );
+    assert_eq!(
+        subscriptions_generation().await,
+        before + 1,
+        "the canceled delivery's commit carried its advance"
+    );
+
+    let addr = spawn_server(webhook_routes(Arc::new(database.inner().clone()))).await;
+    let (status, body) = post(addr, &path, created).await;
+    assert_eq!(status, 200, "the retry is acknowledged: {body}");
+    let updated = json!({
+        "id": "evt_engines_generations_updated",
+        "type": "subscription.updated",
+        "data": { "object": {
+            "id": sub.provider_subscription_id,
+            "customer": "cus_engines_generations",
+        }}
+    });
+    let (status, body) = post(addr, &path, updated).await;
+    assert_eq!(status, 200, "subscription.updated must persist: {body}");
+    assert_eq!(
+        subscriptions_generation().await,
+        before + 2,
+        "the duplicate advanced nothing, and the update advanced the table once"
+    );
+
+    drop_render_cache_schema(database).await;
+    suprnova::render_cache::RenderCache::uninstall_for_test();
+}
+
+async fn live_payments_generations(env: &str, provider_name: &'static str) {
+    let (guard, database) = connect_live(env).await;
+    fresh_payments_schema(&database).await;
+    hydration_advances_generations_in_its_transaction(&database, provider_name).await;
+    drop(guard);
+    database.inner().clone().close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
+async fn postgres_payments_hydration_advances_generations_in_its_transaction() {
+    live_payments_generations("PG_TEST_URL", "mock-engines-generations-postgres").await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_payments_hydration_advances_generations_in_its_transaction() {
+    live_payments_generations("MYSQL_TEST_URL", "mock-engines-generations-mysql").await;
 }
 
 #[tokio::test]
