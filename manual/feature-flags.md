@@ -217,6 +217,7 @@ The framework owns the `features` table schema:
 vec![
     // ... your app's migrations ...
     Box::new(suprnova::features::migrations::CreateFeaturesTable),
+    Box::new(suprnova::features::migrations::FeatureTimestampsToDatetime),
 ]
 ```
 
@@ -230,11 +231,19 @@ features (
     enabled     BOOLEAN     NOT NULL,
     description TEXT,
     updated_by  VARCHAR(255),
-    created_at  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE INDEX (name, scope_key)
 )
 ```
+
+That is the MySQL shape; on Postgres the time columns are
+`timestamp with time zone`. Earlier versions of `CreateFeaturesTable` made
+them `TIMESTAMP` on MySQL and MariaDB, which refuses any time after
+2038-01-19 03:14:07 UTC. `FeatureTimestampsToDatetime` converts such a table
+to `DATETIME`, keeping the stored UTC times, the nullability and the
+`CURRENT_TIMESTAMP` defaults. It changes nothing on Postgres or SQLite, on a
+table that is already `DATETIME`, or when it runs again.
 
 `scope_key` carries the scope kind inline (`"user:42"`, `"team:staff"`, `""` for global) so the read path stays a single string lookup against a unique index.
 

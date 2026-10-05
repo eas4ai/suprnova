@@ -9,8 +9,28 @@
 //! [`convert_mysql_timestamps_to_datetime`].
 
 use sea_orm_migration::SchemaManagerConnection;
-use sea_orm_migration::prelude::{Alias, DbErr, IndexCreateStatement, SchemaManager};
+use sea_orm_migration::prelude::{
+    Alias, ColumnDef, ColumnType, DbErr, IndexCreateStatement, IntoIden, SchemaManager,
+};
 use sea_orm_migration::sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
+
+/// A framework-owned point-in-time column named `name`, for `backend`.
+///
+/// sea-query renders `timestamp_with_time_zone()` as `TIMESTAMP` on MySQL and
+/// MariaDB, which refuses any time after 2038-01-19 03:14:07 UTC. There this
+/// column is `DATETIME`, which holds the UTC time the driver writes in its
+/// UTC session. Postgres keeps `timestamp with time zone` and SQLite its text
+/// type, exactly as these columns always were, so a fresh install there
+/// builds the table its migration always built. A source scan in the test
+/// suite refuses a framework migration that spells the `TIMESTAMP` builders.
+pub(crate) fn utc_timestamp_column<T: IntoIden>(name: T, backend: DbBackend) -> ColumnDef {
+    let kind = if backend == DbBackend::MySql {
+        ColumnType::DateTime
+    } else {
+        ColumnType::TimestampWithTimeZone
+    };
+    ColumnDef::new_with_type(name, kind)
+}
 
 /// Create `index` on `table` unless the table already has an index of
 /// that name.
@@ -49,14 +69,24 @@ pub(crate) async fn create_index_if_missing(
 }
 
 /// Convert each of `columns` of `table` that MySQL or MariaDB stores as
-/// `TIMESTAMP` to `DATETIME`, keeping its nullability and every stored time
-/// in UTC.
+/// `TIMESTAMP` to `DATETIME`, keeping its nullability, its fractional-second
+/// precision, its comment, its `DEFAULT CURRENT_TIMESTAMP` and every stored
+/// time in UTC.
 ///
 /// MySQL's `TIMESTAMP` refuses any time after 2038-01-19 03:14:07 UTC,
 /// and a framework table an older migration created with `.timestamp()`
 /// keeps it until something alters it. Every other backend, a missing
 /// table, and a column that is already `DATETIME` are left alone, so a
 /// migration built on this runs again harmlessly.
+///
+/// `MODIFY` restates the whole column, so whatever it does not repeat is
+/// dropped. It repeats a `CURRENT_TIMESTAMP` default, which some framework
+/// tables declare and their inserts rely on. It does not repeat any other
+/// default: no framework column declares one, and the zero date that older
+/// MariaDB versions add on their own to a `TIMESTAMP NOT NULL` column is not a
+/// valid `DATETIME` under strict mode. Nor the `ON UPDATE CURRENT_TIMESTAMP`
+/// those versions add to the first such column: the framework writes its own
+/// times, and that clause would rewrite one on every update.
 ///
 /// `ALTER TABLE ... MODIFY` turns each `TIMESTAMP` into the wall-clock time
 /// of the session's time zone. The driver sets that zone to UTC on connect
@@ -93,7 +123,9 @@ pub(crate) async fn convert_mysql_timestamps_to_datetime(
     let rows = connection
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::MySql,
-            "SELECT COLUMN_NAME AS name, DATA_TYPE AS kind, IS_NULLABLE AS nullable \
+            "SELECT COLUMN_NAME AS name, DATA_TYPE AS kind, IS_NULLABLE AS nullable, \
+             COLUMN_DEFAULT AS column_default, COLUMN_COMMENT AS column_comment, \
+             CAST(COALESCE(DATETIME_PRECISION, 0) AS SIGNED) AS fsp \
              FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
             [table.into()],
@@ -116,7 +148,36 @@ pub(crate) async fn convert_mysql_timestamps_to_datetime(
             } else {
                 "NOT NULL"
             };
-            changes.push(format!("MODIFY `{column}` DATETIME {null}"));
+            let fsp: i64 = row.try_get("", "fsp")?;
+            let precision = if fsp > 0 {
+                format!("({fsp})")
+            } else {
+                String::new()
+            };
+            let default: Option<String> = row.try_get("", "column_default")?;
+            // MySQL reports the default as `CURRENT_TIMESTAMP`, MariaDB as
+            // `current_timestamp()`, each with the precision when it has one.
+            let default = if default.is_some_and(|default| {
+                default
+                    .to_ascii_lowercase()
+                    .starts_with("current_timestamp")
+            }) {
+                format!(" DEFAULT CURRENT_TIMESTAMP{precision}")
+            } else {
+                String::new()
+            };
+            let comment: String = row.try_get("", "column_comment")?;
+            let comment = if comment.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " COMMENT '{}'",
+                    comment.replace('\\', "\\\\").replace('\'', "''")
+                )
+            };
+            changes.push(format!(
+                "MODIFY `{column}` DATETIME{precision} {null}{default}{comment}"
+            ));
         }
     }
     if changes.is_empty() {

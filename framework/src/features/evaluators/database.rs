@@ -565,7 +565,10 @@ struct InMemoryMigrator;
 #[async_trait::async_trait]
 impl MigratorTrait for InMemoryMigrator {
     fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
-        vec![Box::new(CreateFeaturesTable)]
+        vec![
+            Box::new(CreateFeaturesTable),
+            Box::new(crate::features::migrations::FeatureTimestampsToDatetime),
+        ]
     }
 }
 

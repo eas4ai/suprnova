@@ -1,7 +1,7 @@
 //! The `features` table on real Postgres, MySQL and MariaDB.
 //!
 //! `CreateFeaturesTable` creates native `timestamp with time zone` columns
-//! (`TIMESTAMP` on MySQL). The feature model must read and write them as
+//! (`DATETIME` on MySQL, `TIMESTAMP` in tables older versions created). The feature model must read and write them as
 //! native date-times: before, `set_flag` and the admin upsert bound text,
 //! which Postgres refuses for such a column, and every read failed to decode
 //! as soon as a row existed. The SQLite suite cannot see that.
@@ -17,7 +17,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use sea_orm::ConnectionTrait;
 use sea_orm_migration::{MigrationTrait, SchemaManager};
 use suprnova::features::entity::Feature;
-use suprnova::features::migrations::CreateFeaturesTable;
+use suprnova::features::migrations::{CreateFeaturesTable, FeatureTimestampsToDatetime};
 use suprnova::features::{Context, DatabaseEvaluator, Evaluator, admin};
 use suprnova::testing::{TestClock, TestContainer, TestContainerGuard};
 use suprnova::{DatabaseConfig, DbConnection, Model, attrs};
@@ -140,4 +140,48 @@ async fn postgres_features_read_and_write_native_timestamps() {
 #[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
 async fn mysql_features_read_and_write_native_timestamps() {
     live_features("MYSQL_TEST_URL").await;
+}
+
+/// The feature-flag tables, for the checks every framework table group runs
+/// on MySQL and MariaDB.
+const FEATURE_TABLES: [&str; 1] = ["features"];
+
+/// Every migration the framework ships for the feature-flag tables, in the
+/// order an app's `Migrator` lists them.
+async fn shipped_feature_migrations(db: sea_orm::DatabaseConnection) {
+    let manager = SchemaManager::new(&db);
+    CreateFeaturesTable
+        .up(&manager)
+        .await
+        .expect("run the features migration");
+    FeatureTimestampsToDatetime
+        .up(&manager)
+        .await
+        .expect("move the features time columns to DATETIME");
+}
+
+/// A `features` table created fresh holds a time after 2038-01-19, where
+/// MySQL's `TIMESTAMP` stops.
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_a_fresh_features_table_holds_times_after_2038() {
+    crate::mysql_time_columns::assert_fresh_tables_hold_times_after_2038(
+        &FEATURE_TABLES,
+        shipped_feature_migrations,
+    )
+    .await;
+}
+
+/// A `features` table an older migration created with `TIMESTAMP` columns
+/// moves to `DATETIME` with its UTC times kept.
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_an_upgraded_features_table_keeps_its_utc_times() {
+    crate::mysql_time_columns::assert_upgrade_keeps_utc_times(
+        &FEATURE_TABLES,
+        shipped_feature_migrations,
+    )
+    .await;
 }
