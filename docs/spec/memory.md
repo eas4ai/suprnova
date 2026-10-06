@@ -64,11 +64,15 @@ snapshots, composite headers and document paths, eager relation loading
 results (moved where the call consumes the process; text decoded once when
 the output is valid UTF-8), filesystem append and prepend, Magnetar's hex
 encoding, and Mailgun's form-encoded fields. Every output MUST stay byte for
-byte what it is today.
-Falsifier: streaming a 4 MiB file allocates 6 MiB or more; an initial Inertia visit with a 1 MiB prop allocates at least 1 MiB more than the same visit as an Inertia request; 1,000 requests to a wildcard CORS path allocate at least one block per request more than to an exact path; a value `Context::push` promotes, a queue job's payload, the last broadcast channel's payload, a pure action argument or a full upload read is at a new address; the SQS decode, a retried SQS request, a runtime cast, an image step, a signed snapshot, a composite header, a document path, an eager load, a process result, an append or a hex encoding allocates the size of its data once more than the copy-free path does; or any response, frame, digest, snapshot, image, file or encoded string differs from today's.
+byte what it is today, except the images that IMG-001, IMG-002 and IMG-006
+change on purpose (orientation, stripped metadata and rotation backgrounds),
+output at a public root other than `/` (PFX-002), a Vite tag whose
+`assets_base_url` holds a character that attribute escaping changes
+(PFX-005), and the failed-job payload LDB-002 defines.
+Falsifier: streaming a 4 MiB file allocates 6 MiB or more; an initial Inertia visit with a 1 MiB prop allocates at least 1 MiB more than the same visit as an Inertia request; 1,000 requests to a wildcard CORS path allocate at least one block per request more than to an exact path; a value `Context::push` promotes, a queue job's payload, the last broadcast channel's payload, a pure action argument or a full upload read is at a new address; the SQS decode, a retried SQS request, a runtime cast, an image step, a signed snapshot, a composite header, a document path, an eager load, a process result, an append or a hex encoding allocates the size of its data once more than the copy-free path does; or any response, frame, digest, snapshot, image, file or encoded string differs from today's, other than an image IMG-001, IMG-002 or IMG-006 changes, output at a public root other than `/` (PFX-002), a Vite tag whose `assets_base_url` holds a character attribute escaping changes (PFX-005), or a failed-job payload LDB-002 defines.
 Mechanism: `mem-footprint`.
-Rationale: audit findings M01, M02, M08, M12 to M19 and M21 to M25, the watchlist's CSRF, runtime-cast, broadcast, Magnetar hex and Mailgun entries, and the copies validation found beside them (tokio's per-read buffer under M08, the mounted path under M21, the SQS reservation copy, 18 generated loader sites under M22).
-Status: Agreed 2026-10-03
+Rationale: audit findings M01, M02, M08, M12 to M19 and M21 to M25, the watchlist's CSRF, runtime-cast, broadcast, Magnetar hex and Mailgun entries, and the copies validation found beside them (tokio's per-read buffer under M08, the mounted path under M21, the SQS reservation copy, 18 generated loader sites under M22). Revised 2026-10-05: exceptions for the output IMG-001, IMG-002, IMG-006, PFX-002, PFX-005 and LDB-002 change on purpose.
+Status: Agreed 2026-10-05
 
 [MEM-004] The Live browser runtime MUST read a server-sent event stream
 without copying the bytes it already holds for each new network chunk, MUST

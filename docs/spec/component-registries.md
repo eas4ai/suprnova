@@ -480,13 +480,19 @@ event handler attribute, no `javascript:` or `data:` URL, and no SVG
 (`href`, `src`, `srcset`, `action`, `formaction`, `poster`, `data`,
 `xlink:href`, `ping`) MUST hold a constant that stays on the application's
 origin, or a value the scan shows comes from where the allowlist admits.
+It MAY also hold `suprnova::url::root()` (PFX-011), which carries no
+capability, followed directly by constant text that starts with exactly
+one `/` whose next character is neither `/` nor `\`; the scan MUST
+refuse `url::root()` followed by anything else, so
+`{{ suprnova::url::root() }}/suprnova-ui/x/x.css` is admitted and
+`{{ suprnova::url::root() }}//evil.example` is refused.
 CSS, in a stylesheet, a `style` element or a `style` attribute, parsed as
 CSS, MUST hold no `@import`, and every resource it names, `url()`,
 `image-set()`, `@font-face` `src` and a custom property used as one
 included, MUST stay on the application's origin, or be refused.
-Falsifier: a component installs whose view holds `include_str!`, a call that carries a capability, a custom filter, `escape("none")`, an include of an application template or of a file its manifest does not name, an inline `script` element, a `base` or `meta` element, an `onclick` attribute, a `javascript:` link, a form whose `action` or an image whose `src` leaves the application's origin, or a `style` attribute loading a resource from another origin; or whose stylesheet imports or loads a resource from another origin, `image-set()` included.
+Falsifier: a component installs whose view holds `include_str!`, a call that carries a capability, a custom filter, `escape("none")`, an include of an application template or of a file its manifest does not name, an inline `script` element, a `base` or `meta` element, an `onclick` attribute, a `javascript:` link, a form whose `action` or an image whose `src` leaves the application's origin, or a `style` attribute loading a resource from another origin; or whose stylesheet imports or loads a resource from another origin, `image-set()` included; or the scan refuses `href="{{ suprnova::url::root() }}/x"` in a view, or admits `{{ suprnova::url::root() }}//evil.example/x` or `{{ suprnova::url::root() }}/\evil.example`.
 Mechanism: `registries-scan`.
-Rationale: Ruled 2026-10-05: a non-constant URL may come from a value the application passes in (as `account-menu` takes its links and form action) or from the framework's URL helpers that carry no capability (`route`, `url::to`), and never from a value the component computes itself; a storage URL reaches a view as a value the application passes. The developer named a future component registry on suprnova.app as a possible allowed source once it exists, with the same signature verification; it is not in this scope.
+Rationale: Ruled 2026-10-05: a non-constant URL may come from a value the application passes in (as `account-menu` takes its links and form action) or from the framework's URL helpers that carry no capability (`route`, `url::to`), and never from a value the component computes itself; a storage URL reaches a view as a value the application passes. The developer named a future component registry on suprnova.app as a possible allowed source once it exists, with the same signature verification; it is not in this scope. Revised 2026-10-05: `url::root()` (PFX-011) admitted before a rooted constant path.
 Status: Agreed 2026-10-05
 
 [REG-032] In a script, parsed as a JavaScript module, every call MUST

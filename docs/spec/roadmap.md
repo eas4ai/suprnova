@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: live-components-sdk
+Current: application-port-third-round
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -348,6 +348,29 @@ Requirements: REG-001, REG-002, REG-003, REG-004, REG-005, REG-006, REG-007, REG
    (its bypass corpus refused), `registries-compile` (an installed
    component compiles and renders in a scaffolded application) and
    `registries-serve`.
+
+## application-port-third-round
+
+Requirements: BIND-001, BIND-002, BIND-003, BIND-004, BIND-005, BIND-006, BIND-007, BIND-008, BIND-009, BIND-010, BIND-011, BIND-012, BIND-013, BIND-014, BIND-015, PFX-001, PFX-002, PFX-003, PFX-004, PFX-005, PFX-006, PFX-007, PFX-008, PFX-009, PFX-010, PFX-011, PFX-012, PFX-013, IMG-001, IMG-002, IMG-003, IMG-004, IMG-005, IMG-006, IMG-007, IMG-008, LDB-001, LDB-002, LDB-003, LDB-004, LDB-005, LDB-006, LDB-007, LDB-008, LDB-009, LDB-010, LDB-011, LDB-012, MEM-003, REG-031
+
+29. application-port-third-round - the next four issues from the
+   application port (#141, #142, #144, #145), which the developer ruled on
+   2026-10-05: route model binding with custom keys and columns, scoped
+   child bindings, custom resolution, soft deletes, missing rows, enums,
+   resources, binding by type and URL generation (BIND-001 to BIND-015);
+   serving under a trusted path prefix with one public root for every
+   browser URL, cookie path and cache key, and `url::root()` for views
+   (PFX-001 to PFX-013, with REG-031 revised so a component view can write
+   the root); upright images with their metadata stripped and the rest of
+   Laravel's Image API (IMG-001 to IMG-008, with MEM-003's byte-for-byte
+   rule given its narrow exceptions); and running on a database Laravel
+   created, with Laravel's layouts, an in-place upgrade, and live sharing
+   with a Laravel application (LDB-001 to LDB-012). Delivery includes the
+   manual chapters and corrections each spec names, the scaffold's
+   templates, the regenerated feature map and component allowlist, and the
+   CHANGELOG's breaking-change notes. Done when the six mechanisms pass on
+   a committed tree: `route-binding`, `path-prefix`, `images`,
+   `laravel-database`, `mem-footprint` and `registries-scan`.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
