@@ -479,7 +479,7 @@ impl DiskExt for Operator {
             }
             out.extend_from_slice(separator.as_bytes());
             out.extend_from_slice(data.as_bytes());
-            self.put(path, out.clone()).await
+            self.put(path, out).await
         } else {
             self.put(path, data.as_bytes().to_vec()).await
         }
