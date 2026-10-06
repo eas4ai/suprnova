@@ -871,8 +871,16 @@ impl Redirect {
     /// explicitly. Useful in handlers that have already moved the
     /// request out of `&Request` form. Builds the redirect target from
     /// the request's path + query string.
+    ///
+    /// A request-target a browser would read as another host, such as
+    /// `//evil.example/x` at the host root, is not sent back: the
+    /// redirect goes to the root, as [`Self::refresh`] does when it has
+    /// no previous URL.
     pub fn refresh_for(request: &crate::http::Request) -> Self {
-        Self::to(crate::routing::url::current(request))
+        let current = crate::routing::url::current(request);
+        Self::to(
+            crate::routing::url::root_relative_or_none(&current).unwrap_or_else(|| "/".to_string()),
+        )
     }
 
     /// Redirect a guest user to a login (or other) URL, storing the
@@ -885,10 +893,19 @@ impl Redirect {
     /// be recovered after authentication via
     /// [`Self::intended`]. The intended URL is flashed
     /// to the session under `url.intended` (Laravel's key).
+    ///
+    /// A request-target a browser would read as another host, such as
+    /// `//evil.example/x` at the host root, is not stored, and any intended
+    /// URL already stored is removed, so [`Self::intended`] goes to its
+    /// default rather than off the origin.
     pub fn guest(request: &crate::http::Request, login_path: impl Into<String>) -> Self {
-        let intended = crate::routing::url::current(request);
-        crate::session::session_mut(|s| {
-            s.put("url.intended", intended);
+        let current = crate::routing::url::current(request);
+        let intended = crate::routing::url::root_relative_or_none(&current);
+        crate::session::session_mut(|s| match intended {
+            Some(intended) => s.put("url.intended", intended),
+            None => {
+                s.forget("url.intended");
+            }
         });
         Self::to(login_path)
     }
@@ -900,9 +917,16 @@ impl Redirect {
     /// $headers, $secure)` from `Illuminate/Routing/Redirector.php:95`.
     /// The intended URL is consumed (pulled from the session) so a
     /// subsequent call falls back to `default`.
+    ///
+    /// The stored value is checked when it is read, as the previous URL
+    /// is: a path a browser would read as another host, such as
+    /// `//evil.example/x` or `/\evil.example`, counts as no intended URL.
+    /// A session written by an earlier release can hold one. An intended
+    /// URL that leaves the application is written as an absolute URL.
     pub fn intended(default: impl Into<String>) -> Self {
         let dest = crate::session::session_mut(|s| s.pull::<String>("url.intended"))
             .flatten()
+            .and_then(|stored| crate::routing::url::stored_destination_or_none(&stored))
             .unwrap_or_else(|| default.into());
         Self::to(dest)
     }

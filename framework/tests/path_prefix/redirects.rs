@@ -258,3 +258,123 @@ async fn pfx_004_back_guest_and_intended_carry_the_root_once() {
         Some("/billing/wanted")
     );
 }
+
+/// A router whose fallback answers every unmatched path, as an Inertia or
+/// single-page application's app shell does, so a request-target such as
+/// `//evil.example/x` reaches a handler. The `x-case` header picks what the
+/// fallback does with the request.
+fn request_derived_router() -> Router {
+    let router: Router = Router::new()
+        .get("/signed-in", |_request: Request| async {
+            Redirect::intended("/home").into()
+        })
+        .get("/poison", |_request: Request| async {
+            // A value an earlier release's `Redirect::guest` could store.
+            suprnova::session_mut(|s| s.put("url.intended", "//evil.example/x"));
+            Ok(HttpResponse::text("stored"))
+        })
+        .get("/want-external", |_request: Request| async {
+            Redirect::set_intended_url("https://sso.example/x");
+            Ok(HttpResponse::text("noted"))
+        })
+        .into();
+    suprnova::fallback!(|request: Request| async move {
+        match request.header("x-case").unwrap_or_default() {
+            "guest" => Redirect::guest(&request, "/login").into(),
+            "full" => Ok(HttpResponse::text(suprnova::url::full(&request))),
+            _ => Redirect::refresh_for(&request).into(),
+        }
+    })
+    .register(router)
+}
+
+#[tokio::test]
+async fn pfx_004_a_request_target_naming_another_host_never_leaves_the_origin() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "pfx_004_a_request_target_naming_another_host_never_leaves_the_origin",
+    )
+    .await
+    {
+        return;
+    }
+    support::ensure_crypt();
+    support::install("http://localhost");
+    let address = support::serve(request_derived_router(), session_middleware()).await;
+
+    // `refresh_for` redirects to the request's own URL: one a browser would
+    // read as another host falls back to the root, a percent-encoded one is
+    // a path on this host and is kept.
+    for (target, expected) in [
+        ("//evil.example/x", "/"),
+        ("/\\evil.example", "/"),
+        ("/%2F%2Fevil.example/x", "/%2F%2Fevil.example/x"),
+        ("/%5Cevil.example", "/%5Cevil.example"),
+        ("/%2f/evil.example", "/%2f/evil.example"),
+    ] {
+        let reply = support::get_raw(address, target, &[("x-case", "refresh")]).await;
+        assert_eq!(reply.status, 302, "{target}: {}", reply.body);
+        assert_eq!(
+            reply.header("location").as_deref(),
+            Some(expected),
+            "refresh_for {target}"
+        );
+    }
+    let prefixed = support::get_raw(
+        address,
+        "//evil.example/x",
+        &[("x-case", "refresh"), ("x-forwarded-prefix", PREFIX)],
+    )
+    .await;
+    assert_eq!(
+        prefixed.header("location").as_deref(),
+        Some("/billing//evil.example/x"),
+        "behind a root the target is a path under it"
+    );
+
+    // `url::full` is absolute on the application's origin.
+    let full = support::get_raw(address, "//evil.example/x", &[("x-case", "full")]).await;
+    assert_eq!(full.body, "http://localhost//evil.example/x");
+
+    // `guest` stores the request's URL as the intended URL; `intended`
+    // sends the browser there after sign-in.
+    let first = support::get_raw(address, "/signed-in", &[]).await;
+    let cookie = first.cookie_pair("suprnova_session");
+    for (target, expected) in [
+        ("//evil.example/x", "/home"),
+        ("/\\evil.example", "/home"),
+        ("/%2F%2Fevil.example/x", "/%2F%2Fevil.example/x"),
+    ] {
+        let guest = support::get_raw(
+            address,
+            target,
+            &[("x-case", "guest"), ("cookie", cookie.as_str())],
+        )
+        .await;
+        assert_eq!(
+            guest.header("location").as_deref(),
+            Some("/login"),
+            "{target}"
+        );
+        let signed_in =
+            support::get_raw(address, "/signed-in", &[("cookie", cookie.as_str())]).await;
+        assert_eq!(
+            signed_in.header("location").as_deref(),
+            Some(expected),
+            "intended after guest {target}"
+        );
+    }
+
+    // An intended URL already in the session is checked when it is read.
+    support::get_raw(address, "/poison", &[("cookie", cookie.as_str())]).await;
+    let signed_in = support::get_raw(address, "/signed-in", &[("cookie", cookie.as_str())]).await;
+    assert_eq!(signed_in.header("location").as_deref(), Some("/home"));
+
+    // An external intended URL the application sets itself is kept (PFX-010).
+    support::get_raw(address, "/want-external", &[("cookie", cookie.as_str())]).await;
+    let signed_in = support::get_raw(address, "/signed-in", &[("cookie", cookie.as_str())]).await;
+    assert_eq!(
+        signed_in.header("location").as_deref(),
+        Some("https://sso.example/x")
+    );
+}
