@@ -34,6 +34,7 @@ const MEMBERS: &[&str] = &[
     "tutorial",
     "ts-routes",
     "url-strings",
+    "impl-handlers",
 ];
 
 /// A fresh copy of the fixture workspace for one test, never the system
@@ -169,6 +170,22 @@ fn bind_001_the_route_binding_macro_is_gone() {
 fn bind_001_the_param_name_trait_is_gone() {
     let dir = workspace("removed-trait-fn");
     assert_rejected(&cargo_check(&dir, "removed-trait-fn"), &["param_name"]);
+}
+
+#[test]
+fn bind_003_associated_handlers_take_every_binding_form() {
+    let dir = workspace("impl-handlers");
+    assert_compiles(
+        &cargo_check(&dir, "impl-handlers"),
+        "`#[handler(Self = Posts)]` inside `impl Posts` must compile with every \
+         binding form and register as `Posts::show`",
+    );
+}
+
+#[test]
+fn bind_003_a_handler_inside_an_impl_block_without_its_type_fails_the_build() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/route-binding/*.rs");
 }
 
 #[test]

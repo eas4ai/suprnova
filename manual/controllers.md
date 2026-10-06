@@ -205,6 +205,36 @@ request or `Request`, whatever order the signature lists them in. For the type f
 several attributes on one handler, and the full rules, see
 [Authorize a handler](authorization.md#authorize-a-handler).
 
+### Handlers inside an `impl` block
+
+To group a controller's handlers on a type, put them in an `impl` block and
+name the type in the attribute, `#[handler(Self = Posts)]`:
+
+```rust
+use suprnova::{handler, json_response, Response};
+use crate::models::Post;
+
+pub struct Posts;
+
+impl Posts {
+    // Route: get!("/posts/{post}", controllers::Posts::show)
+    #[handler(Self = Posts)]
+    pub async fn show(post: Post) -> Response {
+        json_response!({ "id": post.id, "title": post.title })
+    }
+}
+```
+
+The handler takes every argument a free handler takes, `#[authorize]`
+included, and the router checks it at startup as it checks a free one. A
+handler in an `impl` block has no `self` argument. Without `Self = Posts`,
+the build fails and says to add it. If the attribute names another type
+than the block's, the build fails too.
+
+The attribute needs the type because `#[handler]` records each handler
+for the router's startup checks, and that record is generated outside the
+function, where `Self` does not name the block's type.
+
 ## The `Response` contract
 
 `Response` is an alias for `Result<HttpResponse, HttpResponse>`. Both

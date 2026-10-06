@@ -7,6 +7,7 @@
 
 pub(crate) mod binding;
 mod group;
+mod handler_site;
 mod macros;
 mod params;
 mod resource;
@@ -24,6 +25,8 @@ pub use binding::{
 pub use binding::{
     BoundArg, HandlerArg, HandlerArgKind, HandlerRecord, MatchedRoute, MissingHandler,
 };
+#[doc(hidden)]
+pub use handler_site::{__FreeContext, __FreeHandler, __IsSelf, __handler_self, __in_free_context};
 pub use route_values::{NamedRouteValue, RouteParameters, RouteValue, bound_route_value};
 
 pub use group::{GroupBuilder, GroupRouter};

@@ -529,6 +529,24 @@ pub fn domain_error(attr: TokenStream, input: TokenStream) -> TokenStream {
 ///     json_response!({ "status": "ok" })
 /// }
 /// ```
+///
+/// ## Inside an `impl` block:
+///
+/// The record the router checks names the function, and an item generated
+/// inside an `impl` block cannot name `Self`, so a handler there names the
+/// block's type. Without it, or naming another type, the build fails.
+///
+/// ```rust,ignore
+/// pub struct Posts;
+///
+/// impl Posts {
+///     // GET /posts/{post}, registered as `Posts::show`
+///     #[handler(Self = Posts)]
+///     pub async fn show(post: Post) -> Response {
+///         json_response!({ "title": post.title })
+///     }
+/// }
+/// ```
 #[proc_macro_attribute]
 pub fn handler(attr: TokenStream, input: TokenStream) -> TokenStream {
     handler::handler_impl(attr, input)
