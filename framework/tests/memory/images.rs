@@ -209,9 +209,10 @@ fn decode_under(
     image: &[u8],
     budget: u64,
 ) -> (Result<(u32, u32), String>, u64) {
-    let _config = ConfigGuard::set(ImageConfig {
-        max_alloc_bytes: budget,
-        ..ImageConfig::default()
+    let _config = ConfigGuard::set({
+        let mut config = ImageConfig::default();
+        config.max_alloc_bytes = budget;
+        config
     });
     let heap = Heap::start();
     let start = heap.live();
@@ -432,9 +433,10 @@ async fn mem_audit_a_file_read_never_reserves_past_the_cap() {
         }
     });
 
-    let _config = ConfigGuard::set(ImageConfig {
-        max_alloc_bytes: CAP,
-        ..ImageConfig::default()
+    let _config = ConfigGuard::set({
+        let mut config = ImageConfig::default();
+        config.max_alloc_bytes = CAP;
+        config
     });
     let heap = Heap::start();
     let start = heap.live();
@@ -775,5 +777,182 @@ async fn mem_audit_a_jpegs_metadata_copies_are_counted() {
         &jpeg_with_icc_chunks(small, 100_000),
         35,
         21,
+    );
+}
+
+/// A big-endian TIFF holding one `Orientation` tag.
+fn orientation_tiff(tag: u16) -> Vec<u8> {
+    let mut tiff = vec![
+        b'M', b'M', 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1,
+    ];
+    tiff.extend_from_slice(&tag.to_be_bytes());
+    tiff.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+    tiff
+}
+
+/// `png` with `chunks` inserted after its header chunk.
+fn png_with_chunks(png: &[u8], chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let mut out = png[..33].to_vec();
+    for (kind, data) in chunks {
+        oxideav_png::chunk::write_chunk(&mut out, kind, data);
+    }
+    out.extend_from_slice(&png[33..]);
+    out
+}
+
+/// A simple-format WebP rebuilt in the extended layout with an `EXIF`
+/// chunk holding `tiff`.
+fn webp_with_exif(webp: &[u8], tiff: &[u8]) -> Vec<u8> {
+    let size = u32::from_le_bytes(webp[16..20].try_into().unwrap()) as usize;
+    let bitstream = &webp[12..20 + size + (size & 1)];
+    let data = &webp[20..];
+    let (width, height, alpha) = match &webp[12..16] {
+        b"VP8L" => {
+            let bits = u32::from_le_bytes(data[1..5].try_into().unwrap());
+            (
+                (bits & 0x3FFF) + 1,
+                ((bits >> 14) & 0x3FFF) + 1,
+                bits & (1 << 28) != 0,
+            )
+        }
+        b"VP8 " => (
+            u32::from(u16::from_le_bytes([data[6], data[7]]) & 0x3FFF),
+            u32::from(u16::from_le_bytes([data[8], data[9]]) & 0x3FFF),
+            false,
+        ),
+        other => panic!("not a simple WebP: {other:?}"),
+    };
+    let mut header = [0u8; 10];
+    header[0] = 0x08 | if alpha { 0x10 } else { 0 };
+    header[4..7].copy_from_slice(&(width - 1).to_le_bytes()[..3]);
+    header[7..10].copy_from_slice(&(height - 1).to_le_bytes()[..3]);
+    let mut body = b"WEBP".to_vec();
+    for (fourcc, payload) in [(b"VP8X", &header[..]), (b"EXIF", tiff)] {
+        if fourcc == b"EXIF" {
+            body.extend_from_slice(bitstream);
+        }
+        body.extend_from_slice(fourcc);
+        body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        body.extend_from_slice(payload);
+        if payload.len() % 2 == 1 {
+            body.push(0);
+        }
+    }
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+/// IMG-001: a decode that turns the image stays within the estimate its
+/// refusal names, in every format that carries the tag. The turn holds a
+/// second full-size plane beside the decoded one, and the estimate counts
+/// it. The source is wider than tall, so the turn swaps the sides.
+#[tokio::test]
+async fn img_001_an_oriented_decode_stays_within_its_estimate() {
+    let _lock = exclusive().await;
+    let opaque: Vec<u8> = noise(256, 128, 3)
+        .chunks(3)
+        .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
+        .collect();
+    let source = oxideav_png::encode_png_image(&PngImage {
+        width: 256,
+        height: 128,
+        pixel_format: PngPixelFormat::Rgba,
+        stride: 256 * 4,
+        data: opaque,
+        palette: Vec::new(),
+    })
+    .expect("the PNG encodes");
+    let tiff = orientation_tiff(6);
+    let mut app1 = vec![0xFF, 0xE1];
+    app1.extend_from_slice(&((tiff.len() + 8) as u16).to_be_bytes());
+    app1.extend_from_slice(b"Exif\0\0");
+    app1.extend_from_slice(&tiff);
+    let jpeg = convert(&source, OutputFormat::Jpeg);
+    let jpeg = [&jpeg[..2], &app1, &jpeg[2..]].concat();
+    for (name, image) in [
+        (
+            "oriented PNG",
+            png_with_chunks(&source, &[(b"eXIf", tiff.clone())]),
+        ),
+        ("oriented JPEG", jpeg),
+        (
+            "oriented lossless WebP",
+            webp_with_exif(&convert(&source, OutputFormat::WebPLossless), &tiff),
+        ),
+        (
+            "oriented lossy WebP",
+            webp_with_exif(&convert(&source, OutputFormat::WebP), &tiff),
+        ),
+    ] {
+        assert_the_budget_holds(name, &image, 128, 256);
+    }
+}
+
+/// 64 MiB of zeros, zlib-compressed: about 64 KiB that inflates a thousand
+/// times over.
+fn zlib_bomb() -> Vec<u8> {
+    compcol::vec::compress_to_vec::<compcol::zlib::Zlib>(&vec![0u8; 64 * 1024 * 1024])
+        .expect("zlib")
+}
+
+/// IMG-001: reading the tag inflates nothing. A compressed text chunk that
+/// expands to 64 MiB sits ahead of the `eXIf` chunk the tag is read from.
+#[tokio::test]
+async fn img_001_reading_the_tag_inflates_no_compressed_chunk() {
+    let _lock = exclusive().await;
+    let driver = OxideAvImageDriver::new();
+    let png = png_with_chunks(
+        &encode_png(16, 8, PngPixelFormat::Rgba, 4, false),
+        &[
+            (b"zTXt", [&b"Comment\0\0"[..], &zlib_bomb()].concat()),
+            (b"eXIf", orientation_tiff(6)),
+        ],
+    );
+    let heap = Heap::start();
+    let start = heap.live();
+    let dimensions = driver.dimensions(&png).expect("the PNG decodes");
+    let peak = (heap.peak() - start) as u64;
+    drop(heap);
+    assert_eq!(dimensions, (8, 16), "the tag was read and applied");
+    assert!(
+        peak < 4 * 1024 * 1024,
+        "reading the tag held {peak} bytes: the compressed chunk was inflated"
+    );
+}
+
+/// IMG-002: a PNG's ICC profile inflates within `IMAGE_MAX_ALLOC_BYTES`.
+/// One that inflates to 64 MiB under a 4 MiB budget is refused, having held
+/// no more than the budget; one that fits is carried.
+#[tokio::test]
+async fn img_002_a_png_icc_profile_inflates_within_the_budget() {
+    let _lock = exclusive().await;
+    const BUDGET: u64 = 4 * 1024 * 1024;
+    let driver = OxideAvImageDriver::new();
+    let source = encode_png(4, 4, PngPixelFormat::Rgba, 4, false);
+    let bomb = png_with_chunks(
+        &source,
+        &[(b"iCCP", [&b"bomb\0\0"[..], &zlib_bomb()].concat())],
+    );
+    let _config = ConfigGuard::set({
+        let mut config = ImageConfig::default();
+        config.max_alloc_bytes = BUDGET;
+        config
+    });
+    let to_png = ImagePipeline {
+        format: Some(OutputFormat::Png),
+        ..Default::default()
+    };
+    let heap = Heap::start();
+    let start = heap.live();
+    let result = driver.process(&bomb, &to_png);
+    let peak = (heap.peak() - start) as u64;
+    drop(heap);
+    let err = result.expect_err("a profile past the budget is refused");
+    assert!(err.to_string().contains("ICC profile"), "got: {err}");
+    assert!(
+        peak <= BUDGET,
+        "inflating the profile held {peak} bytes, over the {BUDGET}-byte budget"
     );
 }

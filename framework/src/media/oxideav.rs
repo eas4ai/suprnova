@@ -78,7 +78,11 @@ use oxideav_pixfmt::{
 use crate::error::FrameworkError;
 
 use super::ImageConfig;
+use super::color::{Color, flatten_rgba};
+use super::custom::ImagePixels;
 use super::driver::{ImageDriver, ImagePipeline, OutputFormat, Transformation};
+use super::metadata::{self, ColourClass, OutputMetadata, SrgbConversion};
+use super::orientation::Orientation;
 use super::sniff::{self, InputFormat, JpegColour, JpegLayout, ZuneJpeg};
 
 mod gif;
@@ -202,6 +206,42 @@ impl Canvas {
     }
 }
 
+/// A decoded source: its pixels, and what decoding learned about it.
+struct Decoded {
+    canvas: Canvas,
+    format: InputFormat,
+    /// The EXIF orientation the source carries, if any.
+    orientation: Option<Orientation>,
+    /// Whether decoding applied it (`IMAGE_AUTO_ORIENT`, on by default).
+    oriented: bool,
+}
+
+/// What the steps of one pipeline share as they run.
+struct Steps {
+    /// The source's EXIF orientation, for [`Transformation::Orient`].
+    orientation: Option<Orientation>,
+    /// Whether orientation has been applied, on decode or by a step. Once
+    /// it has, an `Orient` step does nothing and the output keeps no tag.
+    applied: bool,
+    /// The format the pipeline encodes to, which decides a rotation's
+    /// default background.
+    target: OutputFormat,
+    /// The background of the last rotation, which JPEG and GIF output
+    /// flattens transparency onto; white when nothing rotated.
+    flatten_onto: Color,
+}
+
+impl Steps {
+    fn new(target: OutputFormat, orientation: Option<Orientation>, applied: bool) -> Self {
+        Self {
+            orientation,
+            applied,
+            target,
+            flatten_onto: Color::WHITE,
+        }
+    }
+}
+
 /// The pure-Rust image driver: OxideAV codecs, OxideAV filters, no native
 /// libraries and nothing to install.
 ///
@@ -229,8 +269,9 @@ impl OxideAvImageDriver {
         Self { context }
     }
 
-    /// Run the shared guard, then decode to RGBA.
-    fn load(&self, contents: &[u8], config: &ImageConfig) -> Result<Canvas, FrameworkError> {
+    /// Run the shared guard, then decode to RGBA, applying the source's
+    /// EXIF orientation when `config.auto_orient` is on.
+    fn load(&self, contents: &[u8], config: &ImageConfig) -> Result<Decoded, FrameworkError> {
         if sniff::looks_like_heif(contents) {
             // Deliberately specific rather than falling through to the
             // generic unsupported-format error: iOS clients send HEIC
@@ -248,11 +289,18 @@ impl OxideAvImageDriver {
             )
         })?;
         let (width, height) = sniff::header_dimensions(format, contents)?;
+        // Reading the tag inflates nothing and allocates nothing.
+        let orientation = metadata::source_orientation(format, contents);
+        let turn =
+            orientation.filter(|orientation| config.auto_orient && !orientation.is_identity());
         // The header gate counted the output at four bytes a pixel; the
         // decoders allocate more than that on the way. Refuse what the
         // decode itself would take past the budget. See `peak`.
         let layout = peak::layout(format, contents, width, height)?;
-        let needed = peak::estimate(&layout, contents.len() as u64, width, height)?;
+        let mut needed = peak::estimate(&layout, contents.len() as u64, width, height)?;
+        if turn.is_some() {
+            needed = peak::oriented(needed, width, height);
+        }
         if needed > config.max_alloc_bytes {
             return Err(FrameworkError::param(format!(
                 "image exceeds configured decode limits: decoding this {width}x{height} {} \
@@ -275,7 +323,30 @@ impl OxideAvImageDriver {
                 zune.xmp_reads, config.max_alloc_bytes
             )));
         }
-        self.decode(contents, &layout, width, height, config)
+        let mut canvas = self.decode(contents, &layout, width, height, config)?;
+        if let Some(turn) = turn {
+            canvas = orient(canvas, turn);
+        }
+        Ok(Decoded {
+            canvas,
+            format,
+            orientation,
+            oriented: config.auto_orient,
+        })
+    }
+
+    /// Decode an image ImageMagick handed back between two runs, as it is:
+    /// the `magick` driver applies orientation with ImageMagick, so the
+    /// pixels must not be turned here as well.
+    pub(crate) fn decode_unoriented(
+        &self,
+        contents: &[u8],
+        config: &ImageConfig,
+    ) -> Result<ImagePixels, FrameworkError> {
+        let mut plain = *config;
+        plain.auto_orient = false;
+        let canvas = self.load(contents, &plain)?.canvas;
+        ImagePixels::new(canvas.width, canvas.height, canvas.pixels)
     }
 
     fn decode(
@@ -354,11 +425,92 @@ impl OxideAvImageDriver {
         mut canvas: Canvas,
         pipeline: &ImagePipeline,
         config: &ImageConfig,
+        steps: &mut Steps,
     ) -> Result<Canvas, FrameworkError> {
         for step in &pipeline.transformations {
-            canvas = apply(canvas, *step, config)?;
+            canvas = apply(canvas, *step, config, steps)?;
         }
         Ok(canvas)
+    }
+
+    /// Settle the colour and metadata the output carries, then encode.
+    ///
+    /// The source's ICC profile is carried when the output can hold it,
+    /// since every output this driver writes is RGB and an RGB profile still
+    /// describes it. A grey profile no longer does, so the pixels are
+    /// converted from it to sRGB and it is dropped; GIF output, which holds
+    /// no profile here, has its palette converted instead. The profile is
+    /// read only now, after decoding, and a compressed one inflates within
+    /// what the budget leaves beside the pixels already held.
+    fn finish(
+        &self,
+        mut canvas: Canvas,
+        contents: &[u8],
+        decoded_format: InputFormat,
+        steps: &Steps,
+        quality: u8,
+        config: &ImageConfig,
+    ) -> Result<Vec<u8>, FrameworkError> {
+        let target = steps.target;
+        let held = canvas.pixels.capacity() as u64;
+        let limit = metadata::inflate_limit(config.max_alloc_bytes, held);
+        let icc = metadata::source_icc(decoded_format, contents, limit)?;
+        let class = icc.as_deref().and_then(metadata::icc_class);
+        let mut carried: Option<&[u8]> = None;
+        let mut converted_away = false;
+        if target != OutputFormat::Gif {
+            match class {
+                Some(ColourClass::Rgb) => carried = icc.as_deref(),
+                Some(ColourClass::Gray) => {
+                    if let Some(conversion) = icc.as_deref().and_then(SrgbConversion::from_profile)
+                    {
+                        conversion.convert_rgba(&mut canvas.pixels);
+                    }
+                    converted_away = true;
+                }
+                Some(ColourClass::Other) => converted_away = true,
+                None => {}
+            }
+        }
+        let png_colour =
+            if decoded_format == InputFormat::Png && target == OutputFormat::Png && !converted_away
+            {
+                metadata::png_colour_chunks(contents)
+            } else {
+                Vec::new()
+            };
+        if metadata::flattens(target) {
+            flatten_rgba(&mut canvas.pixels, steps.flatten_onto);
+        }
+        let kept_orientation = if steps.applied {
+            None
+        } else {
+            steps.orientation
+        };
+        let (bytes, written) = match (target, carried) {
+            // The BMP encoder embeds the profile itself.
+            (OutputFormat::Bmp, Some(profile)) => {
+                (encode_bmp_with_profile(canvas, profile)?, Some(profile))
+            }
+            _ => (self.encode(canvas, target, quality)?, None),
+        };
+        let output = match target {
+            OutputFormat::Gif => OutputMetadata {
+                icc: icc.as_deref().filter(|_| class.is_some()),
+                ..OutputMetadata::default()
+            },
+            OutputFormat::Bmp => OutputMetadata {
+                icc: written,
+                ..OutputMetadata::default()
+            },
+            _ => OutputMetadata {
+                icc: carried,
+                orientation: kept_orientation,
+                png_colour: &png_colour,
+                strip: false,
+            },
+        };
+        metadata::rewrite(bytes, target, &output)
     }
 
     /// Encode `canvas`, which the encoder consumes: its pixels move into
@@ -429,27 +581,34 @@ impl ImageDriver for OxideAvImageDriver {
         pipeline: &ImagePipeline,
     ) -> Result<Vec<u8>, FrameworkError> {
         let config = super::config();
-        let canvas = self.load(contents, &config)?;
-        let source_format = sniff::detect(contents);
-        let canvas = self.transform(canvas, pipeline, &config)?;
+        let decoded = self.load(contents, &config)?;
         let target = pipeline
             .format
-            .or_else(|| source_format.and_then(output_for_input))
+            .or_else(|| output_for_input(decoded.format))
             // Only reachable if a format was recognised on the way in and has
             // no encoder counterpart, which cannot happen for these five.
             .unwrap_or(OutputFormat::Png);
-        self.encode(canvas, target, pipeline.quality)
+        let mut steps = Steps::new(target, decoded.orientation, decoded.oriented);
+        let canvas = self.transform(decoded.canvas, pipeline, &config, &mut steps)?;
+        self.finish(
+            canvas,
+            contents,
+            decoded.format,
+            &steps,
+            pipeline.quality,
+            &config,
+        )
     }
 
     fn dimensions(&self, contents: &[u8]) -> Result<(u32, u32), FrameworkError> {
         let config = super::config();
-        let canvas = self.load(contents, &config)?;
+        let canvas = self.load(contents, &config)?.canvas;
         Ok((canvas.width, canvas.height))
     }
 
     fn dominant_color(&self, contents: &[u8]) -> Result<String, FrameworkError> {
         let config = super::config();
-        let canvas = self.load(contents, &config)?;
+        let canvas = self.load(contents, &config)?.canvas;
         Ok(average_color(&canvas))
     }
 
@@ -774,10 +933,35 @@ fn scaled(value: u32, factor: f64) -> u32 {
     }
 }
 
+/// Turn the canvas by an EXIF orientation: one new plane, exact pixels.
+fn orient(canvas: Canvas, orientation: Orientation) -> Canvas {
+    let (pixels, width, height) = orientation.apply(canvas.pixels, canvas.width, canvas.height);
+    Canvas {
+        width,
+        height,
+        pixels,
+    }
+}
+
+/// Run a registered custom transformation on the canvas, and check the
+/// size it hands back against the same caps a resize target meets.
+fn custom(
+    canvas: Canvas,
+    transformation: super::CustomTransformation,
+    config: &ImageConfig,
+) -> Result<Canvas, FrameworkError> {
+    let pixels = ImagePixels::new(canvas.width, canvas.height, canvas.pixels)?;
+    let out = transformation.apply(pixels)?;
+    let (width, height) = (out.width(), out.height());
+    sniff::enforce_limits(width, height, config)?;
+    Canvas::packed(width, height, out.into_pixels())
+}
+
 fn apply(
     canvas: Canvas,
     step: Transformation,
     config: &ImageConfig,
+    steps: &mut Steps,
 ) -> Result<Canvas, FrameworkError> {
     let (w, h) = (canvas.width, canvas.height);
     match step {
@@ -813,7 +997,14 @@ fn apply(
             x,
             y,
         } => crop(canvas, x, y, width, height),
-        Transformation::Rotate(degrees) => rotate(canvas, degrees, config),
+        Transformation::Rotate {
+            degrees,
+            background,
+        } => {
+            let background = background.unwrap_or(metadata::default_background(steps.target));
+            steps.flatten_onto = background;
+            rotate(canvas, degrees, background, config)
+        }
         Transformation::FlipVertically => filter(canvas, &Flip::new()),
         Transformation::FlipHorizontally => filter(canvas, &Flop::new()),
         Transformation::Blur(amount) => match blur_radius(amount) {
@@ -832,6 +1023,17 @@ fn apply(
                 .with_preserve_alpha(true)
                 .with_output_gray8(false),
         ),
+        Transformation::Orient => {
+            if steps.applied {
+                return Ok(canvas);
+            }
+            steps.applied = true;
+            Ok(match steps.orientation {
+                Some(orientation) => orient(canvas, orientation),
+                None => canvas,
+            })
+        }
+        Transformation::Custom(transformation) => custom(canvas, transformation, config),
     }
 }
 
@@ -912,10 +1114,18 @@ fn resize(
 /// `IMAGE_MAX_DIMENSION` would land 1.41x over it. Predicting the extent and
 /// checking it first keeps the cap meaningful for the same reason `resize`
 /// checks its target.
-fn rotate(canvas: Canvas, degrees: f32, config: &ImageConfig) -> Result<Canvas, FrameworkError> {
+fn rotate(
+    canvas: Canvas,
+    degrees: f32,
+    background: Color,
+    config: &ImageConfig,
+) -> Result<Canvas, FrameworkError> {
     let (width, height) = rotated_extent(canvas.width, canvas.height, degrees);
     sniff::enforce_limits(width, height, config)?;
-    filter(canvas, &Rotate::new(degrees))
+    filter(
+        canvas,
+        &Rotate::new(degrees).with_background(background.to_rgba()),
+    )
 }
 
 /// The bounding box of `width x height` rotated by `degrees`, matching the
@@ -1105,6 +1315,30 @@ fn edge_extended_frame(
     })
 }
 
+/// Write a canvas as a V5 bitmap that embeds `profile`, the one BMP layout
+/// that holds an ICC profile.
+fn encode_bmp_with_profile(canvas: Canvas, profile: &[u8]) -> Result<Vec<u8>, FrameworkError> {
+    let image = oxideav_bmp::BmpImage {
+        width: canvas.width,
+        height: canvas.height,
+        pixel_format: oxideav_bmp::BmpPixelFormat::Rgba,
+        planes: vec![oxideav_bmp::BmpPlane {
+            stride: canvas.width as usize * 4,
+            data: canvas.pixels,
+        }],
+        palette: None,
+        pts: None,
+    };
+    // Rendering intent 4: LCS_GM_IMAGES, perceptual, the ICC default.
+    oxideav_bmp::encode_bmp_with_icc_profile(
+        &image,
+        profile,
+        4,
+        oxideav_bmp::BmpEncodeOptions::default(),
+    )
+    .map_err(|e| FrameworkError::internal(format!("image encode failed: bmp: {e}")))
+}
+
 /// Write a canvas as a single-frame GIF.
 ///
 /// The canvas is reduced to at most 256 colours first, with Floyd-Steinberg
@@ -1254,6 +1488,12 @@ mod tests {
         0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xF7, 0x03, 0x41, 0x43, 0x00, 0x00, 0x00,
         0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
+
+    /// The step context of a pipeline that encodes to PNG and has no
+    /// orientation to apply.
+    fn png_steps() -> Steps {
+        Steps::new(OutputFormat::Png, None, true)
+    }
 
     fn canvas(width: u32, height: u32, rgba: [u8; 4]) -> Canvas {
         Canvas {
@@ -1492,8 +1732,12 @@ mod tests {
         // 8x8 is at the cap; rotating it 45 degrees would need ~12 per side.
         let err = apply(
             canvas(8, 8, [1, 2, 3, 255]),
-            Transformation::Rotate(45.0),
+            Transformation::Rotate {
+                degrees: 45.0,
+                background: None,
+            },
             &config,
+            &mut png_steps(),
         )
         .expect_err("the grown canvas exceeds the cap");
         assert!(err.to_string().contains("limit"), "got: {err}");
@@ -1501,8 +1745,12 @@ mod tests {
         // A quarter turn of the same image does not grow, so it is allowed.
         apply(
             canvas(8, 8, [1, 2, 3, 255]),
-            Transformation::Rotate(90.0),
+            Transformation::Rotate {
+                degrees: 90.0,
+                background: None,
+            },
             &config,
+            &mut png_steps(),
         )
         .expect("a quarter turn stays within the cap");
     }
@@ -1544,6 +1792,7 @@ mod tests {
             canvas(4, 2, [10, 120, 250, 255]),
             Transformation::Sharpen(50),
             &ImageConfig::default(),
+            &mut png_steps(),
         )
         .expect("sharpen");
         assert_eq!((out.width, out.height), (4, 2));
@@ -1633,7 +1882,8 @@ mod tests {
             .expect("an encodable canvas");
         let decoded = driver
             .load(&gif, &ImageConfig::default())
-            .expect("our own GIF decodes");
+            .expect("our own GIF decodes")
+            .canvas;
         assert_eq!((decoded.width, decoded.height), (3, 1));
         assert_eq!(
             decoded.pixels,
@@ -1757,6 +2007,7 @@ mod tests {
                 height: 100,
             },
             &config,
+            &mut png_steps(),
         )
         .expect("scale");
         assert_eq!((scaled_up.width, scaled_up.height), (4, 2));
@@ -1768,6 +2019,7 @@ mod tests {
                 height: 100,
             },
             &config,
+            &mut png_steps(),
         )
         .expect("contain");
         assert_eq!(
@@ -1786,6 +2038,7 @@ mod tests {
                 height: 4,
             },
             &ImageConfig::default(),
+            &mut png_steps(),
         )
         .expect("cover");
         assert_eq!((out.width, out.height), (4, 4));
@@ -1804,6 +2057,7 @@ mod tests {
                 height: 4_000,
             },
             &config,
+            &mut png_steps(),
         )
         .expect_err("oversized target");
         assert!(err.to_string().contains("limit"), "got: {err}");

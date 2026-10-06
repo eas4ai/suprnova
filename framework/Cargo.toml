@@ -256,6 +256,16 @@ zune-jpeg = { version = "=0.5.16-rc2", optional = true, features = ["arith"] }
 # `oxideav-png` inflates without one. Pinned to the exact version
 # `oxideav-png` resolves to, so both passes run the same decoder.
 compcol = { version = "=0.6.10", optional = true, default-features = false, features = ["zlib"] }
+# EXIF orientation and colour management for the image pipeline. `image`
+# parses the EXIF `Orientation` tag (`image::metadata::Orientation`) and
+# nothing else: no codec feature is enabled, and its decoders are not used.
+# `moxcms` converts pixels between ICC profiles: to sRGB for GIF output and
+# when a profile no longer matches the pixels. Both are pure Rust with no
+# build script, both were already in the lock (through `totp-rs`'s QR
+# codes), and both declare an MSRV below the workspace's 1.94. `image` is
+# MIT or Apache-2.0; `moxcms` is BSD-3-Clause or Apache-2.0.
+image = { version = "=0.25.10", optional = true, default-features = false }
+moxcms = { version = "=0.8.1", optional = true }
 crypto_secretbox = "0.1.1"
 # Heap profiling behind `heap-profiling`; see `src/profiling.rs`. The
 # allocation tests also use it as a dev-dependency.
@@ -358,6 +368,8 @@ media = [
     "dep:oxideav-gif",
     "dep:oxideav-bmp",
     "dep:zune-jpeg",
+    "dep:image",
+    "dep:moxcms",
 ]
 # Database drivers are shared by SeaORM, migrations, and Magnetar.
 database-sqlite = [
@@ -446,6 +458,10 @@ suprnova-live-test-support = { path = "../crates/suprnova-live/crates/suprnova-l
 # `Registry` type identity.
 prometheus-client = "0.25"
 serial_test = "=2.0.0"
+# Compile-fail checks for the image API's breaking changes (IMG-005,
+# IMG-008). The version suprnova-macros already pins, so the lock gains
+# nothing.
+trybuild = "=1.0.120"
 strum = { version = "0.28.0", features = ["derive"] }
 tokio = { version = "1", features = ["test-util"] }
 tracing = "0.1"

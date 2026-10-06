@@ -182,9 +182,10 @@ async fn an_animated_gif_decodes_as_its_first_frame() {
     let mut frames = vec![frame(0, 0, 256, 256, 0)];
     frames.extend((0..50).map(|_| frame(0, 0, 1, 1, 1)));
     let animation = gif(256, 256, frames);
-    let _config = ConfigGuard::set(ImageConfig {
-        max_alloc_bytes: 5 * 256 * 256 * 4,
-        ..ImageConfig::default()
+    let _config = ConfigGuard::set({
+        let mut config = ImageConfig::default();
+        config.max_alloc_bytes = 5 * 256 * 256 * 4;
+        config
     });
 
     let image = Image::from_bytes(animation);
@@ -260,9 +261,10 @@ async fn a_file_source_is_read_no_further_than_the_cap() {
         let _ = sent_tx.send(sent);
     });
 
-    let _config = ConfigGuard::set(ImageConfig {
-        max_alloc_bytes: CAP,
-        ..ImageConfig::default()
+    let _config = ConfigGuard::set({
+        let mut config = ImageConfig::default();
+        config.max_alloc_bytes = CAP;
+        config
     });
     let err = Image::from_path(&fifo)
         .to_bytes()
@@ -292,9 +294,10 @@ async fn a_stored_file_over_the_cap_is_refused() {
     oversized.resize(256 * 1024, 0);
     disk.put("big.png", oversized).await.expect("seed");
 
-    let _config = ConfigGuard::set(ImageConfig {
-        max_alloc_bytes: 64 * 1024,
-        ..ImageConfig::default()
+    let _config = ConfigGuard::set({
+        let mut config = ImageConfig::default();
+        config.max_alloc_bytes = 64 * 1024;
+        config
     });
     let err = Image::from_disk("budget", "big.png")
         .to_bytes()
@@ -446,9 +449,10 @@ async fn a_stored_file_of_unknown_length_is_read_up_to_the_cap() {
     let mut oversized = PNG_SIGNATURE.to_vec();
     oversized.resize(256 * 1024, 0);
     disk.put("big.png", oversized).await.expect("seed");
-    let _config = ConfigGuard::set(ImageConfig {
-        max_alloc_bytes: 64 * 1024,
-        ..ImageConfig::default()
+    let _config = ConfigGuard::set({
+        let mut config = ImageConfig::default();
+        config.max_alloc_bytes = 64 * 1024;
+        config
     });
     let err = Image::from_disk("unknown-length", "big.png")
         .to_bytes()
@@ -551,9 +555,10 @@ async fn the_extended_xmp_bound_follows_the_configured_budget() {
         (35, 21)
     );
 
-    let _config = ConfigGuard::set(ImageConfig {
-        max_alloc_bytes: 16 * 1024 * 1024,
-        ..ImageConfig::default()
+    let _config = ConfigGuard::set({
+        let mut config = ImageConfig::default();
+        config.max_alloc_bytes = 16 * 1024 * 1024;
+        config
     });
     let err = Image::from_bytes(jpeg)
         .dimensions()

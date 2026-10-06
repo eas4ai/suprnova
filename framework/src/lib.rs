@@ -476,9 +476,10 @@ pub use validation::rule::{
 // `Illuminate\Validation\Rules\ImageFile`.
 #[cfg(feature = "media")]
 pub use media::{
-    DEFAULT_IMAGE_MAGICK_TIMEOUT_SECS, DEFAULT_IMAGE_MAX_ALLOC_BYTES, DEFAULT_IMAGE_MAX_DIMENSION,
-    DEFAULT_IMAGE_QUALITY, Image, ImageConfig, ImageDriver, ImageDriverKind, ImagePipeline,
-    MagickCliDriver, OutputFormat, OxideAvImageDriver, Transformation,
+    Color, CustomTransformation, DEFAULT_IMAGE_MAGICK_TIMEOUT_SECS, DEFAULT_IMAGE_MAX_ALLOC_BYTES,
+    DEFAULT_IMAGE_MAX_DIMENSION, DEFAULT_IMAGE_QUALITY, Image, ImageConfig, ImageDriver,
+    ImageDriverKind, ImagePipeline, ImagePixels, MagickCliDriver, OutputFormat, OxideAvImageDriver,
+    Transformation, register_transformation,
 };
 #[cfg(feature = "vector-pinecone")]
 pub use vector::PineconeVectorDriver;

@@ -392,7 +392,8 @@ URL, because a URL carries the password.
 
 ## Images
 
-Image driver selection and the decode limits that bound hostile input.
+Image driver selection, the decode limits that bound hostile input, and
+orientation on decode.
 Out-of-range limits clamp with a `warn!` rather than failing boot: a
 limit of zero would reject every image in the application. An unknown
 `IMAGE_DRIVER` fails at first use, naming the valid values.
@@ -404,6 +405,7 @@ limit of zero would reject every image in the application. An unknown
 | `IMAGE_MAX_ALLOC_BYTES` | `1073741824` (1 GiB) | `u64` | Cap on the memory one decode may allocate. Every driver checks the decoded RGBA footprint (`width * height * 4`) against it; the default `oxideav` driver also estimates the whole decode from the image's headers and refuses an image whose estimate is over it. Also caps the size of the source file itself, whether it arrives from a path, a disk, or `Image::from_stream` (which checks while collecting). Minimum `4`. |
 | `IMAGE_MAGICK_BINARY` | `magick` | `String` | Binary the `magick` driver invokes. ImageMagick 7 only; the ImageMagick 6 `convert` name is not accepted. A missing binary is a clear error at first use. |
 | `IMAGE_MAGICK_TIMEOUT_SECS` | `30` | `u32` | Wall-clock ceiling on a single ImageMagick invocation. It is both ImageMagick's own `-limit time` argument and the Rust-side deadline that kills the child's whole process group two seconds later, because `-limit time` is enforced by a monitor that a child wedged inside a delegate never engages. Bounds a stalled delegate that would otherwise hold a blocking worker for the life of the process. `magick` driver only. Minimum `1`. |
+| `IMAGE_AUTO_ORIENT` | `true` | `bool` | Apply the source's EXIF `Orientation` tag as an image decodes, under both drivers. `false`, `0`, `no` or `off` turn it off: the pixels keep the sensor's orientation, the output keeps the tag, and `Image::orient()` applies it where the pipeline says. Any other value keeps the default with a `warn!`. [Images](images.md#orientation) |
 
 See [Images](images.md) for the two-tier limit enforcement and how to
 choose between the drivers.

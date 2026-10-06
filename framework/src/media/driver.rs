@@ -14,6 +14,9 @@
 
 use crate::error::FrameworkError;
 
+use super::color::Color;
+use super::custom::CustomTransformation;
+
 /// Default encode quality, matching Laravel's `Image::quality()` default.
 ///
 /// Only the lossy encoders read it. See [`ImagePipeline::quality`] for which
@@ -95,7 +98,13 @@ impl OutputFormat {
 /// Recorded, not executed: an [`Image`](super::Image) accumulates these and
 /// the driver replays them at terminal time. Keeping them as plain data is
 /// what lets the pipeline stay lazy and stay cloneable.
+///
+/// `#[non_exhaustive]`, unlike [`OutputFormat`]: transformations are added
+/// as Laravel's set grows, and a custom [`ImageDriver`] must already answer
+/// one it does not know. Its wildcard arm returns an error naming the step,
+/// which is what both built-in drivers would do with an unknown format.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum Transformation {
     /// Force exact dimensions, ignoring the source aspect ratio.
     Resize {
@@ -145,7 +154,14 @@ pub enum Transformation {
         height: u32,
     },
     /// Rotate clockwise by an arbitrary angle, growing the canvas to fit.
-    Rotate(f32),
+    Rotate {
+        /// Clockwise angle in degrees.
+        degrees: f32,
+        /// Fill for the corners the turn exposes. `None` takes the output
+        /// format's default: white for JPEG and GIF, which cannot hold
+        /// transparency, and transparent for PNG, WebP and BMP.
+        background: Option<Color>,
+    },
     /// Mirror top-to-bottom (Laravel's `flip`).
     FlipVertically,
     /// Mirror left-to-right (Laravel's `flop`).
@@ -156,6 +172,25 @@ pub enum Transformation {
     Sharpen(u32),
     /// Desaturate to grey while staying in a colour layout.
     Grayscale,
+    /// Apply the source's EXIF orientation here, unless decoding already
+    /// did (Laravel's `orient`).
+    ///
+    /// Both drivers orient on decode by default, which makes this a no-op.
+    /// With `IMAGE_AUTO_ORIENT=false` the pixels arrive as the sensor wrote
+    /// them, and this is where the pipeline turns them.
+    Orient,
+    /// A transformation the application registered with
+    /// [`register_transformation`](super::register_transformation), applied
+    /// to the decoded pixels at this place in the pipeline.
+    Custom(CustomTransformation),
+}
+
+impl Transformation {
+    /// The custom transformation registered as `name`, for
+    /// [`Image::transform`](super::Image::transform).
+    pub const fn custom(name: &'static str) -> Self {
+        Self::Custom(CustomTransformation::new(name))
+    }
 }
 
 /// A complete recorded pipeline: what to do, what to encode to, how hard.
@@ -206,6 +241,12 @@ impl Default for ImagePipeline {
 /// terminal wrapper turns a panicking driver into
 /// [`FrameworkError::internal`], but that is a net for genuine bugs, not a
 /// substitute for validation.
+///
+/// [`Transformation`] is `#[non_exhaustive]`, so a driver's `match` on it
+/// ends in a wildcard arm. That arm returns an error naming the step,
+/// rather than skipping it: an image that silently loses a step is a wrong
+/// image nobody notices. A [`Transformation::Custom`] step can be run with
+/// [`CustomTransformation::apply`] on the decoded pixels.
 pub trait ImageDriver: Send + Sync + 'static {
     /// Decode `contents`, replay `pipeline`, and encode the result.
     ///
