@@ -744,8 +744,21 @@ impl Image {
                 Ok((driver.process(contents, pipeline)?, mime))
             })
             .await?;
-        let payload = base64::engine::general_purpose::STANDARD.encode(bytes);
-        Ok(format!("data:{mime};base64,{payload}"))
+        // The prefix, then the base64 encoded straight after it into the
+        // same buffer, sized up front: encoding into a string of its own and
+        // formatting that into the URI held two full base64 copies of the
+        // image at once (MEM-003).
+        let encoded = base64::encoded_len(bytes.len(), true).ok_or_else(|| {
+            FrameworkError::internal("image is too large to encode as a data URI")
+        })?;
+        let prefix = ["data:", mime.as_str(), ";base64,"];
+        let mut uri =
+            String::with_capacity(prefix.iter().map(|part| part.len()).sum::<usize>() + encoded);
+        for part in prefix {
+            uri.push_str(part);
+        }
+        base64::engine::general_purpose::STANDARD.encode_string(&bytes, &mut uri);
+        Ok(uri)
     }
 
     /// Run the pipeline and store the result on a disk, in `directory`,
