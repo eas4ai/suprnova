@@ -209,20 +209,29 @@ fn riff_chunk(fourcc: &[u8; 4], data: &[u8]) -> Vec<u8> {
 /// A simple lossless WebP (one `VP8L` chunk) rebuilt in the extended
 /// layout with `icc` before the image and `after` chunks after it.
 fn webp_with(webp: &[u8], icc: Option<&[u8]>, after: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
-    assert_eq!(
-        &webp[12..16],
-        b"VP8L",
-        "the fixture must be simple lossless"
-    );
     let size = u32::from_le_bytes(webp[16..20].try_into().unwrap()) as usize;
     let vp8l = &webp[12..20 + size + (size & 1)];
-    let bits = u32::from_le_bytes(webp[21..25].try_into().unwrap());
-    let (width, height) = ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1);
+    let (width, height, alpha) = match &webp[12..16] {
+        b"VP8L" => {
+            let bits = u32::from_le_bytes(webp[21..25].try_into().unwrap());
+            (
+                (bits & 0x3FFF) + 1,
+                ((bits >> 14) & 0x3FFF) + 1,
+                bits & (1 << 28) != 0,
+            )
+        }
+        b"VP8 " => (
+            u32::from(u16::from_le_bytes([webp[26], webp[27]]) & 0x3FFF),
+            u32::from(u16::from_le_bytes([webp[28], webp[29]]) & 0x3FFF),
+            false,
+        ),
+        other => panic!("the fixture must be a simple WebP, not {other:?}"),
+    };
     let mut flags = 0u8;
     if icc.is_some() {
         flags |= 0x20;
     }
-    if bits & (1 << 28) != 0 {
+    if alpha {
         flags |= 0x10;
     }
     for (fourcc, _) in after {
@@ -263,10 +272,12 @@ fn oriented_sources(
     let tiff = exif_tiff(Some(orientation), false);
     let jpeg = convert(&png, OutputFormat::Jpeg, 100);
     let webp = convert(&png, OutputFormat::WebPLossless, 70);
+    let lossy = convert(&png, OutputFormat::WebP, 90);
     vec![
         ("JPEG", jpeg_with(&jpeg, &[exif_segment(&tiff)])),
         ("PNG", png_with(&png, &[(b"eXIf", tiff.clone())])),
-        ("WebP", webp_with(&webp, None, &[(b"EXIF", tiff)])),
+        ("WebP", webp_with(&webp, None, &[(b"EXIF", tiff.clone())])),
+        ("lossy WebP", webp_with(&lossy, None, &[(b"EXIF", tiff)])),
     ]
 }
 
@@ -426,11 +437,6 @@ fn output_profile(format: OutputFormat, bytes: &[u8]) -> Option<Vec<u8>> {
             .find(|(label, first)| *label == 0xFF && first == b"ICCRGBG1012")
             .map(|(_, first)| first),
     }
-}
-
-/// The colour space of a profile, from its header.
-fn profile_space(profile: &[u8]) -> [u8; 4] {
-    profile[16..20].try_into().unwrap()
 }
 
 /// The colour space of the pixels encoded output stores.
@@ -823,6 +829,107 @@ fn img_001_image_auto_orient_false_turns_orientation_off_child() {
     assert_eq!(png_pixels(&out), (WIDTH, HEIGHT, rgba));
 }
 
+/// Under `driver`, `source` comes out turned by EXIF orientation `tag`:
+/// the exact permutation of the pixels the driver decodes with orientation
+/// off.
+fn assert_oriented_by(driver: &dyn ImageDriver, label: &str, source: &[u8], tag: u16) {
+    let sensor = {
+        let _config = opt_out();
+        driver
+            .process(source, &pipeline(vec![], OutputFormat::Png))
+            .unwrap_or_else(|e| panic!("{label}, unoriented, through {}: {e}", driver.name()))
+    };
+    let upright = driver
+        .process(source, &pipeline(vec![], OutputFormat::Png))
+        .unwrap_or_else(|e| panic!("{label} through {}: {e}", driver.name()));
+    let (width, height, sensor) = png_pixels(&sensor);
+    assert_eq!(
+        png_pixels(&upright),
+        turned(&sensor, width, height, tag),
+        "{label} through {} must be turned by orientation {tag}",
+        driver.name()
+    );
+}
+
+/// A progressive JPEG with a second Exif segment between its scans, which
+/// zune-jpeg keeps over the one in the header.
+fn progressive_with_a_tag_between_scans() -> Vec<u8> {
+    let jpeg = include_bytes!("fixtures/jpeg/photo-prog-420-35x21.jpg");
+    let first = jpeg.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
+    let second = first
+        + 2
+        + jpeg[first + 2..]
+            .windows(2)
+            .position(|w| w == [0xFF, 0xDA])
+            .expect("a second scan");
+    let mut out = jpeg_with(&jpeg[..second], &[exif_segment(&exif_tiff(Some(3), false))]);
+    out.extend_from_slice(&exif_segment(&exif_tiff(Some(6), false)));
+    out.extend_from_slice(&jpeg[second..]);
+    out
+}
+
+/// ImageMagick's own `Raw profile type exif` text chunk, holding EXIF with
+/// orientation `tag`, which the framework does not read (it would have to
+/// inflate a text chunk).
+fn raw_profile_exif(tag: u16) -> Vec<u8> {
+    let exif = [&b"Exif\0\0"[..], &exif_tiff(Some(tag), false)].concat();
+    let hex: String = exif.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut text = format!("\nexif\n{:8}\n", exif.len());
+    for line in hex.as_bytes().chunks(72) {
+        text.push_str(std::str::from_utf8(line).unwrap());
+        text.push('\n');
+    }
+    [
+        &b"Raw profile type exif\0\0"[..],
+        &compcol::vec::compress_to_vec::<compcol::zlib::Zlib>(text.as_bytes()).unwrap(),
+    ]
+    .concat()
+}
+
+/// Both drivers read the orientation from the same places: the last Exif
+/// segment of a JPEG, wherever it sits, and a PNG's `eXIf` chunk; not
+/// ImageMagick's own text chunk or its `orNT` chunk.
+fn assert_one_reader_orients(driver: &dyn ImageDriver) {
+    let rgba = pattern(WIDTH, HEIGHT);
+    let jpeg = convert(
+        &png_of(WIDTH, HEIGHT, rgba.clone()),
+        OutputFormat::Jpeg,
+        100,
+    );
+    let two = jpeg_with(
+        &jpeg,
+        &[
+            exif_segment(&exif_tiff(Some(3), false)),
+            exif_segment(&exif_tiff(Some(6), false)),
+        ],
+    );
+    assert_oriented_by(driver, "a JPEG with two Exif segments", &two, 6);
+    assert_oriented_by(
+        driver,
+        "a progressive JPEG with a tag between its scans",
+        &progressive_with_a_tag_between_scans(),
+        6,
+    );
+    let png = png_of(WIDTH, HEIGHT, rgba);
+    let text = png_with(&png, &[(b"zTXt", raw_profile_exif(6))]);
+    assert_oriented_by(driver, "a PNG with EXIF only in a text chunk", &text, 1);
+    let ornt = png_with(&png, &[(b"orNT", vec![6])]);
+    assert_oriented_by(driver, "a PNG with an orNT chunk", &ornt, 1);
+}
+
+#[test]
+#[serial]
+fn img_001_oxideav_reads_the_orientation_from_the_shared_sources() {
+    assert_one_reader_orients(oxideav().as_ref());
+}
+
+#[test]
+#[serial]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn img_001_magick_reads_the_orientation_from_the_shared_sources() {
+    assert_one_reader_orients(magick().as_ref());
+}
+
 // ───────────────────────── IMG-002 ─────────────────────────
 
 const XMP: &[u8] = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF/></x:xmpmeta>";
@@ -1140,13 +1247,12 @@ fn img_002_magick_keeps_an_rgb_profile_on_grey_pixels_consistent() {
             let out = magick()
                 .process(&source, &pipeline(vec![], target))
                 .unwrap();
-            if let Some(profile) = output_profile(target, &out) {
-                assert_eq!(
-                    pixel_space(target, &out),
-                    profile_space(&profile),
-                    "{name} to {target:?}"
-                );
-            }
+            let profile = output_profile(target, &out);
+            assert!(
+                profile.as_deref() == Some(&p3[..]),
+                "{name} to {target:?}: the profile was dropped or changed"
+            );
+            assert_eq!(pixel_space(target, &out), *b"RGB ", "{name} to {target:?}");
         }
     }
 }
@@ -1336,6 +1442,209 @@ fn img_002_a_jpeg_decodes_to_the_same_colours_in_libjpeg() {
             }
         }
     }
+}
+
+/// `profile` with its header's size field changed to `size`.
+fn misdeclared(mut profile: Vec<u8>, size: u32) -> Vec<u8> {
+    profile[..4].copy_from_slice(&size.to_be_bytes());
+    profile
+}
+
+/// A profile whose header gives another size than its length is not an ICC
+/// profile, and is not carried.
+fn assert_a_misdeclared_profile_is_not_carried(driver: &dyn ImageDriver) {
+    let p3 = display_p3();
+    let wrong = misdeclared(p3.clone(), p3.len() as u32 + 4);
+    for (name, source) in sources_with_profile(&pattern(WIDTH, HEIGHT), WIDTH, HEIGHT, &wrong) {
+        for target in [OutputFormat::Jpeg, OutputFormat::Png, OutputFormat::WebP] {
+            let label = format!("{name} to {target:?} through {}", driver.name());
+            match driver.process(&source, &pipeline(vec![], target)) {
+                Ok(out) => assert_eq!(output_profile(target, &out), None, "{label}"),
+                // ImageMagick's PNG reader, libpng, refuses a PNG whose
+                // iCCP profile does not match its header: not carried
+                // either.
+                Err(e) if driver.name() == "magick" && name == "PNG" => {
+                    assert!(e.to_string().contains("iCCP"), "{label}: {e}");
+                }
+                Err(e) => panic!("{label}: {e}"),
+            }
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn img_002_oxideav_does_not_carry_a_profile_its_header_misdescribes() {
+    assert_a_misdeclared_profile_is_not_carried(oxideav().as_ref());
+}
+
+#[test]
+#[serial]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn img_002_magick_does_not_carry_a_profile_its_header_misdescribes() {
+    assert_a_misdeclared_profile_is_not_carried(magick().as_ref());
+}
+
+/// `profile` claiming the CMYK colour space.
+fn cmyk_class(mut profile: Vec<u8>) -> Vec<u8> {
+    profile[16..20].copy_from_slice(b"CMYK");
+    profile
+}
+
+/// A CMYK profile cannot describe RGB pixels, so RGB output never carries
+/// one.
+#[test]
+#[serial]
+fn img_002_oxideav_does_not_carry_a_cmyk_profile_on_rgb_pixels() {
+    let cmyk = cmyk_class(display_p3());
+    let rgba = pattern(WIDTH, HEIGHT);
+    let png = png_with(
+        &png_of(WIDTH, HEIGHT, rgba.clone()),
+        &[(b"iCCP", iccp(&cmyk))],
+    );
+    for target in [
+        OutputFormat::Jpeg,
+        OutputFormat::Png,
+        OutputFormat::WebP,
+        OutputFormat::Bmp,
+    ] {
+        let out = oxideav().process(&png, &pipeline(vec![], target)).unwrap();
+        assert_eq!(output_profile(target, &out), None, "{target:?}");
+    }
+    let out = oxideav()
+        .process(&png, &pipeline(vec![], OutputFormat::Png))
+        .unwrap();
+    assert_eq!(
+        png_pixels(&out),
+        (WIDTH, HEIGHT, rgba),
+        "nothing to convert"
+    );
+}
+
+#[test]
+#[serial]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn img_002_magick_does_not_carry_a_cmyk_profile_on_rgb_pixels() {
+    use std::process::Command;
+    let made = Command::new(MagickCliDriver::from_env().binary())
+        .args(["-size", "8x8", "xc:#c83c28", "-colorspace", "CMYK", "jpg:-"])
+        .output()
+        .expect("ImageMagick writes a CMYK JPEG");
+    assert!(made.status.success());
+    let cmyk = cmyk_class(display_p3());
+    let source = jpeg_with(&made.stdout, &icc_segments(&cmyk));
+    for target in [OutputFormat::Png, OutputFormat::WebP, OutputFormat::Bmp] {
+        let out = magick()
+            .process(&source, &pipeline(vec![], target))
+            .unwrap();
+        assert_eq!(output_profile(target, &out), None, "{target:?}");
+        assert_eq!(pixel_space(target, &out), *b"RGB ", "{target:?}");
+    }
+}
+
+/// Under the opt-out, `orient()` after a custom step turns the pixels the
+/// step returned: under `magick` the turn comes after the image went
+/// through Rust between two runs.
+fn assert_orient_after_a_custom_step(driver: &dyn ImageDriver) {
+    suprnova::register_transformation("img-001-identity", Ok);
+    for (name, source) in oriented_sources(&pattern(WIDTH, HEIGHT), WIDTH, HEIGHT, 6) {
+        let _config = opt_out();
+        let sensor = driver
+            .process(&source, &pipeline(vec![], OutputFormat::Png))
+            .unwrap();
+        let out = driver
+            .process(
+                &source,
+                &pipeline(
+                    vec![
+                        Transformation::custom("img-001-identity"),
+                        Transformation::Orient,
+                    ],
+                    OutputFormat::Png,
+                ),
+            )
+            .unwrap();
+        let (width, height, sensor) = png_pixels(&sensor);
+        assert_eq!(
+            png_pixels(&out),
+            turned(&sensor, width, height, 6),
+            "{name} through {}",
+            driver.name()
+        );
+        assert_eq!(
+            metadata_found(OutputFormat::Png, &out),
+            Vec::<String>::new(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn img_001_orient_after_a_custom_step_under_oxideav() {
+    assert_orient_after_a_custom_step(oxideav().as_ref());
+}
+
+#[test]
+#[serial]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn img_001_orient_after_a_custom_step_under_magick() {
+    assert_orient_after_a_custom_step(magick().as_ref());
+}
+
+/// Both drivers report the size an image has once turned, for a source that
+/// still carries its tag, without turning it.
+#[test]
+#[serial]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn img_001_both_drivers_report_a_tagged_source_at_its_turned_size() {
+    for (name, source) in oriented_sources(&pattern(WIDTH, HEIGHT), WIDTH, HEIGHT, 6) {
+        for driver in [oxideav(), magick()] {
+            assert_eq!(
+                driver.dimensions(&source).unwrap(),
+                (HEIGHT, WIDTH),
+                "{name} through {}",
+                driver.name()
+            );
+        }
+    }
+}
+
+/// How many times `img-004-counted` ran.
+static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A custom step runs once, even when `magick` runs the end of the pipeline
+/// again to keep a profile consistent with its pixels: an all-grey image
+/// with an RGB profile, written as PNG, which ImageMagick writes as grey.
+#[test]
+#[serial]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn img_004_a_custom_step_runs_once_when_magick_runs_again() {
+    suprnova::register_transformation("img-004-counted", |pixels| {
+        RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(pixels)
+    });
+    let p3 = display_p3();
+    let grey = png_with(
+        &png_of(8, 8, flat(8, 8, [120, 120, 120, 255])),
+        &[(b"iCCP", iccp(&p3))],
+    );
+    RUNS.store(0, std::sync::atomic::Ordering::SeqCst);
+    let out = magick()
+        .process(
+            &grey,
+            &pipeline(
+                vec![Transformation::custom("img-004-counted")],
+                OutputFormat::Png,
+            ),
+        )
+        .unwrap();
+    assert_eq!(RUNS.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        output_profile(OutputFormat::Png, &out).as_deref(),
+        Some(&p3[..])
+    );
+    assert_eq!(pixel_space(OutputFormat::Png, &out), *b"RGB ");
 }
 
 // ───────────────────────── IMG-003 ─────────────────────────
