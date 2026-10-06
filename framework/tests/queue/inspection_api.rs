@@ -119,26 +119,13 @@ async fn fake_lists_recorded_pushes() {
 
 // ---- database driver -------------------------------------------------
 
+/// An in-memory database with the jobs table and its reservations table,
+/// as the shipped migration creates them.
 async fn fresh_db() -> sea_orm::DatabaseConnection {
+    use sea_orm_migration::{MigrationTrait, SchemaManager};
     let db = Database::connect("sqlite::memory:").await.unwrap();
-    db.execute_unprepared(
-        r"
-        CREATE TABLE jobs (
-            id TEXT PRIMARY KEY,
-            job_name TEXT NOT NULL,
-            queue TEXT NULL,
-            envelope_json TEXT NOT NULL,
-            available_at INTEGER NOT NULL,
-            reserved_until INTEGER NULL,
-            reserved_token TEXT NULL,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            created_at INTEGER NOT NULL
-        )
-    ",
-    )
-    .await
-    .unwrap();
-    db.execute_unprepared("CREATE INDEX idx_jobs_available_at ON jobs(available_at)")
+    suprnova::queue::migrations::CreateJobsTable
+        .up(&SchemaManager::new(&db))
         .await
         .unwrap();
     db
@@ -218,13 +205,14 @@ async fn database_driver_pending_jobs_survives_an_unparseable_row() {
 
     d.push(db_env("good")).await.unwrap();
 
-    // Insert a poison row directly: garbage envelope_json that will fail to
-    // decode when the listing tries to parse it.
+    // Insert a poison row directly: a payload this driver wrote the start
+    // of, but which fails to decode as an envelope when the listing tries to
+    // parse it.
     let now = Utc::now().timestamp();
     db.execute_unprepared(&format!(
-        "INSERT INTO jobs (id, job_name, queue, envelope_json, available_at, attempts, created_at) \
-         VALUES ('{}', 'poison', NULL, 'not valid json', {now}, 0, {now})",
-        Uuid::new_v4()
+        "INSERT INTO jobs (queue, payload, attempts, available_at, created_at) \
+         VALUES ('default', '{{\"schema_version\":2,\"displayName\":\"poison\"}}', 0, \
+         {now}, {now})"
     ))
     .await
     .unwrap();
@@ -253,7 +241,7 @@ async fn database_driver_pending_jobs_survives_an_unparseable_row() {
     assert!(good.id.is_some());
 }
 
-/// The queue filter's `queue = ? OR queue IS NULL` arm is Postgres-ordinal
+/// The queue filter's `queue = ?` arm is Postgres-ordinal
 /// sensitive (`queue_filter_clause` in `database.rs`) and only this SQLite
 /// run exercises the SQL text; a placeholder-ordinal mistake would still
 /// pass on SQLite (its `?` is purely positional) but break on Postgres,

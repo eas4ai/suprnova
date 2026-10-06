@@ -188,7 +188,9 @@ async fn without_overlapping_releases_without_burning_attempt() {
         queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
-    run_worker(driver.clone(), cfg, cancel.clone()).await;
+    run_worker(driver.clone(), cfg, cancel.clone())
+        .await
+        .expect("the worker starts");
 
     // After the worker exits via max_jobs, the released job should be back
     // on the driver (delayed by release_after), and its attempts must be 0 -

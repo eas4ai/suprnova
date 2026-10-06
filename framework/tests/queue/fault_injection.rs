@@ -329,7 +329,9 @@ async fn run_until_done(driver: Arc<dyn QueueDriver>, max_jobs: u64) {
         CancellationToken::new(),
     ));
     match tokio::time::timeout(Duration::from_secs(10), handle).await {
-        Ok(joined) => joined.expect("worker task panicked"),
+        Ok(joined) => joined
+            .expect("worker task panicked")
+            .expect("the worker starts"),
         Err(_) => panic!("worker did not settle {max_jobs} job(s) within 10s"),
     }
 }

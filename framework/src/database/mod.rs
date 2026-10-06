@@ -51,6 +51,9 @@
 //! ```
 
 pub(crate) mod after_commit;
+// Internal: stores and migrations read a table's columns through here to
+// tell Laravel's layout from an earlier framework layout before they act.
+pub(crate) mod catalog;
 // The WHERE and JOIN pieces `DbTableBuilder` and the model builder share.
 // Internal; its public types re-export below.
 pub(crate) mod clauses;

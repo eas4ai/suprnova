@@ -93,7 +93,9 @@ async fn worker_emits_lifecycle_events() {
         queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
-    run_worker(driver, cfg, cancel).await;
+    run_worker(driver, cfg, cancel)
+        .await
+        .expect("the worker starts");
 
     assert_eq!(EV_QUEUED.load(Ordering::SeqCst), 1);
     assert_eq!(EV_PROCESSING.load(Ordering::SeqCst), 1);
@@ -152,7 +154,9 @@ async fn job_timed_out_event_carries_the_jobs_timeout_budget() {
         max_jobs: Some(1),
         queues: Vec::new(),
     };
-    run_worker(driver, cfg, CancellationToken::new()).await;
+    run_worker(driver, cfg, CancellationToken::new())
+        .await
+        .expect("the worker starts");
 
     let timed_out = dispatched::<JobTimedOut>(|_| true);
     assert_eq!(timed_out.len(), 1, "one settlement, one JobTimedOut");
@@ -206,7 +210,9 @@ async fn job_attempted_fires_when_a_job_fails_terminally() {
         max_jobs: Some(1),
         queues: Vec::new(),
     };
-    run_worker(driver, cfg, CancellationToken::new()).await;
+    run_worker(driver, cfg, CancellationToken::new())
+        .await
+        .expect("the worker starts");
 
     assert_eq!(dispatched::<JobFailed>(|_| true).len(), 1, "dead-lettered");
     let attempted = dispatched::<JobAttempted>(|_| true);
@@ -268,7 +274,9 @@ async fn job_attempted_fires_when_middleware_deletes_the_job() {
         max_jobs: Some(1),
         queues: Vec::new(),
     };
-    run_worker(driver.clone(), cfg, CancellationToken::new()).await;
+    run_worker(driver.clone(), cfg, CancellationToken::new())
+        .await
+        .expect("the worker starts");
 
     assert_eq!(driver.size().await.unwrap(), 0, "the deleted job is gone");
     let attempted = dispatched::<JobAttempted>(|_| true);
@@ -303,7 +311,9 @@ async fn job_processed_fires_when_middleware_deletes_the_job() {
         max_jobs: Some(1),
         queues: Vec::new(),
     };
-    run_worker(driver.clone(), cfg, CancellationToken::new()).await;
+    run_worker(driver.clone(), cfg, CancellationToken::new())
+        .await
+        .expect("the worker starts");
 
     let processed = dispatched::<JobProcessed>(|_| true);
     assert_eq!(
@@ -401,7 +411,9 @@ async fn job_processed_fires_before_job_released_when_middleware_releases_the_jo
         max_jobs: Some(1),
         queues: Vec::new(),
     };
-    run_worker(driver.clone(), cfg, CancellationToken::new()).await;
+    run_worker(driver.clone(), cfg, CancellationToken::new())
+        .await
+        .expect("the worker starts");
     EventFacade::forget::<JobProcessed>();
     EventFacade::forget::<suprnova::queue::events::JobReleased>();
 

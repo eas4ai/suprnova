@@ -404,40 +404,48 @@ pub const DEFAULT_BATCH_SETTLEMENTS_TABLE: &str = "job_batch_settlements";
 /// SeaORM-backed [`BatchRepository`]. Batch accounting survives a restart, and
 /// the settlement counters cannot double-count a redelivered job.
 ///
-/// # Schema (operator-managed)
+/// # Schema
+///
+/// `job_batches` is Laravel 13's table (`batches.stub`), which
+/// [`CreateJobBatchesTable`](crate::queue::migrations::CreateJobBatchesTable)
+/// creates; a table Laravel's own migration created works the same.
+/// `job_batch_settlements` is the framework's own:
 ///
 /// ```sql
 /// CREATE TABLE job_batches (
-///     id            TEXT PRIMARY KEY,
-///     name          TEXT NOT NULL,
-///     total_jobs    INTEGER NOT NULL,
-///     options_json  TEXT NOT NULL,
-///     created_at    BIGINT NOT NULL,
-///     cancelled_at  BIGINT NULL,
-///     finished_at   BIGINT NULL
+///     id             VARCHAR(255) PRIMARY KEY,
+///     name           VARCHAR(255) NOT NULL,
+///     total_jobs     INTEGER NOT NULL,
+///     pending_jobs   INTEGER NOT NULL,
+///     failed_jobs    INTEGER NOT NULL,
+///     failed_job_ids LONGTEXT NOT NULL,
+///     options        MEDIUMTEXT NULL,
+///     cancelled_at   INTEGER NULL,
+///     created_at     INTEGER NOT NULL,
+///     finished_at    INTEGER NULL
 /// );
 ///
 /// CREATE TABLE job_batch_settlements (
-///     batch_id   TEXT NOT NULL,
-///     job_id     TEXT NOT NULL,
+///     batch_id   VARCHAR(255) NOT NULL,
+///     job_id     VARCHAR(255) NOT NULL,
 ///     failed     INTEGER NOT NULL,
 ///     settled_at BIGINT NOT NULL,
 ///     PRIMARY KEY (batch_id, job_id)
 /// );
 /// ```
 ///
-/// The epoch columns are `BIGINT` so they outlive 2038. A table created
-/// with `INTEGER` there, as an earlier version of this schema said, still
-/// works: the repository reads every integer column 32 or 64 bits wide.
-///
-/// Same convention as
-/// [`DatabaseFailedJobStore`](crate::queue::DatabaseFailedJobStore): the
-/// framework does not create these, so they belong in your migrations.
+/// `options` holds what Laravel's repository reads there: PHP's
+/// `serialize` of an array, base64-encoded on Postgres as Laravel encodes
+/// it. The array has one key, `suprnova`, holding the [`BatchOptions`] as
+/// JSON, so Laravel decodes a Suprnova batch and this repository reads its
+/// options back.
 ///
 /// # Why the counters are derived rather than stored (DATA-02)
 ///
-/// `pending_jobs` and `failed_jobs` are not columns. They are computed from
-/// the settlement rows on every read:
+/// `pending_jobs` and `failed_jobs` are read from the settlement rows, never
+/// from the columns of the same names. Every settlement writes the derived
+/// values back to those columns, and `failed_job_ids` with them, so Laravel
+/// reads the same counts; nothing here reads them back:
 ///
 /// ```text
 /// pending_jobs = max(0, total_jobs - COUNT(settlements))
@@ -735,6 +743,7 @@ impl DatabaseBatchRepository {
                 .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
             return Err(FrameworkError::internal(format!("batch not found: {id}")));
         };
+        self.write_counters(&txn, id, counts).await?;
 
         txn.commit()
             .await
@@ -776,23 +785,27 @@ impl BatchRepository for DatabaseBatchRepository {
     async fn store(&self, batch: Batch) -> Result<(), FrameworkError> {
         use crate::database::placeholder::placeholder_list;
         use sea_orm::ConnectionTrait;
-        let options_json = serde_json::to_string(&batch.options)
-            .map_err(|e| FrameworkError::internal(format!("encode batch options: {e}")))?;
+        let options = encode_batch_options(&batch.options, self.backend())?;
+        let failed_job_ids = failed_job_ids_json(&batch.failed_job_ids)?;
         self.db
             .execute_raw(sea_orm::Statement::from_sql_and_values(
                 self.backend(),
                 format!(
                     "INSERT INTO {} \
-             (id, name, total_jobs, options_json, created_at, cancelled_at, finished_at) \
+             (id, name, total_jobs, pending_jobs, failed_jobs, failed_job_ids, options, \
+              created_at, cancelled_at, finished_at) \
              VALUES ({})",
                     self.batches,
-                    placeholder_list(self.backend(), 1, 7)?
+                    placeholder_list(self.backend(), 1, 10)?
                 ),
                 vec![
                     sea_orm::Value::from(batch.id.clone()),
                     sea_orm::Value::from(batch.name.clone()),
                     sea_orm::Value::from(batch.total_jobs as i64),
-                    sea_orm::Value::from(options_json),
+                    sea_orm::Value::from(batch.pending_jobs as i64),
+                    sea_orm::Value::from(batch.failed_jobs as i64),
+                    sea_orm::Value::from(failed_job_ids),
+                    sea_orm::Value::from(options),
                     sea_orm::Value::from(batch.created_at.timestamp()),
                     sea_orm::Value::from(batch.cancelled_at.map(|t| t.timestamp())),
                     sea_orm::Value::from(batch.finished_at.map(|t| t.timestamp())),
@@ -811,7 +824,7 @@ impl BatchRepository for DatabaseBatchRepository {
             .query_one_raw(sea_orm::Statement::from_sql_and_values(
                 self.backend(),
                 format!(
-                    "SELECT name, total_jobs, options_json, created_at, cancelled_at, finished_at \
+                    "SELECT name, total_jobs, options, created_at, cancelled_at, finished_at \
              FROM {} WHERE id = {}",
                     self.batches,
                     placeholder(self.backend(), 1)?
@@ -831,7 +844,7 @@ impl BatchRepository for DatabaseBatchRepository {
         };
         let name: String = row.try_get_by_index(0).map_err(col(0, "name"))?;
         let total_jobs = wide_int(&row, 1).map_err(col(1, "total_jobs"))?;
-        let options_json: String = row.try_get_by_index(2).map_err(col(2, "options"))?;
+        let options: Option<String> = row.try_get_by_index(2).map_err(col(2, "options"))?;
         let created_at = wide_int(&row, 3).map_err(col(3, "created_at"))?;
         let cancelled_at = optional_wide_int(&row, 4).map_err(col(4, "cancelled_at"))?;
         let finished_at = optional_wide_int(&row, 5).map_err(col(5, "finished_at"))?;
@@ -848,8 +861,7 @@ impl BatchRepository for DatabaseBatchRepository {
             pending_jobs: counts.pending_jobs,
             failed_jobs: counts.failed_jobs,
             failed_job_ids: self.failed_ids(id).await?,
-            options: serde_json::from_str(&options_json)
-                .map_err(|e| FrameworkError::internal(format!("decode batch options: {e}")))?,
+            options: decode_batch_options(options.as_deref())?,
             created_at: timestamp(created_at, "created_at")?,
             cancelled_at: cancelled_at
                 .map(|t| timestamp(t, "cancelled_at"))
@@ -911,6 +923,7 @@ impl BatchRepository for DatabaseBatchRepository {
                 .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
             return Err(FrameworkError::internal(format!("batch not found: {id}")));
         };
+        self.write_counters(&txn, id, counts).await?;
         txn.commit()
             .await
             .map_err(|e| FrameworkError::internal(format!("job_batches commit: {e}")))?;
@@ -1072,10 +1085,53 @@ impl BatchRepository for DatabaseBatchRepository {
 impl DatabaseBatchRepository {
     /// Ids of the jobs that settled as failures, oldest first.
     async fn failed_ids(&self, id: &str) -> Result<Vec<Uuid>, FrameworkError> {
+        self.failed_ids_on(&self.db, id).await
+    }
+
+    /// Write the counts derived from the settlement rows into the batch
+    /// row's `pending_jobs`, `failed_jobs` and `failed_job_ids`, the columns
+    /// Laravel's repository reads. Runs inside the caller's transaction,
+    /// under the parent-row lock, so the columns never show a count the
+    /// settlements did not reach.
+    async fn write_counters<C: sea_orm::ConnectionTrait>(
+        &self,
+        conn: &C,
+        id: &str,
+        counts: UpdatedBatchJobCounts,
+    ) -> Result<(), FrameworkError> {
         use crate::database::placeholder::placeholder;
-        use sea_orm::ConnectionTrait;
-        let rows = self
-            .db
+        let failed_ids = self.failed_ids_on(conn, id).await?;
+        conn.execute_raw(sea_orm::Statement::from_sql_and_values(
+            self.backend(),
+            format!(
+                "UPDATE {} SET pending_jobs = {}, failed_jobs = {}, failed_job_ids = {} \
+                 WHERE id = {}",
+                self.batches,
+                placeholder(self.backend(), 1)?,
+                placeholder(self.backend(), 2)?,
+                placeholder(self.backend(), 3)?,
+                placeholder(self.backend(), 4)?
+            ),
+            vec![
+                sea_orm::Value::from(i64::try_from(counts.pending_jobs).unwrap_or(i64::MAX)),
+                sea_orm::Value::from(i64::try_from(counts.failed_jobs).unwrap_or(i64::MAX)),
+                sea_orm::Value::from(failed_job_ids_json(&failed_ids)?),
+                sea_orm::Value::from(id.to_string()),
+            ],
+        ))
+        .await
+        .map_err(|e| FrameworkError::internal(format!("job_batches counters: {e}")))?;
+        Ok(())
+    }
+
+    /// [`Self::failed_ids`] on `conn`, which may be a transaction.
+    async fn failed_ids_on<C: sea_orm::ConnectionTrait>(
+        &self,
+        conn: &C,
+        id: &str,
+    ) -> Result<Vec<Uuid>, FrameworkError> {
+        use crate::database::placeholder::placeholder;
+        let rows = conn
             .query_all_raw(sea_orm::Statement::from_sql_and_values(
                 self.backend(),
                 format!(
@@ -1099,6 +1155,80 @@ impl DatabaseBatchRepository {
         }
         Ok(out)
     }
+}
+
+/// The key of the one entry in the PHP array that `options` holds.
+const OPTIONS_KEY: &str = "suprnova";
+
+/// `options` as Laravel's repository stores it: PHP's `serialize` of an
+/// array, base64-encoded on Postgres. The array maps [`OPTIONS_KEY`] to the
+/// options as JSON, so Laravel's `unserialize` reads a valid array.
+pub(crate) fn encode_batch_options(
+    options: &BatchOptions,
+    backend: sea_orm::DatabaseBackend,
+) -> Result<String, FrameworkError> {
+    let json = serde_json::to_string(options)
+        .map_err(|e| FrameworkError::internal(format!("encode batch options: {e}")))?;
+    Ok(php_wrap_options_json(&json, backend))
+}
+
+/// [`encode_batch_options`] for options already encoded as JSON.
+pub(crate) fn php_wrap_options_json(json: &str, backend: sea_orm::DatabaseBackend) -> String {
+    use base64::Engine as _;
+    let serialized = format!(
+        "a:1:{{s:{}:\"{OPTIONS_KEY}\";s:{}:\"{json}\";}}",
+        OPTIONS_KEY.len(),
+        json.len()
+    );
+    if backend == sea_orm::DatabaseBackend::Postgres {
+        base64::engine::general_purpose::STANDARD.encode(serialized)
+    } else {
+        serialized
+    }
+}
+
+/// Read `options` back. Laravel reads a stored value that holds neither
+/// `:` nor `;` as base64 on Postgres, and so does this. A value with no
+/// Suprnova options in it, such as the `a:0:{}` a Laravel batch stores,
+/// reads as the default options: a Laravel batch names no Suprnova
+/// callback.
+fn decode_batch_options(stored: Option<&str>) -> Result<BatchOptions, FrameworkError> {
+    use base64::Engine as _;
+    let Some(stored) = stored else {
+        return Ok(BatchOptions::default());
+    };
+    let decoded;
+    let serialized = if stored.contains(':') || stored.contains(';') {
+        stored
+    } else {
+        decoded = base64::engine::general_purpose::STANDARD
+            .decode(stored.trim())
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_default();
+        decoded.as_str()
+    };
+    let head = format!("a:1:{{s:{}:\"{OPTIONS_KEY}\";s:", OPTIONS_KEY.len());
+    let Some(rest) = serialized.strip_prefix(&head) else {
+        return Ok(BatchOptions::default());
+    };
+    let Some((length, rest)) = rest.split_once(":\"") else {
+        return Ok(BatchOptions::default());
+    };
+    let length: usize = length
+        .parse()
+        .map_err(|e| FrameworkError::internal(format!("decode batch options: {e}")))?;
+    let json = rest.get(..length).ok_or_else(|| {
+        FrameworkError::internal("decode batch options: the stored options are cut short")
+    })?;
+    serde_json::from_str(json)
+        .map_err(|e| FrameworkError::internal(format!("decode batch options: {e}")))
+}
+
+/// `failed_job_ids` as Laravel stores it: a JSON array of the job ids.
+fn failed_job_ids_json(ids: &[Uuid]) -> Result<String, FrameworkError> {
+    serde_json::to_string(&ids.iter().map(Uuid::to_string).collect::<Vec<_>>())
+        .map_err(|e| FrameworkError::internal(format!("encode failed_job_ids: {e}")))
 }
 
 /// Read an integer column 32 or 64 bits wide.

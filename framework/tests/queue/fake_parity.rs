@@ -341,7 +341,8 @@ async fn a_chain_under_except_sends_each_link_where_except_sends_it() {
         run_worker(driver.clone(), cfg, CancellationToken::new()),
     )
     .await
-    .expect("the worker runs the head and the excepted link");
+    .expect("the worker runs the head and the excepted link")
+    .expect("the worker starts");
     assert_eq!(
         COUNTED_RUNS.load(Ordering::SeqCst),
         before + 1,

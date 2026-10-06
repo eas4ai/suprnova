@@ -47,7 +47,9 @@ async fn worker_writes_dead_letter_to_failed_store() {
         queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
-    run_worker(driver, cfg, cancel).await;
+    run_worker(driver, cfg, cancel)
+        .await
+        .expect("the worker starts");
 
     let all = store.all().await.unwrap();
     assert_eq!(all.len(), 1);
@@ -91,7 +93,9 @@ async fn retry_failed_re_enqueues_and_clears_the_record() {
         queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
-    run_worker(driver.clone(), cfg, cancel).await;
+    run_worker(driver.clone(), cfg, cancel)
+        .await
+        .expect("the worker starts");
 
     let all = store.all().await.unwrap();
     assert_eq!(all.len(), 1);
@@ -160,7 +164,9 @@ async fn dead_letter_records_the_envelopes_queue() {
         max_jobs: Some(1),
         queues: Vec::new(),
     };
-    run_worker(driver, cfg, CancellationToken::new()).await;
+    run_worker(driver, cfg, CancellationToken::new())
+        .await
+        .expect("the worker starts");
 
     let all = store.all().await.unwrap();
     assert_eq!(all.len(), 1);

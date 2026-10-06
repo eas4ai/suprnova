@@ -1282,7 +1282,8 @@ async fn queued_work_runs_while_a_newer_dispatch_is_still_pushing() {
         run_worker(driver.clone(), cfg, CancellationToken::new()),
     )
     .await
-    .expect("the worker settled A");
+    .expect("the worker settled A")
+    .expect("the worker starts");
     release.notify_one();
     parked
         .await

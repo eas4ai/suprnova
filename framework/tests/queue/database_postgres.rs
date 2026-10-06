@@ -45,24 +45,30 @@ async fn connect_postgres() -> DatabaseConnection {
         .expect("Postgres test database must be reachable")
 }
 
-/// Create the `jobs` table exactly as `manual/queues.md` documents it, so
-/// the placeholder fix is proved against the schema users actually copy.
+/// Create the `jobs` table in Laravel 13's layout, with the reservations
+/// table the driver keeps beside it, as the shipped migration creates them.
 /// Each test owns its own table name - the binary's tests run in parallel
 /// against one database.
 async fn fresh_jobs_table(db: &DatabaseConnection, table: &str) {
     for sql in [
+        format!("DROP TABLE IF EXISTS suprnova_{table}_reservations"),
         format!("DROP TABLE IF EXISTS {table}"),
         format!(
             "CREATE TABLE {table} (
-                id              TEXT PRIMARY KEY,
-                job_name        TEXT NOT NULL,
-                queue           TEXT NULL,
-                envelope_json   TEXT NOT NULL,
+                id              BIGSERIAL PRIMARY KEY,
+                queue           VARCHAR(255) NOT NULL,
+                payload         TEXT NOT NULL,
+                attempts        SMALLINT NOT NULL,
+                reserved_at     INTEGER NULL,
                 available_at    INTEGER NOT NULL,
-                reserved_until  INTEGER NULL,
-                reserved_token  TEXT NULL,
-                attempts        INTEGER NOT NULL DEFAULT 0,
                 created_at      INTEGER NOT NULL
+            )"
+        ),
+        format!(
+            "CREATE TABLE suprnova_{table}_reservations (
+                job_id          BIGINT PRIMARY KEY,
+                token           CHAR(36) NOT NULL UNIQUE,
+                reserved_until  BIGINT NOT NULL
             )"
         ),
     ] {
@@ -75,13 +81,13 @@ async fn fresh_failed_jobs_table(db: &DatabaseConnection, table: &str) {
         format!("DROP TABLE IF EXISTS {table}"),
         format!(
             "CREATE TABLE {table} (
-                id              TEXT PRIMARY KEY,
-                connection      TEXT NOT NULL,
-                queue           TEXT NOT NULL,
-                job_name        TEXT NOT NULL,
-                envelope_json   TEXT NOT NULL,
+                id              BIGSERIAL PRIMARY KEY,
+                uuid            VARCHAR(255) NOT NULL UNIQUE,
+                connection      VARCHAR(255) NOT NULL,
+                queue           VARCHAR(255) NOT NULL,
+                payload         TEXT NOT NULL,
                 exception       TEXT NOT NULL,
-                failed_at       INTEGER NOT NULL
+                failed_at       TIMESTAMP(0) NOT NULL DEFAULT CURRENT_TIMESTAMP
             )"
         ),
     ] {
@@ -105,13 +111,16 @@ async fn fresh_batch_tables(
         format!("DROP FUNCTION IF EXISTS {gate_function}() CASCADE"),
         format!(
             "CREATE TABLE {batches} (
-                id            TEXT PRIMARY KEY,
-                name          TEXT NOT NULL,
-                total_jobs    BIGINT NOT NULL,
-                options_json  TEXT NOT NULL,
-                created_at    BIGINT NOT NULL,
-                cancelled_at  BIGINT NULL,
-                finished_at   BIGINT NULL
+                id              VARCHAR(255) PRIMARY KEY,
+                name            VARCHAR(255) NOT NULL,
+                total_jobs      INTEGER NOT NULL,
+                pending_jobs    INTEGER NOT NULL,
+                failed_jobs     INTEGER NOT NULL,
+                failed_job_ids  TEXT NOT NULL,
+                options         TEXT NULL,
+                cancelled_at    INTEGER NULL,
+                created_at      INTEGER NOT NULL,
+                finished_at     INTEGER NULL
             )"
         ),
         format!(
@@ -780,7 +789,7 @@ async fn postgres_pop_from_filters_by_queue_and_treats_null_as_default() {
     ));
     d.ack(&got.token).await.unwrap();
 
-    // A default worker still sees the NULL-queue row.
+    // A default worker still sees the unrouted row.
     let got = d
         .pop_from(Duration::from_secs(60), &["default".to_string()])
         .await

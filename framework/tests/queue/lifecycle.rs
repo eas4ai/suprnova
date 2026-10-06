@@ -210,7 +210,8 @@ async fn work_one(driver: Arc<MemoryQueueDriver>) {
         run_worker(driver, cfg, CancellationToken::new()),
     )
     .await
-    .expect("the worker settled one attempt");
+    .expect("the worker settled one attempt")
+    .expect("the worker starts");
 }
 
 fn worker() -> Arc<MemoryQueueDriver> {
@@ -644,7 +645,8 @@ async fn worker_superseded_drop() {
         run_worker(driver, cfg, CancellationToken::new()),
     )
     .await
-    .expect("the worker settled both envelopes");
+    .expect("the worker settled both envelopes")
+    .expect("the worker starts");
     assert_eq!(
         fired_for(first),
         [

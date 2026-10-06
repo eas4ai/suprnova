@@ -6,26 +6,13 @@ use suprnova::queue::driver::{QueueDriver, Settled};
 use suprnova::queue::{BackoffSchedule, CURRENT_SCHEMA_VERSION, Envelope};
 use uuid::Uuid;
 
+/// An in-memory database with the jobs table and its reservations table,
+/// as the shipped migration creates them.
 async fn fresh_db() -> sea_orm::DatabaseConnection {
+    use sea_orm_migration::{MigrationTrait, SchemaManager};
     let db = Database::connect("sqlite::memory:").await.unwrap();
-    db.execute_unprepared(
-        r"
-        CREATE TABLE jobs (
-            id TEXT PRIMARY KEY,
-            job_name TEXT NOT NULL,
-            queue TEXT NULL,
-            envelope_json TEXT NOT NULL,
-            available_at INTEGER NOT NULL,
-            reserved_until INTEGER NULL,
-            reserved_token TEXT NULL,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            created_at INTEGER NOT NULL
-        )
-    ",
-    )
-    .await
-    .unwrap();
-    db.execute_unprepared("CREATE INDEX idx_jobs_available_at ON jobs(available_at)")
+    suprnova::queue::migrations::CreateJobsTable
+        .up(&SchemaManager::new(&db))
         .await
         .unwrap();
     db
@@ -101,7 +88,7 @@ async fn positive_subsecond_visibility_persists_deadline_and_preserves_fencing()
         .expect("initial claim");
     db.execute_raw(sea_orm::Statement::from_sql_and_values(
         sea_orm::DatabaseBackend::Sqlite,
-        "UPDATE jobs SET reserved_until = ?",
+        "UPDATE suprnova_jobs_reservations SET reserved_until = ?",
         vec![sea_orm::Value::from(i64::MIN)],
     ))
     .await
@@ -115,7 +102,7 @@ async fn positive_subsecond_visibility_persists_deadline_and_preserves_fencing()
     let row = db
         .query_one_raw(sea_orm::Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
-            "SELECT reserved_until FROM jobs",
+            "SELECT reserved_until FROM suprnova_jobs_reservations",
         ))
         .await
         .unwrap()
@@ -184,10 +171,18 @@ async fn database_driver_pop_returns_none_when_row_was_reserved_concurrently() {
     let future = now + 600;
     db.execute_raw(sea_orm::Statement::from_sql_and_values(
         sea_orm::DatabaseBackend::Sqlite,
-        "UPDATE jobs SET reserved_until = ?, reserved_token = ?",
+        "UPDATE jobs SET reserved_at = ?",
+        vec![sea_orm::Value::from(now)],
+    ))
+    .await
+    .unwrap();
+    db.execute_raw(sea_orm::Statement::from_sql_and_values(
+        sea_orm::DatabaseBackend::Sqlite,
+        "INSERT INTO suprnova_jobs_reservations (job_id, token, reserved_until) \
+         SELECT id, ?, ? FROM jobs",
         vec![
-            sea_orm::Value::from(future),
             sea_orm::Value::from("other-consumer-token".to_string()),
+            sea_orm::Value::from(future),
         ],
     ))
     .await
@@ -209,7 +204,7 @@ async fn database_driver_pop_returns_none_when_row_was_reserved_concurrently() {
     let row = db
         .query_one_raw(sea_orm::Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
-            "SELECT reserved_token FROM jobs",
+            "SELECT token FROM suprnova_jobs_reservations",
         ))
         .await
         .unwrap()
@@ -265,11 +260,11 @@ async fn database_driver_rejects_invalid_table_identifier() {
     }
 }
 
-/// The SQL filter, including the NULL case. A `queue IS NULL` row was written
-/// before routing existed (or by an unrouted push); a worker draining
-/// `default` must still see it, or upgrading strands every in-flight job.
+/// The SQL filter, including the unrouted case. An unrouted push is stored
+/// under the `default` queue (Laravel's `queue` column is NOT NULL); a
+/// worker draining `default` must see it.
 #[tokio::test]
-async fn pop_from_filters_by_queue_and_treats_null_as_default() {
+async fn pop_from_filters_by_queue_and_reads_unrouted_jobs_as_default() {
     let db = fresh_db().await;
     let d = DatabaseQueueDriver::new(db, "jobs".into()).unwrap();
 
@@ -300,7 +295,7 @@ async fn pop_from_filters_by_queue_and_treats_null_as_default() {
         "billing worker must not consume reports or unrouted work"
     );
 
-    // A default worker picks up the NULL-queue row.
+    // A default worker picks up the unrouted row.
     let got = d
         .pop_from(Duration::from_secs(60), &["default".to_string()])
         .await
@@ -572,12 +567,8 @@ async fn settle_on_a_reclaimed_reservation_commits_nothing() {
 #[tokio::test]
 async fn a_failed_follow_up_rolls_back_the_ack_too() {
     let db = fresh_db().await;
-    let d = DatabaseQueueDriver::new(db, "jobs".to_string()).unwrap();
+    let d = DatabaseQueueDriver::new(db.clone(), "jobs".to_string()).unwrap();
     d.push(env("Head")).await.unwrap();
-
-    // A successor whose id already exists makes the follow-up insert fail.
-    let clash = env("Clash");
-    d.push(clash.clone()).await.unwrap();
 
     let res = d
         .pop_from(Duration::from_secs(60), &[])
@@ -585,13 +576,28 @@ async fn a_failed_follow_up_rolls_back_the_ack_too() {
         .unwrap()
         .unwrap();
 
+    // The database refuses this successor's insert, so the follow-up write
+    // fails inside the settlement.
+    db.execute_unprepared(
+        "CREATE TRIGGER refuse_clash BEFORE INSERT ON jobs \
+         WHEN NEW.payload LIKE '%\"Clash\"%' \
+         BEGIN SELECT RAISE(ABORT, 'clash refused'); END",
+    )
+    .await
+    .unwrap();
+    let clash = env("Clash");
     let err = d.settle(&res.token, std::slice::from_ref(&clash)).await;
     assert!(err.is_err(), "the follow-up write failed");
 
     assert_eq!(
         d.size().await.unwrap(),
-        2,
-        "both original rows survive: the failed settlement dropped nothing"
+        1,
+        "the original row survives: the failed settlement dropped nothing"
+    );
+    assert_eq!(
+        d.reserved_size().await.unwrap(),
+        1,
+        "and it is still reserved by the worker that failed to settle it"
     );
 }
 

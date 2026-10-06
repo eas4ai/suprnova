@@ -1102,6 +1102,36 @@ where
         self.run_cli(cli).await;
     }
 
+    /// [`Self::run`] with an argv the caller builds instead of the
+    /// process's own, for a binary that dispatches its own arguments first
+    /// or a test that runs one subcommand in a child process:
+    ///
+    /// ```rust,no_run
+    /// # async fn example() {
+    /// suprnova::Application::new()
+    ///     .run_with_args(["app", "queue:work", "--max-jobs", "1"])
+    ///     .await;
+    /// # }
+    /// ```
+    ///
+    /// The first item is the program name, as in [`std::env::args`]. An
+    /// argv the CLI cannot parse prints clap's message and exits with its
+    /// status, as [`Self::run`] does. The same boot precondition applies:
+    /// the configuration has to be loaded before the async runtime starts.
+    pub async fn run_with_args<I, T>(self, args: I)
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let cli = Cli::try_parse_from(args).unwrap_or_else(|e| e.exit());
+        if let Err(message) = crate::boot::boot_precondition(crate::boot::env_loaded_pre_runtime())
+        {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+        self.run_cli(cli).await;
+    }
+
     /// Everything [`Self::run`] does after the argv parse and the boot
     /// precondition. Split out so a test can run one subcommand from an
     /// argv it builds, rather than the test binary's own.

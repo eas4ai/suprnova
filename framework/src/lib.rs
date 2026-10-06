@@ -72,6 +72,7 @@ pub mod http_client;
 pub mod idempotency;
 pub mod inertia;
 pub(crate) mod json_number;
+pub mod laravel;
 /// Server-driven interactive components and their application-facing contracts.
 pub mod live;
 #[cfg(feature = "localization")]
@@ -326,6 +327,7 @@ pub use inertia::{
     PropFuture, PropResolver, ProvidesScrollMetadata, ResolvedAssets, ScrollMetadata, SsrConfig,
     SsrResponse, VersionResolver, Visibility, ViteManifest,
 };
+pub use laravel::{LaravelDatabase, SHARED_DATABASE_ENV, SHARED_DEFAULT_QUEUE};
 #[cfg(feature = "localization")]
 pub use localization::{
     CatalogSource, DateStyle, Detect, FluentTranslator, Lang, ListStyle, Locale, LocaleMiddleware,

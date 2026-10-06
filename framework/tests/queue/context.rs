@@ -102,7 +102,9 @@ async fn a_job_reads_the_context_of_the_code_that_pushed_it() {
     in_a_request(async { Queue::push(ReadsContext { label: 1 }).await.unwrap() }).await;
 
     // The worker runs outside every scope, as a worker process does.
-    run_worker(driver, worker_for(1), CancellationToken::new()).await;
+    run_worker(driver, worker_for(1), CancellationToken::new())
+        .await
+        .expect("the worker starts");
 
     assert_eq!(*SEEN.lock().unwrap(), [Seen::carried(1)]);
 }
@@ -151,7 +153,9 @@ async fn an_envelope_written_before_context_travelled_still_decodes_and_runs() {
 
     let fresh = Arc::new(MemoryQueueDriver::new());
     fresh.push(old).await.unwrap();
-    run_worker(fresh, worker_for(1), CancellationToken::new()).await;
+    run_worker(fresh, worker_for(1), CancellationToken::new())
+        .await
+        .expect("the worker starts");
 
     assert_eq!(*SEEN.lock().unwrap(), [Seen::nothing(7)]);
 }
@@ -199,7 +203,9 @@ async fn every_link_of_a_chain_gets_the_context_of_the_dispatch() {
     })
     .await;
 
-    run_worker(driver, worker_for(3), CancellationToken::new()).await;
+    run_worker(driver, worker_for(3), CancellationToken::new())
+        .await
+        .expect("the worker starts");
 
     let expected: Vec<Seen> = (1..=3).map(Seen::carried).collect();
     assert_eq!(*SEEN.lock().unwrap(), expected);
@@ -224,7 +230,9 @@ async fn every_job_of_a_batch_gets_the_context_of_the_code_that_built_it() {
     })
     .await;
 
-    run_worker(driver, worker_for(2), CancellationToken::new()).await;
+    run_worker(driver, worker_for(2), CancellationToken::new())
+        .await
+        .expect("the worker starts");
 
     let mut seen = SEEN.lock().unwrap().clone();
     seen.sort();
@@ -269,7 +277,9 @@ async fn the_events_around_a_job_run_in_the_jobs_context() {
     EventFacade::listen::<JobProcessed, _>(Arc::new(ReadsContextAfterTheJob)).await;
 
     in_a_request(async { Queue::push(ReadsContext { label: 9 }).await.unwrap() }).await;
-    run_worker(driver, worker_for(1), CancellationToken::new()).await;
+    run_worker(driver, worker_for(1), CancellationToken::new())
+        .await
+        .expect("the worker starts");
 
     let ours: Vec<AfterTheJob> = LISTENER_SAW
         .lock()
@@ -319,7 +329,9 @@ async fn the_hooks_run_on_a_push_and_on_the_worker() {
         Queue::push(ReadsContext { label: 5 }).await.unwrap();
     })
     .await;
-    run_worker(driver, worker_for(1), CancellationToken::new()).await;
+    run_worker(driver, worker_for(1), CancellationToken::new())
+        .await
+        .expect("the worker starts");
     Context::test_clear_hooks();
 
     assert_eq!(
