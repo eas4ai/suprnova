@@ -83,10 +83,11 @@ whichever side won the race.
 
 ### Bound values
 
-A parameter takes a string or a bound value, such as a `#[model]` row or
-a `#[derive(RouteBinding)]` enum. A bound value fills a `{post}`
-parameter with its route key and a `{post:slug}` parameter with its
-`slug` column, encoded as any value is:
+A parameter takes a string, a number, or a bound value. A bound value is
+a value whose type implements `RouteValue`: a `#[model]` row, a
+`#[derive(RouteBinding)]` enum, and a `RouteParam<T>` do. A bound value
+fills a `{post}` parameter with its route key and a `{post:slug}`
+parameter with its `slug` column, encoded as any value is:
 
 ```rust
 use suprnova::route;
@@ -102,9 +103,9 @@ let url = route("users.posts.show", (("user", &user), ("post", &post)));
 let url = route("users.posts.show", (("user", "7"), ("post", "hello-world")));
 ```
 
-Every call written with `&[("name", "value")]` pairs keeps working and
-builds the same URL. A type that implements `RouteBinding` by hand
-implements `RouteValue` to be passed here:
+A type that implements `RouteBinding` by hand, and a bare SeaORM model
+whose entity implements `EntityExt`, become bound values with one call to
+`bound_route_value`:
 
 ```rust
 impl suprnova::RouteValue for Region {
@@ -112,6 +113,29 @@ impl suprnova::RouteValue for Region {
         suprnova::bound_route_value(self, field)
     }
 }
+```
+
+Every call written with `&[("name", "value")]` pairs keeps working and
+builds the same URL, except four forms. They compiled only because the
+parameter used to be a `&[(&str, &str)]` slice, which set the type of the
+pairs:
+
+- A value written `s.as_ref()` inside an array of pairs.
+- An array whose pairs mix `&String` and `&str` values, such as
+  `&[("id", &id), ("tab", "posts")]`.
+- An array of more than 32 pairs that holds `&String` values.
+- `route` used as a `fn(&str, &[(&str, &str)]) -> Option<String>` pointer.
+
+In the first three, write the value with `.as_str()`. In place of the
+pointer, write a closure:
+
+```rust
+use suprnova::route;
+
+let url = route("users.show", &[("id", id.as_str()), ("tab", "posts")]);
+
+let build: fn(&str, &[(&str, &str)]) -> Option<String> =
+    |name, params| route(name, params);
 ```
 
 ### The public root

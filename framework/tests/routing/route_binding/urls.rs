@@ -4,9 +4,13 @@
 //! one, else its route key, percent-encoded as any value is. Calls written
 //! with strings produce the URLs they did.
 
+use suprnova::database::EntityExt;
 use suprnova::http::text;
 use suprnova::testing::TestDatabase;
-use suprnova::{Model, Response, RouteParam, Router, attrs, handler, model, route, try_route};
+use suprnova::{
+    FrameworkError, Model, Response, RouteBinding, RouteParam, RouteValue, Router, attrs,
+    bound_route_value, handler, model, route, try_route,
+};
 
 use super::run_sql;
 
@@ -26,6 +30,53 @@ pub struct UrPage {
 pub struct UrUser {
     pub id: i64,
     pub name: String,
+}
+
+// The bare `x::Model` form: a SeaORM row whose entity opts in.
+impl EntityExt for ur_post::Entity {}
+
+impl RouteValue for ur_post::Model {
+    fn route_value(&self, field: Option<&str>) -> Option<String> {
+        bound_route_value(self, field)
+    }
+}
+
+/// A type that implements `RouteBinding` by hand, keyed by its code.
+pub struct UrRegion {
+    code: String,
+    name: String,
+}
+
+#[suprnova::async_trait]
+impl RouteBinding for UrRegion {
+    fn route_key_name() -> &'static str {
+        "code"
+    }
+    fn route_key(&self) -> String {
+        self.code.clone()
+    }
+    fn route_field(&self, field: &str) -> Option<String> {
+        match field {
+            "code" => Some(self.code.clone()),
+            "name" => Some(self.name.clone()),
+            _ => None,
+        }
+    }
+    async fn resolve_route_binding(
+        value: &str,
+        _field: Option<&str>,
+    ) -> Result<Option<Self>, FrameworkError> {
+        Ok(Some(UrRegion {
+            code: value.to_owned(),
+            name: value.to_owned(),
+        }))
+    }
+}
+
+impl RouteValue for UrRegion {
+    fn route_value(&self, field: Option<&str>) -> Option<String> {
+        bound_route_value(self, field)
+    }
 }
 
 #[handler]
@@ -61,6 +112,12 @@ fn register_routes() -> Router {
         .name("ur.plain")
         .get("/ur/home", noop)
         .name("ur.home")
+        .get("/ur/regions/{region}", noop)
+        .name("ur.regions.show")
+        .get("/ur/regions/by-name/{region:name}", noop)
+        .name("ur.regions.named")
+        .get("/ur/regions/{region}/posts/{post:slug}", noop)
+        .name("ur.regions.posts.show")
 }
 
 #[tokio::test]
@@ -185,5 +242,72 @@ fn bind_012_string_pairs_in_every_container_written_today_fill_as_before() {
     assert_eq!(
         route("ur.plain", &[("id", &traversal)]).as_deref(),
         Some("/ur/plain/..%2Fx")
+    );
+}
+
+#[test]
+fn bind_012_a_hand_written_binding_and_a_bare_model_are_bound_values_through_route_value() {
+    let _router = register_routes();
+    let region = UrRegion {
+        code: "eu-west".to_owned(),
+        name: "Western Europe".to_owned(),
+    };
+    let row = ur_post::Model {
+        id: 5,
+        slug: "a b".to_owned(),
+    };
+
+    // Positional: the value fills the route's first parameter with its
+    // route key, or with the binding field the route names.
+    assert_eq!(
+        route("ur.regions.show", &region).as_deref(),
+        Some("/ur/regions/eu-west")
+    );
+    assert_eq!(
+        route("ur.regions.named", &region).as_deref(),
+        Some("/ur/regions/by-name/Western%20Europe")
+    );
+    assert_eq!(route("ur.posts.show", &row).as_deref(), Some("/ur/posts/5"));
+    assert_eq!(
+        route("ur.posts.slug", &row).as_deref(),
+        Some("/ur/slugs/a%20b")
+    );
+
+    // Named, alone and beside another bound value.
+    assert_eq!(
+        route("ur.regions.named", ("region", &region)).as_deref(),
+        Some("/ur/regions/by-name/Western%20Europe")
+    );
+    assert_eq!(
+        route(
+            "ur.regions.posts.show",
+            (("region", &region), ("post", &row))
+        )
+        .as_deref(),
+        Some("/ur/regions/eu-west/posts/a%20b")
+    );
+
+    // `try_route` builds the same paths, and reports a missing one.
+    assert_eq!(
+        try_route("ur.regions.named", &region).as_deref(),
+        Ok("/ur/regions/by-name/Western%20Europe")
+    );
+    assert_eq!(
+        try_route("ur.posts.slug", ("post", &row)).as_deref(),
+        Ok("/ur/slugs/a%20b")
+    );
+    assert_eq!(
+        try_route(
+            "ur.regions.posts.show",
+            (("region", &region), ("post", &row))
+        )
+        .as_deref(),
+        Ok("/ur/regions/eu-west/posts/a%20b")
+    );
+    assert_eq!(
+        try_route("ur.regions.posts.show", ("post", &row))
+            .unwrap_err()
+            .to_string(),
+        "Route 'ur.regions.posts.show' is missing required path parameter(s): region"
     );
 }

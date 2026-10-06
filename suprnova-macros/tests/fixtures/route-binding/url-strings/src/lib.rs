@@ -1,6 +1,7 @@
 //! Every form a `route()` or `try_route()` call passed its string pairs in
 //! before route binding, when the parameter was `&[(&str, &str)]`: each
-//! must still compile (BIND-012).
+//! must still compile (BIND-012), apart from the four the specification
+//! lists, which compile as the manual rewrites them.
 
 use std::borrow::Cow;
 use std::rc::Rc;
@@ -62,4 +63,21 @@ pub fn every_form(
         try_route("a", &[("id", &id)]).ok(),
     ]);
     urls
+}
+
+/// The four forms that compiled only because the slice parameter set the
+/// pairs' type, written as the manual says (BIND-012): `.as_str()` on the
+/// value, and a closure in place of the function pointer.
+pub fn rewritten_forms(id: String) -> Vec<Option<String>> {
+    let pointer: fn(&str, &[(&str, &str)]) -> Option<String> = |name, params| route(name, params);
+    vec![
+        // Was `("id", id.as_ref())`.
+        route("a", &[("id", id.as_str())]),
+        // Was `[("id", &id), ("other", "x")]`.
+        route("a", &[("id", id.as_str()), ("other", "x")]),
+        // Was more than 32 pairs holding `&id`.
+        route("a", &[("id", id.as_str()); 33]),
+        // Was `let pointer: fn(&str, &[(&str, &str)]) -> Option<String> = route;`.
+        pointer("a", &[("id", "1")]),
+    ]
 }
