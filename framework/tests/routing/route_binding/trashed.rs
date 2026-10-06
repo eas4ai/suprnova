@@ -132,6 +132,61 @@ async fn bind_008_a_soft_deleted_row_binds_only_on_a_route_with_trashed() {
 }
 
 #[tokio::test]
+async fn bind_008_every_with_trashed_setter_binds_a_trashed_row() {
+    // Each router holds `/posts/{post}` without `with_trashed()` and
+    // `/trashed/posts/{post}` with it, both registered through one site.
+    let _db = fixture().await;
+    let sites: Vec<(&str, Router)> = vec![
+        (
+            "get!(..).with_trashed",
+            suprnova::get!("/trashed/posts/{post}", show)
+                .with_trashed()
+                .register(suprnova::get!("/posts/{post}", show).register(Router::new())),
+        ),
+        (
+            "any!(..).with_trashed",
+            suprnova::any!("/trashed/posts/{post}", show)
+                .with_trashed()
+                .register(suprnova::any!("/posts/{post}", show).register(Router::new())),
+        ),
+        (
+            "Router::any(..).with_trashed",
+            Router::from(Router::new().any("/posts/{post}", show))
+                .any("/trashed/posts/{post}", show)
+                .with_trashed()
+                .into(),
+        ),
+        (
+            "Router::methods(..).with_trashed",
+            Router::from(Router::new().methods(&[hyper::Method::GET], "/posts/{post}", show))
+                .methods(&[hyper::Method::GET], "/trashed/posts/{post}", show)
+                .with_trashed()
+                .into(),
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (site, router) in sites {
+        let addr = serve(router).await;
+        for (path, expected) in [
+            ("/posts/1", (200, "live")),
+            ("/posts/2", (404, "")),
+            ("/trashed/posts/1", (200, "live")),
+            ("/trashed/posts/2", (200, "gone")),
+        ] {
+            let (status, body) = get(addr, path).await;
+            let matches = status == expected.0 && (expected.0 == 404 || body == expected.1);
+            if !matches {
+                failures.push(format!(
+                    "{site}: {path} answered {status} {body:?}, not {} {:?}",
+                    expected.0, expected.1
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[tokio::test]
 async fn bind_008_the_bare_form_follows_with_trashed() {
     let _db = fixture().await;
     let router: Router = Router::new()

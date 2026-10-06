@@ -7,7 +7,7 @@
 
 use suprnova::http::text;
 use suprnova::testing::TestDatabase;
-use suprnova::{Response, Router, get, group, handler, model};
+use suprnova::{Response, Router, any, get, group, handler, model};
 
 use super::{get as get_path, refusal, run_sql, serve};
 
@@ -179,6 +179,143 @@ async fn bind_006_without_scoped_bindings_does_not_scope() {
         get_path(addr, "/users/1/posts/grace-post").await,
         (200, "ada grace-post".to_owned())
     );
+}
+
+#[tokio::test]
+async fn bind_006_every_scope_bindings_setter_scopes_a_child() {
+    // `/users/1/posts/2` names Grace's post under Ada, by id and with no
+    // field, so only `scope_bindings()` scopes it: scoped it answers 404,
+    // and Ada's own post still binds.
+    let _db = fixture().await;
+    let path = "/users/{user}/posts/{post}";
+    let sites: Vec<(&str, &str, Router)> = vec![
+        (
+            "Router::group(..).scope_bindings",
+            "/g",
+            Router::new()
+                .group("/g", |r| r.get(path, user_post))
+                .scope_bindings()
+                .into(),
+        ),
+        (
+            "get!(..).scope_bindings",
+            "",
+            get!("/users/{user}/posts/{post}", user_post)
+                .scope_bindings()
+                .register(Router::new()),
+        ),
+        (
+            "any!(..).scope_bindings",
+            "",
+            any!("/users/{user}/posts/{post}", user_post)
+                .scope_bindings()
+                .register(Router::new()),
+        ),
+        (
+            "Router::any(..).scope_bindings",
+            "",
+            Router::new().any(path, user_post).scope_bindings().into(),
+        ),
+        (
+            "Router::methods(..).scope_bindings",
+            "",
+            Router::new()
+                .methods(&[hyper::Method::GET], path, user_post)
+                .scope_bindings()
+                .into(),
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (site, prefix, router) in sites {
+        let addr = serve(router).await;
+        let owned = get_path(addr, &format!("{prefix}/users/1/posts/1")).await;
+        if owned != (200, "ada ada-post".to_owned()) {
+            failures.push(format!("{site}: Ada's own post answered {owned:?}"));
+        }
+        let unowned = get_path(addr, &format!("{prefix}/users/1/posts/2")).await;
+        if unowned.0 != 404 {
+            failures.push(format!(
+                "{site}: Grace's post under Ada answered {unowned:?}, not 404"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+    // The control: the same path with no setter does not scope the child.
+    let addr = serve(Router::new().get(path, user_post).into()).await;
+    assert_eq!(
+        get_path(addr, "/users/1/posts/2").await,
+        (200, "ada grace-post".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn bind_006_every_without_scoped_bindings_setter_unscopes_a_child() {
+    // `{post:slug}` scopes the child by default; every
+    // `without_scoped_bindings()` must turn that off, so Grace's post binds
+    // under Ada.
+    let _db = fixture().await;
+    let path = "/users/{user}/posts/{post:slug}";
+    let sites: Vec<(&str, &str, Router)> = vec![
+        (
+            "Router::group(..).without_scoped_bindings",
+            "/g",
+            Router::new()
+                .group("/g", |r| r.get(path, user_post))
+                .without_scoped_bindings()
+                .into(),
+        ),
+        (
+            "group!(..).without_scoped_bindings",
+            "/g",
+            group!("/g", { get!("/users/{user}/posts/{post:slug}", user_post) })
+                .without_scoped_bindings()
+                .register(Router::new()),
+        ),
+        (
+            "get!(..).without_scoped_bindings",
+            "",
+            get!("/users/{user}/posts/{post:slug}", user_post)
+                .without_scoped_bindings()
+                .register(Router::new()),
+        ),
+        (
+            "any!(..).without_scoped_bindings",
+            "",
+            any!("/users/{user}/posts/{post:slug}", user_post)
+                .without_scoped_bindings()
+                .register(Router::new()),
+        ),
+        (
+            "Router::any(..).without_scoped_bindings",
+            "",
+            Router::new()
+                .any(path, user_post)
+                .without_scoped_bindings()
+                .into(),
+        ),
+        (
+            "Router::methods(..).without_scoped_bindings",
+            "",
+            Router::new()
+                .methods(&[hyper::Method::GET], path, user_post)
+                .without_scoped_bindings()
+                .into(),
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (site, prefix, router) in sites {
+        let addr = serve(router).await;
+        let unowned = get_path(addr, &format!("{prefix}/users/1/posts/grace-post")).await;
+        if unowned != (200, "ada grace-post".to_owned()) {
+            failures.push(format!(
+                "{site}: Grace's post under Ada answered {unowned:?}, so the child was scoped"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+    // The control: the same path with no setter scopes the child.
+    let addr = serve(Router::new().get(path, user_post).into()).await;
+    assert_eq!(get_path(addr, "/users/1/posts/grace-post").await.0, 404);
 }
 
 #[tokio::test]
