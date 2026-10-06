@@ -15,7 +15,11 @@ use crate::support::{self, Engine};
 
 /// The flag `name` for the global scope and for user `user`, as the
 /// framework answers them.
-fn answers(evaluator: &Arc<DatabaseEvaluator>, name: &str, user: i64) -> (Option<bool>, Option<bool>) {
+fn answers(
+    evaluator: &Arc<DatabaseEvaluator>,
+    name: &str,
+    user: i64,
+) -> (Option<bool>, Option<bool>) {
     featureflag::evaluator::with_default(Arc::clone(evaluator), || {
         let global = evaluator.is_enabled(name, &Context::root());
         let scoped = featureflag::context! { user_id = user };
@@ -44,16 +48,32 @@ async fn pennant_flags(engine: Engine) {
     let _bound = support::bind(&db.conn);
     let evaluator = Arc::new(DatabaseEvaluator::new().await.expect("the evaluator"));
 
-    assert_eq!(answers(&evaluator, "new-api", 1), (Some(true), Some(true)), "{engine:?}");
-    assert_eq!(answers(&evaluator, "maintenance", 1), (Some(false), Some(false)), "{engine:?}");
+    assert_eq!(
+        answers(&evaluator, "new-api", 1),
+        (Some(true), Some(true)),
+        "{engine:?}"
+    );
+    assert_eq!(
+        answers(&evaluator, "maintenance", 1),
+        (Some(false), Some(false)),
+        "{engine:?}"
+    );
     assert_eq!(
         answers(&evaluator, "purple-theme", 1),
         (None, Some(true)),
         "{engine:?}: Pennant's rich value \"blue\" is active"
     );
     assert_eq!(answers(&evaluator, "purple-theme", 2), (None, None));
-    assert_eq!(answers(&evaluator, "beta", 1), (None, Some(false)), "{engine:?}");
-    assert_eq!(answers(&evaluator, "beta", 2), (None, Some(true)), "{engine:?}");
+    assert_eq!(
+        answers(&evaluator, "beta", 1),
+        (None, Some(false)),
+        "{engine:?}"
+    );
+    assert_eq!(
+        answers(&evaluator, "beta", 2),
+        (None, Some(true)),
+        "{engine:?}"
+    );
 
     // Writes take Pennant's form: the `__laravel_null` and
     // `App\Models\User|{id}` scopes, the values `true` and `false`, one
@@ -71,7 +91,10 @@ async fn pennant_flags(engine: Engine) {
     expected[1].1 = "false".to_owned();
     expected.push(("App\\Models\\User|3".to_owned(), "false".to_owned()));
     assert_eq!(stored_flag(&db, "beta").await, expected, "{engine:?}");
-    assert_eq!(pennant_rows[0], ("App\\Models\\User|1".to_owned(), "false".to_owned()));
+    assert_eq!(
+        pennant_rows[0],
+        ("App\\Models\\User|1".to_owned(), "false".to_owned())
+    );
 
     evaluator
         .set_flag("dark-mode", "", true)
@@ -93,7 +116,10 @@ async fn pennant_flags(engine: Engine) {
     );
     evaluator.reload().await.expect("reload");
     assert_eq!(answers(&evaluator, "beta", 3), (None, Some(false)));
-    assert_eq!(answers(&evaluator, "dark-mode", 3), (Some(true), Some(true)));
+    assert_eq!(
+        answers(&evaluator, "dark-mode", 3),
+        (Some(true), Some(true))
+    );
     let written = support::rows(
         &db.conn,
         "SELECT created_at, updated_at FROM features WHERE name = 'dark-mode'",
@@ -108,7 +134,10 @@ on_every_engine!(pennant_flags =>
     ldb_008_pennant_flags_read_and_write_mysql);
 
 async fn user(id: u64) -> LdbUser {
-    LdbUser::find(id).await.expect("find").expect("a fixture user")
+    LdbUser::find(id)
+        .await
+        .expect("find")
+        .expect("a fixture user")
 }
 
 /// The assignments spatie recorded hold, roles and permissions read
@@ -128,20 +157,37 @@ async fn spatie_permissions(engine: Engine) {
         .map(|role| role.name.clone())
         .collect();
     assert_eq!(roles, ["writer", "admin"], "{engine:?}");
-    assert_eq!(Permission::query().get().await.expect("permissions").len(), 3);
+    assert_eq!(
+        Permission::query().get().await.expect("permissions").len(),
+        3
+    );
 
     let taylor = user(1).await;
     let abigail = user(2).await;
     let jeffrey = user(4).await;
-    assert!(taylor.has_role("writer").await.expect("check"), "{engine:?}");
+    assert!(
+        taylor.has_role("writer").await.expect("check"),
+        "{engine:?}"
+    );
     assert!(!taylor.has_role("admin").await.expect("check"));
     assert!(
-        taylor.has_permission_to("edit articles").await.expect("check"),
+        taylor
+            .has_permission_to("edit articles")
+            .await
+            .expect("check"),
         "{engine:?}: a permission through a role"
     );
-    assert!(!taylor.has_permission_to("delete articles").await.expect("check"));
     assert!(
-        abigail.has_permission_to("delete articles").await.expect("check"),
+        !taylor
+            .has_permission_to("delete articles")
+            .await
+            .expect("check")
+    );
+    assert!(
+        abigail
+            .has_permission_to("delete articles")
+            .await
+            .expect("check"),
         "{engine:?}: a direct permission"
     );
     assert!(!abigail.has_role("writer").await.expect("check"));
@@ -162,9 +208,16 @@ async fn spatie_permissions(engine: Engine) {
     suprnova::rbac::give_permission_to_role("writer", "publish articles")
         .await
         .expect("give a role a permission");
-    suprnova::rbac::create_role("editor").await.expect("create a role");
+    suprnova::rbac::create_role("editor")
+        .await
+        .expect("create a role");
     assert!(dayle.has_role("admin").await.expect("check"));
-    assert!(taylor.has_permission_to("publish articles").await.expect("check"));
+    assert!(
+        taylor
+            .has_permission_to("publish articles")
+            .await
+            .expect("check")
+    );
 
     let assigned = support::rows(
         &db.conn,
@@ -174,7 +227,10 @@ async fn spatie_permissions(engine: Engine) {
     .await;
     assert_eq!(assigned.len(), 1, "{engine:?}");
     assert_eq!(support::text(&assigned[0], "name"), "admin");
-    assert_eq!(support::text(&assigned[0], "model_type"), "App\\Models\\User");
+    assert_eq!(
+        support::text(&assigned[0], "model_type"),
+        "App\\Models\\User"
+    );
     let direct = support::rows(
         &db.conn,
         "SELECT p.name AS name, m.model_type AS model_type FROM model_has_permissions m \
@@ -185,7 +241,12 @@ async fn spatie_permissions(engine: Engine) {
     assert_eq!(support::text(&direct[0], "name"), "edit articles");
     assert_eq!(support::text(&direct[0], "model_type"), "App\\Models\\User");
     assert_eq!(
-        support::count(&db.conn, "role_has_permissions", "role_id = 1 AND permission_id = 3").await,
+        support::count(
+            &db.conn,
+            "role_has_permissions",
+            "role_id = 1 AND permission_id = 3"
+        )
+        .await,
         1,
         "{engine:?}"
     );
@@ -195,7 +256,10 @@ async fn spatie_permissions(engine: Engine) {
     )
     .await;
     assert_eq!(support::text(&editor[0], "guard_name"), "web");
-    assert!(!editor[0]["created_at"].is_null(), "{engine:?}: spatie's timestamps");
+    assert!(
+        !editor[0]["created_at"].is_null(),
+        "{engine:?}: spatie's timestamps"
+    );
 }
 
 on_every_engine!(spatie_permissions =>

@@ -96,6 +96,10 @@ where
             Ok(columns)
         }
         DbBackend::Postgres => {
+            // The schema is the one an unqualified name resolves to on this
+            // connection, as the stores' own statements resolve it: a
+            // temporary table shadows `public`, and the search path decides
+            // among the rest.
             let rows = conn
                 .query_all_raw(Statement::from_sql_and_values(
                     backend,
@@ -103,9 +107,12 @@ where
                      is_nullable::text AS nullable, \
                      character_maximum_length::bigint AS max_length \
                      FROM information_schema.columns \
-                     WHERE table_schema = current_schema() AND table_name = $1 \
+                     WHERE table_name = $1 AND table_schema = ( \
+                         SELECT n.nspname::text FROM pg_catalog.pg_class c \
+                         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                         WHERE c.oid = to_regclass($2)) \
                      ORDER BY ordinal_position",
-                    [table.into()],
+                    [table.into(), format!("\"{table}\"").into()],
                 ))
                 .await?;
             rows.into_iter()

@@ -37,7 +37,10 @@ fn col(name: &str) -> ColumnDef {
     ColumnDef::new(Alias::new(name))
 }
 
-async fn create(conn: &DatabaseConnection, table: sea_orm_migration::sea_query::TableCreateStatement) {
+async fn create(
+    conn: &DatabaseConnection,
+    table: sea_orm_migration::sea_query::TableCreateStatement,
+) {
     conn.execute(&table).await.expect("create an earlier table");
 }
 
@@ -167,7 +170,10 @@ async fn earlier_database(engine: Engine) -> (support::Db, Earlier) {
         .await;
     }
     for id in earlier.failed {
-        let mut env = envelope("Ldb.Refund", serde_json::json!({ "refund": id.to_string() }));
+        let mut env = envelope(
+            "Ldb.Refund",
+            serde_json::json!({ "refund": id.to_string() }),
+        );
         env.id = id;
         insert(
             conn,
@@ -243,7 +249,12 @@ async fn earlier_database(engine: Engine) -> (support::Db, Earlier) {
             conn,
             "job_batch_settlements",
             &["batch_id", "job_id", "failed", "settled_at"],
-            vec![v(earlier.batch.clone()), v(job.to_string()), v(failed), v(t0 - 50)],
+            vec![
+                v(earlier.batch.clone()),
+                v(job.to_string()),
+                v(failed),
+                v(t0 - 50),
+            ],
         )
         .await;
     }
@@ -263,10 +274,8 @@ async fn earlier_database(engine: Engine) -> (support::Db, Earlier) {
             .to_owned(),
     )
     .await;
-    let mut session = suprnova::session::SessionData::new(
-        earlier.session.clone(),
-        earlier.session_csrf.clone(),
-    );
+    let mut session =
+        suprnova::session::SessionData::new(earlier.session.clone(), earlier.session_csrf.clone());
     session.set_auth_guard_for_test("web", "1", None);
     session.user_id = Some("1".to_owned());
     insert(
@@ -340,13 +349,22 @@ async fn earlier_database(engine: Engine) -> (support::Db, Earlier) {
         } else {
             column.timestamp_with_time_zone();
         }
-        column.not_null().default(Expr::current_timestamp()).to_owned()
+        column
+            .not_null()
+            .default(Expr::current_timestamp())
+            .to_owned()
     };
     create(
         conn,
         Table::create()
             .table(Alias::new("features"))
-            .col(col("id").big_integer().not_null().auto_increment().primary_key())
+            .col(
+                col("id")
+                    .big_integer()
+                    .not_null()
+                    .auto_increment()
+                    .primary_key(),
+            )
             .col(col("name").string_len(255).not_null())
             .col(col("scope_key").string_len(255).not_null().default(""))
             .col(col("enabled").boolean().not_null())
@@ -377,7 +395,13 @@ async fn earlier_database(engine: Engine) -> (support::Db, Earlier) {
             conn,
             Table::create()
                 .table(Alias::new(table))
-                .col(col("id").big_integer().not_null().auto_increment().primary_key())
+                .col(
+                    col("id")
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
                 .col(col("name").string_len(255).not_null())
                 .col(col("display_name").string_len(255).null())
                 .col(col("guard_name").string_len(255).not_null().default("web"))
@@ -397,12 +421,21 @@ async fn earlier_database(engine: Engine) -> (support::Db, Earlier) {
         )
         .await;
     }
-    for (table, owner) in [("model_roles", "role_id"), ("model_permissions", "permission_id")] {
+    for (table, owner) in [
+        ("model_roles", "role_id"),
+        ("model_permissions", "permission_id"),
+    ] {
         create(
             conn,
             Table::create()
                 .table(Alias::new(table))
-                .col(col("id").big_integer().not_null().auto_increment().primary_key())
+                .col(
+                    col("id")
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
                 .col(col("model_type").string_len(255).not_null())
                 .col(col("model_id").string_len(255).not_null())
                 .col(col(owner).big_integer().not_null())
@@ -414,13 +447,25 @@ async fn earlier_database(engine: Engine) -> (support::Db, Earlier) {
         conn,
         Table::create()
             .table(Alias::new("role_permissions"))
-            .col(col("id").big_integer().not_null().auto_increment().primary_key())
+            .col(
+                col("id")
+                    .big_integer()
+                    .not_null()
+                    .auto_increment()
+                    .primary_key(),
+            )
             .col(col("role_id").big_integer().not_null())
             .col(col("permission_id").big_integer().not_null())
             .to_owned(),
     )
     .await;
-    insert(conn, "roles", &["name", "display_name"], vec![v("writer"), v("Writer")]).await;
+    insert(
+        conn,
+        "roles",
+        &["name", "display_name"],
+        vec![v("writer"), v("Writer")],
+    )
+    .await;
     for name in ["edit articles", "delete articles"] {
         insert(conn, "permissions", &["name"], vec![v(name)]).await;
     }
@@ -492,14 +537,19 @@ async fn jobs_run_once(engine: Engine) {
     )
     .await;
     assert_eq!(reservations.len(), 1, "{engine:?}");
-    assert_eq!(support::text(&reservations[0], "token"), earlier.reserved_token.to_string());
-    assert_eq!(support::int(&reservations[0], "reserved_until"), earlier.reserved_until);
+    assert_eq!(
+        support::text(&reservations[0], "token"),
+        earlier.reserved_token.to_string()
+    );
+    assert_eq!(
+        support::int(&reservations[0], "reserved_until"),
+        earlier.reserved_until
+    );
 
     // Past the delay and the reservation's deadline: each runs once more.
     {
-        let _clock = suprnova::testing::TestClock::travel_to(
-            Utc::now() + chrono::Duration::seconds(400),
-        );
+        let _clock =
+            suprnova::testing::TestClock::travel_to(Utc::now() + chrono::Duration::seconds(400));
         let later = drain(&driver).await;
         let mut later_sorted = later.clone();
         later_sorted.sort();
@@ -509,9 +559,8 @@ async fn jobs_run_once(engine: Engine) {
         ran.extend(later);
     }
     {
-        let _clock = suprnova::testing::TestClock::travel_to(
-            Utc::now() + chrono::Duration::days(30),
-        );
+        let _clock =
+            suprnova::testing::TestClock::travel_to(Utc::now() + chrono::Duration::days(30));
         let never = drain(&driver).await;
         assert!(never.is_empty(), "{engine:?}: a job ran twice: {never:?}");
     }
@@ -555,7 +604,10 @@ async fn failed_jobs_keep_their_ids(engine: Engine) {
     let store = std::sync::Arc::new(
         DatabaseFailedJobStore::new(db.conn.clone(), "failed_jobs".to_owned()).expect("store"),
     );
-    store.check().await.expect("the worker's check accepts the upgraded table");
+    store
+        .check()
+        .await
+        .expect("the worker's check accepts the upgraded table");
     let mut listed = store.ids().await.expect("list");
     listed.sort();
     let mut expected = earlier.failed.to_vec();
@@ -575,7 +627,10 @@ async fn failed_jobs_keep_their_ids(engine: Engine) {
         drain(&driver).await.contains(&earlier.failed[0]),
         "{engine:?}: the retried job was not queued"
     );
-    assert!(store.forget(earlier.failed[1]).await.expect("forget"), "{engine:?}: queue:forget");
+    assert!(
+        store.forget(earlier.failed[1]).await.expect("forget"),
+        "{engine:?}: queue:forget"
+    );
     assert_eq!(store.count().await.expect("count"), 0);
 }
 
@@ -663,7 +718,10 @@ async fn reshaped_tables_keep_their_rows(engine: Engine) {
     }
     for gone in ["model_roles", "model_permissions", "role_permissions"] {
         assert!(
-            !crate::catalog::tables(&db.conn).await.iter().any(|t| t == gone),
+            !crate::catalog::tables(&db.conn)
+                .await
+                .iter()
+                .any(|t| t == gone),
             "{engine:?}: the earlier {gone} is still there"
         );
     }
@@ -748,7 +806,9 @@ async fn reshaped_tables_keep_their_rows(engine: Engine) {
     .await;
     assert_eq!(support::text(&detail[0], "display_name"), "Writer");
     // A role created after the upgrade takes the next id.
-    let next = suprnova::rbac::create_role("editor").await.expect("create a role");
+    let next = suprnova::rbac::create_role("editor")
+        .await
+        .expect("create a role");
     assert_eq!(next, 2, "{engine:?}");
 }
 
@@ -789,9 +849,12 @@ async fn an_interrupted_upgrade_resumes(engine: Engine) {
                 .any(|t| t == "suprnova_earlier_jobs"),
             "{engine:?}: the copy is gone once empty"
         );
-        let driver =
-            DatabaseQueueDriver::new(db.conn.clone(), "jobs".to_owned()).expect("driver");
-        assert_eq!(drain(&driver).await, [earlier.queued], "{engine:?} (dropped: {dropped})");
+        let driver = DatabaseQueueDriver::new(db.conn.clone(), "jobs".to_owned()).expect("driver");
+        assert_eq!(
+            drain(&driver).await,
+            [earlier.queued],
+            "{engine:?} (dropped: {dropped})"
+        );
     }
 }
 
@@ -824,7 +887,13 @@ async fn the_manuals_users_migration_works(engine: Engine) {
         conn,
         Table::create()
             .table(Alias::new("users"))
-            .col(col("id").big_integer().not_null().auto_increment().primary_key())
+            .col(
+                col("id")
+                    .big_integer()
+                    .not_null()
+                    .auto_increment()
+                    .primary_key(),
+            )
             .col(col("name").string().not_null())
             .col(col("email").string().not_null().unique_key())
             .col(col("password").string().not_null())
@@ -862,7 +931,11 @@ async fn the_manuals_users_migration_works(engine: Engine) {
         .unwrap_or_else(|e| panic!("{engine:?}: the manual's users migration: {e}"));
     let ours = crate::catalog::shape(conn, "users").await;
     crate::tables::assert_same_layout(engine, "users", &laravel["users"], &ours);
-    let rows = support::rows(conn, "SELECT id, email, remember_token FROM users ORDER BY id").await;
+    let rows = support::rows(
+        conn,
+        "SELECT id, email, remember_token FROM users ORDER BY id",
+    )
+    .await;
     assert_eq!(rows.len(), 2, "{engine:?}");
     assert_eq!(support::int(&rows[0], "id"), 1);
     assert_eq!(support::text(&rows[0], "remember_token"), "remember-me");
@@ -871,7 +944,10 @@ async fn the_manuals_users_migration_works(engine: Engine) {
     let created = crate::scaffold::user::User::create("Nuno", "nuno@example.com", "secret")
         .await
         .expect("create a user");
-    assert_eq!(created.id, 3, "{engine:?}: the next id follows the kept ones");
+    assert_eq!(
+        created.id, 3,
+        "{engine:?}: the next id follows the kept ones"
+    );
 }
 
 on_every_engine!(the_manuals_users_migration_works =>

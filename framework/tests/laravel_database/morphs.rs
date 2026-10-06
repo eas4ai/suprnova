@@ -43,7 +43,10 @@ fn post_of_image(morph: &ImageableMorph) -> u64 {
 /// `with_count` and `with_max`, match rows holding the class or the alias.
 async fn reads_accept_the_class_and_the_alias(engine: Engine) {
     let (db, fixture) = support::laravel(engine).await;
-    assert_eq!((fixture.morph.class.as_str(), fixture.morph.alias.as_str()), (CLASS, ALIAS));
+    assert_eq!(
+        (fixture.morph.class.as_str(), fixture.morph.alias.as_str()),
+        (CLASS, ALIAS)
+    );
     let _bound = support::bind(&db.conn);
     let stored: Vec<String> = support::rows(&db.conn, "SELECT commentable_type FROM comments")
         .await
@@ -109,7 +112,12 @@ async fn reads_accept_the_class_and_the_alias(engine: Engine) {
     {
         let expected = if comment.id == 5 { 3 } else { 1 };
         let owner = comment.commentable_loaded().expect("an eager owner");
-        assert_eq!(post_of_comment(owner), expected, "{engine:?}: eager comment {}", comment.id);
+        assert_eq!(
+            post_of_comment(owner),
+            expected,
+            "{engine:?}: eager comment {}",
+            comment.id
+        );
     }
     for image in LdbImage::with(["imageable"])
         .get()
@@ -119,9 +127,19 @@ async fn reads_accept_the_class_and_the_alias(engine: Engine) {
     {
         let expected = if image.id == 2 { 3 } else { 1 };
         let direct = image.imageable().get().await.expect("owner");
-        assert_eq!(post_of_image(&direct), expected, "{engine:?}: image {}", image.id);
+        assert_eq!(
+            post_of_image(&direct),
+            expected,
+            "{engine:?}: image {}",
+            image.id
+        );
         let eager = image.imageable_loaded().expect("an eager owner");
-        assert_eq!(post_of_image(eager), expected, "{engine:?}: eager image {}", image.id);
+        assert_eq!(
+            post_of_image(eager),
+            expected,
+            "{engine:?}: eager image {}",
+            image.id
+        );
     }
 
     // `has`, `with_count` and `with_max` over the same rows.
@@ -182,9 +200,11 @@ async fn writes_store_the_morph_type(engine: Engine) {
         .await
         .expect("give a permission");
     for table in ["model_has_roles", "model_has_permissions"] {
-        let stored =
-            support::rows(&db.conn, &format!("SELECT model_type FROM {table} WHERE model_id = 2"))
-                .await;
+        let stored = support::rows(
+            &db.conn,
+            &format!("SELECT model_type FROM {table} WHERE model_id = 2"),
+        )
+        .await;
         assert!(!stored.is_empty(), "{engine:?}: {table} has abigail's row");
         for row in &stored {
             assert_eq!(

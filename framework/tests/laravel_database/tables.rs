@@ -230,10 +230,8 @@ async fn stores_work_on_laravels_tables(engine: Engine) {
     // sessions: write, read, and Laravel's session rows untouched.
     use suprnova::session::SessionStore;
     let driver = suprnova::session::driver::DatabaseSessionDriver::new(Duration::from_secs(7200));
-    let mut session = suprnova::session::SessionData::new(
-        format!("{:0<40}", "ldbsession"),
-        "csrf-token".into(),
-    );
+    let mut session =
+        suprnova::session::SessionData::new(format!("{:0<40}", "ldbsession"), "csrf-token".into());
     session.user_id = Some("1".into());
     session
         .data

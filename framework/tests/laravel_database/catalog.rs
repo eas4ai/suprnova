@@ -43,7 +43,6 @@ pub struct Shape {
     pub foreign_keys: BTreeSet<ForeignKey>,
 }
 
-
 async fn query(
     conn: &DatabaseConnection,
     sql: &str,

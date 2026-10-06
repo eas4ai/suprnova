@@ -27,7 +27,12 @@ async fn laravel_rows_read_and_write(engine: Engine) {
     assert!(first.created_at.is_some() && first.updated_at.is_some());
     let bare = LdbPost::find(3u64).await.expect("find").expect("post 3");
     assert_eq!(
-        (bare.meta.clone(), bare.created_at, bare.updated_at, bare.deleted_at),
+        (
+            bare.meta.clone(),
+            bare.created_at,
+            bare.updated_at,
+            bare.deleted_at
+        ),
         (None, None, None, None),
         "{engine:?}: NULL json and timestamps"
     );
@@ -39,7 +44,11 @@ async fn laravel_rows_read_and_write(engine: Engine) {
         .iter()
         .map(|p| p.id)
         .collect();
-    assert_eq!(visible, [1, 3], "{engine:?}: Laravel's trashed post 2 is hidden");
+    assert_eq!(
+        visible,
+        [1, 3],
+        "{engine:?}: Laravel's trashed post 2 is hidden"
+    );
     let trashed = LdbPost::query()
         .only_trashed()
         .get()
@@ -56,8 +65,15 @@ async fn laravel_rows_read_and_write(engine: Engine) {
     assert_eq!(updated.title, "Edited");
     let reread = LdbPost::find(3u64).await.expect("find").expect("post 3");
     assert_eq!(reread.title, "Edited");
-    assert_eq!(reread.meta, Some(meta.clone()), "{engine:?}: json round trip");
-    assert!(reread.created_at.is_none(), "{engine:?}: created_at stays NULL");
+    assert_eq!(
+        reread.meta,
+        Some(meta.clone()),
+        "{engine:?}: json round trip"
+    );
+    assert!(
+        reread.created_at.is_none(),
+        "{engine:?}: created_at stays NULL"
+    );
     assert!(reread.updated_at.is_some(), "{engine:?}: updated_at is set");
     let stored = support::rows(&db.conn, "SELECT meta FROM posts WHERE id = 3").await;
     let raw = &stored[0]["meta"];
@@ -65,13 +81,23 @@ async fn laravel_rows_read_and_write(engine: Engine) {
         serde_json::Value::String(text) => serde_json::from_str(text).expect("JSON text"),
         other => other.clone(),
     };
-    assert_eq!(decoded, meta, "{engine:?}: the column holds the JSON itself");
+    assert_eq!(
+        decoded, meta,
+        "{engine:?}: the column holds the JSON itself"
+    );
 
     let created = <LdbPost as Model>::create(attrs! { title: "New", meta: meta.clone() })
         .await
         .expect("create");
-    let created = LdbPost::find(created.id).await.expect("find").expect("created");
-    assert_eq!(created.meta, Some(meta), "{engine:?}: json written on create");
+    let created = LdbPost::find(created.id)
+        .await
+        .expect("find")
+        .expect("created");
+    assert_eq!(
+        created.meta,
+        Some(meta),
+        "{engine:?}: json written on create"
+    );
     assert!(created.created_at.is_some());
 
     // A soft delete of a Laravel row sets `deleted_at`.
@@ -99,7 +125,10 @@ async fn scaffold_user_on_laravels_users(engine: Engine) {
     let _bound = support::bind(&db.conn);
 
     let taylor = User::find(1u64).await.expect("find").expect("user 1");
-    assert_eq!((taylor.name.as_str(), taylor.email.as_str()), ("Taylor", "taylor@example.com"));
+    assert_eq!(
+        (taylor.name.as_str(), taylor.email.as_str()),
+        ("Taylor", "taylor@example.com")
+    );
     let jeffrey = User::find_by_email("jeffrey@example.com")
         .await
         .expect("find by email")
@@ -129,7 +158,10 @@ async fn scaffold_user_on_laravels_users(engine: Engine) {
         assert_eq!(row.id, suprnova::StoredU64(2), "{engine:?}");
         let mut active: ActiveModel = row.into();
         active.name = Set("Abigail Otwell".to_owned());
-        active.update(&db.conn).await.expect("update through the entity");
+        active
+            .update(&db.conn)
+            .await
+            .expect("update through the entity");
         let reread = User::find(2u64).await.expect("find").expect("user 2");
         assert_eq!(reread.name, "Abigail Otwell", "{engine:?}");
     }
@@ -137,12 +169,19 @@ async fn scaffold_user_on_laravels_users(engine: Engine) {
     let created = User::create("Nuno", "nuno@example.com", "created-by-suprnova")
         .await
         .expect("create a user");
-    assert_eq!(created.id, 5, "{engine:?}: the next id after Laravel's rows");
+    assert_eq!(
+        created.id, 5,
+        "{engine:?}: the next id after Laravel's rows"
+    );
     let found = User::find_by_email("nuno@example.com")
         .await
         .expect("find")
         .expect("nuno");
-    assert!(found.verify_password("created-by-suprnova").expect("verify"));
+    assert!(
+        found
+            .verify_password("created-by-suprnova")
+            .expect("verify")
+    );
     assert!(found.created_at.is_some());
 }
 

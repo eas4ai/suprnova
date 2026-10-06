@@ -17,7 +17,9 @@ use chrono::{DateTime, TimeZone, Utc};
 use sea_orm::ConnectionTrait;
 use sea_orm_migration::{MigrationTrait, SchemaManager};
 use suprnova::features::entity::Feature;
-use suprnova::features::migrations::{CreateFeaturesTable, FeatureTimestampsToDatetime};
+use suprnova::features::migrations::{
+    CreateFeaturesTable, FeatureTimestampsToDatetime, FeaturesToPennantLayout,
+};
 use suprnova::features::{Context, DatabaseEvaluator, Evaluator, admin};
 use suprnova::testing::{TestClock, TestContainer, TestContainerGuard};
 use suprnova::{DatabaseConfig, DbConnection, Model, attrs};
@@ -144,7 +146,20 @@ async fn mysql_features_read_and_write_native_timestamps() {
 
 /// The feature-flag tables, for the checks every framework table group runs
 /// on MySQL and MariaDB.
-const FEATURE_TABLES: [&str; 1] = ["features"];
+const FEATURE_TABLES: [&str; 2] = ["features", "suprnova_feature_details"];
+
+/// The `features` table an earlier release created on MySQL: its own
+/// layout, with the `TIMESTAMP` time columns its first migration made.
+const EARLIER_FEATURES: [&str; 1] = ["CREATE TABLE features (\
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, \
+    name VARCHAR(255) NOT NULL, \
+    scope_key VARCHAR(255) NOT NULL DEFAULT '', \
+    enabled TINYINT(1) NOT NULL, \
+    description TEXT NULL, \
+    updated_by VARCHAR(255) NULL, \
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+    UNIQUE KEY idx_features_name_scope_key (name, scope_key))"];
 
 /// Every migration the framework ships for the feature-flag tables, in the
 /// order an app's `Migrator` lists them.
@@ -158,6 +173,10 @@ async fn shipped_feature_migrations(db: sea_orm::DatabaseConnection) {
         .up(&manager)
         .await
         .expect("move the features time columns to DATETIME");
+    FeaturesToPennantLayout
+        .up(&manager)
+        .await
+        .expect("move the features table into Pennant's layout");
 }
 
 /// A `features` table created fresh holds a time after 2038-01-19, where
@@ -173,14 +192,16 @@ async fn mysql_a_fresh_features_table_holds_times_after_2038() {
     .await;
 }
 
-/// A `features` table an older migration created with `TIMESTAMP` columns
-/// moves to `DATETIME` with its UTC times kept.
+/// A `features` table an earlier release created with `TIMESTAMP` columns
+/// moves into Pennant's layout with `DATETIME` columns and its UTC times
+/// kept.
 #[tokio::test]
 #[serial_test::serial]
 #[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
 async fn mysql_an_upgraded_features_table_keeps_its_utc_times() {
     crate::mysql_time_columns::assert_upgrade_keeps_utc_times(
         &FEATURE_TABLES,
+        &EARLIER_FEATURES,
         shipped_feature_migrations,
     )
     .await;

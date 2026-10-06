@@ -88,9 +88,15 @@ async fn whoami(browser: &mut Browser) -> String {
 /// Every flow LDB-007 names, with a check of the column after each.
 async fn flows_leave_the_remember_token(db: &support::Db, password: &str, engine: Engine) {
     let laravel_token = remember_token(db).await;
-    assert!(!laravel_token.is_empty(), "the fixture stores a remember_token");
+    assert!(
+        !laravel_token.is_empty(),
+        "the fixture stores a remember_token"
+    );
     let unchanged = |after: String, step: &str| {
-        assert_eq!(after, laravel_token, "{engine:?}: {step} wrote users.remember_token");
+        assert_eq!(
+            after, laravel_token,
+            "{engine:?}: {step} wrote users.remember_token"
+        );
     };
 
     // A sign-in without remember-me, then a sign-out.
@@ -116,13 +122,19 @@ async fn flows_leave_the_remember_token(db: &support::Db, password: &str, engine
         "1",
         "{engine:?}: the remember-me cookie did not sign in"
     );
-    unchanged(remember_token(db).await, "a sign-in through the remember-me cookie");
+    unchanged(
+        remember_token(db).await,
+        "a sign-in through the remember-me cookie",
+    );
 
     // A revocation of the user's sessions, then a sign-out everywhere.
     suprnova::session::destroy_all_for_user("1")
         .await
         .expect("revoke the user's sessions");
-    unchanged(remember_token(db).await, "a revocation of the user's sessions");
+    unchanged(
+        remember_token(db).await,
+        "a revocation of the user's sessions",
+    );
     let mut everywhere = Browser::serve(router()).await;
     sign_in(&mut everywhere, password, true).await;
     everywhere.get("/logout-everywhere", &[]).await;

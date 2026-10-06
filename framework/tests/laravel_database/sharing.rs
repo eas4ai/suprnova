@@ -60,7 +60,7 @@ enum Php {
 /// PHP's `unserialize` over the subset [`Php`] holds; `None` where PHP
 /// returns `false`.
 fn php_unserialize(input: &[u8]) -> Option<Php> {
-    fn number<'a>(input: &'a [u8], end: u8) -> Option<(&'a str, &'a [u8])> {
+    fn number(input: &[u8], end: u8) -> Option<(&str, &[u8])> {
         let at = input.iter().position(|b| *b == end)?;
         Some((std::str::from_utf8(&input[..at]).ok()?, &input[at + 1..]))
     }
@@ -212,8 +212,8 @@ fn laravel_reads_session(row: &serde_json::Value) -> Result<String, String> {
 /// the timestamps date-times.
 fn laravel_reads_notification(row: &serde_json::Value) -> Result<(), String> {
     uuid::Uuid::parse_str(&support::text(row, "id")).map_err(|e| format!("id: {e}"))?;
-    let data: serde_json::Value = serde_json::from_str(&support::text(row, "data"))
-        .map_err(|e| format!("data: {e}"))?;
+    let data: serde_json::Value =
+        serde_json::from_str(&support::text(row, "data")).map_err(|e| format!("data: {e}"))?;
     if !data.is_object() {
         return Err(format!("data is not an array: {data}"));
     }
@@ -267,7 +267,9 @@ async fn rows_suprnova_writes_decode_in_laravel(engine: Engine) {
     Queue::set_driver(Arc::new(
         DatabaseQueueDriver::new(db.conn.clone(), "jobs".to_owned()).expect("the jobs driver"),
     ));
-    Queue::push(ShipOrder { order: 7 }).await.expect("queue a job");
+    Queue::push(ShipOrder { order: 7 })
+        .await
+        .expect("queue a job");
     let ours: Vec<serde_json::Value> = support::rows(&db.conn, "SELECT * FROM jobs")
         .await
         .into_iter()
@@ -300,8 +302,9 @@ async fn rows_suprnova_writes_decode_in_laravel(engine: Engine) {
         .await
         .expect("record a failure");
     for row in support::rows(&db.conn, "SELECT * FROM job_batches").await {
-        laravel_reads_batch(engine, &row)
-            .unwrap_or_else(|e| panic!("{engine:?} job_batches {}: {e}", support::text(&row, "id")));
+        laravel_reads_batch(engine, &row).unwrap_or_else(|e| {
+            panic!("{engine:?} job_batches {}: {e}", support::text(&row, "id"))
+        });
     }
     let ours = support::rows(
         &db.conn,
@@ -309,7 +312,10 @@ async fn rows_suprnova_writes_decode_in_laravel(engine: Engine) {
     )
     .await;
     assert_eq!(
-        (support::int(&ours[0], "pending_jobs"), support::int(&ours[0], "failed_jobs")),
+        (
+            support::int(&ours[0], "pending_jobs"),
+            support::int(&ours[0], "failed_jobs")
+        ),
         (1, 1),
         "{engine:?}: Laravel reads the counts Suprnova keeps"
     );
@@ -318,7 +324,12 @@ async fn rows_suprnova_writes_decode_in_laravel(engine: Engine) {
     let failed = DatabaseFailedJobStore::new(db.conn.clone(), "failed_jobs".to_owned())
         .expect("the failed-jobs store");
     failed
-        .log("database", "default", &envelope("Ldb.Refund", serde_json::json!({})), "boom")
+        .log(
+            "database",
+            "default",
+            &envelope("Ldb.Refund", serde_json::json!({})),
+            "boom",
+        )
         .await
         .expect("dead-letter a job");
     for row in support::rows(&db.conn, "SELECT * FROM failed_jobs").await {
@@ -332,13 +343,20 @@ async fn rows_suprnova_writes_decode_in_laravel(engine: Engine) {
         "suprnova-csrf-token".into(),
     );
     session.user_id = Some("1".into());
-    session.data.insert("cart".into(), serde_json::json!({ "items": [1, 2] }));
+    session
+        .data
+        .insert("cart".into(), serde_json::json!({ "items": [1, 2] }));
     driver.write(&session).await.expect("write a session");
     for row in support::rows(&db.conn, "SELECT * FROM sessions").await {
-        let token = laravel_reads_session(&row).unwrap_or_else(|e| panic!("{engine:?} sessions: {e}"));
+        let token =
+            laravel_reads_session(&row).unwrap_or_else(|e| panic!("{engine:?} sessions: {e}"));
         if support::text(&row, "id") == session.id {
             assert_eq!(token, "suprnova-csrf-token", "{engine:?}: Laravel's _token");
-            assert_eq!(support::int(&row, "user_id"), 1, "{engine:?}: sessions.user_id");
+            assert_eq!(
+                support::int(&row, "user_id"),
+                1,
+                "{engine:?}: sessions.user_id"
+            );
         }
     }
 
@@ -356,7 +374,10 @@ async fn rows_suprnova_writes_decode_in_laravel(engine: Engine) {
     let evaluator = suprnova::features::DatabaseEvaluator::new()
         .await
         .expect("the evaluator");
-    evaluator.set_flag("checkout-v2", "", true).await.expect("a global flag");
+    evaluator
+        .set_flag("checkout-v2", "", true)
+        .await
+        .expect("a global flag");
     evaluator
         .set_flag("checkout-v2", "user:2", false)
         .await
@@ -366,11 +387,17 @@ async fn rows_suprnova_writes_decode_in_laravel(engine: Engine) {
     }
 
     // users: a password the scaffold sets passes PHP's check.
-    let created = crate::scaffold::user::User::create("Nuno", "nuno@example.com", "set-by-suprnova")
-        .await
-        .expect("create a user");
+    let created =
+        crate::scaffold::user::User::create("Nuno", "nuno@example.com", "set-by-suprnova")
+            .await
+            .expect("create a user");
     let (algo, ok) = support::php_password(&created.password, "set-by-suprnova");
-    assert_eq!((algo.as_str(), ok), ("bcrypt", true), "{engine:?}: {}", created.password);
+    assert_eq!(
+        (algo.as_str(), ok),
+        ("bcrypt", true),
+        "{engine:?}: {}",
+        created.password
+    );
 }
 
 on_every_engine!(rows_suprnova_writes_decode_in_laravel =>
@@ -393,12 +420,19 @@ async fn the_default_queue_follows_the_setting(engine: Engine) {
 
     suprnova::LaravelDatabase::share(false);
     Queue::push(ShipOrder { order: 1 }).await.expect("queue");
-    assert_eq!(queue_of_last().await, "default", "{engine:?}: with the setting off");
+    assert_eq!(
+        queue_of_last().await,
+        "default",
+        "{engine:?}: with the setting off"
+    );
 
     let shared = Shared::on();
     Queue::push(ShipOrder { order: 2 }).await.expect("queue");
     let queue = queue_of_last().await;
-    assert_ne!(queue, "default", "{engine:?}: Laravel's default worker would run it");
+    assert_ne!(
+        queue, "default",
+        "{engine:?}: Laravel's default worker would run it"
+    );
     assert_eq!(queue, suprnova::LaravelDatabase::default_queue());
     drop(shared);
 }
@@ -415,18 +449,22 @@ async fn a_worker_leaves_laravels_jobs(engine: Engine) {
     let (db, _) = support::laravel(engine).await;
     crate::scaffold::migrate(&db.conn).await.expect("migrate");
     let _bound = support::bind(&db.conn);
-    let laravel_jobs =
-        support::rows(&db.conn, "SELECT id, queue, attempts, reserved_at, available_at FROM jobs ORDER BY id")
-            .await;
+    let laravel_jobs = support::rows(
+        &db.conn,
+        "SELECT id, queue, attempts, reserved_at, available_at FROM jobs ORDER BY id",
+    )
+    .await;
     assert!(!laravel_jobs.is_empty());
     // Every Laravel job is due, so only the worker's own filter keeps it off.
     db.conn
         .execute_unprepared("UPDATE jobs SET available_at = 0, reserved_at = NULL")
         .await
         .expect("make Laravel's jobs due");
-    let laravel_jobs =
-        support::rows(&db.conn, "SELECT id, queue, attempts, reserved_at, available_at FROM jobs ORDER BY id")
-            .await;
+    let laravel_jobs = support::rows(
+        &db.conn,
+        "SELECT id, queue, attempts, reserved_at, available_at FROM jobs ORDER BY id",
+    )
+    .await;
 
     suprnova::queue::worker::register_job::<ShipOrder>();
     Queue::set_failed_store(Arc::new(
@@ -450,11 +488,19 @@ async fn a_worker_leaves_laravels_jobs(engine: Engine) {
     .await
     .expect("the worker ran one job in time")
     .expect("the worker");
-    let after =
-        support::rows(&db.conn, "SELECT id, queue, attempts, reserved_at, available_at FROM jobs ORDER BY id")
-            .await;
-    assert_eq!(after, laravel_jobs, "{engine:?}: the worker reserved a Laravel job");
-    assert_eq!(support::count(&db.conn, "failed_jobs", "queue <> 'failing'").await, 0);
+    let after = support::rows(
+        &db.conn,
+        "SELECT id, queue, attempts, reserved_at, available_at FROM jobs ORDER BY id",
+    )
+    .await;
+    assert_eq!(
+        after, laravel_jobs,
+        "{engine:?}: the worker reserved a Laravel job"
+    );
+    assert_eq!(
+        support::count(&db.conn, "failed_jobs", "queue <> 'failing'").await,
+        0
+    );
 }
 
 on_every_engine!(a_worker_leaves_laravels_jobs =>

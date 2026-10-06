@@ -28,7 +28,10 @@ async fn up_over_existing_rbac_tables_and_indexes_succeeds() {
     for (table, index) in [
         ("roles", "roles_name_guard_name_unique"),
         ("permissions", "permissions_name_guard_name_unique"),
-        ("model_has_roles", "model_has_roles_model_id_model_type_index"),
+        (
+            "model_has_roles",
+            "model_has_roles_model_id_model_type_index",
+        ),
         (
             "model_has_permissions",
             "model_has_permissions_model_id_model_type_index",

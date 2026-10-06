@@ -562,16 +562,22 @@ async fn login_session_and_remember_restore(url: &str, schema: Schema) {
 }
 
 /// What each engine names the time columns `schema` creates, so a pass
-/// proves the column type the test claims to cover.
+/// proves the column type the test claims to cover. `sessions` holds
+/// Laravel's epoch-seconds `last_activity` under either schema, an integer
+/// whatever the time columns are.
 async fn assert_time_column_type(url: &str, schema: Schema, expected: &str) {
     let database = connect(url).await;
     drop_scaffold_tables(&database).await;
     create_tables(&database, schema).await;
     let backend = database.inner().get_database_backend();
-    for (table, column) in [
-        ("users", "created_at"),
-        ("sessions", "last_activity"),
-        ("remember_tokens", "expires_at"),
+    let epoch = match backend {
+        DatabaseBackend::MySql => "int",
+        _ => "integer",
+    };
+    for (table, column, expected) in [
+        ("users", "created_at", expected),
+        ("sessions", "last_activity", epoch),
+        ("remember_tokens", "expires_at", expected),
     ] {
         let sql = match backend {
             DatabaseBackend::MySql => format!(

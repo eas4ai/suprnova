@@ -104,7 +104,10 @@ pub async fn create_tag_tables(conn: &sea_orm::DatabaseConnection) {
     let (key, reference) = match conn.get_database_backend() {
         sea_orm::DbBackend::Sqlite => ("INTEGER PRIMARY KEY AUTOINCREMENT", "INTEGER"),
         sea_orm::DbBackend::Postgres => ("BIGSERIAL PRIMARY KEY", "BIGINT"),
-        _ => ("BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY", "BIGINT UNSIGNED"),
+        _ => (
+            "BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY",
+            "BIGINT UNSIGNED",
+        ),
     };
     for sql in [
         format!("CREATE TABLE ldb_tags (id {key}, name VARCHAR(255) NOT NULL)"),
@@ -113,7 +116,9 @@ pub async fn create_tag_tables(conn: &sea_orm::DatabaseConnection) {
              taggable_id {reference} NOT NULL, taggable_type VARCHAR(255) NOT NULL)"
         ),
     ] {
-        conn.execute_unprepared(&sql).await.expect("create a tag table");
+        conn.execute_unprepared(&sql)
+            .await
+            .expect("create a tag table");
     }
 }
 

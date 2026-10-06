@@ -4,11 +4,12 @@
 //! `failed_jobs.stub`), so a Suprnova application runs on a database
 //! Laravel created, and its rows read the same to both:
 //!
-//! - [`CreateJobsTable`]: `jobs`, and the reservations table the database
-//!   driver keeps beside it (see [`crate::queue::database`]).
-//! - [`CreateJobBatchesTable`]: `job_batches`, and `job_batch_settlements`,
-//!   where the batch repository records which jobs settled.
-//! - [`CreateFailedJobsTable`]: `failed_jobs`.
+//! - [`CreateJobsTable`] creates `jobs`, and the reservations table the
+//!   database driver keeps beside it (see [`crate::queue::database`]).
+//! - [`CreateJobBatchesTable`] creates `job_batches`, and
+//!   `job_batch_settlements`, where the batch repository records which jobs
+//!   settled.
+//! - [`CreateFailedJobsTable`] creates `failed_jobs`.
 //!
 //! Each one creates its tables when they are missing, leaves a table that
 //! is already in Laravel's layout exactly as it is (Laravel's own migration

@@ -29,13 +29,19 @@ fn ldb_012_the_chapter_is_linked_and_has_the_manuals_shape() {
         "manual/documentation.md does not link the chapter"
     );
     let chapter = read("manual/laravel-database.md");
-    assert!(chapter.contains("```rust"), "the chapter has no runnable example");
+    assert!(
+        chapter.contains("```rust"),
+        "the chapter has no runnable example"
+    );
     assert!(chapter.contains("\n### Why Suprnova diverges\n"));
     let last_section = chapter
         .lines()
         .rfind(|line| line.starts_with("## "))
         .expect("a section");
-    assert_eq!(last_section, "## Next", "the chapter does not close with ## Next");
+    assert_eq!(
+        last_section, "## Next",
+        "the chapter does not close with ## Next"
+    );
 }
 
 #[test]
@@ -87,7 +93,10 @@ fn ldb_012_the_chapter_covers_the_upgrade_setting_and_aliases() {
         "Remember-me cookies Laravel issued",
         "whose time zone is not UTC",
     ] {
-        assert!(chapter.contains(phrase), "the chapter does not say: {phrase}");
+        assert!(
+            chapter.contains(phrase),
+            "the chapter does not say: {phrase}"
+        );
     }
 }
 

@@ -75,12 +75,10 @@ impl Grant {
     /// after [`Self::seed`], so the role and permission ids exist.
     pub(crate) async fn competing_insert(self) -> String {
         match self {
-            Self::Role => format!(
-                "INSERT INTO roles (name, guard_name) VALUES ('{ROLE}', 'web')"
-            ),
-            Self::Permission => format!(
-                "INSERT INTO permissions (name, guard_name) VALUES ('{PERMISSION}', 'web')"
-            ),
+            Self::Role => format!("INSERT INTO roles (name, guard_name) VALUES ('{ROLE}', 'web')"),
+            Self::Permission => {
+                format!("INSERT INTO permissions (name, guard_name) VALUES ('{PERMISSION}', 'web')")
+            }
             Self::RolePermission => {
                 let role = create_role(ROLE).await.expect("the seeded role");
                 let permission = create_permission(PERMISSION)
