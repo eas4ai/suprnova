@@ -209,6 +209,33 @@ pub(crate) fn prefixed(path: &str) -> String {
     out
 }
 
+/// [`prefixed`] for a path the caller owns and no longer needs.
+///
+/// At the host root the path is the result itself, so a path the framework
+/// just built, such as the first Inertia page's URL, is not copied a second
+/// time (MEM-003). Under a root the result is one new buffer, the root
+/// followed by the path, as [`prefixed`] writes it.
+pub(crate) fn prefixed_owned(path: String) -> String {
+    let root = current();
+    if root.is_empty() {
+        return path;
+    }
+    let mut out = String::with_capacity(root.len() + path.len());
+    out.push_str(&root);
+    out.push_str(&path);
+    out
+}
+
+/// [`rooted`] for a target the caller owns and no longer needs: a target
+/// that keeps its bytes is returned as it is, not copied (MEM-003).
+pub(crate) fn rooted_owned(target: String) -> String {
+    let rooted = match rooted(&target) {
+        Cow::Owned(rooted) => Some(rooted),
+        Cow::Borrowed(_) => None,
+    };
+    rooted.unwrap_or(target)
+}
+
 /// The `Path` a framework cookie takes when the application sets none
 /// (PFX-007): the current root, or `/` at the host root.
 pub(crate) fn cookie_path() -> String {

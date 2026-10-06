@@ -2263,6 +2263,26 @@ fn pfx_005_no_frontend_template_imports_by_a_root_absolute_path() {
     );
 }
 
+/// PFX-011: `suprnova::url::root()` is admitted by the REG allowlist as an
+/// item that carries no capability, so a component's view can call it.
+#[test]
+fn pfx_011_url_root_carries_no_capability_in_the_allowlist() {
+    use suprnova_cli::registry::scan::allowlist::{self, Admission};
+
+    let list = allowlist::embedded().expect("the embedded allowlist parses");
+    match list.admit("suprnova::url::root") {
+        Some(Admission::Item { canonical, item }) => {
+            assert_eq!(canonical, "suprnova::url::root");
+            assert!(!item.hidden, "`suprnova::url::root` is hidden");
+            assert_eq!(
+                item.capability, None,
+                "`suprnova::url::root` carries a capability"
+            );
+        }
+        other => panic!("`suprnova::url::root` is not admitted as an item: {other:?}"),
+    }
+}
+
 /// PFX-012: the scaffold registers the framework's `root` shared prop.
 #[test]
 fn pfx_012_the_scaffold_registers_the_root_share() {
@@ -2273,23 +2293,58 @@ fn pfx_012_the_scaffold_registers_the_root_share() {
     );
 }
 
+/// The first string in `line` that opens with a quote, a double quote or a
+/// backquote and starts with `/`: a literal application path, in a call
+/// (`post`, `put`, `patch`, `delete`, `visit`, `get`), an attribute (`href`,
+/// `action`, a Vue `:href` binding, a JSX expression) or a template literal.
+/// A quote before `/>`, the end of a self-closing tag, starts no path.
+fn literal_path(line: &str) -> Option<&str> {
+    let bytes = line.as_bytes();
+    (0..bytes.len().saturating_sub(1)).find_map(|at| {
+        let quote = matches!(bytes[at], b'\'' | b'"' | b'`');
+        let path = bytes[at + 1] == b'/' && bytes.get(at + 2) != Some(&b'>');
+        (quote && path).then(|| &line[at..])
+    })
+}
+
+/// Whether `line` is a comment line of a script, a template or a stylesheet.
+fn is_comment(line: &str) -> bool {
+    let line = line.trim_start();
+    ["//", "/*", "*", "<!--", "{/*"]
+        .iter()
+        .any(|start| line.starts_with(start))
+}
+
+#[test]
+fn pfx_012_the_literal_path_reader_sees_every_form() {
+    for line in [
+        "form.post('/login')",
+        "router.delete(\"/session\")",
+        "form.put(`/profile`)",
+        "form.patch('/password')",
+        "router.visit('/')",
+        "<a href=\"/register\">",
+        "<a :href=\"'/register'\">",
+        "<Link href={'/'}>",
+        "<form action=\"/logout\" method=\"post\">",
+    ] {
+        assert!(literal_path(line).is_some(), "{line}");
+    }
+    for line in [
+        "form.post(`${root}/login`)",
+        "<a :href=\"`${root}/register`\">",
+        "<input type=\"email\"/>",
+        "const { root } = usePage<{ root: string }>().props",
+    ] {
+        assert_eq!(literal_path(line), None, "{line}");
+    }
+}
+
 /// PFX-012: every page the scaffold writes - the auth pages, the dashboard
 /// and the error page - builds each URL it posts to, visits or links from
 /// the `root` prop, never from a literal application path.
 #[test]
 fn pfx_012_scaffold_pages_build_every_url_from_the_root_prop() {
-    let literal = [
-        "post('/",
-        "post(\"/",
-        "visit('/",
-        "visit(\"/",
-        "get('/",
-        "get(\"/",
-        "href=\"/",
-        "href='/",
-        "href={'/",
-        "href={\"/",
-    ];
     let mut offenders = Vec::new();
     let mut pages = 0usize;
     for frontend in FRONTENDS {
@@ -2304,7 +2359,7 @@ fn pfx_012_scaffold_pages_build_every_url_from_the_root_prop() {
             }
             pages += 1;
             for (index, line) in body.lines().enumerate() {
-                if literal.iter().any(|needle| line.contains(needle)) {
+                if !is_comment(line) && literal_path(line).is_some() {
                     offenders.push(format!("{}:{}: {}", path.display(), index + 1, line.trim()));
                 }
             }

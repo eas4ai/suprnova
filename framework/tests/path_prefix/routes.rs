@@ -37,6 +37,27 @@ fn router() -> Router {
                 .map_err(|error| HttpResponse::text(error.to_string()).status(500))?;
             Ok(HttpResponse::text(signed))
         })
+        .get("/sign/{how}", |request: Request| async move {
+            let how = request.param("how").unwrap_or_default().to_owned();
+            let signed = match how.as_str() {
+                "temporary" => {
+                    url::temporary_signed_route("invoices.show", &[("id", "7")], 4_000_000_000)
+                }
+                "url" => url::signed_url("/invoices/7", None),
+                "redirect" => {
+                    let redirect = suprnova::Redirect::temporary_signed_route(
+                        "invoices.show",
+                        &[("id", "7")],
+                        4_000_000_000,
+                    )
+                    .map_err(|error| HttpResponse::text(error.to_string()).status(500))?;
+                    return redirect.into();
+                }
+                _ => return Err(HttpResponse::text("unknown case").status(404)),
+            }
+            .map_err(|error| HttpResponse::text(error.to_string()).status(500))?;
+            Ok(HttpResponse::text(signed))
+        })
         .into()
 }
 
@@ -105,6 +126,41 @@ async fn pfx_003_a_url_signed_behind_a_prefix_verifies_behind_it_only() {
         host_root.body, "refused",
         "a URL signed under a root verified at the host root"
     );
+
+    // The other signers share the signing: a temporary signed route, an
+    // application path signed with `signed_url`, and the `Location` of
+    // `Redirect::temporary_signed_route` each verify behind the prefix and
+    // nowhere else.
+    for how in ["redirect", "temporary", "url"] {
+        let reply = support::get_prefixed(address, &format!("/sign/{how}")).await;
+        let signed = if how == "redirect" {
+            reply.header("location").expect("a Location")
+        } else {
+            reply.body
+        };
+        assert!(
+            signed.starts_with("/billing/invoices/7?"),
+            "{how}: {signed}"
+        );
+        let path = forwarded_path(&signed);
+        assert_eq!(
+            support::get_prefixed(address, path).await.body,
+            "verified",
+            "{how}: {signed}"
+        );
+        assert_eq!(
+            support::get(address, path, &[("x-forwarded-prefix", "/other")])
+                .await
+                .body,
+            "refused",
+            "{how}: a URL signed under one root verified under another"
+        );
+        assert_eq!(
+            support::get(address, path, &[]).await.body,
+            "refused",
+            "{how}: a URL signed under a root verified at the host root"
+        );
+    }
 }
 
 #[tokio::test]

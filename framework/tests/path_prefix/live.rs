@@ -16,8 +16,8 @@ use suprnova::live::testing::{
     LiveSecurityCheck, prepare_live_router_for_test, record_live_security_pass_for_test,
 };
 use suprnova::live::{
-    ActionOutcome, ActionResult, CanonicalValue, LiveBootstrapOptions, LiveComponent, LiveDocument,
-    LiveMount, LiveRegistry, MountFlags, live,
+    ActionOutcome, ActionResult, CanonicalValue, ComponentContract, EventPayloadMetadata,
+    LiveBootstrapOptions, LiveComponent, LiveDocument, LiveMount, LiveRegistry, MountFlags, live,
 };
 use suprnova::view::{
     AssetSet, DocumentResponseIntent, TrustedHtml, TrustedMarkupReason, ViewName,
@@ -70,6 +70,33 @@ impl PfxCounter {
     }
 }
 
+pub struct PfxFeedUpdated;
+
+impl EventPayloadMetadata for PfxFeedUpdated {
+    const NAME: &'static str = "pfx.feed.updated";
+    const VERSION: u16 = 1;
+}
+
+/// A component with a stream, so its document loads the asynchronous role
+/// and boots through the script that configures it.
+#[derive(LiveComponent)]
+#[live(
+    name = "tests.pfx-feed",
+    view = "live/tests/bootstrap-feed.html",
+    minimum_protocol_version = 2,
+    streams(stream(name = "feed", topics("feed"), events(PfxFeedUpdated)))
+)]
+pub struct PfxFeed {
+    #[public]
+    headline: String,
+}
+
+#[live]
+impl PfxFeed {
+    #[action]
+    pub fn refresh(&mut self) {}
+}
+
 #[suprnova::view(path = "live/tests/bootstrap-document.html")]
 struct DocumentView<'a> {
     bootstrap: &'a TrustedHtml,
@@ -117,12 +144,14 @@ fn empty_slot() -> TrustedHtml {
     .expect("empty markup")
 }
 
-fn document_handler(
-    mount: &LiveMount<PfxCounter>,
+fn document_handler<C: ComponentContract + 'static>(
+    mount: &LiveMount<C>,
+    options: LiveBootstrapOptions,
 ) -> impl Fn(Request) -> DocumentFuture + Send + Sync + 'static {
     let mount = mount.clone();
     move |request: Request| -> DocumentFuture {
         let mount = mount.clone();
+        let options = options.clone();
         Box::pin(async move {
             let result: Result<HttpResponse, String> = async {
                 let mut document =
@@ -136,7 +165,7 @@ fn document_handler(
                     .await
                     .map_err(|error| error.to_string())?;
                 let bootstrap = document
-                    .bootstrap(LiveBootstrapOptions::esm())
+                    .bootstrap(options)
                     .map_err(|error| error.to_string())?;
                 let empty = empty_slot();
                 document
@@ -161,20 +190,43 @@ fn document_handler(
     }
 }
 
-fn live_router(mount: &LiveMount<PfxCounter>) -> Router {
+/// The documents a test requests: the counter under ES modules and as
+/// classic scripts, and the feed, whose stream loads the asynchronous role.
+struct Mounts {
+    counter: LiveMount<PfxCounter>,
+    classic: LiveMount<PfxCounter>,
+    feed: LiveMount<PfxFeed>,
+}
+
+fn live_router(mounts: &Mounts) -> Router {
     let router: Router = Router::new()
         .get("/receipts/{receipt}", |_request: Request| async {
             Ok(HttpResponse::text("receipt"))
         })
         .name("pfx.receipt");
     let router: Router = router
-        .get("/catalog/{section}", document_handler(mount))
+        .get(
+            "/catalog/{section}",
+            document_handler(&mounts.counter, LiveBootstrapOptions::esm()),
+        )
+        .get(
+            "/classic/{section}",
+            document_handler(&mounts.classic, LiveBootstrapOptions::classic()),
+        )
+        .get(
+            "/feed/{section}",
+            document_handler(&mounts.feed, LiveBootstrapOptions::esm()),
+        )
         .into();
     let router = router
         .try_live()
         .expect("install the Live endpoint")
-        .try_live_mount(mount)
-        .expect("register the document mount");
+        .try_live_mount(&mounts.counter)
+        .expect("register the document mount")
+        .try_live_mount(&mounts.classic)
+        .expect("register the classic document mount")
+        .try_live_mount(&mounts.feed)
+        .expect("register the feed document mount");
     prepare_live_router_for_test(&router).expect("prepare the Live runtime");
     router
 }
@@ -244,13 +296,28 @@ async fn served() -> (std::net::SocketAddr, TestContainerGuard) {
         LiveRegistry::builder()
             .register::<PfxCounter>()
             .expect("register the counter")
+            .register::<PfxFeed>()
+            .expect("register the feed")
             .build(),
     );
-    let mount =
-        LiveMount::<PfxCounter>::public_seed("/catalog/{section}", "counter", "catalog-counter")
-            .expect("declare the mount");
+    let mounts = Mounts {
+        counter: LiveMount::<PfxCounter>::public_seed(
+            "/catalog/{section}",
+            "counter",
+            "catalog-counter",
+        )
+        .expect("declare the mount"),
+        classic: LiveMount::<PfxCounter>::public_seed(
+            "/classic/{section}",
+            "counter",
+            "classic-counter",
+        )
+        .expect("declare the classic mount"),
+        feed: LiveMount::<PfxFeed>::public_seed("/feed/{section}", "feed", "feed-feed")
+            .expect("declare the feed mount"),
+    };
     let address = support::serve(
-        live_router(&mount),
+        live_router(&mounts),
         MiddlewareRegistry::new().append(ActionFacts),
     )
     .await;
@@ -286,6 +353,62 @@ async fn pfx_006_a_live_document_names_its_endpoint_and_assets_under_the_root() 
     assert_eq!(config_endpoint(&at_host_root.body), "/__live/action");
     let script = attribute(&at_host_root.body, "<script type=\"module\" src");
     assert!(script.starts_with("/__live/assets/"), "{script}");
+
+    // The classic bootstrap and the asynchronous one load every script from
+    // under the root too, and each one is served there.
+    for (path, files) in [
+        (
+            "/classic/books",
+            &["suprnova-live.classic.js", "suprnova-live.boot.classic.js"][..],
+        ),
+        (
+            "/feed/books",
+            &[
+                "suprnova-live.esm.js",
+                "suprnova-live.async.esm.js",
+                "suprnova-live.boot.async.esm.js",
+            ][..],
+        ),
+    ] {
+        let document = support::get_prefixed(address, path).await;
+        assert_eq!(document.status, 200, "{path}: {}", document.body);
+        assert_eq!(config_endpoint(&document.body), "/billing/__live/action");
+        let urls = asset_urls(&document.body);
+        for file in files {
+            assert!(
+                urls.iter().any(|url| url.ends_with(&format!("/{file}"))),
+                "{path}: no {file} in {urls:?}"
+            );
+        }
+        for url in &urls {
+            assert!(url.starts_with("/billing/__live/assets/"), "{path}: {url}");
+            let asset =
+                support::get_prefixed(address, url.strip_prefix(PREFIX).expect("the root")).await;
+            assert_eq!(asset.status, 200, "{path}: {url}");
+        }
+
+        let at_host_root = support::get(address, path, &[]).await;
+        for url in asset_urls(&at_host_root.body) {
+            assert!(url.starts_with("/__live/assets/"), "{path}: {url}");
+        }
+    }
+}
+
+/// Every `src` and `href` value of `html` that names a Live asset.
+fn asset_urls(html: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    for attribute in ["src=\"", "href=\""] {
+        let mut rest = html;
+        while let Some(at) = rest.find(attribute) {
+            rest = &rest[at + attribute.len()..];
+            let value = &rest[..rest.find('"').expect("a closing quote")];
+            if value.contains("/__live/assets/") {
+                urls.push(value.to_owned());
+            }
+        }
+    }
+    assert!(!urls.is_empty(), "no Live asset in {html}");
+    urls
 }
 
 /// The snapshot a document's island carries.

@@ -1090,13 +1090,7 @@ impl InertiaResponse {
         // (PFX-005): the default derivation is an application path and
         // always gets it; a resolver's root-relative path gets it unless it
         // is already under the root.
-        let url = match config.url_resolver.as_ref() {
-            Some(resolve_url) => {
-                let resolved = resolve_url(req as &dyn InertiaRequestExt);
-                crate::routing::root::rooted(&resolved).into_owned()
-            }
-            None => crate::routing::root::prefixed(&req.path_and_query()),
-        };
+        let url = page_url(config.url_resolver.as_ref(), req);
 
         // History-encryption precedence: per-response override (handler
         // wins) > middleware task_local > config default.
@@ -2566,6 +2560,21 @@ fn render_prod_head(config: &InertiaConfig) -> String {
     }
 }
 
+/// The page object's `url`: the request's path and query, or what the
+/// application's resolver derives, carrying the public root (PFX-005).
+///
+/// The default derivation is an application path and always gets the root;
+/// a resolver's root-relative path gets it unless it is already under the
+/// root. Either `String` is owned here and becomes the URL itself when it
+/// keeps its bytes, as it does at the host root, so the first page does not
+/// copy its URL a second time (MEM-003).
+fn page_url(resolver: Option<&super::config::UrlResolver>, req: &dyn InertiaRequestExt) -> String {
+    match resolver {
+        Some(resolve_url) => crate::routing::root::rooted_owned(resolve_url(req)),
+        None => crate::routing::root::prefixed_owned(req.path_and_query()),
+    }
+}
+
 /// The base the Vite tags name their files under (PFX-005).
 ///
 /// A root-relative `assets_base_url`, one that starts with a single `/`
@@ -2604,6 +2613,101 @@ fn escape_html_text(s: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A request whose path and query is one `String` the test built, so a
+    /// test can tell the page URL that is this buffer from a copy of it.
+    struct OwnedPathRequest {
+        path_and_query: std::sync::Mutex<Option<String>>,
+        address: usize,
+    }
+
+    impl OwnedPathRequest {
+        fn new(path_and_query: String) -> Self {
+            Self {
+                address: path_and_query.as_ptr() as usize,
+                path_and_query: std::sync::Mutex::new(Some(path_and_query)),
+            }
+        }
+    }
+
+    impl InertiaRequestExt for OwnedPathRequest {
+        fn path(&self) -> &str {
+            "/page"
+        }
+
+        fn path_and_query(&self) -> String {
+            self.path_and_query
+                .lock()
+                .expect("the path lock")
+                .take()
+                .expect("the page reads its path and query once")
+        }
+
+        fn header(&self, _name: &str) -> Option<&str> {
+            None
+        }
+    }
+
+    /// MEM-003: at the host root the first page's URL is the path and query
+    /// the request built, or the `String` the application's resolver
+    /// returned, never a copy of it. Under a root the default URL is one new
+    /// buffer, the root followed by the path.
+    #[tokio::test]
+    async fn mem_audit_the_first_page_url_is_the_path_the_request_built() {
+        let path = format!("/page?q={}", "a".repeat(4_000));
+        for root in ["", "/billing"] {
+            let request = OwnedPathRequest::new(path.clone());
+            let url =
+                crate::routing::root::scope(Arc::from(root), async { page_url(None, &request) })
+                    .await;
+            assert_eq!(url, format!("{root}{path}"));
+            if root.is_empty() {
+                assert_eq!(
+                    url.as_ptr() as usize,
+                    request.address,
+                    "the request's path and query was copied"
+                );
+            } else {
+                assert_eq!(url.capacity(), url.len(), "one exact buffer");
+            }
+        }
+
+        // A resolved URL that keeps its bytes, at the host root or already
+        // under the root, is the URL itself.
+        for (root, resolved, expected, kept) in [
+            ("", "/resolved?q=1", "/resolved?q=1", true),
+            (
+                "/billing",
+                "/billing/resolved?q=1",
+                "/billing/resolved?q=1",
+                true,
+            ),
+            ("/billing", "/resolved?q=1", "/billing/resolved?q=1", false),
+        ] {
+            let resolved = resolved.to_owned();
+            let address = resolved.as_ptr() as usize;
+            let slot = std::sync::Mutex::new(Some(resolved));
+            let resolver: crate::inertia::config::UrlResolver = Arc::new(move |_request| {
+                slot.lock()
+                    .expect("the resolver lock")
+                    .take()
+                    .expect("the page resolves its URL once")
+            });
+            let request = OwnedPathRequest::new("/page".to_owned());
+            let url = crate::routing::root::scope(Arc::from(root), async {
+                page_url(Some(&resolver), &request)
+            })
+            .await;
+            assert_eq!(url, expected);
+            if kept {
+                assert_eq!(
+                    url.as_ptr() as usize,
+                    address,
+                    "the resolved URL was copied"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_commented_out_title_does_not_pass_for_one() {

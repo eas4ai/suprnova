@@ -145,6 +145,52 @@ fn pfx_010_the_manual_says_routes_must_not_begin_with_the_prefix() {
     );
 }
 
+/// The value at the start of `rest`: up to the matching quote when it opens
+/// with one, otherwise up to a space, `>` or `)`.
+fn value_at(rest: &str) -> &str {
+    for quote in ['"', '\''] {
+        if let Some(inner) = rest.strip_prefix(quote) {
+            return &inner[..inner.find(quote).unwrap_or(inner.len())];
+        }
+    }
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '>' || c == ')')
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// Every link `line` writes: an HTML attribute value, quoted either way or
+/// not at all; a Markdown link target or link definition; and the URL of a
+/// CSS `url()` or `@import`.
+fn links_in(line: &str) -> Vec<&str> {
+    let mut links = Vec::new();
+    let bytes = line.as_bytes();
+    for (at, _) in line.match_indices('=') {
+        let named = at > 0
+            && (bytes[at - 1].is_ascii_alphanumeric() || matches!(bytes[at - 1], b'-' | b'_'));
+        if named {
+            links.push(value_at(&line[at + 1..]));
+        }
+    }
+    for (at, _) in line.match_indices("](") {
+        links.push(value_at(&line[at + 2..]));
+    }
+    if let Some((_, target)) = line
+        .trim_start()
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once("]: "))
+    {
+        links.push(value_at(target.trim_start()));
+    }
+    for (at, _) in line.match_indices("url(") {
+        links.push(value_at(line[at + 4..].trim_start()));
+    }
+    for (at, _) in line.match_indices("@import ") {
+        links.push(value_at(line[at + 8..].trim_start()));
+    }
+    links
+}
+
 #[test]
 fn pfx_011_every_component_asset_link_in_the_manual_writes_the_root() {
     let mut offenders = Vec::new();
@@ -156,25 +202,68 @@ fn pfx_011_every_component_asset_link_in_the_manual_writes_the_root() {
         }
         let text = std::fs::read_to_string(&path).expect("a chapter");
         for (index, line) in text.lines().enumerate() {
-            for attribute in ["href=\"", "src=\""] {
-                let mut rest = line;
-                while let Some(at) = rest.find(attribute) {
-                    let value = &rest[at + attribute.len()..];
-                    let value = &value[..value.find('"').unwrap_or(value.len())];
-                    let component_link = value.contains("-ui/") && !value.contains("://");
-                    if component_link && !value.starts_with("{{ suprnova::url::root() }}/") {
-                        offenders.push(format!(
-                            "{}:{}: {value}",
-                            path.file_name().unwrap_or_default().to_string_lossy(),
-                            index + 1
-                        ));
-                    }
-                    rest = &rest[at + attribute.len()..];
+            for value in links_in(line) {
+                let component_link =
+                    value.contains("-ui/") && !value.contains("://") && !value.starts_with("//");
+                if component_link && !value.starts_with("{{ suprnova::url::root() }}/") {
+                    offenders.push(format!(
+                        "{}:{}: {value}",
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        index + 1
+                    ));
                 }
             }
         }
     }
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}
+
+#[test]
+fn pfx_011_the_link_reader_sees_every_link_form() {
+    for (line, link) in [
+        (
+            r#"<link href="/suprnova-ui/a/a.css">"#,
+            "/suprnova-ui/a/a.css",
+        ),
+        ("<link href='/suprnova-ui/a/a.css'>", "/suprnova-ui/a/a.css"),
+        ("<link href=/suprnova-ui/a/a.css>", "/suprnova-ui/a/a.css"),
+        (
+            r#"<script src="/acme-ui/a/a.js"></script>"#,
+            "/acme-ui/a/a.js",
+        ),
+        (
+            "[a stylesheet](/suprnova-ui/a/a.css)",
+            "/suprnova-ui/a/a.css",
+        ),
+        ("[a]: /acme-ui/a/a.css", "/acme-ui/a/a.css"),
+        (
+            "background: url(/suprnova-ui/a/a.png);",
+            "/suprnova-ui/a/a.png",
+        ),
+        (
+            "background: url('/suprnova-ui/a/a.png');",
+            "/suprnova-ui/a/a.png",
+        ),
+        (r#"@import "/suprnova-ui/a/a.css";"#, "/suprnova-ui/a/a.css"),
+    ] {
+        assert!(
+            links_in(line).contains(&link),
+            "{line}: {:?}",
+            links_in(line)
+        );
+    }
+    // A path named in prose or in a view's `import` is no link.
+    for line in [
+        "Assets are served at `/suprnova-ui/<component>/<file>`.",
+        r#"{% import "suprnova-ui/field/field.html" as field %}"#,
+        r#"#[live(name = "acme.counter", view = "acme-ui/counter/counter.html")]"#,
+    ] {
+        assert!(
+            links_in(line).iter().all(|value| !value.contains("-ui/")),
+            "{line}: {:?}",
+            links_in(line)
+        );
+    }
 }
 
 #[test]
