@@ -285,30 +285,6 @@
    "class": "verified",
    "evidence": "Both /_suprnova/health/ready and /_suprnova/health?db=true exist (framework/src/config/providers/server.rs:104, :351)."
   },
-  "Posts::Content": {
-   "class": "noise",
-   "evidence": "The reader's own DeriveIden migration enum (sea-orm-migration idiom); the snippet elides its definition."
-  },
-  "Posts::CreatedAt": {
-   "class": "noise",
-   "evidence": "The reader's own DeriveIden migration enum (sea-orm-migration idiom); the snippet elides its definition."
-  },
-  "Posts::Id": {
-   "class": "noise",
-   "evidence": "The reader's own DeriveIden migration enum (sea-orm-migration idiom); the snippet elides its definition."
-  },
-  "Posts::Table": {
-   "class": "noise",
-   "evidence": "The reader's own DeriveIden migration enum (sea-orm-migration idiom); the snippet elides its definition."
-  },
-  "Posts::Title": {
-   "class": "noise",
-   "evidence": "The reader's own DeriveIden migration enum (sea-orm-migration idiom); the snippet elides its definition."
-  },
-  "Posts::UserId": {
-   "class": "noise",
-   "evidence": "The reader's own DeriveIden migration enum (sea-orm-migration idiom); the snippet elides its definition."
-  },
   "ProvidesScrollMetadata::getPageName": {
    "class": "noise",
    "evidence": "Laravel / Inertia-Laravel / Laravel-Data names in a comparison column or labelled as Laravel's."
@@ -376,10 +352,6 @@
   "Sent mail (via `MailBuilder::send`) lands in the in-memory transport; queued mail (via `.queue` / `.later`) lands in the fake's queue buffer.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
-  },
-  "Status::Error": {
-   "class": "noise",
-   "evidence": "A third-party type used as documented; `opentelemetry::trace::Status::Error`. Not a Suprnova API."
   },
   "Surfacing them as `Failed` is the conservative default - your app treats the charge as not-yet-confirmed until you upgrade the adapter.": {
    "class": "verified",
