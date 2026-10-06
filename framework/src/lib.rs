@@ -72,6 +72,7 @@ pub mod http_client;
 pub mod idempotency;
 pub mod inertia;
 pub(crate) mod json_number;
+pub mod laravel;
 /// Server-driven interactive components and their application-facing contracts.
 pub mod live;
 #[cfg(feature = "localization")]
@@ -164,13 +165,13 @@ pub use data::{
     current_include_set, scope_include_set, with_include_overrides,
 };
 pub use database::{
-    AutoRouteBinding, AvgValue, ColumnValue, ConnectionCount, ConnectionEstablished,
-    ConnectionRegistry, DB, Database, DatabaseBusy, DatabaseConfig, DatabaseType, DbConnection,
-    DbTableBuilder, DynamicRow, EntityExt, EntityExtMut, IntoWhereIn, JoinClause,
-    PRIMARY_CONNECTION_NAME, PrunedMigration, QueryExecuted, QueryListener,
-    READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, RouteParam, SchemaDump,
-    StoredDateTime, Transaction, TransactionBeginning, TransactionCommitted, TransactionRolledBack,
-    TxHandle, UrlSource, WhereIn,
+    AutoRouteBinding, AvgValue, BoundChild, ChildBindings, ColumnValue, ConnectionCount,
+    ConnectionEstablished, ConnectionRegistry, DB, Database, DatabaseBusy, DatabaseConfig,
+    DatabaseType, DbConnection, DbTableBuilder, DynamicRow, EntityExt, EntityExtMut, IntoWhereIn,
+    JoinClause, ModelRouteBinding, PRIMARY_CONNECTION_NAME, PrunedMigration, QueryExecuted,
+    QueryListener, READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, RouteBindingInfo,
+    RouteColumn, RouteParam, SchemaDump, StoredDateTime, Transaction, TransactionBeginning,
+    TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource, WhereIn,
 };
 #[cfg(feature = "magnetar-oauth")]
 pub use magnetar::{
@@ -323,9 +324,10 @@ pub use inertia::{
     InertiaResponse, InertiaSharedData, InertiaValidationRedirectMiddleware,
     InertiaVersionMiddleware, IntoInertiaData, MANIFEST_VERSION_FALLBACK, ManifestEntry,
     MatchOnFields, MergeMode, MergeStrategy, OnceOptions, PartialFilter, Prop, PropEntry,
-    PropFuture, PropResolver, ProvidesScrollMetadata, ResolvedAssets, ScrollMetadata, SsrConfig,
-    SsrResponse, VersionResolver, Visibility, ViteManifest,
+    PropFuture, PropResolver, ProvidesScrollMetadata, ResolvedAssets, RootShare, ScrollMetadata,
+    SsrConfig, SsrResponse, VersionResolver, Visibility, ViteManifest,
 };
+pub use laravel::{LaravelDatabase, SHARED_DATABASE_ENV, SHARED_DEFAULT_QUEUE};
 #[cfg(feature = "localization")]
 pub use localization::{
     CatalogSource, DateStyle, Detect, FluentTranslator, Lang, ListStyle, Locale, LocaleMiddleware,
@@ -410,22 +412,28 @@ pub use routing::{
     GroupRoute,
     GroupRouter,
     IntoGroupItem,
+    MatchedRoute,
+    NamedRouteValue,
     ParamConstraint,
     ResourceAction,
     ResourceController,
     ResourceRoutes,
     RouteBuilder,
     RouteDefBuilder,
+    RouteParameters,
+    RouteValue,
     Router,
     SignatureVerdict,
     WholeValuePattern,
     WsRouteDef,
+    bound_route_value,
     clear_route_names_for_test,
     redirect,
     redirect_to,
     route,
     sign_route,
     sign_url,
+    try_route,
     url,
     validate_route_path,
     verify_signature,
@@ -476,9 +484,10 @@ pub use validation::rule::{
 // `Illuminate\Validation\Rules\ImageFile`.
 #[cfg(feature = "media")]
 pub use media::{
-    DEFAULT_IMAGE_MAGICK_TIMEOUT_SECS, DEFAULT_IMAGE_MAX_ALLOC_BYTES, DEFAULT_IMAGE_MAX_DIMENSION,
-    DEFAULT_IMAGE_QUALITY, Image, ImageConfig, ImageDriver, ImageDriverKind, ImagePipeline,
-    MagickCliDriver, OutputFormat, OxideAvImageDriver, Transformation,
+    Color, CustomTransformation, DEFAULT_IMAGE_MAGICK_TIMEOUT_SECS, DEFAULT_IMAGE_MAX_ALLOC_BYTES,
+    DEFAULT_IMAGE_MAX_DIMENSION, DEFAULT_IMAGE_QUALITY, Image, ImageConfig, ImageDriver,
+    ImageDriverKind, ImagePipeline, ImagePixels, MagickCliDriver, OutputFormat, OxideAvImageDriver,
+    Transformation, register_transformation,
 };
 #[cfg(feature = "vector-pinecone")]
 pub use vector::PineconeVectorDriver;
@@ -728,7 +737,9 @@ pub use suprnova_macros::{view, view_filter};
 pub use suprnova_macros::Factory;
 pub use suprnova_macros::MultipartRequest;
 pub use suprnova_macros::NotificationMailable;
+pub use suprnova_macros::RouteBinding;
 pub use suprnova_macros::suprnova_test;
+pub use suprnova_macros::{api_resource, resource};
 
 // Re-export Jest-like testing macros
 pub use suprnova_macros::describe;

@@ -15,6 +15,12 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000002_create_sessions_table::Migration),
             Box::new(m20240101_000003_create_remember_tokens_table::Migration),
             Box::new(m20240101_000004_create_auth_flow_tokens_table::Migration),
+            // Moves a `sessions` table an earlier scaffold created into the
+            // Laravel 13 layout, keeping every session; does nothing to any
+            // other `sessions` table.
+            Box::new(suprnova::session::migrations::CreateSessionsTable::new(
+                suprnova::session::migrations::SessionUserKey::Integer,
+            )),
             // The RenderCache Tier 0 generation ledger. The framework ships
             // the migration; listing it here provisions the
             // `suprnova_render_*` tables alongside this project's own

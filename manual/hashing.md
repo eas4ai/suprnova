@@ -63,7 +63,9 @@ let hashed = hash_with(&driver, "my_password")?;
 assert!(verify_with(&driver, "my_password", &hashed)?);
 ```
 
-Bcrypt has a **72-byte block-size cap** on the password input - the underlying primitive silently truncates longer inputs, which means two distinct passphrases sharing their first 72 bytes hash to the same value. Suprnova rejects up-front (the framework's bcrypt path errors on `hash()` and returns `Ok(false)` on `verify()` for oversized passwords, keeping the auth flow's "invalid credentials" response uniform). Argon2 has no such ceiling.
+Bcrypt has a **72-byte block-size cap** on the password input - the underlying primitive silently truncates longer inputs, which means two distinct passphrases sharing their first 72 bytes hash to the same value. Suprnova rejects an oversized password up-front when it hashes one: the framework's bcrypt path errors on `hash()`. `verify()` accepts a password of any length and judges it on its first 72 bytes, as PHP's `password_verify` does, so a user whose long password a Laravel application hashed still signs in. Argon2 has no such ceiling.
+
+An application that shares its database with a Laravel application turns on `LARAVEL_SHARED_DATABASE`. Then `hash()` writes `$2y$` bcrypt hashes, which Laravel's hasher accepts with `HASH_VERIFY=true`, and a valid sign-in rewrites a `$2b$` or Argon2id hash as `$2y$`. See [Running on a Laravel Database](laravel-database.md).
 
 The bcrypt cap is exposed as `suprnova::hashing::MAX_BCRYPT_PASSWORD_BYTES` (71 - the usable limit after the bcrypt null terminator).
 
@@ -164,6 +166,8 @@ HASH_VERIFY=true
 ```
 
 With the gate on, `verify()` returns `Ok(false)` for any hash whose algorithm differs from the active driver - same shape as Laravel's `RuntimeException`, but Suprnova returns false rather than throwing because the auth-flow caller expects a `Result<bool>` either way.
+
+While `LARAVEL_SHARED_DATABASE` is on, the gate accepts bcrypt hashes as well as the active driver's: the application then writes bcrypt, and a user whose hash the active driver wrote still signs in, which rewrites the hash as `$2y$`.
 
 ## Async vs sync
 

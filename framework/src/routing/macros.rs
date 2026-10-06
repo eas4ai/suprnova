@@ -51,6 +51,7 @@ pub const fn validate_route_path(path: &'static str) -> &'static str {
     path
 }
 use crate::middleware::{BoxedMiddleware, Middleware, boxed_as};
+use crate::routing::binding::{HandlerRecord, RouteBindingOptions, boxed_missing, record_of};
 use crate::routing::params::ParamConstraint;
 use crate::routing::router::{ANY_METHODS, BoxedHandler, Router, register_route_name};
 use crate::session::SessionBlock;
@@ -205,6 +206,46 @@ pub struct RouteDefBuilder<H> {
     middlewares: Vec<BoxedMiddleware>,
     block: Option<SessionBlock>,
     constraints: Vec<(String, ParamConstraint)>,
+    bindings: RouteBindingOptions,
+}
+
+/// The route-binding methods of a route builder that collects its settings
+/// before it registers: `with_trashed`, `scope_bindings`,
+/// `without_scoped_bindings` and `missing`.
+macro_rules! binding_methods {
+    () => {
+        /// Bind soft-deleted rows on this route (BIND-008). Laravel's
+        /// `withTrashed()`.
+        pub fn with_trashed(mut self) -> Self {
+            self.bindings.with_trashed = true;
+            self
+        }
+
+        /// Look every bound child parameter up through its parent's
+        /// relation (BIND-006). Laravel's `scopeBindings()`.
+        pub fn scope_bindings(mut self) -> Self {
+            self.bindings.scoped = Some(true);
+            self
+        }
+
+        /// Never scope this route's bindings to a parent. Laravel's
+        /// `withoutScopedBindings()`.
+        pub fn without_scoped_bindings(mut self) -> Self {
+            self.bindings.scoped = Some(false);
+            self
+        }
+
+        /// Answer with `handler` instead of a 404 when a binding finds
+        /// nothing (BIND-009). Laravel's `missing()`.
+        pub fn missing<M, MFut>(mut self, handler: M) -> Self
+        where
+            M: Fn(Request) -> MFut + Send + Sync + 'static,
+            MFut: Future<Output = Response> + Send + 'static,
+        {
+            self.bindings.missing = Some(boxed_missing(handler));
+            self
+        }
+    };
 }
 
 impl<H, Fut> RouteDefBuilder<H>
@@ -222,8 +263,11 @@ where
             middlewares: Vec::new(),
             block: None,
             constraints: Vec::new(),
+            bindings: RouteBindingOptions::default(),
         }
     }
+
+    binding_methods!();
 
     /// Hold a parameter of this route to a constraint. A request whose
     /// value the constraint refuses gets a 404, and the handler is not run.
@@ -323,6 +367,7 @@ where
             Some(block) => builder.block_session(block),
             None => builder,
         };
+        let builder = builder.with_binding_options(self.bindings);
 
         // Apply name if present, otherwise convert to Router
         if let Some(name) = self.name {
@@ -647,6 +692,7 @@ pub struct AnyRouteDefBuilder<H> {
     middlewares: Vec<BoxedMiddleware>,
     block: Option<SessionBlock>,
     constraints: Vec<(String, ParamConstraint)>,
+    bindings: RouteBindingOptions,
 }
 
 impl<H, Fut> AnyRouteDefBuilder<H>
@@ -662,8 +708,11 @@ where
             middlewares: Vec::new(),
             block: None,
             constraints: Vec::new(),
+            bindings: RouteBindingOptions::default(),
         }
     }
+
+    binding_methods!();
 
     /// Hold a parameter of this route to a constraint, for every method.
     /// See [`RouteDefBuilder::constrain`], which says when a constraint
@@ -732,6 +781,7 @@ where
             Some(block) => multi.block_session(block),
             None => multi,
         };
+        let multi = multi.with_binding_options(self.bindings);
         if let Some(name) = self.name {
             multi.name(name)
         } else {
@@ -982,6 +1032,7 @@ where
     /// Register this fallback definition with a router
     pub fn register(self, mut router: Router) -> Router {
         let handler = self.handler;
+        router.note_fallback_record(record_of::<H>());
         let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         router.set_fallback(Arc::new(boxed));
 
@@ -1065,6 +1116,8 @@ pub struct GroupRoute {
     middlewares: Vec<BoxedMiddleware>,
     block: Option<SessionBlock>,
     constraints: Vec<(String, ParamConstraint)>,
+    record: Option<&'static HandlerRecord>,
+    bindings: RouteBindingOptions,
 }
 
 /// A multi-method route (`any!`) stored within a group. Holds a
@@ -1079,6 +1132,8 @@ pub struct GroupAnyRoute {
     middlewares: Vec<BoxedMiddleware>,
     block: Option<SessionBlock>,
     constraints: Vec<(String, ParamConstraint)>,
+    record: Option<&'static HandlerRecord>,
+    bindings: RouteBindingOptions,
 }
 
 /// An item that can be added to a route group - a single-method route,
@@ -1134,6 +1189,9 @@ pub struct GroupDef {
     items: Vec<GroupItem>,
     group_middlewares: Vec<BoxedMiddleware>,
     group_block: Option<SessionBlock>,
+    /// Route-binding settings for every route in the group, nested groups
+    /// included unless they set their own.
+    group_bindings: RouteBindingOptions,
 }
 
 impl GroupDef {
@@ -1148,7 +1206,33 @@ impl GroupDef {
             items: Vec::new(),
             group_middlewares: Vec::new(),
             group_block: None,
+            group_bindings: RouteBindingOptions::default(),
         }
+    }
+
+    /// Scope every bound child parameter of the group's routes to its
+    /// parent (BIND-006). Laravel's `Route::scopeBindings()->group(...)`.
+    pub fn scope_bindings(mut self) -> Self {
+        self.group_bindings.scoped = Some(true);
+        self
+    }
+
+    /// Never scope the bindings of the group's routes. Laravel's
+    /// `withoutScopedBindings()` on a group.
+    pub fn without_scoped_bindings(mut self) -> Self {
+        self.group_bindings.scoped = Some(false);
+        self
+    }
+
+    /// Answer with `handler` instead of a 404 when a binding of a route in
+    /// the group finds nothing (BIND-009). A route's own `missing()` wins.
+    pub fn missing<M, MFut>(mut self, handler: M) -> Self
+    where
+        M: Fn(Request) -> MFut + Send + Sync + 'static,
+        MFut: Future<Output = Response> + Send + 'static,
+    {
+        self.group_bindings.missing = Some(boxed_missing(handler));
+        self
     }
 
     /// Put `prefix` in front of the name of every route in this group.
@@ -1275,7 +1359,14 @@ impl GroupDef {
     /// Parent group middleware is applied before child group middleware,
     /// which is applied before route-specific middleware.
     pub fn register(self, mut router: Router) -> Router {
-        self.register_with_inherited(&mut router, "", "", &[], None);
+        self.register_with_inherited(
+            &mut router,
+            "",
+            "",
+            &[],
+            None,
+            &RouteBindingOptions::default(),
+        );
         router
     }
 
@@ -1288,9 +1379,12 @@ impl GroupDef {
         parent_name_prefix: &str,
         inherited_middleware: &[BoxedMiddleware],
         inherited_block: Option<SessionBlock>,
+        inherited_bindings: &RouteBindingOptions,
     ) {
         // The nearest block wins: this group's own, else the parent's.
         let group_block = self.group_block.or(inherited_block);
+        // Binding settings too: this group's own, else the parent's.
+        let group_bindings = self.group_bindings.within(inherited_bindings);
         // Name prefixes concatenate outside in: `admin.` then `users.`.
         let name_prefix = format!("{parent_name_prefix}{}", self.name_prefix);
         // Build the full prefix for this group. join_paths keeps the
@@ -1375,6 +1469,9 @@ impl GroupDef {
                     if let Some(block) = route.block.or(group_block) {
                         register_route_block(&http_method, full_path, block);
                     }
+                    router.note_route_record(http_method.clone(), full_path, route.record);
+                    *router.bindings.options_mut(http_method, full_path) =
+                        route.bindings.within(&group_bindings);
                 }
                 GroupItem::AnyRoute(any_route) => {
                     // Prefix join + matchit normalisation, mirroring the
@@ -1425,6 +1522,9 @@ impl GroupDef {
                         if let Some(block) = any_route.block.or(group_block) {
                             register_route_block(method, full_path, block);
                         }
+                        router.note_route_record(method.clone(), full_path, any_route.record);
+                        *router.bindings.options_mut(method.clone(), full_path) =
+                            any_route.bindings.clone().within(&group_bindings);
                     }
                 }
                 GroupItem::NestedGroup(nested) => {
@@ -1436,6 +1536,7 @@ impl GroupDef {
                         &name_prefix,
                         &combined_middleware,
                         group_block,
+                        &group_bindings,
                     );
                 }
             }
@@ -1462,6 +1563,8 @@ where
             middlewares: self.middlewares,
             block: self.block,
             constraints: self.constraints,
+            record: record_of::<H>(),
+            bindings: self.bindings,
         }
     }
 }
@@ -1504,6 +1607,8 @@ where
             middlewares: self.middlewares,
             block: self.block,
             constraints: self.constraints,
+            record: record_of::<H>(),
+            bindings: self.bindings,
         }
     }
 }

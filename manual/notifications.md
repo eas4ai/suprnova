@@ -216,13 +216,13 @@ store in `notifiable_type` so you can query inbox rows back later). The
 recipient's `route_for("database")` becomes the `notifiable_id`.
 
 The framework ships the table as migrations in
-`suprnova::notifications::migrations`. Register both in your app's
+`suprnova::notifications::migrations`. Register them in your app's
 `Migrator`, in this order:
 
 ```rust
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
 use suprnova::notifications::migrations::{
-    CreateNotificationsTable, NotificationTimestampsToDatetime,
+    CreateNotificationsTable, NotificationTimestampsToDatetime, NotificationsToLaravelLayout,
 };
 
 pub struct Migrator;
@@ -233,6 +233,7 @@ impl MigratorTrait for Migrator {
             // ... your app's migrations ...
             Box::new(CreateNotificationsTable),
             Box::new(NotificationTimestampsToDatetime),
+            Box::new(NotificationsToLaravelLayout),
         ]
     }
 }
@@ -242,16 +243,24 @@ Then run `suprnova migrate` and the table appears. Until the `Migrator`
 lists the migration, the channel's first insert fails on the missing
 table.
 
-`NotificationTimestampsToDatetime` matters on MySQL and MariaDB.
-`CreateNotificationsTable` creates `read_at`, `created_at` and
-`updated_at` as `DATETIME`, but earlier versions of it created them as
-`TIMESTAMP`, as a table made by hand or by Laravel's notifications
-migration has them. MySQL's `TIMESTAMP` refuses any time after
-2038-01-19 03:14:07 UTC, so every notification written after that fails.
-The upgrade converts each of those columns that is still `TIMESTAMP` to
-`DATETIME`, keeping its nullability and the stored UTC times. It changes
-nothing on Postgres or SQLite, on a column that is already `DATETIME`, or
-when it runs again, and its `down` leaves the columns `DATETIME`.
+The table is Laravel's `notifications`, so a Suprnova application reads and
+writes the notifications a Laravel application stored. `notifiable_id`
+follows `NOTIFICATIONS_MORPH_KEY`, as Laravel's `morphs` follows its
+default morph key type: `int` (the default) for a big integer, `uuid` for
+the column `uuidMorphs` creates, `ulid` for the one `ulidMorphs` creates.
+`CreateNotificationsTable` creates the table when it is missing and leaves
+one Laravel created as it is.
+
+The other two upgrade a table an earlier release created.
+`NotificationsToLaravelLayout` moves an earlier table, whose
+`notifiable_id` was a 64-character string, into Laravel's layout with every
+notification. `NotificationTimestampsToDatetime` matters on MySQL and
+MariaDB, where earlier versions created `read_at`, `created_at` and
+`updated_at` as `TIMESTAMP`, which refuses any time after 2038-01-19
+03:14:07 UTC. It converts each of those columns of an earlier table to
+`DATETIME`, keeping its nullability and the stored UTC times, and changes
+nothing on Postgres or SQLite or on a table Laravel created. See
+[Running on a Laravel Database](laravel-database.md).
 
 #### Reading the inbox
 

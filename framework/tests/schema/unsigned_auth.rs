@@ -119,11 +119,12 @@ pub async fn me() -> Response {
     }
 }
 
-/// Creates the users table, the session table and the remember-me table.
+/// Creates the users table, the session table in the Laravel 13
+/// skeleton's layout, and the remember-me table.
 ///
-/// The session and remember-me stores read their times as a naive
-/// date-time, which the MySQL driver reads from `DATETIME` only, so the
-/// time columns are date-times rather than `TIMESTAMP`s.
+/// The remember-me store reads its times as a naive date-time, which the
+/// MySQL driver reads from `DATETIME` only, so its time columns are
+/// date-times rather than `TIMESTAMP`s.
 async fn create_tables(conn: &DatabaseConnection) {
     let manager = SchemaManager::new(conn);
     drop_tables(conn, TABLES).await;
@@ -134,29 +135,13 @@ async fn create_tables(conn: &DatabaseConnection) {
     })
     .await
     .expect("create ua_users");
-    manager
-        .create_table(
-            Table::create()
-                .table(Alias::new("ua_sessions"))
-                .col(
-                    ColumnDef::new(Alias::new("id"))
-                        .string()
-                        .not_null()
-                        .primary_key(),
-                )
-                .col(ColumnDef::new(Alias::new("user_id")).string().null())
-                .col(ColumnDef::new(Alias::new("payload")).text().not_null())
-                .col(ColumnDef::new(Alias::new("csrf_token")).string().not_null())
-                .col(
-                    ColumnDef::new(Alias::new("last_activity"))
-                        .date_time()
-                        .not_null()
-                        .default(Expr::current_timestamp()),
-                )
-                .to_owned(),
-        )
-        .await
-        .expect("create ua_sessions");
+    suprnova::session::migrations::create_sessions_table(
+        &manager,
+        "ua_sessions",
+        suprnova::session::migrations::SessionUserKey::Integer,
+    )
+    .await
+    .expect("create ua_sessions");
     manager
         .create_table(
             Table::create()

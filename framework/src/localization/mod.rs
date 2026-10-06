@@ -645,7 +645,8 @@ macro_rules! __ {
 /// [`LocalizationConfig::fallback_locale`], resolved the same way
 /// `Lang`'s hot path does (the bootstrap snapshot if one exists, else a
 /// fresh env/config read). `catalog.url` names the
-/// `/_suprnova/lang/<locale>.ftl` endpoint with a `?v=<hash>`
+/// `/_suprnova/lang/<locale>.ftl` endpoint under the public root
+/// ([`crate::url::root`]) with a `?v=<hash>`
 /// cache-buster matching [`CatalogSource::hash`], so the frontend can
 /// request it as immutably cacheable once it already has the hash (from
 /// this share, or from a prior fetch's `ETag`).
@@ -669,7 +670,13 @@ impl InertiaSharedData for LocaleShare {
             .and_then(|translator| translator.catalog(&locale))
             .map(|source| {
                 serde_json::json!({
-                    "url": format!("/_suprnova/lang/{}.ftl?v={}", locale.as_str(), source.hash),
+                    // Under the public root, so a frontend served behind a
+                    // path prefix fetches its catalog there (PFX-006).
+                    "url": crate::routing::root::prefixed(&format!(
+                        "/_suprnova/lang/{}.ftl?v={}",
+                        locale.as_str(),
+                        source.hash
+                    )),
                     "hash": source.hash,
                 })
             });

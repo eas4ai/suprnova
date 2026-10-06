@@ -33,9 +33,11 @@ use suprnova::{DB, DbConnection};
 /// migration so the columns are exactly the ones an application gets.
 pub(crate) async fn fresh_rbac_schema(database: &DbConnection) {
     for table in [
-        "model_permissions",
-        "model_roles",
-        "role_permissions",
+        "model_has_permissions",
+        "model_has_roles",
+        "role_has_permissions",
+        "suprnova_permission_details",
+        "suprnova_role_details",
         "permissions",
         "roles",
     ] {
@@ -142,8 +144,8 @@ async fn postgres_rbac_assignment_is_idempotent() {
     assert_eq!(roles, 1, "repeated create_role must not insert duplicates");
 
     let assignments: i64 = DB::scalar(
-        "SELECT COUNT(*) FROM model_roles WHERE model_id = $1",
-        vec!["7".into()],
+        "SELECT COUNT(*) FROM model_has_roles WHERE model_id = $1",
+        vec![7i64.into()],
     )
     .await
     .expect("count assignments");

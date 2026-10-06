@@ -309,7 +309,10 @@ assert_eq!(url, "https://cdn.example.com/files/avatars/7.png");
 
 `Storage::set_public_url(disk, base_url)` takes the name of a registered
 disk and the place where the root of that disk is served from. The base URL
-is an absolute URL or a path of your own host, such as `/storage`.
+is an absolute URL or a path of your own host, such as `/storage`. A path
+of your own host gets the public root in front, so behind a proxy that
+serves the application under `/billing` the link is
+`/billing/storage/avatars/7.png`; an absolute base is left as it is.
 `Storage::url(disk, path)` joins the base URL and the path and returns a
 `String`. It does not ask the disk, so it returns a URL for a file that
 does not exist.

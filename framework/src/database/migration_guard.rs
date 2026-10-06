@@ -4,33 +4,15 @@
 //! it over tables that already exist: created by an earlier, differently
 //! named migration, by a scaffolded copy of the same schema, or by hand.
 //! Each framework `up` therefore creates its tables with `if_not_exists`
-//! and its indexes through [`create_index_if_missing`], and an upgrade
-//! moves an older table's MySQL `TIMESTAMP` columns through
-//! [`convert_mysql_timestamps_to_datetime`].
+//! and its indexes through [`create_index_if_missing`], an upgrade moves an
+//! older table's MySQL `TIMESTAMP` columns through
+//! [`convert_mysql_timestamps_to_datetime`], and an upgrade that reshapes a
+//! table into a new layout moves its rows through [`set_aside`] and
+//! [`move_earlier_rows`].
 
 use sea_orm_migration::SchemaManagerConnection;
-use sea_orm_migration::prelude::{
-    Alias, ColumnDef, ColumnType, DbErr, IndexCreateStatement, IntoIden, SchemaManager,
-};
+use sea_orm_migration::prelude::{Alias, DbErr, IndexCreateStatement, SchemaManager};
 use sea_orm_migration::sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
-
-/// A framework-owned point-in-time column named `name`, for `backend`.
-///
-/// sea-query renders `timestamp_with_time_zone()` as `TIMESTAMP` on MySQL and
-/// MariaDB, which refuses any time after 2038-01-19 03:14:07 UTC. There this
-/// column is `DATETIME`, which holds the UTC time the driver writes in its
-/// UTC session. Postgres keeps `timestamp with time zone` and SQLite its text
-/// type, exactly as these columns always were, so a fresh install there
-/// builds the table its migration always built. A source scan in the test
-/// suite refuses a framework migration that spells the `TIMESTAMP` builders.
-pub(crate) fn utc_timestamp_column<T: IntoIden>(name: T, backend: DbBackend) -> ColumnDef {
-    let kind = if backend == DbBackend::MySql {
-        ColumnType::DateTime
-    } else {
-        ColumnType::TimestampWithTimeZone
-    };
-    ColumnDef::new_with_type(name, kind)
-}
 
 /// Create `index` on `table` unless the table already has an index of
 /// that name.
@@ -212,5 +194,344 @@ async fn alter_in_utc(connection: &impl ConnectionTrait, alter: &str) -> Result<
         .await;
     altered?;
     restored?;
+    Ok(())
+}
+
+/// The table an upgrade keeps a table's earlier rows in while it reshapes
+/// them into a new layout under the original name: in the same schema when
+/// the name is schema-qualified.
+pub(crate) fn earlier_table_name(table: &str) -> String {
+    match table.rsplit_once('.') {
+        Some((schema, name)) => format!("{schema}.suprnova_earlier_{name}"),
+        None => format!("suprnova_earlier_{table}"),
+    }
+}
+
+/// Where an upgrade of `table` stands, read from the catalog: the earlier
+/// layout is recognized by `is_earlier`, which a caller writes for its
+/// table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpgradeState {
+    /// Neither `table` nor its earlier rows exist: create the new layout.
+    Fresh,
+    /// `table` is in the earlier layout: set it aside, create the new
+    /// layout, move the rows.
+    Earlier,
+    /// A previous run set the rows aside and stopped: create the new layout
+    /// if it is missing, then move what is left.
+    Resume,
+    /// `table` is in some other layout (Laravel's, or one this upgrade
+    /// already produced) and nothing is set aside: leave it alone.
+    Untouched,
+}
+
+/// Read [`UpgradeState`] for `table`.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when the catalog cannot be read.
+pub(crate) async fn upgrade_state(
+    manager: &SchemaManager<'_>,
+    table: &str,
+    is_earlier: impl Fn(&[crate::database::catalog::CatalogColumn]) -> bool,
+) -> Result<UpgradeState, DbErr> {
+    let connection = manager.get_connection();
+    let columns = crate::database::catalog::table_columns(connection, table).await?;
+    let earlier =
+        crate::database::catalog::table_columns(connection, &earlier_table_name(table)).await?;
+    Ok(match (columns.is_empty(), earlier.is_empty()) {
+        (true, true) => UpgradeState::Fresh,
+        (false, true) if is_earlier(&columns) => UpgradeState::Earlier,
+        (false, true) => UpgradeState::Untouched,
+        (_, false) => UpgradeState::Resume,
+    })
+}
+
+/// Copy `table` into its earlier-rows table and drop it, so the caller can
+/// create the new layout under the same name.
+///
+/// `CREATE TABLE ... AS SELECT` copies the rows and none of the indexes,
+/// keys or sequences, so the new table's names never collide with the
+/// earlier table's. Each statement is atomic, so a run that stops between
+/// them is resumed by [`resume_set_aside`]: the copy is either whole or
+/// absent.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a statement fails.
+pub(crate) async fn set_aside(manager: &SchemaManager<'_>, table: &str) -> Result<(), DbErr> {
+    let connection = manager.get_connection();
+    let backend = connection.get_database_backend();
+    let earlier = earlier_table_name(table);
+    connection
+        .execute_unprepared(&format!(
+            "CREATE TABLE {} AS SELECT * FROM {}",
+            quote(backend, &earlier),
+            quote(backend, table)
+        ))
+        .await?;
+    connection
+        .execute_unprepared(&format!("DROP TABLE {}", quote(backend, table)))
+        .await?;
+    Ok(())
+}
+
+/// Finish what [`set_aside`] started when a run stopped after the copy:
+/// drop `table` if it is still in the earlier layout. The copy is whole,
+/// since `CREATE TABLE ... AS SELECT` is one statement.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when the catalog cannot be read or the drop fails.
+pub(crate) async fn resume_set_aside(
+    manager: &SchemaManager<'_>,
+    table: &str,
+    is_earlier: impl Fn(&[crate::database::catalog::CatalogColumn]) -> bool,
+) -> Result<(), DbErr> {
+    let connection = manager.get_connection();
+    let columns = crate::database::catalog::table_columns(connection, table).await?;
+    if !columns.is_empty() && is_earlier(&columns) {
+        let backend = connection.get_database_backend();
+        connection
+            .execute_unprepared(&format!("DROP TABLE {}", quote(backend, table)))
+            .await?;
+    }
+    Ok(())
+}
+
+/// How many rows one read of [`first_misfit`] takes.
+const SCAN_CHUNK: u64 = 1000;
+
+/// The first row of `table`, in the order of its `key` column, whose text
+/// `column` `fits` refuses, as `(key, value)`; `None` when every row fits.
+///
+/// An upgrade whose layout takes a setting (a key type) runs this over the
+/// rows it is about to move, before it changes any table: a row the setting
+/// cannot hold then stops the migration with nothing set aside and no new
+/// table created in the wrong form, and running it again under the setting
+/// the error advises starts from the earlier layout. `key` is a unique
+/// column, an integer one when `integer_key` says so and text otherwise;
+/// the rows are read in chunks from the last key seen.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a statement fails or a row cannot be read.
+pub(crate) async fn first_misfit(
+    manager: &SchemaManager<'_>,
+    table: &str,
+    key: &str,
+    integer_key: bool,
+    column: &str,
+    fits: impl Fn(&str) -> bool,
+) -> Result<Option<(String, String)>, DbErr> {
+    let connection = manager.get_connection();
+    let backend = connection.get_database_backend();
+    let mut after: Option<sea_orm_migration::sea_orm::Value> = None;
+    loop {
+        let (filter, values) = match &after {
+            Some(last) => (
+                format!(
+                    " WHERE {} > {}",
+                    quote(backend, key),
+                    crate::database::placeholder::placeholder(backend, 1)
+                        .map_err(|e| DbErr::Migration(e.to_string()))?
+                ),
+                vec![last.clone()],
+            ),
+            None => (String::new(), Vec::new()),
+        };
+        let rows = connection
+            .query_all_raw(Statement::from_sql_and_values(
+                backend,
+                format!(
+                    "SELECT {key_column} AS row_key, {value_column} AS row_value FROM {table}\
+                     {filter} ORDER BY {key_column} LIMIT {SCAN_CHUNK}",
+                    key_column = quote(backend, key),
+                    value_column = quote(backend, column),
+                    table = quote(backend, table),
+                ),
+                values,
+            ))
+            .await?;
+        let Some(last) = rows.last() else {
+            return Ok(None);
+        };
+        let read_key = |row: &sea_orm_migration::sea_orm::QueryResult| {
+            if integer_key {
+                row.try_get::<i64>("", "row_key")
+                    .map(sea_orm_migration::sea_orm::Value::from)
+            } else {
+                row.try_get::<String>("", "row_key")
+                    .map(sea_orm_migration::sea_orm::Value::from)
+            }
+        };
+        for row in &rows {
+            let value: String = row.try_get("", "row_value")?;
+            if !fits(&value) {
+                let key = match read_key(row)? {
+                    sea_orm_migration::sea_orm::Value::BigInt(Some(key)) => key.to_string(),
+                    sea_orm_migration::sea_orm::Value::String(Some(key)) => key,
+                    other => format!("{other:?}"),
+                };
+                return Ok(Some((key, value)));
+            }
+        }
+        after = Some(read_key(last)?);
+    }
+}
+
+/// One earlier row, converted: the statements that write it into the new
+/// layout, and the earlier table's key for the row, by which it is removed
+/// from the earlier-rows table in the same transaction.
+pub(crate) struct MovedRow {
+    pub(crate) key: sea_orm_migration::sea_orm::Value,
+    pub(crate) writes: Vec<Statement>,
+}
+
+/// How many earlier rows one transaction moves.
+const MOVE_CHUNK: u64 = 500;
+
+/// Move every row of `table`'s earlier-rows table into the new layout, then
+/// drop the earlier-rows table.
+///
+/// Rows move in chunks. Each chunk's writes and the removal of its rows
+/// from the earlier-rows table commit together, so a run that stops part
+/// way loses nothing and moves nothing twice: the next run starts from the
+/// rows still set aside.
+///
+/// `select` names the earlier columns `convert` reads, and `key` the
+/// earlier table's key column.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a statement fails or `convert` refuses a row.
+pub(crate) async fn move_earlier_rows(
+    manager: &SchemaManager<'_>,
+    table: &str,
+    select: &str,
+    key: &str,
+    convert: impl FnMut(&sea_orm_migration::sea_orm::QueryResult) -> Result<MovedRow, DbErr>,
+) -> Result<u64, DbErr> {
+    move_rows(manager, &earlier_table_name(table), select, key, convert).await
+}
+
+/// [`move_earlier_rows`] from any table `source`, which is dropped once it
+/// is empty: for an earlier table whose rows move to a table of another
+/// name.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a statement fails or `convert` refuses a row.
+pub(crate) async fn move_rows(
+    manager: &SchemaManager<'_>,
+    source: &str,
+    select: &str,
+    key: &str,
+    mut convert: impl FnMut(&sea_orm_migration::sea_orm::QueryResult) -> Result<MovedRow, DbErr>,
+) -> Result<u64, DbErr> {
+    let connection = manager.get_connection();
+    let backend = connection.get_database_backend();
+    let earlier = source.to_owned();
+    let mut moved = 0;
+    loop {
+        let rows = connection
+            .query_all_raw(Statement::from_string(
+                backend,
+                format!(
+                    "SELECT {select} FROM {} LIMIT {MOVE_CHUNK}",
+                    quote(backend, &earlier)
+                ),
+            ))
+            .await?;
+        if rows.is_empty() {
+            break;
+        }
+        let mut converted = Vec::with_capacity(rows.len());
+        for row in &rows {
+            converted.push(convert(row)?);
+        }
+        let placeholders = (1..=converted.len())
+            .map(|ordinal| {
+                if backend == DbBackend::Postgres {
+                    format!("${ordinal}")
+                } else {
+                    "?".to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let keys: Vec<_> = converted.iter().map(|row| row.key.clone()).collect();
+        let remove = Statement::from_sql_and_values(
+            backend,
+            format!(
+                "DELETE FROM {} WHERE {} IN ({placeholders})",
+                quote(backend, &earlier),
+                quote(backend, key)
+            ),
+            keys,
+        );
+        let writes: Vec<Statement> = converted.into_iter().flat_map(|row| row.writes).collect();
+        match connection {
+            SchemaManagerConnection::Connection(pool) => {
+                let txn = pool.begin().await?;
+                for write in writes {
+                    txn.execute_raw(write).await?;
+                }
+                txn.execute_raw(remove).await?;
+                txn.commit().await?;
+            }
+            // Already inside the migration's transaction (Postgres).
+            pinned => {
+                for write in writes {
+                    pinned.execute_raw(write).await?;
+                }
+                pinned.execute_raw(remove).await?;
+            }
+        }
+        moved += rows.len() as u64;
+    }
+    connection
+        .execute_unprepared(&format!("DROP TABLE {}", quote(backend, &earlier)))
+        .await?;
+    Ok(moved)
+}
+
+/// `name` quoted as an identifier for `backend`. Callers pass plain
+/// identifiers (letters, digits, underscores); a schema-qualified name is
+/// quoted segment by segment.
+pub(crate) fn quote(backend: DbBackend, name: &str) -> String {
+    let mark = if backend == DbBackend::MySql {
+        '`'
+    } else {
+        '"'
+    };
+    name.split('.')
+        .map(|segment| format!("{mark}{segment}{mark}"))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// After rows were inserted with explicit ids, move a Postgres `id`
+/// sequence past them, so the next insert does not reuse one. Every other
+/// engine advances its counter on its own.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when the statement fails.
+pub(crate) async fn advance_id_sequence(
+    manager: &SchemaManager<'_>,
+    table: &str,
+) -> Result<(), DbErr> {
+    let connection = manager.get_connection();
+    if connection.get_database_backend() != DbBackend::Postgres {
+        return Ok(());
+    }
+    connection
+        .execute_unprepared(&format!(
+            "SELECT setval(pg_get_serial_sequence('{table}', 'id'), COALESCE(MAX(id), 1), \
+             MAX(id) IS NOT NULL) FROM {}",
+            quote(DbBackend::Postgres, table)
+        ))
+        .await?;
     Ok(())
 }

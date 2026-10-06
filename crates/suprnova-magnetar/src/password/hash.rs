@@ -6,9 +6,11 @@
 //! Argon2-format call through the installable [`PasswordHashDriver`]: the
 //! stored hash is driven in its own format and a warmed dummy stands in for
 //! the other, so neither account existence nor the stored format is
-//! observable through hash work. The migration target is pinned to Argon2id;
-//! rehash is upgrade-only and a rehash failure is a post-login outcome, never
-//! an authentication failure.
+//! observable through hash work. The migration target is Argon2id by
+//! default, and rehash is then upgrade-only; an application that shares its
+//! database with a Laravel application pins it to Laravel's `$2y$` bcrypt
+//! instead ([`PasswordTarget::LaravelBcrypt`]). A rehash failure is a
+//! post-login outcome, never an authentication failure.
 
 use std::sync::Arc;
 
@@ -16,13 +18,30 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::{Error, Result};
 
-/// Maximum usable password bytes for the deployed bcrypt lane.
+/// The longest password a `$2b$` hash the framework's bcrypt driver wrote
+/// can hold: bcrypt needs a trailing null inside its 72-byte block.
 ///
-/// Bcrypt needs a trailing null inside its 72-byte block, so 71 bytes is the
-/// usable ceiling. Longer inputs can never match a Magnetar-accepted bcrypt
-/// hash; verification reports a mismatch instead of an error so length leaks
-/// nothing, exactly as the deployed framework behaves.
+/// Verification does not stop at it. Bcrypt judges a password on its first
+/// 72 bytes, as PHP's `password_verify` does, so a password of 72 bytes or
+/// more verifies against the `$2y$` hash Laravel wrote for it, and cannot
+/// match a `$2b$` hash of 71 bytes or fewer.
 pub const MAX_BCRYPT_PASSWORD_BYTES: usize = 71;
+
+/// What a credential is minted as, and what a valid sign-in rehashes to.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum PasswordTarget {
+    /// Argon2id at the configured profile. A bcrypt hash upgrades to it on
+    /// a valid sign-in, and a weaker Argon2 hash is raised to it. The
+    /// default.
+    #[default]
+    Argon2id,
+    /// `$2y$` bcrypt at the configured bcrypt cost, the hash Laravel 13's
+    /// hasher accepts with `HASH_VERIFY=true`. A valid sign-in rewrites any
+    /// other stored hash (`$2b$`, `$2a$`, Argon2) as one, and nothing is
+    /// upgraded to Argon2id. For an application that shares its database
+    /// with a Laravel application.
+    LaravelBcrypt,
+}
 
 /// The two deployed hash formats.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -95,7 +114,8 @@ pub trait PasswordHashDriver: Send + Sync {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PasswordHashConfig {
     /// Deployed bcrypt cost (framework default 12). Used for the bcrypt
-    /// dummy profile only; bcrypt is never a mint target.
+    /// dummy profile, and as the mint cost under
+    /// [`PasswordTarget::LaravelBcrypt`].
     pub bcrypt_cost: u32,
     /// Deployed and target Argon2id memory in KiB.
     pub argon2_memory_kib: u32,
@@ -149,8 +169,8 @@ impl PasswordHashConfig {
 pub enum RehashOutcome {
     /// The stored hash meets the target; nothing to do.
     NotNeeded,
-    /// The credential was re-hashed to the Argon2id target; callers persist
-    /// this value.
+    /// The credential was re-hashed to the verifier's [`PasswordTarget`];
+    /// callers persist this value.
     Upgraded(String),
     /// Rehash failed after a successful login; recorded, not fatal.
     Failed {
@@ -196,10 +216,14 @@ where
     }
 }
 
+/// The highest cost bcrypt takes: a cost above it is no hash bcrypt wrote.
+const MAX_BCRYPT_COST: u32 = 31;
+
 /// The one verification service for both deployed formats.
 pub struct PasswordVerifier {
     driver: Arc<dyn PasswordHashDriver>,
     config: PasswordHashConfig,
+    target: PasswordTarget,
     bcrypt_dummy: String,
     argon2_dummy: String,
 }
@@ -217,15 +241,59 @@ impl PasswordVerifier {
         Ok(Self {
             driver,
             config,
+            target: PasswordTarget::Argon2id,
             bcrypt_dummy,
             argon2_dummy,
         })
+    }
+
+    /// Mint credentials as `target`, and rehash a valid sign-in's stored
+    /// hash to it. [`PasswordTarget::Argon2id`] unless set here.
+    #[must_use]
+    pub fn with_target(mut self, target: PasswordTarget) -> Self {
+        self.target = target;
+        self
     }
 
     /// The configured profiles, exposed for deterministic tests.
     #[must_use]
     pub const fn config(&self) -> &PasswordHashConfig {
         &self.config
+    }
+
+    /// What this verifier mints and rehashes to.
+    #[must_use]
+    pub const fn target(&self) -> PasswordTarget {
+        self.target
+    }
+
+    /// The work profile [`Self::target`] mints with.
+    fn target_profile(&self) -> HashWorkProfile {
+        match self.target {
+            PasswordTarget::Argon2id => self.config.argon2_target(),
+            PasswordTarget::LaravelBcrypt => self.config.bcrypt_profile(),
+        }
+    }
+
+    /// The work profile a valid sign-in's rewrite of a hash stored at
+    /// `stored` mints with: [`Self::target_profile`], except that a rewrite
+    /// to [`PasswordTarget::LaravelBcrypt`] keeps a stored bcrypt cost above
+    /// the configured one. The rewrite changes the variant Laravel reads,
+    /// never lowers the work, and Laravel accepts a `$2y$` hash at any cost.
+    fn rehash_profile(&self, stored: &HashWorkProfile) -> HashWorkProfile {
+        match (self.target, stored.parameters) {
+            (PasswordTarget::LaravelBcrypt, HashParameters::Bcrypt { cost })
+                if cost > self.config.bcrypt_cost =>
+            {
+                HashWorkProfile {
+                    algorithm: HashAlgorithm::Bcrypt,
+                    parameters: HashParameters::Bcrypt {
+                        cost: cost.min(MAX_BCRYPT_COST),
+                    },
+                }
+            }
+            _ => self.target_profile(),
+        }
     }
 
     /// Verify one attempt with fixed-format work and compute any required
@@ -242,8 +310,8 @@ impl PasswordVerifier {
         let (valid, stored_profile) = self.verify_fixed_work(stored_hash, password)?;
         let rehash = if valid {
             match stored_profile {
-                Some(profile) if self.needs_rehash(&profile) => {
-                    match self.driver.mint(&self.config.argon2_target(), password) {
+                Some(profile) if self.needs_rehash(&profile, stored_hash.unwrap_or_default()) => {
+                    match self.driver.mint(&self.rehash_profile(&profile), password) {
                         Ok(upgraded) => RehashOutcome::Upgraded(upgraded),
                         Err(error) => RehashOutcome::Failed {
                             message: error.to_string(),
@@ -325,9 +393,9 @@ impl PasswordVerifier {
         Ok((valid, stored_profile))
     }
 
-    /// Mint a fresh credential hash at the pinned Argon2id target.
+    /// Mint a fresh credential hash at the verifier's [`PasswordTarget`].
     pub fn mint_target(&self, password: &SecretString) -> Result<String> {
-        self.driver.mint(&self.config.argon2_target(), password)
+        self.driver.mint(&self.target_profile(), password)
     }
 
     /// [`mint_target`](Self::mint_target), run where it cannot stall the
@@ -359,10 +427,24 @@ impl PasswordVerifier {
         run_hash_work(move || verifier.verify_work_only(stored_hash.as_deref(), &password)).await
     }
 
-    /// Upgrade-only rehash policy: bcrypt always upgrades; Argon2 upgrades
-    /// only when a parameter falls below the pinned target. A stronger
-    /// stored Argon2 hash is never downgraded.
-    fn needs_rehash(&self, stored: &HashWorkProfile) -> bool {
+    /// The rehash policy for [`Self::target`].
+    ///
+    /// [`PasswordTarget::Argon2id`] is upgrade-only: bcrypt always
+    /// upgrades; Argon2 upgrades only when a parameter falls below the
+    /// pinned target. A stronger stored Argon2 hash is never downgraded.
+    ///
+    /// [`PasswordTarget::LaravelBcrypt`] rewrites everything that is not a
+    /// `$2y$` hash at the configured cost or higher, Argon2 included:
+    /// Laravel's hasher refuses any other format.
+    fn needs_rehash(&self, stored: &HashWorkProfile, stored_hash: &str) -> bool {
+        if self.target == PasswordTarget::LaravelBcrypt {
+            return match stored.parameters {
+                HashParameters::Bcrypt { cost } => {
+                    !stored_hash.starts_with("$2y$") || cost < self.config.bcrypt_cost
+                }
+                HashParameters::Argon2 { .. } => true,
+            };
+        }
         match stored.parameters {
             HashParameters::Bcrypt { .. } => true,
             HashParameters::Argon2 {
@@ -433,16 +515,10 @@ pub struct StandardPasswordHashDriver;
 impl PasswordHashDriver for StandardPasswordHashDriver {
     fn verify(&self, call: &VerificationCall<'_>) -> Result<bool> {
         match call.profile.algorithm {
-            HashAlgorithm::Bcrypt => {
-                // Over-length inputs can never match a Magnetar-accepted
-                // bcrypt hash; report a mismatch, not an error, so length
-                // discloses nothing (deployed framework behavior).
-                if call.password.expose_secret().len() > MAX_BCRYPT_PASSWORD_BYTES {
-                    return Ok(false);
-                }
-                bcrypt::verify(call.password.expose_secret(), call.hash)
-                    .map_err(|_| malformed_hash())
-            }
+            // Every length verifies, judged on its first 72 bytes as PHP's
+            // `password_verify` judges it (see `MAX_BCRYPT_PASSWORD_BYTES`).
+            HashAlgorithm::Bcrypt => bcrypt::verify(call.password.expose_secret(), call.hash)
+                .map_err(|_| malformed_hash()),
             HashAlgorithm::Argon2 => {
                 use argon2::PasswordVerifier as _;
                 let parsed = argon2::password_hash::PasswordHash::new(call.hash)
@@ -456,18 +532,16 @@ impl PasswordHashDriver for StandardPasswordHashDriver {
 
     fn mint(&self, profile: &HashWorkProfile, password: &SecretString) -> Result<String> {
         match profile.parameters {
+            // `$2y$`, judged on the first 72 bytes, as PHP's
+            // `password_hash` writes it: the form Laravel's hasher accepts,
+            // and the one `PasswordTarget::LaravelBcrypt` mints. The bcrypt
+            // dummy is minted the same way.
             HashParameters::Bcrypt { cost } => {
-                if password.expose_secret().len() > MAX_BCRYPT_PASSWORD_BYTES {
-                    return Err(Error::InvalidInput {
-                        field: "password".to_owned(),
-                        message: format!(
-                            "password exceeds the {MAX_BCRYPT_PASSWORD_BYTES}-byte bcrypt limit"
-                        ),
-                    });
-                }
-                bcrypt::hash(password.expose_secret(), cost).map_err(|error| Error::Internal {
-                    message: format!("bcrypt hashing failed: {error}"),
-                })
+                bcrypt::hash_with_result(password.expose_secret(), cost)
+                    .map(|parts| parts.format_for_version(bcrypt::Version::TwoY))
+                    .map_err(|error| Error::Internal {
+                        message: format!("bcrypt hashing failed: {error}"),
+                    })
             }
             HashParameters::Argon2 {
                 memory_kib,

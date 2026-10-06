@@ -10,7 +10,7 @@ use crate::models::user::User;
 
 #[derive(Serialize)]
 pub struct UserInfo {
-    pub id: i64,
+    pub id: u64,
     pub name: String,
     pub email: String,
 }

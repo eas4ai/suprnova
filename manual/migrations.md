@@ -466,6 +466,11 @@ Schema::create(manager, "comments", |t| {
 - `t.unique(&["a", "b"])` creates a unique index named `{table}_{columns}_unique`.
 - The columns are joined with `_` in the name.
 - Indexes are separate `CREATE INDEX` statements that run after the table.
+- On Postgres, `Schema::create`, `Schema::table`, `Schema::drop`,
+  `Schema::drop_if_exists` and `Schema::rename` read a table named
+  `schema.table` as that table in that schema, as Laravel does, and the
+  `.` becomes `_` in the index and foreign key names. On MySQL and SQLite
+  the builder refuses a schema-qualified name.
 - `foreign_id(name).constrained(table)` creates a foreign key to the `id`
   column of `table`, named `{table}_{column}_foreign`.
 - `.references(table, column)` points the key at another column. On MySQL that

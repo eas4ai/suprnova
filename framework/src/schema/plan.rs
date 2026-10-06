@@ -17,7 +17,7 @@ use sea_orm::{DbBackend, DbErr};
 use super::blueprint::{Blueprint, Command, IndexSpec};
 use super::column::ColumnKind;
 use super::foreign::ForeignSpec;
-use super::{quote_ident, sea_ident};
+use super::{quote_ident, quote_table, sea_ident, sea_table};
 
 /// Longest identifier Postgres keeps: 63 bytes. The builder applies it on
 /// every backend so a migration that runs on one runs on all three. The plan
@@ -79,6 +79,24 @@ fn check_blueprint(blueprint: &Blueprint) -> Result<(), DbErr> {
     Ok(())
 }
 
+/// Refuses a schema-qualified table name the builder cannot take: one with
+/// more than one `.`, and any outside Postgres. SeaQuery writes an index
+/// on a table in a named schema for Postgres only, and SQLite's
+/// `CREATE INDEX` cannot name one at all.
+fn check_qualified(table: &str, backend: DbBackend) -> Result<(), DbErr> {
+    if table.matches('.').count() > 1 {
+        return Err(refuse(format!(
+            "schema: the table name `{table}` has more than one `.`; name a table as `table` or `schema.table`"
+        )));
+    }
+    if backend != DbBackend::Postgres && table.contains('.') {
+        return Err(refuse(format!(
+            "schema: the schema-qualified table `{table}` is supported on Postgres only; on {backend:?} name the table without its schema"
+        )));
+    }
+    Ok(())
+}
+
 /// Refuses a foreign key whose action sets its column to `NULL` when the
 /// closure declares that column `NOT NULL`. MySQL would refuse the key only
 /// after the column was added, and MySQL cannot roll the column back.
@@ -135,7 +153,7 @@ fn index_statement(
     let mut statement = Index::create();
     statement
         .name(constraint_name(backend, name))
-        .table(sea_ident(table));
+        .table(sea_table(table));
     for column in &spec.columns {
         statement.col(sea_ident(column));
     }
@@ -192,8 +210,8 @@ fn foreign_statement(
     let mut statement = ForeignKeyCreateStatement::new();
     statement
         .name(constraint_name(backend, name))
-        .from(sea_ident(table), sea_ident(&foreign.column))
-        .to(sea_ident(ref_table), sea_ident(&foreign.ref_column));
+        .from(sea_table(table), sea_ident(&foreign.column))
+        .to(sea_table(ref_table), sea_ident(&foreign.ref_column));
     if let Some(action) = foreign.on_delete {
         statement.on_delete(action);
     }
@@ -255,7 +273,7 @@ fn add_primary_sql(backend: DbBackend, table: &str, columns: &[String]) -> Strin
         .join(", ");
     format!(
         "ALTER TABLE {} ADD PRIMARY KEY ({columns})",
-        quote_ident(backend, table)
+        quote_table(backend, table)
     )
 }
 
@@ -263,9 +281,10 @@ fn add_primary_sql(backend: DbBackend, table: &str, columns: &[String]) -> Strin
 /// keys first, then one statement per index.
 pub(crate) fn plan_create(blueprint: &Blueprint, backend: DbBackend) -> Result<Vec<Step>, DbErr> {
     check_blueprint(blueprint)?;
+    check_qualified(blueprint.table(), backend)?;
     let table = blueprint.table();
     let mut create = Table::create();
-    create.table(sea_ident(table));
+    create.table(sea_table(table));
     let mut indexes = Vec::new();
     let mut seen_columns = HashSet::new();
     let mut nullable_columns = HashSet::new();
@@ -440,6 +459,7 @@ fn refuse_sqlite_foreign_keys(blueprint: &Blueprint) -> Result<(), DbErr> {
 /// builds them.
 pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Vec<Step>, DbErr> {
     check_blueprint(blueprint)?;
+    check_qualified(blueprint.table(), backend)?;
     let table = blueprint.table();
     let sqlite = backend == DbBackend::Sqlite;
     if sqlite {
@@ -491,7 +511,7 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
                 }
                 let mut alter = Table::alter();
                 alter
-                    .table(sea_ident(table))
+                    .table(sea_table(table))
                     .add_column(column.to_column_def(backend));
                 steps.push(Step::AlterTable(alter));
             }
@@ -503,7 +523,7 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
                 }
                 let mut alter = Table::alter();
                 alter
-                    .table(sea_ident(table))
+                    .table(sea_table(table))
                     .rename_column(sea_ident(from), sea_ident(to));
                 steps.push(Step::AlterTable(alter));
             }
@@ -514,7 +534,7 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
                     )));
                 }
                 let mut alter = Table::alter();
-                alter.table(sea_ident(table)).drop_column(sea_ident(name));
+                alter.table(sea_table(table)).drop_column(sea_ident(name));
                 steps.push(Step::AlterTable(alter));
             }
             Command::AddIndex(spec) => {
@@ -532,7 +552,7 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
                 let mut statement = Index::drop();
                 statement
                     .name(constraint_name(backend, name))
-                    .table(sea_ident(table));
+                    .table(sea_table(table));
                 steps.push(Step::DropIndex(statement));
             }
             Command::AddForeign(position) => {
@@ -568,7 +588,7 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
                 let mut statement = ForeignKey::drop();
                 statement
                     .name(constraint_name(backend, name))
-                    .table(sea_ident(table));
+                    .table(sea_table(table));
                 steps.push(Step::DropForeignKey(statement));
             }
         }

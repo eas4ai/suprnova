@@ -185,6 +185,18 @@ pub(super) fn estimate(
     Ok(peak.saturating_add(FIXED))
 }
 
+/// The estimate for a decode that then applies a non-identity EXIF
+/// orientation.
+///
+/// Every decoder here returns its RGBA and frees its own buffers before
+/// the orientation runs; the orientation then fills a second RGBA plane of
+/// the same size while the first is held. So the decode peaks either where
+/// it did, or at the two planes, whichever is higher.
+pub(super) fn oriented(estimate: u64, width: u32, height: u32) -> u64 {
+    let plane = mul(mul(u64::from(width), u64::from(height)), 4);
+    estimate.max(add(mul(plane, 2), FIXED))
+}
+
 /// `a * b`, saturating: a saturated estimate is refused, never wrapped.
 fn mul(a: u64, b: u64) -> u64 {
     a.saturating_mul(b)

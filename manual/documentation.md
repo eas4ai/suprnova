@@ -87,6 +87,7 @@
     - [Pagination](pagination.md)
     - [Migrations](migrations.md)
     - [Seeding](seeding.md)
+    - [Running on a Laravel Database](laravel-database.md)
 - ## Eloquent ORM
     - [Getting Started](eloquent.md)
     - [Relationships](eloquent-relationships.md)

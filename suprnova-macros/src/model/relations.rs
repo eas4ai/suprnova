@@ -2160,13 +2160,15 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                         // the snake-cased type name - the same default
                         // the parent-side MorphMany / MorphOne uses to
                         // write the type-string column.
-                        let registered: ::std::option::Option<&'static str> =
-                            ::suprnova::find_morph_type_by_id(
-                                ::std::any::TypeId::of::<#ty>(),
-                            )
-                            .map(|e| e.morph_type);
-                        let expected: &str = registered.unwrap_or(#snake_fallback);
-                        if expected == morph_type {
+                        //
+                        // A registered target also answers to each of its
+                        // `morph_aliases`, the other names a Laravel
+                        // database may hold for it.
+                        if ::suprnova::eloquent::relations::morph_registry::names_morph_target(
+                            ::std::any::TypeId::of::<#ty>(),
+                            #snake_fallback,
+                            morph_type,
+                        ) {
                             return ::core::option::Option::Some(#index);
                         }
                     }
@@ -3390,20 +3392,21 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
-                    // Type-string predicate goes through the
-                    // standard `filter` path; the inner builder
-                    // serialises it to a bind parameter via
-                    // `IntoVal`. We pre-wrap it in a JSON `String`
-                    // value so the WhereTerm storage stays
-                    // homogeneous with the IN-list above.
-                    let morph_type_predicate =
-                        ::suprnova::serde_json::Value::String(
-                            ::std::string::String::from(#morph_type_value),
-                        );
+                    // Type-string predicate: every name the parent
+                    // answers to, its `morph_type` and its
+                    // `morph_aliases`, as an IN-list of JSON strings like
+                    // the id list above.
+                    let morph_type_predicate: ::std::vec::Vec<::suprnova::serde_json::Value> =
+                        ::suprnova::eloquent::relations::morph_registry::morph_type_names(
+                            #morph_type_value,
+                        )
+                        .into_iter()
+                        .map(::suprnova::serde_json::Value::String)
+                        .collect();
                     let __sn_builder: ::suprnova::Builder<#target_ty> =
                         <#target_ty as ::suprnova::eloquent::Model>::query()
                             .filter_in(#id_col, pk_values)
-                            .filter(#type_col, morph_type_predicate);
+                            .filter_in(#type_col, morph_type_predicate);
                     let __sn_builder = match __sn_pred.take() {
                         ::core::option::Option::Some(f) => f(__sn_builder),
                         ::core::option::Option::None => __sn_builder,
@@ -4479,16 +4482,16 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
         }
         RelationKindAttr::MorphMany | RelationKindAttr::MorphOne => {
             // Server-side GROUP BY count over the child table, with
-            // both the `<name>_id IN (...)` and
-            // `<name>_type = '<morph_type>'` predicates applied so
-            // children of other morph families are excluded from the
-            // count.
+            // both the `<name>_id IN (...)` and the `<name>_type IN
+            // (...)` predicates applied, the latter over the parent's
+            // `morph_type` and `morph_aliases`, so children of other
+            // morph families are excluded from the count.
             //
             //   SELECT CAST(<id_col> AS TEXT|CHAR) AS __sn_fk_key,
             //          COUNT(*)                   AS __sn_count
             //     FROM <child_table>
             //    WHERE <id_col> IN (?, ?, ...)
-            //      AND <type_col> = ?
+            //      AND <type_col> IN (?, ...)
             //    GROUP BY <id_col>
             //
             // Same CAST-as-text key-matching contract as the HasMany
@@ -4560,16 +4563,29 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             ::suprnova::eloquent::model::json_value_to_sea_value(v),
                         );
                     }
-                    // The morph-type predicate gets the next sequential
-                    // Postgres placeholder ($N+1) or `?` on the
-                    // remaining backends. Bound after the IN-list.
-                    let type_ph = match db_backend {
-                        ::suprnova::sea_orm::DatabaseBackend::Postgres => {
-                            ::std::format!("${}", pk_json_values.len() + 1 + __sn_offset)
-                        }
-                        _ => ::std::string::String::from("?"),
-                    };
-                    binds.push(::suprnova::sea_orm::Value::from(#morph_type_value));
+                    // The morph-type predicate: every name the parent
+                    // answers to, its `morph_type` and its
+                    // `morph_aliases`, bound after the IN-list with the
+                    // next sequential Postgres placeholders, or `?` on
+                    // the remaining backends.
+                    let mut __sn_type_phs: ::std::vec::Vec<::std::string::String> =
+                        ::std::vec::Vec::new();
+                    for (i, __sn_type_name) in
+                        ::suprnova::eloquent::relations::morph_registry::morph_type_names(
+                            #morph_type_value,
+                        )
+                        .into_iter()
+                        .enumerate()
+                    {
+                        __sn_type_phs.push(match db_backend {
+                            ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                                ::std::format!("${}", pk_json_values.len() + 1 + i + __sn_offset)
+                            }
+                            _ => ::std::string::String::from("?"),
+                        });
+                        binds.push(::suprnova::sea_orm::Value::from(__sn_type_name));
+                    }
+                    let type_ph = __sn_type_phs.join(", ");
 
                     let __sn_cast_kw = match db_backend {
                         ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
@@ -4580,7 +4596,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                                 COUNT(*) AS __sn_count \
                            FROM {table} \
                           WHERE {id} IN ({phs}) \
-                            AND {type_col} = {type_ph} \
+                            AND {type_col} IN ({type_ph}) \
                           GROUP BY {id}",
                         id = #id_col,
                         cast = __sn_cast_kw,
@@ -5827,15 +5843,15 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
         RelationKindAttr::MorphMany | RelationKindAttr::MorphOne => {
             // Server-side GROUP BY aggregate over the child table.
             // Same SQL skeleton as the HasMany aggregate arm but with
-            // the extra `<name>_type = '<morph_type>'` predicate so
-            // aggregates of children pointing at OTHER morph families
-            // are excluded.
+            // the extra `<name>_type IN (...)` predicate, over the
+            // parent's `morph_type` and `morph_aliases`, so aggregates
+            // of children pointing at OTHER morph families are excluded.
             //
             //   SELECT CAST(<id_col> AS TEXT|CHAR) AS __sn_fk_key,
             //          <AGG>(<col>)                AS __sn_agg
             //     FROM <child_table>
             //    WHERE <id_col> IN (?, ?, ...)
-            //      AND <type_col> = ?
+            //      AND <type_col> IN (?, ...)
             //    GROUP BY <id_col>
             //
             // Sum/Avg → f64 with 0.0 empty default. Min/Max →
@@ -5908,13 +5924,29 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             ::suprnova::eloquent::model::json_value_to_sea_value(v),
                         );
                     }
-                    let type_ph = match db_backend {
-                        ::suprnova::sea_orm::DatabaseBackend::Postgres => {
-                            ::std::format!("${}", pk_json_values.len() + 1 + __sn_offset)
-                        }
-                        _ => ::std::string::String::from("?"),
-                    };
-                    binds.push(::suprnova::sea_orm::Value::from(#morph_type_value));
+                    // The morph-type predicate: every name the parent
+                    // answers to, its `morph_type` and its
+                    // `morph_aliases`, bound after the IN-list with the
+                    // next sequential Postgres placeholders, or `?` on
+                    // the remaining backends.
+                    let mut __sn_type_phs: ::std::vec::Vec<::std::string::String> =
+                        ::std::vec::Vec::new();
+                    for (i, __sn_type_name) in
+                        ::suprnova::eloquent::relations::morph_registry::morph_type_names(
+                            #morph_type_value,
+                        )
+                        .into_iter()
+                        .enumerate()
+                    {
+                        __sn_type_phs.push(match db_backend {
+                            ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                                ::std::format!("${}", pk_json_values.len() + 1 + i + __sn_offset)
+                            }
+                            _ => ::std::string::String::from("?"),
+                        });
+                        binds.push(::suprnova::sea_orm::Value::from(__sn_type_name));
+                    }
+                    let type_ph = __sn_type_phs.join(", ");
 
                     let __sn_cast_kw = match db_backend {
                         ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
@@ -5941,7 +5973,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                 {agg} AS __sn_agg \
                            FROM {table} \
                           WHERE {id} IN ({phs}) \
-                            AND {type_col} = {type_ph} \
+                            AND {type_col} IN ({type_ph}) \
                           GROUP BY {id}",
                         id = #id_col,
                         cast = __sn_cast_kw,

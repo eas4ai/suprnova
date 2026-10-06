@@ -79,6 +79,11 @@ pub struct HandlerInfo {
     pub name: String,
     pub has_handler_attr: bool,
     pub request_type: Option<String>,
+    /// Every argument of the handler, in order: its binding's name and its
+    /// type's last segment. A route reads the argument named after one of
+    /// its parameters from the path, bound or as a path value, never as
+    /// the form request.
+    pub args: Vec<(Option<String>, Option<String>)>,
 }
 
 /// A form request struct definition
@@ -375,16 +380,36 @@ enum Placeholder<'a> {
 
 /// Read the text between `{` and `}`. Anything other than a plain, a
 /// catch-all or an optional name is not a parameter the helpers fill in.
+/// A `{post:slug}` placeholder is the parameter `post`: the field after
+/// the colon is the backend's route binding field.
 fn placeholder(inner: &str) -> Option<Placeholder<'_>> {
     let is_name =
         |name: &str| !name.is_empty() && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_');
-    if let Some(name) = inner.strip_suffix('?') {
+    if let Some(key) = inner.strip_suffix('?') {
+        let name = without_binding_field(key)?;
         return is_name(name).then_some(Placeholder::Optional(name));
     }
     match inner.strip_prefix('*') {
         Some(name) if is_name(name) => Some(Placeholder::CatchAll(name)),
-        None if is_name(inner) => Some(Placeholder::Segment(inner)),
+        None => {
+            let name = without_binding_field(inner)?;
+            is_name(name).then_some(Placeholder::Segment(name))
+        }
         _ => None,
+    }
+}
+
+/// A placeholder's name without the route binding field of `name:field`.
+/// `None` when the field is not a name.
+fn without_binding_field(key: &str) -> Option<&str> {
+    match key.split_once(':') {
+        Some((name, field))
+            if !field.is_empty() && field.chars().all(|ch| ch.is_alphanumeric() || ch == '_') =>
+        {
+            Some(name)
+        }
+        Some(_) => None,
+        None => Some(key),
     }
 }
 
@@ -433,6 +458,19 @@ fn has_optional_placeholder(path: &str) -> bool {
     path_pieces(path)
         .iter()
         .any(|piece| matches!(piece, Ok(Placeholder::Optional(_))))
+}
+
+/// The name a handler argument's pattern binds: `post` for `post: Post`
+/// and for `RouteParam(post): RouteParam<Post>`.
+fn binding_name(pat: &syn::Pat) -> Option<String> {
+    match pat {
+        syn::Pat::Ident(binding) => Some(binding.ident.to_string()),
+        syn::Pat::TupleStruct(tuple) if tuple.elems.len() == 1 => match tuple.elems.first() {
+            Some(syn::Pat::Ident(binding)) => Some(binding.ident.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Visitor that collects handler functions with #[handler] attribute
@@ -492,10 +530,26 @@ impl<'ast> Visit<'ast> for HandlerVisitor {
             None
         };
 
+        let args = if has_handler {
+            node.sig
+                .inputs
+                .iter()
+                .filter_map(|arg| match arg {
+                    FnArg::Typed(pat_type) => Some((
+                        binding_name(&pat_type.pat),
+                        self.type_to_string(&pat_type.ty),
+                    )),
+                    FnArg::Receiver(_) => None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.handlers.push(HandlerInfo {
             name: node.sig.ident.to_string(),
             has_handler_attr: has_handler,
             request_type,
+            args,
         });
 
         syn::visit::visit_item_fn(self, node);
@@ -704,11 +758,21 @@ pub fn scan_routes(project_path: &Path) -> Result<Vec<GeneratedRoute>, String> {
             None
         };
 
-        // Find the form request struct if the handler has one
-        let request_struct = handler_info
-            .as_ref()
-            .and_then(|h| h.request_type.as_ref())
-            .and_then(|type_name| form_requests.get(type_name).cloned());
+        // Find the form request struct if the handler has one: the first
+        // argument the route does not read from its path whose type is a
+        // form request. An argument named after a path parameter is bound
+        // or a path value, never the form request.
+        let request_struct = handler_info.as_ref().and_then(|h| {
+            h.args
+                .iter()
+                .filter(|(name, _)| {
+                    !name
+                        .as_ref()
+                        .is_some_and(|name| def.path_params.iter().any(|p| &p.name == name))
+                })
+                .filter_map(|(_, type_name)| type_name.as_ref())
+                .find_map(|type_name| form_requests.get(type_name).cloned())
+        });
 
         generated_routes.push(GeneratedRoute {
             definition: def,

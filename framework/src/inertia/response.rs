@@ -1085,9 +1085,17 @@ impl InertiaResponse {
         // from the same expression - so by default the two agree; a
         // `url_resolver` intentionally moves only this one, because the
         // 409 bounce has to name a URL the browser can actually fetch.
+        //
+        // The URL carries the public root, the URL the browser shows
+        // (PFX-005): the default derivation is an application path and
+        // always gets it; a resolver's root-relative path gets it unless it
+        // is already under the root.
         let url = match config.url_resolver.as_ref() {
-            Some(resolve_url) => resolve_url(req as &dyn InertiaRequestExt),
-            None => req.path_and_query(),
+            Some(resolve_url) => {
+                let resolved = resolve_url(req as &dyn InertiaRequestExt);
+                crate::routing::root::rooted(&resolved).into_owned()
+            }
+            None => crate::routing::root::prefixed(&req.path_and_query()),
         };
 
         // History-encryption precedence: per-response override (handler
@@ -2523,36 +2531,62 @@ fn render_prod_head(config: &InertiaConfig) -> String {
     // produced before the manifest layer keep booting. The fallback
     // path emits a tracing::warn! at first read inside
     // `InertiaConfig::vite_manifest`.
-    let base = config.assets_base_url.trim_end_matches('/');
+    let base = asset_base(&config.assets_base_url);
     let entry = &config.entry_point;
+    let url = |file: &str| escape_html_attr(&format!("{base}/{file}"));
     if let Some(assets) = config.vite_manifest().and_then(|m| m.resolve_entry(entry)) {
         let mut out = String::new();
         for css in &assets.css {
             out.push_str(&format!(
-                "<link rel=\"stylesheet\" href=\"{base}/{css}\">\n"
+                "<link rel=\"stylesheet\" href=\"{}\">\n",
+                url(css)
             ));
         }
         for js in &assets.js {
             out.push_str(&format!(
-                "<script type=\"module\" src=\"{base}/{js}\"></script>\n"
+                "<script type=\"module\" src=\"{}\"></script>\n",
+                url(js)
             ));
         }
         for chunk in &assets.preload {
             out.push_str(&format!(
-                "<link rel=\"modulepreload\" href=\"{base}/{chunk}\">\n"
+                "<link rel=\"modulepreload\" href=\"{}\">\n",
+                url(chunk)
             ));
         }
         out
     } else {
         // Manifest absent or entry not present - legacy fallback.
         format!(
-            "<script type=\"module\" src=\"{base}/main.js\"></script>\n\
-             <link rel=\"stylesheet\" href=\"{base}/main.css\">\n"
+            "<script type=\"module\" src=\"{}\"></script>\n\
+             <link rel=\"stylesheet\" href=\"{}\">\n",
+            url("main.js"),
+            url("main.css")
         )
     }
 }
 
-fn escape_html_attr(s: &str) -> String {
+/// The base the Vite tags name their files under (PFX-005).
+///
+/// A root-relative `assets_base_url`, one that starts with a single `/`
+/// such as the default `/assets`, is served by the application and gets
+/// the public root in front. An absolute or network-path base (a CDN) is
+/// another host's path and is left as it is.
+///
+/// The base is classified before its trailing slashes are removed, so a
+/// base of `/`, which serves the assets at the root itself, is root-relative
+/// too and gives the root alone.
+fn asset_base(assets_base_url: &str) -> std::borrow::Cow<'_, str> {
+    let trimmed = assets_base_url.trim_end_matches('/');
+    if assets_base_url.starts_with('/') && !assets_base_url.starts_with("//") {
+        std::borrow::Cow::Owned(crate::routing::root::prefixed(trimmed))
+    } else {
+        std::borrow::Cow::Borrowed(trimmed)
+    }
+}
+
+/// Escape `s` for a double- or single-quoted HTML attribute value.
+pub(crate) fn escape_html_attr(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

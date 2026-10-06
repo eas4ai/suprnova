@@ -59,6 +59,7 @@ pub mod events;
 pub mod fields;
 pub mod middleware;
 pub mod migrations;
+pub mod store;
 pub mod sync;
 
 pub use bootstrap::{

@@ -16,7 +16,7 @@ use serde::Serialize;
 /// them:
 ///
 /// - The database driver's listing methods decode each row's
-///   `envelope_json`; a row whose JSON fails to parse is still reported
+///   `payload`; a row whose JSON fails to parse is still reported
 ///   (rather than dropped, which would hide a poison job from an operator)
 ///   with `id: None` and a `payload` that flags it as unparseable, since
 ///   there is no envelope to recover an id or a dispatch timestamp from.

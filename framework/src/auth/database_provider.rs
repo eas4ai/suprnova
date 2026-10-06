@@ -216,6 +216,28 @@ impl DatabaseUserProvider {
         })
     }
 
+    /// `id` bound as the identifier column takes it: the id parser's value,
+    /// with an id above `i64::MAX` bound as [`Self::bind_large_id`] decides.
+    async fn id_value(&self, id: &str) -> Result<SeaValue, FrameworkError> {
+        Ok(match (self.id_parser)(id) {
+            SeaValue::BigUnsigned(Some(n)) if n > i64::MAX as u64 => self.bind_large_id(n).await?,
+            value => value,
+        })
+    }
+
+    /// Store `hashed` in the password column of the user `id` names, and
+    /// nothing else: the user's `remember_token`, which a Laravel
+    /// application on the same database owns, is left as it was.
+    async fn write_password(&self, id: &str, hashed: &str) -> Result<(), FrameworkError> {
+        let mut attrs = crate::eloquent::attrs::Attrs::new();
+        attrs.insert(self.password_column.clone(), hashed.to_owned());
+        DB::table(&self.table)
+            .filter(self.identifier_column.clone(), self.id_value(id).await?)
+            .update(attrs)
+            .await?;
+        Ok(())
+    }
+
     /// Build a [`GenericUser`] from a row.
     fn row_to_user(&self, row: DynamicRow) -> Arc<dyn Authenticatable> {
         let map = row.into_map();
@@ -236,10 +258,7 @@ impl UserProvider for DatabaseUserProvider {
         &self,
         id: &str,
     ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
-        let value = match (self.id_parser)(id) {
-            SeaValue::BigUnsigned(Some(n)) if n > i64::MAX as u64 => self.bind_large_id(n).await?,
-            value => value,
-        };
+        let value = self.id_value(id).await?;
         let row = DB::table(&self.table)
             .filter(self.identifier_column.clone(), value)
             .first()
@@ -288,7 +307,32 @@ impl UserProvider for DatabaseUserProvider {
     ) -> Result<bool, FrameworkError> {
         let password = credentials.get("password").and_then(|v| v.as_str());
         match (password, user.get_auth_password()) {
-            (Some(plaintext), Some(hash)) => hashing::verify_async(plaintext, hash).await,
+            (Some(plaintext), Some(hash)) => {
+                let valid = hashing::verify_async(plaintext, hash).await?;
+                // While the application shares its database with Laravel,
+                // a valid sign-in rewrites a hash Laravel's hasher would
+                // refuse (`$2b$`, Argon2id) as the `$2y$` one it accepts,
+                // in the configured password column, as the model provider
+                // does. The sign-in stands if the rewrite fails; the next
+                // one tries again.
+                if valid && crate::LaravelDatabase::is_shared() && hashing::needs_rehash(hash) {
+                    let rewritten = match hashing::rehash_for_laravel_async(plaintext, hash).await {
+                        Ok(rehashed) => {
+                            self.write_password(&user.get_auth_identifier(), &rehashed)
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = rewritten {
+                        tracing::warn!(
+                            error = %error,
+                            "the password hash could not be rewritten for Laravel after a \
+                             valid sign-in; the sign-in stands"
+                        );
+                    }
+                }
+                Ok(valid)
+            }
             // A user row with no stored password (OAuth-only / passwordless). Run a
             // dummy verify so this path costs the same as a wrong-password attempt,
             // closing the account-type timing oracle. Mirrors EloquentUserProvider.

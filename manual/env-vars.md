@@ -105,6 +105,10 @@ Four rules decide how the list is used:
   A proxy that writes `X-Real-IP` alone must remove the client's
   `X-Forwarded-For`. The `Forwarded` header of RFC 7239 is not read.
 
+A proxy that serves the application under a path, such as `/billing`, names
+that path in `X-Forwarded-Prefix`, which counts under the same rule. See
+[Serving under a path prefix](deployment.md#serving-under-a-path-prefix).
+
 An IPv4 address written as an IPv6 one (`::ffff:10.0.0.5`) counts as the IPv4
 address, in the headers and for the peer. `Request::ips()` returns the whole
 chain. It is a record, not something to decide by.
@@ -160,6 +164,18 @@ drops idle connections - see [Pool liveness](database.md#pool-liveness).
 | `DB_PING_AFTER_IDLE` | unset | `u64` (seconds) | Ping a pooled connection only after it has been idle this long. Setting it turns `DB_TEST_BEFORE_ACQUIRE` off, so hot connections are handed out untouched. |
 | `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT` | `false` | `bool` | When true, a failing auto-migration during `serve` boot is logged but does not abort. Default is fail-closed: boot exits non-zero rather than start against a partially-migrated schema. Pass `--no-migrate` to skip auto-migration entirely. |
 
+## Laravel database
+
+Variables for an application on a database a Laravel application created.
+See [Running on a Laravel Database](laravel-database.md).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `LARAVEL_SHARED_DATABASE` | `false` | `bool` | Turn on when a Laravel application uses the database at the same time. Password hashes are written as `$2y$` bcrypt, a valid sign-in rewrites a `$2b$` or Argon2id hash as `$2y$`, Magnetar stops upgrading bcrypt to Argon2id, and an unrouted database-queue job is stored on the queue `suprnova` instead of `default`. Accepts `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`; any other value fails boot. |
+| `NOTIFICATIONS_MORPH_KEY` | `int` | `String` | The type `CreateNotificationsTable` gives `notifications.notifiable_id`: `int` for Laravel's `morphs`, `uuid` for `uuidMorphs`, `ulid` for `ulidMorphs`. Any other value fails the migration. |
+| `RBAC_MODEL_KEY` | `int` | `String` | The type the RBAC migrations give `model_has_roles.model_id` and `model_has_permissions.model_id`: `int`, `uuid` or `ulid`. Any other value fails the migration. |
+| `FEATURES_USER_SCOPE` | `App\Models\User` | `String` | What a user's flags are stored under in Pennant's `features.scope`, before `\|<id>`: the class or morph alias of the user model in the Laravel application. |
+
 ## Session
 
 Cookie attributes and lifetime for the session subsystem. Note that
@@ -172,7 +188,7 @@ flip it off only for local HTTP development.
 | `SESSION_TOUCH_INTERVAL` | `300` (seconds) | `u64` | Minimum sliding-expiry persistence cadence. Runtime enforcement caps it at half the session lifetime. |
 | `SESSION_GC_INTERVAL` | `3600` (seconds) | `u64` | Cadence for the supervised expired-session collector installed by `SessionMiddleware::install`. |
 | `SESSION_COOKIE` | `"suprnova_session"` | `String` | Session cookie name. |
-| `SESSION_PATH` | `"/"` | `String` | Cookie `Path=` attribute. |
+| `SESSION_PATH` | unset | `String` | Cookie `Path=` attribute. Unset, the session, remember-me and XSRF cookies take the public root of each request: `/` at the host root, `/billing` behind a trusted `X-Forwarded-Prefix: /billing`. See [Serving under a path prefix](deployment.md#serving-under-a-path-prefix). |
 | `SESSION_DOMAIN` | unset | `String` | Cookie `Domain=` attribute. Leave unset for host-only cookies (the safer default for most apps). |
 | `SESSION_SECURE` | `true` | `bool` | Cookie `Secure` attribute. Defaults to `true`; set to `false` only in local HTTP development. `cookie_http_only` is always `true` and is not env-configurable. |
 | `SESSION_SAME_SITE` | `"Lax"` | `String` | `SameSite` attribute. Accepts `Strict`, `Lax`, `None` (case-insensitive). |
@@ -392,7 +408,8 @@ URL, because a URL carries the password.
 
 ## Images
 
-Image driver selection and the decode limits that bound hostile input.
+Image driver selection, the decode limits that bound hostile input, and
+orientation on decode.
 Out-of-range limits clamp with a `warn!` rather than failing boot: a
 limit of zero would reject every image in the application. An unknown
 `IMAGE_DRIVER` fails at first use, naming the valid values.
@@ -404,6 +421,7 @@ limit of zero would reject every image in the application. An unknown
 | `IMAGE_MAX_ALLOC_BYTES` | `1073741824` (1 GiB) | `u64` | Cap on the memory one decode may allocate. Every driver checks the decoded RGBA footprint (`width * height * 4`) against it; the default `oxideav` driver also estimates the whole decode from the image's headers and refuses an image whose estimate is over it. Also caps the size of the source file itself, whether it arrives from a path, a disk, or `Image::from_stream` (which checks while collecting). Minimum `4`. |
 | `IMAGE_MAGICK_BINARY` | `magick` | `String` | Binary the `magick` driver invokes. ImageMagick 7 only; the ImageMagick 6 `convert` name is not accepted. A missing binary is a clear error at first use. |
 | `IMAGE_MAGICK_TIMEOUT_SECS` | `30` | `u32` | Wall-clock ceiling on a single ImageMagick invocation. It is both ImageMagick's own `-limit time` argument and the Rust-side deadline that kills the child's whole process group two seconds later, because `-limit time` is enforced by a monitor that a child wedged inside a delegate never engages. Bounds a stalled delegate that would otherwise hold a blocking worker for the life of the process. `magick` driver only. Minimum `1`. |
+| `IMAGE_AUTO_ORIENT` | `true` | `bool` | Apply the source's EXIF `Orientation` tag as an image decodes, under both drivers. `false`, `0`, `no` or `off` turn it off: the pixels keep the sensor's orientation, the output keeps the tag, and `Image::orient()` applies it where the pipeline says. Any other value keeps the default with a `warn!`. [Images](images.md#orientation) |
 
 See [Images](images.md) for the two-tier limit enforcement and how to
 choose between the drivers.
@@ -588,7 +606,8 @@ framework reads:
 - **Notifications, Payments, Feature Flags.** Each
   registers concrete drivers via `App::bind` in `bootstrap()`. Pick
   your driver in Rust; pass any URLs/keys it needs as your own env
-  vars.
+  vars. The exceptions are the table-layout variables in
+  **Laravel database** above.
 - **Vector search** registers its drivers the same way. The Qdrant,
   MariaDB and Pinecone drivers have a `from_env()` constructor that reads the
   variables in **Vector search** above.

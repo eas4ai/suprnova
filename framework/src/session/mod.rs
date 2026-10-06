@@ -44,6 +44,7 @@ pub mod blocking;
 pub mod config;
 pub mod driver;
 pub mod middleware;
+pub mod migrations;
 pub mod store;
 
 pub use blocking::SessionBlock;

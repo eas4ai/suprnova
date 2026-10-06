@@ -1,37 +1,49 @@
-//! Migration that creates the framework-owned `features` table consumed
-//! by [`crate::features::DatabaseEvaluator`].
+//! Migration that creates the `features` table in laravel/pennant's
+//! layout, consumed by [`crate::features::DatabaseEvaluator`] and the
+//! admin facade, and the framework's `suprnova_feature_details` beside it.
 //!
 //! Schema:
 //!
 //! ```text
 //! features (
-//!   id          BIGINT      PRIMARY KEY AUTO_INCREMENT
+//!   id          BIGINT       PRIMARY KEY AUTO_INCREMENT (unsigned on MySQL)
 //!   name        VARCHAR(255) NOT NULL
-//!   scope_key   VARCHAR(255) NOT NULL DEFAULT ''  -- '' = global; "user:42" / "team:staff" etc.
-//!   enabled     BOOLEAN     NOT NULL
-//!   description TEXT
-//!   updated_by  VARCHAR(255)                      -- audit: which user toggled it (opaque id, string-typed for UUID/ULID support)
-//!   created_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP  -- DATETIME on MySQL
-//!   updated_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP  -- DATETIME on MySQL
-//!   UNIQUE INDEX (name, scope_key)
+//!   scope       VARCHAR(255) NOT NULL   -- '__laravel_null' = global
+//!   value       TEXT         NOT NULL   -- JSON: true, false, "blue", ...
+//!   created_at  DATETIME     NULL       -- timestamp(0) on Postgres
+//!   updated_at  DATETIME     NULL
+//!   UNIQUE INDEX features_name_scope_unique (name, scope)
+//! )
+//!
+//! suprnova_feature_details (
+//!   name        VARCHAR(255) NOT NULL
+//!   scope       VARCHAR(255) NOT NULL
+//!   description TEXT         NULL
+//!   updated_by  VARCHAR(255) NULL
+//!   PRIMARY KEY (name, scope)
 //! )
 //! ```
 //!
-//! The time columns are `DATETIME` on MySQL and MariaDB, whose `TIMESTAMP`
-//! refuses any time after 2038-01-19. A table this migration created before
-//! has `TIMESTAMP` there;
-//! [`FeatureTimestampsToDatetime`](super::FeatureTimestampsToDatetime)
-//! converts it.
+//! The time columns are `DATETIME` on MySQL and MariaDB, where Pennant's
+//! migration says `TIMESTAMP`: `TIMESTAMP` refuses any time after
+//! 2038-01-19.
+//!
+//! A `features` table that already exists is left exactly as it is: one
+//! Pennant created stays as Pennant left it, and one an earlier version of
+//! this migration created is reshaped by
+//! [`FeaturesToPennantLayout`](super::FeaturesToPennantLayout). The details
+//! table is created whenever it is missing.
 //!
 //! Consumer apps include this migration in their `Migrator`'s
 //! `migrations()` list - the framework owns the schema, the app owns
-//! when to apply it. The example app wires this in Task 7.
+//! when to apply it.
 
 use sea_orm_migration::prelude::*;
 
-use crate::database::migration_guard::{create_index_if_missing, utc_timestamp_column};
+use crate::features::store::{DETAILS_TABLE, FEATURES_TABLE};
+use crate::schema::Schema;
 
-/// Migration that creates the framework-owned `features` table.
+/// Migration that creates the `features` table.
 ///
 /// Re-exported as `CreateFeaturesTable` from the parent migrations module
 /// so consumer apps can list it in their `Migrator::migrations()`.
@@ -48,75 +60,58 @@ impl MigrationName for Migration {
     }
 }
 
-#[derive(DeriveIden)]
-enum Features {
-    Table,
-    Id,
-    Name,
-    ScopeKey,
-    Enabled,
-    Description,
-    UpdatedBy,
-    CreatedAt,
-    UpdatedAt,
+/// Create `features` in Pennant's layout, or add the indexes a stopped
+/// upgrade left out of the one it created (see
+/// `Schema::create_or_complete`). Callers reach it only when the table is
+/// missing or the upgrade created it.
+pub(crate) async fn create_features(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    Schema::create_or_complete(manager, FEATURES_TABLE, |t| {
+        t.unsigned_id();
+        t.string("name");
+        t.string("scope");
+        t.text("value");
+        t.date_time("created_at").precision(0).nullable();
+        t.date_time("updated_at").precision(0).nullable();
+        t.unique(&["name", "scope"]);
+    })
+    .await
+}
+
+/// Create `suprnova_feature_details` unless it exists.
+pub(crate) async fn create_details(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    if manager.has_table(DETAILS_TABLE).await? {
+        return Ok(());
+    }
+    Schema::create(manager, DETAILS_TABLE, |t| {
+        t.string("name");
+        t.string("scope");
+        t.text("description").nullable();
+        t.string("updated_by").nullable();
+        t.primary(&["name", "scope"]);
+    })
+    .await
 }
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let backend = manager.get_database_backend();
-        manager
-            .create_table(
-                Table::create()
-                    .table(Features::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(Features::Id)
-                            .big_integer()
-                            .not_null()
-                            .auto_increment()
-                            .primary_key(),
-                    )
-                    .col(ColumnDef::new(Features::Name).string_len(255).not_null())
-                    .col(
-                        ColumnDef::new(Features::ScopeKey)
-                            .string_len(255)
-                            .not_null()
-                            .default(""),
-                    )
-                    .col(ColumnDef::new(Features::Enabled).boolean().not_null())
-                    .col(ColumnDef::new(Features::Description).text().null())
-                    .col(ColumnDef::new(Features::UpdatedBy).string_len(255).null())
-                    .col(
-                        utc_timestamp_column(Features::CreatedAt, backend)
-                            .not_null()
-                            .default(Expr::current_timestamp()),
-                    )
-                    .col(
-                        utc_timestamp_column(Features::UpdatedAt, backend)
-                            .not_null()
-                            .default(Expr::current_timestamp()),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-
-        create_index_if_missing(
-            manager,
-            "features",
-            Index::create()
-                .name("idx_features_name_scope_key")
-                .col(Features::Name)
-                .col(Features::ScopeKey)
-                .unique()
-                .to_owned(),
-        )
-        .await
+        if !manager.has_table(FEATURES_TABLE).await? {
+            create_features(manager).await?;
+        }
+        create_details(manager).await
     }
 
+    /// Drops the framework's details table and leaves `features`: a table
+    /// Pennant created looks the same as the one this migration creates,
+    /// and rolling back must not drop Pennant's flags with it.
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(Features::Table).to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(Alias::new(DETAILS_TABLE))
+                    .if_exists()
+                    .to_owned(),
+            )
             .await
     }
 }

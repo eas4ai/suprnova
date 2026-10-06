@@ -50,6 +50,12 @@ pub struct RenderKeyInput {
     pub epoch: u64,
     /// Declared variance.
     pub variance: VarianceDescriptor,
+    /// The public root the representation was rendered under: the path a
+    /// reverse proxy serves the application at, without a trailing slash,
+    /// and the empty string at the host root. A page rendered under one
+    /// root names its links, assets and endpoints under it, so the root is
+    /// part of every key and no policy can leave it out.
+    pub root: String,
 }
 
 /// A purpose-separated digest of one representation identity.
@@ -119,6 +125,13 @@ impl RenderKey {
                     sink(&[11]);
                     input.variance.write_canonical(sink);
                 });
+                // The host root mixes nothing, so every key derived at the
+                // host root stays the one it was before roots existed, and
+                // entries stored then are still found. Any other root is a
+                // part of its own, so no two roots share a key.
+                if !input.root.is_empty() {
+                    mac.part(&[&[12][..], input.root.as_bytes()]);
+                }
             })
             .map_err(|_| invalid())?;
         Ok(Self { digest })
@@ -172,6 +185,7 @@ impl RenderKey {
             build: BuildId::parse("test").expect("'test' is a valid build id"),
             epoch: 1,
             variance: VarianceDescriptor::new(),
+            root: String::new(),
         };
         Self::derive(&input, keys).expect("bounded fixture input always derives")
     }

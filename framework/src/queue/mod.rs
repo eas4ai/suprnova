@@ -16,6 +16,7 @@ pub mod inspect;
 pub mod job;
 pub mod memory;
 pub mod middleware;
+pub mod migrations;
 pub mod null;
 pub mod outcome;
 pub mod redis;
@@ -1329,8 +1330,16 @@ impl Queue {
         let Some(record) = store.find(id).await? else {
             return Ok(false);
         };
-        let mut env = Envelope::from_json(&record.envelope_json)
-            .map_err(|e| FrameworkError::internal(format!("retry_failed: decode envelope: {e}")))?;
+        // A row a Laravel application wrote into a shared `failed_jobs`
+        // holds Laravel's payload, which is no Suprnova job: pushing it
+        // anywhere would run nothing. Laravel retries its own rows.
+        let mut env = Envelope::from_json(&record.envelope_json).map_err(|e| {
+            FrameworkError::internal(format!(
+                "the failed job [{id}] cannot be retried: its payload is not a Suprnova \
+                 job ({e}). A Laravel application on the same database wrote it; retry it \
+                 with Laravel's `queue:retry`"
+            ))
+        })?;
         env.attempts = 0;
         env.available_at = crate::clock::now();
         env.idempotency_key = None;

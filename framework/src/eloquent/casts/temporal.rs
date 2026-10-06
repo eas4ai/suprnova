@@ -382,27 +382,27 @@ impl IntoDynCast for AsOptionalNativeDateTime {
 
 // ---- AsNaiveDateTime ----------------------------------------------------------
 
-/// Cast `chrono::DateTime<Utc>` ↔ a native date-time column without a
-/// zone, holding the UTC wall clock: `timestamp` on Postgres, `DATETIME`
-/// on MySQL, text on SQLite. A MySQL `TIMESTAMP` column needs
-/// [`AsNativeDateTime`]: the MySQL driver reads it only as a zone-aware
-/// value.
+/// Cast `chrono::DateTime<Utc>` ↔ a native date-time column holding the
+/// UTC wall clock: `timestamp` on Postgres, `DATETIME` on MySQL, text on
+/// SQLite, and the `TIMESTAMP` Laravel's `timestamps()` creates on MySQL.
 ///
-/// This is the shape Laravel's `timestamps()` creates on Postgres. The
-/// Postgres driver will not read such a column as a zone-aware value,
-/// so [`AsNativeDateTime`] cannot serve it. Declare it per field, like
-/// [`AsNativeDateTime`].
+/// It reads every one of those through
+/// [`StoredDateTime`](crate::database::StoredDateTime), which also reads a
+/// zone-aware column, and writes the UTC wall clock, which each of them
+/// stores as given (the drivers run every session in UTC). So one model
+/// over a table Laravel created reads and writes it on SQLite, MySQL and
+/// Postgres alike. Declare it per field, like [`AsNativeDateTime`].
 pub struct AsNaiveDateTime;
 
 impl Cast for AsNaiveDateTime {
     type Runtime = DateTime<Utc>;
-    type Storage = NaiveDateTime;
+    type Storage = crate::database::StoredDateTime;
 
-    fn to_storage(v: &DateTime<Utc>) -> Result<NaiveDateTime, FrameworkError> {
-        Ok(v.naive_utc())
+    fn to_storage(v: &DateTime<Utc>) -> Result<crate::database::StoredDateTime, FrameworkError> {
+        Ok(crate::database::StoredDateTime::from(v.naive_utc()))
     }
 
-    fn from_storage(s: &NaiveDateTime) -> Result<DateTime<Utc>, FrameworkError> {
+    fn from_storage(s: &crate::database::StoredDateTime) -> Result<DateTime<Utc>, FrameworkError> {
         Ok(s.and_utc())
     }
 
@@ -424,13 +424,17 @@ pub struct AsOptionalNaiveDateTime;
 
 impl Cast for AsOptionalNaiveDateTime {
     type Runtime = Option<DateTime<Utc>>;
-    type Storage = Option<NaiveDateTime>;
+    type Storage = Option<crate::database::StoredDateTime>;
 
-    fn to_storage(v: &Option<DateTime<Utc>>) -> Result<Option<NaiveDateTime>, FrameworkError> {
-        Ok(v.map(|moment| moment.naive_utc()))
+    fn to_storage(
+        v: &Option<DateTime<Utc>>,
+    ) -> Result<Option<crate::database::StoredDateTime>, FrameworkError> {
+        Ok(v.map(|moment| crate::database::StoredDateTime::from(moment.naive_utc())))
     }
 
-    fn from_storage(s: &Option<NaiveDateTime>) -> Result<Option<DateTime<Utc>>, FrameworkError> {
+    fn from_storage(
+        s: &Option<crate::database::StoredDateTime>,
+    ) -> Result<Option<DateTime<Utc>>, FrameworkError> {
         Ok(s.map(|moment| moment.and_utc()))
     }
 
@@ -569,7 +573,7 @@ mod tests {
     fn the_naive_casts_store_the_utc_wall_clock() {
         let moment = Utc.with_ymd_and_hms(2031, 3, 14, 9, 30, 0).unwrap();
         let stored = AsNaiveDateTime::to_storage(&moment).unwrap();
-        assert_eq!(stored.to_string(), "2031-03-14 09:30:00");
+        assert_eq!(stored.naive_utc().to_string(), "2031-03-14 09:30:00");
         assert_eq!(AsNaiveDateTime::from_storage(&stored).unwrap(), moment);
         assert_eq!(
             AsOptionalNaiveDateTime::to_storage(&Some(moment)).unwrap(),

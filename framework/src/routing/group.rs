@@ -1,5 +1,6 @@
 //! Route grouping with shared prefix and middleware
 
+use super::binding::{HandlerRecord, RouteBindingOptions, boxed_missing, record_of};
 use super::macros::{convert_route_params, join_paths};
 use super::router::ANY_METHODS;
 use super::{BoxedHandler, RouteBuilder, Router};
@@ -46,6 +47,8 @@ pub struct GroupBuilder {
     middleware: Vec<BoxedMiddleware>,
     /// Session block to register for every route in this group
     block: Option<SessionBlock>,
+    /// Route-binding settings for every route in this group.
+    bindings: RouteBindingOptions,
 }
 
 /// A route registered within a group
@@ -53,6 +56,8 @@ struct GroupRoute {
     method: GroupMethod,
     path: String,
     handler: Arc<BoxedHandler>,
+    /// What `#[handler]` recorded about the handler, if anything.
+    record: Option<&'static HandlerRecord>,
 }
 
 #[derive(Clone, Copy)]
@@ -119,6 +124,31 @@ impl GroupBuilder {
     /// this group (SESS-001); see [`RouteBuilder::block_session`].
     pub fn block_session(mut self, block: SessionBlock) -> Self {
         self.block = Some(block);
+        self
+    }
+
+    /// Scope every bound child parameter of the group's routes to its
+    /// parent; see [`RouteBuilder::scope_bindings`].
+    pub fn scope_bindings(mut self) -> Self {
+        self.bindings.scoped = Some(true);
+        self
+    }
+
+    /// Never scope the bindings of the group's routes; see
+    /// [`RouteBuilder::without_scoped_bindings`].
+    pub fn without_scoped_bindings(mut self) -> Self {
+        self.bindings.scoped = Some(false);
+        self
+    }
+
+    /// Answer with `handler` when a binding of a route in the group finds
+    /// nothing; see [`RouteBuilder::missing`].
+    pub fn missing<H, Fut>(mut self, handler: H) -> Self
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.bindings.missing = Some(boxed_missing(handler));
         self
     }
 
@@ -217,6 +247,13 @@ impl GroupBuilder {
             if let Some(block) = self.block {
                 register_route_block(&http_method, &full_path, block);
             }
+            self.outer_router
+                .note_route_record(http_method.clone(), &full_path, route.record);
+            let options = self
+                .outer_router
+                .bindings
+                .options_mut(http_method, &full_path);
+            *options = std::mem::take(options).within(&self.bindings);
         }
 
         Ok(self.outer_router)
@@ -246,6 +283,7 @@ impl GroupRouter {
             method: GroupMethod::Get,
             path: path.to_string(),
             handler: Arc::new(boxed),
+            record: record_of::<H>(),
         });
         self
     }
@@ -261,6 +299,7 @@ impl GroupRouter {
             method: GroupMethod::Post,
             path: path.to_string(),
             handler: Arc::new(boxed),
+            record: record_of::<H>(),
         });
         self
     }
@@ -276,6 +315,7 @@ impl GroupRouter {
             method: GroupMethod::Put,
             path: path.to_string(),
             handler: Arc::new(boxed),
+            record: record_of::<H>(),
         });
         self
     }
@@ -291,6 +331,7 @@ impl GroupRouter {
             method: GroupMethod::Delete,
             path: path.to_string(),
             handler: Arc::new(boxed),
+            record: record_of::<H>(),
         });
         self
     }
@@ -306,6 +347,7 @@ impl GroupRouter {
             method: GroupMethod::Patch,
             path: path.to_string(),
             handler: Arc::new(boxed),
+            record: record_of::<H>(),
         });
         self
     }
@@ -326,6 +368,7 @@ impl GroupRouter {
             method: GroupMethod::Head,
             path: path.to_string(),
             handler: Arc::new(boxed),
+            record: record_of::<H>(),
         });
         self
     }
@@ -345,6 +388,7 @@ impl GroupRouter {
             method: GroupMethod::Options,
             path: path.to_string(),
             handler: Arc::new(boxed),
+            record: record_of::<H>(),
         });
         self
     }
@@ -426,7 +470,7 @@ impl GroupRouter {
         }
         let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         let arc = Arc::new(boxed);
-        Ok(self.push_routes_for_methods(path, group_methods, arc))
+        Ok(self.push_routes_for_methods(path, group_methods, arc, record_of::<H>()))
     }
 
     /// Internal helper behind [`GroupRouter::methods`], and so behind
@@ -438,12 +482,14 @@ impl GroupRouter {
         path: &str,
         methods: impl IntoIterator<Item = GroupMethod>,
         handler: Arc<BoxedHandler>,
+        record: Option<&'static HandlerRecord>,
     ) -> Self {
         for method in methods {
             self.routes.push(GroupRoute {
                 method,
                 path: path.to_string(),
                 handler: handler.clone(),
+                record,
             });
         }
         self
@@ -493,6 +539,7 @@ impl Router {
             prefix: prefix.to_string(),
             middleware: Vec::new(),
             block: None,
+            bindings: RouteBindingOptions::default(),
         }
     }
 }

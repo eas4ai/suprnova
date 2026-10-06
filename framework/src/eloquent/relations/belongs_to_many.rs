@@ -1521,3 +1521,54 @@ async fn detach_one<C: ConnectionTrait>(
         .map_err(|e| FrameworkError::database(e.to_string()))?;
     Ok(())
 }
+
+/// A scoped child through a `BelongsToMany` is a related row a pivot row
+/// of this parent points at. The pivot is read in a subquery, so the
+/// child's own query stays a query on its table alone.
+impl<L, R, P> super::RouteChildRelation<R> for BelongsToMany<L, R, P>
+where
+    L: EloquentModel,
+    R: Model,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+    P: Model + 'static,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    fn __route_child_query(self) -> Result<Builder<R>, FrameworkError> {
+        let (sql, values) = super::owned_through_table(
+            R::TABLE,
+            &self.related_key,
+            &self.pivot_table,
+            &self.pivot_related_key,
+            &[(
+                self.pivot_foreign_key.as_str(),
+                self.parent_key_value.clone(),
+            )],
+            "",
+        )?;
+        Ok(R::query().filter_raw(sql, values))
+    }
+}

@@ -2196,3 +2196,126 @@ use suprnova::Schedule;
         "a part of a name is not the name"
     );
 }
+
+/// The three scaffold frontends.
+const FRONTENDS: [&str; 3] = ["vue", "react", "svelte"];
+
+/// PFX-005: each scaffold Vite config builds with the relative base `./`,
+/// so the built entry loads its code-split chunks and assets from where the
+/// server's tags put it, at `/` and under a path prefix alike.
+#[test]
+fn pfx_005_every_vite_config_sets_the_relative_base() {
+    for frontend in FRONTENDS {
+        let config = read(&format!(
+            "src/templates/files/frontend/{frontend}/vite.config.ts.tpl"
+        ));
+        let bases: Vec<&str> = config
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("base:"))
+            .collect();
+        assert_eq!(
+            bases,
+            ["base: './',"],
+            "{frontend}/vite.config.ts.tpl must set `base` to './' once"
+        );
+    }
+}
+
+/// PFX-005: no scaffold frontend module imports a stylesheet or a module by a
+/// path that starts with `/`, which would resolve against the host root
+/// instead of the entry script's URL. `index.html.tpl` is the development
+/// entry, which no server under a prefix ever serves.
+#[test]
+fn pfx_005_no_frontend_template_imports_by_a_root_absolute_path() {
+    let frontend = cli_root().join("src/templates/files/frontend");
+    let refused = [
+        "from '/",
+        "from \"/",
+        "import '/",
+        "import \"/",
+        "import('/",
+        "import(\"/",
+        "@import '/",
+        "@import \"/",
+        "url(/",
+        "url('/",
+        "url(\"/",
+    ];
+    let mut offenders = Vec::new();
+    let mut seen = 0usize;
+    visit(&frontend, &mut |path, body| {
+        if path.file_name().and_then(|name| name.to_str()) == Some("index.html.tpl") {
+            return;
+        }
+        seen += 1;
+        for (index, line) in body.lines().enumerate() {
+            if refused.iter().any(|needle| line.contains(needle)) {
+                offenders.push(format!("{}:{}: {}", path.display(), index + 1, line.trim()));
+            }
+        }
+    });
+    assert!(seen > 0, "walked zero frontend templates");
+    assert!(
+        offenders.is_empty(),
+        "root-absolute imports:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// PFX-012: the scaffold registers the framework's `root` shared prop.
+#[test]
+fn pfx_012_the_scaffold_registers_the_root_share() {
+    let bootstrap = read("src/templates/files/backend/bootstrap.rs.tpl");
+    assert!(
+        bootstrap.contains("App::register_inertia_shared(Arc::new(RootShare::around("),
+        "the scaffold bootstrap must register `RootShare`"
+    );
+}
+
+/// PFX-012: every page the scaffold writes - the auth pages, the dashboard
+/// and the error page - builds each URL it posts to, visits or links from
+/// the `root` prop, never from a literal application path.
+#[test]
+fn pfx_012_scaffold_pages_build_every_url_from_the_root_prop() {
+    let literal = [
+        "post('/",
+        "post(\"/",
+        "visit('/",
+        "visit(\"/",
+        "get('/",
+        "get(\"/",
+        "href=\"/",
+        "href='/",
+        "href={'/",
+        "href={\"/",
+    ];
+    let mut offenders = Vec::new();
+    let mut pages = 0usize;
+    for frontend in FRONTENDS {
+        let dir = cli_root().join(format!("src/templates/files/frontend/{frontend}/src/pages"));
+        visit(&dir, &mut |path, body| {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if name.starts_with("Home.") {
+                return;
+            }
+            pages += 1;
+            for (index, line) in body.lines().enumerate() {
+                if literal.iter().any(|needle| line.contains(needle)) {
+                    offenders.push(format!("{}:{}: {}", path.display(), index + 1, line.trim()));
+                }
+            }
+            if !body.contains("usePage<{ root: string }>().props") || !body.contains("${root}/") {
+                offenders.push(format!(
+                    "{}: builds no URL from the `root` prop",
+                    path.display()
+                ));
+            }
+        });
+    }
+    assert_eq!(pages, 21, "seven pages for each of the three frontends");
+    assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}

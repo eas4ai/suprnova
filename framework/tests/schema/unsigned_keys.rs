@@ -50,7 +50,7 @@ pub struct UkOrder {
 impl EntityExt for uk_order::Entity {}
 
 /// An `i64`-keyed model, for what a route segment that is not a number
-/// answers today. Its table is never read: the segment fails to parse first.
+/// answers. Its table is never read: the segment fails to parse first.
 #[model(table = "uk_signed_orders", fillable = ["label"])]
 pub struct UkSignedOrder {
     pub id: i64,
@@ -150,10 +150,10 @@ pub(super) fn message(body: &str) -> String {
 
 /// A `u64`-keyed model binds from a route through `RouteParam<M>` and as its
 /// bare SeaORM model, and finds its row. A segment that is not a number
-/// answers 400, as it does for an `i64` key, naming the type the model
-/// declares rather than the type that stores it. On MySQL a key at the top
-/// of the `u64` range binds too. It fails to compile while the stored key
-/// type cannot be parsed from a route segment or displayed.
+/// answers 404, as a missing row does, naming the model and not repeating
+/// the segment (BIND-002). On MySQL a key at the top of the `u64` range
+/// binds too. It fails to compile while the stored key type cannot be
+/// parsed from a route segment or displayed.
 pub async fn route_binding_finds_a_u64_key(conn: &DatabaseConnection) {
     create_tables(conn).await;
     let _guard = TestContainer::fake();
@@ -182,16 +182,16 @@ pub async fn route_binding_finds_a_u64_key(conn: &DatabaseConnection) {
     let (signed_status, signed_body) = get(addr, "/signed-orders/abc").await;
     assert_eq!(
         (signed_status, message(&signed_body).as_str()),
-        (400, "Invalid parameter 'abc': expected i64"),
+        (404, "UkSignedOrder not found"),
         "what an i64 key answers"
     );
-    for path in ["/orders/abc", "/raw-orders/abc"] {
+    for (path, named) in [
+        ("/orders/abc", "UkOrder not found"),
+        ("/raw-orders/abc", "uk_order not found"),
+    ] {
         let (status, body) = get(addr, path).await;
-        assert_eq!(
-            (status, message(&body).as_str()),
-            (400, "Invalid parameter 'abc': expected u64"),
-            "{path}"
-        );
+        assert_eq!((status, message(&body).as_str()), (404, named), "{path}");
+        assert!(!body.contains("abc"), "{path} repeated the value: {body}");
     }
 
     if conn.get_database_backend() == DbBackend::MySql {

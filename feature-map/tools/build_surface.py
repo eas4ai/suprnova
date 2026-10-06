@@ -25,6 +25,7 @@ REV = sys.argv[5]
 
 # Source-file prefix -> chapter (longest prefix wins).
 PATH_RULES = {
+    "framework/src/laravel.rs": "laravel-database",
     "framework/src/app/maintenance": "deployment",
     "framework/src/profiling": "deployment",
     "framework/src/app/paths": "structure",
@@ -161,6 +162,7 @@ MACROS = {
     "workflow": "workflows", "workflow_step": "workflows", "inertia_response": "frontend-inertia-responses",
     "InertiaProps": "frontend-typescript-types", "redirect": "responses",
     "InputNames": "data", "authorize": "authorization",
+    "RouteBinding": "routing", "resource": "routing", "api_resource": "routing",
 }
 # External crates re-exported by `suprnova`.
 EXTERNAL = {
@@ -201,7 +203,8 @@ TABLE_RULES = [  # (source-path prefix, chapter)
     ("framework/src/workflow/", "workflows"), ("framework/src/auth_flows/", "auth-flows"),
     ("framework/src/payments/", "payments"), ("framework/src/render_cache/", "render-cache-deployment"),
     ("crates/suprnova-magnetar/", "auth-flows"), ("suprnova-cli/src/templates/", "cli-new"),
-    ("framework/src/queue/", "queues"),
+    ("framework/src/queue/", "queues"), ("framework/src/notifications/", "notifications"),
+    ("framework/src/session/", "session"),
 ]
 
 chapters = {p.stem for p in MANUAL.glob("*.md")} - {"README", "documentation"}

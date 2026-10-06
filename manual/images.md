@@ -80,12 +80,19 @@ filled memory.
 | `cover(w, h)` | Fill the box exactly, cropping the overflow from the centre |
 | `contain(w, h)` | Fit inside the box, preserving aspect ratio. No padding |
 | `rotate(degrees)` | Rotate clockwise by any angle, growing the canvas to fit |
-| `flip_vertically()` / `flip_horizontally()` | Laravel's `flip` and `flop` |
+| `rotate_with_background(degrees, color)` | Rotate, filling the exposed corners with a `Color` |
+| `flip_vertically()` / `flip_horizontally()` | Mirror top to bottom, or left to right |
+| `flip()` / `flop()` | Laravel's names for the same two mirrors |
+| `orient()` | Apply the source's EXIF orientation here, if decoding did not |
+| `transform(transformation)` | Add any `Transformation`, a custom one included |
 | `blur(amount)` | Gaussian blur, `0..=100`. `0` is a no-op |
 | `sharpen(amount)` | Unsharp mask, `0..=100`. `0` is a no-op. `50` is the classic strength |
 | `grayscale()` | Desaturate. Spelled the Laravel way |
 | `to_format(format)` | Choose the output container: `Jpeg`, `Png`, `WebP`, `WebPLossless`, `Gif` or `Bmp` |
+| `to_webp()`, `to_jpg()`, `to_jpeg()`, `to_png()`, `to_gif()`, `to_bmp()` | Shortcuts for `to_format` |
 | `quality(q)` | Encode quality, clamped to `1..=100`, default `70` |
+| `optimize(format, q)` | `to_format(format).quality(q)` in one call |
+| `using(driver)` | Process this image with the `oxideav` or `magick` driver (see [Backends](#backends)) |
 
 Values that would be nonsense are clamped rather than rejected:
 `blur(500)` records `100`, `quality(0)` records `1`. A crop that falls
@@ -94,8 +101,169 @@ someone's crop box is worse than telling them.
 
 `rotate` takes arbitrary angles. A 90-degree multiple takes an exact
 axis-aligned path with no resampling; anything else is bilinear, and the
-canvas grows so no pixel is clipped. The exposed corners are transparent
-where the output format has an alpha channel.
+canvas grows so no pixel is clipped.
+
+The corners a rotation exposes are white when the output is JPEG or GIF,
+which cannot hold transparency, and transparent when it is PNG, WebP or
+BMP. `rotate_with_background` names the colour instead. JPEG and GIF
+output also flattens any transparency in the image onto that colour, or
+onto white when the pipeline does not rotate:
+
+```rust
+use suprnova::{Color, FrameworkError, Image};
+
+async fn tilted() -> Result<Vec<u8>, FrameworkError> {
+    Image::from_path("storage/photos/logo.png")
+        .rotate_with_background(15.0, Color::from_hex("#1e293b")?)
+        .to_jpg()
+        .to_bytes()
+        .await
+}
+```
+
+`Color` is a typed value: `Color::rgb`, `Color::rgba`, `Color::WHITE`,
+`Color::BLACK`, `Color::TRANSPARENT`, or `Color::from_hex` for a colour
+that arrives as text (`rgb`, `rrggbb` or `rrggbbaa`, with or without
+`#`). A string that is not a hex colour fails at `from_hex`, in your
+code, rather than inside a driver.
+
+## Orientation
+
+A phone stores a photo's pixels as the sensor read them and records, in
+the EXIF `Orientation` tag, how to turn them for display. Both drivers
+apply the tag as they decode, as Laravel's do, so a portrait photo comes
+out upright. All eight orientations are quarter turns and mirrors, so
+applying one moves pixels and never resamples them.
+
+The tag is read from a JPEG's last Exif `APP1` segment, wherever it sits
+(a progressive JPEG can carry one between its scans), a PNG's `eXIf`
+chunk, and a WebP's `EXIF` chunk. Reading it never inflates a compressed
+chunk. Both drivers read the tag in these places, with the same reader,
+and turn the image with a fixed quarter turn or mirror, so a file comes
+out the same way under either. ImageMagick's own orientation sources, a
+PNG's `Raw profile type exif` text chunk and its `orNT` chunk, are not
+used. For a format the framework cannot read (HEIC, TIFF), the `magick`
+driver leaves orientation to ImageMagick's `-auto-orient`.
+
+Turning the image holds a second full-size plane beside the decoded one,
+and the decode estimate counts it (see
+[What a decode costs](#what-a-decode-costs)). `ImageDriver::dimensions`
+reports a tagged source at its turned size, and `dominant_color` at its
+average, without turning the pixels.
+
+| Var | Default | Purpose |
+|---|---|---|
+| `IMAGE_AUTO_ORIENT` | `true` | Apply the EXIF orientation on decode. `false`, `0`, `no` or `off` turn it off |
+
+With `IMAGE_AUTO_ORIENT=false` the pixels keep the sensor's orientation,
+and the output keeps the `Orientation` tag, so a viewer can still turn
+the image. `orient()` then applies the tag at the point in the pipeline
+where you put it:
+
+```rust
+use suprnova::{FrameworkError, Image};
+
+// With IMAGE_AUTO_ORIENT=false: crop in sensor coordinates, then turn.
+async fn crop_then_turn() -> Result<Vec<u8>, FrameworkError> {
+    Image::from_path("storage/photos/scan.jpg")
+        .crop(1200, 800, 40, 40)
+        .orient()
+        .to_bytes()
+        .await
+}
+```
+
+When decoding has already oriented the image, `orient()` does nothing, so
+an image is never turned twice.
+
+## Metadata
+
+Processed output keeps two things of the source's metadata and drops the
+rest:
+
+- **The ICC profile**, so the colours read the same. JPEG output carries
+  it in `APP2` segments, PNG in an `iCCP` chunk, WebP in an `ICCP` chunk,
+  and BMP in a V5 header. A PNG's `cHRM`, `gAMA`, `sRGB` and `cICP`
+  chunks describe its colour too, and PNG output keeps them with the
+  profile.
+- **An `Orientation` tag**, alone in its own EXIF block, when orientation
+  was not applied: `IMAGE_AUTO_ORIENT=false` with no `orient()` in the
+  pipeline. Only JPEG, PNG and WebP can hold one.
+
+Everything else goes: EXIF (and with it the GPS position), XMP, IPTC,
+JPEG comments, PNG `tEXt`, `zTXt` and `iTXt` chunks, and the date and
+time an encoder adds by itself, such as PNG's `tIME` chunk and
+ImageMagick's `date:` text. A user's upload does not publish where it was
+taken.
+
+A profile must describe the pixels it travels with. GIF holds no profile
+here, so GIF output has its colours converted from the profile to sRGB.
+The default driver writes every format as RGB, so a grey profile no
+longer describes its output: the pixels are converted from it to sRGB,
+and the profile and its PNG colour chunks are dropped. The `magick`
+driver keeps a grey profile on output it writes as grey.
+
+A profile is carried only when its length is the size its own header
+gives. A profile is a few kilobytes, but a PNG's is compressed, and a
+small file can hold one that inflates a thousand times over. So the
+driver reads the header first, and the pixels it holds, the profile, and
+the copy of it the output carries must fit `IMAGE_MAX_ALLOC_BYTES`
+together. A profile that does not is refused like any other decode over
+the limit. The `magick` driver reads no more than the header of a source
+profile, and checks the one ImageMagick writes without holding it.
+
+A CMYK or Lab profile cannot describe RGB output, so it is dropped. The
+default driver does not read CMYK JPEGs at all. Under `magick`,
+ImageMagick converts CMYK pixels to RGB with its own formula, not through
+the profile, so colours can shift.
+
+## Custom transformations
+
+A custom transformation is a function over decoded pixels that you
+register by name, and both drivers run it at its place in the pipeline:
+
+```rust
+use suprnova::{FrameworkError, Image, ImagePixels, Transformation, register_transformation};
+
+pub fn register() {
+    // Invert every colour, keeping the alpha.
+    register_transformation("invert", |mut pixels: ImagePixels| {
+        for pixel in pixels.pixels_mut().chunks_mut(4) {
+            for channel in &mut pixel[..3] {
+                *channel = !*channel;
+            }
+        }
+        Ok(pixels)
+    });
+}
+
+async fn negative() -> Result<Vec<u8>, FrameworkError> {
+    Image::from_path("storage/photos/hero.jpg")
+        .resize(800, 600)
+        .transform(Transformation::custom("invert"))
+        .to_png()
+        .to_bytes()
+        .await
+}
+```
+
+`ImagePixels` holds packed 8-bit RGBA, rows top to bottom. The function
+receives the pixels as the steps before it left them and returns the
+pixels the steps after it work on; to change the size, build a new
+`ImagePixels` with `ImagePixels::new(width, height, bytes)`. The returned
+size meets the same `IMAGE_MAX_DIMENSION` and `IMAGE_MAX_ALLOC_BYTES`
+caps a resize does.
+
+Register during bootstrap. Registering a name again replaces its
+function. An image that names a transformation nothing is registered
+under fails with an error that names it.
+
+Under the `magick` driver a custom step runs in Rust between two
+ImageMagick runs, which pass the image over stdout and stdin as a PNG
+that keeps the ICC profile and, while orientation is still to be applied,
+the EXIF. A pipeline with a custom step ends with the same profile and
+orientation tag as one without. The step contributes no ImageMagick
+argument.
 
 ## Terminals
 
@@ -108,9 +276,13 @@ occupies a blocking worker.
 |---|---|
 | `to_bytes()` | `Vec<u8>` of the encoded file |
 | `to_response()` | An `HttpResponse` with the right `Content-Type` |
+| `to_base64()` | The encoded file as standard, padded base64 |
+| `to_data_uri()` | A `data:` URI: the media type and the base64 bytes |
 | `save(path)` | Writes to the filesystem |
-| `store(disk, path)` | Writes to a `Storage` disk |
+| `store(directory, disk)` | Writes to a `Storage` disk under a generated name, returning the path |
+| `store_as(directory, name, disk)` | Writes to a `Storage` disk as `directory/name`, returning the path |
 | `dimensions()` | `(width, height)` of the **processed** image |
+| `width()` / `height()` | One side of `dimensions()` |
 | `mime_type()` | The **processed** image's media type |
 | `dominant_color()` | The average colour, as `#rrggbb` |
 
@@ -204,21 +376,40 @@ An opaque one is therefore written lossy.
 
 ## Storage
 
-`from_disk` and `store` work against any registered `Storage` disk, so a
-resize-and-restore round trip never touches local paths:
+`from_disk`, `store` and `store_as` work against any registered `Storage`
+disk, so a resize-and-restore round trip never touches local paths.
+
+`store(directory, disk)` stores the result in `directory` under a
+generated name: 40 random letters and digits and the output format's
+extension. `store_as(directory, name, disk)` stores it as
+`directory/name`. Both return the path they wrote, with the slashes at
+the ends of `directory` and `name` trimmed. `disk` names a disk, and
+`None` means the application's default disk (`FILESYSTEM_DISK`):
 
 ```rust
 use suprnova::{FrameworkError, Image};
 
-async fn make_web_copy() -> Result<(), FrameworkError> {
-    Image::from_disk("uploads", "originals/42.png")
+async fn make_web_copies() -> Result<(String, String), FrameworkError> {
+    // For example "web/8f1Qx...Zt2.webp".
+    let generated = Image::from_disk("uploads", "originals/42.png")
         .scale(1024, 1024)
-        .store("uploads", "web/42.png")
-        .await
+        .to_webp()
+        .store("web", Some("uploads"))
+        .await?;
+
+    // Exactly "web/42.png", on the default disk.
+    let named = Image::from_disk("uploads", "originals/42.png")
+        .scale(1024, 1024)
+        .store_as("web", "42.png", None)
+        .await?;
+
+    Ok((generated, named))
 }
 ```
 
-See [File Storage](filesystem.md) for registering disks.
+There is no `store_publicly`: Suprnova sets visibility per disk, so
+storing on a disk with a public base URL is what makes a file public.
+See [File Storage](filesystem.md) for registering disks and their URLs.
 
 ## Decode limits
 
@@ -294,9 +485,14 @@ bytes:
 | WebP | 1.4 to 2.4 |
 | BMP | 1.0 to 2.1 |
 
+An image that decoding turns by its EXIF orientation needs at least 2
+times width x height x 4 bytes, the decoded plane and the turned one,
+or the table's figure when that is more.
+
 So the default 1 GiB decodes a 48-megapixel photo (8000x6000) in every
 8-bit format, a progressive 4:4:4 JPEG and a PNG of incompressible RGBA
-included. 16-bit PNG holds more and tops out lower, as the table says.
+included, turned or not. 16-bit PNG holds more and tops out lower, as
+the table says.
 Raise `IMAGE_MAX_ALLOC_BYTES` if your users upload larger images, or
 lower it on a small host.
 
@@ -336,6 +532,25 @@ Like Laravel, the image surface is two drivers, chosen with
 | OxideAV | `oxideav` (default) | nothing | PNG, JPEG, WebP, GIF, BMP |
 | ImageMagick | `magick` | ImageMagick 7 on the host | whatever the host's delegates provide |
 
+`IMAGE_DRIVER` sets the driver for the whole process. One image can
+choose its own with `using`, which changes the driver of that image and
+its clones only:
+
+```rust
+use suprnova::{FrameworkError, Image, ImageDriverKind};
+
+// HEIC goes to ImageMagick; every other image stays on the default.
+async fn thumbnail(upload: Vec<u8>, is_heic: bool) -> Result<Vec<u8>, FrameworkError> {
+    let image = Image::from_bytes(upload).cover(320, 320).to_jpg();
+    let image = if is_heic {
+        image.using(ImageDriverKind::Magick)
+    } else {
+        image
+    };
+    image.to_bytes().await
+}
+```
+
 ### `IMAGE_DRIVER=oxideav`
 
 The default. Pure Rust, built on the [OxideAV](https://github.com/OxideAV)
@@ -353,9 +568,12 @@ components), which its decoder, oxideav-mjpeg, refuses.
 ### `IMAGE_DRIVER=magick`
 
 Opt-in. Runs a host-installed ImageMagick 7 binary, piping the image in
-over stdin and reading the result back over stdout - no temp files. The
-binary name comes from `IMAGE_MAGICK_BINARY` and defaults to `magick`;
-a missing binary is a clear error at first use, not a silent fallback.
+over stdin and reading the result back over stdout. The driver writes no
+temporary file. ImageMagick itself copies its stdin into its own
+temporary directory before it decodes, and deletes the copy when it
+exits. The binary name comes from `IMAGE_MAGICK_BINARY` and defaults to
+`magick`; a missing binary is a clear error at first use, not a silent
+fallback.
 
 Choose it when you need input formats the pure-Rust driver does not
 carry - HEIC being the common one. The cost is a host dependency: the
@@ -370,8 +588,11 @@ the same size for it.
 
 Arguments are always a fixed array handed straight to the process, never
 a shell string, and every numeric argument is formatted from an
-already-validated field. There is no argument position user input can
-reach.
+already-validated field. A rotation background is a typed `Color` that
+the driver formats itself. The arguments that choose which metadata
+ImageMagick keeps are fixed strings. A custom transformation adds no
+argument: it runs on the pixels between two runs. There is no argument
+position user input can reach.
 
 When the framework recognises the input, the decoder is named on the
 command line - `png:-` rather than a bare `-`. That matters: given a
@@ -429,7 +650,9 @@ impl ImageDriver for MyDriver {
         // Decode `contents`, replay `pipeline.transformations`, then encode
         // to `pipeline.format` at `pipeline.quality`. Give every
         // `OutputFormat` variant an arm, `WebPLossless` included: the
-        // enum is not `#[non_exhaustive]`.
+        // enum is not `#[non_exhaustive]`. `Transformation` is, so its
+        // match ends in a wildcard arm that returns an error naming the
+        // step. Run a `Transformation::Custom` step with its `apply`.
         todo!()
     }
 
@@ -460,6 +683,10 @@ pub fn register() -> Result<(), FrameworkError> {
 A conforming driver enforces the configured `ImageConfig` limits before
 allocating for a decode. The framework cannot do it on a driver's
 behalf, because it never sees the decoded buffer.
+
+`ImageConfig` is `#[non_exhaustive]`: start from
+`ImageConfig::default()` or `ImageConfig::from_env()` and set the fields
+you change, rather than writing a struct literal.
 
 ### Reaching more formats
 
@@ -527,8 +754,9 @@ compiled into **both** the system ImageMagick binary and the PHP
 and `IMAGE_DRIVER=magick` reads it whenever the host's ImageMagick
 carries the libheif delegate - no extension layer in between. So HEIC
 ingestion works: install ImageMagick with libheif through your
-package manager and flip the env var. The licensing sits where it
-belongs, with the host.
+package manager, and send HEIC uploads to it with
+`using(ImageDriverKind::Magick)`, or set `IMAGE_DRIVER=magick` for every
+image. The licensing sits where it belongs, with the host.
 
 When the `oxideav` driver meets a HEIC file it says so by name, points
 at this chapter, and names both ways forward, rather than returning a
@@ -547,6 +775,28 @@ construction, counting bytes against `IMAGE_MAX_ALLOC_BYTES` as it goes.
 **`contain` does not pad.** It fits the image inside the box and stops
 there; it does not letterbox onto a background. Compose it with a
 background yourself if you need one.
+
+**Metadata is stripped by default.** Laravel's Imagick driver keeps
+every profile, the GPS position included, and its GD driver drops all of
+them, the colour profile included. Suprnova keeps the ICC profile and
+drops the rest, in both drivers, so a stored upload neither leaks where
+it was taken nor shifts colour. Laravel also returns an upload's original
+bytes when the pipeline changes nothing; Suprnova always re-encodes, so
+every output is stripped.
+
+**Rotation keeps transparency where the format holds it.** Laravel fills
+exposed corners with white in every format. Suprnova fills them with
+white for JPEG and GIF and leaves them transparent for PNG, WebP and BMP,
+unless you name a colour.
+
+**A custom transformation is a pixel function.** Laravel's
+`transformUsing` adds a handler to one driver, written against that
+driver's library. Suprnova's `register_transformation` takes a function
+over decoded RGBA that both drivers run, so changing `IMAGE_DRIVER` never
+drops a step, and no custom code reaches an ImageMagick argument.
+
+**No `store_publicly`.** Visibility belongs to the disk in Suprnova, so
+`store` and `store_as` on a public disk are the public variants.
 
 **Resize uses bilinear resampling.** The backend's filter set ships
 nearest-neighbour and bilinear; bilinear is its documented default for

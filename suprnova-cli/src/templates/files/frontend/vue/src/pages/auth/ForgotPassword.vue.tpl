@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { useForm } from '@inertiajs/vue3'
+import { useForm, usePage } from '@inertiajs/vue3'
+
+// The public root the server shares with every page (`RootShare`): empty
+// at the host root, `/billing` behind a proxy that serves the app there.
+// Every URL this page posts to or links is built from it, so one build
+// runs at both.
+const { root } = usePage<{ root: string }>().props
 
 const form = useForm({
   email: '',
@@ -11,7 +17,7 @@ const form = useForm({
 const sent = ref(false)
 
 function submit() {
-  form.post('/forgot-password', {
+  form.post(`${root}/forgot-password`, {
     onSuccess: () => {
       sent.value = true
     },
@@ -67,7 +73,7 @@ function submit() {
         </div>
 
         <div class="text-center">
-          <a href="/login" class="text-indigo-600 hover:text-indigo-500">
+          <a :href="`${root}/login`" class="text-indigo-600 hover:text-indigo-500">
             Back to sign in
           </a>
         </div>

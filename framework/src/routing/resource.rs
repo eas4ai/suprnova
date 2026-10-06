@@ -45,8 +45,21 @@
 //! - [`ResourceRoutes::only`] restricts the generated set to a list.
 //! - [`ResourceRoutes::except`] excludes a list from the default set.
 //! - [`ResourceRoutes::names`] overrides route names per action.
-//! - [`ResourceRoutes::parameters`] renames the path parameter
-//!   (Laravel's `parameters(['users' => 'user_id'])`).
+//! - [`ResourceRoutes::parameters`] renames path parameters by resource
+//!   segment (Laravel's `parameters(['users' => 'user_id'])`).
+//! - [`ResourceRoutes::scoped`], [`ResourceRoutes::with_trashed`] and
+//!   [`ResourceRoutes::missing`] set the routes' binding fields and
+//!   scoping, soft-deleted rows and missing-row answer.
+//!
+//! A dotted name nests: `users.posts` registers `/users/{user}/posts` and
+//! `/users/{user}/posts/{post}` under `users.posts.*`.
+//!
+//! ## Actions that bind
+//!
+//! A [`ResourceController`] action takes the request. For actions that
+//! take bound arguments, `resource!("posts", controllers::posts)` names a
+//! module whose `#[handler]` functions are the actions, found by action
+//! name, and builds a [`ResourceDef`] with the same chain.
 //!
 //! ## Dual-API
 //!
@@ -54,6 +67,7 @@
 //! - `except` (Laravel) + `drop` (Rust) - both alias.
 //! - `names` (Laravel) + `rename` (Rust) - both alias.
 
+use super::binding::{HandlerRecord, MissingHook, RouteBindingOptions, boxed_missing};
 use super::router::{BoxedHandler, Router};
 use crate::FrameworkError;
 use crate::auth::{Auth, Authenticatable};
@@ -138,10 +152,6 @@ impl ResourceAction {
         })
     }
 }
-
-/// Type alias for an async resource handler.
-type ResourceHandlerFn =
-    dyn Fn(Request) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync;
 
 /// Factory that produces the authorization middleware for one resource
 /// action. Built by [`ResourceRoutes::authorize_resource`], invoked once
@@ -282,10 +292,264 @@ fn not_implemented(action: &str) -> Response {
     )
 }
 
+/// What one resource registration says, in either form: its name, its
+/// actions, and how its routes are named, parameterised and bound.
+struct ResourceSpec {
+    name: String,
+    actions: Vec<ResourceAction>,
+    name_overrides: std::collections::HashMap<String, String>,
+    /// The parameter name of the last resource segment (`parameter()`).
+    parameter: Option<String>,
+    /// Parameter names by resource segment (`parameters()`).
+    parameters: std::collections::HashMap<String, String>,
+    /// Binding fields by parameter, set by `scoped()`, which also scopes
+    /// every nested parameter to its parent.
+    binding_fields: Option<std::collections::HashMap<String, String>>,
+    /// The actions that bind soft-deleted rows (`with_trashed()`). An empty
+    /// list means `show`, `edit` and `update`.
+    trashed: Option<Vec<ResourceAction>>,
+    /// What every route answers for a binding that finds nothing.
+    missing: Option<MissingHook>,
+    /// When `true`, route names are not registered. Used by
+    /// nested-or-skip flows that want raw paths without polluting the
+    /// process-global registry.
+    suppress_names: bool,
+    /// When set by `authorize_resource`, produces the per-action
+    /// authorization middleware attached to each generated route.
+    authorize: Option<AuthorizeFactory>,
+}
+
+impl ResourceSpec {
+    fn new(name: &str, actions: &[ResourceAction]) -> Self {
+        Self {
+            name: name.to_string(),
+            actions: actions.to_vec(),
+            name_overrides: std::collections::HashMap::new(),
+            parameter: None,
+            parameters: std::collections::HashMap::new(),
+            binding_fields: None,
+            trashed: None,
+            missing: None,
+            suppress_names: false,
+            authorize: None,
+        }
+    }
+}
+
+/// The handlers of a resource's actions.
+enum ResourceHandlers {
+    /// A [`ResourceController`], whose actions take the request.
+    Controller(Arc<dyn ResourceController>),
+    /// `#[handler]` functions, one per action, with what `#[handler]`
+    /// recorded about each.
+    Functions(
+        Vec<(
+            ResourceAction,
+            Arc<BoxedHandler>,
+            Option<&'static HandlerRecord>,
+        )>,
+    ),
+}
+
+impl ResourceHandlers {
+    fn handler(
+        &self,
+        action: ResourceAction,
+    ) -> Result<(Arc<BoxedHandler>, Option<&'static HandlerRecord>), FrameworkError> {
+        match self {
+            ResourceHandlers::Controller(controller) => {
+                Ok((make_handler(controller.clone(), action), None))
+            }
+            ResourceHandlers::Functions(functions) => functions
+                .iter()
+                .find(|(found, _, _)| *found == action)
+                .map(|(_, handler, record)| (handler.clone(), *record))
+                .ok_or_else(|| {
+                    FrameworkError::internal(format!(
+                        "the resource has no `{}` function for its `{}` action",
+                        action.key(),
+                        action.key()
+                    ))
+                }),
+        }
+    }
+}
+
+/// The builder methods both resource forms share. Each acts on
+/// `self.spec`.
+macro_rules! resource_spec_methods {
+    () => {
+        /// Override route names per action. Pairs are
+        /// `(action_key, new_name)`, e.g. `("index", "posts.list")`.
+        /// Mirrors Laravel's `names(['index' => 'posts.list'])`.
+        ///
+        /// Unknown action keys are silently ignored (matching Laravel's
+        /// permissiveness - typos surface as the default name still being
+        /// registered).
+        pub fn names<'a, I>(mut self, overrides: I) -> Self
+        where
+            I: IntoIterator<Item = (&'a str, &'a str)>,
+        {
+            for (key, name) in overrides {
+                if ResourceAction::from_key(key).is_some() {
+                    self.spec
+                        .name_overrides
+                        .insert(key.to_string(), name.to_string());
+                }
+            }
+            self
+        }
+
+        /// Rust-side alias of [`Self::names`].
+        pub fn rename<'a, I>(self, overrides: I) -> Self
+        where
+            I: IntoIterator<Item = (&'a str, &'a str)>,
+        {
+            self.names(overrides)
+        }
+
+        /// Override the path-parameter name of the resource itself, the
+        /// last segment of a nested name, from the default (the singular
+        /// of the resource name - e.g. `posts` → `{post}`). Mirrors a
+        /// single-pair `parameters(['posts' => 'post_id'])` call.
+        pub fn parameter(mut self, name: &str) -> Self {
+            self.spec.parameter = Some(name.to_string());
+            self
+        }
+
+        /// Rename path parameters by resource segment: pairs are
+        /// `(segment, parameter)`, e.g. `[("users", "author")]` makes
+        /// `users.posts` register `/users/{author}/posts/{post}`. Mirrors
+        /// Laravel's `parameters(['users' => 'author'])`.
+        pub fn parameters<'a, I>(mut self, renames: I) -> Self
+        where
+            I: IntoIterator<Item = (&'a str, &'a str)>,
+        {
+            for (segment, parameter) in renames {
+                self.spec
+                    .parameters
+                    .insert(segment.to_string(), parameter.to_string());
+            }
+            self
+        }
+
+        /// Scope the resource's bindings: each pair gives a parameter a
+        /// binding field, `[("post", "slug")]` registering `{post:slug}`,
+        /// and every nested parameter is looked up through its parent's
+        /// relation (BIND-006). Mirrors Laravel's `scoped(['post' => 'slug'])`;
+        /// an empty list scopes without fields.
+        pub fn scoped<'a, I>(mut self, fields: I) -> Self
+        where
+            I: IntoIterator<Item = (&'a str, &'a str)>,
+        {
+            let mut map = self.spec.binding_fields.take().unwrap_or_default();
+            for (parameter, field) in fields {
+                map.insert(parameter.to_string(), field.to_string());
+            }
+            self.spec.binding_fields = Some(map);
+            self
+        }
+
+        /// Bind soft-deleted rows on the routes of `actions`; `show`,
+        /// `edit` and `update` when the list is empty (BIND-008). Mirrors
+        /// Laravel's `withTrashed()`.
+        pub fn with_trashed(mut self, actions: &[ResourceAction]) -> Self {
+            self.spec.trashed = Some(actions.to_vec());
+            self
+        }
+
+        /// Answer with `handler` instead of a 404 when a binding of one of
+        /// the resource's routes finds nothing (BIND-009). Mirrors
+        /// Laravel's `missing()`.
+        pub fn missing<H, Fut>(mut self, handler: H) -> Self
+        where
+            H: Fn(Request) -> Fut + Send + Sync + 'static,
+            Fut: Future<Output = Response> + Send + 'static,
+        {
+            self.spec.missing = Some(boxed_missing(handler));
+            self
+        }
+
+        /// Suppress route-name registration entirely. Useful for nested
+        /// resources where the parent already owns the namespace, or for
+        /// tests that don't want the process-global registry touched.
+        /// No Laravel analogue (Laravel has no opt-out flag); Rust-side
+        /// convenience.
+        pub fn unnamed(mut self) -> Self {
+            self.spec.suppress_names = true;
+            self
+        }
+
+        /// Gate every generated resource route behind its conventional ability,
+        /// matching Laravel's `authorizeResource`.
+        ///
+        /// Without this, each generated `index`/`show`/`store`/`update`/`destroy`
+        /// route is ungated unless the controller body remembers to call
+        /// [`Gate::authorize`] itself - and a single forgotten `destroy` ships an
+        /// ungated delete. `authorize_resource` closes that gap by attaching an
+        /// authorization middleware to every route, mapping each action to its
+        /// ability:
+        ///
+        /// | Action          | Ability |
+        /// |-----------------|---------|
+        /// | index / show    | `view`  |
+        /// | create / store  | `create`|
+        /// | edit / update   | `update`|
+        /// | destroy         | `delete`|
+        ///
+        /// The middleware resolves the user of the route's guard as `U` and runs
+        /// the mapped ability through the [`Gate`] against a [`Default`] value of
+        /// the resource marker `R` (the gate discriminates on the `R` *type*, so
+        /// the marker carries the same routing information for the policy that a
+        /// model class would in Laravel). The route's guard is the one the last
+        /// `AuthMiddleware` that passed the request on checked, else the default
+        /// guard. No user on that guard, a user that is not a `U`, or a denied
+        /// ability short-circuits the chain with `403` (or the gate's custom
+        /// status) **before** the resource handler runs - fail-closed. Another
+        /// guard's user never stands in.
+        ///
+        /// Define the abilities with [`Gate::define`] /
+        /// [`Gate::define_with`] (or a `#[policy]`) keyed on `(ability, U, R)`.
+        ///
+        /// # Example
+        ///
+        /// ```rust,ignore
+        /// Gate::define::<User, Post>("view",   |u, _p| u.is_member);
+        /// Gate::define::<User, Post>("create", |u, _p| u.is_author);
+        /// Gate::define::<User, Post>("update", |u, _p| u.is_author);
+        /// Gate::define::<User, Post>("delete", |u, _p| u.is_admin);
+        ///
+        /// let router: Router = Router::new()
+        ///     .resource("posts", PostsCtl)
+        ///     .authorize_resource::<User, Post>()
+        ///     .into();
+        /// ```
+        ///
+        /// (Kept `ignore`: `authorize_resource::<U, R>` requires a `U:
+        /// Authenticatable` user model and a gate-keyed `R` resource type
+        /// that only a full application crate provides.)
+        pub fn authorize_resource<U, R>(mut self) -> Self
+        where
+            U: Authenticatable + Clone + 'static,
+            R: Default + Send + Sync + 'static,
+        {
+            self.spec.authorize = Some(Box::new(|action: ResourceAction| {
+                let mw = ResourceAuthorizeMiddleware::<U, R> {
+                    ability: ability_for(action),
+                    _user: std::marker::PhantomData,
+                    _resource: std::marker::PhantomData,
+                };
+                Some(boxed_as(mw))
+            }));
+            self
+        }
+    };
+}
+
 /// Pending resource registration. Returned by [`Router::resource`] /
 /// [`Router::api_resource`]; absorbs Laravel-shaped chains
-/// (`only`/`except`/`names`/`parameters`) before finalizing into a
-/// [`Router`].
+/// (`only`/`except`/`names`/`parameters`/`scoped`/`with_trashed`/`missing`)
+/// before finalizing into a [`Router`].
 ///
 /// The router consumes the builder either via the conversion
 /// `Router::from(routes)` / `routes.into()` or explicitly via
@@ -294,18 +558,8 @@ fn not_implemented(action: &str) -> Response {
 /// policy. Use [`ResourceRoutes::try_register`] for a fallible variant.
 pub struct ResourceRoutes {
     router: Router,
-    name: String,
+    spec: ResourceSpec,
     controller: Arc<dyn ResourceController>,
-    actions: Vec<ResourceAction>,
-    name_overrides: std::collections::HashMap<String, String>,
-    parameter: Option<String>,
-    /// When `true`, route names are not registered. Used by
-    /// nested-or-skip flows that want raw paths without polluting the
-    /// process-global registry.
-    suppress_names: bool,
-    /// When set by [`ResourceRoutes::authorize_resource`], produces the
-    /// per-action authorization middleware attached to each generated route.
-    authorize: Option<AuthorizeFactory>,
 }
 
 impl ResourceRoutes {
@@ -317,13 +571,8 @@ impl ResourceRoutes {
     ) -> Self {
         Self {
             router,
-            name: name.to_string(),
+            spec: ResourceSpec::new(name, defaults),
             controller,
-            actions: defaults.to_vec(),
-            name_overrides: std::collections::HashMap::new(),
-            parameter: None,
-            suppress_names: false,
-            authorize: None,
         }
     }
 
@@ -331,7 +580,7 @@ impl ResourceRoutes {
     /// `only(['index', 'show'])`. Duplicates are de-duplicated.
     pub fn only(mut self, actions: &[ResourceAction]) -> Self {
         let allowed: std::collections::HashSet<ResourceAction> = actions.iter().copied().collect();
-        self.actions.retain(|a| allowed.contains(a));
+        self.spec.actions.retain(|a| allowed.contains(a));
         self
     }
 
@@ -345,7 +594,7 @@ impl ResourceRoutes {
     /// Laravel's `except(['destroy'])`.
     pub fn except(mut self, actions: &[ResourceAction]) -> Self {
         let blocked: std::collections::HashSet<ResourceAction> = actions.iter().copied().collect();
-        self.actions.retain(|a| !blocked.contains(a));
+        self.spec.actions.retain(|a| !blocked.contains(a));
         self
     }
 
@@ -354,116 +603,7 @@ impl ResourceRoutes {
         self.except(actions)
     }
 
-    /// Override route names per action. Pairs are
-    /// `(action_key, new_name)`, e.g. `("index", "posts.list")`.
-    /// Mirrors Laravel's `names(['index' => 'posts.list'])`.
-    ///
-    /// Unknown action keys are silently ignored (matching Laravel's
-    /// permissiveness - typos surface as the default name still being
-    /// registered).
-    pub fn names<'a, I>(mut self, overrides: I) -> Self
-    where
-        I: IntoIterator<Item = (&'a str, &'a str)>,
-    {
-        for (key, name) in overrides {
-            if ResourceAction::from_key(key).is_some() {
-                self.name_overrides
-                    .insert(key.to_string(), name.to_string());
-            }
-        }
-        self
-    }
-
-    /// Rust-side alias of [`Self::names`].
-    pub fn rename<'a, I>(self, overrides: I) -> Self
-    where
-        I: IntoIterator<Item = (&'a str, &'a str)>,
-    {
-        self.names(overrides)
-    }
-
-    /// Override the path-parameter name for `show`/`update`/`destroy`/
-    /// `edit` from the default (the singular of the resource name -
-    /// e.g. `posts` → `{post}`) to a custom value. Mirrors a single-pair
-    /// `parameters(['posts' => 'post_id'])` call.
-    pub fn parameter(mut self, name: &str) -> Self {
-        self.parameter = Some(name.to_string());
-        self
-    }
-
-    /// Suppress route-name registration entirely. Useful for nested
-    /// resources where the parent already owns the namespace, or for
-    /// tests that don't want the process-global registry touched.
-    /// No Laravel analogue (Laravel has no opt-out flag); Rust-side
-    /// convenience.
-    pub fn unnamed(mut self) -> Self {
-        self.suppress_names = true;
-        self
-    }
-
-    /// Gate every generated resource route behind its conventional ability,
-    /// matching Laravel's `authorizeResource`.
-    ///
-    /// Without this, each generated `index`/`show`/`store`/`update`/`destroy`
-    /// route is ungated unless the controller body remembers to call
-    /// [`Gate::authorize`] itself - and a single forgotten `destroy` ships an
-    /// ungated delete. `authorize_resource` closes that gap by attaching an
-    /// authorization middleware to every route, mapping each action to its
-    /// ability:
-    ///
-    /// | Action          | Ability |
-    /// |-----------------|---------|
-    /// | index / show    | `view`  |
-    /// | create / store  | `create`|
-    /// | edit / update   | `update`|
-    /// | destroy         | `delete`|
-    ///
-    /// The middleware resolves the user of the route's guard as `U` and runs
-    /// the mapped ability through the [`Gate`] against a [`Default`] value of
-    /// the resource marker `R` (the gate discriminates on the `R` *type*, so
-    /// the marker carries the same routing information for the policy that a
-    /// model class would in Laravel). The route's guard is the one the last
-    /// `AuthMiddleware` that passed the request on checked, else the default
-    /// guard. No user on that guard, a user that is not a `U`, or a denied
-    /// ability short-circuits the chain with `403` (or the gate's custom
-    /// status) **before** the resource handler runs - fail-closed. Another
-    /// guard's user never stands in.
-    ///
-    /// Define the abilities with [`Gate::define`] /
-    /// [`Gate::define_with`] (or a `#[policy]`) keyed on `(ability, U, R)`.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// Gate::define::<User, Post>("view",   |u, _p| u.is_member);
-    /// Gate::define::<User, Post>("create", |u, _p| u.is_author);
-    /// Gate::define::<User, Post>("update", |u, _p| u.is_author);
-    /// Gate::define::<User, Post>("delete", |u, _p| u.is_admin);
-    ///
-    /// let router: Router = Router::new()
-    ///     .resource("posts", PostsCtl)
-    ///     .authorize_resource::<User, Post>()
-    ///     .into();
-    /// ```
-    ///
-    /// (Kept `ignore`: `authorize_resource::<U, R>` requires a `U:
-    /// Authenticatable` user model and a gate-keyed `R` resource type
-    /// that only a full application crate provides.)
-    pub fn authorize_resource<U, R>(mut self) -> Self
-    where
-        U: Authenticatable + Clone + 'static,
-        R: Default + Send + Sync + 'static,
-    {
-        self.authorize = Some(Box::new(|action: ResourceAction| {
-            let mw = ResourceAuthorizeMiddleware::<U, R> {
-                ability: ability_for(action),
-                _user: std::marker::PhantomData,
-                _resource: std::marker::PhantomData,
-            };
-            Some(boxed_as(mw))
-        }));
-        self
-    }
+    resource_spec_methods!();
 
     /// Finalize the resource registration into a [`Router`].
     ///
@@ -480,87 +620,11 @@ impl ResourceRoutes {
     /// `Err(FrameworkError)` on duplicate registration; otherwise
     /// identical.
     pub fn try_register(self) -> Result<Router, FrameworkError> {
-        let Self {
-            mut router,
-            name,
-            controller,
-            actions,
-            name_overrides,
-            parameter,
-            suppress_names,
-            authorize,
-        } = self;
-
-        let base = if name.starts_with('/') {
-            name.clone()
-        } else {
-            format!("/{name}")
-        };
-        // Default param name is the resource name itself, sans trailing 's'
-        // if present - keeps single-segment paths Laravel-shaped
-        // (`posts` → `{post}`).
-        let param = parameter.unwrap_or_else(|| default_param_name(&name));
-
-        // Captured before the loop consumes `actions` so the post-loop
-        // PATCH-alongside-PUT registration knows whether Update was in
-        // the set without re-walking.
-        let had_update = actions.contains(&ResourceAction::Update);
-
-        for action in actions {
-            let (method, path, default_name) = resource_route(&base, &param, action);
-            let handler = make_handler(controller.clone(), action);
-            match method {
-                hyper::Method::GET => router.try_insert_get(&path, handler)?,
-                hyper::Method::POST => router.try_insert_post(&path, handler)?,
-                hyper::Method::PUT => router.try_insert_put(&path, handler)?,
-                hyper::Method::PATCH => router.try_insert_patch(&path, handler)?,
-                hyper::Method::DELETE => router.try_insert_delete(&path, handler)?,
-                ref m => {
-                    return Err(FrameworkError::internal(format!(
-                        "ResourceRoutes: unexpected method '{m}' for action '{}'",
-                        action.key()
-                    )));
-                }
-            }
-
-            if !suppress_names {
-                let effective_name = name_overrides
-                    .get(action.key())
-                    .cloned()
-                    .unwrap_or_else(|| default_name.clone());
-                super::router::try_register_route_name(&effective_name, &path)?;
-            }
-
-            // Attach the per-action authorization middleware (if
-            // `authorize_resource` was called) keyed by the matched pattern,
-            // the same key the dispatcher recovers via `match_route`.
-            if let Some(factory) = authorize.as_ref()
-                && let Some(mw) = factory(action)
-            {
-                router.add_middleware(method, &path, mw);
-            }
-        }
-
-        // PUT and PATCH share the update action - Laravel registers both
-        // by default. The action-loop above registers PUT (the verb
-        // returned by `resource_route(Update)`); layer a parallel PATCH
-        // entry on the same path against the same handler so callers
-        // can use either verb. The route NAME has already been claimed
-        // by the PUT registration above - re-registering it would
-        // conflict, so we only insert the PATCH verb here. The PATCH verb
-        // gets the same authorization middleware as the PUT verb so neither
-        // verb is an ungated bypass of the other.
-        if had_update {
-            let (_method, path, _name) = resource_route(&base, &param, ResourceAction::Update);
-            let handler = make_handler(controller.clone(), ResourceAction::Update);
-            router.try_insert_patch(&path, handler)?;
-            if let Some(factory) = authorize.as_ref()
-                && let Some(mw) = factory(ResourceAction::Update)
-            {
-                router.add_middleware(hyper::Method::PATCH, &path, mw);
-            }
-        }
-        Ok(router)
+        register_resource(
+            self.router,
+            self.spec,
+            ResourceHandlers::Controller(self.controller),
+        )
     }
 }
 
@@ -570,52 +634,244 @@ impl From<ResourceRoutes> for Router {
     }
 }
 
-/// Build the `(method, path, default_name)` tuple for a single resource
-/// action. Default names follow the Laravel convention
-/// `<resource>.<action>`.
-fn resource_route(
-    base: &str,
-    param: &str,
-    action: ResourceAction,
-) -> (hyper::Method, String, String) {
-    let resource_name = base.trim_start_matches('/').replace('/', ".");
-    match action {
-        ResourceAction::Index => (
-            hyper::Method::GET,
-            base.to_string(),
-            format!("{resource_name}.index"),
-        ),
-        ResourceAction::Create => (
-            hyper::Method::GET,
-            format!("{base}/create"),
-            format!("{resource_name}.create"),
-        ),
-        ResourceAction::Store => (
-            hyper::Method::POST,
-            base.to_string(),
-            format!("{resource_name}.store"),
-        ),
-        ResourceAction::Show => (
-            hyper::Method::GET,
-            format!("{base}/{{{param}}}"),
-            format!("{resource_name}.show"),
-        ),
-        ResourceAction::Edit => (
-            hyper::Method::GET,
-            format!("{base}/{{{param}}}/edit"),
-            format!("{resource_name}.edit"),
-        ),
-        ResourceAction::Update => (
-            hyper::Method::PUT,
-            format!("{base}/{{{param}}}"),
-            format!("{resource_name}.update"),
-        ),
-        ResourceAction::Destroy => (
-            hyper::Method::DELETE,
-            format!("{base}/{{{param}}}"),
-            format!("{resource_name}.destroy"),
-        ),
+/// A resource whose actions are `#[handler]` functions of one module,
+/// found by action name: what `resource!` and `api_resource!` build.
+///
+/// The actions take bound arguments as any handler does (BIND-011):
+///
+/// ```rust,ignore
+/// // controllers::posts::{index, create, store, show, edit, update, destroy}
+/// routes! {
+///     resource!("posts", controllers::posts),
+///     resource!("users.posts", controllers::user_posts, only = [index, show])
+///         .scoped([("post", "slug")]),
+/// }
+/// ```
+///
+/// Register it with [`ResourceDef::register`], which `routes!` calls, or
+/// [`ResourceDef::try_register`].
+pub struct ResourceDef {
+    spec: ResourceSpec,
+    functions: Vec<(
+        ResourceAction,
+        Arc<BoxedHandler>,
+        Option<&'static HandlerRecord>,
+    )>,
+}
+
+impl ResourceDef {
+    /// A resource named `name` with `actions`, before their functions are
+    /// added. Built by `resource!`.
+    #[doc(hidden)]
+    pub fn __new(name: &str, actions: &[ResourceAction]) -> Self {
+        Self {
+            spec: ResourceSpec::new(name, actions),
+            functions: Vec::new(),
+        }
     }
+
+    /// Add the function of one action. Built by `resource!`, which names
+    /// the function `<module>::<action>`, so a selected action the module
+    /// does not define fails to compile.
+    #[doc(hidden)]
+    pub fn __action<H, Fut>(mut self, action: ResourceAction, handler: H) -> Self
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let record = super::binding::record_of::<H>();
+        let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
+        self.functions.push((action, Arc::new(boxed), record));
+        self
+    }
+
+    resource_spec_methods!();
+
+    /// Register the resource's routes on `router`.
+    ///
+    /// # Panics
+    ///
+    /// On a duplicate route or route name, at boot. Use
+    /// [`Self::try_register`] for the error instead.
+    pub fn register(self, router: Router) -> Router {
+        self.try_register(router).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::register`].
+    pub fn try_register(self, router: Router) -> Result<Router, FrameworkError> {
+        register_resource(
+            router,
+            self.spec,
+            ResourceHandlers::Functions(self.functions),
+        )
+    }
+}
+
+/// Where a resource's routes go: the collection path (`index`, `store`,
+/// `create`), the member path (`show`, `edit`, `update`, `destroy`), and
+/// the name every route name starts with.
+struct ResourceLayout {
+    collection: String,
+    member: String,
+    route_name: String,
+}
+
+impl ResourceLayout {
+    /// `posts` lays out `/posts` and `/posts/{post}`; a nested
+    /// `users.posts` lays out `/users/{user}/posts` and
+    /// `/users/{user}/posts/{post}`, named `users.posts.*` (BIND-011).
+    fn of(spec: &ResourceSpec) -> Self {
+        let name = spec.name.trim_start_matches('/');
+        let segments: Vec<&str> = name.split('.').collect();
+        let last = segments.len() - 1;
+        let mut path = String::new();
+        let mut member = String::new();
+        for (index, segment) in segments.iter().enumerate() {
+            let parameter = Self::parameter_of(spec, segment, index == last);
+            let placeholder = match spec
+                .binding_fields
+                .as_ref()
+                .and_then(|fields| fields.get(&parameter))
+            {
+                Some(field) => format!("{{{parameter}:{field}}}"),
+                None => format!("{{{parameter}}}"),
+            };
+            path.push('/');
+            path.push_str(segment);
+            if index == last {
+                member = format!("{path}/{placeholder}");
+            } else {
+                path.push('/');
+                path.push_str(&placeholder);
+            }
+        }
+        let route_name = if segments.len() > 1 {
+            name.to_string()
+        } else {
+            path.trim_start_matches('/').replace('/', ".")
+        };
+        Self {
+            collection: path,
+            member,
+            route_name,
+        }
+    }
+
+    /// The parameter of one resource segment: the `parameter()` override
+    /// for the resource itself, a `parameters()` rename, else the singular
+    /// of the segment.
+    fn parameter_of(spec: &ResourceSpec, segment: &str, is_last: bool) -> String {
+        let key = segment.rsplit('/').next().unwrap_or(segment);
+        if is_last && let Some(parameter) = &spec.parameter {
+            return parameter.clone();
+        }
+        spec.parameters
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| default_param_name(segment))
+    }
+
+    /// The `(method, path, default_name)` of one action.
+    fn route(&self, action: ResourceAction) -> (hyper::Method, String, String) {
+        let name = &self.route_name;
+        match action {
+            ResourceAction::Index => (
+                hyper::Method::GET,
+                self.collection.clone(),
+                format!("{name}.index"),
+            ),
+            ResourceAction::Create => (
+                hyper::Method::GET,
+                format!("{}/create", self.collection),
+                format!("{name}.create"),
+            ),
+            ResourceAction::Store => (
+                hyper::Method::POST,
+                self.collection.clone(),
+                format!("{name}.store"),
+            ),
+            ResourceAction::Show => (
+                hyper::Method::GET,
+                self.member.clone(),
+                format!("{name}.show"),
+            ),
+            ResourceAction::Edit => (
+                hyper::Method::GET,
+                format!("{}/edit", self.member),
+                format!("{name}.edit"),
+            ),
+            ResourceAction::Update => (
+                hyper::Method::PUT,
+                self.member.clone(),
+                format!("{name}.update"),
+            ),
+            ResourceAction::Destroy => (
+                hyper::Method::DELETE,
+                self.member.clone(),
+                format!("{name}.destroy"),
+            ),
+        }
+    }
+}
+
+/// Register every action of a resource: its route, its name, its
+/// authorization middleware and its binding settings. `update` answers
+/// PATCH beside PUT, as Laravel registers it.
+fn register_resource(
+    mut router: Router,
+    spec: ResourceSpec,
+    handlers: ResourceHandlers,
+) -> Result<Router, FrameworkError> {
+    let layout = ResourceLayout::of(&spec);
+    let trashed: Vec<ResourceAction> = match &spec.trashed {
+        Some(listed) if !listed.is_empty() => listed.clone(),
+        Some(_) => vec![
+            ResourceAction::Show,
+            ResourceAction::Edit,
+            ResourceAction::Update,
+        ],
+        None => Vec::new(),
+    };
+    let options = |action: ResourceAction| RouteBindingOptions {
+        scoped: spec.binding_fields.as_ref().map(|_| true),
+        with_trashed: trashed.contains(&action),
+        missing: spec.missing.clone(),
+    };
+
+    for action in spec.actions.iter().copied() {
+        let (method, path, default_name) = layout.route(action);
+        let (handler, record) = handlers.handler(action)?;
+        let mut methods = vec![method];
+        if action == ResourceAction::Update {
+            methods.push(hyper::Method::PATCH);
+        }
+        for method in methods {
+            router.try_insert_method(&method, &path, handler.clone())?;
+            router.note_route_record(method.clone(), &path, record);
+            *router.bindings.options_mut(method.clone(), &path) = options(action);
+            // Attach the per-action authorization middleware (if
+            // `authorize_resource` was called) keyed by the matched pattern,
+            // the same key the dispatcher recovers via `match_route`. PATCH
+            // gets the PUT verb's middleware so neither verb is an ungated
+            // bypass of the other.
+            if let Some(factory) = spec.authorize.as_ref()
+                && let Some(mw) = factory(action)
+            {
+                router.add_middleware(method, &path, mw);
+            }
+        }
+
+        // The route NAME is claimed once, by the first verb of the action.
+        if !spec.suppress_names {
+            let effective_name = spec
+                .name_overrides
+                .get(action.key())
+                .cloned()
+                .unwrap_or(default_name);
+            super::router::try_register_route_name(&effective_name, &path)?;
+        }
+    }
+    Ok(router)
 }
 
 /// Build a [`BoxedHandler`] that dispatches into one of the trait
@@ -639,10 +895,6 @@ fn make_handler(
         };
         fut
     });
-    // Silence unused: the type alias is here for future call sites
-    // that want a concrete `Arc<ResourceHandlerFn>` to share across
-    // verbs without rebuilding.
-    let _: Arc<ResourceHandlerFn> = Arc::new(|_req| Box::pin(async { not_implemented("") }));
     Arc::new(inner)
 }
 
@@ -671,6 +923,11 @@ impl Router {
     /// `index`/`create`/`store`/`show`/`edit`/`update`/`destroy`
     /// with conventional route names (`<resource>.<action>`). Use the
     /// returned [`ResourceRoutes`] to restrict / rename / re-parameterise.
+    /// A dotted name nests: `users.posts` registers
+    /// `/users/{user}/posts/{post}` under `users.posts.*`.
+    ///
+    /// For actions that take bound arguments, name a module of
+    /// `#[handler]` functions with `resource!` instead.
     ///
     /// Mirrors Laravel's `Route::resource($name, $controller)` from
     /// `Illuminate/Routing/Router.php:347`.
@@ -729,17 +986,8 @@ impl Router {
         I: IntoIterator<Item = (&'static str, Box<dyn ResourceController>)>,
     {
         for (name, ctl) in resources {
-            self = ResourceRoutes {
-                router: self,
-                name: name.to_string(),
-                controller: Arc::from(ctl),
-                actions: ResourceAction::web_defaults().to_vec(),
-                name_overrides: Default::default(),
-                parameter: None,
-                suppress_names: false,
-                authorize: None,
-            }
-            .register();
+            self = ResourceRoutes::new(self, name, Arc::from(ctl), ResourceAction::web_defaults())
+                .register();
         }
         self
     }
@@ -751,17 +999,8 @@ impl Router {
         I: IntoIterator<Item = (&'static str, Box<dyn ResourceController>)>,
     {
         for (name, ctl) in resources {
-            self = ResourceRoutes {
-                router: self,
-                name: name.to_string(),
-                controller: Arc::from(ctl),
-                actions: ResourceAction::api_defaults().to_vec(),
-                name_overrides: Default::default(),
-                parameter: None,
-                suppress_names: false,
-                authorize: None,
-            }
-            .register();
+            self = ResourceRoutes::new(self, name, Arc::from(ctl), ResourceAction::api_defaults())
+                .register();
         }
         self
     }

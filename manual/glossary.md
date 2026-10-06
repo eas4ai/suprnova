@@ -733,7 +733,18 @@ Two unrelated things share the name; both ship.
    and includes. See [API Resources](eloquent-resources.md).
 2. **Resource routing** - a route helper that mounts a CRUD
    `index`/`show`/`store`/`update`/`destroy` set against a
-   `ResourceController` impl. See [Routing](routing.md).
+   `ResourceController` impl, or against a module of `#[handler]`
+   functions with `resource!`, whose actions take bound arguments. See
+   [Routing](routing.md#resource-routing).
+
+### Route binding
+
+Turning a route parameter into a value before the handler runs. A
+handler argument binds from the parameter of its name when its type
+implements `RouteBinding`: every `#[suprnova::model]` struct, a
+`#[derive(RouteBinding)]` enum, or a type that implements it by hand. A
+value that does not parse or matches nothing answers 404. See
+[Route model binding](routing.md#route-model-binding).
 
 ### `routes!` macro
 

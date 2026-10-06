@@ -16,10 +16,17 @@ pub(crate) struct IndexSpec {
 
 impl IndexSpec {
     /// The index name in Laravel's shape: `{table}_{columns}_index` and
-    /// `{table}_{columns}_unique`, with the columns joined by `_`.
+    /// `{table}_{columns}_unique`, with the columns joined by `_`. A
+    /// schema-qualified table's `.` becomes `_`, as Laravel's
+    /// `createIndexName` makes it: the index lives in the table's schema,
+    /// and its name is one identifier.
     pub(crate) fn name(&self, table: &str) -> String {
         let suffix = if self.unique { "unique" } else { "index" };
-        format!("{table}_{}_{suffix}", self.columns.join("_"))
+        format!(
+            "{}_{}_{suffix}",
+            table.replace('.', "_"),
+            self.columns.join("_")
+        )
     }
 }
 

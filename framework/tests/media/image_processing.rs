@@ -315,9 +315,10 @@ async fn decode_limits_reject_oversized_dimensions() {
     // Build the fixture under the default limits, then tighten the cap
     // below its width so the decode is refused before any allocation.
     let src = red_png_4x2().await;
-    let _config = ConfigGuard::set(ImageConfig {
-        max_dimension: 2,
-        ..ImageConfig::default()
+    let _config = ConfigGuard::set({
+        let mut config = ImageConfig::default();
+        config.max_dimension = 2;
+        config
     });
     let err = Image::from_bytes(src)
         .to_bytes()
@@ -330,10 +331,11 @@ async fn decode_limits_reject_oversized_dimensions() {
 #[serial_test::serial]
 async fn decode_limits_reject_oversized_allocation() {
     let src = red_png_4x2().await;
-    let _config = ConfigGuard::set(ImageConfig {
+    let _config = ConfigGuard::set({
+        let mut config = ImageConfig::default();
         // 4 x 2 x 4 bytes = 32; cap one byte under it.
-        max_alloc_bytes: 31,
-        ..ImageConfig::default()
+        config.max_alloc_bytes = 31;
+        config
     });
     let err = Image::from_bytes(src)
         .to_bytes()
@@ -366,11 +368,12 @@ async fn storage_roundtrip() {
     use suprnova::DiskExt;
     disk.put("in.png", red_png_4x2().await).await.expect("seed");
 
-    Image::from_disk("images", "in.png")
+    let path = Image::from_disk("images", "in.png")
         .resize(2, 1)
-        .store("images", "out.png")
+        .store_as("", "out.png", Some("images"))
         .await
         .expect("store");
+    assert_eq!(path, "out.png");
     let out = disk.get("out.png").await.expect("read back");
     let (w, h) = Image::from_bytes(out).dimensions().await.expect("decode");
     assert_eq!((w, h), (2, 1));
@@ -410,9 +413,10 @@ async fn from_stream_is_capped_while_it_collects() {
 
     // With the cap below the payload, collection stops rather than
     // discovering the problem after memory is already spent.
-    let _config = ConfigGuard::set(ImageConfig {
-        max_alloc_bytes: 8,
-        ..ImageConfig::default()
+    let _config = ConfigGuard::set({
+        let mut config = ImageConfig::default();
+        config.max_alloc_bytes = 8;
+        config
     });
     let chunks: Vec<std::io::Result<bytes::Bytes>> = RED_PNG_1X1
         .chunks(16)

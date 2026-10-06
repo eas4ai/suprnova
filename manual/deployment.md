@@ -460,6 +460,132 @@ characters) and prints the bypass URL, over picking a memorable string for
 `--secret` - and treat it like any other credential in your incident
 notes.
 
+## Serving under a path prefix
+
+A reverse proxy can serve the application under a path, such as
+`https://example.org/billing`, and strip that path before it forwards the
+request. The application then receives `/invoices/7` for the browser's
+`/billing/invoices/7`. Routes still match on the path the application
+receives, so you don't change a single route. Every URL the framework hands
+the browser has to carry the stripped path again, and the proxy tells the
+framework what it is with the `X-Forwarded-Prefix` header.
+
+This nginx location serves an application listening on port 8000 under
+`/billing`:
+
+```nginx
+location /billing/ {
+    proxy_pass http://127.0.0.1:8000/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Prefix /billing;
+}
+```
+
+The trailing slash on `proxy_pass` is what strips `/billing`. Caddy does the
+same with `handle_path`:
+
+```text
+example.org {
+    handle_path /billing/* {
+        reverse_proxy 127.0.0.1:8000 {
+            header_up X-Forwarded-Prefix /billing
+        }
+    }
+}
+```
+
+Then trust the proxy, and give `APP_URL` the prefix too:
+
+```bash
+APP_TRUSTED_PROXIES=127.0.0.1
+APP_URL=https://example.org/billing
+```
+
+### The trust rule
+
+The framework reads `X-Forwarded-Prefix` under the rule every other
+forwarded header follows: only when the TCP peer is listed in
+`APP_TRUSTED_PROXIES`. From any other peer the header is ignored. The proxy
+sets or clears `X-Forwarded-Prefix` on every request it forwards, as it does
+for `X-Forwarded-For`. A proxy that passes a client's header on as it came
+lets the client choose the root of every URL the application builds.
+
+A trusted value counts only when it is a clean path: ASCII letters, digits,
+`-`, `.`, `_`, `~` and `/`, starting with `/`, not ending with `/`, and with
+no empty, `.` or `..` segment. A header sent on two lines is ignored whole. A
+trusted `/` means the application is at the host root, and an empty value is
+ignored. An ignored value leaves the root to `APP_URL`.
+
+### The public root
+
+The public root is the trusted prefix when the request carries one,
+otherwise the path in `APP_URL`, which is also the root outside a request:
+in console commands, queued jobs and mail. A trusted prefix replaces the
+`APP_URL` path, so the two never add up to `/billing/billing`. At the host
+root the root is empty.
+
+The framework puts the root in front of every URL it builds for the
+browser: `route()` and the signed URLs, `url::to`, `url::current`,
+`Request::url`, every redirect, the Inertia page URL and its Vite tags, Live's
+endpoints and assets, the localization catalog, pagination links and a
+`Storage::url` with a root-relative base. A path that already carries the
+root, such as the output of `route()`, keeps it once.
+
+A template writes the root with `url::root()`, which returns `/billing`
+under the prefix and the empty string at the host root:
+
+```html
+<link rel="stylesheet" href="{{ suprnova::url::root() }}/suprnova-ui/button/button.css">
+```
+
+An Inertia frontend gets the root as the `root` prop, which `RootShare`
+shares with every page. A scaffolded application registers it, and its pages
+post to `` `${root}/login` ``, so the same frontend build runs at `/` and
+under `/billing`.
+
+Mail and job links are built outside a request, where no header arrives. A
+deployment whose mail and job links must work behind a header-only prefix
+sets the prefix in `APP_URL` as well, as the example above does.
+
+### Cookies
+
+When the application sets no cookie path, the session, XSRF, remember-me and
+maintenance bypass cookies take the root of each request as their `Path`, so
+two applications under `/a` and `/b` on one host keep separate sessions. A
+`__Host-` cookie keeps `Path=/`, as the browser requires. Two applications
+that share a host and both use `__Host-` cookies need distinct cookie names,
+set with `SESSION_COOKIE`.
+
+When a browser sends two cookies of one name, the framework reads the first.
+The browser lists the cookie with the longer path first, so after you move an
+application under a prefix, a session cookie left over at `Path=/` cannot
+shadow the one scoped to the root.
+
+### Routes that begin with the prefix
+
+The framework tells a path that carries the root from an application path by
+its first segment. An application whose own routes begin with its
+deployment prefix, such as a `/billing` route group behind a proxy that
+serves `/billing`, can't be told apart, so don't give an application routes
+that begin with the prefix. Let the proxy strip it instead.
+
+### Why Suprnova diverges
+
+- **A trailing slash is ignored, not trimmed.** Symfony trims a trailing
+  slash from `X-Forwarded-Prefix`. Suprnova ignores a value that ends with
+  `/`, so each root has one spelling and two spellings never mean two cache
+  keys or two cookie paths. Send `/billing`, not `/billing/`.
+- **The relative `route()` carries the root.** Laravel's
+  `route($name, $parameters, false)` strips the base URL. Suprnova's
+  `route()` is relative and keeps the root, so a redirect or a link built
+  from it works behind the prefix.
+- **The `APP_URL` path is the root when no prefix header arrives.** Laravel
+  reads the root from the request alone. Suprnova falls back to the path in
+  `APP_URL`, so console commands, jobs and mail build the same URLs as a
+  request does.
+
 ## Scaling
 
 ### Web

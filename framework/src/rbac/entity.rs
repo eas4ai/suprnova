@@ -1,116 +1,111 @@
-//! SeaORM models for framework-owned RBAC tables.
+//! Models for the RBAC tables, in spatie/laravel-permission's layout.
+//!
+//! `roles` and `permissions` are spatie's tables: `id`, `name`,
+//! `guard_name` and nullable timestamps, unique on `(name, guard_name)`.
+//! The assignments live in spatie's `model_has_roles`,
+//! `model_has_permissions` and `role_has_permissions`, which the functions
+//! in [`crate::rbac`] read and write; they have composite keys and no
+//! model of their own here.
+//!
+//! A display name has no column in spatie's tables. An upgrade from the
+//! earlier Suprnova layout keeps the ones it finds in
+//! `suprnova_role_details` and `suprnova_permission_details`, read through
+//! [`RoleDetail`] and [`PermissionDetail`].
 
 use chrono::{DateTime, Utc};
 
 /// Role row, usually named for a coarse application capability such as
 /// `"admin"` or `"author"`.
 ///
-/// The timestamps are cast native because the migration creates native
-/// `timestamp with time zone` columns: the default text cast is refused
-/// by Postgres on write and by every driver on read.
+/// The timestamps use the naive casts, which read the `TIMESTAMP` columns
+/// spatie's migration creates on MySQL, `timestamp` on Postgres and the
+/// text SQLite stores.
 #[suprnova::model(
     table = "roles",
     timestamps,
     casts = {
-        created_at = suprnova::AsNativeDateTime,
-        updated_at = suprnova::AsNativeDateTime,
+        created_at = suprnova::AsOptionalNaiveDateTime,
+        updated_at = suprnova::AsOptionalNaiveDateTime,
     },
 )]
 pub struct Role {
     /// Primary key.
-    pub id: i64,
+    pub id: u64,
     /// Role name, unique with [`Self::guard_name`].
     pub name: String,
-    /// Human-readable label shown in admin UIs.
-    pub display_name: Option<String>,
-    /// Guard namespace; defaults to `"web"` for normal session users.
+    /// Guard namespace; `"web"` for normal session users.
     pub guard_name: String,
     /// Timestamp at which the row was inserted.
-    pub created_at: DateTime<Utc>,
+    pub created_at: Option<DateTime<Utc>>,
     /// Timestamp at which the row was last mutated.
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// Permission row, usually named as a dotted ability such as
 /// `"articles.create"`.
 ///
-/// The timestamps are cast native for the same reason as [`Role`]'s.
+/// The timestamps use the naive casts for the same reason as [`Role`]'s.
 #[suprnova::model(
     table = "permissions",
     timestamps,
     casts = {
-        created_at = suprnova::AsNativeDateTime,
-        updated_at = suprnova::AsNativeDateTime,
+        created_at = suprnova::AsOptionalNaiveDateTime,
+        updated_at = suprnova::AsOptionalNaiveDateTime,
     },
 )]
 pub struct Permission {
     /// Primary key.
-    pub id: i64,
+    pub id: u64,
     /// Permission name, unique with [`Self::guard_name`].
     pub name: String,
-    /// Human-readable label shown in admin UIs.
-    pub display_name: Option<String>,
-    /// Guard namespace; defaults to `"web"` for normal session users.
+    /// Guard namespace; `"web"` for normal session users.
     pub guard_name: String,
     /// Timestamp at which the row was inserted.
-    pub created_at: DateTime<Utc>,
+    pub created_at: Option<DateTime<Utc>>,
     /// Timestamp at which the row was last mutated.
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
-/// Join row assigning a permission to a role.
-#[suprnova::model(table = "role_permissions")]
-pub struct RolePermission {
-    /// Primary key.
-    pub id: i64,
-    /// ID from the `roles` table.
-    pub role_id: i64,
-    /// ID from the `permissions` table.
-    pub permission_id: i64,
+/// The display name an earlier Suprnova release kept on a role.
+#[suprnova::model(
+    table = "suprnova_role_details",
+    primary_key = "role_id",
+    auto_increment = false,
+    timestamps = false
+)]
+pub struct RoleDetail {
+    /// The role's id in `roles`.
+    pub role_id: u64,
+    /// Human-readable label shown in admin UIs.
+    pub display_name: Option<String>,
 }
 
-/// Polymorphic join row assigning a role to a model.
-#[suprnova::model(table = "model_roles")]
-pub struct ModelRole {
-    /// Primary key.
-    pub id: i64,
-    /// Short model discriminator, for example `"User"`.
-    pub model_type: String,
-    /// Model identifier string. Numeric and opaque IDs both round-trip.
-    pub model_id: String,
-    /// ID from the `roles` table.
-    pub role_id: i64,
+/// The display name an earlier Suprnova release kept on a permission.
+#[suprnova::model(
+    table = "suprnova_permission_details",
+    primary_key = "permission_id",
+    auto_increment = false,
+    timestamps = false
+)]
+pub struct PermissionDetail {
+    /// The permission's id in `permissions`.
+    pub permission_id: u64,
+    /// Human-readable label shown in admin UIs.
+    pub display_name: Option<String>,
 }
 
-/// Polymorphic join row assigning a direct permission to a model.
-#[suprnova::model(table = "model_permissions")]
-pub struct ModelPermission {
-    /// Primary key.
-    pub id: i64,
-    /// Short model discriminator, for example `"User"`.
-    pub model_type: String,
-    /// Model identifier string. Numeric and opaque IDs both round-trip.
-    pub model_id: String,
-    /// ID from the `permissions` table.
-    pub permission_id: i64,
-}
-
-pub use model_permission::{
-    ActiveModel as ModelPermissionActiveModel, Column as ModelPermissionColumn,
-    Entity as ModelPermissionEntity, Model as ModelPermissionModel,
-};
-pub use model_role::{
-    ActiveModel as ModelRoleActiveModel, Column as ModelRoleColumn, Entity as ModelRoleEntity,
-    Model as ModelRoleModel,
-};
 pub use permission::{
     ActiveModel as PermissionActiveModel, Column as PermissionColumn, Entity as PermissionEntity,
     Model as PermissionModel,
 };
+pub use permission_detail::{
+    ActiveModel as PermissionDetailActiveModel, Column as PermissionDetailColumn,
+    Entity as PermissionDetailEntity, Model as PermissionDetailModel,
+};
 pub use role::{
     ActiveModel as RoleActiveModel, Column as RoleColumn, Entity as RoleEntity, Model as RoleModel,
 };
-pub use role_permission::{
-    ActiveModel as RolePermissionActiveModel, Column as RolePermissionColumn,
-    Entity as RolePermissionEntity, Model as RolePermissionModel,
+pub use role_detail::{
+    ActiveModel as RoleDetailActiveModel, Column as RoleDetailColumn, Entity as RoleDetailEntity,
+    Model as RoleDetailModel,
 };

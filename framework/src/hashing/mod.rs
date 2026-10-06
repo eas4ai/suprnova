@@ -24,12 +24,15 @@
 //! which means two distinct passphrases sharing their first 72 bytes hash
 //! to the same value (audit HIGH `hashing` #2). When the active driver is
 //! bcrypt, [`hash`] rejects passwords > [`MAX_BCRYPT_PASSWORD_BYTES`]
-//! up-front:
+//! up-front with `FrameworkError::param("password exceeds … bytes")`.
 //!
-//! - [`hash`] returns `FrameworkError::param("password exceeds … bytes")`.
-//! - [`verify`] returns `Ok(false)` so the calling auth flow surfaces the
-//!   same "invalid credentials" response regardless - no length-based
-//!   information disclosure.
+//! [`verify`] accepts a password of any length against a bcrypt hash and
+//! judges it on its first 72 bytes, as PHP's `password_verify` does, so a
+//! user whose password of 72 bytes or more a Laravel application hashed
+//! signs in. While the application shares its database with a Laravel
+//! application ([`LaravelDatabase`](crate::LaravelDatabase)), [`hash`]
+//! writes the `$2y$` form [`hash_for_laravel`] mints, which judges a
+//! password on its first 72 bytes as PHP's `password_hash` does.
 //!
 //! Argon2i / Argon2id have **no such limit** and accept arbitrary-length
 //! passphrases. The guard only fires when the active driver is bcrypt.
@@ -169,8 +172,81 @@ pub fn set_default_driver(driver: Box<dyn Hasher>) -> Result<(), FrameworkError>
 /// `password` exceeds [`MAX_BCRYPT_PASSWORD_BYTES`] - see module docs for
 /// the rationale.
 pub fn hash(password: &str) -> Result<String, FrameworkError> {
+    if crate::LaravelDatabase::is_shared() {
+        return hash_for_laravel(password, HashConfig::from_env()?.rounds);
+    }
     let driver = default_driver()?;
     hash_with(driver, password)
+}
+
+/// The bcrypt hash a Laravel application writes and accepts: `$2y$`, at
+/// `cost`, and judged on the password's first 72 bytes, as PHP's
+/// `password_hash` judges it.
+///
+/// Laravel 13's hasher throws on any hash PHP's `password_get_info` does
+/// not report as bcrypt while `HASH_VERIFY` is true, its default, and PHP
+/// reports the framework's usual `$2b$` as unknown. So an application that
+/// shares its database with a Laravel application writes this form for
+/// every password ([`LaravelDatabase`](crate::LaravelDatabase)): [`hash`]
+/// returns it while the setting is on.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError::param`] when `cost` is outside
+/// [`MIN_BCRYPT_COST`]`..=`[`MAX_BCRYPT_COST`].
+pub fn hash_for_laravel(password: &str, cost: u32) -> Result<String, FrameworkError> {
+    if !(MIN_BCRYPT_COST..=MAX_BCRYPT_COST).contains(&cost) {
+        return Err(FrameworkError::param(format!(
+            "bcrypt cost={cost} out of range {MIN_BCRYPT_COST}..={MAX_BCRYPT_COST}"
+        )));
+    }
+    bcrypt::hash_with_result(password, cost)
+        .map(|parts| parts.format_for_version(bcrypt::Version::TwoY))
+        .map_err(|e| FrameworkError::internal(format!("bcrypt hash error: {e}")))
+}
+
+/// The `$2y$` hash a valid sign-in rewrites `stored` as while the
+/// application shares its database with a Laravel application
+/// ([`LaravelDatabase`](crate::LaravelDatabase)): [`hash_for_laravel`] at
+/// the configured cost, or at `stored`'s own bcrypt cost when that is
+/// higher. The rewrite changes the variant or the algorithm Laravel's
+/// hasher refuses; it never lowers the work a bcrypt hash already had, and
+/// Laravel accepts a `$2y$` hash at any cost.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] when the hashing configuration is invalid or
+/// the hash cannot be computed.
+pub(crate) fn rehash_for_laravel(password: &str, stored: &str) -> Result<String, FrameworkError> {
+    let configured = HashConfig::from_env()?.rounds;
+    let stored = info::parse(stored);
+    let kept = match stored.algo {
+        info::AlgoName::Bcrypt => stored.rounds.unwrap_or_default().min(MAX_BCRYPT_COST),
+        _ => 0,
+    };
+    hash_for_laravel(password, configured.max(kept))
+}
+
+/// Async-safe wrapper around [`rehash_for_laravel`]: the CPU-bound hash
+/// runs on `tokio::task::spawn_blocking`.
+pub(crate) async fn rehash_for_laravel_async(
+    password: &str,
+    stored: &str,
+) -> Result<String, FrameworkError> {
+    let password = password.to_string();
+    let stored = stored.to_string();
+    tokio::task::spawn_blocking(move || rehash_for_laravel(&password, &stored))
+        .await
+        .map_err(|e| FrameworkError::internal(format!("rehash join error: {e}")))?
+}
+
+/// Whether `hash` is not the hash [`hash_for_laravel`] would write at
+/// `cost`: another algorithm, another bcrypt variant, or a lower cost.
+fn needs_laravel_rehash(hash: &str, cost: u32) -> bool {
+    let stored = info::parse(hash);
+    !(matches!(stored.algo, info::AlgoName::Bcrypt)
+        && stored.bcrypt_variant == Some("2y")
+        && stored.rounds.is_some_and(|rounds| rounds >= cost))
 }
 
 /// Hash a password using an explicit driver. Used by tests and by the
@@ -214,16 +290,18 @@ pub fn hash_with_cost(password: &str, cost: u32) -> Result<String, FrameworkErro
 /// Uses constant-time comparison (delegated to the underlying crate) to
 /// prevent timing attacks.
 ///
-/// For bcrypt, a password longer than [`MAX_BCRYPT_PASSWORD_BYTES`]
-/// cannot match any hash this module produces, so verify returns
-/// `Ok(false)` rather than an error - keeps the calling auth flow
-/// returning the same "invalid credentials" response regardless of
-/// length.
+/// For bcrypt, a password of any length verifies, judged on its first 72
+/// bytes as PHP's `password_verify` judges it, so a password of 72 bytes
+/// or more that Laravel hashed signs in.
 ///
 /// When `HASH_VERIFY=true` AND the configured driver's algorithm
 /// differs from the stored hash's algorithm, [`verify`] returns
 /// `Ok(false)`. Set `HASH_VERIFY=false` (the default) while rotating
-/// from bcrypt → argon2id so legacy hashes still match.
+/// from bcrypt → argon2id so legacy hashes still match. While the
+/// application shares its database with a Laravel application, a bcrypt
+/// hash is accepted as well: every hash the application writes then is
+/// bcrypt, and a valid sign-in rewrites one of the driver's own algorithm
+/// as bcrypt.
 pub fn verify(password: &str, hash: &str) -> Result<bool, FrameworkError> {
     let driver = default_driver()?;
     verify_with(driver, password, hash)
@@ -248,10 +326,16 @@ pub fn verify_with(
     // `HASH_VERIFY` cross-algorithm rejection gate. Compare the stored
     // algorithm against the configured driver's algorithm and reject if
     // they differ. Apply at the facade so the underlying verify still
-    // dispatches on the stored algo regardless.
+    // dispatches on the stored algo regardless. While the application
+    // shares its database with Laravel, every hash it writes is bcrypt,
+    // whatever the driver, so bcrypt is accepted too; the driver's own
+    // algorithm stays accepted, so a user whose hash the application wrote
+    // before signs in and the sign-in rewrites the hash for Laravel.
     if configured_driver.verify_algorithm() {
         let stored_algo = stored.algo.supported();
-        if stored_algo != Some(configured_driver.algorithm()) {
+        let accepted = stored_algo == Some(configured_driver.algorithm())
+            || (crate::LaravelDatabase::is_shared() && stored_algo == Some(Algorithm::Bcrypt));
+        if !accepted {
             return Ok(false);
         }
     }
@@ -263,15 +347,12 @@ pub fn verify_with(
     // `Argon2::default().verify_password` reads m/t/p from the PHC
     // string.
     match stored.algo {
-        info::AlgoName::Bcrypt => {
-            // Bcrypt's 72-byte length guard applies on the verify side
-            // too - a >71-byte password cannot match any bcrypt hash
-            // this module produces.
-            if password.len() > MAX_BCRYPT_PASSWORD_BYTES {
-                return Ok(false);
-            }
-            verify_bcrypt(password, hash)
-        }
+        // Every length verifies, judged on its first 72 bytes as PHP's
+        // `password_verify` judges it: a Laravel user's password of 72
+        // bytes or more signs in. A password over 71 bytes cannot match a
+        // `$2b$` hash the bcrypt driver wrote, which holds at most 71 bytes
+        // and their terminator.
+        info::AlgoName::Bcrypt => verify_bcrypt(password, hash),
         info::AlgoName::Argon2i | info::AlgoName::Argon2id | info::AlgoName::Argon2d => {
             verify_argon(password, hash)
         }
@@ -367,6 +448,10 @@ pub async fn verify_async(password: &str, hash: &str) -> Result<bool, FrameworkE
 /// Returns `true` for malformed input so the caller naturally rotates
 /// any hash it can't parse.
 pub fn needs_rehash(hash: &str) -> bool {
+    if crate::LaravelDatabase::is_shared() {
+        return HashConfig::from_env()
+            .map_or(true, |config| needs_laravel_rehash(hash, config.rounds));
+    }
     let Ok(driver) = default_driver() else {
         return true;
     };

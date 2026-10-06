@@ -569,6 +569,12 @@ impl Cookie {
 /// - A cookie sent under its literal name wins over one whose name only
 ///   decodes to it, whatever their order in the header.
 ///
+/// Of two cookies sent under one name, the first wins (PFX-013). RFC 6265
+/// section 5.4 has the browser list the cookie with the longest `Path`
+/// first, so a cookie scoped to the application's public root beats one a
+/// deployment at `/` left behind, which would otherwise shadow it until it
+/// expired.
+///
 /// # Example
 ///
 /// ```rust,no_run
@@ -591,10 +597,13 @@ pub fn parse_cookies(header: &str) -> HashMap<String, String> {
         let value = url_decode(parts.next().unwrap_or("").trim());
         let name = url_decode(wire_name);
         if name == wire_name {
-            literal_names.insert(name.clone());
-            cookies.insert(name, value);
+            // The first literal of a name replaces an alias read before it
+            // and is never replaced itself.
+            if literal_names.insert(name.clone()) {
+                cookies.insert(name, value);
+            }
         } else if (has_protected_prefix(wire_name) || !has_protected_prefix(&name))
-            && !literal_names.contains(&name)
+            && !cookies.contains_key(&name)
         {
             cookies.insert(name, value);
         }
