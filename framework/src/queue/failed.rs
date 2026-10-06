@@ -403,7 +403,7 @@ impl FailedJobStore for DatabaseFailedJobStore {
         env: &Envelope,
         exception: &str,
     ) -> Result<Uuid, FrameworkError> {
-        let id = Uuid::new_v4();
+        let id = env.id;
         let payload = failed_payload(env, id)?;
         let stmt = Statement::from_sql_and_values(
             self.backend(),

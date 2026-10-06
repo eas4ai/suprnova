@@ -1354,7 +1354,7 @@ fn keeps_jpeg_segment(marker: u8, body: &[u8], keep_icc: bool) -> bool {
         0xE0 => body.starts_with(b"JFIF\0"),
         0xE2 => keep_icc && body.starts_with(ICC_PROFILE),
         0xEE => body.starts_with(b"Adobe"),
-        0xE1..=0xEF | 0xFE => true,
+        0xE1..=0xEF | 0xFE => false,
         _ => true,
     }
 }
