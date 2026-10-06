@@ -270,6 +270,11 @@ fn bind_006_a_relation_of_another_type_is_refused_at_startup() {
         .get("/users/{user}/notes/{note:slug}", user_note)
         .into();
     let error = refusal(&router);
+    assert!(
+        error.contains("GET /users/{user}/notes/{note:slug}"),
+        "{error}"
+    );
+    assert!(error.contains("`ScUser`"), "the parent: {error}");
     assert!(error.contains("`notes`"), "{error}");
     assert!(error.contains("ScComment"), "{error}");
 }
@@ -283,6 +288,11 @@ fn bind_006_a_morph_to_relation_is_refused_at_startup() {
         )
         .into();
     let error = refusal(&router);
+    assert!(
+        error.contains("GET /comments/{comment}/commentables/{commentable:slug}"),
+        "{error}"
+    );
+    assert!(error.contains("`ScComment`"), "the parent: {error}");
     assert!(error.contains("`commentables`"), "{error}");
     assert!(error.contains("MorphTo"), "{error}");
 }

@@ -133,6 +133,93 @@ async fn bind_002_a_malformed_key_is_the_same_miss_as_a_missing_row() {
     }
 }
 
+// ── A SeaORM entity no `#[model]` defines ──────────────────────────────────
+
+/// A SeaORM entity written by hand, as `db:sync` writes one, that no
+/// `#[model]` defines. Its `deleted_at` column belongs to no soft-deleting
+/// `#[model]`, so the bare form treats no row as soft-deleted (BIND-008).
+pub mod rg_note {
+    use sea_orm::entity::prelude::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "rg_notes")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub body: String,
+        pub deleted_at: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+impl suprnova::database::EntityExt for rg_note::Entity {}
+
+#[handler]
+pub async fn show_note(note: rg_note::Model) -> Response {
+    text(note.body)
+}
+
+#[tokio::test]
+async fn bind_003_the_bare_form_binds_an_entity_no_model_defines() {
+    let _db = {
+        let db = TestDatabase::sqlite_memory().await.unwrap();
+        run_sql(
+            &db,
+            &[
+                "CREATE TABLE rg_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                    body TEXT NOT NULL, deleted_at TEXT)",
+                "INSERT INTO rg_notes (id, body, deleted_at) VALUES \
+                    (1, 'first', NULL), (2, 'dated', '2026-01-01T00:00:00+00:00')",
+            ],
+        )
+        .await;
+        db
+    };
+    let router: Router = Router::new()
+        .get("/notes/{note}", show_note)
+        .get("/trashed/notes/{note}", show_note)
+        .with_trashed()
+        .into();
+    router
+        .prepare_bindings()
+        .expect("the bare form of a hand-written entity passes the startup checks");
+    let addr = serve(router).await;
+
+    // By primary key, as before route binding.
+    assert_eq!(get(addr, "/notes/1").await, (200, "first".to_owned()));
+    // No `#[model]` covers `rg_notes`, so a set `deleted_at` is just a
+    // column: the row binds on every route.
+    assert_eq!(get(addr, "/notes/2").await, (200, "dated".to_owned()));
+    assert_eq!(
+        get(addr, "/trashed/notes/2").await,
+        (200, "dated".to_owned())
+    );
+    // A missing row and a malformed key are the same 404, naming the
+    // entity's module.
+    let (missing_status, missing) = get(addr, "/notes/99").await;
+    let (malformed_status, malformed) = get(addr, "/notes/1x").await;
+    assert_eq!((missing_status, malformed_status), (404, 404));
+    assert_eq!(super::message(&missing), "rg_note not found");
+    assert_eq!(super::message(&malformed), "rg_note not found");
+    assert!(!malformed.contains("1x"), "{malformed}");
+
+    // The trait, called directly, binds the same row by primary key.
+    let row = <rg_note::Model as AutoRouteBinding>::from_route_param("2")
+        .await
+        .expect("the bare form binds by primary key");
+    assert_eq!(row.body, "dated");
+    assert_eq!(
+        <rg_note::Model as suprnova::RouteBinding>::route_key_name(),
+        "id"
+    );
+    assert_eq!(suprnova::RouteBinding::route_key(&row), "2");
+}
+
 // A model without `soft_deletes` and a registered tenant scope: the binding
 // applies the scope through the builder every `Model::query()` read uses.
 #[model(table = "rbsc_articles", fillable = ["tenant_id", "title"])]

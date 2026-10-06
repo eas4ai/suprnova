@@ -224,6 +224,40 @@ fn bind_007_a_resolver_of_another_type_is_refused() {
 }
 
 #[test]
+fn bind_007_a_model_binder_of_another_type_is_refused() {
+    // `model::<CuTag>` binds `user`, which the handler binds as `CuUser`.
+    let router: Router = Router::new()
+        .model::<CuTag, _, _>("user", |_value| async {
+            Err(FrameworkError::model_not_found("CuTag"))
+        })
+        .get("/users/{user}", show_user)
+        .into();
+    let error = refusal(&router);
+    assert!(error.contains("GET /users/{user}"), "{error}");
+    assert!(error.contains("CuTag"), "{error}");
+    assert!(error.contains("`user: CuUser`"), "{error}");
+
+    // Registered after the route, it is refused the same way.
+    let router: Router = Router::new().get("/users/{user}", show_user).into();
+    let router = router.model::<CuTag, _, _>("user", |_value| async {
+        Err(FrameworkError::model_not_found("CuTag"))
+    });
+    let error = refusal(&router);
+    assert!(error.contains("CuTag"), "{error}");
+
+    // A binder of the argument's own type starts.
+    let router: Router = Router::new()
+        .model::<CuUser, _, _>("user", |_value| async {
+            Err(FrameworkError::model_not_found("CuUser"))
+        })
+        .get("/users/{user}", show_user)
+        .into();
+    router
+        .prepare_bindings()
+        .expect("a model binder of the argument's type is accepted");
+}
+
+#[test]
 fn bind_007_a_binder_for_a_path_value_or_a_form_request_is_refused() {
     let resolver = |value: String, _route: suprnova::MatchedRoute| async move {
         Ok(Some(CuUser {

@@ -161,6 +161,76 @@ async fn bind_008_a_scoped_child_follows_with_trashed() {
     );
 }
 
+/// A soft-deleting parent of a scoped child.
+#[model(table = "tr_shelves", soft_deletes, relations = {
+    books: HasMany<TrBook>,
+})]
+pub struct TrShelf {
+    pub id: i64,
+    pub name: String,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+#[model(table = "tr_books")]
+pub struct TrBook {
+    pub id: i64,
+    pub tr_shelf_id: i64,
+    pub slug: String,
+}
+
+#[handler]
+pub async fn shelf_book(shelf: TrShelf, book: TrBook) -> Response {
+    text(format!("{} {}", shelf.name, book.slug))
+}
+
+#[tokio::test]
+async fn bind_008_a_soft_deleted_parent_binds_only_on_a_route_with_trashed() {
+    let db = fixture().await;
+    run_sql(
+        &db,
+        &[
+            "CREATE TABLE tr_shelves (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, \
+                deleted_at TEXT)",
+            "CREATE TABLE tr_books (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                tr_shelf_id INTEGER NOT NULL, slug TEXT NOT NULL)",
+            "INSERT INTO tr_shelves (id, name, deleted_at) VALUES (1, 'open', NULL), \
+                (2, 'closed', '2026-01-01T00:00:00+00:00')",
+            "INSERT INTO tr_books (id, tr_shelf_id, slug) VALUES (1, 1, 'dune'), (2, 2, 'emma')",
+        ],
+    )
+    .await;
+    let router: Router = Router::new()
+        .get("/shelves/{shelf}/books/{book:slug}", shelf_book)
+        .get("/trashed/shelves/{shelf}/books/{book:slug}", shelf_book)
+        .with_trashed()
+        .get("/unscoped/shelves/{shelf}/books/{book}", shelf_book)
+        .get("/trashed/unscoped/shelves/{shelf}/books/{book}", shelf_book)
+        .with_trashed()
+        .into();
+    let addr = serve(router).await;
+    // A live parent binds on both routes.
+    assert_eq!(
+        get(addr, "/shelves/1/books/dune").await,
+        (200, "open dune".to_owned())
+    );
+    assert_eq!(
+        get(addr, "/trashed/shelves/1/books/dune").await,
+        (200, "open dune".to_owned())
+    );
+    // A soft-deleted parent, of a scoped child and of an unscoped one,
+    // binds only where the route asks for trashed rows.
+    assert_eq!(get(addr, "/shelves/2/books/emma").await.0, 404);
+    assert_eq!(
+        get(addr, "/trashed/shelves/2/books/emma").await,
+        (200, "closed emma".to_owned())
+    );
+    assert_eq!(get(addr, "/unscoped/shelves/2/books/2").await.0, 404);
+    assert_eq!(
+        get(addr, "/trashed/unscoped/shelves/2/books/2").await,
+        (200, "closed emma".to_owned())
+    );
+}
+
 #[tokio::test]
 async fn bind_008_a_replaced_binding_receives_the_soft_deletable_lookup() {
     let router: Router = Router::new()

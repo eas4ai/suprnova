@@ -34,6 +34,21 @@ pub struct KyToken {
     pub label: String,
 }
 
+#[model(table = "ky_shelves", relations = {
+    books: HasMany<KyBook>,
+})]
+pub struct KyShelf {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "ky_books")]
+pub struct KyBook {
+    pub id: i64,
+    pub ky_shelf_id: i64,
+    pub title: String,
+}
+
 #[model(table = "ky_archives", connection = "ky_archive", fillable = ["title"])]
 pub struct KyArchive {
     pub id: i64,
@@ -53,6 +68,19 @@ pub async fn show_wrapped(post: RouteParam<KyPost>) -> Response {
 #[handler]
 pub async fn show_bare(post: ky_post::Model) -> Response {
     text(post.title)
+}
+
+#[handler]
+pub async fn maybe_post(post: Option<KyPost>) -> Response {
+    text(
+        post.map(|post| post.title)
+            .unwrap_or_else(|| "none".to_owned()),
+    )
+}
+
+#[handler]
+pub async fn shelf_book(shelf: KyShelf, book: KyBook) -> Response {
+    text(format!("{} {}", shelf.name, book.title))
 }
 
 #[handler]
@@ -89,9 +117,14 @@ async fn fixture() -> TestDatabase {
             "CREATE TABLE ky_pages (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL, \
                 title TEXT NOT NULL)",
             "CREATE TABLE ky_tokens (id TEXT PRIMARY KEY, label TEXT NOT NULL)",
+            "CREATE TABLE ky_shelves (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+            "CREATE TABLE ky_books (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                ky_shelf_id INTEGER NOT NULL, title TEXT NOT NULL)",
             "INSERT INTO ky_posts (id, slug, title) VALUES (7, 'seven', 'Seven')",
             "INSERT INTO ky_pages (id, slug, title) VALUES (1, 'about', 'About us'), \
                 (2, '1', 'Slug one')",
+            "INSERT INTO ky_shelves (id, name) VALUES (1, 'top'), (2, 'low')",
+            "INSERT INTO ky_books (id, ky_shelf_id, title) VALUES (1, 1, 'Dune'), (2, 2, 'Emma')",
         ],
     )
     .await;
@@ -105,6 +138,10 @@ fn router() -> Router {
         .get("/bare/{post}", show_bare)
         .get("/pages/{page}", show_page)
         .get("/tokens/{token}", show_token)
+        .get("/maybe/{post?}", maybe_post)
+        .get("/shelves/{shelf}/books/{book}", shelf_book)
+        .scope_bindings()
+        .get("/fielded/shelves/{shelf}/books/{book:id}", shelf_book)
         .into()
 }
 
@@ -130,20 +167,85 @@ async fn bind_002_a_malformed_value_answers_the_404_a_missing_row_does() {
         "the body repeated the value: {malformed}"
     );
 
-    // Every binding form answers a malformed value with a 404.
-    for (path, named) in [
-        ("/wrapped/7abc", "KyPost not found"),
-        ("/bare/7abc", "ky_post not found"),
+    // Every binding form answers a malformed value with the 404 a missing
+    // row gets, body for body.
+    for (malformed_path, missing_path, named) in [
+        ("/wrapped/7abc", "/wrapped/8", "KyPost not found"),
+        ("/bare/7abc", "/bare/8", "ky_post not found"),
     ] {
-        let (status, body) = get(addr, path).await;
-        assert_eq!((status, message(&body).as_str()), (404, named), "{path}");
-        assert!(!body.contains("7abc"), "{path}: {body}");
+        let (malformed_status, malformed) = get(addr, malformed_path).await;
+        let (missing_status, missing) = get(addr, missing_path).await;
+        assert_eq!(
+            (malformed_status, missing_status),
+            (404, 404),
+            "{malformed_path} and {missing_path}"
+        );
+        assert_eq!(
+            without_request_id(&malformed),
+            without_request_id(&missing),
+            "{malformed_path} and {missing_path}: the two 404 bodies must be the same"
+        );
+        assert_eq!(message(&missing), named, "{missing_path}");
+        assert!(
+            !malformed.contains("7abc"),
+            "{malformed_path}: the body repeated the value: {malformed}"
+        );
     }
-    let (status, body) = get(addr, "/bare/8").await;
+}
+
+#[tokio::test]
+async fn bind_002_a_malformed_value_answers_404_for_a_scoped_child_and_an_optional_argument() {
+    let _db = fixture().await;
+    let addr = serve(router()).await;
+
+    // A scoped child, without and with a binding field: the value is parsed
+    // in the child lookup through the parent's relation.
+    for prefix in ["/shelves/1/books", "/fielded/shelves/1/books"] {
+        assert_eq!(
+            get(addr, &format!("{prefix}/1")).await,
+            (200, "top Dune".to_owned()),
+            "{prefix}"
+        );
+        let (malformed_status, malformed) = get(addr, &format!("{prefix}/1x")).await;
+        let (missing_status, missing) = get(addr, &format!("{prefix}/99")).await;
+        let (unowned_status, unowned) = get(addr, &format!("{prefix}/2")).await;
+        assert_eq!(
+            (malformed_status, missing_status, unowned_status),
+            (404, 404, 404),
+            "{prefix}: {malformed}"
+        );
+        assert_eq!(
+            without_request_id(&malformed),
+            without_request_id(&missing),
+            "{prefix}: a malformed child answers the body a missing one does"
+        );
+        assert_eq!(
+            without_request_id(&unowned),
+            without_request_id(&missing),
+            "{prefix}"
+        );
+        assert_eq!(message(&missing), "KyBook not found", "{prefix}");
+        assert!(!malformed.contains("1x"), "{prefix}: {malformed}");
+    }
+
+    // An `Option<T>` argument: absent binds `None`, a malformed value is a
+    // miss, not `None`.
+    assert_eq!(get(addr, "/maybe").await, (200, "none".to_owned()));
+    assert_eq!(get(addr, "/maybe/7").await, (200, "Seven".to_owned()));
+    let (malformed_status, malformed) = get(addr, "/maybe/7abc").await;
+    let (missing_status, missing) = get(addr, "/maybe/8").await;
     assert_eq!(
-        (status, message(&body).as_str()),
-        (404, "ky_post not found")
+        (malformed_status, missing_status),
+        (404, 404),
+        "{malformed}"
     );
+    assert_eq!(
+        without_request_id(&malformed),
+        without_request_id(&missing),
+        "an optional argument answers a malformed value as a missing row"
+    );
+    assert_eq!(message(&missing), "KyPost not found");
+    assert!(!malformed.contains("7abc"), "{malformed}");
 }
 
 #[tokio::test]
