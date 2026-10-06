@@ -154,3 +154,36 @@ fn bind_012_calls_written_with_strings_produce_the_same_urls() {
         Some("/ur/slugs/plain")
     );
 }
+
+#[test]
+fn bind_012_string_pairs_in_every_container_written_today_fill_as_before() {
+    let _router = register_routes();
+    let expected = Some("/ur/plain/7".to_owned());
+    let id = String::from("7");
+    let mut pairs: Vec<(&str, &str)> = vec![("id", "7")];
+    let mut array = [("id", "7")];
+    let slice: &[(&str, &str)] = &[("id", "7")];
+    // Borrowed and mutable vectors, a mutable array and a mutable slice: a
+    // `&[(&str, &str)]` parameter took each by coercion.
+    assert_eq!(route("ur.plain", &pairs), expected);
+    assert_eq!(route("ur.plain", &mut pairs), expected);
+    assert_eq!(route("ur.plain", &mut array), expected);
+    assert_eq!(route("ur.plain", &mut array[..]), expected);
+    assert_eq!(route("ur.plain", slice), expected);
+    assert_eq!(route("ur.home", &mut []).as_deref(), Some("/ur/home"));
+    // A value that derefs to a string, inside an array literal.
+    assert_eq!(route("ur.plain", &[("id", &id)]), expected);
+    assert_eq!(route("ur.plain", &[("other", "x"), ("id", &id)]), expected);
+    assert_eq!(route("ur.plain", &[(&String::from("id"), &id)]), expected);
+    assert_eq!(try_route("ur.plain", &pairs).as_deref(), Ok("/ur/plain/7"));
+    assert_eq!(
+        try_route("ur.plain", &[("id", &id)]).as_deref(),
+        Ok("/ur/plain/7")
+    );
+    // A value is percent-encoded the same way in every form.
+    let traversal = String::from("../x");
+    assert_eq!(
+        route("ur.plain", &[("id", &traversal)]).as_deref(),
+        Some("/ur/plain/..%2Fx")
+    );
+}

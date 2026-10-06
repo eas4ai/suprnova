@@ -33,6 +33,7 @@ const MEMBERS: &[&str] = &[
     "resource-selected",
     "tutorial",
     "ts-routes",
+    "url-strings",
 ];
 
 /// A fresh copy of the fixture workspace for one test, never the system
@@ -216,6 +217,15 @@ fn bind_011_a_selected_action_without_its_function_fails_the_build() {
     assert_compiles(
         &cargo_check(&dir, "resource-selected"),
         "an action `only` leaves out needs no function",
+    );
+}
+
+#[test]
+fn bind_012_every_string_pair_form_written_before_route_binding_compiles() {
+    let dir = workspace("url-strings");
+    assert_compiles(
+        &cargo_check(&dir, "url-strings"),
+        "a `route()` or `try_route()` call written with string pairs must keep compiling",
     );
 }
 
