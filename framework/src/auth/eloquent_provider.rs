@@ -213,10 +213,11 @@ where
                 // While the application shares its database with Laravel,
                 // a valid sign-in rewrites a hash Laravel's hasher would
                 // refuse (`$2b$`, Argon2id) as the `$2y$` one it accepts,
-                // as Laravel itself rehashes on login. The sign-in stands
+                // as Laravel itself rehashes on login, keeping a stored
+                // bcrypt cost above the configured one. The sign-in stands
                 // if the rewrite fails; the next one tries again.
                 if valid && crate::LaravelDatabase::is_shared() && hashing::needs_rehash(hash) {
-                    let rewritten = match hashing::hash_async(plaintext).await {
+                    let rewritten = match hashing::rehash_for_laravel_async(plaintext, hash).await {
                         Ok(rehashed) => {
                             self.set_password(&user.get_auth_identifier(), &rehashed)
                                 .await
