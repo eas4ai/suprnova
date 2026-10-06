@@ -204,10 +204,12 @@ async fn mem_audit_a_gif_frame_larger_than_its_screen_is_refused_before_decoding
 }
 
 /// One decode under `budget`: the result, and the most bytes it held at once.
+/// `turned` decodes as `process` does, the EXIF orientation applied.
 fn decode_under(
     driver: &OxideAvImageDriver,
     image: &[u8],
     budget: u64,
+    turned: bool,
 ) -> (Result<(u32, u32), String>, u64) {
     let _config = ConfigGuard::set({
         let mut config = ImageConfig::default();
@@ -216,7 +218,12 @@ fn decode_under(
     });
     let heap = Heap::start();
     let start = heap.live();
-    let result = driver.dimensions(image).map_err(|e| e.to_string());
+    let result = if turned {
+        driver.decoded_dimensions(image)
+    } else {
+        driver.dimensions(image)
+    }
+    .map_err(|e| e.to_string());
     let peak = (heap.peak() - start) as u64;
     drop(heap);
     (result, peak)
@@ -229,9 +236,15 @@ fn decode_under(
 /// refusal names the driver's estimate of the decode; at exactly that budget
 /// the decode runs and stays within it, and one byte less is refused.
 fn assert_the_budget_holds(name: &str, image: &[u8], width: u32, height: u32) {
+    assert_the_decode_budget_holds(name, image, width, height, false);
+}
+
+/// [`assert_the_budget_holds`], decoding as `process` does when `turned`:
+/// with the EXIF orientation applied.
+fn assert_the_decode_budget_holds(name: &str, image: &[u8], width: u32, height: u32, turned: bool) {
     let driver = OxideAvImageDriver::new();
     let header_budget = u64::from(width) * u64::from(height) * 4;
-    let (result, peak) = decode_under(&driver, image, header_budget);
+    let (result, peak) = decode_under(&driver, image, header_budget, turned);
     let message = match result {
         Ok(_) => {
             panic!("{name}: admitted at a {header_budget}-byte budget and peaked at {peak} bytes")
@@ -249,7 +262,7 @@ fn assert_the_budget_holds(name: &str, image: &[u8], width: u32, height: u32) {
         .and_then(|number| number.parse().ok())
         .unwrap_or_else(|| panic!("{name}: the refusal names no estimate: {message}"));
 
-    let (result, peak) = decode_under(&driver, image, estimate);
+    let (result, peak) = decode_under(&driver, image, estimate, turned);
     assert_eq!(
         result.unwrap_or_else(|e| panic!(
             "{name}: refused at its own {estimate}-byte estimate after holding {peak} bytes: {e}"
@@ -261,7 +274,7 @@ fn assert_the_budget_holds(name: &str, image: &[u8], width: u32, height: u32) {
         "{name}: peaked at {peak} bytes over its {estimate}-byte estimate"
     );
 
-    let (result, _) = decode_under(&driver, image, estimate - 1);
+    let (result, _) = decode_under(&driver, image, estimate - 1, turned);
     assert!(
         result.is_err(),
         "{name}: admitted one byte under its {estimate}-byte estimate"
@@ -886,7 +899,7 @@ async fn img_001_an_oriented_decode_stays_within_its_estimate() {
             webp_with_exif(&convert(&source, OutputFormat::WebP), &tiff),
         ),
     ] {
-        assert_the_budget_holds(name, &image, 128, 256);
+        assert_the_decode_budget_holds(name, &image, 128, 256, true);
     }
 }
 
@@ -923,8 +936,9 @@ async fn img_001_reading_the_tag_inflates_no_compressed_chunk() {
 }
 
 /// IMG-002: a PNG's ICC profile inflates within `IMAGE_MAX_ALLOC_BYTES`.
-/// One that inflates to 64 MiB under a 4 MiB budget is refused, having held
-/// no more than the budget; one that fits is carried.
+/// An `iCCP` whose data inflates to 64 MiB of zeros has no profile header,
+/// so it is read no further than the header's 128 bytes: the image is
+/// processed without a profile, holding next to nothing for it.
 #[tokio::test]
 async fn img_002_a_png_icc_profile_inflates_within_the_budget() {
     let _lock = exclusive().await;
@@ -949,10 +963,203 @@ async fn img_002_a_png_icc_profile_inflates_within_the_budget() {
     let result = driver.process(&bomb, &to_png);
     let peak = (heap.peak() - start) as u64;
     drop(heap);
-    let err = result.expect_err("a profile past the budget is refused");
-    assert!(err.to_string().contains("ICC profile"), "got: {err}");
+    let out = result.expect("the image is processed without the profile");
     assert!(
-        peak <= BUDGET,
-        "inflating the profile held {peak} bytes, over the {BUDGET}-byte budget"
+        !out.windows(4).any(|window| window == b"iCCP"),
+        "a profile with no header was carried"
     );
+    assert!(
+        peak < 1024 * 1024,
+        "reading the profile held {peak} bytes for a 64 MiB inflate"
+    );
+}
+
+/// A Display P3 profile, padded to the four-byte multiple ICC requires,
+/// then grown with zeros to `size` bytes and its header's size field set
+/// to match: a valid header over a large, highly compressible body.
+fn p3_profile_of(size: usize) -> Vec<u8> {
+    let mut profile = moxcms::ColorProfile::new_display_p3()
+        .encode()
+        .expect("moxcms encodes Display P3");
+    let size = size.max(profile.len().next_multiple_of(4));
+    profile.resize(size, 0);
+    profile[..4].copy_from_slice(&(size as u32).to_be_bytes());
+    profile
+}
+
+/// An `iCCP` chunk's data for `profile`.
+fn iccp_chunk(profile: &[u8]) -> Vec<u8> {
+    [
+        &b"fixture\0\0"[..],
+        &compcol::vec::compress_to_vec::<compcol::zlib::Zlib>(profile).expect("zlib"),
+    ]
+    .concat()
+}
+
+/// IMG-002: the profile and the copy of it the output carries count against
+/// `IMAGE_MAX_ALLOC_BYTES`. A 3 MiB profile, a few kilobytes compressed,
+/// cannot reach a WebP under a 4 MiB budget; under 16 MiB it does.
+#[tokio::test]
+async fn img_002_a_profile_and_its_copy_are_charged_to_the_budget() {
+    let _lock = exclusive().await;
+    const PROFILE: usize = 3 * 1024 * 1024;
+    let driver = OxideAvImageDriver::new();
+    let png = png_with_chunks(
+        &encode_png(4, 4, PngPixelFormat::Rgba, 4, false),
+        &[(b"iCCP", iccp_chunk(&p3_profile_of(PROFILE)))],
+    );
+    let to_webp = ImagePipeline {
+        format: Some(OutputFormat::WebPLossless),
+        ..Default::default()
+    };
+    for (budget, carried) in [(4 * 1024 * 1024u64, false), (16 * 1024 * 1024, true)] {
+        let _config = ConfigGuard::set({
+            let mut config = ImageConfig::default();
+            config.max_alloc_bytes = budget;
+            config
+        });
+        let heap = Heap::start();
+        let start = heap.live();
+        let result = driver.process(&png, &to_webp);
+        let peak = (heap.peak() - start) as u64;
+        drop(heap);
+        match result {
+            Ok(out) => {
+                assert!(
+                    carried,
+                    "a {budget}-byte budget carried a {PROFILE}-byte profile"
+                );
+                assert!(out.len() > PROFILE, "the profile was not carried");
+            }
+            Err(e) => {
+                assert!(!carried, "refused under a {budget}-byte budget: {e}");
+                assert!(e.to_string().contains("ICC profile"), "got: {e}");
+            }
+        }
+        assert!(
+            peak <= budget,
+            "held {peak} bytes under a {budget}-byte budget"
+        );
+    }
+}
+
+/// IMG-002: the `magick` driver learns a source profile's colour space from
+/// its header, inflating no more than that. A profile that inflates to
+/// 64 MiB costs the Rust side next to nothing; ImageMagick holds it.
+#[test]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn img_002_magick_reads_only_a_profile_header() {
+    let _lock = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(exclusive());
+    let png = png_with_chunks(
+        &encode_png(8, 8, PngPixelFormat::Rgba, 4, false),
+        &[(b"iCCP", iccp_chunk(&p3_profile_of(64 * 1024 * 1024)))],
+    );
+    let driver = suprnova::MagickCliDriver::from_env();
+    let to_png = ImagePipeline {
+        format: Some(OutputFormat::Png),
+        ..Default::default()
+    };
+    driver.process(&png, &to_png).expect("a warm-up");
+    let heap = Heap::start();
+    let start = heap.live();
+    driver.process(&png, &to_png).expect("the pipeline runs");
+    let peak = (heap.peak() - start) as u64;
+    drop(heap);
+    assert!(
+        peak < 8 * 1024 * 1024,
+        "the driver held {peak} bytes for a 64 MiB profile ImageMagick reads"
+    );
+}
+
+/// The bytes everything allocated while `process` ran, after a warm-up.
+fn allocated_by(
+    driver: &OxideAvImageDriver,
+    image: &[u8],
+    pipeline: &ImagePipeline,
+) -> (u64, usize) {
+    let out = driver.process(image, pipeline).expect("a warm-up");
+    let heap = Heap::start();
+    let before = heap.bytes();
+    driver.process(image, pipeline).expect("the pipeline");
+    let used = heap.bytes() - before;
+    drop(heap);
+    (used, out.len())
+}
+
+/// MEM-003: the metadata an image keeps is written into the one output
+/// buffer the encoder fills, not by copying the encoded file again. The
+/// same image with and without a profile allocates the same, give or take
+/// what reading and writing the profile itself takes, which is far less
+/// than half the output: a second copy of the output would be all of it.
+#[tokio::test]
+async fn mem_audit_an_image_with_a_profile_is_written_in_one_buffer() {
+    let _lock = exclusive().await;
+    let driver = OxideAvImageDriver::new();
+    let profile = p3_profile_of(0);
+    // Noise, so the encoded outputs are as large as the pixels. WebP adds
+    // its metadata through the same in-place insertion (the unit test
+    // `img_002_adding_metadata_moves_bytes_within_the_reserved_buffer`
+    // covers it); its encoders allocate too much for dhat to record
+    // quickly.
+    for (format, side) in [(OutputFormat::Png, 512), (OutputFormat::Jpeg, 512)] {
+        let plain = encode_png(side, side, PngPixelFormat::Rgba, 4, false);
+        let tagged = png_with_chunks(&plain, &[(b"iCCP", iccp_chunk(&profile))]);
+        let pipeline = ImagePipeline {
+            format: Some(format),
+            ..Default::default()
+        };
+        let (without, out_len) = allocated_by(&driver, &plain, &pipeline);
+        let (with, _) = allocated_by(&driver, &tagged, &pipeline);
+        let allowance = out_len as u64 / 2;
+        assert!(
+            with < without + allowance,
+            "{format:?}: {with} bytes with the profile against {without} without, for a \
+             {out_len}-byte output: the output was copied"
+        );
+    }
+}
+
+/// IMG-001: `dimensions` and `dominant_color` answer for a tagged source
+/// without turning its pixels: the size swaps, the average does not change.
+/// Turning would allocate a second full plane; the bytes allocated in all,
+/// not the peak (a PNG decode peaks above two planes anyway), show it.
+#[tokio::test]
+async fn img_001_dimensions_and_dominant_color_do_not_turn_the_image() {
+    let _lock = exclusive().await;
+    let driver = OxideAvImageDriver::new();
+    let plain = encode_png(512, 256, PngPixelFormat::Rgba, 4, false);
+    let tagged = png_with_chunks(&plain, &[(b"eXIf", orientation_tiff(6))]);
+    let allocated = |image: &[u8], colour: bool| {
+        let heap = Heap::start();
+        let before = heap.bytes();
+        if colour {
+            driver.dominant_color(image).expect("the image decodes");
+        } else {
+            driver.dimensions(image).expect("the image decodes");
+        }
+        let used = heap.bytes() - before;
+        drop(heap);
+        used
+    };
+    assert_eq!(
+        driver.dimensions(&tagged).unwrap(),
+        (256, 512),
+        "the turned size"
+    );
+    assert_eq!(
+        driver.dominant_color(&tagged).unwrap(),
+        driver.dominant_color(&plain).unwrap()
+    );
+    const PLANE: u64 = 512 * 256 * 4;
+    for (name, colour) in [("dimensions", false), ("dominant_color", true)] {
+        let (tagged_bytes, plain_bytes) = (allocated(&tagged, colour), allocated(&plain, colour));
+        assert!(
+            tagged_bytes < plain_bytes + PLANE / 2,
+            "{name} allocated {tagged_bytes} bytes for a tagged image, {plain_bytes} untagged: it \
+             turned the pixels"
+        );
+    }
 }

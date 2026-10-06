@@ -53,8 +53,10 @@ pub fn run_alone(name: &str) {
 /// binary, with stdout and stderr captured for [`assert_child_passed`].
 pub fn child_command(name: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+    // `--include-ignored`: a child of an `#[ignore]`d test (one that needs a
+    // host binary, say) is `#[ignore]`d too, and must still run here.
     command
-        .args(["--exact", name, "--nocapture"])
+        .args(["--exact", name, "--nocapture", "--include-ignored"])
         .env(OWN_PROCESS, "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -62,6 +64,11 @@ pub fn child_command(name: &str) -> Command {
 }
 
 /// Fail unless the child ran exactly one test and passed it.
+///
+/// "Ran" is checked by the count libtest reports as passed, not only by
+/// "running 1 test": libtest prints that line for an `#[ignore]`d test too,
+/// reports it ignored, and exits zero, so a child that never ran its body
+/// would otherwise pass.
 pub fn assert_child_passed(output: &std::process::Output) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -72,5 +79,9 @@ pub fn assert_child_passed(output: &std::process::Output) {
     assert!(
         output.status.success(),
         "the child failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("test result: ok. 1 passed;"),
+        "the child did not run its one test (ignored?); stdout:\n{stdout}"
     );
 }

@@ -135,11 +135,21 @@ apply the tag as they decode, as Laravel's do, so a portrait photo comes
 out upright. All eight orientations are quarter turns and mirrors, so
 applying one moves pixels and never resamples them.
 
-The tag is read from a JPEG's last Exif `APP1` segment, a PNG's `eXIf`
+The tag is read from a JPEG's last Exif `APP1` segment, wherever it sits
+(a progressive JPEG can carry one between its scans), a PNG's `eXIf`
 chunk, and a WebP's `EXIF` chunk. Reading it never inflates a compressed
-chunk. Turning the image holds a second full-size plane beside the decoded
-one, and the decode estimate counts it (see
-[What a decode costs](#what-a-decode-costs)).
+chunk. Both drivers read the tag in these places, with the same reader,
+and turn the image with a fixed quarter turn or mirror, so a file comes
+out the same way under either. ImageMagick's own orientation sources, a
+PNG's `Raw profile type exif` text chunk and its `orNT` chunk, are not
+used. For a format the framework cannot read (HEIC, TIFF), the `magick`
+driver leaves orientation to ImageMagick's `-auto-orient`.
+
+Turning the image holds a second full-size plane beside the decoded one,
+and the decode estimate counts it (see
+[What a decode costs](#what-a-decode-costs)). `ImageDriver::dimensions`
+reports a tagged source at its turned size, and `dominant_color` at its
+average, without turning the pixels.
 
 | Var | Default | Purpose |
 |---|---|---|
@@ -193,9 +203,19 @@ longer describes its output: the pixels are converted from it to sRGB,
 and the profile and its PNG colour chunks are dropped. The `magick`
 driver keeps a grey profile on output it writes as grey.
 
-A PNG's profile is compressed. Inflating it counts against
-`IMAGE_MAX_ALLOC_BYTES`, and a profile that inflates past what the budget
-leaves is refused like any other decode over the limit.
+A profile is carried only when its length is the size its own header
+gives. A profile is a few kilobytes, but a PNG's is compressed, and a
+small file can hold one that inflates a thousand times over. So the
+driver reads the header first, and the pixels it holds, the profile, and
+the copy of it the output carries must fit `IMAGE_MAX_ALLOC_BYTES`
+together. A profile that does not is refused like any other decode over
+the limit. The `magick` driver reads no more than the header of a source
+profile, and checks the one ImageMagick writes without holding it.
+
+A CMYK or Lab profile cannot describe RGB output, so it is dropped. The
+default driver does not read CMYK JPEGs at all. Under `magick`,
+ImageMagick converts CMYK pixels to RGB with its own formula, not through
+the profile, so colours can shift.
 
 ## Custom transformations
 
