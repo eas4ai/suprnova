@@ -81,21 +81,23 @@ Status: Observed
 ## Orientation and metadata
 
 [IMG-001] Both drivers MUST apply the EXIF orientation on decode by
-default: `magick` with `-auto-orient` after the input, `oxideav` by
-reading the tag from the JPEG's last APP1 Exif segment (the one zune-jpeg
-keeps, lossless JPEGs included), PNG's uncompressed `eXIf` chunk and
-WebP's `EXIF` chunk (its `Exif\0\0` prefix removed), parsing it with
-`image::metadata::Orientation` as a direct dependency, and applying it
-with its exact rotations and flips. Reading the tag MUST NOT inflate
+default, read from the same place: the JPEG's last APP1 Exif segment (the
+one zune-jpeg keeps, lossless JPEGs included), PNG's uncompressed `eXIf`
+chunk and WebP's `EXIF` chunk (its `Exif\0\0` prefix removed), parsed
+with `image::metadata::Orientation` as a direct dependency. `oxideav`
+applies it with its exact rotations and flips; `magick` applies the same
+tag as the matching fixed rotation or flip after the input, so both
+drivers turn one file alike, and uses `-auto-orient` only for a format
+the framework cannot read (HEIC, TIFF). Reading the tag MUST NOT inflate
 compressed chunks. `oxideav`'s decode estimate MUST count the full-size
 copy a non-identity orientation allocates. `orient()` MUST exist as an
 explicit transformation that applies the tag when decode has not, and
 `ImageConfig` MUST offer an opt-out, read from `IMAGE_AUTO_ORIENT`
 (default `true`) like its other fields.
-Falsifier: a JPEG, PNG or WebP with any of the eight orientations comes out of either driver with pixels that are not the exact orientation permutation of its decoded pixels; `oxideav` orients a JPEG with two Exif APP1 segments by any but the last; a PNG with a large compressed chunk is inflated to read the tag; an oriented decode peaks above the estimate its refusal names; `orient()` is missing, does not apply the tag under the opt-out, or turns an image its decode already oriented; the opt-out does not keep the sensor's pixels; or `IMAGE_AUTO_ORIENT=false` does not turn orientation on decode off.
+Falsifier: a JPEG, PNG or WebP with any of the eight orientations comes out of either driver with pixels that are not the exact orientation permutation of its decoded pixels; `oxideav` orients a JPEG with two Exif APP1 segments by any but the last; a PNG with a large compressed chunk is inflated to read the tag; an oriented decode peaks above the estimate its refusal names; `orient()` is missing, does not apply the tag under the opt-out, or turns an image its decode already oriented; the opt-out does not keep the sensor's pixels; or `IMAGE_AUTO_ORIENT=false` does not turn orientation on decode off; or `magick` takes the orientation of a JPEG, PNG or WebP from anywhere but the places `oxideav` reads it.
 Mechanism: `images`.
-Rationale: Laravel's drivers orient on decode by default (Intervention `Config::autoOrientation`). Ruled 2026-10-05: MEM-003 gains an exception for the image bytes this changes on purpose.
-Status: Agreed 2026-10-05
+Rationale: Laravel's drivers orient on decode by default (Intervention `Config::autoOrientation`). Ruled 2026-10-05: MEM-003 gains an exception for the image bytes this changes on purpose. Ruled 2026-10-06 (escalation 5ef445fa): ImageMagick's own reading takes the first Exif segment, PNG raw-profile text and its `orNT` chunk, so `magick` applies the framework's reading.
+Status: Agreed 2026-10-06
 
 [IMG-002] Processed output from both drivers MUST NOT carry the source's
 EXIF, XMP or IPTC metadata, GPS position included, or its text metadata:

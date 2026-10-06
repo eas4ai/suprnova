@@ -313,11 +313,13 @@ Status: Agreed 2026-10-05
 with exactly one `/` and is already under the root (PFX-002) MUST be left
 as it is; any other target starting with exactly one `/` MUST get the
 root. An absolute URL, a network-path reference (`//host/x`) and a
-relative reference (`?q`, `#f`, `x`) MUST be left as they are. The
+relative redirect target (`?q`, `#f`, `x`) MUST be left as they are;
+`url::to` and `url::secure` turn a relative path (`x`) into an absolute
+URL under the origin and the root, as Laravel's `url()` does. The
 manual's prefix-deployment section (PFX-009) MUST say that an application
 whose own routes begin with its deployment prefix cannot be told apart
 and must not do so.
-Falsifier: behind `/billing`, `Redirect::to(route(...))`, `signed_route`, `back()`, `Redirect::to("/billing?tab=2")` or `Redirect::to("/billing#x")` sends the root twice; `Redirect::to("?page=2")`, an absolute URL or a `//host` reference gains it; or a plain root-relative application path is sent without it.
+Falsifier: behind `/billing`, `Redirect::to(route(...))`, `signed_route`, `back()`, `Redirect::to("/billing?tab=2")` or `Redirect::to("/billing#x")` sends the root twice; `Redirect::to("?page=2")`, an absolute URL or a `//host` reference gains it; `url::to("x")` is anything but the origin, the root and `/x`; or a plain root-relative application path is sent without it.
 Mechanism: `path-prefix`.
-Rationale: Laravel avoids the question because its `route()` is absolute by default (`Routing/UrlGenerator.php:527`). Of the three options offered (leave a rooted path alone; a rooted-path type; absolute `route()`), the developer ruled "a" on 2026-10-05. Ruled 2026-10-05: a rooted path followed by `?` or `#`, and a query-only target, are left as they are.
-Status: Agreed 2026-10-05
+Rationale: Laravel avoids the question because its `route()` is absolute by default (`Routing/UrlGenerator.php:527`). Of the three options offered (leave a rooted path alone; a rooted-path type; absolute `route()`), the developer ruled "a" on 2026-10-05. Ruled 2026-10-05: a rooted path followed by `?` or `#`, and a query-only target, are left as they are. Ruled 2026-10-06 (escalation 5ef445fa): `url::to` keeps making an absolute URL from a relative path, as it did from `APP_URL` before.
+Status: Agreed 2026-10-06
