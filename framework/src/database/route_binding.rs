@@ -851,54 +851,40 @@ fn parse_as<T: FromStr + serde::Serialize>(value: &str) -> Option<serde_json::Va
         .and_then(|parsed| serde_json::to_value(parsed).ok())
 }
 
-/// A JSON column: a path segment is never compared with one.
+/// A column's path-segment parser, picked by the column's type. The
+/// generated code calls it on `&&&&probe`, and method lookup tries the
+/// impls from the most references down: a JSON value, or an `Option` of
+/// one, never parses (a path segment is never compared with one); then a
+/// type that is `FromStr` and `Serialize` parses; then an `Option` of such
+/// a type (a nullable column) parses as its inner type; and any other type
+/// does not parse. One trait for every kind means the generated code
+/// imports one name, and uses it wherever it imports it.
 #[doc(hidden)]
-pub trait __ColumnJson {
-    /// No parser.
+pub trait __ColumnParser {
+    /// The column's parser, or `None` when a path segment never matches it.
     fn __column_parser(&self) -> Option<fn(&str) -> Option<serde_json::Value>>;
 }
-impl __ColumnJson for &&&__ColumnProbe<serde_json::Value> {
+impl __ColumnParser for &&&__ColumnProbe<serde_json::Value> {
     fn __column_parser(&self) -> Option<fn(&str) -> Option<serde_json::Value>> {
         None
     }
 }
-impl __ColumnJson for &&&__ColumnProbe<Option<serde_json::Value>> {
+impl __ColumnParser for &&&__ColumnProbe<Option<serde_json::Value>> {
     fn __column_parser(&self) -> Option<fn(&str) -> Option<serde_json::Value>> {
         None
     }
 }
-
-/// A column whose type parses from text.
-#[doc(hidden)]
-pub trait __ColumnParses {
-    /// The type's parser.
-    fn __column_parser(&self) -> Option<fn(&str) -> Option<serde_json::Value>>;
-}
-impl<T: FromStr + serde::Serialize> __ColumnParses for &&__ColumnProbe<T> {
+impl<T: FromStr + serde::Serialize> __ColumnParser for &&__ColumnProbe<T> {
     fn __column_parser(&self) -> Option<fn(&str) -> Option<serde_json::Value>> {
         Some(parse_as::<T>)
     }
 }
-
-/// A nullable column whose type parses from text.
-#[doc(hidden)]
-pub trait __ColumnOptional {
-    /// The inner type's parser.
-    fn __column_parser(&self) -> Option<fn(&str) -> Option<serde_json::Value>>;
-}
-impl<T: FromStr + serde::Serialize> __ColumnOptional for &__ColumnProbe<Option<T>> {
+impl<T: FromStr + serde::Serialize> __ColumnParser for &__ColumnProbe<Option<T>> {
     fn __column_parser(&self) -> Option<fn(&str) -> Option<serde_json::Value>> {
         Some(parse_as::<T>)
     }
 }
-
-/// Any other column: it cannot be parsed from a path segment.
-#[doc(hidden)]
-pub trait __ColumnOther {
-    /// No parser.
-    fn __column_parser(&self) -> Option<fn(&str) -> Option<serde_json::Value>>;
-}
-impl<T> __ColumnOther for __ColumnProbe<T> {
+impl<T> __ColumnParser for __ColumnProbe<T> {
     fn __column_parser(&self) -> Option<fn(&str) -> Option<serde_json::Value>> {
         None
     }

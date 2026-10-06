@@ -145,10 +145,7 @@ pub use model::{EntityExt, EntityExtMut};
 pub use monitor::ConnectionCount;
 pub use query_builder::QueryBuilder;
 #[doc(hidden)]
-pub use route_binding::{
-    __ColumnJson, __ColumnOptional, __ColumnOther, __ColumnParses, __ColumnProbe,
-    __route_child_lookup, SoftDeleteTable,
-};
+pub use route_binding::{__ColumnParser, __ColumnProbe, __route_child_lookup, SoftDeleteTable};
 pub use route_binding::{
     AutoRouteBinding, BoundChild, ChildBindings, ModelRouteBinding, RouteBinding, RouteBindingInfo,
     RouteColumn, RouteLookup, RouteParam, model_route_binding_info, model_route_field,

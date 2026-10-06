@@ -29,6 +29,13 @@ pub fn emit(input: &ModelInput) -> TokenStream {
 
     let columns = column_entries(input);
     let children = child_arms(input);
+    // Every column's parser comes through the probe trait, imported only
+    // when there is a column to call it for.
+    let column_parser = if columns.is_empty() {
+        TokenStream::new()
+    } else {
+        quote! { use ::suprnova::database::__ColumnParser as _; }
+    };
 
     let binding_impl = if input.custom_route_binding {
         TokenStream::new()
@@ -98,11 +105,7 @@ pub fn emit(input: &ModelInput) -> TokenStream {
     quote! {
         impl ::suprnova::database::ModelRouteBinding for #struct_ident {
             fn route_columns() -> ::std::vec::Vec<::suprnova::RouteColumn> {
-                #[allow(unused_imports)]
-                use ::suprnova::database::{
-                    __ColumnJson as _, __ColumnOptional as _, __ColumnOther as _,
-                    __ColumnParses as _,
-                };
+                #column_parser
                 ::std::vec![#(#columns),*]
             }
 

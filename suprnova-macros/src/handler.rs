@@ -262,14 +262,6 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
     };
     let (site_check, site_const) = handler_site(fn_name, self_ty.as_ref(), &input_text, record);
 
-    let probes = quote! {
-        #[allow(unused_imports)]
-        use ::suprnova::routing::{
-            __ArgBinds as _, __ArgReadsBody as _, __OptionalArgBinds as _,
-            __OptionalArgReadsBody as _,
-        };
-    };
-
     // Pass 1: every argument that may bind takes its bound value, the
     // `#[authorize]` targets among them binding into their patterns.
     let mut bind_pass = Vec::new();
@@ -277,6 +269,11 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
     // `#[authorize]`, every remaining argument in declaration order.
     let mut path_pass = Vec::new();
     let mut body_pass = Vec::new();
+    // Whether the passes call a probe, and so need its trait in scope, and
+    // whether they change the input, and so need it `mut`: the body never
+    // declares what it does not use.
+    let mut calls_probe = false;
+    let mut changes_input = false;
     for arg in &args {
         let pat = arg.pat;
         let ty = arg.ty;
@@ -284,6 +281,9 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
         let name = arg.name.as_deref().unwrap_or("");
         let slot = quote::format_ident!("__suprnova_arg_{}", index);
         let is_target = targets.contains(&index);
+        // A path value reads the input; every other argument takes from it.
+        changes_input |= !matches!(arg.kind, ArgKind::Path | ArgKind::OptionalPath(_));
+        calls_probe |= !is_target && matches!(arg.kind, ArgKind::Probe | ArgKind::OptionalProbe(_));
         match &arg.kind {
             ArgKind::Probe if is_target => bind_pass.push(quote! {
                 let #pat: #ty = ::suprnova::routing::__authorize_target::<#ty>(
@@ -375,11 +375,19 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
 
     let input_binding = if args.is_empty() {
         quote! { let _ = __suprnova_req; }
-    } else {
+    } else if changes_input {
         quote! {
-            #[allow(unused_mut)]
             let mut __suprnova_input = ::suprnova::routing::HandlerInput::new(__suprnova_req);
         }
+    } else {
+        quote! {
+            let __suprnova_input = ::suprnova::routing::HandlerInput::new(__suprnova_req);
+        }
+    };
+    let probes = if calls_probe {
+        quote! { use ::suprnova::routing::__ArgSource as _; }
+    } else {
+        TokenStream2::new()
     };
 
     quote! {
@@ -590,6 +598,16 @@ fn record_items(fn_name: &Ident, self_ty: Option<&Type>, args: &[Arg]) -> TokenS
         ),
         None => (quote! { #fn_ref }, fn_name.to_string()),
     };
+    // A probe's record comes through its trait, imported only when an
+    // entry calls it.
+    let probes = if args
+        .iter()
+        .any(|arg| matches!(arg.kind, ArgKind::Probe | ArgKind::OptionalProbe(_)))
+    {
+        quote! { use ::suprnova::routing::__ArgSource as _; }
+    } else {
+        TokenStream2::new()
+    };
     let entries = args.iter().map(|arg| {
         let ty = arg.ty;
         let ty_text = type_text(ty);
@@ -618,11 +636,7 @@ fn record_items(fn_name: &Ident, self_ty: Option<&Type>, args: &[Arg]) -> TokenS
             ::suprnova::routing::__type_id_of(&#handler)
         }
         fn __suprnova_handler_args() -> ::std::vec::Vec<::suprnova::routing::HandlerArg> {
-            #[allow(unused_imports)]
-            use ::suprnova::routing::{
-                __ArgBinds as _, __ArgReadsBody as _, __OptionalArgBinds as _,
-                __OptionalArgReadsBody as _,
-            };
+            #probes
             ::std::vec![#(#entries),*]
         }
         ::suprnova::inventory::submit! {
@@ -1519,5 +1533,249 @@ mod tests {
 
         let out = authorize_expansion(quote! { "update", Post }, quote! { pub struct Post; });
         assert!(out.contains("compile_error"), "got:\n{out}");
+    }
+
+    /// BIND-003: the input is `mut` only when an argument takes from it.
+    /// Rustc never reports `unused_mut` on a binding whose name starts with
+    /// an underscore, so the expansion is read instead.
+    #[test]
+    fn bind_003_the_input_is_mut_only_when_an_argument_takes_from_it() {
+        for src in [
+            quote! { pub async fn show(id: i64) -> Response { todo!() } },
+            quote! { pub async fn show(id: i64, page: Option<u32>) -> Response { todo!() } },
+            quote! { pub fn show(id: String) -> Response { todo!() } },
+        ] {
+            let out = expansion(src);
+            assert!(out.contains("let __suprnova_input ="), "got:\n{out}");
+            assert!(!out.contains("let mut __suprnova_input"), "got:\n{out}");
+        }
+        for src in [
+            quote! { pub async fn show(id: i64, post: Post) -> Response { todo!() } },
+            quote! { pub async fn show(post: Option<Post>) -> Response { todo!() } },
+            quote! { pub async fn show(id: i64, req: Request) -> Response { todo!() } },
+            quote! { pub async fn show<T: FromRequest>(id: i64, form: T) -> Response { todo!() } },
+            quote! {
+                #[authorize("view", post)]
+                pub async fn show(post: Post) -> Response { todo!() }
+            },
+        ] {
+            let out = expansion(src);
+            assert!(out.contains("let mut __suprnova_input ="), "got:\n{out}");
+        }
+    }
+
+    // ── The generated code compiled as written source ────────────────────────
+
+    /// A crate under this test binary's target directory
+    /// (`<target>/debug/deps/<binary>`), beside the route-binding fixtures,
+    /// so it shares their check of `suprnova`.
+    fn scratch_crate(name: &str) -> std::path::PathBuf {
+        let binary = std::env::current_exe().expect("locate the test binary");
+        let target = binary
+            .ancestors()
+            .nth(3)
+            .expect("the test binary sits under <target>/<profile>/deps");
+        target.join("tmp/route-binding").join(name)
+    }
+
+    /// `cargo check` a crate whose `src/lib.rs` is `source`, against the
+    /// framework in this repository.
+    fn check_source(name: &str, source: &str) -> std::process::Output {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let framework = manifest_dir
+            .join("../framework")
+            .canonicalize()
+            .expect("locate the framework crate");
+        let dir = scratch_crate(name);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("clear the previous crate");
+        }
+        std::fs::create_dir_all(dir.join("src")).expect("create the crate");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!(
+                "[package]\n\
+                 name = \"route-binding-{name}\"\n\
+                 version = \"0.0.0\"\n\
+                 edition = \"2024\"\n\
+                 publish = false\n\
+                 \n\
+                 [workspace]\n\
+                 \n\
+                 [dependencies]\n\
+                 suprnova = {{ path = {framework:?}, default-features = false }}\n\
+                 sea-orm = {{ version = \"2.0\", default-features = false }}\n\
+                 serde = {{ version = \"1\", features = [\"derive\"] }}\n\
+                 tokio = {{ version = \"1\", features = [\"sync\"] }}\n\
+                 validator = {{ version = \"0.20\", features = [\"derive\"] }}\n"
+            ),
+        )
+        .expect("write the manifest");
+        // The repository's lockfile keeps the crate on the dependency
+        // versions the framework is tested with.
+        std::fs::copy(manifest_dir.join("../Cargo.lock"), dir.join("Cargo.lock"))
+            .expect("seed the lockfile");
+        std::fs::write(dir.join("src/lib.rs"), source).expect("write the source");
+        std::process::Command::new(env!("CARGO"))
+            .args(["check", "--quiet"])
+            .env("CARGO_TARGET_DIR", scratch_crate("target"))
+            .env("CARGO_INCREMENTAL", "0")
+            .current_dir(&dir)
+            .output()
+            .expect("run cargo check")
+    }
+
+    /// BIND-003: the code `#[handler]` and `#[model]` generate imports only
+    /// the probe trait it calls, for every form of argument and kind of
+    /// column. Rustc does not report a lint inside a macro's output, so
+    /// the expansions are rendered and checked as written source, where
+    /// `unused_imports` applies. Each handler takes one form of argument
+    /// alone and each model one kind of column beside its key, so nothing
+    /// else in an expansion uses what that form or kind brings in.
+    #[test]
+    fn bind_003_generated_code_imports_only_the_probe_trait_it_calls() {
+        let models = [
+            (
+                quote! { table = "tags" },
+                quote! { pub struct Tag { pub id: i64, pub name: String } },
+            ),
+            (
+                quote! { table = "notes" },
+                quote! { pub struct Note { pub id: i64, pub body: Option<String> } },
+            ),
+            (
+                quote! { table = "documents" },
+                quote! { pub struct Document { pub id: i64, pub meta: suprnova::serde_json::Value } },
+            ),
+            (
+                quote! { table = "drafts" },
+                quote! { pub struct Draft { pub id: i64, pub meta: Option<suprnova::serde_json::Value> } },
+            ),
+            (
+                quote! { table = "blobs" },
+                quote! { pub struct Blob { pub id: i64, pub digest: Vec<u8> } },
+            ),
+            (
+                quote! { table = "posts", route_key = "title" },
+                quote! {
+                    pub struct Post {
+                        pub id: i64,
+                        pub title: String,
+                        pub subtitle: Option<String>,
+                        pub meta: suprnova::serde_json::Value,
+                        pub extra: Option<suprnova::serde_json::Value>,
+                        pub digest: Vec<u8>,
+                    }
+                },
+            ),
+        ];
+        let handlers = [
+            quote! { pub async fn bound(tag: Tag) -> Response { suprnova::http::text(tag.name) } },
+            quote! { pub async fn form(form: UpdateTag) -> Response { suprnova::http::text(form.name) } },
+            quote! {
+                pub async fn maybe_bound(tag: Option<Tag>) -> Response {
+                    suprnova::http::text(format!("{}", tag.is_some()))
+                }
+            },
+            quote! {
+                pub async fn wrapped(tag: RouteParam<Tag>) -> Response {
+                    suprnova::http::text(tag.name.clone())
+                }
+            },
+            quote! {
+                pub async fn destructured(RouteParam(tag): RouteParam<Tag>) -> Response {
+                    suprnova::http::text(tag.name)
+                }
+            },
+            quote! { pub async fn bare(tag: tag::Model) -> Response { suprnova::http::text(tag.name) } },
+            quote! { pub async fn path(id: i64) -> Response { suprnova::http::text(id.to_string()) } },
+            quote! {
+                pub async fn maybe_path(page: Option<u32>) -> Response {
+                    suprnova::http::text(format!("{page:?}"))
+                }
+            },
+            quote! {
+                pub async fn raw(req: Request) -> Response {
+                    suprnova::http::text(req.path().to_owned())
+                }
+            },
+            quote! {
+                pub async fn generic<T: FromRequest + Send + 'static>(form: T) -> Response {
+                    let _ = form;
+                    suprnova::http::text("generic")
+                }
+            },
+            quote! {
+                #[suprnova::authorize("view", tag)]
+                pub async fn guarded(tag: Tag) -> Response { suprnova::http::text(tag.name) }
+            },
+            quote! {
+                #[suprnova::authorize("show", id)]
+                pub async fn guarded_id(id: i64) -> Response {
+                    suprnova::http::text(id.to_string())
+                }
+            },
+            quote! {
+                #[suprnova::authorize("update", tag)]
+                pub async fn guarded_form(tag: Tag, form: UpdateTag) -> Response {
+                    suprnova::http::text(format!("{} {}", tag.name, form.name))
+                }
+            },
+            quote! { pub async fn index() -> Response { suprnova::http::text("index") } },
+            quote! { pub fn ping() -> Response { suprnova::http::text("pong") } },
+            quote! {
+                pub async fn every(
+                    id: i64,
+                    page: Option<u32>,
+                    tag: Tag,
+                    other: Option<Tag>,
+                    form: UpdateTag,
+                ) -> Response {
+                    suprnova::http::text(format!(
+                        "{id} {page:?} {} {} {}",
+                        tag.name,
+                        other.is_some(),
+                        form.name
+                    ))
+                }
+            },
+        ];
+        let associated = [
+            quote! { pub async fn show(tag: Tag) -> Response { suprnova::http::text(tag.name) } },
+            quote! { pub async fn by_id(id: i64) -> Response { suprnova::http::text(id.to_string()) } },
+        ];
+
+        let mut source = String::from(
+            "#![deny(unused_imports)]\n\
+             use suprnova::{FromRequest, Request, Response, RouteParam};\n\
+             impl suprnova::database::EntityExt for tag::Entity {}\n\
+             #[suprnova::request]\n\
+             pub struct UpdateTag { pub name: String }\n\
+             pub struct Tags;\n",
+        );
+        for (attr, item) in models {
+            let expanded = crate::model::expand(attr, item).expect("expand the model");
+            source.push_str(&expanded.to_string());
+            source.push('\n');
+        }
+        for item in handlers {
+            source.push_str(&expansion(item));
+            source.push('\n');
+        }
+        source.push_str("impl Tags {\n");
+        for item in associated {
+            source.push_str(&expansion_with(quote! { Self = Tags }, item));
+            source.push('\n');
+        }
+        source.push_str("}\n");
+        assert!(!source.contains("compile_error"), "got:\n{source}");
+
+        let output = check_source("rendered", &source);
+        assert!(
+            output.status.success(),
+            "the generated code must import only what it uses, yet the \
+             check failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

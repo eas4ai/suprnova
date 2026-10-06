@@ -19,8 +19,7 @@ pub mod url;
 
 #[doc(hidden)]
 pub use binding::{
-    __ArgBinds, __ArgProbe, __ArgReadsBody, __OptionalArgBinds, __OptionalArgProbe,
-    __OptionalArgReadsBody, __authorize_target, __type_id_of, HandlerInput,
+    __ArgProbe, __ArgSource, __OptionalArgProbe, __authorize_target, __type_id_of, HandlerInput,
 };
 pub use binding::{
     BoundArg, HandlerArg, HandlerArgKind, HandlerRecord, MatchedRoute, MissingHandler,
