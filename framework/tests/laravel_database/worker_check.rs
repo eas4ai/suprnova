@@ -271,6 +271,10 @@ async fn queue_work_exits_non_zero_when_it_refuses(engine: Engine) {
     );
     assert!(stderr.contains("failed_jobs"), "{stderr}");
     assert!(stderr.contains("envelope_json"), "{stderr}");
+    assert!(
+        stderr.contains(RETURNED),
+        "run_with_args did not return the refusal to its caller: {stderr}"
+    );
     assert_eq!(jobs.size().await.unwrap(), 1, "queue:work popped the job");
 
     // Laravel's own table: the worker starts, runs the job and exits 0.
@@ -316,16 +320,26 @@ fn queue_work_child() {
         .enable_all()
         .build()
         .unwrap();
-    runtime.block_on(async {
+    let outcome = runtime.block_on(async {
         suprnova::Application::new()
             .bootstrap(|| async {
                 suprnova::Config::register(suprnova::DatabaseConfig::from_env());
                 suprnova::DB::init().await.expect("connect");
             })
             .run_with_args(["app", "queue:work", "--max-jobs", "1", "--poll", "10"])
-            .await;
+            .await
     });
+    // The executable boundary: the failure came back to this caller, which
+    // prints it and exits non-zero, as `Application::run` does.
+    if let Err(e) = outcome {
+        eprintln!("{RETURNED}{}", e.message());
+        std::process::exit(1);
+    }
 }
+
+/// What [`queue_work_child`] prints before a failure `run_with_args`
+/// returned to it.
+const RETURNED: &str = "run_with_args returned: ";
 
 /// A schema-qualified queue table works on Postgres as an unqualified one
 /// does: the shipped migrations upgrade an earlier-layout `failed_jobs` in
@@ -459,4 +473,35 @@ async fn run_on_qualified_tables(db: &Db, jobs: &str, failed: &str) {
         .expect("the job just pushed");
     driver.ack(&popped.token).await.unwrap();
     assert_eq!(driver.size().await.unwrap(), 0);
+}
+
+/// `Application::run_with_args` hands its failures to its caller instead
+/// of ending the process: an argv the CLI cannot parse, and a command
+/// whose boot precondition fails (this process loaded no configuration
+/// before its runtime started). The test reaching its end is the proof.
+#[tokio::test]
+#[serial_test::serial]
+async fn ldb_003_run_with_args_returns_its_failures_to_the_caller() {
+    let unknown = suprnova::Application::new()
+        .run_with_args(["app", "no-such-command"])
+        .await
+        .expect_err("an argv the CLI cannot parse");
+    assert!(
+        unknown.message().contains("no-such-command"),
+        "the error carries clap's message: {}",
+        unknown.message()
+    );
+    let refused = suprnova::Application::new()
+        .run_with_args(["app", "queue:work", "--max-jobs", "1"])
+        .await
+        .expect_err("this process loaded no configuration before its runtime");
+    assert!(
+        refused.message().contains("#[suprnova::main]"),
+        "the error carries the boot precondition's advice: {}",
+        refused.message()
+    );
+    suprnova::Application::new()
+        .run_with_args(["app", "--help"])
+        .await
+        .expect("--help prints and returns");
 }
