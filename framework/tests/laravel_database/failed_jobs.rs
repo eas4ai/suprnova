@@ -1,20 +1,26 @@
 //! LDB-002: `failed_jobs` in Laravel 13's layout, on a table Laravel
 //! created and on one the shipped migration created.
+//!
+//! `queue:failed`, `queue:retry`, `queue:forget` and `queue:flush` run as
+//! console commands of a real `Application`, in a child process of this
+//! test binary ([`console`]), so the test reads what each prints and the
+//! exit status it ends with.
 
-use std::sync::Arc;
+use std::process::{Command, Output, Stdio};
 
 use chrono::Utc;
 use sea_orm::{ConnectionTrait, Statement};
 use sea_orm_migration::{MigrationTrait, SchemaManager};
-use suprnova::queue::migrations::CreateFailedJobsTable;
+use suprnova::queue::migrations::{CreateFailedJobsTable, CreateJobsTable};
 use suprnova::queue::{BackoffSchedule, CURRENT_SCHEMA_VERSION};
 use suprnova::{
-    DatabaseFailedJobStore, Envelope, FailedJobStore, MemoryQueueDriver, Queue, QueueDriver,
+    DatabaseFailedJobStore, DatabaseQueueDriver, Envelope, FailedJobStore, QueueDriver,
 };
 use uuid::Uuid;
 
 use crate::on_every_engine;
 use crate::support::{self, Db, Engine};
+use crate::worker_check::child_url;
 
 /// Who created the `failed_jobs` table a case runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,17 +249,89 @@ on_every_engine!(a_mebibyte_is_stored_whole =>
     ldb_002_a_mebibyte_payload_and_exception_are_stored_whole_postgres,
     ldb_002_a_mebibyte_payload_and_exception_are_stored_whole_mysql);
 
-/// `queue:failed` lists the row, `queue:retry <uuid>` pushes its envelope
-/// and deletes it, `queue:forget <uuid>` deletes it. The commands are thin
-/// wrappers over these calls (`framework/src/queue/failed_console.rs`).
+/// What [`console_child`] prints on stderr before a failure
+/// `run_with_args` returned to it.
+const CONSOLE_FAILED: &str = "the console command failed: ";
+
+/// Run `suprnova <args>` as a console command of a real `Application`, in
+/// a child process of this test binary, against the database at `url`.
+/// `QUEUE_DRIVER=database` wires the queue on `jobs` and the failed-jobs
+/// store on `failed_jobs`, as an application's boot does.
+fn console(url: &str, args: &[&str]) -> Output {
+    Command::new(std::env::current_exe().expect("the test binary"))
+        .args(["--exact", "failed_jobs::console_child", "--nocapture"])
+        .env(
+            "LDB_CONSOLE_CHILD",
+            serde_json::to_string(args).expect("the arguments as JSON"),
+        )
+        .env("DATABASE_URL", url)
+        .env("QUEUE_DRIVER", "database")
+        .env("APP_ENV", "testing")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run the child")
+}
+
+/// The child half of [`console`]: one console command through
+/// `Application::run_with_args`. It does nothing unless [`console`]
+/// started it.
+#[test]
+fn console_child() {
+    let Ok(args) = std::env::var("LDB_CONSOLE_CHILD") else {
+        return;
+    };
+    let args: Vec<String> = serde_json::from_str(&args).expect("the arguments");
+    suprnova::boot::load_env().expect("load the configuration");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let outcome = runtime.block_on(async {
+        suprnova::Application::new()
+            .bootstrap(|| async {
+                suprnova::Config::register(suprnova::DatabaseConfig::from_env());
+                suprnova::DB::init().await.expect("connect");
+            })
+            .run_with_args(std::iter::once("app".to_owned()).chain(args))
+            .await
+    });
+    // The executable boundary: print the failure and exit non-zero, as
+    // `Application::run` does.
+    if let Err(e) = outcome {
+        eprintln!("{CONSOLE_FAILED}{}", e.message());
+        std::process::exit(1);
+    }
+}
+
+/// The child's stdout and stderr, for an assertion message.
+fn printed(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+/// `failed_jobs` from `origin`, with the `jobs` table the queue pushes a
+/// retried job onto (Laravel's own, on the Laravel fixture).
+async fn console_database(engine: Engine, origin: Origin) -> Db {
+    let db = failed_jobs_table(engine, origin).await;
+    CreateJobsTable
+        .up(&SchemaManager::new(&db.conn))
+        .await
+        .expect("the jobs table");
+    db
+}
+
+/// `queue:failed` lists the rows, `queue:retry <uuid>` pushes the row's
+/// envelope onto its queue and deletes the row, and `queue:forget <uuid>`
+/// deletes the row.
 async fn list_retry_and_forget(engine: Engine) {
     for origin in ORIGINS {
-        let db = failed_jobs_table(engine, origin).await;
-        let store = Arc::new(store(&db));
-        let memory = Arc::new(MemoryQueueDriver::new());
-        Queue::register_connection("database", memory.clone());
-        Queue::set_failed_store(store.clone());
-
+        let db = console_database(engine, origin).await;
+        let url = child_url(engine, &db);
+        let store = store(&db);
         let env = envelope("App.Retry.Me", serde_json::json!({ "n": 1 }));
         let retried = store
             .log("database", "default", &env, "boom")
@@ -269,45 +347,54 @@ async fn list_retry_and_forget(engine: Engine) {
             .await
             .unwrap();
 
-        let listed: Vec<Uuid> = store
-            .all()
-            .await
-            .expect("list")
-            .iter()
-            .map(|r| r.id)
-            .collect();
-        assert!(
-            listed.contains(&retried) && listed.contains(&forgotten),
-            "{origin:?}"
-        );
+        let listed = console(&url, &["queue:failed"]);
+        assert!(listed.status.success(), "{origin:?}: {}", printed(&listed));
+        let stdout = String::from_utf8_lossy(&listed.stdout);
+        for (id, job) in [(retried, "App.Retry.Me"), (forgotten, "App.Forget.Me")] {
+            assert!(
+                stdout
+                    .lines()
+                    .any(|line| line.contains(&id.to_string()) && line.contains(job)),
+                "{origin:?}: queue:failed does not list {id} ({job}):\n{stdout}"
+            );
+        }
 
+        let jobs = DatabaseQueueDriver::new(db.conn.clone(), "jobs".to_owned()).unwrap();
+        let retry = console(&url, &["queue:retry", &retried.to_string()]);
+        assert!(retry.status.success(), "{origin:?}: {}", printed(&retry));
         assert!(
-            Queue::retry_failed(retried).await.expect("retry"),
-            "{origin:?}"
+            String::from_utf8_lossy(&retry.stdout).contains(&format!(
+                "The failed job [{retried}] has been pushed back onto the queue."
+            )),
+            "{origin:?}: {}",
+            printed(&retry)
         );
-        assert_eq!(
-            memory.size().await.unwrap(),
-            1,
-            "{origin:?}: nothing was pushed"
+        assert!(
+            store.find(retried).await.unwrap().is_none(),
+            "{origin:?}: queue:retry kept the row"
         );
-        let pushed = memory
+        let pushed = jobs
             .pop(std::time::Duration::from_secs(30))
             .await
             .unwrap()
-            .expect("the retried job");
+            .unwrap_or_else(|| panic!("{origin:?}: queue:retry pushed nothing"));
         assert_eq!(
             pushed.envelope.id, env.id,
             "{origin:?}: another envelope was pushed"
         );
-        assert!(
-            store.find(retried).await.unwrap().is_none(),
-            "{origin:?}: row kept"
-        );
+        jobs.ack(&pushed.token).await.unwrap();
 
-        assert!(store.forget(forgotten).await.expect("forget"), "{origin:?}");
+        let forget = console(&url, &["queue:forget", &forgotten.to_string()]);
+        assert!(forget.status.success(), "{origin:?}: {}", printed(&forget));
+        assert!(
+            String::from_utf8_lossy(&forget.stdout)
+                .contains(&format!("The failed job [{forgotten}] has been deleted.")),
+            "{origin:?}: {}",
+            printed(&forget)
+        );
         assert!(
             store.find(forgotten).await.unwrap().is_none(),
-            "{origin:?}: row kept"
+            "{origin:?}: queue:forget kept the row"
         );
     }
 }
@@ -321,7 +408,7 @@ on_every_engine!(list_retry_and_forget =>
 /// newer one.
 async fn flush_hours_keeps_newer_rows(engine: Engine) {
     for origin in ORIGINS {
-        let db = failed_jobs_table(engine, origin).await;
+        let db = console_database(engine, origin).await;
         let store = store(&db);
         let old = store
             .log(
@@ -353,8 +440,13 @@ async fn flush_hours_keeps_newer_rows(engine: Engine) {
         };
         db.conn.execute_raw(backdate(old, 3)).await.unwrap();
         db.conn.execute_raw(backdate(recent, 1)).await.unwrap();
-        let cutoff = Utc::now() - chrono::Duration::hours(2);
-        store.flush(Some(cutoff)).await.expect("flush");
+        let flush = console(&child_url(engine, &db), &["queue:flush", "--hours=2"]);
+        assert!(flush.status.success(), "{origin:?}: {}", printed(&flush));
+        assert!(
+            String::from_utf8_lossy(&flush.stdout).contains("older than 2 hour(s) deleted."),
+            "{origin:?}: {}",
+            printed(&flush)
+        );
         assert!(
             store.find(old).await.unwrap().is_none(),
             "{origin:?}: older row kept"
@@ -372,32 +464,42 @@ on_every_engine!(flush_hours_keeps_newer_rows =>
     ldb_002_flush_hours_deletes_older_rows_and_keeps_newer_mysql);
 
 /// The failed job Laravel's worker logged lists, and `queue:retry` refuses
-/// it with an error naming its uuid, pushing nothing and keeping the row.
+/// it with an error naming its uuid and a non-zero exit, pushing nothing
+/// and keeping the row.
 async fn a_laravel_row_lists_and_retry_refuses_it(engine: Engine) {
-    let db = failed_jobs_table(engine, Origin::Laravel).await;
-    let store = Arc::new(store(&db));
+    let db = console_database(engine, Origin::Laravel).await;
+    let url = child_url(engine, &db);
+    let store = store(&db);
     let laravel_row = support::rows(&db.conn, "SELECT uuid FROM failed_jobs").await;
     assert_eq!(laravel_row.len(), 1, "the fixture holds one failed job");
     let uuid = Uuid::parse_str(&support::text(&laravel_row[0], "uuid")).unwrap();
 
-    let listed = store.all().await.expect("Laravel's row lists");
-    let record = listed.iter().find(|r| r.id == uuid).expect("Laravel's row");
-    assert_eq!(record.job_name, "App\\Jobs\\FailingJob");
-    assert_eq!(record.queue, "failing");
-
-    let memory = Arc::new(MemoryQueueDriver::new());
-    Queue::register_connection("database", memory.clone());
-    Queue::set_failed_store(store.clone());
-    let refused = Queue::retry_failed(uuid)
-        .await
-        .expect_err("queue:retry must refuse a row Laravel wrote");
+    let listed = console(&url, &["queue:failed"]);
+    assert!(listed.status.success(), "{}", printed(&listed));
+    let stdout = String::from_utf8_lossy(&listed.stdout);
     assert!(
-        refused.to_string().contains(&uuid.to_string()),
-        "the error names the uuid: {refused}"
+        stdout.lines().any(|line| line.contains(&uuid.to_string())
+            && line.contains("App\\Jobs\\FailingJob")
+            && line.contains("failing")),
+        "queue:failed does not list Laravel's row:\n{stdout}"
+    );
+
+    let queued = support::count(&db.conn, "jobs", "").await;
+    let refused = console(&url, &["queue:retry", &uuid.to_string()]);
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "queue:retry did not fail on a row Laravel wrote: {}",
+        printed(&refused)
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains(CONSOLE_FAILED) && stderr.contains(&uuid.to_string()),
+        "the error does not name the uuid: {stderr}"
     );
     assert_eq!(
-        memory.size().await.unwrap(),
-        0,
+        support::count(&db.conn, "jobs", "").await,
+        queued,
         "a Laravel payload was pushed"
     );
     assert!(
@@ -406,12 +508,13 @@ async fn a_laravel_row_lists_and_retry_refuses_it(engine: Engine) {
     );
 
     // `queue:retry all` leaves it too.
-    Queue::set_driver(memory.clone());
-    Queue::retry_all_failed(None).await.expect("retry all");
+    let all = console(&url, &["queue:retry", "all"]);
+    assert!(all.status.success(), "{}", printed(&all));
     assert!(
         store.find(uuid).await.unwrap().is_some(),
         "retry all deleted the row"
     );
+    assert_eq!(support::count(&db.conn, "jobs", "").await, queued);
 }
 
 on_every_engine!(a_laravel_row_lists_and_retry_refuses_it =>

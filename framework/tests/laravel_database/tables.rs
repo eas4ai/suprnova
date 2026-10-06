@@ -4,16 +4,24 @@
 //! it, and the tables they create use `DATETIME`, never `TIMESTAMP`, on
 //! MySQL.
 
+use std::any::Any;
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
-use sea_orm::DbBackend;
-use sea_orm_migration::SchemaManager;
-use suprnova::session::migrations::{SessionUserKey, create_sessions_table};
+use sea_orm::{ConnectionTrait, DbBackend};
+use sea_orm_migration::{MigrationTrait as _, SchemaManager};
+use suprnova::eloquent::{HasUniqueId, UniqueIdKind};
+use suprnova::session::migrations::{CreateSessionsTable, SessionUserKey, create_sessions_table};
 use suprnova::{
-    Batch, BatchOptions, BatchRepository, DatabaseBatchRepository, DatabaseQueueDriver, QueueDriver,
+    Auth, AuthConfig, AuthManager, Authenticatable, Batch, BatchOptions, BatchRepository,
+    DatabaseBatchRepository, DatabaseQueueDriver, FrameworkError, HttpResponse, Model, QueueDriver,
+    Request, Router, UserProvider, attrs, model,
 };
 
+use crate::browser::{self, Browser};
 use crate::catalog::{self, Shape};
 use crate::failed_jobs::envelope;
 use crate::on_every_engine;
@@ -171,6 +179,276 @@ on_every_engine!(keyed_columns_follow_the_key_type =>
     ldb_001_notifiable_id_and_user_id_follow_the_key_type_sqlite,
     ldb_001_notifiable_id_and_user_id_follow_the_key_type_postgres,
     ldb_001_notifiable_id_and_user_id_follow_the_key_type_mysql);
+
+/// A user model keyed by an auto-incrementing integer, Laravel's default.
+#[model(table = "ldb_int_users", fillable = ["name"])]
+pub struct LdbIntUser {
+    pub id: u64,
+    pub name: String,
+}
+
+/// A user model with a UUID key (`HasUuids`).
+#[model(
+    table = "ldb_uuid_users",
+    primary_key = "id",
+    key_type = "String",
+    auto_increment = false,
+    unique_id = "uuid",
+    fillable = ["name"]
+)]
+pub struct LdbUuidUser {
+    pub id: String,
+    pub name: String,
+}
+
+/// A user model with a ULID key (`HasUlids`).
+#[model(
+    table = "ldb_ulid_users",
+    primary_key = "id",
+    key_type = "String",
+    auto_increment = false,
+    unique_id = "ulid",
+    fillable = ["name"]
+)]
+pub struct LdbUlidUser {
+    pub id: String,
+    pub name: String,
+}
+
+macro_rules! authenticatable {
+    ($($model:ty),*) => {$(
+        impl Authenticatable for $model {
+            fn get_auth_identifier(&self) -> String {
+                self.id.to_string()
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+                self
+            }
+        }
+    )*};
+}
+
+authenticatable!(LdbIntUser, LdbUuidUser, LdbUlidUser);
+
+/// The `sessions.user_id` a `unique_id` key takes, as the application
+/// picks it from its user model's key: `foreignUuid` for a UUID,
+/// `foreignUlid` for a ULID.
+fn session_key<M: HasUniqueId>() -> SessionUserKey {
+    match M::UNIQUE_ID_KIND {
+        UniqueIdKind::UuidV7 | UniqueIdKind::UuidV4 => SessionUserKey::Uuid,
+        UniqueIdKind::Ulid => SessionUserKey::Ulid,
+    }
+}
+
+type Found = Result<Option<Arc<dyn Authenticatable>>, FrameworkError>;
+
+/// The `users` provider of the default guard: one of the models above,
+/// looked up by its key.
+struct ModelUsers(fn(String) -> Pin<Box<dyn Future<Output = Found> + Send>>);
+
+#[async_trait::async_trait]
+impl UserProvider for ModelUsers {
+    async fn retrieve_by_id(&self, id: &str) -> Found {
+        (self.0)(id.to_owned()).await
+    }
+
+    async fn retrieve_by_credentials(&self, _credentials: &serde_json::Value) -> Found {
+        Ok(None)
+    }
+
+    async fn validate_credentials(
+        &self,
+        _user: &dyn Authenticatable,
+        _credentials: &serde_json::Value,
+    ) -> Result<bool, FrameworkError> {
+        Ok(false)
+    }
+}
+
+fn found<M: Authenticatable + 'static>(user: Option<M>) -> Found {
+    Ok(user.map(|user| Arc::new(user) as Arc<dyn Authenticatable>))
+}
+
+/// `/login` signs in, through the default guard, the user the `x-user`
+/// header names; `/whoami` answers who the session says is signed in.
+fn sign_in_router() -> Router {
+    Router::new()
+        .get("/login", |request: Request| async move {
+            match Auth::login_using_id(&browser::header(&request, "x-user"), false).await {
+                Ok(Some(user)) => Ok(HttpResponse::text(user.get_auth_identifier())),
+                Ok(None) => Ok(HttpResponse::text("no such user").status(404)),
+                Err(error) => {
+                    Err(HttpResponse::text(error.to_string()).status(error.status_code()))
+                }
+            }
+        })
+        .get("/whoami", |_request: Request| async {
+            Ok(HttpResponse::text(
+                Auth::id().unwrap_or_else(|| "guest".to_owned()),
+            ))
+        })
+        .into()
+}
+
+/// One user model's half of [`sessions_follow_the_user_model`]: its
+/// `users` table, the shipped sessions migration for its key, and a sign-in
+/// of a user the model created, through the session driver.
+async fn sign_in_with(
+    engine: Engine,
+    laravel_sessions: &Shape,
+    users_key: &str,
+    key: SessionUserKey,
+    lookup: fn(String) -> Pin<Box<dyn Future<Output = Found> + Send>>,
+    create: impl AsyncFnOnce() -> String,
+) {
+    let db = support::empty(engine).await;
+    db.conn
+        .execute_unprepared(&format!(
+            "CREATE TABLE ldb_{}_users (id {users_key}, name VARCHAR(255) NOT NULL)",
+            match key {
+                SessionUserKey::Integer => "int",
+                SessionUserKey::Uuid => "uuid",
+                SessionUserKey::Ulid => "ulid",
+            }
+        ))
+        .await
+        .expect("the users table");
+    CreateSessionsTable::new(key)
+        .up(&SchemaManager::new(&db.conn))
+        .await
+        .expect("the shipped sessions migration");
+
+    let mut expected = laravel_sessions.clone();
+    let kind = match key {
+        SessionUserKey::Integer => None,
+        SessionUserKey::Uuid => Some(laravel_key_kind(engine, "uuid")),
+        SessionUserKey::Ulid => Some(laravel_key_kind(engine, "ulid")),
+    };
+    if let Some(kind) = kind {
+        expected
+            .columns
+            .iter_mut()
+            .find(|c| c.name == "user_id")
+            .expect("user_id")
+            .kind = kind.to_owned();
+    }
+    let ours = catalog::shape(&db.conn, "sessions").await;
+    assert_same_layout(
+        engine,
+        &format!("sessions ({key:?} user)"),
+        &expected,
+        &ours,
+    );
+
+    let _bound = support::bind(&db.conn);
+    let _ = suprnova::crypto::_test_install_key(suprnova::EncryptionKey::generate());
+    suprnova::testing::TestContainer::singleton(AuthManager::new(AuthConfig::default()));
+    Auth::register_provider("users", Arc::new(ModelUsers(lookup)))
+        .expect("register the users provider");
+    let id = create().await;
+
+    let mut browser = Browser::serve(sign_in_router()).await;
+    assert_eq!(
+        browser.get("/login", &[("x-user", id.as_str())]).await,
+        (200, id.clone()),
+        "{engine:?} {key:?}: the sign-in failed"
+    );
+    assert_eq!(
+        browser.get("/whoami", &[]).await,
+        (200, id.clone()),
+        "{engine:?} {key:?}: the session does not sign its user in"
+    );
+    let stored = support::rows(&db.conn, "SELECT user_id FROM sessions").await;
+    assert_eq!(stored.len(), 1, "{engine:?} {key:?}: one session");
+    assert_eq!(
+        support::text(&stored[0], "user_id"),
+        id,
+        "{engine:?} {key:?}: sessions.user_id does not hold the user's key"
+    );
+    // Revoking the user's sessions finds the row by its `user_id`.
+    suprnova::session::destroy_all_for_user(&id)
+        .await
+        .expect("revoke the user's sessions");
+    assert_eq!(
+        browser.get("/whoami", &[]).await,
+        (200, "guest".to_owned()),
+        "{engine:?} {key:?}: the revoked session still signs its user in"
+    );
+}
+
+/// `sessions.user_id` with an integer-keyed and a `unique_id`-keyed user
+/// model: the shipped migration, given the key the model has, creates the
+/// column Laravel's `foreignId`, `foreignUuid` or `foreignUlid` creates, and
+/// a user the model created signs in, is stored in that column and is
+/// signed out by a revocation of their sessions.
+async fn sessions_follow_the_user_model(engine: Engine) {
+    let laravel = laravel_shapes(engine).await;
+    let sessions = &laravel["sessions"];
+    let integer_key = match engine {
+        Engine::Sqlite => "INTEGER PRIMARY KEY AUTOINCREMENT",
+        Engine::Postgres => "BIGSERIAL PRIMARY KEY",
+        Engine::Mysql => "BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY",
+    };
+    sign_in_with(
+        engine,
+        sessions,
+        integer_key,
+        SessionUserKey::Integer,
+        |id| {
+            Box::pin(async move {
+                match id.parse::<u64>() {
+                    Ok(key) => found(LdbIntUser::find(key).await?),
+                    Err(_) => Ok(None),
+                }
+            })
+        },
+        async || {
+            let user = LdbIntUser::create(attrs! { name: "Taylor" })
+                .await
+                .expect("create an integer-keyed user");
+            user.id.to_string()
+        },
+    )
+    .await;
+    sign_in_with(
+        engine,
+        sessions,
+        "CHAR(36) PRIMARY KEY",
+        session_key::<LdbUuidUser>(),
+        |id| Box::pin(async move { found(LdbUuidUser::find(id).await?) }),
+        async || {
+            LdbUuidUser::create(attrs! { name: "Ada" })
+                .await
+                .expect("create a UUID-keyed user")
+                .id
+        },
+    )
+    .await;
+    sign_in_with(
+        engine,
+        sessions,
+        "CHAR(26) PRIMARY KEY",
+        session_key::<LdbUlidUser>(),
+        |id| Box::pin(async move { found(LdbUlidUser::find(id).await?) }),
+        async || {
+            LdbUlidUser::create(attrs! { name: "Grace" })
+                .await
+                .expect("create a ULID-keyed user")
+                .id
+        },
+    )
+    .await;
+}
+
+on_every_engine!(sessions_follow_the_user_model =>
+    ldb_001_sessions_user_id_follows_an_integer_and_a_unique_id_keyed_user_model_sqlite,
+    ldb_001_sessions_user_id_follows_an_integer_and_a_unique_id_keyed_user_model_postgres,
+    ldb_001_sessions_user_id_follows_an_integer_and_a_unique_id_keyed_user_model_mysql);
 
 /// On the tables Laravel created, with the rows Laravel wrote, the jobs
 /// driver, the batch repository, the session driver and the database

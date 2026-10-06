@@ -82,8 +82,9 @@ fn ldb_012_the_chapter_covers_the_upgrade_setting_and_aliases() {
         "Argon2id",
         // Morph aliases.
         "morph_aliases = [\"post\"]",
-        // Unsigned keys.
-        "unsigned_ids = true",
+        // Unsigned keys: the setting, tied to an unsigned `users.id` on
+        // MySQL, not only the TOML block that holds it.
+        "An application whose `users.id` is unsigned on MySQL sets `unsigned_ids = true`",
         // Laravel's queue:retry.
         "`queue:retry all` stops at the first failed job Suprnova wrote",
         "`queue:retry --queue=<queue>` with a queue only Laravel uses, and Laravel retries its own failed jobs",

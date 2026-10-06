@@ -213,7 +213,7 @@ on_every_engine!(other_stores_do_not_refuse =>
     ldb_003_a_worker_without_the_database_store_does_not_refuse_mysql);
 
 /// The URL a child process connects to for this engine's test database.
-fn child_url(engine: Engine, db: &Db) -> String {
+pub(crate) fn child_url(engine: Engine, db: &Db) -> String {
     match engine {
         Engine::Sqlite => format!(
             "sqlite://{}",
