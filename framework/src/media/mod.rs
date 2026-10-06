@@ -1034,16 +1034,20 @@ fn read_file_capped(path: &Path, cap: u64) -> Result<Vec<u8>, FrameworkError> {
     Ok(bytes)
 }
 
-async fn read_source(source: Source) -> Result<Vec<u8>, FrameworkError> {
+/// The source's bytes, for the driver to read. Bytes the caller handed
+/// [`Image::from_bytes`] are passed on as they are, never copied: a driver
+/// only reads its input (MEM-003).
+async fn read_source(source: Source) -> Result<Bytes, FrameworkError> {
     let cap = config().max_alloc_bytes;
     match source {
         Source::Bytes(bytes) => {
             check_source_size(bytes.len() as u64, cap, "the image")?;
-            Ok(bytes.to_vec())
+            Ok(bytes)
         }
         Source::Path(path) => tokio::task::spawn_blocking(move || read_file_capped(&path, cap))
             .await
-            .map_err(|e| FrameworkError::internal(format!("image source read panicked: {e}")))?,
+            .map_err(|e| FrameworkError::internal(format!("image source read panicked: {e}")))?
+            .map(Bytes::from),
         #[cfg(feature = "filesystem")]
         Source::Disk { disk, path } => {
             use crate::DiskExt;
@@ -1069,7 +1073,9 @@ async fn read_source(source: Source) -> Result<Vec<u8>, FrameworkError> {
                 .into_bytes_stream(..)
                 .await
                 .map_err(storage_error)?;
-            collect_capped(stream, cap, reported, "stored file").await
+            collect_capped(stream, cap, reported, "stored file")
+                .await
+                .map(Bytes::from)
         }
     }
 }
