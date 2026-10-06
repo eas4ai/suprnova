@@ -22,7 +22,12 @@
 //! by the function's type. The router reads it wherever it registers the
 //! handler and, before the first request, refuses a route whose handler
 //! reads a parameter its path does not declare, or reads the body twice. A
-//! generic handler has no record and is not checked.
+//! generic handler has no type to key a record by, so it is not checked
+//! before the first request. When one of its arguments may bind, its body
+//! starts by handing the route the same description of every argument, and
+//! the route binds its concrete arguments as it binds a recorded handler's:
+//! in path order, by the route's binding fields, scoped, through the
+//! router's binders, with `with_trashed()` and `missing()`.
 //!
 //! ## A handler inside an `impl` block
 //!
@@ -254,11 +259,22 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
         .collect();
 
     // The record the router reads. A generic handler has no type to key it
-    // by, and is not checked.
-    let record = if has_type_generics(fn_generics) {
+    // by, and is not checked before the first request; one that may bind
+    // hands the route the same description of its arguments at the request.
+    let generic = has_type_generics(fn_generics);
+    let record = if generic {
         TokenStream2::new()
     } else {
         record_items(fn_name, self_ty.as_ref(), &args)
+    };
+    let unrecorded = if generic
+        && args
+            .iter()
+            .any(|arg| matches!(arg.kind, ArgKind::Probe | ArgKind::OptionalProbe(_)))
+    {
+        unrecorded_binding(fn_name, self_ty.as_ref(), &args)
+    } else {
+        TokenStream2::new()
     };
     let (site_check, site_const) = handler_site(fn_name, self_ty.as_ref(), &input_text, record);
 
@@ -396,6 +412,7 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
             #site_check
             #probes
             #input_binding
+            #unrecorded
             #(#bind_pass)*
             #(#path_pass)*
             #(#checks)*
@@ -583,6 +600,74 @@ fn type_text(ty: &Type) -> String {
     quote!(#ty).to_string().replace(' ', "")
 }
 
+/// The handler as a record or a refusal names it: `show`, or `Posts::show`
+/// for one inside an `impl` block, after its module's path.
+fn handler_display(fn_name: &Ident, self_ty: Option<&Type>) -> String {
+    match self_ty {
+        Some(self_ty) => format!("{}::{fn_name}", type_last_segment(self_ty)),
+        None => fn_name.to_string(),
+    }
+}
+
+/// The start of a generic handler's body when an argument may bind: the
+/// route plans the handler's arguments, described as a record describes
+/// them, keyed by a type only this handler declares, and binds the concrete
+/// ones as it binds a recorded handler's (BIND-004). A binding that finds
+/// nothing answers the route's `missing()` response or a 404 in place of
+/// the handler.
+fn unrecorded_binding(fn_name: &Ident, self_ty: Option<&Type>, args: &[Arg]) -> TokenStream2 {
+    let display = handler_display(fn_name, self_ty);
+    let entries = arg_entries(args);
+    quote! {
+        {
+            struct __SuprnovaUnrecordedHandler;
+            if let ::core::option::Option::Some(__suprnova_answer) = __suprnova_input
+                .__bind_unrecorded(
+                    ::std::any::TypeId::of::<__SuprnovaUnrecordedHandler>(),
+                    ::core::concat!(::core::module_path!(), "::", #display),
+                    || {
+                        use ::suprnova::routing::__ArgSource as _;
+                        ::std::vec![#(#entries),*]
+                    },
+                )
+                .await
+            {
+                return __suprnova_answer;
+            }
+        }
+    }
+}
+
+/// One `HandlerArg` per argument, in declaration order. A probed
+/// argument's entry calls its probe, so the trait must be in scope.
+fn arg_entries(args: &[Arg]) -> Vec<TokenStream2> {
+    args.iter()
+        .map(|arg| {
+            let ty = arg.ty;
+            let ty_text = type_text(ty);
+            let name = arg.name.as_deref().unwrap_or("_");
+            match &arg.kind {
+                ArgKind::Request | ArgKind::Generic => quote! {
+                    ::suprnova::routing::HandlerArg::body(#name, #ty_text)
+                },
+                ArgKind::Path => quote! {
+                    ::suprnova::routing::HandlerArg::path_value(#name, #ty_text, false)
+                },
+                ArgKind::OptionalPath(_) => quote! {
+                    ::suprnova::routing::HandlerArg::path_value(#name, #ty_text, true)
+                },
+                ArgKind::Probe => quote! {
+                    (&&::suprnova::routing::__ArgProbe::<#ty>::new()).__record(#name, #ty_text)
+                },
+                ArgKind::OptionalProbe(inner) => quote! {
+                    (&&::suprnova::routing::__OptionalArgProbe::<#inner>::new())
+                        .__record(#name, #ty_text)
+                },
+            }
+        })
+        .collect()
+}
+
 /// The `inventory` record of the handler: its type, its name and every
 /// argument, for the router's startup checks (BIND-004). A free function
 /// is named by its name, one inside an `impl` block through its type.
@@ -591,13 +676,11 @@ fn record_items(fn_name: &Ident, self_ty: Option<&Type>, args: &[Arg]) -> TokenS
     // Type` the name does not resolve, and the error points at `#[handler]`.
     let mut fn_ref = fn_name.clone();
     fn_ref.set_span(Span::call_site());
-    let (handler, display) = match self_ty {
-        Some(self_ty) => (
-            quote! { <#self_ty>::#fn_ref },
-            format!("{}::{fn_name}", type_last_segment(self_ty)),
-        ),
-        None => (quote! { #fn_ref }, fn_name.to_string()),
+    let handler = match self_ty {
+        Some(self_ty) => quote! { <#self_ty>::#fn_ref },
+        None => quote! { #fn_ref },
     };
+    let display = handler_display(fn_name, self_ty);
     // A probe's record comes through its trait, imported only when an
     // entry calls it.
     let probes = if args
@@ -608,29 +691,7 @@ fn record_items(fn_name: &Ident, self_ty: Option<&Type>, args: &[Arg]) -> TokenS
     } else {
         TokenStream2::new()
     };
-    let entries = args.iter().map(|arg| {
-        let ty = arg.ty;
-        let ty_text = type_text(ty);
-        let name = arg.name.as_deref().unwrap_or("_");
-        match &arg.kind {
-            ArgKind::Request | ArgKind::Generic => quote! {
-                ::suprnova::routing::HandlerArg::body(#name, #ty_text)
-            },
-            ArgKind::Path => quote! {
-                ::suprnova::routing::HandlerArg::path_value(#name, #ty_text, false)
-            },
-            ArgKind::OptionalPath(_) => quote! {
-                ::suprnova::routing::HandlerArg::path_value(#name, #ty_text, true)
-            },
-            ArgKind::Probe => quote! {
-                (&&::suprnova::routing::__ArgProbe::<#ty>::new()).__record(#name, #ty_text)
-            },
-            ArgKind::OptionalProbe(inner) => quote! {
-                (&&::suprnova::routing::__OptionalArgProbe::<#inner>::new())
-                    .__record(#name, #ty_text)
-            },
-        }
-    });
+    let entries = arg_entries(args);
     quote! {
         fn __suprnova_handler_type() -> ::std::any::TypeId {
             ::suprnova::routing::__type_id_of(&#handler)
@@ -1097,6 +1158,68 @@ mod tests {
         });
         assert!(!out.contains("compile_error"), "got:\n{out}");
         assert!(!out.contains("HandlerRecord"), "got:\n{out}");
+    }
+
+    #[test]
+    fn bind_004_a_generic_handler_plans_its_concrete_arguments_against_the_route() {
+        // No record to key a startup plan by, so the generated code hands
+        // the router every argument at the request, before any binds.
+        let out = expansion(quote! {
+            pub async fn show<T: FromRequest>(user: User, post: Option<Post>, form: T)
+                -> Response { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(!out.contains("HandlerRecord"), "got:\n{out}");
+        let plan = position(&out, "__bind_unrecorded");
+        assert!(
+            plan < position(&out, "__ArgProbe :: < User > :: new ()) . __bind"),
+            "the route plans the arguments before the first binds; got:\n{out}"
+        );
+        assert!(
+            plan < position(&out, "< T as :: suprnova :: FromRequest > :: from_request"),
+            "and before the body is read; got:\n{out}"
+        );
+        assert!(
+            out.contains("__ArgProbe :: < User > :: new ()) . __record (\"user\" , \"User\")"),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains(
+                "__OptionalArgProbe :: < Post > :: new ()) . __record (\"post\" , \"Option<Post>\")"
+            ),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains("HandlerArg :: body (\"form\" , \"T\")"),
+            "the generic argument is described as the body reader it is; got:\n{out}"
+        );
+        // A handler whose miss the route answers returns that answer.
+        assert!(out.contains("return __suprnova_answer"), "got:\n{out}");
+    }
+
+    #[test]
+    fn bind_004_only_a_generic_handler_that_may_bind_plans_at_the_request() {
+        for src in [
+            // Recorded: the router planned it before the first request.
+            quote! { pub async fn show(user: User, form: Form) -> Response { todo!() } },
+            // Generic, with nothing that may bind.
+            quote! { pub async fn show<T: FromRequest>(id: i64, form: T) -> Response { todo!() } },
+            quote! { pub async fn show<T: FromRequest>(req: Request) -> Response { todo!() } },
+        ] {
+            let out = expansion(src);
+            assert!(!out.contains("compile_error"), "got:\n{out}");
+            assert!(!out.contains("__bind_unrecorded"), "got:\n{out}");
+        }
+        // An `#[authorize]` target binds too.
+        let out = expansion(quote! {
+            #[authorize("view", post)]
+            pub async fn show<T: FromRequest>(post: Post, form: T) -> Response { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            position(&out, "__bind_unrecorded") < position(&out, "__authorize_target"),
+            "got:\n{out}"
+        );
     }
 
     // ── A handler inside an `impl` block ─────────────────────────────────────
@@ -1706,6 +1829,26 @@ mod tests {
                 }
             },
             quote! {
+                pub async fn generic_bound<T: FromRequest + Send + 'static>(
+                    tag: Tag,
+                    other: Option<Tag>,
+                    form: T,
+                ) -> Response {
+                    let _ = form;
+                    suprnova::http::text(format!("{} {}", tag.name, other.is_some()))
+                }
+            },
+            quote! {
+                #[suprnova::authorize("view", tag)]
+                pub async fn generic_guarded<T: FromRequest + Send + 'static>(
+                    tag: Tag,
+                    form: T,
+                ) -> Response {
+                    let _ = form;
+                    suprnova::http::text(tag.name)
+                }
+            },
+            quote! {
                 #[suprnova::authorize("view", tag)]
                 pub async fn guarded(tag: Tag) -> Response { suprnova::http::text(tag.name) }
             },
@@ -1743,6 +1886,15 @@ mod tests {
         let associated = [
             quote! { pub async fn show(tag: Tag) -> Response { suprnova::http::text(tag.name) } },
             quote! { pub async fn by_id(id: i64) -> Response { suprnova::http::text(id.to_string()) } },
+            quote! {
+                pub async fn generic_show<T: FromRequest + Send + 'static>(
+                    tag: Tag,
+                    form: T,
+                ) -> Response {
+                    let _ = form;
+                    suprnova::http::text(tag.name)
+                }
+            },
         ];
 
         let mut source = String::from(

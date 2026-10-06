@@ -111,6 +111,12 @@ pub(crate) type RouteBound = Box<dyn std::any::Any + Send + Sync>;
 #[derive(Clone)]
 struct RouteBindings(std::sync::Arc<std::sync::Mutex<Option<Vec<Option<RouteBound>>>>>);
 
+/// The binding settings of a matched route whose handler carries no
+/// record, for a generic handler to bind its concrete arguments by. Kept in
+/// the extensions for the reason [`RouteBindings`] is.
+#[derive(Clone)]
+struct UnrecordedRouteBindings(std::sync::Arc<crate::routing::binding::UnrecordedRoute>);
+
 /// The address one entry of `X-Forwarded-For` names, in its canonical
 /// form, so an IPv4 address written as an IPv6 one is the IPv4 address.
 ///
@@ -186,6 +192,26 @@ impl Request {
             .insert(RouteBindings(std::sync::Arc::new(std::sync::Mutex::new(
                 Some(values),
             ))));
+    }
+
+    /// Hand a handler that carries no record the binding settings of the
+    /// route it answers.
+    pub(crate) fn set_unrecorded_route(
+        &mut self,
+        route: std::sync::Arc<crate::routing::binding::UnrecordedRoute>,
+    ) {
+        self.parts.extensions.insert(UnrecordedRouteBindings(route));
+    }
+
+    /// Take the binding settings of the route, once. `None` when the
+    /// request's route has a recorded handler, or no route matched.
+    pub(crate) fn take_unrecorded_route(
+        &mut self,
+    ) -> Option<std::sync::Arc<crate::routing::binding::UnrecordedRoute>> {
+        self.parts
+            .extensions
+            .remove::<UnrecordedRouteBindings>()
+            .map(|UnrecordedRouteBindings(route)| route)
     }
 
     /// Take the values the route's bindings resolved, once. `None` when the

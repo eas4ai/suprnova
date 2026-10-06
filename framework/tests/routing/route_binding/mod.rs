@@ -23,6 +23,7 @@ pub mod associated;
 pub mod contract;
 pub mod custom;
 pub mod enums;
+pub mod generic;
 pub mod handler_form;
 pub mod keys;
 pub mod manual;

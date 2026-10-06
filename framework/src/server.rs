@@ -1068,10 +1068,17 @@ async fn handle_request_inner(
             crate::error::debug_page::note_route_pattern(&pattern);
             // The route's bindings run after its middleware, right before
             // the handler (BIND-015). The checks above passed, so the plan
-            // is there.
-            let handler = match router.binding_plan(&effective_method, &pattern) {
-                Ok(Some(plan)) => crate::routing::binding::planned_handler(plan, handler),
-                Ok(None) => handler,
+            // is there. A handler with no record gets the route's settings
+            // and binds inside itself.
+            let (handler, unrecorded) = match router.binding_plan(&effective_method, &pattern) {
+                Ok(Some(crate::routing::binding::RouteBinds::Planned(plan))) => (
+                    crate::routing::binding::planned_handler(plan, handler),
+                    None,
+                ),
+                Ok(Some(crate::routing::binding::RouteBinds::Unrecorded(route))) => {
+                    (handler, Some(route))
+                }
+                Ok(None) => (handler, None),
                 Err(error) => {
                     return into_hyper_in_scope(crate::http::HttpResponse::from(error));
                 }
@@ -1081,6 +1088,9 @@ async fn handle_request_inner(
                     .with_params(params)
                     .with_route_pattern(pattern.clone()),
             );
+            if let Some(route) = unrecorded {
+                request.set_unrecorded_route(route);
+            }
             let live_metadata = router.live_route_metadata(&effective_method, &pattern);
             if let Some(metadata) = live_metadata {
                 let runtime = match crate::live::LiveRuntime::bind() {

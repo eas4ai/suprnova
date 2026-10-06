@@ -452,7 +452,15 @@ refusal as an error. A router driven through `handle_request` in a test
 runs the same checks before its first request and answers every request
 with a 500 when they fail, a request the fallback would answer included;
 `router.prepare_bindings()` returns the error itself. A closure handler
-and a generic `#[handler]` function carry no record and are not checked.
+and a generic `#[handler]` function carry no record and are not checked
+at startup. A closure binds nothing. A generic handler's arguments of a
+concrete type that implements `RouteBinding` bind as any handler's do: in
+path order, by the route's binding fields, scoped, through the router's
+binders, with `with_trashed()` and `missing()`. The route plans them at
+the handler's first request and keeps the plan; a binding field, a scoped
+child or a binder the checks above would refuse answers that request with
+a 500 instead of binding. Its generic arguments read the body.
+
 A handler inside an `impl` block names its type,
 `#[handler(Self = Posts)]`, and is checked as a free handler is; see
 [Handlers inside an `impl` block](controllers.md#handlers-inside-an-impl-block).

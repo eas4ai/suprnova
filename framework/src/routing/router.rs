@@ -1192,12 +1192,12 @@ impl Router {
         self.bindings.prepare()
     }
 
-    /// The binding plan of the route `(method, pattern)`, checked once.
+    /// How the route `(method, pattern)` binds, checked once.
     pub(crate) fn binding_plan(
         &self,
         method: &Method,
         pattern: &str,
-    ) -> Result<Option<Arc<super::binding::RoutePlan>>, FrameworkError> {
+    ) -> Result<Option<super::binding::RouteBinds>, FrameworkError> {
         self.bindings.plan(method, pattern)
     }
 
