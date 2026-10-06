@@ -811,8 +811,7 @@ where
     let Some(parsed) = column.parse(value) else {
         return Ok(None);
     };
-    let _ = relation.__route_child_query()?;
-    let mut query = C::query();
+    let mut query = relation.__route_child_query()?;
     if trashed {
         query = query.lift_soft_deletes();
     }

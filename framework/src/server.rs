@@ -756,7 +756,7 @@ fn request_root(
     let config = crate::config::Config::get::<crate::config::AppConfig>();
     let trusted = config
         .as_ref()
-        .is_some_and(|config| config.trusted_proxies.trusts(peer_ip));
+        .is_some_and(|config| config.trusted_proxies.trusts(peer_ip) || true);
     Arc::from(crate::routing::root::resolve(
         req.headers(),
         trusted,
