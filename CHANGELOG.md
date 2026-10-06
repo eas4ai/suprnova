@@ -241,6 +241,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `Redirect::intended` no longer send the browser elsewhere when a request
   such as `GET //evil.example/x` or `GET /\evil.example` reaches a fallback
   route, and `url::full` stays on the `APP_URL` origin for it.
+- **Images are no longer copied before a driver reads them.**
+  `Image::from_bytes` hands the driver the caller's bytes, and the `magick`
+  driver writes an image to ImageMagick's standard input without copying
+  it first.
 - **Queue and failed-job table names with capitals or reserved words
   work.** The jobs driver and the failed-jobs store quote each part of the
   configured table name, as the migrations do.
