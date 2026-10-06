@@ -78,7 +78,7 @@ pub fn to(path: &str) -> String {
         let rooted = super::root::rooted_with(&root, path);
         return format!("{origin}{rooted}");
     }
-    join_base_path(origin, path)
+    join_base_path(&format!("{origin}{root}"), path)
 }
 
 /// Build an absolute `https://` URL even if `APP_URL` is `http://`.
