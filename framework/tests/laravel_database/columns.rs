@@ -115,6 +115,25 @@ async fn scaffold_user_on_laravels_users(engine: Engine) {
     let reread = User::find(4u64).await.expect("find").expect("user 4");
     assert_eq!(reread.name, "Jeffrey Way", "{engine:?}");
 
+    // The SeaORM types the scaffold's model re-exports read and write the
+    // same table.
+    {
+        use crate::scaffold::user::{ActiveModel, Column, Entity};
+        use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+        let row = Entity::find()
+            .filter(Column::Email.eq("abigail@example.com"))
+            .one(&db.conn)
+            .await
+            .expect("query the entity")
+            .expect("abigail");
+        assert_eq!(row.id, suprnova::StoredU64(2), "{engine:?}");
+        let mut active: ActiveModel = row.into();
+        active.name = Set("Abigail Otwell".to_owned());
+        active.update(&db.conn).await.expect("update through the entity");
+        let reread = User::find(2u64).await.expect("find").expect("user 2");
+        assert_eq!(reread.name, "Abigail Otwell", "{engine:?}");
+    }
+
     let created = User::create("Nuno", "nuno@example.com", "created-by-suprnova")
         .await
         .expect("create a user");

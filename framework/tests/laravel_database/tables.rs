@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use sea_orm::{ConnectionTrait, DbBackend};
+use sea_orm::DbBackend;
 use sea_orm_migration::SchemaManager;
 use suprnova::session::migrations::{SessionUserKey, create_sessions_table};
 use suprnova::{

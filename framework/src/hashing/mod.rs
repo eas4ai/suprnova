@@ -24,12 +24,15 @@
 //! which means two distinct passphrases sharing their first 72 bytes hash
 //! to the same value (audit HIGH `hashing` #2). When the active driver is
 //! bcrypt, [`hash`] rejects passwords > [`MAX_BCRYPT_PASSWORD_BYTES`]
-//! up-front:
+//! up-front with `FrameworkError::param("password exceeds … bytes")`.
 //!
-//! - [`hash`] returns `FrameworkError::param("password exceeds … bytes")`.
-//! - [`verify`] returns `Ok(false)` so the calling auth flow surfaces the
-//!   same "invalid credentials" response regardless - no length-based
-//!   information disclosure.
+//! [`verify`] accepts a password of any length against a bcrypt hash and
+//! judges it on its first 72 bytes, as PHP's `password_verify` does, so a
+//! user whose password of 72 bytes or more a Laravel application hashed
+//! signs in. While the application shares its database with a Laravel
+//! application ([`LaravelDatabase`](crate::LaravelDatabase)), [`hash`]
+//! writes the `$2y$` form [`hash_for_laravel`] mints, which judges a
+//! password on its first 72 bytes as PHP's `password_hash` does.
 //!
 //! Argon2i / Argon2id have **no such limit** and accept arbitrary-length
 //! passphrases. The guard only fires when the active driver is bcrypt.

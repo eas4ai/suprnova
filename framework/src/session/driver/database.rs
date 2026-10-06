@@ -329,9 +329,23 @@ impl DatabaseSessionDriver {
     /// column.
     async fn user_id_value(&self, user_id: Option<&str>) -> Result<sea_orm::Value, FrameworkError> {
         Ok(match self.user_id_column().await? {
-            UserIdColumn::Integer => {
-                sea_orm::Value::BigInt(user_id.and_then(|id| id.parse::<i64>().ok()))
-            }
+            // MySQL's `foreignId` is `BIGINT UNSIGNED`, which holds the ids
+            // above `i64::MAX` a `u64` key reaches.
+            UserIdColumn::Integer => match user_id {
+                Some(id) => match id.parse::<i64>() {
+                    Ok(id) => sea_orm::Value::BigInt(Some(id)),
+                    Err(_) => match id.parse::<u64>() {
+                        Ok(id)
+                            if DB::connection()?.inner().get_database_backend()
+                                == sea_orm::DatabaseBackend::MySql =>
+                        {
+                            sea_orm::Value::BigUnsigned(Some(id))
+                        }
+                        _ => sea_orm::Value::BigInt(None),
+                    },
+                },
+                None => sea_orm::Value::BigInt(None),
+            },
             UserIdColumn::Uuid => {
                 sea_orm::Value::Uuid(user_id.and_then(|id| uuid::Uuid::parse_str(id).ok()))
             }

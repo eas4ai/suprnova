@@ -144,8 +144,8 @@ async fn postgres_rbac_assignment_is_idempotent() {
     assert_eq!(roles, 1, "repeated create_role must not insert duplicates");
 
     let assignments: i64 = DB::scalar(
-        "SELECT COUNT(*) FROM model_roles WHERE model_id = $1",
-        vec!["7".into()],
+        "SELECT COUNT(*) FROM model_has_roles WHERE model_id = $1",
+        vec![7i64.into()],
     )
     .await
     .expect("count assignments");

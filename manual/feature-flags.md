@@ -218,34 +218,48 @@ vec![
     // ... your app's migrations ...
     Box::new(suprnova::features::migrations::CreateFeaturesTable),
     Box::new(suprnova::features::migrations::FeatureTimestampsToDatetime),
+    Box::new(suprnova::features::migrations::FeaturesToPennantLayout),
 ]
 ```
 
-Schema:
+The table is laravel/pennant's `features`, so the framework reads and writes
+the flags a Laravel application stored with Pennant:
 
 ```sql
 features (
-    id          BIGINT      PRIMARY KEY AUTO_INCREMENT,
+    id          BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
     name        VARCHAR(255) NOT NULL,
-    scope_key   VARCHAR(255) NOT NULL DEFAULT '',
-    enabled     BOOLEAN     NOT NULL,
-    description TEXT,
-    updated_by  VARCHAR(255),
-    created_at  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE INDEX (name, scope_key)
+    scope       VARCHAR(255) NOT NULL,
+    value       TEXT        NOT NULL,
+    created_at  DATETIME    NULL,
+    updated_at  DATETIME    NULL,
+    UNIQUE INDEX (name, scope)
 )
 ```
 
-That is the MySQL shape; on Postgres the time columns are
-`timestamp with time zone`. Earlier versions of `CreateFeaturesTable` made
-them `TIMESTAMP` on MySQL and MariaDB, which refuses any time after
-2038-01-19 03:14:07 UTC. `FeatureTimestampsToDatetime` converts such a table
-to `DATETIME`, keeping the stored UTC times, the nullability and the
-`CURRENT_TIMESTAMP` defaults. It changes nothing on Postgres or SQLite, on a
-table that is already `DATETIME`, or when it runs again.
+That is the MySQL shape of the table `CreateFeaturesTable` creates; Pennant's
+own migration says `TIMESTAMP`, and a table Pennant created is left exactly
+as it is. A flag's framework scope key maps to Pennant's `scope`:
 
-`scope_key` carries the scope kind inline (`"user:42"`, `"team:staff"`, `""` for global) so the read path stays a single string lookup against a unique index.
+| Scope key | Stored `scope` |
+|---|---|
+| `""` (global) | `__laravel_null` |
+| `user:42` | `App\Models\User\|42`, or `{FEATURES_USER_SCOPE}\|42` |
+| anything else, such as `team:staff` | the key as it is |
+
+`value` holds JSON. The framework stores `true` or `false`, as Pennant does
+for an activated or deactivated flag, and reads any stored value other than
+`false` as enabled, as Pennant's `active()` does, so a rich value such as
+`"blue"` is enabled. Each flag's description and the actor who last changed
+it live in the framework's `suprnova_feature_details` table, because
+Pennant's has no column for them.
+
+`FeaturesToPennantLayout` moves a `features` table an earlier release
+created (`scope_key`, `enabled`, `description`, `updated_by`) into
+Pennant's layout with its rows, so no flag changes its answer.
+`FeatureTimestampsToDatetime` converts the `TIMESTAMP` columns of such an
+earlier table to `DATETIME` on MySQL and MariaDB, keeping the stored UTC
+times. See [Running on a Laravel Database](laravel-database.md).
 
 ## User and team ids
 

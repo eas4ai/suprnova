@@ -160,6 +160,18 @@ drops idle connections - see [Pool liveness](database.md#pool-liveness).
 | `DB_PING_AFTER_IDLE` | unset | `u64` (seconds) | Ping a pooled connection only after it has been idle this long. Setting it turns `DB_TEST_BEFORE_ACQUIRE` off, so hot connections are handed out untouched. |
 | `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT` | `false` | `bool` | When true, a failing auto-migration during `serve` boot is logged but does not abort. Default is fail-closed: boot exits non-zero rather than start against a partially-migrated schema. Pass `--no-migrate` to skip auto-migration entirely. |
 
+## Laravel database
+
+Variables for an application on a database a Laravel application created.
+See [Running on a Laravel Database](laravel-database.md).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `LARAVEL_SHARED_DATABASE` | `false` | `bool` | Turn on when a Laravel application uses the database at the same time. Password hashes are written as `$2y$` bcrypt, a valid sign-in rewrites a `$2b$` or Argon2id hash as `$2y$`, Magnetar stops upgrading bcrypt to Argon2id, and an unrouted database-queue job is stored on the queue `suprnova` instead of `default`. Accepts `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`; any other value fails boot. |
+| `NOTIFICATIONS_MORPH_KEY` | `int` | `String` | The type `CreateNotificationsTable` gives `notifications.notifiable_id`: `int` for Laravel's `morphs`, `uuid` for `uuidMorphs`, `ulid` for `ulidMorphs`. Any other value fails the migration. |
+| `RBAC_MODEL_KEY` | `int` | `String` | The type the RBAC migrations give `model_has_roles.model_id` and `model_has_permissions.model_id`: `int`, `uuid` or `ulid`. Any other value fails the migration. |
+| `FEATURES_USER_SCOPE` | `App\Models\User` | `String` | What a user's flags are stored under in Pennant's `features.scope`, before `\|<id>`: the class or morph alias of the user model in the Laravel application. |
+
 ## Session
 
 Cookie attributes and lifetime for the session subsystem. Note that
@@ -588,7 +600,8 @@ framework reads:
 - **Notifications, Payments, Feature Flags.** Each
   registers concrete drivers via `App::bind` in `bootstrap()`. Pick
   your driver in Rust; pass any URLs/keys it needs as your own env
-  vars.
+  vars. The exceptions are the table-layout variables in
+  **Laravel database** above.
 - **Vector search** registers its drivers the same way. The Qdrant,
   MariaDB and Pinecone drivers have a `from_env()` constructor that reads the
   variables in **Vector search** above.

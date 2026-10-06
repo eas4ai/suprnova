@@ -20,7 +20,7 @@ use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Sta
 use sea_orm_migration::prelude::*;
 use serial_test::serial;
 use suprnova::notifications::migrations::{
-    CreateNotificationsTable, NotificationTimestampsToDatetime,
+    CreateNotificationsTable, NotificationTimestampsToDatetime, NotificationsToLaravelLayout,
 };
 
 async fn connect_mysql() -> DatabaseConnection {
@@ -83,6 +83,10 @@ async fn run_shipped_migrations(db: &DatabaseConnection) {
         .up(&manager)
         .await
         .expect("move the time columns to DATETIME");
+    NotificationsToLaravelLayout
+        .up(&manager)
+        .await
+        .expect("move the table into Laravel's layout");
 }
 
 /// Type and nullability of each time column, in the table's order.
@@ -133,9 +137,9 @@ async fn stored_times(db: &DatabaseConnection) -> Vec<(String, Option<String>, S
 
 /// A `notifications` table an older version of the migration created keeps
 /// MySQL's `TIMESTAMP`, which refuses any time after 2038-01-19: from then
-/// on every notification write fails. The shipped migrations convert it to
-/// `DATETIME`, keep each column's nullability and every stored time in UTC,
-/// and run again harmlessly. They run here over a session in another time
+/// on every notification write fails. The shipped migrations move it into
+/// Laravel's layout with `DATETIME` time columns, nullable as Laravel's
+/// are, keep every stored time in UTC, and run again harmlessly. They run here over a session in another time
 /// zone, which `ALTER TABLE` would otherwise convert the stored times into.
 #[tokio::test]
 #[serial]
@@ -169,15 +173,15 @@ async fn mysql_the_shipped_migrations_move_a_timestamp_table_past_2038_in_utc() 
             (
                 "created_at".to_owned(),
                 "datetime".to_owned(),
-                "no".to_owned()
+                "yes".to_owned()
             ),
             (
                 "updated_at".to_owned(),
                 "datetime".to_owned(),
-                "no".to_owned()
+                "yes".to_owned()
             ),
         ],
-        "every time column is DATETIME, with its nullability kept"
+        "every time column is DATETIME and nullable, as Laravel's timestamps are"
     );
     assert_eq!(
         stored_times(&db).await,

@@ -61,14 +61,19 @@ async fn row_of(
     })
 }
 
-/// List every flag row, sorted by name, then by stored scope. Use this to
-/// populate the admin panel's "all flags" table.
+/// List every flag row, sorted by name, then by scope key, the global
+/// `""` first. Use this to populate the admin panel's "all flags" table.
+///
+/// The sort runs here rather than in SQL: the stored scopes are Pennant's
+/// (`__laravel_null`, `App\Models\User|42`), whose order differs from the
+/// scope keys' and from one database collation to another.
 pub async fn list() -> Result<Vec<FeatureRow>, FrameworkError> {
     let db = DB::connection()?;
     let mut rows = Vec::new();
     for flag in store::all(db.inner()).await? {
         rows.push(row_of(db.inner(), flag).await?);
     }
+    rows.sort_by(|a, b| (&a.name, &a.scope_key).cmp(&(&b.name, &b.scope_key)));
     Ok(rows)
 }
 

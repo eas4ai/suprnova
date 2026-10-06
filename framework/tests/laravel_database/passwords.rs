@@ -293,9 +293,13 @@ async fn magnetar_writes_laravels_hashes(engine: Engine) {
         ("short@example.com", "registered-password"),
         ("long@example.com", long.as_str()),
     ] {
-        support::in_request(Auth::password().register(email, password))
+        let registration = support::in_request(Auth::password().register(email, password))
             .await
             .expect("register through Magnetar");
+        assert!(
+            matches!(registration, suprnova::Registration::Created(_)),
+            "{engine:?}: {email} is a new address, so Magnetar creates its account"
+        );
         assert_laravel_accepts(
             &magnetar_hash(&db, email).await,
             password,

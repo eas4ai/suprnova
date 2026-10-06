@@ -128,7 +128,7 @@ async fn notification_queue_dispatches_through_queue_and_lands_in_db() {
         .expect("row present");
     assert_eq!(row.try_get_by_index::<String>(0).unwrap(), "OrderShipped");
     assert_eq!(row.try_get_by_index::<String>(1).unwrap(), "users");
-    assert_eq!(row.try_get_by_index::<String>(2).unwrap(), "7");
+    assert_eq!(row.try_get_by_index::<i64>(2).unwrap(), 7);
     let data_json: String = row.try_get_by_index(3).unwrap();
     let data: serde_json::Value = serde_json::from_str(&data_json).unwrap();
     assert_eq!(data["tracking"], "1Z");

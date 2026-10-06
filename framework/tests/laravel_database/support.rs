@@ -33,14 +33,6 @@ impl Engine {
             Engine::Mysql => "mysql",
         }
     }
-
-    pub fn backend(self) -> DbBackend {
-        match self {
-            Engine::Sqlite => DbBackend::Sqlite,
-            Engine::Postgres => DbBackend::Postgres,
-            Engine::Mysql => DbBackend::MySql,
-        }
-    }
 }
 
 /// Three tests from one case: SQLite with the suite, Postgres and MySQL
@@ -114,7 +106,6 @@ pub fn fixtures_dir() -> PathBuf {
 /// One test's database. A SQLite file is removed when this is dropped.
 pub struct Db {
     pub conn: DatabaseConnection,
-    pub engine: Engine,
     sqlite_file: Option<PathBuf>,
 }
 
@@ -153,7 +144,6 @@ pub async fn empty(engine: Engine) -> Db {
                 .expect("enable foreign keys");
             Db {
                 conn,
-                engine,
                 sqlite_file: Some(path),
             }
         }
@@ -169,7 +159,6 @@ pub async fn empty(engine: Engine) -> Db {
                 .expect("create the public schema");
             Db {
                 conn,
-                engine,
                 sqlite_file: None,
             }
         }
@@ -226,7 +215,6 @@ pub async fn empty(engine: Engine) -> Db {
             }
             Db {
                 conn,
-                engine,
                 sqlite_file: None,
             }
         }

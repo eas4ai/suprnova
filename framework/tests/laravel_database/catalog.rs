@@ -43,22 +43,6 @@ pub struct Shape {
     pub foreign_keys: BTreeSet<ForeignKey>,
 }
 
-impl Shape {
-    /// The shape without column defaults, which LDB-001 does not compare.
-    pub fn without_defaults(mut self) -> Self {
-        for column in &mut self.columns {
-            column.default = None;
-        }
-        self
-    }
-
-    pub fn column(&self, name: &str) -> &Column {
-        self.columns
-            .iter()
-            .find(|c| c.name == name)
-            .unwrap_or_else(|| panic!("no column {name} in {self:?}"))
-    }
-}
 
 async fn query(
     conn: &DatabaseConnection,

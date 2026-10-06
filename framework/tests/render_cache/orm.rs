@@ -2143,7 +2143,7 @@ async fn an_out_of_band_flag_change_reflected_by_reload_invalidates_the_entry() 
 
     DB::table("features")
         .filter("name", "orm-suite-out-of-band")
-        .update(attrs! { enabled: true })
+        .update(attrs! { value: "true" })
         .await
         .expect("write the row out of band");
     features.database.reload().await.expect("reload");
@@ -2180,7 +2180,7 @@ async fn reload_invalidates_the_cached_evaluator() {
 
     DB::table("features")
         .filter("name", "orm-suite-cached")
-        .update(attrs! { enabled: true })
+        .update(attrs! { value: "true" })
         .await
         .expect("write the row out of band");
     features.database.reload().await.expect("reload");
@@ -2361,7 +2361,7 @@ async fn a_render_during_a_reload_is_invalidated_once_the_reload_completes() {
 
     DB::table("features")
         .filter("name", "orm-suite-reload-in-flight")
-        .update(attrs! { enabled: true })
+        .update(attrs! { value: "true" })
         .await
         .expect("write the row out of band");
     features.database.reload().await.expect("reload");
