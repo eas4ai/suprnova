@@ -82,6 +82,6 @@
   "methods of external trait impls (Debug, Clone, Serialize, ...); the traits themselves are listed in each type's implements_external",
   "demo application code (app/), test-support crates and fixtures"
  ],
- "sibling_reexports_folded_into_aliases": 299,
- "source_rev": "f6669cf56"
+ "sibling_reexports_folded_into_aliases": 302,
+ "source_rev": "5bf54ce69"
 }
