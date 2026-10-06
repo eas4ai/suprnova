@@ -1127,7 +1127,7 @@ impl Walker<'_, '_> {
                 ""
             }
         };
-        if name == "safe" {
+        if name == "never-a-filter" {
             self.refuse(
                 "view-escape",
                 span,
