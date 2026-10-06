@@ -15,9 +15,15 @@
 //! definition - it arrives as an upload. Every numeric argument is formatted
 //! from an already-validated `u32`/`f32`/`u8` field of a
 //! [`Transformation`], never from caller-supplied text, so there is no
-//! argument position an attacker can reach. The image bytes themselves go
-//! over stdin and come back over stdout; no temp file is written, so there
-//! is no path to traverse and nothing to clean up.
+//! argument position an attacker can reach. A colour is a typed
+//! [`Color`](super::Color) the driver formats itself. The arguments that
+//! choose which metadata ImageMagick keeps are fixed strings. A custom
+//! transformation contributes no argument at all: it runs on the pixels,
+//! in Rust, between two ImageMagick runs. The image bytes go over stdin and
+//! come back over stdout; the driver writes no temporary file, so there is
+//! no path to traverse and nothing to clean up. (ImageMagick itself copies
+//! stdin into its own temporary directory before it decodes, and removes
+//! the copy when it exits.)
 //!
 //! # Two-tier limits
 //!
@@ -43,7 +49,12 @@ use crate::config::env_optional;
 use crate::error::FrameworkError;
 
 use super::ImageConfig;
+use super::color::Color;
+use super::custom::{CustomTransformation, ImagePixels};
 use super::driver::{ImageDriver, ImagePipeline, OutputFormat, Transformation};
+use super::metadata::{self, ColourClass, OutputMetadata, SrgbConversion};
+use super::orientation::Orientation;
+use super::oxideav::OxideAvImageDriver;
 use super::sniff;
 
 /// Default binary name. ImageMagick 7 only.
@@ -341,6 +352,345 @@ impl MagickCliDriver {
     }
 }
 
+impl MagickCliDriver {
+    /// Run the pipeline under `plan`: one ImageMagick run, or one more for
+    /// every custom step and for a conversion to sRGB, each passing the
+    /// image to the next over stdout and stdin.
+    ///
+    /// Between two runs the image is a PNG: ImageMagick writes it with the
+    /// ICC profile, and the EXIF while orientation is still to be applied;
+    /// the driver decodes it, runs the step on the pixels, and encodes it
+    /// back with the same two kept. So a pipeline with a custom step ends
+    /// with the profile and the orientation tag a pipeline without one
+    /// would.
+    fn run_pipeline(
+        &self,
+        contents: &[u8],
+        pipeline: &ImagePipeline,
+        config: &ImageConfig,
+        detected: Option<sniff::InputFormat>,
+        target: OutputFormat,
+        plan: ColourPlan,
+    ) -> Result<Vec<u8>, FrameworkError> {
+        let stages = stages(pipeline, plan);
+        let background = flatten_background(pipeline, target);
+        let mut applied = config.auto_orient;
+        let mut input: Option<Vec<u8>> = None;
+        for (index, stage) in stages.iter().enumerate() {
+            let first = index == 0;
+            let mut args = limit_args(config);
+            if first {
+                args.extend(first_frame_input(detected));
+                if config.auto_orient {
+                    args.push("-auto-orient".into());
+                }
+            } else {
+                args.push("png:-[0]".into());
+            }
+            for step in stage.steps {
+                if *step == Transformation::Orient {
+                    if !applied {
+                        applied = true;
+                        args.push("-auto-orient".into());
+                    }
+                    continue;
+                }
+                args.extend(transformation_args(*step, target));
+            }
+            let source: &[u8] = input.as_deref().unwrap_or(contents);
+            let Some(after) = stage.after else {
+                args.extend(output_args(pipeline, target, plan, applied, background));
+                return self.run(&args, source, config);
+            };
+            args.extend(intermediate_args(applied));
+            let intermediate = self.run(&args, source, config)?;
+            input = Some(rust_stage(&intermediate, after, applied, config)?);
+        }
+        Err(FrameworkError::internal(
+            "image: the magick pipeline has no stages",
+        ))
+    }
+
+    /// Keep, of what ImageMagick wrote, what IMG-002 keeps.
+    ///
+    /// The profile ImageMagick carried is kept when its colour space is the
+    /// output pixels' own. When it is not, the caller runs again with a plan
+    /// that keeps the two consistent, which `Settled::Mismatch` reports. A
+    /// PNG source's colour chunks go with its profile: they are kept when
+    /// the output carries the profile, or when the source had none.
+    fn settle(
+        &self,
+        output: Vec<u8>,
+        target: OutputFormat,
+        applied: bool,
+        png_colour: &[([u8; 4], Vec<u8>)],
+        source_had_profile: bool,
+        config: &ImageConfig,
+    ) -> Result<Settled, FrameworkError> {
+        let limit = metadata::inflate_limit(config.max_alloc_bytes, output.len() as u64);
+        let icc = metadata::output_icc(target, &output, limit)?;
+        let orientation = if applied {
+            None
+        } else {
+            metadata::output_orientation(target, &output)
+        };
+        let class = icc.as_deref().and_then(metadata::icc_class);
+        if target == OutputFormat::Gif {
+            // A GIF's palette converts to sRGB in place, so no class
+            // mismatches; the profile goes.
+            let gif = OutputMetadata {
+                icc: icc.as_deref(),
+                strip: true,
+                ..OutputMetadata::default()
+            };
+            return metadata::rewrite(output, target, &gif).map(Settled::Done);
+        }
+        let pixels = metadata::pixel_class(target, &output);
+        let carried = match class {
+            Some(class) if class == pixels => icc.as_deref(),
+            Some(class @ (ColourClass::Rgb | ColourClass::Gray)) => {
+                return Ok(Settled::Mismatch {
+                    class,
+                    png_colour_type: png_colour_type(&output),
+                });
+            }
+            // A CMYK or Lab profile on pixels ImageMagick converted out of
+            // that space no longer describes them.
+            Some(ColourClass::Other) | None => None,
+        };
+        let kept = OutputMetadata {
+            icc: carried,
+            orientation,
+            png_colour: if carried.is_some() || (class.is_none() && !source_had_profile) {
+                png_colour
+            } else {
+                &[]
+            },
+            strip: true,
+        };
+        metadata::rewrite(output, target, &kept).map(Settled::Done)
+    }
+}
+
+/// How the driver keeps a profile and the pixels consistent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ColourPlan {
+    /// Write a JPEG with three components even when every pixel is grey,
+    /// so an RGB profile still describes it.
+    jpeg_true_colour: bool,
+    /// The PNG colour type to write: 2 or 6 when every pixel is grey and an
+    /// RGB profile has to keep describing them.
+    png_colour_type: Option<u8>,
+    /// Convert the pixels to sRGB in Rust before the last run, and drop the
+    /// profile: for a grey profile on pixels the output stores as RGB.
+    srgb: bool,
+}
+
+impl ColourPlan {
+    /// The plan for a profile of `class`, before anything has run.
+    fn before(class: Option<ColourClass>, target: OutputFormat) -> Self {
+        match class {
+            Some(ColourClass::Rgb) => Self {
+                jpeg_true_colour: target == OutputFormat::Jpeg,
+                ..Self::default()
+            },
+            // WebP and BMP store grey as RGB, so a grey profile cannot stay.
+            Some(ColourClass::Gray) => Self {
+                srgb: matches!(
+                    target,
+                    OutputFormat::WebP | OutputFormat::WebPLossless | OutputFormat::Bmp
+                ),
+                ..Self::default()
+            },
+            Some(ColourClass::Other) | None => Self::default(),
+        }
+    }
+
+    /// The plan after output came back with a profile of `class` that does
+    /// not match its pixels.
+    fn after_mismatch(
+        class: ColourClass,
+        target: OutputFormat,
+        png_colour_type: Option<u8>,
+    ) -> Self {
+        match class {
+            ColourClass::Rgb => Self {
+                jpeg_true_colour: target == OutputFormat::Jpeg,
+                // A grey PNG, with alpha (4) or without (0), written as RGB
+                // with the same alpha.
+                png_colour_type: match png_colour_type {
+                    Some(4) => Some(6),
+                    _ if target == OutputFormat::Png => Some(2),
+                    _ => None,
+                },
+                srgb: false,
+            },
+            ColourClass::Gray | ColourClass::Other => Self {
+                srgb: true,
+                ..Self::default()
+            },
+        }
+    }
+}
+
+/// What [`MagickCliDriver::settle`] found.
+enum Settled {
+    /// The finished output.
+    Done(Vec<u8>),
+    /// ImageMagick wrote a profile whose colour space is not its pixels'.
+    Mismatch {
+        class: ColourClass,
+        png_colour_type: Option<u8>,
+    },
+}
+
+/// The colour type in a PNG's header.
+fn png_colour_type(bytes: &[u8]) -> Option<u8> {
+    (bytes.get(12..16)? == b"IHDR").then(|| bytes.get(25).copied())?
+}
+
+/// What runs in Rust between two ImageMagick runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AfterStage {
+    /// A registered custom transformation.
+    Custom(CustomTransformation),
+    /// The conversion of the pixels from their profile to sRGB.
+    Srgb,
+}
+
+/// One ImageMagick run's steps, and what runs in Rust after it; `None`
+/// after the last.
+struct Stage<'a> {
+    steps: &'a [Transformation],
+    after: Option<AfterStage>,
+}
+
+/// Split a pipeline into ImageMagick runs at its custom steps, and after
+/// the last when the plan converts to sRGB.
+fn stages(pipeline: &ImagePipeline, plan: ColourPlan) -> Vec<Stage<'_>> {
+    let mut stages = Vec::new();
+    let mut start = 0;
+    for (index, step) in pipeline.transformations.iter().enumerate() {
+        if let Transformation::Custom(custom) = step {
+            stages.push(Stage {
+                steps: &pipeline.transformations[start..index],
+                after: Some(AfterStage::Custom(*custom)),
+            });
+            start = index + 1;
+        }
+    }
+    let rest = &pipeline.transformations[start..];
+    if plan.srgb {
+        stages.push(Stage {
+            steps: rest,
+            after: Some(AfterStage::Srgb),
+        });
+        stages.push(Stage {
+            steps: &[],
+            after: None,
+        });
+    } else {
+        stages.push(Stage {
+            steps: rest,
+            after: None,
+        });
+    }
+    stages
+}
+
+/// The settings that end a run whose image goes on to Rust: keep the ICC
+/// profile, and the EXIF while orientation is still to be applied, and
+/// write an 8-bit PNG to stdout.
+fn intermediate_args(applied: bool) -> Vec<String> {
+    let keep = if applied { "!icc,*" } else { "!icc,!exif,*" };
+    vec![
+        "+profile".into(),
+        keep.into(),
+        "-depth".into(),
+        "8".into(),
+        "png:-".into(),
+    ]
+}
+
+/// Run a Rust stage on the PNG one ImageMagick run wrote, and encode the
+/// PNG the next run reads.
+fn rust_stage(
+    intermediate: &[u8],
+    after: AfterStage,
+    applied: bool,
+    config: &ImageConfig,
+) -> Result<Vec<u8>, FrameworkError> {
+    let decoder = OxideAvImageDriver::new();
+    let pixels = decoder.decode_unoriented(intermediate, config)?;
+    let held = pixels.pixels().len() as u64;
+    let limit = metadata::inflate_limit(config.max_alloc_bytes, held);
+    let mut icc = metadata::output_icc(OutputFormat::Png, intermediate, limit)?;
+    let orientation: Option<Orientation> = if applied {
+        None
+    } else {
+        metadata::output_orientation(OutputFormat::Png, intermediate)
+    };
+    let mut pixels = match after {
+        AfterStage::Custom(custom) => {
+            let out = custom.apply(pixels)?;
+            sniff::enforce_limits(out.width(), out.height(), config)?;
+            out
+        }
+        AfterStage::Srgb => pixels,
+    };
+    // The PNG between runs is RGBA, so only an RGB profile describes it; a
+    // grey one is converted away here, and so is any profile at the sRGB
+    // stage.
+    let class = icc.as_deref().and_then(metadata::icc_class);
+    if after == AfterStage::Srgb || class != Some(ColourClass::Rgb) {
+        if let Some(conversion) = icc.as_deref().and_then(SrgbConversion::from_profile) {
+            conversion.convert_rgba(pixels.pixels_mut())?;
+        }
+        icc = None;
+    }
+    let png = encode_intermediate(pixels)?;
+    let kept = OutputMetadata {
+        icc: icc.as_deref(),
+        orientation,
+        ..OutputMetadata::default()
+    };
+    metadata::rewrite(png, OutputFormat::Png, &kept)
+}
+
+/// Encode RGBA as the PNG the next ImageMagick run reads. Lossless, so the
+/// next run starts from exactly the pixels the step returned.
+fn encode_intermediate(pixels: ImagePixels) -> Result<Vec<u8>, FrameworkError> {
+    let (width, height) = (pixels.width(), pixels.height());
+    oxideav_png::encode_png_image(&oxideav_png::PngImage {
+        width,
+        height,
+        pixel_format: oxideav_png::PngPixelFormat::Rgba,
+        stride: width as usize * 4,
+        data: pixels.into_pixels(),
+        palette: Vec::new(),
+    })
+    .map_err(|e| {
+        FrameworkError::internal(format!("image encode failed between ImageMagick runs: {e}"))
+    })
+}
+
+/// The colour JPEG and GIF output flattens transparency onto: the last
+/// rotation's background put over white, or white when nothing rotates.
+fn flatten_background(pipeline: &ImagePipeline, target: OutputFormat) -> Color {
+    pipeline
+        .transformations
+        .iter()
+        .rev()
+        .find_map(|step| match step {
+            Transformation::Rotate { background, .. } => {
+                Some(background.unwrap_or(metadata::default_background(target)))
+            }
+            _ => None,
+        })
+        .unwrap_or(Color::WHITE)
+        .over_white()
+}
+
 impl ImageDriver for MagickCliDriver {
     fn process(
         &self,
@@ -358,11 +708,52 @@ impl ImageDriver for MagickCliDriver {
                 ));
             }
         };
-        self.run(
-            &process_args(pipeline, &config, detected, target),
-            contents,
-            &config,
-        )
+        // For the five formats the framework reads, the profile is known
+        // before ImageMagick runs; for the rest, from what it writes.
+        let limit = metadata::inflate_limit(config.max_alloc_bytes, 0);
+        let source_class = match detected {
+            Some(format) => metadata::source_icc(format, contents, limit)?
+                .as_deref()
+                .and_then(metadata::icc_class),
+            None => None,
+        };
+        let png_colour = if detected == Some(sniff::InputFormat::Png) && target == OutputFormat::Png
+        {
+            metadata::png_colour_chunks(contents)
+        } else {
+            Vec::new()
+        };
+        let applied =
+            config.auto_orient || pipeline.transformations.contains(&Transformation::Orient);
+        let mut plan = ColourPlan::before(source_class, target);
+        let mut retried = false;
+        loop {
+            let output = self.run_pipeline(contents, pipeline, &config, detected, target, plan)?;
+            let colour = if plan.srgb { &[][..] } else { &png_colour[..] };
+            match self.settle(
+                output,
+                target,
+                applied,
+                colour,
+                source_class.is_some(),
+                &config,
+            )? {
+                Settled::Done(bytes) => return Ok(bytes),
+                Settled::Mismatch {
+                    class,
+                    png_colour_type,
+                } if !retried => {
+                    retried = true;
+                    plan = ColourPlan::after_mismatch(class, target, png_colour_type);
+                }
+                Settled::Mismatch { .. } => {
+                    return Err(FrameworkError::internal(
+                        "image: ImageMagick wrote an ICC profile that does not describe its \
+                         pixels, twice",
+                    ));
+                }
+            }
+        }
     }
 
     fn dimensions(&self, contents: &[u8]) -> Result<(u32, u32), FrameworkError> {
@@ -439,7 +830,7 @@ fn limit_args(config: &ImageConfig) -> Vec<String> {
 ///
 /// Geometry suffixes carry the semantics: `!` forces exact dimensions,
 /// `>` shrinks only, `^` fills the box, and a bare `WxH` fits inside it.
-fn transformation_args(step: Transformation) -> Vec<String> {
+fn transformation_args(step: Transformation, target: OutputFormat) -> Vec<String> {
     let arg = |value: &str| value.to_string();
     match step {
         Transformation::Resize { width, height } => {
@@ -476,9 +867,15 @@ fn transformation_args(step: Transformation) -> Vec<String> {
             format!("{width}x{height}+{x}+{y}"),
             arg("+repage"),
         ],
-        Transformation::Rotate(degrees) => vec![
+        // The colour is the driver's own formatting of a typed value.
+        Transformation::Rotate {
+            degrees,
+            background,
+        } => vec![
             arg("-background"),
-            arg("none"),
+            background
+                .unwrap_or(metadata::default_background(target))
+                .to_hex(),
             arg("-rotate"),
             format!("{degrees}"),
             arg("+repage"),
@@ -494,6 +891,10 @@ fn transformation_args(step: Transformation) -> Vec<String> {
             None => Vec::new(),
         },
         Transformation::Grayscale => vec![arg("-colorspace"), arg("Gray")],
+        // Neither ever reaches ImageMagick as an argument: the pipeline
+        // places `-auto-orient` for an orientation itself, and a custom
+        // step runs in Rust between two runs.
+        Transformation::Orient | Transformation::Custom(_) => Vec::new(),
     }
 }
 
@@ -559,7 +960,8 @@ fn first_frame_input(detected: Option<sniff::InputFormat>) -> Vec<String> {
     args
 }
 
-/// Full argv (after the binary) for a process run.
+/// Full argv (after the binary) for a pipeline with no custom step.
+#[cfg(test)]
 fn process_args(
     pipeline: &ImagePipeline,
     config: &ImageConfig,
@@ -568,8 +970,64 @@ fn process_args(
 ) -> Vec<String> {
     let mut args = limit_args(config);
     args.extend(first_frame_input(detected));
+    let mut applied = config.auto_orient;
+    if applied {
+        args.push("-auto-orient".into());
+    }
     for step in &pipeline.transformations {
-        args.extend(transformation_args(*step));
+        if *step == Transformation::Orient {
+            if !applied {
+                applied = true;
+                args.push("-auto-orient".into());
+            }
+            continue;
+        }
+        args.extend(transformation_args(*step, target));
+    }
+    let plan = ColourPlan::default();
+    args.extend(output_args(
+        pipeline,
+        target,
+        plan,
+        applied,
+        flatten_background(pipeline, target),
+    ));
+    args
+}
+
+/// The settings that end the last run: flatten for a format without
+/// alpha, keep only the metadata IMG-002 keeps, hold the pixels in the
+/// profile's colour space, set the quality, and write the output to stdout.
+///
+/// Every one is a fixed string or the driver's formatting of a value.
+fn output_args(
+    pipeline: &ImagePipeline,
+    target: OutputFormat,
+    plan: ColourPlan,
+    applied: bool,
+    background: Color,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if metadata::flattens(target) {
+        args.push("-background".into());
+        args.push(background.to_hex());
+        args.push("-alpha".into());
+        args.push("remove".into());
+        args.push("-alpha".into());
+        args.push("off".into());
+    }
+    // ImageMagick keeps every profile it read unless told otherwise. The
+    // EXIF stays while orientation is unapplied, so its tag survives for
+    // the driver to keep; the driver strips everything else it writes.
+    args.push("+profile".into());
+    args.push(if applied { "!icc,*" } else { "!icc,!exif,*" }.into());
+    if plan.jpeg_true_colour && target == OutputFormat::Jpeg {
+        args.push("-type".into());
+        args.push("TrueColor".into());
+    }
+    if let (Some(colour_type), OutputFormat::Png) = (plan.png_colour_type, target) {
+        args.push("-define".into());
+        args.push(format!("png:color-type={colour_type}"));
     }
     args.push("-quality".into());
     args.push(pipeline.quality.to_string());
@@ -716,6 +1174,7 @@ mod tests {
             max_dimension: 4096,
             max_alloc_bytes: 1024,
             magick_timeout_secs: 30,
+            auto_orient: true,
         }
     }
 
@@ -765,10 +1224,15 @@ mod tests {
                 // The input coder is pinned, not sniffed by ImageMagick, and
                 // only the first frame is read.
                 "png:-[0]",
+                // The EXIF orientation is applied as the image is read.
+                "-auto-orient",
                 "-resize",
                 "800x600!",
                 "-colorspace",
                 "Gray",
+                // Only the ICC profile survives; the driver strips the rest.
+                "+profile",
+                "!icc,*",
                 "-quality",
                 "65",
                 // Lossy at every quality: ImageMagick goes lossless at 100.
@@ -835,43 +1299,52 @@ mod tests {
     fn geometry_suffixes_carry_the_resize_semantics() {
         // `!` forces exact dimensions, ignoring aspect ratio.
         assert_eq!(
-            transformation_args(Transformation::Resize {
-                width: 10,
-                height: 20
-            }),
+            transformation_args(
+                Transformation::Resize {
+                    width: 10,
+                    height: 20
+                },
+                OutputFormat::Png
+            ),
             vec!["-resize", "10x20!"]
         );
         // `>` shrinks only - this is what makes `scale` never enlarge.
         assert_eq!(
-            transformation_args(Transformation::Scale {
-                width: 10,
-                height: 20
-            }),
+            transformation_args(
+                Transformation::Scale {
+                    width: 10,
+                    height: 20
+                },
+                OutputFormat::Png
+            ),
             vec!["-resize", "10x20>"]
         );
         assert_eq!(
-            transformation_args(Transformation::ScaleWidth(10)),
+            transformation_args(Transformation::ScaleWidth(10), OutputFormat::Png),
             vec!["-resize", "10x>"]
         );
         assert_eq!(
-            transformation_args(Transformation::ScaleHeight(20)),
+            transformation_args(Transformation::ScaleHeight(20), OutputFormat::Png),
             vec!["-resize", "x20>"]
         );
         // A bare geometry fits inside the box, preserving aspect ratio.
         assert_eq!(
-            transformation_args(Transformation::Contain {
-                width: 10,
-                height: 20
-            }),
+            transformation_args(
+                Transformation::Contain {
+                    width: 10,
+                    height: 20
+                },
+                OutputFormat::Png
+            ),
             vec!["-resize", "10x20"]
         );
         // A single dimension lets IM derive the other.
         assert_eq!(
-            transformation_args(Transformation::ResizeWidth(10)),
+            transformation_args(Transformation::ResizeWidth(10), OutputFormat::Png),
             vec!["-resize", "10x"]
         );
         assert_eq!(
-            transformation_args(Transformation::ResizeHeight(20)),
+            transformation_args(Transformation::ResizeHeight(20), OutputFormat::Png),
             vec!["-resize", "x20"]
         );
     }
@@ -879,10 +1352,13 @@ mod tests {
     #[test]
     fn cover_fills_then_crops_from_the_centre() {
         assert_eq!(
-            transformation_args(Transformation::Cover {
-                width: 64,
-                height: 64
-            }),
+            transformation_args(
+                Transformation::Cover {
+                    width: 64,
+                    height: 64
+                },
+                OutputFormat::Png
+            ),
             vec![
                 "-resize", "64x64^", "-gravity", "center", "-extent", "64x64", "+repage"
             ]
@@ -891,18 +1367,27 @@ mod tests {
 
     #[test]
     fn crop_and_rotate_reset_the_virtual_canvas() {
-        let crop = transformation_args(Transformation::Crop {
-            width: 4,
-            height: 3,
-            x: 2,
-            y: 1,
-        });
+        let crop = transformation_args(
+            Transformation::Crop {
+                width: 4,
+                height: 3,
+                x: 2,
+                y: 1,
+            },
+            OutputFormat::Png,
+        );
         assert_eq!(crop, vec!["-crop", "4x3+2+1", "+repage"]);
 
-        let rotate = transformation_args(Transformation::Rotate(45.0));
+        let rotate = transformation_args(
+            Transformation::Rotate {
+                degrees: 45.0,
+                background: None,
+            },
+            OutputFormat::Png,
+        );
         assert_eq!(
             rotate,
-            vec!["-background", "none", "-rotate", "45", "+repage"],
+            vec!["-background", "#00000000", "-rotate", "45", "+repage"],
             "a transparent background keeps rotation from painting corners black"
         );
     }
@@ -910,19 +1395,19 @@ mod tests {
     #[test]
     fn flips_map_to_their_imagemagick_names() {
         assert_eq!(
-            transformation_args(Transformation::FlipVertically),
+            transformation_args(Transformation::FlipVertically, OutputFormat::Png),
             vec!["-flip"]
         );
         assert_eq!(
-            transformation_args(Transformation::FlipHorizontally),
+            transformation_args(Transformation::FlipHorizontally, OutputFormat::Png),
             vec!["-flop"]
         );
     }
 
     #[test]
     fn zero_strength_blur_and_sharpen_emit_no_arguments() {
-        assert!(transformation_args(Transformation::Blur(0)).is_empty());
-        assert!(transformation_args(Transformation::Sharpen(0)).is_empty());
+        assert!(transformation_args(Transformation::Blur(0), OutputFormat::Png).is_empty());
+        assert!(transformation_args(Transformation::Sharpen(0), OutputFormat::Png).is_empty());
     }
 
     #[test]
@@ -932,11 +1417,11 @@ mod tests {
         assert_eq!(sharpen_amount(50), Some(1.0));
         assert_eq!(sharpen_amount(100), Some(2.0));
         assert_eq!(
-            transformation_args(Transformation::Blur(100)),
+            transformation_args(Transformation::Blur(100), OutputFormat::Png),
             vec!["-blur", "0x7.5"]
         );
         assert_eq!(
-            transformation_args(Transformation::Sharpen(50)),
+            transformation_args(Transformation::Sharpen(50), OutputFormat::Png),
             vec!["-unsharp", "0x1+1+0"]
         );
     }
@@ -954,7 +1439,10 @@ mod tests {
                     x: 3,
                     y: 4,
                 },
-                Transformation::Rotate(-33.5),
+                Transformation::Rotate {
+                    degrees: -33.5,
+                    background: None,
+                },
             ],
             format: Some(OutputFormat::Jpeg),
             quality: 70,
@@ -1251,6 +1739,172 @@ mod tests {
             .run(&[], &payload, &ImageConfig::default())
             .expect("cat must echo the payload back");
         assert_eq!(out.len(), payload.len(), "every byte must survive");
+    }
+
+    #[test]
+    fn img_001_orientation_is_applied_after_the_input_or_at_its_step() {
+        let pipeline = ImagePipeline::default();
+        let args = process_args(
+            &pipeline,
+            &config(),
+            Some(sniff::InputFormat::Jpeg),
+            OutputFormat::Png,
+        );
+        let input = args.iter().position(|arg| arg == "jpeg:-[0]").unwrap();
+        assert_eq!(args[input + 1], "-auto-orient");
+
+        let mut opt_out = config();
+        opt_out.auto_orient = false;
+        let plain = process_args(
+            &pipeline,
+            &opt_out,
+            Some(sniff::InputFormat::Jpeg),
+            OutputFormat::Png,
+        );
+        assert!(!plain.contains(&"-auto-orient".to_string()));
+        let oriented = ImagePipeline {
+            transformations: vec![Transformation::Grayscale, Transformation::Orient],
+            ..ImagePipeline::default()
+        };
+        let args = process_args(
+            &oriented,
+            &opt_out,
+            Some(sniff::InputFormat::Jpeg),
+            OutputFormat::Png,
+        );
+        let grey = args.iter().position(|arg| arg == "Gray").unwrap();
+        assert_eq!(
+            args[grey + 1],
+            "-auto-orient",
+            "orient() applies at its place"
+        );
+        // An `orient()` after decode already applied it adds nothing.
+        let twice = process_args(
+            &oriented,
+            &config(),
+            Some(sniff::InputFormat::Jpeg),
+            OutputFormat::Png,
+        );
+        assert_eq!(twice.iter().filter(|arg| *arg == "-auto-orient").count(), 1);
+    }
+
+    #[test]
+    fn img_002_the_arguments_that_keep_metadata_are_fixed_strings() {
+        let pipeline = ImagePipeline::default();
+        let applied = process_args(&pipeline, &config(), None, OutputFormat::Jpeg);
+        let profile = applied.iter().position(|arg| arg == "+profile").unwrap();
+        assert_eq!(
+            applied[profile + 1],
+            "!icc,*",
+            "only the ICC profile is kept"
+        );
+        let mut opt_out = config();
+        opt_out.auto_orient = false;
+        let kept = process_args(&pipeline, &opt_out, None, OutputFormat::Jpeg);
+        let profile = kept.iter().position(|arg| arg == "+profile").unwrap();
+        assert_eq!(
+            kept[profile + 1],
+            "!icc,!exif,*",
+            "the EXIF stays for its tag"
+        );
+    }
+
+    #[test]
+    fn img_004_custom_steps_split_the_pipeline_and_add_no_argument() {
+        let custom = Transformation::custom("img-004-split");
+        let pipeline = ImagePipeline {
+            transformations: vec![
+                Transformation::Grayscale,
+                custom,
+                Transformation::FlipVertically,
+            ],
+            ..ImagePipeline::default()
+        };
+        let stages = stages(&pipeline, ColourPlan::default());
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0].steps, [Transformation::Grayscale]);
+        assert_eq!(
+            stages[0].after,
+            Some(AfterStage::Custom(CustomTransformation::new(
+                "img-004-split"
+            )))
+        );
+        assert_eq!(stages[1].steps, [Transformation::FlipVertically]);
+        assert_eq!(stages[1].after, None);
+        assert!(transformation_args(custom, OutputFormat::Png).is_empty());
+        assert_eq!(
+            intermediate_args(true),
+            ["+profile", "!icc,*", "-depth", "8", "png:-"],
+            "between runs the image goes over stdout as a PNG"
+        );
+        let srgb = stages_with_srgb(&pipeline);
+        assert_eq!(srgb.last().map(|stage| stage.after), Some(None));
+        assert_eq!(srgb[srgb.len() - 2].after, Some(AfterStage::Srgb));
+    }
+
+    fn stages_with_srgb(pipeline: &ImagePipeline) -> Vec<Stage<'_>> {
+        stages(
+            pipeline,
+            ColourPlan {
+                srgb: true,
+                ..ColourPlan::default()
+            },
+        )
+    }
+
+    #[test]
+    fn img_006_a_colour_reaches_magick_as_the_drivers_formatting() {
+        let typed = Color::from_hex("#ABC").unwrap();
+        let rotate = transformation_args(
+            Transformation::Rotate {
+                degrees: 30.0,
+                background: Some(typed),
+            },
+            OutputFormat::Png,
+        );
+        assert_eq!(
+            rotate[1], "#aabbccff",
+            "the driver writes the colour from its bytes"
+        );
+        assert!(!rotate.iter().any(|arg| arg.contains("ABC")));
+
+        // JPEG and GIF default to white and flatten onto the rotation's
+        // background; PNG, WebP and BMP default to transparent.
+        let default = |target| {
+            transformation_args(
+                Transformation::Rotate {
+                    degrees: 30.0,
+                    background: None,
+                },
+                target,
+            )[1]
+            .clone()
+        };
+        assert_eq!(default(OutputFormat::Jpeg), "#ffffffff");
+        assert_eq!(default(OutputFormat::Gif), "#ffffffff");
+        assert_eq!(default(OutputFormat::Png), "#00000000");
+        let pipeline = ImagePipeline {
+            transformations: vec![Transformation::Rotate {
+                degrees: 30.0,
+                background: Some(Color::rgb(0, 0, 255)),
+            }],
+            ..ImagePipeline::default()
+        };
+        let jpeg = process_args(&pipeline, &config(), None, OutputFormat::Jpeg);
+        assert!(
+            jpeg.windows(6).any(|window| window
+                == [
+                    "-background",
+                    "#0000ffff",
+                    "-alpha",
+                    "remove",
+                    "-alpha",
+                    "off"
+                ]),
+            "JPEG flattens onto the rotation's background: {jpeg:?}"
+        );
+        let png = process_args(&pipeline, &config(), None, OutputFormat::Png);
+        assert!(!png.contains(&"remove".to_string()), "PNG keeps its alpha");
     }
 
     #[test]
