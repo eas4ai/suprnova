@@ -9,7 +9,7 @@ pub mod lockout;
 
 pub use hash::{
     AttemptVerdict, CallProvenance, HashAlgorithm, HashParameters, HashWorkProfile,
-    PasswordHashConfig, PasswordHashDriver, PasswordVerifier, RehashOutcome,
+    PasswordHashConfig, PasswordHashDriver, PasswordTarget, PasswordVerifier, RehashOutcome,
     StandardPasswordHashDriver, VerificationCall,
 };
 pub use lockout::{

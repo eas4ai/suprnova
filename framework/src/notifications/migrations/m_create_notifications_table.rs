@@ -1,29 +1,35 @@
-//! Migration that creates the framework-owned `notifications` table that
+//! Migration that creates the `notifications` table that
 //! [`crate::notifications::channels::database::DatabaseChannel`] writes
 //! and the read helpers in [`crate::notifications`] query - see
 //! [`crate::notifications::migrations`] for the convention.
 //!
-//! The column types are portable across SQLite, Postgres and MySQL:
+//! The table takes the layout Laravel 13's `make:notifications-table`
+//! migration creates, so a Suprnova application and a Laravel one read
+//! each other's notifications:
 //!
-//! - `id` is `CHAR(36)`, a UUID, the same width on every engine.
-//! - `type` and `notifiable_type` are `VARCHAR(255)`, Laravel's widths, so
-//!   rows migrated from a Laravel app fit.
-//! - `notifiable_id` is `VARCHAR(64)`, so integer keys (as text) and UUID
-//!   keys share one schema without per-driver casting.
-//! - `data` is `TEXT` holding the JSON payload. MySQL `TEXT` holds 65,535
-//!   bytes, more than any realistic notification.
-//! - The timestamps are `DATETIME` (`timestamp` on Postgres) without a
-//!   zone; the channel writes UTC. Not MySQL's `TIMESTAMP`, which refuses
-//!   any time after 2038-01-19. Tables this migration created before have
-//!   `TIMESTAMP` there; the read helpers read both, and
-//!   [`NotificationTimestampsToDatetime`](super::NotificationTimestampsToDatetime)
-//!   converts them.
+//! - `id` is a UUID: `uuid` on Postgres, `CHAR(36)` elsewhere.
+//! - `type` and `notifiable_type` are `VARCHAR(255)`.
+//! - `notifiable_id` follows `NOTIFICATIONS_MORPH_KEY`, as Laravel's
+//!   `morphs` follows its default morph key type: `int` (the default) for
+//!   a big integer (unsigned on MySQL), `uuid` for the column
+//!   `uuidMorphs` creates, `ulid` for the one `ulidMorphs` creates. The
+//!   pair has Laravel's index.
+//! - `data` is `TEXT` holding the JSON payload.
+//! - `read_at`, `created_at` and `updated_at` are nullable. They are
+//!   `DATETIME` on MySQL, where Laravel's migration says `TIMESTAMP`, the
+//!   framework's rule for a time column: `TIMESTAMP` refuses any time after
+//!   2038-01-19.
+//!
+//! A `notifications` table that already exists is left exactly as it is:
+//! one Laravel created stays as Laravel left it, and one an earlier
+//! version of this migration created is reshaped by
+//! [`NotificationsToLaravelLayout`](super::NotificationsToLaravelLayout).
 
 use sea_orm_migration::prelude::*;
 
-use crate::database::migration_guard::create_index_if_missing;
+use crate::schema::Schema;
 
-/// Migration that creates the framework-owned `notifications` table.
+/// Migration that creates the `notifications` table.
 pub struct Migration;
 
 impl MigrationName for Migration {
@@ -35,93 +41,72 @@ impl MigrationName for Migration {
     }
 }
 
-#[async_trait::async_trait]
-impl MigrationTrait for Migration {
-    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .create_table(
-                Table::create()
-                    .table(Notifications::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(Notifications::Id)
-                            .char_len(36)
-                            .not_null()
-                            .primary_key(),
-                    )
-                    .col(
-                        ColumnDef::new(Notifications::Type)
-                            .string_len(255)
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Notifications::NotifiableType)
-                            .string_len(255)
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Notifications::NotifiableId)
-                            .string_len(64)
-                            .not_null(),
-                    )
-                    .col(ColumnDef::new(Notifications::Data).text().not_null())
-                    .col(ColumnDef::new(Notifications::ReadAt).date_time().null())
-                    .col(
-                        ColumnDef::new(Notifications::CreatedAt)
-                            .date_time()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Notifications::UpdatedAt)
-                            .date_time()
-                            .not_null(),
-                    )
-                    .to_owned(),
-            )
-            .await?;
+/// The key type of the notifiable models, from `NOTIFICATIONS_MORPH_KEY`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MorphKey {
+    /// `int`: Laravel's `morphs`.
+    Int,
+    /// `uuid`: Laravel's `uuidMorphs`.
+    Uuid,
+    /// `ulid`: Laravel's `ulidMorphs`.
+    Ulid,
+}
 
-        // The inbox helpers filter on the recipient pair and on `read_at`.
-        // An app that created the table by hand from the schema this
-        // migration replaced already has both indexes; see
-        // `create_index_if_missing` for why each is checked first.
-        create_index_if_missing(
-            manager,
-            "notifications",
-            Index::create()
-                .name("idx_notifications_notifiable")
-                .col(Notifications::NotifiableType)
-                .col(Notifications::NotifiableId)
-                .to_owned(),
-        )
-        .await?;
-
-        create_index_if_missing(
-            manager,
-            "notifications",
-            Index::create()
-                .name("idx_notifications_read_at")
-                .col(Notifications::ReadAt)
-                .to_owned(),
-        )
-        .await
-    }
-
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .drop_table(Table::drop().table(Notifications::Table).to_owned())
-            .await
+/// Read `NOTIFICATIONS_MORPH_KEY`: `int` when unset.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] naming the variable when it holds anything else.
+pub(crate) fn morph_key() -> Result<MorphKey, DbErr> {
+    match std::env::var("NOTIFICATIONS_MORPH_KEY") {
+        Err(_) => Ok(MorphKey::Int),
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "int" => Ok(MorphKey::Int),
+            "uuid" => Ok(MorphKey::Uuid),
+            "ulid" => Ok(MorphKey::Ulid),
+            _ => Err(DbErr::Migration(format!(
+                "NOTIFICATIONS_MORPH_KEY={raw:?} is not one of int, uuid or ulid"
+            ))),
+        },
     }
 }
 
-#[derive(DeriveIden)]
-enum Notifications {
-    Table,
-    Id,
-    Type,
-    NotifiableType,
-    NotifiableId,
-    Data,
-    ReadAt,
-    CreatedAt,
-    UpdatedAt,
+/// Create `notifications` in Laravel's layout, with `notifiable_id` for
+/// `key`, or add the indexes a stopped upgrade left out of the one it
+/// created (see `Schema::create_or_complete`). Callers reach it only when
+/// the table is missing or the upgrade created it.
+pub(crate) async fn create_table(manager: &SchemaManager<'_>, key: MorphKey) -> Result<(), DbErr> {
+    Schema::create_or_complete(manager, "notifications", |t| {
+        t.uuid("id").primary();
+        t.string("type");
+        t.string("notifiable_type");
+        match key {
+            MorphKey::Int => t.unsigned_big_integer("notifiable_id"),
+            MorphKey::Uuid => t.uuid("notifiable_id"),
+            MorphKey::Ulid => t.ulid("notifiable_id"),
+        };
+        t.index(&["notifiable_type", "notifiable_id"]);
+        t.text("data");
+        t.date_time("read_at").precision(0).nullable();
+        t.date_time("created_at").precision(0).nullable();
+        t.date_time("updated_at").precision(0).nullable();
+    })
+    .await
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.has_table("notifications").await? {
+            return Ok(());
+        }
+        create_table(manager, morph_key()?).await
+    }
+
+    /// Leaves the table. A table Laravel created looks the same as the one
+    /// this migration creates, and rolling back must not drop Laravel's
+    /// notifications with it.
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Ok(())
+    }
 }

@@ -17,7 +17,9 @@ use chrono::{DateTime, TimeZone, Utc};
 use sea_orm::ConnectionTrait;
 use sea_orm_migration::{MigrationTrait, SchemaManager};
 use suprnova::features::entity::Feature;
-use suprnova::features::migrations::{CreateFeaturesTable, FeatureTimestampsToDatetime};
+use suprnova::features::migrations::{
+    CreateFeaturesTable, FeatureTimestampsToDatetime, FeaturesToPennantLayout,
+};
 use suprnova::features::{Context, DatabaseEvaluator, Evaluator, admin};
 use suprnova::testing::{TestClock, TestContainer, TestContainerGuard};
 use suprnova::{DatabaseConfig, DbConnection, Model, attrs};
@@ -91,39 +93,39 @@ async fn live_features(env: &str) {
     )
     .await
     .expect("admin upsert");
-    assert_eq!(row.created_at, at(2));
-    assert_eq!(row.updated_at, at(2));
+    assert_eq!(row.created_at, Some(at(2)));
+    assert_eq!(row.updated_at, Some(at(2)));
     let listed = admin::list().await.expect("admin list");
     assert_eq!(listed.len(), 2);
     let flag = listed
         .iter()
         .find(|row| row.name == "checkout.v2")
         .expect("the set_flag row is listed");
-    assert_eq!(flag.created_at, at(0));
-    assert_eq!(flag.updated_at, at(1));
+    assert_eq!(flag.created_at, Some(at(0)));
+    assert_eq!(flag.updated_at, Some(at(1)));
 
     clock.set(at(3));
+    // The model is Pennant's row: its serialized scope and JSON value.
     let made = Feature::create(attrs! {
         name: "search",
-        scope_key: "",
-        enabled: true,
-        description: "full-text search",
+        scope: "__laravel_null",
+        value: "true",
     })
     .await
     .expect("create a flag through the model");
-    assert_eq!(made.created_at, at(3));
+    assert_eq!(made.created_at, Some(at(3)));
     clock.set(at(4));
     let made = made
-        .update(attrs! { enabled: false })
+        .update(attrs! { value: "false" })
         .await
         .expect("update a flag through the model");
     let reread = Feature::find(made.id)
         .await
         .expect("read the flag through the model")
         .expect("the flag exists");
-    assert!(!reread.enabled);
-    assert_eq!(reread.created_at, at(3));
-    assert_eq!(reread.updated_at, at(4));
+    assert_eq!(reread.value, "false");
+    assert_eq!(reread.created_at, Some(at(3)));
+    assert_eq!(reread.updated_at, Some(at(4)));
 
     drop(clock);
     drop(guard);
@@ -144,7 +146,20 @@ async fn mysql_features_read_and_write_native_timestamps() {
 
 /// The feature-flag tables, for the checks every framework table group runs
 /// on MySQL and MariaDB.
-const FEATURE_TABLES: [&str; 1] = ["features"];
+const FEATURE_TABLES: [&str; 2] = ["features", "suprnova_feature_details"];
+
+/// The `features` table an earlier release created on MySQL: its own
+/// layout, with the `TIMESTAMP` time columns its first migration made.
+const EARLIER_FEATURES: [&str; 1] = ["CREATE TABLE features (\
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, \
+    name VARCHAR(255) NOT NULL, \
+    scope_key VARCHAR(255) NOT NULL DEFAULT '', \
+    enabled TINYINT(1) NOT NULL, \
+    description TEXT NULL, \
+    updated_by VARCHAR(255) NULL, \
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+    UNIQUE KEY idx_features_name_scope_key (name, scope_key))"];
 
 /// Every migration the framework ships for the feature-flag tables, in the
 /// order an app's `Migrator` lists them.
@@ -158,6 +173,10 @@ async fn shipped_feature_migrations(db: sea_orm::DatabaseConnection) {
         .up(&manager)
         .await
         .expect("move the features time columns to DATETIME");
+    FeaturesToPennantLayout
+        .up(&manager)
+        .await
+        .expect("move the features table into Pennant's layout");
 }
 
 /// A `features` table created fresh holds a time after 2038-01-19, where
@@ -173,14 +192,16 @@ async fn mysql_a_fresh_features_table_holds_times_after_2038() {
     .await;
 }
 
-/// A `features` table an older migration created with `TIMESTAMP` columns
-/// moves to `DATETIME` with its UTC times kept.
+/// A `features` table an earlier release created with `TIMESTAMP` columns
+/// moves into Pennant's layout with `DATETIME` columns and its UTC times
+/// kept.
 #[tokio::test]
 #[serial_test::serial]
 #[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
 async fn mysql_an_upgraded_features_table_keeps_its_utc_times() {
     crate::mysql_time_columns::assert_upgrade_keeps_utc_times(
         &FEATURE_TABLES,
+        &EARLIER_FEATURES,
         shipped_feature_migrations,
     )
     .await;

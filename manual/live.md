@@ -226,6 +226,12 @@ validation port, fails registration with a typed `RegistryError`.
 `/__live/action`, `/__live/upload`, the `/__live/async/*` control
 routes and WebSocket handshake, and the immutable `/__live/assets/*`
 routes. Startup fails if an application route can claim `/__live`.
+Behind a reverse proxy that serves the application under a path prefix,
+the routes still match `/__live/...` as the application receives it, and
+the page names them under the public root: the configuration element's
+endpoint is `/billing/__live/action`, and the browser runtime reaches the
+upload and asynchronous routes beside it
+([Serving under a path prefix](deployment.md#serving-under-a-path-prefix)).
 
 The reserved request routes carry a strict policy: every request needs
 session, origin, CSRF, principal, tenant, and rate-limit facts. The framework
@@ -751,7 +757,14 @@ component on disk too. It can carry Rust, which `live:add` writes under
 the plan, capabilities, key pins and the record, and [Live Component
 Libraries](live-libraries.md) covers writing a library. Call the macros from
 your views, serve the vendored stylesheet and script with
-`try_live_ui_assets()`, and link them from the document:
+`try_live_ui_assets()`, and link them from the document with
+`url::root()` in front, so the links still work when a reverse proxy serves
+the application under a path prefix:
+
+```html
+<link rel="stylesheet" href="{{ suprnova::url::root() }}/suprnova-ui/field/field.css">
+<link rel="stylesheet" href="{{ suprnova::url::root() }}/suprnova-ui/input/input.css">
+```
 
 ```html
 {% import "suprnova-ui/field/field.html" as field %}

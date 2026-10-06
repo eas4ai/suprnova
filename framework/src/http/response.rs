@@ -568,6 +568,13 @@ impl HttpResponse {
     /// middleware would forward into a header (CORS allow-headers,
     /// `X-Forwarded-*`, custom debug headers).
     ///
+    /// A `Location`, `X-Inertia-Location` or `X-Inertia-Redirect` whose
+    /// target is a root-relative application path gets the public root
+    /// here, once, whatever built the header: a `Redirect`, a middleware,
+    /// or a handler (PFX-004, PFX-010). A target already under the root,
+    /// an absolute URL, a network-path reference and a relative reference
+    /// pass unchanged, so a header is never rooted twice.
+    ///
     /// The status code is constrained to the IANA HTTP status range
     /// `100..=599`. Anything outside that range - `Hyper`'s own
     /// `from_u16` is more permissive (it accepts the full `100..=999`
@@ -601,7 +608,14 @@ impl HttpResponse {
         };
         let mut builder = hyper::Response::builder().status(status);
 
+        let mut root: Option<std::sync::Arc<str>> = None;
         for (name, value) in self.headers {
+            let value = if is_navigation_header(&name) {
+                let root = root.get_or_insert_with(crate::routing::root::current);
+                crate::routing::root::rooted_with(root, &value).into_owned()
+            } else {
+                value
+            };
             let header_name = match hyper::header::HeaderName::try_from(name.as_str()) {
                 Ok(n) => n,
                 Err(e) => {
@@ -857,8 +871,16 @@ impl Redirect {
     /// explicitly. Useful in handlers that have already moved the
     /// request out of `&Request` form. Builds the redirect target from
     /// the request's path + query string.
+    ///
+    /// A request-target a browser would read as another host, such as
+    /// `//evil.example/x` at the host root, is not sent back: the
+    /// redirect goes to the root, as [`Self::refresh`] does when it has
+    /// no previous URL.
     pub fn refresh_for(request: &crate::http::Request) -> Self {
-        Self::to(crate::routing::url::current(request))
+        let current = crate::routing::url::current(request);
+        Self::to(
+            crate::routing::url::root_relative_or_none(&current).unwrap_or_else(|| "/".to_string()),
+        )
     }
 
     /// Redirect a guest user to a login (or other) URL, storing the
@@ -871,10 +893,19 @@ impl Redirect {
     /// be recovered after authentication via
     /// [`Self::intended`]. The intended URL is flashed
     /// to the session under `url.intended` (Laravel's key).
+    ///
+    /// A request-target a browser would read as another host, such as
+    /// `//evil.example/x` at the host root, is not stored, and any intended
+    /// URL already stored is removed, so [`Self::intended`] goes to its
+    /// default rather than off the origin.
     pub fn guest(request: &crate::http::Request, login_path: impl Into<String>) -> Self {
-        let intended = crate::routing::url::current(request);
-        crate::session::session_mut(|s| {
-            s.put("url.intended", intended);
+        let current = crate::routing::url::current(request);
+        let intended = crate::routing::url::root_relative_or_none(&current);
+        crate::session::session_mut(|s| match intended {
+            Some(intended) => s.put("url.intended", intended),
+            None => {
+                s.forget("url.intended");
+            }
         });
         Self::to(login_path)
     }
@@ -886,9 +917,16 @@ impl Redirect {
     /// $headers, $secure)` from `Illuminate/Routing/Redirector.php:95`.
     /// The intended URL is consumed (pulled from the session) so a
     /// subsequent call falls back to `default`.
+    ///
+    /// The stored value is checked when it is read, as the previous URL
+    /// is: a path a browser would read as another host, such as
+    /// `//evil.example/x` or `/\evil.example`, counts as no intended URL.
+    /// A session written by an earlier release can hold one. An intended
+    /// URL that leaves the application is written as an absolute URL.
     pub fn intended(default: impl Into<String>) -> Self {
         let dest = crate::session::session_mut(|s| s.pull::<String>("url.intended"))
             .flatten()
+            .and_then(|stored| crate::routing::url::stored_destination_or_none(&stored))
             .unwrap_or_else(|| default.into());
         Self::to(dest)
     }
@@ -898,7 +936,9 @@ impl Redirect {
     /// Laravel's `Redirector::setIntendedUrl($url)`. No-op outside a
     /// `SessionMiddleware` scope.
     pub fn set_intended_url(url: impl Into<String>) {
-        let url = url.into();
+        // The session records the URL the browser will be sent to, root
+        // included (PFX-004).
+        let url = crate::routing::root::rooted(&url.into()).into_owned();
         crate::session::session_mut(|s| s.put("url.intended", url));
     }
 
@@ -1240,6 +1280,14 @@ fn drain_flash(flash: Vec<(String, serde_json::Value)>) {
             }
         }
     });
+}
+
+/// Whether `name` is a header that sends the browser to a URL, whose
+/// target therefore has to carry the public root (PFX-004).
+fn is_navigation_header(name: &str) -> bool {
+    ["location", "x-inertia-location", "x-inertia-redirect"]
+        .iter()
+        .any(|navigation| name.eq_ignore_ascii_case(navigation))
 }
 
 /// Auto-convert Redirect to Response

@@ -147,6 +147,7 @@ impl Server {
         let router = router.into();
         let runtime = crate::live::LiveRuntime::bind()?;
         Self::prepare_live_router(&router, &runtime)?;
+        router.prepare_bindings()?;
         Ok(Self::from_prepared_config(router, config))
     }
 
@@ -215,6 +216,7 @@ impl Server {
         config: ServerConfig,
     ) -> Result<Self, crate::FrameworkError> {
         Self::prepare_live_router(&router, runtime)?;
+        router.prepare_bindings()?;
         Ok(Self::from_prepared_config(router, config))
     }
 
@@ -377,6 +379,7 @@ impl Server {
             let _ = Self::prepare_config()?;
             let runtime = crate::live::LiveRuntime::bind()?;
             Self::prepare_live_router(&self.router, &runtime)?;
+            self.router.prepare_bindings()?;
             self.prepared = true;
         }
 
@@ -726,8 +729,39 @@ pub async fn handle_request_with_peer(
     // dropped once the response is ready and every streamed body, terminable
     // hook or after-commit callback of the request, which carry the scope,
     // has ended.
-    let request = serve_request(router, middleware_registry, req, peer_ip);
-    crate::container::scope::run_in_new_scope(request).await
+    //
+    // The public root is resolved here, before the debug page, the built-in
+    // endpoints or any middleware sees the request, and holds for the whole
+    // request (PFX-002): every URL, redirect, cookie path and cache key the
+    // request produces reads this one value.
+    //
+    // The request future is boxed before it is wrapped: it is large, and
+    // each wrapper would otherwise move a copy of it through the stack of
+    // the task that polls it, which deep render paths cannot spare.
+    let root = request_root(&req, peer_ip);
+    let request = Box::pin(serve_request(router, middleware_registry, req, peer_ip));
+    crate::container::scope::run_in_new_scope(crate::routing::root::scope(root, request)).await
+}
+
+/// The public root of `req` (PFX-001, PFX-002): a valid
+/// `X-Forwarded-Prefix` when the TCP peer is a trusted proxy, otherwise
+/// the path in `APP_URL`.
+///
+/// The trust rule is the one every other forwarded header follows: with no
+/// `AppConfig` registered, or no peer address, nothing is trusted.
+fn request_root(
+    req: &hyper::Request<hyper::body::Incoming>,
+    peer_ip: Option<std::net::IpAddr>,
+) -> Arc<str> {
+    let config = crate::config::Config::get::<crate::config::AppConfig>();
+    let trusted = config
+        .as_ref()
+        .is_some_and(|config| config.trusted_proxies.trusts(peer_ip));
+    Arc::from(crate::routing::root::resolve(
+        req.headers(),
+        trusted,
+        || crate::routing::root::root_of_app_url(&crate::routing::url::app_url_of(config.as_ref())),
+    ))
 }
 
 /// The body of [`handle_request_with_peer`], run inside the request's
@@ -999,12 +1033,14 @@ async fn handle_request_inner(
     // freshly-constructed Request. `peer_ip` stays an `Option` because
     // in-process callers (the testing harness, the WS upgrade replay)
     // may invoke `handle_request` directly without a real TCP peer.
+    let root = crate::routing::root::current();
     let stamp_peer = |r: Request| -> Request {
         let r = match peer_ip {
             Some(ip) => r.with_peer_addr(ip),
             None => r,
         };
         r.with_trusted_proxies(trusted_proxies.clone())
+            .with_public_root(Arc::clone(&root))
     };
     // RFC 9110 §9.3.2: a HEAD request that lacks an explicit handler falls
     // back to GET inside `Router::match_route`. The middleware list for
@@ -1019,9 +1055,27 @@ async fn handle_request_inner(
         method.clone()
     };
 
+    // The binding checks run before the route is matched, so a request the
+    // fallback answers meets the refusal a matched one does (BIND-004): a
+    // router whose checks fail answers every request with that error, as a
+    // server built from it would refuse to start.
+    if let Err(error) = router.prepare_bindings() {
+        return into_hyper_in_scope(crate::http::HttpResponse::from(error));
+    }
+
     match router.match_route(&method, path) {
         Some((pattern, handler, params)) => {
             crate::error::debug_page::note_route_pattern(&pattern);
+            // The route's bindings run after its middleware, right before
+            // the handler (BIND-015). The checks above passed, so the plan
+            // is there.
+            let handler = match router.binding_plan(&effective_method, &pattern) {
+                Ok(Some(plan)) => crate::routing::binding::planned_handler(plan, handler),
+                Ok(None) => handler,
+                Err(error) => {
+                    return into_hyper_in_scope(crate::http::HttpResponse::from(error));
+                }
+            };
             let mut request = stamp_peer(
                 Request::new(req)
                     .with_params(params)

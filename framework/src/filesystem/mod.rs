@@ -1269,7 +1269,10 @@ impl Storage {
                  the file itself"
             )));
         }
-        let mut url = base;
+        // A root-relative public base names a path the application serves,
+        // so it gets the public root unless it already has it (PFX-006,
+        // PFX-010); an absolute base, such as a CDN's, stays as it is.
+        let mut url = crate::routing::root::rooted(&base).into_owned();
         for segment in segments {
             url.push('/');
             url.extend(utf8_percent_encode(segment, URL_PATH_SEGMENT));

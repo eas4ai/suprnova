@@ -1,7 +1,12 @@
-import { useForm } from '@inertiajs/react'
+import { useForm, usePage } from '@inertiajs/react'
 import type { ResetPasswordProps } from '../../types/inertia-props'
 
 export default function ResetPassword({ token }: ResetPasswordProps) {
+  // The public root the server shares with every page (`RootShare`): empty
+  // at the host root, `/billing` behind a proxy that serves the app there.
+  // Every URL this page posts to or links is built from it, so one build
+  // runs at both.
+  const { root } = usePage<{ root: string }>().props
   // The token came in on the mailed link's query string and goes back in
   // the form body; the server never reads it from the URL on submit.
   const { data, setData, post, processing, errors, reset } = useForm({
@@ -12,7 +17,7 @@ export default function ResetPassword({ token }: ResetPasswordProps) {
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
-    post('/reset-password', {
+    post(`${root}/reset-password`, {
       onFinish: () => reset('password', 'password_confirmation'),
     })
   }
@@ -29,7 +34,7 @@ export default function ResetPassword({ token }: ResetPasswordProps) {
         {errors.token && (
           <p className="text-center text-sm text-red-600">
             {errors.token}{' '}
-            <a href="/forgot-password" className="text-indigo-600 hover:text-indigo-500">
+            <a href={`${root}/forgot-password`} className="text-indigo-600 hover:text-indigo-500">
               Request a new link
             </a>
           </p>
@@ -87,7 +92,7 @@ export default function ResetPassword({ token }: ResetPasswordProps) {
           </div>
 
           <div className="text-center">
-            <a href="/login" className="text-indigo-600 hover:text-indigo-500">
+            <a href={`${root}/login`} className="text-indigo-600 hover:text-indigo-500">
               Back to sign in
             </a>
           </div>

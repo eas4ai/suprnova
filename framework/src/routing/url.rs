@@ -43,13 +43,18 @@ use crate::routing::signed::{
 };
 
 /// Build an absolute URL by joining `path` to the configured
-/// `APP_URL`.
+/// `APP_URL` under the public root.
 ///
 /// Mirrors Laravel's `url()->to($path)` /
-/// `Illuminate/Routing/UrlGenerator.php::to()`. The host comes from
-/// `APP_URL` (env at boot), the scheme/port from that URL too.
-/// An already-absolute `path` (one that starts with `http://`,
-/// `https://`, or `//`) is returned unchanged.
+/// `Illuminate/Routing/UrlGenerator.php::to()`. The scheme, host and
+/// port come from `APP_URL`. The path that follows them is the public
+/// root ([`root`]): the trusted `X-Forwarded-Prefix` of the request
+/// being handled, or else the path in `APP_URL`. A trusted prefix
+/// replaces the `APP_URL` path rather than adding to it, and a `path`
+/// that already starts with the root keeps it once (PFX-010), so
+/// `url::to(&route(...))` never doubles it. An already-absolute `path`
+/// (one that starts with `http://`, `https://`, or `//`) is returned
+/// unchanged.
 ///
 /// # Example
 ///
@@ -66,8 +71,14 @@ pub fn to(path: &str) -> String {
     if is_absolute(path) {
         return path.to_string();
     }
-    let base = app_url();
-    join_base_path(&base, path)
+    let app_url = app_url();
+    let (origin, _) = super::root::split_app_url(&app_url);
+    let root = super::root::current();
+    if path.starts_with('/') {
+        let rooted = super::root::rooted_with(&root, path);
+        return format!("{origin}{rooted}");
+    }
+    join_base_path(&format!("{origin}{root}"), path)
 }
 
 /// Build an absolute `https://` URL even if `APP_URL` is `http://`.
@@ -81,25 +92,73 @@ pub fn secure(path: &str) -> String {
     }
 }
 
-/// The current request's path + query string, derived from the active
-/// request scope. Returns `None` outside a handler (no request scope).
+/// The current request's public root, path and query string: the URL
+/// the browser asked for, relative to its host.
 ///
 /// Mirrors Laravel's `url()->current()` (path only, without query is the
 /// PHP default; Suprnova returns path+query because Rust callers
-/// typically want the full visible URL). Use [`Request::path`] directly
-/// when you only need the path.
+/// typically want the full visible URL). Behind a proxy that strips a
+/// path prefix the request arrives without it, so the root is put back
+/// in front: a request for `/invoices` behind a trusted
+/// `X-Forwarded-Prefix: /billing` gives `/billing/invoices` (PFX-002).
+/// Use [`Request::path`] directly when you need the path the
+/// application matched its routes on.
+///
+/// The value is what the client sent. At the host root a request-target
+/// such as `//evil.example/x` gives a network-path reference, which a
+/// browser reads as another host, so the framework's redirects and the
+/// intended URL check it before they use it.
 pub fn current(request: &Request) -> String {
+    let root = request.public_root();
     let path = request.path();
     match request.uri().query() {
-        Some(q) if !q.is_empty() => format!("{path}?{q}"),
-        _ => path.to_string(),
+        Some(q) if !q.is_empty() => format!("{root}{path}?{q}"),
+        _ => format!("{root}{path}"),
     }
 }
 
 /// Full absolute URL of the current request - `APP_URL` host +
 /// [`current`]. Mirrors Laravel's `url()->full()`.
+///
+/// The origin is joined here rather than through [`to`], which returns a
+/// target that starts with `//` unchanged: a request for `//evil.example/x`
+/// is a path on this host, and its full URL stays on `APP_URL`'s origin.
 pub fn full(request: &Request) -> String {
-    to(&current(request))
+    let current = current(request);
+    if !current.starts_with('/') {
+        return to(&current);
+    }
+    let app_url = app_url();
+    let (origin, _) = super::root::split_app_url(&app_url);
+    format!("{origin}{current}")
+}
+
+/// The public root of the request being handled, without a trailing
+/// slash: `/billing` behind a trusted `X-Forwarded-Prefix: /billing`, the
+/// path in `APP_URL` when no trusted prefix arrives and outside a request,
+/// and the empty string at the host root.
+///
+/// The root followed by a root-relative path is a link that works at every
+/// root, so this is how a template writes a root-relative link that
+/// [`crate::route`] does not build, such as a component stylesheet:
+///
+/// ```text
+/// <link rel="stylesheet" href="{{ suprnova::url::root() }}/suprnova-ui/button/button.css">
+/// ```
+///
+/// It reads no request data a client controls unchecked: a prefix counts
+/// only from a trusted proxy and only when it passes the value rule, so
+/// the value is safe in a URL and in an attribute. Mirrors the path part of
+/// Laravel's `Request::root()`, which also drops the trailing slash.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// // At the host root, outside a request, with `APP_URL` carrying no path:
+/// assert_eq!(suprnova::url::root(), "");
+/// ```
+pub fn root() -> String {
+    super::root::current().to_string()
 }
 
 /// The previous URL recorded by [`crate::session::SessionMiddleware`] on
@@ -281,6 +340,28 @@ pub(crate) fn root_relative_or_none(candidate: &str) -> Option<String> {
     }
 }
 
+/// Accept a redirect destination read back from the session, or reject
+/// one a browser would read as another host while it looks like a path on
+/// this one.
+///
+/// The intended URL is written by [`crate::Redirect::guest`] from the
+/// request, and by [`crate::Redirect::set_intended_url`] from the
+/// application. A path is held to [`root_relative_or_none`], so a value an
+/// earlier release stored from a request-target such as `//evil.example/x`
+/// is not followed. An absolute URL and a relative reference come only from
+/// the application and pass. A value that starts with `\` or holds a
+/// control byte is refused, because a browser reads `\` as `/` and strips
+/// tab and newline before it resolves the URL.
+pub(crate) fn stored_destination_or_none(candidate: &str) -> Option<String> {
+    if candidate.is_empty() || has_control_byte(candidate) || candidate.starts_with('\\') {
+        return None;
+    }
+    if candidate.starts_with('/') {
+        return root_relative_or_none(candidate);
+    }
+    Some(candidate.to_string())
+}
+
 /// True when `s` contains an ASCII control byte: C0 (`0x00..=0x1F`) or
 /// DEL (`0x7F`). Covers tab and newline - the two the URL parser strips
 /// before comparing origins - without having to name them individually.
@@ -292,9 +373,14 @@ pub(crate) fn has_control_byte(s: &str) -> bool {
 /// [`crate::config::ConfigRegistry`] when a config provider is
 /// registered, otherwise falls back to the `APP_URL` env var or
 /// `http://localhost`.
-fn app_url() -> String {
+pub(crate) fn app_url() -> String {
+    app_url_of(crate::config::Config::get::<crate::config::AppConfig>().as_ref())
+}
+
+/// [`app_url`] for a configuration the caller already read.
+pub(crate) fn app_url_of(config: Option<&crate::config::AppConfig>) -> String {
     // Try the typed `AppConfig` first.
-    if let Some(cfg) = crate::config::Config::get::<crate::config::AppConfig>() {
+    if let Some(cfg) = config {
         let trimmed = cfg.url.trim_end_matches('/').to_string();
         if !trimmed.is_empty() {
             return trimmed;

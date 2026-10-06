@@ -14,6 +14,8 @@
 //!
 //! The current schema comes from the scaffold's own migration and model
 //! templates, so the test cannot drift from what `suprnova new` writes. The
+//! older scaffold's `sessions` table is moved into Laravel's layout by the
+//! framework's `CreateSessionsTable`, which the scaffold's Migrator lists. The
 //! test then registers a user through the scaffold's `User::create`, and
 //! drives a real login, a session restore and a remember-me restore through
 //! `handle_request` and `SessionMiddleware` over a loopback socket.
@@ -379,9 +381,20 @@ async fn create_tables(database: &DbConnection, schema: Schema) {
                 .await
                 .expect("scaffold remember_tokens migration");
         }
-        Schema::Legacy => legacy::create(&manager)
+        Schema::Legacy => {
+            legacy::create(&manager)
+                .await
+                .expect("legacy scaffold tables");
+            // The scaffold's Migrator lists the framework's sessions
+            // migration, which moves the older scaffold's `sessions` into
+            // Laravel's layout; an older application adds it the same way.
+            suprnova::session::migrations::CreateSessionsTable::new(
+                suprnova::session::migrations::SessionUserKey::Integer,
+            )
+            .up(&manager)
             .await
-            .expect("legacy scaffold tables"),
+            .expect("move the older sessions table into Laravel's layout");
+        }
     }
 }
 
@@ -405,8 +418,9 @@ async fn register(database: &DbConnection, schema: Schema) -> String {
                     .verify_password(PASSWORD)
                     .expect("verify the password")
             );
-            found
-                .update_remember_token(Some("scaffold-token".into()))
+            let mut renamed = found.clone();
+            renamed.name = "Scaffold User Renamed".into();
+            <scaffold_user::User as suprnova::eloquent::Model>::save(&renamed)
                 .await
                 .expect("save the user through the model");
             let stored = scaffold_user::Entity::find()
@@ -415,9 +429,9 @@ async fn register(database: &DbConnection, schema: Schema) -> String {
                 .await
                 .expect("read the user through the entity")
                 .expect("the user row");
-            assert_eq!(stored.remember_token.as_deref(), Some("scaffold-token"));
+            assert_eq!(stored.name, "Scaffold User Renamed");
             let mut active: scaffold_user::ActiveModel = stored.into();
-            active.remember_token = Set(None);
+            active.name = Set("Scaffold User".into());
             active
                 .update(database.inner())
                 .await
@@ -532,22 +546,15 @@ async fn login_session_and_remember_restore(url: &str, schema: Schema) {
         .expect("verify the long-lived token");
     assert_eq!(verified.map(|(owner, _)| owner), Some(user_id.clone()));
 
-    // Whole rows read through the public entities, whatever type the
+    // Whole rows read through the public entity, whatever type the
     // migration gave the time columns.
-    let sessions = suprnova::session::driver::database::sessions::Entity::find()
-        .all(database.inner())
-        .await;
     let tokens = suprnova::auth::remember::entity::Entity::find()
         .all(database.inner())
         .await;
     assert_eq!(
-        format!(
-            "{:?} {:?}",
-            sessions.as_ref().map(|rows| !rows.is_empty()),
-            tokens.as_ref().map(|rows| !rows.is_empty()),
-        ),
-        "Ok(true) Ok(true)",
-        "{schema:?}: whole rows through sessions::Entity and remember::entity::Entity"
+        format!("{:?}", tokens.as_ref().map(|rows| !rows.is_empty())),
+        "Ok(true)",
+        "{schema:?}: whole rows through remember::entity::Entity"
     );
 
     drop_scaffold_tables(&database).await;
@@ -555,16 +562,22 @@ async fn login_session_and_remember_restore(url: &str, schema: Schema) {
 }
 
 /// What each engine names the time columns `schema` creates, so a pass
-/// proves the column type the test claims to cover.
+/// proves the column type the test claims to cover. `sessions` holds
+/// Laravel's epoch-seconds `last_activity` under either schema, an integer
+/// whatever the time columns are.
 async fn assert_time_column_type(url: &str, schema: Schema, expected: &str) {
     let database = connect(url).await;
     drop_scaffold_tables(&database).await;
     create_tables(&database, schema).await;
     let backend = database.inner().get_database_backend();
-    for (table, column) in [
-        ("users", "created_at"),
-        ("sessions", "last_activity"),
-        ("remember_tokens", "expires_at"),
+    let epoch = match backend {
+        DatabaseBackend::MySql => "int",
+        _ => "integer",
+    };
+    for (table, column, expected) in [
+        ("users", "created_at", expected),
+        ("sessions", "last_activity", epoch),
+        ("remember_tokens", "expires_at", expected),
     ] {
         let sql = match backend {
             DatabaseBackend::MySql => format!(

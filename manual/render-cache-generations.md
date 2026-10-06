@@ -135,8 +135,8 @@ through.
 so the render is marked unobservable and never stored. The response is still
 served, correctly, every time.
 The framework's own RBAC role and permission checks name the five tables
-they read - `roles`, `permissions`, `role_permissions`, `model_roles`, and
-`model_permissions` - so a cached route that evaluates one is observed
+they read - `roles`, `permissions`, `role_has_permissions`, `model_has_roles`,
+and `model_has_permissions` - so a cached route that evaluates one is observed
 precisely and cached normally.
 Reads through `DB::table(..)` know their table and cache normally.
 

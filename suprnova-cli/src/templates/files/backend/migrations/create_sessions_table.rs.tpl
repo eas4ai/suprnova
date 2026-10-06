@@ -1,4 +1,5 @@
 use sea_orm_migration::prelude::*;
+use suprnova::session::migrations::{create_sessions_table, SessionUserKey};
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -6,63 +7,21 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .create_table(
-                Table::create()
-                    .table(Sessions::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(Sessions::Id)
-                            .string()
-                            .not_null()
-                            .primary_key(),
-                    )
-                    .col(ColumnDef::new(Sessions::UserId).string().null())
-                    .col(ColumnDef::new(Sessions::Payload).text().not_null())
-                    .col(ColumnDef::new(Sessions::CsrfToken).string().not_null())
-                    // `.date_time()`: DATETIME on MySQL, which holds dates past
-                    // 2038-01-19 where TIMESTAMP stops. The framework writes UTC.
-                    .col(ColumnDef::new(Sessions::LastActivity).date_time().not_null())
-                    .to_owned(),
-            )
-            .await?;
-
-        // Index on user_id for fast user session lookups
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_sessions_user_id")
-                    .table(Sessions::Table)
-                    .col(Sessions::UserId)
-                    .to_owned(),
-            )
-            .await?;
-
-        // Index on last_activity for garbage collection
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_sessions_last_activity")
-                    .table(Sessions::Table)
-                    .col(Sessions::LastActivity)
-                    .to_owned(),
-            )
-            .await
+        // The sessions table of the Laravel 13 skeleton, keyed to the
+        // `User` model's integer id. A `sessions` table that already exists,
+        // Laravel's included, is left as it is; one an earlier scaffold
+        // created is moved into this layout by `CreateSessionsTable`, which
+        // the Migrator lists after this migration.
+        if manager.has_table("sessions").await? {
+            return Ok(());
+        }
+        create_sessions_table(manager, "sessions", SessionUserKey::Integer).await
     }
 
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .drop_table(Table::drop().table(Sessions::Table).to_owned())
-            .await
+    /// Leaves the table. `up` skips a `sessions` table that already exists,
+    /// so the table may be Laravel's, with its signed-in sessions, and
+    /// rolling back must not drop them.
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Ok(())
     }
-}
-
-#[derive(DeriveIden)]
-enum Sessions {
-    Table,
-    Id,
-    UserId,
-    Payload,
-    CsrfToken,
-    LastActivity,
 }

@@ -18,12 +18,16 @@ V = [
         "table", "primary_key", "key_type", "auto_increment", "connection", "fillable",
         "guarded", "casts", "timestamps", "created_at", "updated_at", "soft_deletes",
         "soft_deletes_column", "appends", "hidden", "visible", "mutators", "touches",
-        "relations", "morph_type", "observers")],
+        "relations", "morph_type", "observers", "morph_aliases", "route_key", "custom_route_binding")],
     ("model", "`unique_id = \"uuid\" | \"uuid_v7\" | \"uuid_v4\" | \"ulid\"`", "model/parse.rs", "parse", "unique_id"),
     *[("model", f"relation option `{k}`", "model/parse.rs", "parse_relation_options", k) for k in (
         "fk", "lk", "with_pivot", "with_timestamps", "with_default", "name",
         "morph_name", "targets", "first_key", "second_key", "second_local_key", "pivot_table",
         "pivot_foreign_key", "pivot_related_key", "related_key", "target_morph_type")],
+    # resource!(...) and api_resource!(...): the function form's action selectors
+    *[(m, f"`{k} = [...]`", "resource.rs", "parse", k) for m in ("resource", "api_resource") for k in ("only", "except")],
+    # #[derive(RouteBinding)] on a unit-only enum: a variant's explicit value
+    ("RouteBinding", "variant `#[route(value = \"...\")]`", "route_binding_derive.rs", "route_value", "value"),
     # #[suprnova::observer(M)] impl: lifecycle method names it wires
     *[("observer", f"method `{k}`", "observer.rs", "emit_adapter_call", k) for k in (
         "retrieving", "retrieved", "created", "saved", "updated", "deleted", "trashed",

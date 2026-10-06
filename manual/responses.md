@@ -563,6 +563,13 @@ recover the originally-requested URL:
 suprnova::Redirect::set_intended_url("/admin/users");
 ```
 
+`Redirect::intended` follows a stored path that starts with a single `/`,
+or an absolute URL. It ignores a stored value that starts with `//`, `/\`
+or `\`, or that holds a control character, and redirects to its fallback
+instead, because a browser reads `//host/x` as another host. To send a
+user to another site after sign-in, store the absolute URL
+(`https://example.com/x`).
+
 ## Aborting from a handler
 
 Three free functions short-circuit a handler at a given status. They

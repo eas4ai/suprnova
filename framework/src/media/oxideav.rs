@@ -78,7 +78,11 @@ use oxideav_pixfmt::{
 use crate::error::FrameworkError;
 
 use super::ImageConfig;
+use super::color::{Color, flatten_rgba};
+use super::custom::ImagePixels;
 use super::driver::{ImageDriver, ImagePipeline, OutputFormat, Transformation};
+use super::metadata::{self, ColourClass, IccData, Kept, SrgbConversion};
+use super::orientation::Orientation;
 use super::sniff::{self, InputFormat, JpegColour, JpegLayout, ZuneJpeg};
 
 mod gif;
@@ -202,6 +206,42 @@ impl Canvas {
     }
 }
 
+/// A decoded source: its pixels, and what decoding learned about it.
+struct Decoded {
+    canvas: Canvas,
+    format: InputFormat,
+    /// The EXIF orientation the source carries, if any.
+    orientation: Option<Orientation>,
+    /// Whether decoding applied it (`IMAGE_AUTO_ORIENT`, on by default).
+    oriented: bool,
+}
+
+/// What the steps of one pipeline share as they run.
+struct Steps {
+    /// The source's EXIF orientation, for [`Transformation::Orient`].
+    orientation: Option<Orientation>,
+    /// Whether orientation has been applied, on decode or by a step. Once
+    /// it has, an `Orient` step does nothing and the output keeps no tag.
+    applied: bool,
+    /// The format the pipeline encodes to, which decides a rotation's
+    /// default background.
+    target: OutputFormat,
+    /// The background of the last rotation, which JPEG and GIF output
+    /// flattens transparency onto; white when nothing rotated.
+    flatten_onto: Color,
+}
+
+impl Steps {
+    fn new(target: OutputFormat, orientation: Option<Orientation>, applied: bool) -> Self {
+        Self {
+            orientation,
+            applied,
+            target,
+            flatten_onto: Color::WHITE,
+        }
+    }
+}
+
 /// The pure-Rust image driver: OxideAV codecs, OxideAV filters, no native
 /// libraries and nothing to install.
 ///
@@ -229,8 +269,18 @@ impl OxideAvImageDriver {
         Self { context }
     }
 
-    /// Run the shared guard, then decode to RGBA.
-    fn load(&self, contents: &[u8], config: &ImageConfig) -> Result<Canvas, FrameworkError> {
+    /// Run the shared guard, then decode to RGBA, applying the source's
+    /// EXIF orientation when `turn` is set and `config.auto_orient` is on.
+    ///
+    /// `turn` is off for the answers a turn cannot change, `dimensions`
+    /// (which swaps the sides instead) and `dominant_color`, so they never
+    /// pay for the second plane.
+    fn load(
+        &self,
+        contents: &[u8],
+        config: &ImageConfig,
+        turn: bool,
+    ) -> Result<Decoded, FrameworkError> {
         if sniff::looks_like_heif(contents) {
             // Deliberately specific rather than falling through to the
             // generic unsupported-format error: iOS clients send HEIC
@@ -248,11 +298,18 @@ impl OxideAvImageDriver {
             )
         })?;
         let (width, height) = sniff::header_dimensions(format, contents)?;
+        // Reading the tag inflates nothing and allocates nothing.
+        let orientation = metadata::source_orientation(format, contents);
+        let turn = orientation
+            .filter(|orientation| turn && config.auto_orient && !orientation.is_identity());
         // The header gate counted the output at four bytes a pixel; the
         // decoders allocate more than that on the way. Refuse what the
         // decode itself would take past the budget. See `peak`.
         let layout = peak::layout(format, contents, width, height)?;
-        let needed = peak::estimate(&layout, contents.len() as u64, width, height)?;
+        let mut needed = peak::estimate(&layout, contents.len() as u64, width, height)?;
+        if turn.is_some() {
+            needed = peak::oriented(needed, width, height);
+        }
         if needed > config.max_alloc_bytes {
             return Err(FrameworkError::param(format!(
                 "image exceeds configured decode limits: decoding this {width}x{height} {} \
@@ -275,7 +332,41 @@ impl OxideAvImageDriver {
                 zune.xmp_reads, config.max_alloc_bytes
             )));
         }
-        self.decode(contents, &layout, width, height, config)
+        let mut canvas = self.decode(contents, &layout, width, height, config)?;
+        if let Some(turn) = turn {
+            canvas = orient(canvas, turn);
+        }
+        Ok(Decoded {
+            canvas,
+            format,
+            orientation,
+            oriented: config.auto_orient,
+        })
+    }
+
+    /// Decode an image ImageMagick handed back between two runs, as it is:
+    /// the `magick` driver applies orientation with ImageMagick, so the
+    /// pixels must not be turned here as well.
+    pub(crate) fn decode_unoriented(
+        &self,
+        contents: &[u8],
+        config: &ImageConfig,
+    ) -> Result<ImagePixels, FrameworkError> {
+        let canvas = self.load(contents, config, false)?.canvas;
+        ImagePixels::new(canvas.width, canvas.height, canvas.pixels)
+    }
+
+    /// Decode `contents` as `process` does, the EXIF orientation applied,
+    /// and report the decoded size.
+    ///
+    /// Exists so a test can measure what a decode allocates, the turn
+    /// included, without an encode after it. Not part of the supported
+    /// surface: [`ImageDriver::dimensions`] answers the same without
+    /// turning.
+    #[doc(hidden)]
+    pub fn decoded_dimensions(&self, contents: &[u8]) -> Result<(u32, u32), FrameworkError> {
+        let canvas = self.load(contents, &super::config(), true)?.canvas;
+        Ok((canvas.width, canvas.height))
     }
 
     fn decode(
@@ -354,20 +445,141 @@ impl OxideAvImageDriver {
         mut canvas: Canvas,
         pipeline: &ImagePipeline,
         config: &ImageConfig,
+        steps: &mut Steps,
     ) -> Result<Canvas, FrameworkError> {
         for step in &pipeline.transformations {
-            canvas = apply(canvas, *step, config)?;
+            canvas = apply(canvas, *step, config, steps)?;
         }
         Ok(canvas)
     }
 
+    /// Settle the colour and metadata the output carries, then encode.
+    ///
+    /// The source's ICC profile is carried when the output can hold it,
+    /// since every output this driver writes is RGB and an RGB profile still
+    /// describes it. A grey profile no longer does, so the pixels are
+    /// converted from it to sRGB and it is dropped; GIF output, which holds
+    /// no profile here, has its palette converted instead.
+    ///
+    /// Only the profile's header is read before the budget is charged: the
+    /// pixels already held, the profile, and the copy of it the output
+    /// carries must fit `IMAGE_MAX_ALLOC_BYTES` together, so a small file
+    /// cannot make the driver hold, or write, a profile near the whole
+    /// budget twice. A profile whose header gives another size than its
+    /// length is not a profile, and is not carried.
+    fn finish(
+        &self,
+        mut canvas: Canvas,
+        contents: &[u8],
+        decoded_format: InputFormat,
+        steps: &Steps,
+        quality: u8,
+        config: &ImageConfig,
+    ) -> Result<Vec<u8>, FrameworkError> {
+        let target = steps.target;
+        let found = metadata::find_profile(decoded_format, contents);
+        if let Some(found) = &found {
+            let held = canvas.pixels.capacity() as u64;
+            let work = if decoded_format == InputFormat::Png {
+                metadata::INFLATE_WORK
+            } else {
+                0
+            };
+            let needed = held
+                .saturating_add(found.header.size.saturating_mul(2))
+                .saturating_add(work);
+            if needed > config.max_alloc_bytes {
+                return Err(FrameworkError::param(format!(
+                    "image exceeds configured decode limits: its {}-byte ICC profile, with the \
+                     copy the output carries and the pixels held, needs about {needed} bytes, \
+                     over the IMAGE_MAX_ALLOC_BYTES limit of {}",
+                    found.header.size, config.max_alloc_bytes
+                )));
+            }
+        }
+        let profile = found.as_ref().and_then(|found| found.read());
+        let class = profile
+            .as_ref()
+            .and(found.as_ref())
+            .map(|found| found.header.class);
+        let mut carried: Option<&[u8]> = None;
+        let mut converted_away = false;
+        if target != OutputFormat::Gif {
+            match class {
+                Some(ColourClass::Rgb) => carried = profile.as_deref(),
+                Some(ColourClass::Gray) => {
+                    if let Some(conversion) =
+                        profile.as_deref().and_then(SrgbConversion::from_profile)
+                    {
+                        conversion.convert_rgba(&mut canvas.pixels)?;
+                    }
+                    converted_away = true;
+                }
+                Some(ColourClass::Other) => converted_away = true,
+                None => {}
+            }
+        }
+        let png_colour =
+            if decoded_format == InputFormat::Png && target == OutputFormat::Png && !converted_away
+            {
+                metadata::png_colour_chunks(contents)
+            } else {
+                Vec::new()
+            };
+        if metadata::flattens(target) {
+            flatten_rgba(&mut canvas.pixels, steps.flatten_onto);
+        }
+        let icc = match (target, carried) {
+            // A PNG's own chunk goes into PNG output as it stands.
+            (OutputFormat::Png, Some(_)) => Some(
+                found
+                    .as_ref()
+                    .and_then(|found| found.png_chunk())
+                    .map_or_else(
+                        || IccData::Profile(carried.unwrap_or_default()),
+                        IccData::PngChunk,
+                    ),
+            ),
+            (_, Some(profile)) => Some(IccData::Profile(profile)),
+            (_, None) => None,
+        };
+        let kept = Kept {
+            icc,
+            orientation: if steps.applied {
+                None
+            } else {
+                steps.orientation
+            },
+            png_colour: &png_colour,
+        };
+        let additions = kept.prepare(target)?;
+        let mut output = match (target, carried) {
+            // The BMP encoder embeds the profile itself.
+            (OutputFormat::Bmp, Some(profile)) => encode_bmp_with_profile(canvas, profile)?,
+            _ => self.encode(canvas, target, quality, additions.len())?,
+        };
+        match target {
+            OutputFormat::Gif => {
+                if let Some(profile) = profile.as_deref().filter(|_| class.is_some()) {
+                    metadata::gif_to_srgb(&mut output, profile)?;
+                }
+            }
+            _ => metadata::add(&mut output, &additions)?,
+        }
+        Ok(output)
+    }
+
     /// Encode `canvas`, which the encoder consumes: its pixels move into
     /// the frame the encoder takes.
+    ///
+    /// `reserve` is the room left in the output buffer for the metadata
+    /// added after, so adding it allocates nothing and copies nothing.
     fn encode(
         &self,
         canvas: Canvas,
         format: OutputFormat,
         quality: u8,
+        reserve: usize,
     ) -> Result<Vec<u8>, FrameworkError> {
         // Every `WebP` canvas `webp_is_lossy` turns down goes to the
         // lossless arm below, rather than into a file that drops the
@@ -375,18 +587,15 @@ impl OxideAvImageDriver {
         if format == OutputFormat::WebP
             && webp_is_lossy(canvas.width, canvas.height, canvas.is_opaque())
         {
-            return encode_lossy_webp(canvas, quality);
+            return encode_lossy_webp(canvas, quality, reserve);
         }
 
         let (width, height) = (canvas.width, canvas.height);
         let (codec, frame, pixel_format) = match format {
             // The MJPEG encoder rejects RGBA outright, so the conversion is
-            // mandatory rather than an optimisation.
-            OutputFormat::Jpeg => (
-                "mjpeg",
-                convert_frame(&canvas.into_frame(), width, height, PixelFormat::Rgb24)?,
-                PixelFormat::Rgb24,
-            ),
+            // mandatory rather than an optimisation. See `jpeg_frame` for why
+            // it is YCbCr.
+            OutputFormat::Jpeg => ("mjpeg", jpeg_frame(canvas)?, PixelFormat::Yuv444P),
             OutputFormat::Png => ("png", canvas.into_frame(), PixelFormat::Rgba),
             // The VP8L (lossless) encoder is the only WebP encoder in the
             // registry; codec id "webp" has a decoder but no encoder. `WebP`
@@ -412,7 +621,7 @@ impl OxideAvImageDriver {
         let mut encoder = self.context.codecs.first_encoder(&params).map_err(|e| {
             FrameworkError::internal(format!("image encode failed: no {codec} encoder: {e}"))
         })?;
-        encode_frame(encoder.as_mut(), frame, codec)
+        encode_frame(encoder.as_mut(), frame, codec, reserve)
     }
 }
 
@@ -429,27 +638,45 @@ impl ImageDriver for OxideAvImageDriver {
         pipeline: &ImagePipeline,
     ) -> Result<Vec<u8>, FrameworkError> {
         let config = super::config();
-        let canvas = self.load(contents, &config)?;
-        let source_format = sniff::detect(contents);
-        let canvas = self.transform(canvas, pipeline, &config)?;
+        let decoded = self.load(contents, &config, true)?;
         let target = pipeline
             .format
-            .or_else(|| source_format.and_then(output_for_input))
+            .or_else(|| output_for_input(decoded.format))
             // Only reachable if a format was recognised on the way in and has
             // no encoder counterpart, which cannot happen for these five.
             .unwrap_or(OutputFormat::Png);
-        self.encode(canvas, target, pipeline.quality)
+        let mut steps = Steps::new(target, decoded.orientation, decoded.oriented);
+        let canvas = self.transform(decoded.canvas, pipeline, &config, &mut steps)?;
+        self.finish(
+            canvas,
+            contents,
+            decoded.format,
+            &steps,
+            pipeline.quality,
+            &config,
+        )
     }
 
+    /// The size of the image as decoding presents it: a source whose tag
+    /// turns it a quarter reports its sides swapped. The pixels are not
+    /// turned to find that out.
     fn dimensions(&self, contents: &[u8]) -> Result<(u32, u32), FrameworkError> {
         let config = super::config();
-        let canvas = self.load(contents, &config)?;
-        Ok((canvas.width, canvas.height))
+        let decoded = self.load(contents, &config, false)?;
+        let (width, height) = (decoded.canvas.width, decoded.canvas.height);
+        let swaps = config.auto_orient && decoded.orientation.is_some_and(Orientation::swaps_axes);
+        Ok(if swaps {
+            (height, width)
+        } else {
+            (width, height)
+        })
     }
 
+    /// The average colour, which no turn of the pixels changes, so they are
+    /// not turned.
     fn dominant_color(&self, contents: &[u8]) -> Result<String, FrameworkError> {
         let config = super::config();
-        let canvas = self.load(contents, &config)?;
+        let canvas = self.load(contents, &config, false)?.canvas;
         Ok(average_color(&canvas))
     }
 
@@ -774,10 +1001,35 @@ fn scaled(value: u32, factor: f64) -> u32 {
     }
 }
 
+/// Turn the canvas by an EXIF orientation: one new plane, exact pixels.
+fn orient(canvas: Canvas, orientation: Orientation) -> Canvas {
+    let (pixels, width, height) = orientation.apply(canvas.pixels, canvas.width, canvas.height);
+    Canvas {
+        width,
+        height,
+        pixels,
+    }
+}
+
+/// Run a registered custom transformation on the canvas, and check the
+/// size it hands back against the same caps a resize target meets.
+fn custom(
+    canvas: Canvas,
+    transformation: super::CustomTransformation,
+    config: &ImageConfig,
+) -> Result<Canvas, FrameworkError> {
+    let pixels = ImagePixels::new(canvas.width, canvas.height, canvas.pixels)?;
+    let out = transformation.apply(pixels)?;
+    let (width, height) = (out.width(), out.height());
+    sniff::enforce_limits(width, height, config)?;
+    Canvas::packed(width, height, out.into_pixels())
+}
+
 fn apply(
     canvas: Canvas,
     step: Transformation,
     config: &ImageConfig,
+    steps: &mut Steps,
 ) -> Result<Canvas, FrameworkError> {
     let (w, h) = (canvas.width, canvas.height);
     match step {
@@ -813,7 +1065,14 @@ fn apply(
             x,
             y,
         } => crop(canvas, x, y, width, height),
-        Transformation::Rotate(degrees) => rotate(canvas, degrees, config),
+        Transformation::Rotate {
+            degrees,
+            background,
+        } => {
+            let background = background.unwrap_or(metadata::default_background(steps.target));
+            steps.flatten_onto = background;
+            rotate(canvas, degrees, background, config)
+        }
         Transformation::FlipVertically => filter(canvas, &Flip::new()),
         Transformation::FlipHorizontally => filter(canvas, &Flop::new()),
         Transformation::Blur(amount) => match blur_radius(amount) {
@@ -832,6 +1091,17 @@ fn apply(
                 .with_preserve_alpha(true)
                 .with_output_gray8(false),
         ),
+        Transformation::Orient => {
+            if steps.applied {
+                return Ok(canvas);
+            }
+            steps.applied = true;
+            Ok(match steps.orientation {
+                Some(orientation) => orient(canvas, orientation),
+                None => canvas,
+            })
+        }
+        Transformation::Custom(transformation) => custom(canvas, transformation, config),
     }
 }
 
@@ -912,10 +1182,18 @@ fn resize(
 /// `IMAGE_MAX_DIMENSION` would land 1.41x over it. Predicting the extent and
 /// checking it first keeps the cap meaningful for the same reason `resize`
 /// checks its target.
-fn rotate(canvas: Canvas, degrees: f32, config: &ImageConfig) -> Result<Canvas, FrameworkError> {
+fn rotate(
+    canvas: Canvas,
+    degrees: f32,
+    background: Color,
+    config: &ImageConfig,
+) -> Result<Canvas, FrameworkError> {
     let (width, height) = rotated_extent(canvas.width, canvas.height, degrees);
     sniff::enforce_limits(width, height, config)?;
-    filter(canvas, &Rotate::new(degrees))
+    filter(
+        canvas,
+        &Rotate::new(degrees).with_background(background.to_rgba()),
+    )
 }
 
 /// The bounding box of `width x height` rotated by `degrees`, matching the
@@ -992,15 +1270,57 @@ fn cover(
 
 // ───────────────────────── encode helpers ─────────────────────────
 
-fn convert_frame(
-    frame: &VideoFrame,
-    width: u32,
-    height: u32,
-    target: PixelFormat,
-) -> Result<VideoFrame, FrameworkError> {
-    let info = FrameInfo::new(PixelFormat::Rgba, width, height);
-    pix_convert(frame, info, target, &ConvertOptions::default())
-        .map_err(|e| FrameworkError::internal(format!("image pixel conversion failed: {e}")))
+/// Convert the canvas to the samples a JPEG stores: YCbCr as JFIF defines
+/// it (ITU-T T.871, full-range BT.601), every component at full resolution
+/// (4:4:4).
+///
+/// This is the form every decoder reads the same way. The encoder used to
+/// be handed RGB, which it wrote as RGB samples behind both a JFIF header
+/// and an Adobe marker saying "no transform". libjpeg, behind ImageMagick
+/// and most browsers, takes the JFIF header to mean YCbCr and showed those
+/// files in the wrong colours: a flat (200, 60, 40) came back as
+/// (77, 255, 80). So the output's header changes with the samples:
+/// component ids 1, 2 and 3 instead of `R`, `G` and `B`, no Adobe segment,
+/// and a chroma quantisation table beside the luma one.
+///
+/// The conversion is T.871's, in 16-bit fixed point as libjpeg does it,
+/// rather than the pixel-format crate's `Bt601Full`, whose chroma range is
+/// not JFIF's and pulls colours toward grey. 4:4:4 keeps the chroma as
+/// sharp as the RGB coding did. The three planes together are the size of
+/// the RGB copy the encoder took before.
+fn jpeg_frame(canvas: Canvas) -> Result<VideoFrame, FrameworkError> {
+    const HALF: i32 = 1 << 15;
+    const CENTRE: i32 = 128 << 16;
+    let (width, height) = (canvas.width as usize, canvas.height as usize);
+    let count = width.checked_mul(height).ok_or_else(|| {
+        FrameworkError::internal("image dimensions overflow the addressable pixel buffer")
+    })?;
+    let (mut luma, mut blue, mut red) = (
+        Vec::with_capacity(count),
+        Vec::with_capacity(count),
+        Vec::with_capacity(count),
+    );
+    let sample = |value: i32| (value >> 16).clamp(0, 255) as u8;
+    for pixel in canvas.pixels.as_chunks::<4>().0 {
+        let (r, g, b) = (
+            i32::from(pixel[0]),
+            i32::from(pixel[1]),
+            i32::from(pixel[2]),
+        );
+        luma.push(sample(19_595 * r + 38_470 * g + 7_471 * b + HALF));
+        blue.push(sample(
+            -11_059 * r - 21_709 * g + 32_768 * b + CENTRE + HALF,
+        ));
+        red.push(sample(32_768 * r - 27_439 * g - 5_329 * b + CENTRE + HALF));
+    }
+    let plane = |data: Vec<u8>| VideoPlane {
+        stride: width,
+        data,
+    };
+    Ok(VideoFrame {
+        pts: Some(0),
+        planes: vec![plane(luma), plane(blue), plane(red)],
+    })
 }
 
 /// The largest width or height a VP8 frame can have.
@@ -1028,7 +1348,11 @@ fn webp_is_lossy(width: u32, height: u32, opaque: bool) -> bool {
 /// it, so the encoder is built directly instead of looked up in the
 /// registry. It is built before the pixels are converted, so a parameter
 /// the factory refuses costs no conversion.
-fn encode_lossy_webp(canvas: Canvas, quality: u8) -> Result<Vec<u8>, FrameworkError> {
+fn encode_lossy_webp(
+    canvas: Canvas,
+    quality: u8,
+    reserve: usize,
+) -> Result<Vec<u8>, FrameworkError> {
     let codec = oxideav_webp::CODEC_ID_VP8;
     let mut params = CodecParameters::video(CodecId::new(codec));
     params.width = Some(canvas.width);
@@ -1038,7 +1362,7 @@ fn encode_lossy_webp(canvas: Canvas, quality: u8) -> Result<Vec<u8>, FrameworkEr
         oxideav_webp::encoder_vp8::make_encoder_with_quality(&params, f32::from(quality))
             .map_err(|e| FrameworkError::internal(format!("image encode failed: {codec}: {e}")))?;
     let frame = yuv420_frame(canvas)?;
-    encode_frame(encoder.as_mut(), frame, codec)
+    encode_frame(encoder.as_mut(), frame, codec, reserve)
 }
 
 /// Convert the canvas to the planar 4:2:0 layout the VP8 encoder takes.
@@ -1105,6 +1429,30 @@ fn edge_extended_frame(
     })
 }
 
+/// Write a canvas as a V5 bitmap that embeds `profile`, the one BMP layout
+/// that holds an ICC profile.
+fn encode_bmp_with_profile(canvas: Canvas, profile: &[u8]) -> Result<Vec<u8>, FrameworkError> {
+    let image = oxideav_bmp::BmpImage {
+        width: canvas.width,
+        height: canvas.height,
+        pixel_format: oxideav_bmp::BmpPixelFormat::Rgba,
+        planes: vec![oxideav_bmp::BmpPlane {
+            stride: canvas.width as usize * 4,
+            data: canvas.pixels,
+        }],
+        palette: None,
+        pts: None,
+    };
+    // Rendering intent 4: LCS_GM_IMAGES, perceptual, the ICC default.
+    oxideav_bmp::encode_bmp_with_icc_profile(
+        &image,
+        profile,
+        4,
+        oxideav_bmp::BmpEncodeOptions::default(),
+    )
+    .map_err(|e| FrameworkError::internal(format!("image encode failed: bmp: {e}")))
+}
+
 /// Write a canvas as a single-frame GIF.
 ///
 /// The canvas is reduced to at most 256 colours first, with Floyd-Steinberg
@@ -1166,11 +1514,12 @@ fn quantise_for_gif(canvas: Canvas) -> Result<VideoFrame, FrameworkError> {
 }
 
 /// Feed a still image's one frame to `encoder` and collect the file it
-/// emits.
+/// emits, with `reserve` bytes of room after it.
 fn encode_frame(
     encoder: &mut dyn Encoder,
     frame: VideoFrame,
     codec: &str,
+    reserve: usize,
 ) -> Result<Vec<u8>, FrameworkError> {
     encoder
         .send_frame(&Frame::Video(frame))
@@ -1178,7 +1527,7 @@ fn encode_frame(
     encoder
         .flush()
         .map_err(|e| FrameworkError::internal(format!("image encode failed: {codec}: {e}")))?;
-    drain(encoder, codec)
+    drain(encoder, codec, reserve)
 }
 
 /// Collect the encoded file out of an encoder.
@@ -1189,11 +1538,23 @@ fn encode_frame(
 /// naive loop reads a successful encode as a failure. Errors are therefore
 /// only fatal before the first packet arrives - after that they mean the
 /// stream is drained.
-fn drain(encoder: &mut dyn Encoder, codec: &str) -> Result<Vec<u8>, FrameworkError> {
+///
+/// The buffer is allocated once, at the first packet's size plus `reserve`,
+/// the room the metadata added afterwards needs.
+fn drain(
+    encoder: &mut dyn Encoder,
+    codec: &str,
+    reserve: usize,
+) -> Result<Vec<u8>, FrameworkError> {
     let mut out = Vec::new();
     loop {
         match encoder.receive_packet() {
-            Ok(packet) => out.extend_from_slice(&packet.data),
+            Ok(packet) => {
+                if out.is_empty() {
+                    out.reserve_exact(packet.data.len().saturating_add(reserve));
+                }
+                out.extend_from_slice(&packet.data);
+            }
             Err(oxideav_core::Error::NeedMore) | Err(oxideav_core::Error::Eof) => break,
             Err(e) => {
                 if out.is_empty() {
@@ -1254,6 +1615,12 @@ mod tests {
         0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xF7, 0x03, 0x41, 0x43, 0x00, 0x00, 0x00,
         0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
+
+    /// The step context of a pipeline that encodes to PNG and has no
+    /// orientation to apply.
+    fn png_steps() -> Steps {
+        Steps::new(OutputFormat::Png, None, true)
+    }
 
     fn canvas(width: u32, height: u32, rgba: [u8; 4]) -> Canvas {
         Canvas {
@@ -1492,8 +1859,12 @@ mod tests {
         // 8x8 is at the cap; rotating it 45 degrees would need ~12 per side.
         let err = apply(
             canvas(8, 8, [1, 2, 3, 255]),
-            Transformation::Rotate(45.0),
+            Transformation::Rotate {
+                degrees: 45.0,
+                background: None,
+            },
             &config,
+            &mut png_steps(),
         )
         .expect_err("the grown canvas exceeds the cap");
         assert!(err.to_string().contains("limit"), "got: {err}");
@@ -1501,8 +1872,12 @@ mod tests {
         // A quarter turn of the same image does not grow, so it is allowed.
         apply(
             canvas(8, 8, [1, 2, 3, 255]),
-            Transformation::Rotate(90.0),
+            Transformation::Rotate {
+                degrees: 90.0,
+                background: None,
+            },
             &config,
+            &mut png_steps(),
         )
         .expect("a quarter turn stays within the cap");
     }
@@ -1544,6 +1919,7 @@ mod tests {
             canvas(4, 2, [10, 120, 250, 255]),
             Transformation::Sharpen(50),
             &ImageConfig::default(),
+            &mut png_steps(),
         )
         .expect("sharpen");
         assert_eq!((out.width, out.height), (4, 2));
@@ -1614,7 +1990,7 @@ mod tests {
         };
         let driver = OxideAvImageDriver::new();
         let out = driver
-            .encode(source, OutputFormat::Gif, 70)
+            .encode(source, OutputFormat::Gif, 70, 0)
             .expect("quantised gif");
         assert!(out.starts_with(b"GIF"), "expected a GIF file");
     }
@@ -1629,11 +2005,12 @@ mod tests {
         };
         let driver = OxideAvImageDriver::new();
         let gif = driver
-            .encode(source, OutputFormat::Gif, 70)
+            .encode(source, OutputFormat::Gif, 70, 0)
             .expect("an encodable canvas");
         let decoded = driver
-            .load(&gif, &ImageConfig::default())
-            .expect("our own GIF decodes");
+            .load(&gif, &ImageConfig::default(), true)
+            .expect("our own GIF decodes")
+            .canvas;
         assert_eq!((decoded.width, decoded.height), (3, 1));
         assert_eq!(
             decoded.pixels,
@@ -1672,7 +2049,7 @@ mod tests {
         // what lets a 5x3 image reach the lossy encoder at all.
         let driver = OxideAvImageDriver::new();
         let out = driver
-            .encode(canvas(5, 3, [200, 120, 40, 255]), OutputFormat::WebP, 70)
+            .encode(canvas(5, 3, [200, 120, 40, 255]), OutputFormat::WebP, 70, 0)
             .expect("lossy webp");
         assert!(out.starts_with(b"RIFF"), "expected a WebP file");
         assert_eq!(&out[12..16], b"VP8 ", "an opaque canvas must encode lossy");
@@ -1707,7 +2084,7 @@ mod tests {
         let mut source = canvas(4, 2, [10, 20, 30, 255]);
         source.pixels[3] = 0;
         let out = driver
-            .encode(source, OutputFormat::WebP, 70)
+            .encode(source, OutputFormat::WebP, 70, 0)
             .expect("lossless webp");
         // VP8L with alpha is written in the extended layout: a VP8X header
         // chunk first, then the VP8L bitstream.
@@ -1720,6 +2097,7 @@ mod tests {
                 canvas(4, 2, [10, 20, 30, 255]),
                 OutputFormat::WebPLossless,
                 70,
+                0,
             )
             .expect("lossless webp");
         assert_eq!(
@@ -1757,6 +2135,7 @@ mod tests {
                 height: 100,
             },
             &config,
+            &mut png_steps(),
         )
         .expect("scale");
         assert_eq!((scaled_up.width, scaled_up.height), (4, 2));
@@ -1768,6 +2147,7 @@ mod tests {
                 height: 100,
             },
             &config,
+            &mut png_steps(),
         )
         .expect("contain");
         assert_eq!(
@@ -1786,6 +2166,7 @@ mod tests {
                 height: 4,
             },
             &ImageConfig::default(),
+            &mut png_steps(),
         )
         .expect("cover");
         assert_eq!((out.width, out.height), (4, 4));
@@ -1804,6 +2185,7 @@ mod tests {
                 height: 4_000,
             },
             &config,
+            &mut png_steps(),
         )
         .expect_err("oversized target");
         assert!(err.to_string().contains("limit"), "got: {err}");

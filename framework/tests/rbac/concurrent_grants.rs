@@ -52,9 +52,9 @@ impl Grant {
         match self {
             Self::Role => "roles",
             Self::Permission => "permissions",
-            Self::RolePermission => "role_permissions",
-            Self::ModelRole => "model_roles",
-            Self::ModelPermission => "model_permissions",
+            Self::RolePermission => "role_has_permissions",
+            Self::ModelRole => "model_has_roles",
+            Self::ModelPermission => "model_has_permissions",
         }
     }
 
@@ -75,29 +75,25 @@ impl Grant {
     /// after [`Self::seed`], so the role and permission ids exist.
     pub(crate) async fn competing_insert(self) -> String {
         match self {
-            Self::Role => format!(
-                "INSERT INTO roles (name, display_name, guard_name) \
-                 VALUES ('{ROLE}', '{ROLE}', 'web')"
-            ),
-            Self::Permission => format!(
-                "INSERT INTO permissions (name, display_name, guard_name) \
-                 VALUES ('{PERMISSION}', '{PERMISSION}', 'web')"
-            ),
+            Self::Role => format!("INSERT INTO roles (name, guard_name) VALUES ('{ROLE}', 'web')"),
+            Self::Permission => {
+                format!("INSERT INTO permissions (name, guard_name) VALUES ('{PERMISSION}', 'web')")
+            }
             Self::RolePermission => {
                 let role = create_role(ROLE).await.expect("the seeded role");
                 let permission = create_permission(PERMISSION)
                     .await
                     .expect("the seeded permission");
                 format!(
-                    "INSERT INTO role_permissions (role_id, permission_id) \
+                    "INSERT INTO role_has_permissions (role_id, permission_id) \
                      VALUES ({role}, {permission})"
                 )
             }
             Self::ModelRole => {
                 let role = create_role(ROLE).await.expect("the seeded role");
                 format!(
-                    "INSERT INTO model_roles (model_type, model_id, role_id) \
-                     VALUES ('{MODEL_TYPE}', '{MODEL_ID}', {role})"
+                    "INSERT INTO model_has_roles (model_type, model_id, role_id) \
+                     VALUES ('{MODEL_TYPE}', {MODEL_ID}, {role})"
                 )
             }
             Self::ModelPermission => {
@@ -105,8 +101,8 @@ impl Grant {
                     .await
                     .expect("the seeded permission");
                 format!(
-                    "INSERT INTO model_permissions (model_type, model_id, permission_id) \
-                     VALUES ('{MODEL_TYPE}', '{MODEL_ID}', {permission})"
+                    "INSERT INTO model_has_permissions (model_type, model_id, permission_id) \
+                     VALUES ('{MODEL_TYPE}', {MODEL_ID}, {permission})"
                 )
             }
         }
@@ -132,7 +128,7 @@ impl Grant {
             Self::Permission => format!("name = '{PERMISSION}' AND guard_name = 'web'"),
             Self::RolePermission => "1 = 1".to_owned(),
             Self::ModelRole | Self::ModelPermission => {
-                format!("model_type = '{MODEL_TYPE}' AND model_id = '{MODEL_ID}'")
+                format!("model_type = '{MODEL_TYPE}' AND model_id = {MODEL_ID}")
             }
         };
         format!("SELECT COUNT(*) FROM {} WHERE {filter}", self.table())

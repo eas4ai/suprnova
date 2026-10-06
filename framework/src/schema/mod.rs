@@ -171,7 +171,7 @@ mod plan;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use sea_orm::sea_query::{Alias, Table};
+use sea_orm::sea_query::{Alias, IntoTableRef, Table, TableRef};
 use sea_orm::{ConnectionTrait, DbBackend, DbErr};
 use sea_orm_migration::SchemaManager;
 
@@ -185,6 +185,29 @@ use plan::{Step, plan_alter, plan_create};
 /// string, which is what a table or column named at run time needs.
 fn sea_ident(name: &str) -> Alias {
     Alias::new(name)
+}
+
+/// The table `name` names, for SeaQuery: `schema.table` is the table in
+/// that schema (Postgres's schema, MySQL's database), as Laravel's grammar
+/// reads a dotted name; any other name is one identifier.
+fn sea_table(name: &str) -> TableRef {
+    match name.split_once('.') {
+        Some((schema, table)) => (sea_ident(schema), sea_ident(table)).into_table_ref(),
+        None => sea_ident(name).into_table_ref(),
+    }
+}
+
+/// The table `name` names, quoted for `backend` as [`sea_table`] reads it,
+/// for the statements the builder writes itself.
+fn quote_table(backend: DbBackend, name: &str) -> String {
+    match name.split_once('.') {
+        Some((schema, table)) => format!(
+            "{}.{}",
+            quote_ident(backend, schema),
+            quote_ident(backend, table)
+        ),
+        None => quote_ident(backend, name),
+    }
 }
 
 /// `name` quoted as an identifier for `backend`, for the few statements
@@ -277,6 +300,48 @@ impl Schema {
         run(manager, steps).await
     }
 
+    /// [`Schema::create`] for a table the framework's upgrade owns, which a
+    /// stopped run may have left part built: creates the whole table when it
+    /// is missing, and otherwise each index `define` records that the table
+    /// does not have yet.
+    ///
+    /// On MySQL and SQLite the migrator runs a migration without a
+    /// transaction, and the table and each index are statements of their
+    /// own, so a run can stop between them. An upgrade that resumes must
+    /// finish what was started, not take the table for complete because it
+    /// exists. The table statement itself is atomic, so its columns and
+    /// keys are whole whenever it exists.
+    pub(crate) async fn create_or_complete<F>(
+        manager: &SchemaManager<'_>,
+        table: &str,
+        define: F,
+    ) -> Result<(), DbErr>
+    where
+        F: FnOnce(&mut Blueprint) + Send,
+    {
+        let steps = {
+            let mut blueprint = Blueprint::new(table);
+            define(&mut blueprint);
+            plan_create(&blueprint, manager.get_database_backend())?
+        };
+        let connection = manager.get_connection();
+        if !crate::database::catalog::table_exists(connection, table).await? {
+            return run(manager, steps).await;
+        }
+        let existing = crate::database::catalog::index_names(connection, table).await?;
+        let missing = steps
+            .into_iter()
+            .filter(|step| match step {
+                Step::CreateIndex(index) => index
+                    .get_index_spec()
+                    .get_name()
+                    .is_some_and(|name| !existing.iter().any(|have| have == name)),
+                _ => false,
+            })
+            .collect();
+        run(manager, missing).await
+    }
+
     /// Alters the existing `table` with the operations `define` records.
     ///
     /// Each operation runs as its own statement, in the order the closure
@@ -306,14 +371,14 @@ impl Schema {
     /// [`Schema::drop_if_exists`] when that is acceptable.
     pub async fn drop(manager: &SchemaManager<'_>, table: &str) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(sea_ident(table)).to_owned())
+            .drop_table(Table::drop().table(sea_table(table)).to_owned())
             .await
     }
 
     /// Drops `table` if it exists, and does nothing if it does not.
     pub async fn drop_if_exists(manager: &SchemaManager<'_>, table: &str) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(sea_ident(table)).if_exists().to_owned())
+            .drop_table(Table::drop().table(sea_table(table)).if_exists().to_owned())
             .await
     }
 
@@ -322,7 +387,7 @@ impl Schema {
         manager
             .rename_table(
                 Table::rename()
-                    .table(sea_ident(from), sea_ident(to))
+                    .table(sea_table(from), sea_table(to))
                     .to_owned(),
             )
             .await

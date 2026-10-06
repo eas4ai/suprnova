@@ -35,7 +35,13 @@ use sea_orm::{ColIdx, DatabaseBackend, QueryResult, TryGetError, TryGetable, Val
 /// `timestamptz` column, the types older scaffolds created; this type
 /// reads both shapes, so a whole-row read through the entity works on
 /// every table those migrations made.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// It serializes as the `NaiveDateTime` it holds, so an entity whose field
+/// was a `NaiveDateTime` serializes the same with this type.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub struct StoredDateTime(pub(crate) NaiveDateTime);
 
 impl StoredDateTime {

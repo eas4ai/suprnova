@@ -288,7 +288,7 @@ SESSION_COOKIE=suprnova_session
 
 # Cookie attributes
 SESSION_SECURE=true          # require HTTPS; DEFAULT IS true
-SESSION_PATH=/
+SESSION_PATH=/                # optional; unset = the public root of each request
 SESSION_DOMAIN=.example.com  # optional; unset = host-only
 SESSION_SAME_SITE=Lax        # Lax | Strict | None
 SESSION_COOKIE_PREFIX=       # empty | __Secure- | __Host-
@@ -512,34 +512,41 @@ the client can retry, not a fault in the server.
 
 ## The sessions table
 
-The default driver expects a `sessions` table with this shape (the
-`sessions` SeaORM entity in `framework/src/session/driver/database.rs`
-documents it):
+The default driver reads the `sessions` table of the Laravel 13 skeleton,
+so a Suprnova application runs on a database Laravel created:
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | VARCHAR PK | 40-char lowercase alphanumeric session id |
-| `user_id` | VARCHAR NULL | authenticated user id (string, supports opaque ids) |
-| `payload` | TEXT | JSON-serialized session data map |
-| `csrf_token` | VARCHAR | per-session CSRF token |
-| `last_activity` | DATETIME or TIMESTAMP (`timestamp` or `timestamptz` on Postgres) | last access, in UTC; drives expiry + GC |
+| `user_id` | nullable big integer, indexed | the signed-in user; `uuid` or `CHAR(26)` for a UUID or ULID user key |
+| `ip_address` | VARCHAR(45) NULL | left NULL by Suprnova |
+| `user_agent` | TEXT NULL | left NULL by Suprnova |
+| `payload` | LONGTEXT | base64-encoded JSON: the session data, the CSRF token as `_token` |
+| `last_activity` | INTEGER, indexed | epoch seconds of the last access; drives expiry and GC |
 
-Two indexes ship alongside the table: `idx_sessions_user_id` (for
-`destroy_for_user`) and `idx_sessions_last_activity` (for `gc()`).
-
-A scaffolded app includes a `create_sessions_table` migration that
-matches this shape. If you bring your own migrations, mirror the column
-names exactly - the driver names each column in its queries, so a
-renamed column won't match.
-
-To keep sessions under another name, set `SESSION_TABLE` (for example
-`SESSION_TABLE=app_sessions`) and have the sessions migration create
-the table under that name, with the same columns:
+The framework ships the migration. List it in your `Migrator` with the key
+type of your user model:
 
 ```rust
-Table::create()
-    .table(Alias::new("app_sessions")) // the name SESSION_TABLE holds
+use suprnova::session::migrations::{CreateSessionsTable, SessionUserKey};
+
+// in Migrator::migrations(), after the users table:
+Box::new(CreateSessionsTable::new(SessionUserKey::Integer)),
 ```
+
+`SessionUserKey::Uuid` and `SessionUserKey::Ulid` create the column
+`foreignUuid` and `foreignUlid` create. A table Laravel created is left as
+it is. A table in the layout earlier Suprnova scaffolds created
+(`csrf_token`, a date-time `last_activity`, JSON `payload`) is moved into
+this layout with its rows, so nobody is signed out. Session garbage
+collection only deletes rows Suprnova wrote, so a Laravel application's
+sessions in the same table expire on Laravel's own schedule. See
+[Running on a Laravel Database](laravel-database.md).
+
+To keep sessions under another name, set `SESSION_TABLE` (for example
+`SESSION_TABLE=app_sessions`). `CreateSessionsTable` creates the table
+under that name, and `suprnova::session::migrations::create_sessions_table`
+creates one under any name you pass it.
 
 The driver never creates the table itself. Code that builds the driver
 directly passes the name to

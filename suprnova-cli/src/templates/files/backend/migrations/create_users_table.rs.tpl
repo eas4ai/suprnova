@@ -1,4 +1,5 @@
 use sea_orm_migration::prelude::*;
+use suprnova::schema::Schema;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -6,68 +7,36 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .create_table(
-                Table::create()
-                    .table(Users::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(Users::Id)
-                            .big_integer()
-                            .not_null()
-                            .auto_increment()
-                            .primary_key(),
-                    )
-                    .col(ColumnDef::new(Users::Name).string().not_null())
-                    .col(
-                        ColumnDef::new(Users::Email)
-                            .string()
-                            .not_null()
-                            .unique_key(),
-                    )
-                    .col(ColumnDef::new(Users::Password).string().not_null())
-                    .col(ColumnDef::new(Users::RememberToken).string().null())
-                    // Nullable verification timestamp. `NULL` = unverified;
-                    // `EmailVerification::verify` stamps it on consume.
-                    //
-                    // The time columns are `.date_time()`: DATETIME on MySQL,
-                    // `timestamp` on Postgres, holding the UTC wall clock. The
-                    // `User` model reads and writes them through the
-                    // `AsNaiveDateTime` casts, the casts for that column type.
-                    .col(ColumnDef::new(Users::EmailVerifiedAt).date_time().null())
-                    .col(
-                        ColumnDef::new(Users::CreatedAt)
-                            .date_time()
-                            .not_null()
-                            .default(Expr::current_timestamp()),
-                    )
-                    .col(
-                        ColumnDef::new(Users::UpdatedAt)
-                            .date_time()
-                            .not_null()
-                            .default(Expr::current_timestamp()),
-                    )
-                    .to_owned(),
-            )
-            .await
+        // The users table of the Laravel 13 skeleton, so this application
+        // runs on a database a Laravel application created. A `users` table
+        // that already exists, Laravel's included, is left as it is.
+        if manager.has_table("users").await? {
+            return Ok(());
+        }
+        Schema::create(manager, "users", |t| {
+            // `BIGINT UNSIGNED` on MySQL, as Laravel's `id()` creates it;
+            // the `User` model reads it into a `u64`.
+            t.unsigned_id();
+            t.string("name");
+            t.string("email").unique();
+            // The time columns are nullable, as Laravel's are, and
+            // `.date_time()`: DATETIME on MySQL, `timestamp` on Postgres,
+            // holding the UTC wall clock. The `User` model reads and writes
+            // them through the `AsOptionalNaiveDateTime` casts, which also
+            // read the `TIMESTAMP` columns Laravel's migration creates.
+            t.date_time("email_verified_at").precision(0).nullable();
+            t.string("password");
+            t.remember_token();
+            t.date_time("created_at").precision(0).nullable();
+            t.date_time("updated_at").precision(0).nullable();
+        })
+        .await
     }
 
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .drop_table(Table::drop().table(Users::Table).to_owned())
-            .await
+    /// Leaves the table. `up` skips a `users` table that already exists, so
+    /// the table may be Laravel's, with its users, and rolling back must not
+    /// drop them.
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Ok(())
     }
-}
-
-#[derive(DeriveIden)]
-enum Users {
-    Table,
-    Id,
-    Name,
-    Email,
-    Password,
-    RememberToken,
-    EmailVerifiedAt,
-    CreatedAt,
-    UpdatedAt,
 }

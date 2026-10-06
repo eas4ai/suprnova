@@ -34,7 +34,9 @@ async fn restart_signal_breaks_worker_loop() {
     let cancel = CancellationToken::new();
     let token = cancel.clone();
     let handle = tokio::spawn(async move {
-        run_worker(driver, cfg, token).await;
+        run_worker(driver, cfg, token)
+            .await
+            .expect("the worker starts");
     });
 
     // Issue the restart signal AFTER the worker boots (so worker_started_at

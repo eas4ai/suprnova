@@ -1,0 +1,27 @@
+error[E0425]: cannot find value `show` in this scope
+  --> tests/ui/route-binding/handler_in_impl_without_self.rs:10:5
+   |
+10 |     #[handler]
+   |     ^^^^^^^^^^ not found in this scope
+   |
+   = note: this error originates in the attribute macro `handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `#[handler]` on a function inside an `impl` block must name the block's type: write `#[handler(Self = <Type>)]`
+  --> tests/ui/route-binding/handler_in_impl_without_self.rs:10:5
+   |
+10 |     #[handler]
+   |     ^^^^^^^^^^ this handler is inside an `impl` block
+   |
+   = help: the trait `suprnova::routing::__FreeContext` is not implemented for `&suprnova::routing::__FreeHandler`
+   = note: the router finds a handler's record by the handler's type, and a record emitted inside an `impl` block can name the function only through that type
+help: the trait `suprnova::routing::__FreeContext` is implemented for `suprnova::routing::__FreeHandler`
+  --> $WORKSPACE/framework/src/routing/handler_site.rs
+   |
+   | impl __FreeContext for __FreeHandler {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `suprnova::routing::__in_free_context`
+  --> $WORKSPACE/framework/src/routing/handler_site.rs
+   |
+   | pub fn __in_free_context<T: __FreeContext>(_probe: T) {}
+   |                             ^^^^^^^^^^^^^ required by this bound in `__in_free_context`
+   = note: this error originates in the attribute macro `handler` (in Nightly builds, run with -Z macro-backtrace for more info)

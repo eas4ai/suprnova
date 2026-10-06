@@ -92,7 +92,24 @@ pub struct Request {
     /// What middleware asked to keep for as long as the connection lives.
     /// See [`Request::hold_for_connection`].
     connection_holds: Vec<ConnectionHold>,
+    /// The public root the server resolved for this request before the
+    /// middleware chain ran (PFX-002). `None` for a request built outside
+    /// the server, whose root [`Request::public_root`] resolves from its
+    /// own headers on each read.
+    public_root: Option<std::sync::Arc<str>>,
 }
+
+/// A value a route binding resolved, held until the handler takes it.
+pub(crate) type RouteBound = Box<dyn std::any::Any + Send + Sync>;
+
+/// The values a route's bindings resolved, by handler argument, kept in the
+/// request's extensions rather than in a field: a request is moved by value
+/// through every middleware, and each move copies the struct, so a field
+/// would grow every frame of a deep middleware stack. The mutex makes the
+/// cell `Sync` and `Clone`, which the extension map requires; the value is
+/// taken out once.
+#[derive(Clone)]
+struct RouteBindings(std::sync::Arc<std::sync::Mutex<Option<Vec<Option<RouteBound>>>>>);
 
 /// The address one entry of `X-Forwarded-For` names, in its canonical
 /// form, so an IPv4 address written as an IPv6 one is the IPv4 address.
@@ -150,6 +167,7 @@ impl Request {
             live_cancellation: None,
             render_cache_prepared: None,
             connection_holds: Vec::new(),
+            public_root: None,
         }
     }
 
@@ -158,6 +176,27 @@ impl Request {
     pub fn with_params(mut self, params: HashMap<String, String>) -> Self {
         self.params = params;
         self
+    }
+
+    /// Hand the handler the values the route's bindings resolved, one slot
+    /// per handler argument.
+    pub(crate) fn set_route_bindings(&mut self, values: Vec<Option<RouteBound>>) {
+        self.parts
+            .extensions
+            .insert(RouteBindings(std::sync::Arc::new(std::sync::Mutex::new(
+                Some(values),
+            ))));
+    }
+
+    /// Take the values the route's bindings resolved, once. `None` when the
+    /// router ran no binding plan for this request.
+    pub(crate) fn take_route_bindings(&mut self) -> Option<Vec<Option<RouteBound>>> {
+        let RouteBindings(cell) = self.parts.extensions.remove::<RouteBindings>()?;
+        let mut slot = match cell.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        slot.take()
     }
 
     /// Record the matched route pattern (e.g. `/users/{id}`) on the
@@ -265,6 +304,7 @@ impl Request {
             live_cancellation: None,
             render_cache_prepared: None,
             connection_holds: Vec::new(),
+            public_root: None,
         }
     }
 
@@ -478,6 +518,27 @@ impl Request {
     /// duplicating the resolution logic.
     pub fn peer_is_trusted_proxy(&self) -> bool {
         self.trusted_proxies.trusts(self.peer_addr)
+    }
+
+    /// Record the public root the server resolved for this request, so
+    /// the accessors that build URLs read it instead of resolving it again.
+    pub(crate) fn with_public_root(mut self, root: std::sync::Arc<str>) -> Self {
+        self.public_root = Some(root);
+        self
+    }
+
+    /// The public root of this request (PFX-002): a valid
+    /// `X-Forwarded-Prefix` from a trusted proxy, otherwise the path in
+    /// `APP_URL`; the empty string at the host root.
+    pub(crate) fn public_root(&self) -> std::sync::Arc<str> {
+        match &self.public_root {
+            Some(root) => std::sync::Arc::clone(root),
+            None => std::sync::Arc::from(crate::routing::root::resolve(
+                self.headers(),
+                self.peer_is_trusted_proxy(),
+                crate::routing::root::app_url_root,
+            )),
+        }
     }
 
     /// Get the request method
@@ -1020,13 +1081,17 @@ impl Request {
 
     /// Get the URL of the request (no query string, trailing `/`
     /// stripped). Mirrors Laravel's `Request::url()`.
+    ///
+    /// The path is the public root followed by the path the request
+    /// arrived on, so behind a proxy that strips `/billing` the URL is the
+    /// one the browser asked for (PFX-002).
     pub fn url(&self) -> String {
         let scheme_host = self.scheme_and_http_host().unwrap_or_default();
-        let path = self.path();
+        let path = format!("{}{}", self.public_root(), self.path());
         let stripped = if path.len() > 1 {
             path.trim_end_matches('/')
         } else {
-            path
+            path.as_str()
         };
         format!("{scheme_host}{stripped}")
     }
@@ -1989,6 +2054,7 @@ mod url_helper_tests {
             live_cancellation: None,
             render_cache_prepared: None,
             connection_holds: Vec::new(),
+            public_root: None,
         };
 
         // Use `.err()` rather than `expect_err` so the test doesn't require
@@ -2026,6 +2092,7 @@ mod url_helper_tests {
             live_cancellation: None,
             render_cache_prepared: None,
             connection_holds: Vec::new(),
+            public_root: None,
         };
 
         let (_, bytes) = req
@@ -2078,6 +2145,7 @@ mod url_helper_tests {
             live_cancellation: None,
             render_cache_prepared: None,
             connection_holds: Vec::new(),
+            public_root: None,
         };
 
         // The bogus middle hop is dropped - only parseable IPs (plus the
@@ -2123,6 +2191,7 @@ mod url_helper_tests {
             live_cancellation: None,
             render_cache_prepared: None,
             connection_holds: Vec::new(),
+            public_root: None,
         };
 
         // A junk-only forwarded chain can't rotate rate-limit buckets - `ip()`

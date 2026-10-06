@@ -207,7 +207,9 @@ pub struct CsrfMiddleware {
     /// (`Cookie('XSRF-TOKEN', token, availableAt(60 * lifetime), ...)`).
     /// Defaults to 2 hours, matching the session-config default.
     xsrf_cookie_lifetime: Duration,
-    /// `Path` attribute on the XSRF cookie. Defaults to `/`.
+    /// `Path` attribute on the XSRF cookie. Empty, the default, means
+    /// none was set: the cookie then takes the public root of each request
+    /// (`/` at the host root), or `/` under a `__Host-` name (PFX-007).
     xsrf_cookie_path: String,
     /// `Domain` attribute on the XSRF cookie. Defaults to unset
     /// (browser uses the request host).
@@ -234,7 +236,7 @@ impl CsrfMiddleware {
             add_xsrf_cookie: true,
             xsrf_cookie_name: "XSRF-TOKEN".to_string(),
             xsrf_cookie_lifetime: Duration::from_secs(120 * 60),
-            xsrf_cookie_path: "/".to_string(),
+            xsrf_cookie_path: String::new(),
             xsrf_cookie_domain: None,
             xsrf_cookie_secure: true,
             xsrf_cookie_same_site: SameSite::Lax,
@@ -359,7 +361,8 @@ impl CsrfMiddleware {
         self
     }
 
-    /// Set the `Path` attribute on the `XSRF-TOKEN` cookie.
+    /// Set the `Path` attribute on the `XSRF-TOKEN` cookie. Without it the
+    /// cookie takes the public root of each request, `/` at the host root.
     pub fn xsrf_cookie_path(mut self, path: impl Into<String>) -> Self {
         self.xsrf_cookie_path = path.into();
         self
@@ -506,11 +509,18 @@ impl CsrfMiddleware {
     /// compares server-side. See `docs/parity/csrf.md` (`Diverged`
     /// row for `XSRF-TOKEN` cookie encryption) for the rationale.
     fn build_xsrf_cookie(&self, token: &str) -> Cookie {
+        let path = if !self.xsrf_cookie_path.is_empty() {
+            self.xsrf_cookie_path.clone()
+        } else if self.xsrf_cookie_name.starts_with("__Host-") {
+            "/".to_owned()
+        } else {
+            crate::routing::root::cookie_path()
+        };
         let mut cookie = Cookie::new(self.xsrf_cookie_name.clone(), token)
             .http_only(false)
             .secure(self.xsrf_cookie_secure)
             .same_site(self.xsrf_cookie_same_site.clone())
-            .path(self.xsrf_cookie_path.clone())
+            .path(path)
             .max_age(self.xsrf_cookie_lifetime);
         if let Some(domain) = self.xsrf_cookie_domain.clone() {
             cookie = cookie.domain(domain);

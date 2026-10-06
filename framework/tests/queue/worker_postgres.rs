@@ -54,18 +54,24 @@ async fn connect_postgres() -> DatabaseConnection {
 
 async fn fresh_jobs_table(db: &DatabaseConnection, table: &str) {
     for sql in [
+        format!("DROP TABLE IF EXISTS suprnova_{table}_reservations"),
         format!("DROP TABLE IF EXISTS {table}"),
         format!(
             "CREATE TABLE {table} (
-                id              TEXT PRIMARY KEY,
-                job_name        TEXT NOT NULL,
-                queue           TEXT NULL,
-                envelope_json   TEXT NOT NULL,
+                id              BIGSERIAL PRIMARY KEY,
+                queue           VARCHAR(255) NOT NULL,
+                payload         TEXT NOT NULL,
+                attempts        SMALLINT NOT NULL,
+                reserved_at     INTEGER NULL,
                 available_at    INTEGER NOT NULL,
-                reserved_until  INTEGER NULL,
-                reserved_token  TEXT NULL,
-                attempts        INTEGER NOT NULL DEFAULT 0,
                 created_at      INTEGER NOT NULL
+            )"
+        ),
+        format!(
+            "CREATE TABLE suprnova_{table}_reservations (
+                job_id          BIGINT PRIMARY KEY,
+                token           CHAR(36) NOT NULL UNIQUE,
+                reserved_until  BIGINT NOT NULL
             )"
         ),
     ] {
@@ -78,13 +84,13 @@ async fn fresh_failed_jobs_table(db: &DatabaseConnection, table: &str) {
         format!("DROP TABLE IF EXISTS {table}"),
         format!(
             "CREATE TABLE {table} (
-                id              TEXT PRIMARY KEY,
-                connection      TEXT NOT NULL,
-                queue           TEXT NOT NULL,
-                job_name        TEXT NOT NULL,
-                envelope_json   TEXT NOT NULL,
+                id              BIGSERIAL PRIMARY KEY,
+                uuid            VARCHAR(255) NOT NULL UNIQUE,
+                connection      VARCHAR(255) NOT NULL,
+                queue           VARCHAR(255) NOT NULL,
+                payload         TEXT NOT NULL,
                 exception       TEXT NOT NULL,
-                failed_at       INTEGER NOT NULL
+                failed_at       TIMESTAMP(0) NOT NULL DEFAULT CURRENT_TIMESTAMP
             )"
         ),
     ] {
@@ -194,10 +200,14 @@ async fn postgres_queue_worker_boots_after_db_init_and_drains_a_job() {
     let _env = crate::env_lock::lock_env_async().await;
     let raw = connect_postgres().await;
     fresh_jobs_table(&raw, "pg_worker_jobs").await;
+    // `QUEUE_DRIVER=database` binds the database failed-jobs store, and a
+    // worker refuses to start until its table exists (LDB-003).
+    fresh_failed_jobs_table(&raw, "pg_worker_boot_failed_jobs").await;
 
     let _env = EnvGuard::set(&[
         ("QUEUE_DRIVER", "database"),
         ("QUEUE_DB_TABLE", "pg_worker_jobs"),
+        ("QUEUE_FAILED_DB_TABLE", "pg_worker_boot_failed_jobs"),
     ]);
 
     // Step 1 - the app's bootstrap. `DB::init_with` is what a scaffolded
@@ -218,7 +228,9 @@ async fn postgres_queue_worker_boots_after_db_init_and_drains_a_job() {
     assert_eq!(row_count(&raw, "pg_worker_jobs").await, 1);
 
     let driver = Queue::driver().expect("driver registered");
-    run_worker(driver, one_job_config(), CancellationToken::new()).await;
+    run_worker(driver, one_job_config(), CancellationToken::new())
+        .await
+        .expect("the worker starts");
 
     assert_eq!(RAN.load(Ordering::SeqCst), 1, "handler ran exactly once");
     assert_eq!(
@@ -259,7 +271,9 @@ async fn postgres_queue_worker_dead_letters_into_the_database_store() {
     Queue::push(DeadJob).await.expect("push");
 
     let driver = Queue::driver().expect("driver registered");
-    run_worker(driver, one_job_config(), CancellationToken::new()).await;
+    run_worker(driver, one_job_config(), CancellationToken::new())
+        .await
+        .expect("the worker starts");
 
     let failed = store.all().await.expect("read failed jobs");
     assert_eq!(failed.len(), 1);

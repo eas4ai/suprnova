@@ -1099,13 +1099,85 @@ where
             eprintln!("{message}");
             std::process::exit(1);
         }
-        self.run_cli(cli).await;
+        self.run_cli_or_exit(cli).await;
+    }
+
+    /// [`Self::run`] with an argv the caller builds instead of the
+    /// process's own, for a binary that dispatches its own arguments first
+    /// or a test that runs one subcommand:
+    ///
+    /// ```rust,no_run
+    /// # async fn example() {
+    /// if let Err(e) = suprnova::Application::new()
+    ///     .run_with_args(["app", "queue:work", "--max-jobs", "1"])
+    ///     .await
+    /// {
+    ///     eprintln!("{}", e.message());
+    ///     std::process::exit(1);
+    /// }
+    /// # }
+    /// ```
+    ///
+    /// The first item is the program name, as in [`std::env::args`].
+    /// Where [`Self::run`] prints a failure and ends the process, this
+    /// returns it, so the caller decides what an embedding program or a
+    /// test does with it: an argv the CLI cannot parse, the boot
+    /// precondition (the configuration has to be loaded before the async
+    /// runtime starts), a boot that fails, or a command that fails. The
+    /// error's [`FrameworkError::message`] is the text [`Self::run`] would
+    /// print; a command that already printed its own report (a
+    /// `schedule:run` task that failed) returns a
+    /// [silent](FrameworkError::is_silent) error. `--help` and `--version`
+    /// print what they print and return `Ok(())`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] for every failure [`Self::run`] exits
+    /// non-zero on.
+    pub async fn run_with_args<I, T>(self, args: I) -> Result<(), FrameworkError>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let cli = match Cli::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(e) => {
+                use clap::error::ErrorKind;
+                return match e.kind() {
+                    ErrorKind::DisplayHelp
+                    | ErrorKind::DisplayVersion
+                    | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+                        let _ = e.print();
+                        Ok(())
+                    }
+                    _ => Err(FrameworkError::internal(e.render().to_string())),
+                };
+            }
+        };
+        crate::boot::boot_precondition(crate::boot::env_loaded_pre_runtime())
+            .map_err(FrameworkError::internal)?;
+        self.run_cli(cli, Failures::Return).await
+    }
+
+    /// [`Self::run_cli`] at the executable boundary: a failure is printed,
+    /// unless it already reported itself, and ends the process with exit
+    /// status 1.
+    async fn run_cli_or_exit(self, cli: Cli) {
+        if self.run_cli(cli, Failures::Print).await.is_err() {
+            std::process::exit(1);
+        }
     }
 
     /// Everything [`Self::run`] does after the argv parse and the boot
     /// precondition. Split out so a test can run one subcommand from an
     /// argv it builds, rather than the test binary's own.
-    async fn run_cli(self, cli: Cli) {
+    ///
+    /// A failure is returned after the process is wound down as a success
+    /// winds it down: a booted command stops and drains the supervisors its
+    /// bootstrap started, and the file log channels are flushed. With
+    /// [`Failures::Print`] the failure is printed on stderr before that,
+    /// where the commands printed it before they returned errors.
+    async fn run_cli(self, cli: Cli, failures: Failures) -> Result<(), FrameworkError> {
         // Register all #[policy] gates collected via inventory::submit!.
         // Called here (before the subcommand match) so background workers,
         // CLI commands, and scheduled tasks all see registered gates - not
@@ -1140,29 +1212,34 @@ where
             None | Some(Commands::Serve { .. } | Commands::WebRun { .. })
         ) && boot != ProcessBoot::Migrations;
 
-        match cli.command {
+        let result = match cli.command {
             None
             | Some(Commands::Serve { no_migrate: false })
             | Some(Commands::WebRun { no_migrate: false }) => {
                 // Default: run server with auto-migrate
-                Self::run_migrations_silent::<M>().await;
-                Self::run_server_internal(bootstrap_fn, http_bootstrap_fn, routes_fn, booted_fns)
-                    .await;
+                match Self::run_migrations_silent::<M>().await {
+                    Ok(()) => {
+                        Self::run_server_internal(
+                            bootstrap_fn,
+                            http_bootstrap_fn,
+                            routes_fn,
+                            booted_fns,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                }
             }
             Some(Commands::Serve { no_migrate: true })
             | Some(Commands::WebRun { no_migrate: true }) => {
                 // Run server without migrations
                 Self::run_server_internal(bootstrap_fn, http_bootstrap_fn, routes_fn, booted_fns)
-                    .await;
+                    .await
             }
-            Some(Commands::Migrate { schema_path }) => {
-                Self::run_migrations::<M>(schema_path).await;
-            }
-            Some(Commands::MigrateStatus) => {
-                Self::show_migration_status::<M>().await;
-            }
+            Some(Commands::Migrate { schema_path }) => Self::run_migrations::<M>(schema_path).await,
+            Some(Commands::MigrateStatus) => Self::show_migration_status::<M>().await,
             Some(Commands::MigrateRollback { steps }) => {
-                Self::rollback_migrations::<M>(steps).await;
+                Self::rollback_migrations::<M>(steps).await
             }
             Some(Commands::MigrateFresh { force, schema_path }) => {
                 // The CLI's `suprnova migrate:fresh` gained this gate first,
@@ -1170,31 +1247,28 @@ where
                 // binary, not the dev CLI - so without the same check here
                 // the guard was bypassable by the path that matters most.
                 let env = crate::config::Environment::detect();
-                if let Err(message) = authorize_migrate_fresh(
+                match authorize_migrate_fresh(
                     &env,
                     force,
                     std::io::IsTerminal::is_terminal(&std::io::stdin()),
                     &mut read_confirmation_from_stdin,
                 ) {
-                    eprintln!("{message}");
-                    std::process::exit(1);
+                    Ok(()) => Self::fresh_migrations::<M>(schema_path).await,
+                    Err(message) => Err(FrameworkError::internal(message)),
                 }
-                Self::fresh_migrations::<M>(schema_path).await;
             }
-            Some(Commands::SchemaDump { path, prune }) => {
-                Self::dump_schema::<M>(path, prune).await;
-            }
+            Some(Commands::SchemaDump { path, prune }) => Self::dump_schema::<M>(path, prune).await,
             Some(Commands::ScheduleWork) => {
-                Self::run_scheduler_daemon_internal(boot, bootstrap_fn, schedule_fn).await;
+                Self::run_scheduler_daemon_internal(boot, bootstrap_fn, schedule_fn).await
             }
             Some(Commands::ScheduleRun) => {
-                Self::run_scheduled_tasks_internal(boot, bootstrap_fn, schedule_fn).await;
+                Self::run_scheduled_tasks_internal(boot, bootstrap_fn, schedule_fn).await
             }
             Some(Commands::ScheduleList { timezone }) => {
-                Self::list_scheduled_tasks(boot, bootstrap_fn, schedule_fn, timezone).await;
+                Self::list_scheduled_tasks(boot, bootstrap_fn, schedule_fn, timezone).await
             }
             Some(Commands::WorkflowWork) => {
-                Self::run_workflow_worker_internal(boot, bootstrap_fn).await;
+                Self::run_workflow_worker_internal(boot, bootstrap_fn).await
             }
             Some(Commands::QueueWork {
                 visibility_timeout,
@@ -1212,32 +1286,28 @@ where
                     queues,
                     connection,
                 )
-                .await;
+                .await
             }
             Some(Commands::QueuePause {
                 queue,
                 all,
                 connection,
-            }) => {
-                Self::run_queue_pause_internal(boot, bootstrap_fn, queue, all, connection).await;
-            }
+            }) => Self::run_queue_pause_internal(boot, bootstrap_fn, queue, all, connection).await,
             Some(Commands::QueueResume {
                 queue,
                 all,
                 connection,
-            }) => {
-                Self::run_queue_resume_internal(boot, bootstrap_fn, queue, all, connection).await;
-            }
+            }) => Self::run_queue_resume_internal(boot, bootstrap_fn, queue, all, connection).await,
             Some(Commands::QueueFailed) => {
-                Self::run_failed_jobs_internal(boot, bootstrap_fn, FailedJobsCommand::Failed).await;
+                Self::run_failed_jobs_internal(boot, bootstrap_fn, FailedJobsCommand::Failed).await
             }
             Some(Commands::QueueRetry { ids }) => {
                 Self::run_failed_jobs_internal(boot, bootstrap_fn, FailedJobsCommand::Retry(ids))
-                    .await;
+                    .await
             }
             Some(Commands::QueueForget { id }) => {
                 Self::run_failed_jobs_internal(boot, bootstrap_fn, FailedJobsCommand::Forget(id))
-                    .await;
+                    .await
             }
             Some(Commands::QueueFlush { hours }) => {
                 Self::run_failed_jobs_internal(
@@ -1245,7 +1315,7 @@ where
                     bootstrap_fn,
                     FailedJobsCommand::Flush { hours },
                 )
-                .await;
+                .await
             }
             Some(Commands::QueuePruneFailed { hours }) => {
                 Self::run_failed_jobs_internal(
@@ -1253,7 +1323,7 @@ where
                     bootstrap_fn,
                     FailedJobsCommand::PruneFailed { hours },
                 )
-                .await;
+                .await
             }
             Some(Commands::Down {
                 retry,
@@ -1277,22 +1347,27 @@ where
                     except,
                     message,
                 )
-                .await;
+                .await
             }
-            Some(Commands::Up) => {
-                Self::run_up(boot, bootstrap_fn).await;
-            }
+            Some(Commands::Up) => Self::run_up(boot, bootstrap_fn).await,
+        };
+        if let (Err(e), Failures::Print) = (&result, failures)
+            && !e.is_silent()
+        {
+            eprintln!("{}", e.message());
         }
         // A booted process stops its supervisors and waits for its queued
-        // listeners as the server does at the end of its graceful shutdown:
-        // returning drops the runtime, and every task still running would
-        // end with it.
-        if booted {
+        // listeners as the server does at the end of its graceful shutdown,
+        // whether the command succeeded or failed, and so does a server that
+        // failed after its hooks ran: returning drops the runtime, and every
+        // task still running would end with it.
+        if booted || result.is_err() {
             process_boot::finish_process().await;
         }
         // Every command ends here; the file log channels buffer, and nothing
-        // a worker wrote before a clean exit may be lost.
+        // a worker wrote before it ended may be lost.
         crate::logging::Log::flush();
+        result
     }
 
     async fn run_server_internal(
@@ -1300,7 +1375,7 @@ where
         http_bootstrap_fn: Option<BootstrapFn>,
         routes_fn: Option<RoutesFn>,
         booted_fns: Vec<BootedFn>,
-    ) {
+    ) -> Result<(), FrameworkError> {
         // Run the process-wide hook, then the HTTP-only one.
         Self::run_boot_hooks(bootstrap_fn, http_bootstrap_fn).await;
 
@@ -1312,13 +1387,9 @@ where
         // error type carries the user-facing remediation (it points at
         // `suprnova key:generate`); we surface it on stderr without a
         // panic stack-trace wrapper so production boot logs stay clean.
-        let server = match RoutesFn::prepare_server(routes_fn).await {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("suprnova: failed to start server: {e}");
-                process_boot::exit_after_boot(1).await;
-            }
-        };
+        let server = RoutesFn::prepare_server(routes_fn)
+            .await
+            .map_err(|e| failed(format!("suprnova: failed to start server: {e}")))?;
 
         // Services are booted now (Server::from_config ran service
         // registration); fire the registered `booted` callbacks before
@@ -1327,33 +1398,29 @@ where
             booted();
         }
 
-        if let Err(e) = server.run().await {
-            eprintln!("suprnova: server exited with error: {e}");
-            process_boot::exit_after_boot(1).await;
-        }
+        server
+            .run()
+            .await
+            .map_err(|e| failed(format!("suprnova: server exited with error: {e}")))
     }
 
-    async fn get_database_connection() -> sea_orm::DatabaseConnection {
-        let database_url = Self::database_url();
+    async fn get_database_connection() -> Result<sea_orm::DatabaseConnection, FrameworkError> {
+        let database_url = Self::database_url()?;
         sea_orm::Database::connect(crate::database::config::driver_url(&database_url).as_ref())
             .await
-            .unwrap_or_else(|e| {
-                eprintln!("suprnova: failed to connect to the database: {e}");
-                std::process::exit(1);
-            })
+            .map_err(|e| failed(format!("suprnova: failed to connect to the database: {e}")))
     }
 
     /// `DATABASE_URL`, with a SQLite file created when it does not exist
-    /// yet. Exits when the variable is unset or the file cannot be made.
-    fn database_url() -> String {
-        let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
-            eprintln!(
+    /// yet. An error when the variable is unset or the file cannot be made.
+    fn database_url() -> Result<String, FrameworkError> {
+        let database_url = env::var("DATABASE_URL").map_err(|_| {
+            failed(
                 "suprnova: DATABASE_URL is not set. \
                  Configure DATABASE_URL in your environment (e.g. .env) \
-                 before running a database subcommand."
-            );
-            std::process::exit(1);
-        });
+                 before running a database subcommand.",
+            )
+        })?;
 
         // For SQLite, ensure the database file can be created. Surface
         // filesystem errors (permission denied, no such path, read-only fs)
@@ -1374,29 +1441,27 @@ where
                     && !parent.as_os_str().is_empty()
                     && let Err(e) = std::fs::create_dir_all(parent)
                 {
-                    eprintln!(
+                    return Err(failed(format!(
                         "suprnova: failed to create SQLite parent directory \
                          {parent}: {e}. Check that the path is writable and the \
                          enclosing filesystem is not read-only.",
                         parent = parent.display(),
-                    );
-                    std::process::exit(1);
+                    )));
                 }
 
                 if !Path::new(&path).exists()
                     && let Err(e) = std::fs::File::create(&path)
                 {
-                    eprintln!(
+                    return Err(failed(format!(
                         "suprnova: failed to create SQLite database file {path}: \
                          {e}. Check filesystem permissions on the target path.",
-                    );
-                    std::process::exit(1);
+                    )));
                 }
             }
 
-            connect_url
+            Ok(connect_url)
         } else {
-            database_url
+            Ok(database_url)
         }
     }
 
@@ -1413,7 +1478,7 @@ where
     /// can opt in by setting [`AUTO_MIGRATE_BEST_EFFORT_ENV`] to one of the
     /// truthy values accepted by [`parse_auto_migrate_best_effort`]. The
     /// process then logs a warning and continues into the server boot.
-    async fn run_migrations_silent<Migrator: MigratorTrait>() {
+    async fn run_migrations_silent<Migrator: MigratorTrait>() -> Result<(), FrameworkError> {
         // If the configured migrator has no migrations (the default
         // `NoMigrator`, or any app-defined migrator with an empty set),
         // skip the database connection entirely. This is the default
@@ -1421,103 +1486,98 @@ where
         // should boot successfully without `DATABASE_URL` being set.
         // Explicit subcommands like `migrate` continue to require it.
         if Migrator::migrations().is_empty() {
-            return;
+            return Ok(());
         }
         let best_effort =
             parse_auto_migrate_best_effort(env::var(AUTO_MIGRATE_BEST_EFFORT_ENV).ok().as_deref());
-        let url = Self::database_url();
+        let url = Self::database_url()?;
         // Connecting and loading a schema dump fail closed whatever the
         // best-effort setting says: it covers a failing migration, not a
         // database that cannot be reached or a dump that did not load.
         let db = match crate::SchemaDump::prepare::<Migrator>(&url, None).await {
             Ok((db, _)) => db,
             Err(e) => {
-                eprintln!("suprnova: migration failed: {e}");
-                eprintln!(
-                    "suprnova: refusing to start the server: the database could not be reached \
+                return Err(failed(format!(
+                    "suprnova: migration failed: {e}\n\
+                     suprnova: refusing to start the server: the database could not be reached \
                      or its schema dump did not load."
-                );
-                std::process::exit(1);
+                )));
             }
         };
         let outcome = Migrator::up(&db, None).await;
-        if let Err(e) = resolve_auto_migration(outcome, best_effort) {
-            eprintln!("suprnova: migration failed: {e}");
-            eprintln!(
-                "suprnova: refusing to start the server against a partially-migrated schema. \
+        resolve_auto_migration(outcome, best_effort).map_err(|e| {
+            failed(format!(
+                "suprnova: migration failed: {e}\n\
+                 suprnova: refusing to start the server against a partially-migrated schema. \
                  Fix the failing migration, or set {AUTO_MIGRATE_BEST_EFFORT_ENV}=true to keep \
                  the previous best-effort behaviour, or pass --no-migrate to skip auto-migration."
-            );
-            std::process::exit(1);
-        }
+            ))
+        })
     }
 
-    async fn run_migrations<Migrator: MigratorTrait>(schema_path: Option<PathBuf>) {
+    async fn run_migrations<Migrator: MigratorTrait>(
+        schema_path: Option<PathBuf>,
+    ) -> Result<(), FrameworkError> {
         println!("Running migrations...");
-        let url = Self::database_url();
-        match crate::SchemaDump::migrate::<Migrator>(&url, schema_path.as_deref()).await {
-            Ok(loaded) => {
-                if let Some(path) = loaded {
-                    println!("Loaded the schema dump {}", path.display());
-                }
-            }
-            Err(e) => {
-                eprintln!("suprnova: migration failed: {e}");
-                std::process::exit(1);
-            }
+        let url = Self::database_url()?;
+        let loaded = crate::SchemaDump::migrate::<Migrator>(&url, schema_path.as_deref())
+            .await
+            .map_err(|e| failed(format!("suprnova: migration failed: {e}")))?;
+        if let Some(path) = loaded {
+            println!("Loaded the schema dump {}", path.display());
         }
         println!("Migrations completed successfully!");
+        Ok(())
     }
 
-    async fn show_migration_status<Migrator: MigratorTrait>() {
+    async fn show_migration_status<Migrator: MigratorTrait>() -> Result<(), FrameworkError> {
         println!("Migration status:");
-        let db = Self::get_database_connection().await;
-        if let Err(e) = Migrator::status(&db).await {
-            eprintln!("suprnova: failed to read migration status: {e}");
-            std::process::exit(1);
-        }
+        let db = Self::get_database_connection().await?;
+        Migrator::status(&db)
+            .await
+            .map_err(|e| failed(format!("suprnova: failed to read migration status: {e}")))
     }
 
-    async fn rollback_migrations<Migrator: MigratorTrait>(steps: u32) {
+    async fn rollback_migrations<Migrator: MigratorTrait>(
+        steps: u32,
+    ) -> Result<(), FrameworkError> {
         println!("Rolling back {} migration(s)...", steps);
-        let db = Self::get_database_connection().await;
-        if let Err(e) = Migrator::down(&db, Some(steps)).await {
-            eprintln!("suprnova: rollback failed: {e}");
-            std::process::exit(1);
-        }
+        let db = Self::get_database_connection().await?;
+        Migrator::down(&db, Some(steps))
+            .await
+            .map_err(|e| failed(format!("suprnova: rollback failed: {e}")))?;
         println!("Rollback completed successfully!");
+        Ok(())
     }
 
-    async fn fresh_migrations<Migrator: MigratorTrait>(schema_path: Option<PathBuf>) {
+    async fn fresh_migrations<Migrator: MigratorTrait>(
+        schema_path: Option<PathBuf>,
+    ) -> Result<(), FrameworkError> {
         println!("WARNING: Dropping all tables and re-running migrations...");
-        let url = Self::database_url();
-        match crate::SchemaDump::fresh::<Migrator>(&url, schema_path.as_deref()).await {
-            Ok(loaded) => {
-                if let Some(path) = loaded {
-                    println!("Loaded the schema dump {}", path.display());
-                }
-            }
-            Err(e) => {
-                eprintln!("suprnova: database refresh failed: {e}");
-                std::process::exit(1);
-            }
+        let url = Self::database_url()?;
+        let loaded = crate::SchemaDump::fresh::<Migrator>(&url, schema_path.as_deref())
+            .await
+            .map_err(|e| failed(format!("suprnova: database refresh failed: {e}")))?;
+        if let Some(path) = loaded {
+            println!("Loaded the schema dump {}", path.display());
         }
         println!("Database refreshed successfully!");
+        Ok(())
     }
 
     /// `schema:dump`: the schema and ledger to `path` or the engine's
     /// default dump, then, with `prune`, the dumped migrations in
     /// `src/migrations` replaced by their names.
-    async fn dump_schema<Migrator: MigratorTrait>(path: Option<PathBuf>, prune: bool) {
-        let url = Self::database_url();
+    async fn dump_schema<Migrator: MigratorTrait>(
+        path: Option<PathBuf>,
+        prune: bool,
+    ) -> Result<(), FrameworkError> {
+        let url = Self::database_url()?;
         let path = match path {
             Some(path) => path,
             None => crate::SchemaDump::default_path(&url)
                 .await
-                .unwrap_or_else(|e| {
-                    eprintln!("suprnova: schema dump failed: {e}");
-                    std::process::exit(1);
-                }),
+                .map_err(|e| failed(format!("suprnova: schema dump failed: {e}")))?,
         };
         let outcome = if prune {
             crate::SchemaDump::dump_and_prune::<Migrator>(
@@ -1532,21 +1592,15 @@ where
                 .await
                 .map(|()| None)
         };
-        match outcome {
-            Ok(pruned) => {
-                println!("Database schema dumped to {}", path.display());
-                if let Some(pruned) = pruned {
-                    println!(
-                        "Pruned {} migration(s); rebuild the app before it migrates again",
-                        pruned.len()
-                    );
-                }
-            }
-            Err(e) => {
-                eprintln!("suprnova: schema dump failed: {e}");
-                std::process::exit(1);
-            }
+        let pruned = outcome.map_err(|e| failed(format!("suprnova: schema dump failed: {e}")))?;
+        println!("Database schema dumped to {}", path.display());
+        if let Some(pruned) = pruned {
+            println!(
+                "Pruned {} migration(s); rebuild the app before it migrates again",
+                pruned.len()
+            );
         }
+        Ok(())
     }
 
     /// `schedule:work`: run the scheduler as a long-lived daemon.
@@ -1560,17 +1614,16 @@ where
         boot: ProcessBoot,
         bootstrap_fn: Option<BootstrapFn>,
         schedule_fn: Option<ScheduleFn>,
-    ) {
+    ) -> Result<(), FrameworkError> {
         let shutdown = Self::start_daemon();
-        Self::boot_or_exit("schedule:work", boot, bootstrap_fn).await;
+        Self::boot_or_fail("schedule:work", boot, bootstrap_fn).await?;
         let schedule = build_schedule(schedule_fn);
         // Before any task runs: a production deployment that asks for
         // single-server execution with a per-process cache would get every
         // replica running every task, silently. Fail the boot instead.
-        if let Err(e) = schedule.validate_single_server_locking() {
-            eprintln!("suprnova: {e}");
-            process_boot::exit_after_boot(1).await;
-        }
+        schedule
+            .validate_single_server_locking()
+            .map_err(|e| failed(format!("suprnova: {e}")))?;
 
         println!("==============================================");
         println!("  suprnova Scheduler Daemon");
@@ -1599,6 +1652,7 @@ where
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         run_scheduler_loop(&schedule, tick, &shutdown, SCHEDULER_DRAIN_GRACE).await;
+        Ok(())
     }
 
     /// `schedule:run`: evaluate and run the due tasks once, then exit. Exits
@@ -1607,22 +1661,21 @@ where
         boot: ProcessBoot,
         bootstrap_fn: Option<BootstrapFn>,
         schedule_fn: Option<ScheduleFn>,
-    ) {
+    ) -> Result<(), FrameworkError> {
         // Logging only. `schedule:run` evaluates the due tasks once and
         // exits, so there is no long-lived loop for a stop signal to
         // interrupt - the default disposition is right for a one-shot
         // command, and installing a handler it never reads would only
         // make Ctrl-C stop working.
         Self::install_daemon_logging();
-        Self::boot_or_exit("schedule:run", boot, bootstrap_fn).await;
+        Self::boot_or_fail("schedule:run", boot, bootstrap_fn).await?;
         let schedule = build_schedule(schedule_fn);
         // Before any task runs: a production deployment that asks for
         // single-server execution with a per-process cache would get every
         // replica running every task, silently. Fail the boot instead.
-        if let Err(e) = schedule.validate_single_server_locking() {
-            eprintln!("suprnova: {e}");
-            process_boot::exit_after_boot(1).await;
-        }
+        schedule
+            .validate_single_server_locking()
+            .map_err(|e| failed(format!("suprnova: {e}")))?;
 
         println!("Running due scheduled tasks...");
         let (results, any_failed) = evaluate_due_once(&schedule).await;
@@ -1631,7 +1684,7 @@ where
         process_boot::finish_process().await;
         if results.is_empty() {
             println!("No tasks were due.");
-            return;
+            return Ok(());
         }
         for (name, result) in &results {
             match result {
@@ -1639,9 +1692,11 @@ where
                 Err(e) => eprintln!("  ✗ {name}: {e}"),
             }
         }
+        // Each failed task is reported above, by name.
         if any_failed {
-            process_boot::exit_after_boot(1).await;
+            return Err(FrameworkError::silent());
         }
+        Ok(())
     }
 
     /// `schedule:list`: print every registered task and its cron expression.
@@ -1654,25 +1709,24 @@ where
         bootstrap_fn: Option<BootstrapFn>,
         schedule_fn: Option<ScheduleFn>,
         timezone: Option<String>,
-    ) {
-        let display_tz = match resolve_display_timezone(timezone.as_deref()) {
-            Ok(tz) => tz,
-            Err(message) => {
-                eprintln!("suprnova: {message}");
-                std::process::exit(1);
-            }
-        };
-        Self::boot_or_exit("schedule:list", boot, bootstrap_fn).await;
+    ) -> Result<(), FrameworkError> {
+        let display_tz = resolve_display_timezone(timezone.as_deref())
+            .map_err(|message| failed(format!("suprnova: {message}")))?;
+        Self::boot_or_fail("schedule:list", boot, bootstrap_fn).await?;
         let schedule = build_schedule(schedule_fn);
         print!(
             "{}",
             format_schedule_listing(&schedule, display_tz, crate::clock::now())
         );
+        Ok(())
     }
 
-    async fn run_workflow_worker_internal(boot: ProcessBoot, bootstrap_fn: Option<BootstrapFn>) {
+    async fn run_workflow_worker_internal(
+        boot: ProcessBoot,
+        bootstrap_fn: Option<BootstrapFn>,
+    ) -> Result<(), FrameworkError> {
         let shutdown = Self::start_daemon();
-        Self::boot_or_exit("workflow:work", boot, bootstrap_fn).await;
+        Self::boot_or_fail("workflow:work", boot, bootstrap_fn).await?;
 
         let worker = crate::workflow::WorkflowWorker::new();
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -1698,28 +1752,18 @@ where
                 println!("suprnova: workflow worker shutting down ({}).", signal.as_str());
                 cancel.cancel();
                 match handle.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        eprintln!("Workflow worker error during drain: {e}");
-                        process_boot::exit_after_boot(1).await;
-                    }
-                    Err(e) => {
-                        eprintln!("Workflow worker task panicked during drain: {e}");
-                        process_boot::exit_after_boot(1).await;
-                    }
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(failed(format!("Workflow worker error during drain: {e}"))),
+                    Err(e) => Err(failed(format!(
+                        "Workflow worker task panicked during drain: {e}"
+                    ))),
                 }
             }
             res = &mut handle => {
                 match res {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        eprintln!("Workflow worker error: {e}");
-                        process_boot::exit_after_boot(1).await;
-                    }
-                    Err(e) => {
-                        eprintln!("Workflow worker task panicked: {e}");
-                        process_boot::exit_after_boot(1).await;
-                    }
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(failed(format!("Workflow worker error: {e}"))),
+                    Err(e) => Err(failed(format!("Workflow worker task panicked: {e}"))),
                 }
             }
         }
@@ -1743,9 +1787,9 @@ where
         max_jobs: Option<u64>,
         queues: Vec<String>,
         connection: Option<String>,
-    ) {
+    ) -> Result<(), FrameworkError> {
         let shutdown = Self::start_daemon();
-        Self::boot_or_exit("queue:work", boot, bootstrap_fn).await;
+        Self::boot_or_fail("queue:work", boot, bootstrap_fn).await?;
 
         // Resolved here as well as inside the worker: a connection nobody
         // registered has to stop the process before the banner promises a
@@ -1755,8 +1799,9 @@ where
         let (driver, connection) = match crate::queue::connections::target(&requested) {
             Ok(target) => (target.driver, target.label),
             Err(e) => {
-                eprintln!("suprnova: the queue worker cannot start: {e}");
-                process_boot::exit_after_boot(1).await;
+                return Err(failed(format!(
+                    "suprnova: the queue worker cannot start: {e}"
+                )));
             }
         };
 
@@ -1798,13 +1843,10 @@ where
 
         let cancel_for_worker = cancel.clone();
         let mut worker = tokio::spawn(async move {
-            if let Err(e) =
-                crate::queue::worker::run_worker_on(&connection, cfg, cancel_for_worker).await
-            {
-                eprintln!("suprnova: queue worker could not start: {e}");
-                process_boot::exit_after_boot(1).await;
-            }
+            crate::queue::worker::run_worker_on(&connection, cfg, cancel_for_worker).await
         });
+        let worker_failed =
+            |e: FrameworkError| failed(format!("suprnova: queue worker could not start: {e}"));
 
         // Either a stop signal fires (then we cancel and wait for in-flight
         // to settle) or the worker exits on its own (max_jobs reached).
@@ -1812,15 +1854,17 @@ where
             signal = shutdown.fired() => {
                 println!("suprnova: queue worker shutting down ({}).", signal.as_str());
                 cancel.cancel();
-                if let Err(e) = worker.await {
-                    eprintln!("suprnova: queue worker task error during drain: {e}");
-                    process_boot::exit_after_boot(1).await;
+                match worker.await {
+                    Ok(outcome) => outcome.map_err(worker_failed),
+                    Err(e) => Err(failed(format!(
+                        "suprnova: queue worker task error during drain: {e}"
+                    ))),
                 }
             }
             res = &mut worker => {
-                if let Err(e) = res {
-                    eprintln!("suprnova: queue worker task error: {e}");
-                    process_boot::exit_after_boot(1).await;
+                match res {
+                    Ok(outcome) => outcome.map_err(worker_failed),
+                    Err(e) => Err(failed(format!("suprnova: queue worker task error: {e}"))),
                 }
             }
         }
@@ -1841,42 +1885,36 @@ where
         queue: Option<String>,
         all: bool,
         connection: Option<String>,
-    ) {
+    ) -> Result<(), FrameworkError> {
         if !crate::queue::pausable_from_env() {
-            eprintln!("suprnova: queue pausing is currently disabled (QUEUE_PAUSABLE=false).");
-            std::process::exit(1);
+            return Err(failed(
+                "suprnova: queue pausing is currently disabled (QUEUE_PAUSABLE=false).",
+            ));
         }
-        let target = match resolve_pause_target(queue, all) {
-            Ok(t) => t,
-            Err(message) => {
-                eprintln!("suprnova: {message}");
-                std::process::exit(1);
-            }
-        };
-        Self::boot_or_exit("queue:pause", boot, bootstrap_fn).await;
+        let target = resolve_pause_target(queue, all)
+            .map_err(|message| failed(format!("suprnova: {message}")))?;
+        Self::boot_or_fail("queue:pause", boot, bootstrap_fn).await?;
         match target {
             PauseTarget::All => {
-                if let Err(e) = crate::queue::Queue::pause_all().await {
-                    eprintln!("suprnova: failed to pause all queues: {e}");
-                    process_boot::exit_after_boot(1).await;
-                }
+                crate::queue::Queue::pause_all()
+                    .await
+                    .map_err(|e| failed(format!("suprnova: failed to pause all queues: {e}")))?;
                 println!("Job processing on all queues across all connections has been paused.");
             }
             PauseTarget::Named(queue) => {
-                let connection = match Self::pause_connection(connection) {
-                    Ok(connection) => connection,
-                    Err(e) => {
-                        eprintln!("suprnova: {e}");
-                        process_boot::exit_after_boot(1).await;
-                    }
-                };
-                if let Err(e) = crate::queue::Queue::pause(&connection, &queue).await {
-                    eprintln!("suprnova: failed to pause queue [{connection}:{queue}]: {e}");
-                    process_boot::exit_after_boot(1).await;
-                }
+                let connection = Self::pause_connection(connection)
+                    .map_err(|e| failed(format!("suprnova: {e}")))?;
+                crate::queue::Queue::pause(&connection, &queue)
+                    .await
+                    .map_err(|e| {
+                        failed(format!(
+                            "suprnova: failed to pause queue [{connection}:{queue}]: {e}"
+                        ))
+                    })?;
                 println!("Job processing on queue [{connection}:{queue}] has been paused.");
             }
         }
+        Ok(())
     }
 
     /// `queue:failed`, `queue:retry`, `queue:forget`, `queue:flush` and
@@ -1891,23 +1929,20 @@ where
         boot: ProcessBoot,
         bootstrap_fn: Option<BootstrapFn>,
         command: FailedJobsCommand,
-    ) {
+    ) -> Result<(), FrameworkError> {
         let name = command.name();
-        Self::boot_or_exit(name, boot, bootstrap_fn).await;
-        match crate::queue::failed_console::run(command).await {
-            Ok(report) => {
-                for line in &report.lines {
-                    println!("{line}");
-                }
-                if !report.succeeded {
-                    process_boot::exit_after_boot(1).await;
-                }
-            }
-            Err(e) => {
-                eprintln!("suprnova: {name}: {e}");
-                process_boot::exit_after_boot(1).await;
-            }
+        Self::boot_or_fail(name, boot, bootstrap_fn).await?;
+        let report = crate::queue::failed_console::run(command)
+            .await
+            .map_err(|e| failed(format!("suprnova: {name}: {e}")))?;
+        for line in &report.lines {
+            println!("{line}");
         }
+        // The report printed above says what was not met.
+        if !report.succeeded {
+            return Err(FrameworkError::silent());
+        }
+        Ok(())
     }
 
     /// `queue:resume` (alias `queue:continue`): clear a queue's pause (or,
@@ -1921,21 +1956,15 @@ where
         queue: Option<String>,
         all: bool,
         connection: Option<String>,
-    ) {
-        let target = match resolve_pause_target(queue, all) {
-            Ok(t) => t,
-            Err(message) => {
-                eprintln!("suprnova: {message}");
-                std::process::exit(1);
-            }
-        };
-        Self::boot_or_exit("queue:resume", boot, bootstrap_fn).await;
+    ) -> Result<(), FrameworkError> {
+        let target = resolve_pause_target(queue, all)
+            .map_err(|message| failed(format!("suprnova: {message}")))?;
+        Self::boot_or_fail("queue:resume", boot, bootstrap_fn).await?;
         match target {
             PauseTarget::All => {
-                if let Err(e) = crate::queue::Queue::resume_all().await {
-                    eprintln!("suprnova: failed to resume all queues: {e}");
-                    process_boot::exit_after_boot(1).await;
-                }
+                crate::queue::Queue::resume_all()
+                    .await
+                    .map_err(|e| failed(format!("suprnova: failed to resume all queues: {e}")))?;
                 println!("Job processing on all queues across all connections has been resumed.");
             }
             PauseTarget::Named(queue) => {
@@ -1946,13 +1975,17 @@ where
                 // connection is registered again.
                 let connection = Self::pause_connection(connection.clone())
                     .unwrap_or_else(|_| connection.unwrap_or_default());
-                if let Err(e) = crate::queue::Queue::resume(&connection, &queue).await {
-                    eprintln!("suprnova: failed to resume queue [{connection}:{queue}]: {e}");
-                    process_boot::exit_after_boot(1).await;
-                }
+                crate::queue::Queue::resume(&connection, &queue)
+                    .await
+                    .map_err(|e| {
+                        failed(format!(
+                            "suprnova: failed to resume queue [{connection}:{queue}]: {e}"
+                        ))
+                    })?;
                 println!("Job processing on queue [{connection}:{queue}] has been resumed.");
             }
         }
+        Ok(())
     }
 
     /// The connection a `queue:pause` or `queue:resume` of one queue acts
@@ -2043,16 +2076,20 @@ where
         process_boot::boot_after_hook(boot).await
     }
 
-    /// [`Self::boot_process`], or report the failure and exit non-zero.
+    /// [`Self::boot_process`], with a failure as the error `command`
+    /// reports.
     ///
-    /// A failure comes after the application's hook ran, so the exit goes
-    /// through [`process_boot::exit_after_boot`]: the supervisors the hook
-    /// started are stopped and drained first.
-    async fn boot_or_exit(command: &str, boot: ProcessBoot, bootstrap_fn: Option<BootstrapFn>) {
-        if let Err(e) = Self::boot_process(boot, bootstrap_fn).await {
-            eprintln!("suprnova: {command} bootstrap error: {e}");
-            process_boot::exit_after_boot(1).await;
-        }
+    /// A failure comes after the application's hook ran; [`Self::run_cli`]
+    /// stops and drains the supervisors the hook started before it returns
+    /// the error.
+    async fn boot_or_fail(
+        command: &str,
+        boot: ProcessBoot,
+        bootstrap_fn: Option<BootstrapFn>,
+    ) -> Result<(), FrameworkError> {
+        Self::boot_process(boot, bootstrap_fn)
+            .await
+            .map_err(|e| failed(format!("suprnova: {command} bootstrap error: {e}")))
     }
 
     /// Run the boot hooks for an HTTP server process: the process-wide hook
@@ -2094,8 +2131,8 @@ where
         status: u16,
         except: Vec<String>,
         message: Option<String>,
-    ) {
-        Self::boot_or_exit("down", boot, bootstrap_fn).await;
+    ) -> Result<(), FrameworkError> {
+        Self::boot_or_fail("down", boot, bootstrap_fn).await?;
 
         let secret = match (secret, with_secret) {
             (Some(s), _) => Some(s),
@@ -2113,33 +2150,47 @@ where
             template: message,
         };
 
-        match maintenance::maintenance_mode().activate(&payload).await {
-            Ok(()) => {
-                println!("Application is now in maintenance mode.");
-                if let Some(secret) = secret {
-                    println!("Bypass maintenance mode by visiting: /{secret}");
-                }
-            }
-            Err(e) => {
-                eprintln!("suprnova: failed to enter maintenance mode: {e}");
-                process_boot::exit_after_boot(1).await;
-            }
+        maintenance::maintenance_mode()
+            .activate(&payload)
+            .await
+            .map_err(|e| failed(format!("suprnova: failed to enter maintenance mode: {e}")))?;
+        println!("Application is now in maintenance mode.");
+        if let Some(secret) = secret {
+            println!("Bypass maintenance mode by visiting: /{secret}");
         }
+        Ok(())
     }
 
     /// `up`: clear maintenance state via the configured driver, after the
     /// same boot `down` runs.
-    async fn run_up(boot: ProcessBoot, bootstrap_fn: Option<BootstrapFn>) {
-        Self::boot_or_exit("up", boot, bootstrap_fn).await;
-
-        match maintenance::maintenance_mode().deactivate().await {
-            Ok(()) => println!("Application is now live."),
-            Err(e) => {
-                eprintln!("suprnova: failed to bring the application up: {e}");
-                process_boot::exit_after_boot(1).await;
-            }
-        }
+    async fn run_up(
+        boot: ProcessBoot,
+        bootstrap_fn: Option<BootstrapFn>,
+    ) -> Result<(), FrameworkError> {
+        Self::boot_or_fail("up", boot, bootstrap_fn).await?;
+        maintenance::maintenance_mode()
+            .deactivate()
+            .await
+            .map_err(|e| failed(format!("suprnova: failed to bring the application up: {e}")))?;
+        println!("Application is now live.");
+        Ok(())
     }
+}
+
+/// What [`Application::run_cli`] does with a failure besides returning it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Failures {
+    /// Print it on stderr, as [`Application::run`] reports it before the
+    /// process exits.
+    Print,
+    /// Leave it to the caller of [`Application::run_with_args`].
+    Return,
+}
+
+/// A command's failure, carrying the text [`Application::run`] prints for
+/// it.
+fn failed(message: impl Into<String>) -> FrameworkError {
+    FrameworkError::internal(message)
 }
 
 /// One line of `queue:work` output for a queue that paused or resumed.
@@ -2776,7 +2827,9 @@ mod process_exit_tests {
                 }
             });
             let cli = Cli::try_parse_from(["app", "schedule:list"]).expect("the argv parses");
-            app.run_cli(cli).await;
+            app.run_cli(cli, Failures::Print)
+                .await
+                .expect("schedule:list succeeds");
         });
         assert!(
             STARTED.load(Ordering::SeqCst),
@@ -2888,7 +2941,7 @@ mod process_exit_tests {
                 );
             });
             let cli = Cli::try_parse_from(["app", command.as_str()]).expect("the argv parses");
-            app.run_cli(cli).await;
+            app.run_cli_or_exit(cli).await;
         });
         panic!("{command} was expected to fail and exit the process");
     }
@@ -3638,10 +3691,8 @@ mod tests {
     /// being set.
     ///
     /// Without the empty-migrations short-circuit in `run_migrations_silent`,
-    /// `get_database_connection()` calls `std::process::exit(1)` when the
-    /// env var is missing - that would terminate the entire test binary,
-    /// not just fail this single test, so a passing run is itself the
-    /// regression signal.
+    /// `database_url()` returns an error when the env var is missing, which
+    /// the `expect` below turns into this test's failure.
     ///
     /// The `remove_var` is load-bearing: if the ambient environment has
     /// `DATABASE_URL` set, the unfixed path would skip the exit and
@@ -3659,10 +3710,9 @@ mod tests {
         }
 
         // With the fix in place this call returns immediately because
-        // `NoMigrator::migrations()` is empty; without the fix this would
-        // terminate the test binary via `std::process::exit(1)` inside
-        // `get_database_connection`.
-        Application::<NoMigrator>::run_migrations_silent::<NoMigrator>().await;
+        // `NoMigrator::migrations()` is empty; without the fix it would
+        // return the missing-`DATABASE_URL` error.
+        let outcome = Application::<NoMigrator>::run_migrations_silent::<NoMigrator>().await;
 
         // SAFETY: same justification as above.
         unsafe {
@@ -3670,6 +3720,7 @@ mod tests {
                 env::set_var("DATABASE_URL", prior);
             }
         }
+        outcome.expect("an application without migrations needs no DATABASE_URL to serve");
     }
 
     /// `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT` parsing: unset, empty, and

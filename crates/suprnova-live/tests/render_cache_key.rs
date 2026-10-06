@@ -46,6 +46,7 @@ fn input(query: &[(&str, &str)]) -> RenderKeyInput {
         build: BuildId::parse("build-1").expect("build"),
         epoch: 1,
         variance: VarianceDescriptor::new(),
+        root: String::new(),
     }
 }
 
@@ -222,6 +223,7 @@ fn plain() -> RenderKeyInput {
         build: BuildId::parse("build-7").expect("build id"),
         epoch: 3,
         variance: VarianceDescriptor::new(),
+        root: String::new(),
     }
 }
 

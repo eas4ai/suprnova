@@ -126,63 +126,12 @@ struct LocalMigrator;
 impl MigratorTrait for LocalMigrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
         vec![
-            Box::new(CreateSessionsTable),
+            Box::new(suprnova::session::migrations::CreateSessionsTable::new(
+                suprnova::session::migrations::SessionUserKey::Integer,
+            )),
             Box::new(CreateRememberTokensTable),
         ]
     }
-}
-
-struct CreateSessionsTable;
-
-impl MigrationName for CreateSessionsTable {
-    fn name(&self) -> &str {
-        "m20240101_000001_create_sessions_table"
-    }
-}
-
-#[async_trait::async_trait]
-impl MigrationTrait for CreateSessionsTable {
-    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .create_table(
-                Table::create()
-                    .table(Sessions::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(Sessions::Id)
-                            .string()
-                            .not_null()
-                            .primary_key(),
-                    )
-                    .col(ColumnDef::new(Sessions::UserId).string().null())
-                    .col(ColumnDef::new(Sessions::Payload).text().not_null())
-                    .col(ColumnDef::new(Sessions::CsrfToken).string().not_null())
-                    .col(
-                        ColumnDef::new(Sessions::LastActivity)
-                            .timestamp()
-                            .not_null()
-                            .default(Expr::current_timestamp()),
-                    )
-                    .to_owned(),
-            )
-            .await
-    }
-
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .drop_table(Table::drop().table(Sessions::Table).to_owned())
-            .await
-    }
-}
-
-#[derive(DeriveIden)]
-enum Sessions {
-    Table,
-    Id,
-    UserId,
-    Payload,
-    CsrfToken,
-    LastActivity,
 }
 
 struct CreateRememberTokensTable;

@@ -2780,6 +2780,17 @@ impl<M> Builder<M> {
         self.skip_all_scopes = true;
         self
     }
+
+    /// Lift the soft-delete filter, as `with_trashed()` does, on a builder
+    /// whose model may not soft-delete: a route binding asks for trashed
+    /// rows without knowing whether the model has any. On a model without
+    /// soft deletes there is no filter to lift, and nothing changes.
+    pub(crate) fn lift_soft_deletes(mut self) -> Self {
+        if !self.global_scopes_disabled.contains(&"soft_deletes") {
+            self.global_scopes_disabled.push("soft_deletes");
+        }
+        self
+    }
 }
 
 // ---- SQL rendering -- placeholder dialect --------------------------------
@@ -3141,6 +3152,24 @@ fn render_date_part(
     })
 }
 
+/// Placeholders for every string a `*_type` column may hold for the model
+/// `morph_type` names (its `morph_type` and its `morph_aliases`), with
+/// their values pushed onto `values`.
+fn morph_type_list(
+    backend: DbBackend,
+    morph_type: &str,
+    values: &mut Vec<SeaValue>,
+    n: &mut usize,
+) -> Result<String, FrameworkError> {
+    let mut placeholders = Vec::new();
+    for name in crate::eloquent::relations::morph_registry::morph_type_names(morph_type) {
+        *n += 1;
+        placeholders.push(placeholder(backend, *n)?);
+        values.push(SeaValue::String(Some(name)));
+    }
+    Ok(placeholders.join(", "))
+}
+
 /// Render an `EXISTS (...)` / `NOT EXISTS (...)` correlated subquery.
 ///
 /// Three join shapes, dispatched on which slots the spec carries:
@@ -3252,12 +3281,13 @@ fn render_exists(
             parent = parent,
             pk = spec.parent_key,
         ));
+        // A morph child (MorphOne / MorphMany) belongs to the parent under
+        // its `morph_type` or any of its `morph_aliases`, as the relation's
+        // own reads accept.
         if !spec.morph_type_column.is_empty() && !spec.morph_type_value.is_empty() {
-            *n += 1;
-            let ph = placeholder(backend, *n)?;
-            values.push(SeaValue::String(Some(spec.morph_type_value.clone())));
+            let list = morph_type_list(backend, &spec.morph_type_value, values, n)?;
             where_parts.push(format!(
-                "{target}.{col} = {ph}",
+                "{target}.{col} IN ({list})",
                 target = spec.target_table,
                 col = spec.morph_type_column,
             ));

@@ -50,7 +50,10 @@ DB_LOGGING=false
 SESSION_LIFETIME=120
 SESSION_COOKIE=suprnova_session
 SESSION_SECURE=false
-SESSION_PATH=/
+# Cookie path. Unset, the session and CSRF cookies take the public root
+# of each request: `/`, or `/billing` behind a proxy that serves the app
+# there. Set it only to pin one path.
+# SESSION_PATH=/
 SESSION_SAME_SITE=Lax
 # Cookie-name prefix for the session and remember-me cookies.
 # "__Host-" is the production hardening: the browser refuses the cookie

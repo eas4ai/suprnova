@@ -16,7 +16,7 @@
 //!
 //! ```rust,no_run
 //! use suprnova::http::text;
-//! use suprnova::{Response, RouteParam, authorize, handler};
+//! use suprnova::{Response, authorize, handler};
 //!
 //! #[suprnova::model(table = "posts")]
 //! pub struct Post {
@@ -25,7 +25,7 @@
 //!
 //! #[handler]
 //! #[authorize("update", post)]
-//! pub async fn update(post: RouteParam<Post>) -> Response {
+//! pub async fn update(post: Post) -> Response {
 //!     text(format!("updated {}", post.id))
 //! }
 //! # fn main() {}
@@ -35,7 +35,7 @@
 //!
 //! ```compile_fail
 //! use suprnova::http::text;
-//! use suprnova::{Response, RouteParam, authorize, handler};
+//! use suprnova::{Response, authorize, handler};
 //!
 //! #[suprnova::model(table = "posts")]
 //! pub struct Post {
@@ -44,7 +44,7 @@
 //!
 //! #[handler]
 //! #[authorize("update", post)]
-//! pub async fn update(article: RouteParam<Post>) -> Response {
+//! pub async fn update(article: Post) -> Response {
 //!     text(format!("updated {}", article.id))
 //! }
 //! # fn main() {}

@@ -130,6 +130,10 @@ impl Config {
                 crate::session::driver::database::SESSION_TABLE_RULE
             )));
         }
+        // `LARAVEL_SHARED_DATABASE` changes the password hash format and the
+        // default queue, so a value that is neither on nor off stops boot
+        // instead of quietly reading as off.
+        crate::laravel::LaravelDatabase::validate_environment()?;
         // Live's limits (`LIVE_MAX_REQUEST_BYTES` and the rest), checked here
         // so a bad value aborts boot with its key named, rather than when the
         // first Live route prepares the runtime.

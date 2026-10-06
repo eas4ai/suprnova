@@ -454,7 +454,7 @@ async fn a_failing_read_denies_and_is_logged_once_without_the_user_id() {
         "the permission answers while the read works"
     );
 
-    db.execute_unprepared("DROP TABLE model_permissions")
+    db.execute_unprepared("DROP TABLE model_has_permissions")
         .await
         .unwrap();
 
@@ -570,7 +570,7 @@ async fn a_read_that_failed_inside_a_rolled_back_transaction_is_not_kept() {
         let outcome: Result<(), FrameworkError> = DB::transaction(move |_tx| {
             Box::pin(async move {
                 // Every permission read fails until the rollback restores it.
-                DB::statement("DROP TABLE model_permissions", Vec::new()).await?;
+                DB::statement("DROP TABLE model_has_permissions", Vec::new()).await?;
                 let allowed = Gate::allows_async(DIRECT, &checking, &elsewhere()).await;
                 *seen_inside.lock().unwrap() = Some(allowed);
                 Err(FrameworkError::internal("roll the drop back"))

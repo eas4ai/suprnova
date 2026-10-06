@@ -59,7 +59,9 @@ async fn chain_runs_in_order() {
         queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
-    run_worker(driver.clone(), cfg, cancel).await;
+    run_worker(driver.clone(), cfg, cancel)
+        .await
+        .expect("the worker starts");
 
     let seen = ORDER.lock().unwrap().clone();
     assert_eq!(seen, vec![1, 2, 3], "chain must execute in order");
@@ -115,7 +117,9 @@ async fn chain_stops_after_a_failing_link() {
         queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
-    run_worker(driver.clone(), cfg, cancel).await;
+    run_worker(driver.clone(), cfg, cancel)
+        .await
+        .expect("the worker starts");
 
     // Step 2 dead-letters; step 3 never gets enqueued (the worker doesn't
     // propagate the tail on failure).
@@ -294,7 +298,9 @@ async fn chain_dispatch_uses_bound_driver_not_global() {
         queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
-    run_worker(bound.clone(), cfg, cancel).await;
+    run_worker(bound.clone(), cfg, cancel)
+        .await
+        .expect("the worker starts");
 
     let seen = CHAIN_DRIVER_TAG.lock().unwrap().clone();
     assert_eq!(

@@ -169,10 +169,18 @@ where
         // type-string in `serde_json::Value::String` so the inner
         // WhereTerm storage stays homogeneous with the rest of the
         // dual-API.
-        let type_val = serde_json::Value::String(morph_type_value.clone());
+        //
+        // Every name the parent answers to: its `morph_type` and each of
+        // its `morph_aliases`, so a row a Laravel application wrote under
+        // either belongs to it.
+        let type_vals: Vec<serde_json::Value> =
+            crate::eloquent::relations::morph_registry::morph_type_names(&morph_type_value)
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect();
         let inner = R::query()
             .filter(id_col.as_str(), parent_key_value.clone())
-            .filter(type_col.as_str(), type_val);
+            .filter_in(type_col.as_str(), type_vals);
         Self {
             parent_key_value,
             morph_name,
@@ -843,4 +851,55 @@ pub const fn assert_morph_id_column_holds_key<Column, Key, Child, Target, Relati
 where
     Column: MorphIdColumnHoldsKey<Key, Child, Target, Relation>,
 {
+}
+
+/// A scoped child through a `MorphMany` is one of the rows its own
+/// pre-filtered builder reads: the `<name>_id` and `<name>_type` columns
+/// both name the parent.
+impl<L, R> super::RouteChildRelation<R> for MorphMany<L, R>
+where
+    L: EloquentModel,
+    R: Model,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    fn __route_child_query(self) -> Result<Builder<R>, FrameworkError> {
+        Ok(self.inner)
+    }
+}
+
+/// A scoped child through a `MorphOne` is the row the `MorphMany` inside
+/// it reads.
+impl<L, R> super::RouteChildRelation<R> for MorphOne<L, R>
+where
+    L: EloquentModel,
+    R: Model,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    fn __route_child_query(self) -> Result<Builder<R>, FrameworkError> {
+        super::RouteChildRelation::__route_child_query(self.inner)
+    }
 }

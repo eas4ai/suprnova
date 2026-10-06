@@ -1087,3 +1087,82 @@ fn reg_030_the_feature_map_extractor_records_return_types() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// Scans a component whose only file is the view `html`, against the
+/// embedded allowlist.
+fn scan_view(html: &str) -> ScanReport {
+    let files = vec![("widget.html".to_string(), html.as_bytes().to_vec())];
+    let component = ComponentFiles {
+        namespace: "acme",
+        directory: "widget",
+        files: &files,
+        dependency_modules: &[],
+        importable_views: &[],
+        importable_scripts: &[],
+    };
+    scan_component(&component, allowlist::embedded().expect("allowlist")).expect("scan")
+}
+
+/// REG-031, PFX-011: `suprnova::url::root()` is Suprnova API that carries no
+/// capability.
+#[test]
+fn reg_031_url_root_is_admitted_and_carries_no_capability() {
+    let list = allowlist::embedded().expect("the embedded allowlist parses");
+    assert_eq!(capability_of(list, "suprnova::url::root"), None);
+}
+
+/// REG-031: a URL attribute may hold `suprnova::url::root()` followed
+/// directly by constant text that starts with exactly one `/`.
+#[test]
+fn reg_031_url_root_before_a_rooted_constant_path_is_admitted() {
+    for view in [
+        r#"<a href="{{ suprnova::url::root() }}/x">x</a>"#,
+        r#"<a href="{{ suprnova::url::root() }}/">home</a>"#,
+        r#"<img src="{{ suprnova::url::root() }}/suprnova-ui/x/x.png" alt="">"#,
+        r#"<a href="{{ suprnova::url::root() }}/posts/{{ id }}">post</a>"#,
+        r#"<a href="{{ suprnova::url::root() }}/search?q=a#top">search</a>"#,
+        r#"{% let home = suprnova::url::root() %}<a href="{{ home }}/x">x</a>"#,
+    ] {
+        let report = scan_view(&format!("{view}\n"));
+        assert!(report.accepted(), "{view}: {:?}", report.findings);
+    }
+}
+
+/// REG-031: anything else after `suprnova::url::root()` is refused: a second
+/// slash or a backslash, in any spelling a browser reads, no slash, a value,
+/// or nothing. A template local keeps what it was bound to, and a macro
+/// argument cannot carry the root into a URL attribute, so neither writes
+/// it there without the rooted constant.
+#[test]
+fn reg_031_url_root_before_anything_but_a_rooted_constant_is_refused() {
+    for view in [
+        r#"<a href="{{ suprnova::url::root() }}//evil.example/x">x</a>"#,
+        r#"<a href="{{ suprnova::url::root() }}/\evil.example">x</a>"#,
+        r#"<a href="{{ suprnova::url::root() }}/&#47;evil.example">x</a>"#,
+        r#"<a href="{{ suprnova::url::root() }}/&#9;/evil.example">x</a>"#,
+        r#"<a href="{{ suprnova::url::root() }}/&#x5c;evil.example">x</a>"#,
+        r#"<a href="{{ suprnova::url::root() }}evil.example">x</a>"#,
+        r#"<a href="{{ suprnova::url::root() }}{{ value }}">x</a>"#,
+        r#"<a href="{{ suprnova::url::root() }}">x</a>"#,
+        r#"<a href="https://evil.example{{ suprnova::url::root() }}/x">x</a>"#,
+        r#"<a href="/{{ suprnova::url::root() }}/x">x</a>"#,
+        r#"{% let home = suprnova::url::root() %}<a href="{{ home }}">x</a>"#,
+        r#"{% let home = suprnova::url::root() %}<a href="{{ home }}//evil.example/x">x</a>"#,
+        r#"{% if let home = suprnova::url::root() %}<a href="{{ home }}">x</a>{% endif %}"#,
+        r#"{% match suprnova::url::root() %}{% when home %}<a href="{{ home }}">x</a>{% endmatch %}"#,
+        r#"{% for part in suprnova::url::root() %}<a href="{{ part }}/x">x</a>{% endfor %}"#,
+        r#"{% macro link(href) %}<a href="{{ href }}">x</a>{% endmacro %}{% call link(suprnova::url::root()) %}{% endcall %}"#,
+        r#"{% macro link(href) %}<a href="{{ href }}">x</a>{% endmacro %}{% let home = suprnova::url::root() %}{% call link(home) %}{% endcall %}"#,
+        r#"{% macro link(href = suprnova::url::root()) %}<a href="{{ href }}">x</a>{% endmacro %}{% call link() %}{% endcall %}"#,
+    ] {
+        let report = scan_view(&format!("{view}\n"));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.check == "view-url" && finding.line == Some(1)),
+            "{view} was not refused: {:?}",
+            report.findings
+        );
+    }
+}

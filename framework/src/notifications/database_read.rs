@@ -38,10 +38,28 @@ pub struct StoredNotification {
     pub data: serde_json::Value,
     /// `Some(t)` iff the recipient has marked the notification read.
     pub read_at: Option<chrono::NaiveDateTime>,
-    /// Timestamp at which the row was inserted.
-    pub created_at: chrono::NaiveDateTime,
-    /// Timestamp at which the row was last mutated.
-    pub updated_at: chrono::NaiveDateTime,
+    /// Timestamp at which the row was inserted. Laravel's table allows
+    /// `NULL` here.
+    pub created_at: Option<chrono::NaiveDateTime>,
+    /// Timestamp at which the row was last mutated. Laravel's table allows
+    /// `NULL` here.
+    pub updated_at: Option<chrono::NaiveDateTime>,
+}
+
+/// A key column as text, whatever type the table gave it: `uuid` or text
+/// for `id`, an integer, `uuid` or text for `notifiable_id`.
+fn key_text(res: &QueryResult, column: &str) -> Result<String, sea_orm::DbErr> {
+    if let Ok(text) = res.try_get::<String>("", column) {
+        return Ok(text);
+    }
+    if let Ok(number) = res.try_get::<i64>("", column) {
+        return Ok(number.to_string());
+    }
+    if let Ok(number) = res.try_get::<u64>("", column) {
+        return Ok(number.to_string());
+    }
+    res.try_get::<uuid::Uuid>("", column)
+        .map(|uuid| uuid.to_string())
 }
 
 impl FromQueryResult for StoredNotification {
@@ -50,26 +68,40 @@ impl FromQueryResult for StoredNotification {
         let data: serde_json::Value =
             serde_json::from_str(&data_text).map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
         Ok(Self {
-            id: res.try_get("", "id")?,
+            id: key_text(res, "id")?,
             type_name: res.try_get("", "type")?,
             notifiable_type: res.try_get("", "notifiable_type")?,
-            notifiable_id: res.try_get("", "notifiable_id")?,
+            notifiable_id: key_text(res, "notifiable_id")?,
             data,
-            // The migration creates these with `.timestamp()`: `TIMESTAMP`
-            // on MySQL and MariaDB, which a plain `NaiveDateTime` cannot be
-            // decoded from. A read time that fails to decode is an error,
-            // not an unread notification.
+            // Laravel's migration creates these as `TIMESTAMP` on MySQL and
+            // MariaDB, which a plain `NaiveDateTime` cannot be decoded from.
+            // A read time that fails to decode is an error, not an unread
+            // notification.
             read_at: res
                 .try_get::<Option<StoredDateTime>>("", "read_at")?
                 .map(|read_at| read_at.0),
-            created_at: res.try_get::<StoredDateTime>("", "created_at")?.0,
-            updated_at: res.try_get::<StoredDateTime>("", "updated_at")?.0,
+            created_at: res
+                .try_get::<Option<StoredDateTime>>("", "created_at")?
+                .map(|at| at.0),
+            updated_at: res
+                .try_get::<Option<StoredDateTime>>("", "updated_at")?
+                .map(|at| at.0),
         })
     }
 }
 
 const COLS: &str =
     "id, type, notifiable_type, notifiable_id, data, read_at, created_at, updated_at";
+
+/// `notifiable_id` bound as its column takes it.
+fn key(db: &DatabaseConnection, notifiable_id: &str) -> Value {
+    crate::notifications::morph_key_value(db.get_database_backend(), notifiable_id)
+}
+
+/// A notification id bound as its column takes it.
+fn id_value(db: &DatabaseConnection, id: &str) -> Value {
+    crate::notifications::uuid_value(db.get_database_backend(), id)
+}
 
 async fn run(
     db: &DatabaseConnection,
@@ -117,7 +149,12 @@ pub async fn all_for(
          ORDER BY created_at DESC",
         recipient_predicate(db, 1)?
     );
-    run(db, &sql, vec![notifiable_type.into(), notifiable_id.into()]).await
+    run(
+        db,
+        &sql,
+        vec![notifiable_type.into(), key(db, notifiable_id)],
+    )
+    .await
 }
 
 /// Unread notifications (`read_at IS NULL`) for a recipient, newest first.
@@ -133,7 +170,12 @@ pub async fn unread_for(
          ORDER BY created_at DESC",
         recipient_predicate(db, 1)?
     );
-    run(db, &sql, vec![notifiable_type.into(), notifiable_id.into()]).await
+    run(
+        db,
+        &sql,
+        vec![notifiable_type.into(), key(db, notifiable_id)],
+    )
+    .await
 }
 
 /// Read notifications (`read_at IS NOT NULL`) for a recipient, newest first.
@@ -149,13 +191,18 @@ pub async fn read_for(
          ORDER BY created_at DESC",
         recipient_predicate(db, 1)?
     );
-    run(db, &sql, vec![notifiable_type.into(), notifiable_id.into()]).await
+    run(
+        db,
+        &sql,
+        vec![notifiable_type.into(), key(db, notifiable_id)],
+    )
+    .await
 }
 
 /// Mark a single notification row as read. No-op if `read_at` is already set
 /// (matches Laravel's `markAsRead` idempotence).
 pub async fn mark_as_read(db: &DatabaseConnection, id: &str) -> Result<(), FrameworkError> {
-    let now = crate::clock::now().naive_utc();
+    let now = whole_seconds_now();
     let backend = db.get_database_backend();
     let stmt = Statement::from_sql_and_values(
         backend,
@@ -166,7 +213,7 @@ pub async fn mark_as_read(db: &DatabaseConnection, id: &str) -> Result<(), Frame
             placeholder(backend, 2)?,
             placeholder(backend, 3)?
         ),
-        vec![now.into(), now.into(), id.into()],
+        vec![now.into(), now.into(), id_value(db, id)],
     );
     db.execute_raw(stmt)
         .await
@@ -177,7 +224,7 @@ pub async fn mark_as_read(db: &DatabaseConnection, id: &str) -> Result<(), Frame
 /// Mark a single notification row as unread. No-op if `read_at` is already
 /// NULL (matches Laravel's `markAsUnread` idempotence).
 pub async fn mark_as_unread(db: &DatabaseConnection, id: &str) -> Result<(), FrameworkError> {
-    let now = crate::clock::now().naive_utc();
+    let now = whole_seconds_now();
     let backend = db.get_database_backend();
     let stmt = Statement::from_sql_and_values(
         backend,
@@ -187,7 +234,7 @@ pub async fn mark_as_unread(db: &DatabaseConnection, id: &str) -> Result<(), Fra
             placeholder(backend, 1)?,
             placeholder(backend, 2)?
         ),
-        vec![now.into(), id.into()],
+        vec![now.into(), id_value(db, id)],
     );
     db.execute_raw(stmt)
         .await
@@ -203,7 +250,7 @@ pub async fn mark_all_as_read(
     notifiable_type: &str,
     notifiable_id: &str,
 ) -> Result<u64, FrameworkError> {
-    let now = crate::clock::now().naive_utc();
+    let now = whole_seconds_now();
     let backend = db.get_database_backend();
     let stmt = Statement::from_sql_and_values(
         backend,
@@ -218,7 +265,7 @@ pub async fn mark_all_as_read(
             now.into(),
             now.into(),
             notifiable_type.into(),
-            notifiable_id.into(),
+            key(db, notifiable_id),
         ],
     );
     let res = db
@@ -241,11 +288,20 @@ pub async fn delete_for(
             "DELETE FROM notifications WHERE {}",
             recipient_predicate(db, 1)?
         ),
-        vec![notifiable_type.into(), notifiable_id.into()],
+        vec![notifiable_type.into(), key(db, notifiable_id)],
     );
     let res = db
         .execute_raw(stmt)
         .await
         .map_err(|e| FrameworkError::internal(format!("delete_for: {e}")))?;
     Ok(res.rows_affected())
+}
+
+/// The current time at whole seconds, the precision of Laravel's
+/// timestamp columns.
+fn whole_seconds_now() -> chrono::NaiveDateTime {
+    let now = crate::clock::now();
+    chrono::DateTime::<chrono::Utc>::from_timestamp(now.timestamp(), 0)
+        .unwrap_or(now)
+        .naive_utc()
 }

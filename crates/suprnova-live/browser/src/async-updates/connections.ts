@@ -15,14 +15,14 @@ import type {
   DocumentTransportKey,
   SubscriptionState,
 } from "./types.js";
+import { reservedRoutePath } from "../reserved-routes.js";
 
 const MAX_LOGICAL_SUBSCRIPTIONS = 256;
 const MAX_PENDING_HANDSHAKES_PER_ORIGIN = 1_024;
 const MAX_WEBSOCKET_ACK_BYTES = 512;
 // Reserved versioned routes of the framework host: one SSE reader per document
-// transport and one same-origin WebSocket per document transport.
-const ASYNC_EVENTS_PATH = "/__live/async/events";
-const ASYNC_SOCKET_PATH = "/__live/async/socket";
+// transport and one same-origin WebSocket per document transport, at
+// `async/events` and `async/socket` under the page's reserved route root.
 const WEBSOCKET_CONTROL_NONCE = /^[0-9a-z]{16}$/u;
 const SSE_CONNECTION_BRAND = Symbol("suprnova.live.async.sse.connection");
 const WEBSOCKET_ACK_LIMITS: CanonicalLimits = Object.freeze({
@@ -563,7 +563,7 @@ class NativeEventSourceAdapter implements EventSourcePort {
       membershipTimeoutMs,
       sseConnectionHandle(),
     );
-    const url = new URL(ASYNC_EVENTS_PATH, request.key.origin).href;
+    const url = new URL(reservedRoutePath("async/events"), request.key.origin).href;
     this.#native = create(url, Object.freeze({ withCredentials: true }));
     setHandler(this.#native, "onopen", () => {
       if (!this.#closed) request.opened();
@@ -629,7 +629,7 @@ class FetchEventSourceAdapter implements EventSourcePort {
     if (authorization.kind !== "bearer" || authorization.credential.length === 0) {
       throw new Error("async_transport_authorization_invalid");
     }
-    const url = new URL(ASYNC_EVENTS_PATH, request.key.origin);
+    const url = new URL(reservedRoutePath("async/events"), request.key.origin);
     const headers = new Headers({
       Accept: "text/event-stream",
       Authorization: `SuprnovaAsync ${authorization.credential}`,
@@ -735,7 +735,7 @@ class BrowserWebSocketAdapter implements WebSocketPort {
     this.#request = request;
     this.#timers = timers;
     this.#timeoutMs = timeoutMs;
-    const url = new URL(ASYNC_SOCKET_PATH, request.key.origin);
+    const url = new URL(reservedRoutePath("async/socket"), request.key.origin);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     this.#native = create(url.href);
     setHandler(this.#native, "onopen", () => {

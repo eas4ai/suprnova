@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import { useForm } from '@inertiajs/vue3'
+import { useForm, usePage } from '@inertiajs/vue3'
+
+// The public root the server shares with every page (`RootShare`): empty
+// at the host root, `/billing` behind a proxy that serves the app there.
+// Every URL this page posts to or links is built from it, so one build
+// runs at both.
+const { root } = usePage<{ root: string }>().props
 
 // Validation errors arrive through the form: a failed submission is a
 // `303` back to this page with the errors flashed, and the Inertia client
@@ -13,7 +19,7 @@ const form = useForm({
 })
 
 function submit() {
-  form.post('/register')
+  form.post(`${root}/register`)
 }
 </script>
 
@@ -104,7 +110,7 @@ function submit() {
         </div>
 
         <div class="text-center">
-          <a href="/login" class="text-indigo-600 hover:text-indigo-500">
+          <a :href="`${root}/login`" class="text-indigo-600 hover:text-indigo-500">
             Already have an account? Sign in
           </a>
         </div>

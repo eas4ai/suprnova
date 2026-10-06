@@ -29,7 +29,7 @@ use std::sync::Arc;
 use suprnova::{
     bind, global_middleware, singleton, App, Auth, AuthConfig, AuthManager, CsrfMiddleware,
     EloquentUserProvider, Frontend, IncludeMiddleware, Inertia, InertiaConfig, LocaleMiddleware,
-    LocaleShare, OriginPolicy, SessionConfig, SessionMiddleware, DB,
+    LocaleShare, OriginPolicy, RootShare, SessionConfig, SessionMiddleware, DB,
 };
 
 use crate::middleware;
@@ -204,8 +204,11 @@ pub fn register_http_stack() {
     // ignore include/fieldset query parameters.
     global_middleware!(IncludeMiddleware);
 
-    // Inertia shared data: the `lang` prop (active locale, fallback, and
-    // where to fetch its Fluent catalog) on every Inertia response. The
-    // frontend kit's `lib/lang.ts` wrapper reads this via `initLang(page)`.
-    App::register_inertia_shared(Arc::new(LocaleShare));
+    // Inertia shared data on every Inertia response: the `root` prop, the
+    // public root every page builds its URLs from, so the same frontend
+    // build runs at `/` and behind a proxy that serves the app under a
+    // path prefix; and the `lang` prop (active locale, fallback, and where
+    // to fetch its Fluent catalog), which the frontend kit's `lib/lang.ts`
+    // wrapper reads via `initLang(page)`.
+    App::register_inertia_shared(Arc::new(RootShare::around(Arc::new(LocaleShare))));
 }

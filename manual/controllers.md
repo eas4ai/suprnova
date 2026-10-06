@@ -8,11 +8,11 @@ unit, and the `#[handler]` attribute glues it to the routing macros.
 
 ```rust
 use suprnova::{handler, json_response, Response};
-use crate::models::user;
+use crate::models::User;
 
 // GET /users/{user}
 #[handler]
-pub async fn show(user: user::Model) -> Response {
+pub async fn show(user: User) -> Response {
     json_response!({
         "id": user.id,
         "name": user.name,
@@ -59,20 +59,28 @@ becomes `order_item.rs`.
 
 ## The `#[handler]` attribute
 
-The macro classifies each parameter's type and generates the matching
-extractor. Four categories:
+The macro generates the matching extractor for each parameter. Four
+categories:
 
 | Parameter type | Extracted via | Failure mode |
 |---|---|---|
 | `Request` | passes the request through unchanged | - |
 | `i32`, `i64`, `u32`, `u64`, `usize`, `String` | `FromParam` - parses the route param of the same name | 400 on parse failure, 400 on missing |
-| `T: AutoRouteBinding` (any Eloquent `Model`) | parses the param as the model's primary key, loads the row | 400 on parse failure, 404 if not found |
+| `T: RouteBinding` (every `#[suprnova::model]` struct) | binds the route param of the same name, matching the model's route key | 404 if the value does not parse or matches no row |
 | Anything else (`T: FromRequest`) | calls `T::from_request(req)` - typically a `#[derive(FormRequest)]` validator | whatever `from_request` returns; 422 for validation errors |
 
-The macro runs the extractions in declaration order, so the body of
-your function sees fully-typed values. If any extraction fails, the
-error short-circuits via `?` and the handler body never runs. A handler
-with `#[authorize]` changes the order; see [Authorization](#authorization).
+The macro tells a path value and `Request` by their spelling. For any
+other type the generated code chooses at compile time: a type that
+implements `RouteBinding` binds, and any other reads the body. A generic
+argument always reads the body.
+
+The router binds every bound argument first, in path order, after the
+route's middleware and before the handler, so a missing row is a 404
+before the form is read. The other arguments are extracted in
+declaration order. If any extraction fails, the error short-circuits via
+`?` and the handler body never runs. A handler with `#[authorize]` changes
+the order; see [Authorization](#authorization). One argument at most may
+read the request body; the router refuses a handler with two at startup.
 
 ### Path parameters
 
@@ -100,16 +108,16 @@ the parameter and target type.
 
 ### Route model binding
 
-`Eloquent` models implement `AutoRouteBinding` automatically. Declare
-the model as an argument and the framework loads it:
+Every `#[suprnova::model]` struct implements `RouteBinding`. Declare the
+model as an argument and the router loads it:
 
 ```rust
 use suprnova::{handler, json_response, Response};
-use crate::models::user;
+use crate::models::User;
 
 // Route: get!("/users/{user}", controllers::user::show)
 #[handler]
-pub async fn show(user: user::Model) -> Response {
+pub async fn show(user: User) -> Response {
     json_response!({
         "id": user.id,
         "name": user.name,
@@ -119,12 +127,12 @@ pub async fn show(user: user::Model) -> Response {
 ```
 
 The route placeholder name (`{user}`) and the argument name (`user`)
-must match. The framework parses the param string as the model's
-primary-key type, calls `Entity::find_by_pk`, and returns 404 if the
-row is missing. Any `#[suprnova::model]` struct binds automatically;
-the `route_binding!` macro stays available for hand-rolled SeaORM
-entities that don't use `#[suprnova::model]` - see
-[Macros](macros.md#route_binding).
+must match; the router refuses a route whose handler reads a parameter
+its path does not declare. The value is parsed as the model's route key
+and looked up through `User::query()`, so global scopes and the
+soft-delete filter apply. A value that does not parse or matches no row
+answers 404. For binding fields, scoped children, custom resolution and
+enums, see [Route model binding](routing.md#route-model-binding).
 
 ### Form requests
 
@@ -134,12 +142,12 @@ request body and surfaces a 422 with field-keyed errors on failure:
 
 ```rust
 use suprnova::{attrs, handler, json_response, Response};
-use crate::models::user;
+use crate::models::User;
 use crate::requests::UpdateUserRequest;
 
 // Route: put!("/users/{user}", controllers::user::update)
 #[handler]
-pub async fn update(user: user::Model, form: UpdateUserRequest) -> Response {
+pub async fn update(user: User, form: UpdateUserRequest) -> Response {
     let id = user.id;
     user.update(attrs! { name: form.name, email: form.email }).await?;
     json_response!({ "updated": id })
@@ -169,7 +177,7 @@ pub async fn show(req: Request) -> Response {
 }
 ```
 
-You can mix and match: `pub async fn nested(category_id: i64, product: product::Model, req: Request)` is a valid signature. The macro extracts each argument by its own rule.
+You can mix and match: `pub async fn nested(category_id: i64, product: Product, req: Request)` is a valid signature. The macro extracts each argument by its own rule.
 
 ### Authorization
 
@@ -178,24 +186,54 @@ after the route parameters are bound and before the request body is read,
 so a denied request never reaches validation or the handler body:
 
 ```rust
-use suprnova::{authorize, handler, json_response, Response, RouteParam};
+use suprnova::{authorize, handler, json_response, Response};
 use crate::models::Post;
 use crate::requests::UpdatePostRequest;
 
 // Route: put!("/posts/{post}", controllers::post::update)
 #[handler]
 #[authorize("update-post", post)]
-pub async fn update(post: RouteParam<Post>, form: UpdatePostRequest) -> Response {
+pub async fn update(post: Post, form: UpdatePostRequest) -> Response {
     json_response!({ "updated": post.id, "title": form.title })
 }
 ```
 
 A guest gets 401, a denial 403, and a policy that denies as not found 404.
-On a handler with `#[authorize]`, the macro extracts the route-bound
-parameters first, then runs the checks, then extracts the form request or
-`Request`, whatever order the signature lists them in. For the type form,
+On a handler with `#[authorize]`, the route-bound arguments and the path
+values come first, then the checks run, then the macro extracts the form
+request or `Request`, whatever order the signature lists them in. For the type form,
 several attributes on one handler, and the full rules, see
 [Authorize a handler](authorization.md#authorize-a-handler).
+
+### Handlers inside an `impl` block
+
+To group a controller's handlers on a type, put them in an `impl` block and
+name the type in the attribute, `#[handler(Self = Posts)]`:
+
+```rust
+use suprnova::{handler, json_response, Response};
+use crate::models::Post;
+
+pub struct Posts;
+
+impl Posts {
+    // Route: get!("/posts/{post}", controllers::Posts::show)
+    #[handler(Self = Posts)]
+    pub async fn show(post: Post) -> Response {
+        json_response!({ "id": post.id, "title": post.title })
+    }
+}
+```
+
+The handler takes every argument a free handler takes, `#[authorize]`
+included, and the router checks it at startup as it checks a free one. A
+handler in an `impl` block has no `self` argument. Without `Self = Posts`,
+the build fails and says to add it. If the attribute names another type
+than the block's, the build fails too.
+
+The attribute needs the type because `#[handler]` records each handler
+for the router's startup checks, and that record is generated outside the
+function, where `Self` does not name the block's type.
 
 ## The `Response` contract
 
@@ -217,11 +255,11 @@ The body of a handler reads top-to-bottom and uses `?` to bail:
 
 ```rust
 use suprnova::{handler, json_response, Response};
-use crate::models::user;
+use crate::models::User;
 
 #[handler]
 pub async fn show(id: i64) -> Response {
-    let user = user::Model::find_or_fail(id).await?;
+    let user = User::find_or_fail(id).await?;
     let invoices = user.invoices().get().await?;
     json_response!({ "user": user, "invoices": invoices })
 }
@@ -340,26 +378,26 @@ global lookup cascade.
 ```rust
 // src/controllers/user.rs
 use suprnova::{attrs, handler, json_response, redirect, Response, ResponseExt};
-use crate::models::user;
+use crate::models::User;
 use crate::requests::{StoreUserRequest, UpdateUserRequest};
 
 // GET /users
 #[handler]
 pub async fn index() -> Response {
-    let users = user::Model::all().await?;
+    let users = User::all().await?;
     json_response!({ "users": users })
 }
 
 // GET /users/{user}
 #[handler]
-pub async fn show(user: user::Model) -> Response {
+pub async fn show(user: User) -> Response {
     json_response!({ "user": user })
 }
 
 // POST /users
 #[handler]
 pub async fn store(form: StoreUserRequest) -> Response {
-    let user = user::Model::create(attrs! {
+    let user = User::create(attrs! {
         name: form.name,
         email: form.email,
     }).await?;
@@ -368,7 +406,7 @@ pub async fn store(form: StoreUserRequest) -> Response {
 
 // PUT /users/{user}
 #[handler]
-pub async fn update(user: user::Model, form: UpdateUserRequest) -> Response {
+pub async fn update(user: User, form: UpdateUserRequest) -> Response {
     let id = user.id;
     user.update(attrs! {
         name: form.name,
@@ -379,7 +417,7 @@ pub async fn update(user: user::Model, form: UpdateUserRequest) -> Response {
 
 // DELETE /users/{user}
 #[handler]
-pub async fn destroy(user: user::Model) -> Response {
+pub async fn destroy(user: User) -> Response {
     user.delete().await?;
     redirect!("users.index").into()
 }
@@ -401,7 +439,7 @@ routes! {
 }
 ```
 
-The route placeholder `{user}` matches the argument name `user: user::Model`, which is how the framework knows which path segment loads the model.
+The route placeholder `{user}` matches the argument name `user: User`, which is how the framework knows which path segment loads the model.
 
 ## The `Request` API
 

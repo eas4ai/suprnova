@@ -266,6 +266,7 @@ fn key_input(pattern: &str, route_seed: u8) -> Result<RenderKeyInput, Box<dyn Er
         build: BuildId::parse("bench")?,
         epoch: 1,
         variance: VarianceDescriptor::new(),
+        root: String::new(),
     })
 }
 

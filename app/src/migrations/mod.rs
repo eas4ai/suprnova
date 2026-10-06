@@ -90,8 +90,9 @@ impl MigratorTrait for Migrator {
             // Benchmark Phase 1 support - scheduler tick log and the
             // UNIQUE-indexed job-run table that makes duplicate claiming a
             // database error rather than an afterthought query.
-            // `jobs` / `failed_jobs` - the schema QUEUE_DRIVER=database reads.
-            // The framework ships the driver but not a migration for it.
+            // `jobs` / `failed_jobs` in the layout the queue read before the
+            // framework shipped its own migrations, which move both into
+            // Laravel's layout below.
             Box::new(m_2026_08_01_queue_tables::Migration),
             Box::new(m_2026_08_01_bench_tables::Migration),
             Box::new(m_2026_08_02_bench_tick_task::Migration),
@@ -109,6 +110,15 @@ impl MigratorTrait for Migrator {
             // `RENDER_CACHE_PROFILE=database` a configuration choice this
             // application can actually make.
             Box::new(suprnova::render_cache::migration::TierMigration),
+            // The framework's tables in Laravel 13's layouts. On a database
+            // the migrations above created, these move `sessions`, `jobs` and
+            // `failed_jobs` and reshape `features`, keeping their rows.
+            Box::new(suprnova::session::migrations::CreateSessionsTable::new(
+                suprnova::session::migrations::SessionUserKey::Integer,
+            )),
+            Box::new(suprnova::queue::migrations::CreateJobsTable),
+            Box::new(suprnova::queue::migrations::CreateFailedJobsTable),
+            Box::new(suprnova::features::migrations::FeaturesToPennantLayout),
         ]
     }
 }

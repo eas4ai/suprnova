@@ -166,9 +166,9 @@ where
     }
     crate::middleware::prepend_global_middleware(GateBridgeMiddleware);
     Gate::before_async::<U, _, _>(|user: &U, ability: &str| {
-        let model_type = user.rbac_model_type();
+        let model_types = user.rbac_model_types();
         let model_id = user.rbac_model_id();
-        answer(model_type, model_id, ability.to_owned())
+        answer(model_types, model_id, ability.to_owned())
     });
 }
 
@@ -198,8 +198,9 @@ impl Middleware for GateBridgeMiddleware {
 
 /// The bridge's answer for one ability: `Some(true)` when the user holds a
 /// permission of that name, `None` otherwise. Never `Some(false)`, so the
-/// gate goes on to its definitions and policies.
-async fn answer(model_type: String, model_id: String, ability: String) -> Option<bool> {
+/// gate goes on to its definitions and policies. `model_types` is the
+/// user's [`HasRoles::rbac_model_types`], its own discriminator first.
+async fn answer(model_types: Vec<String>, model_id: String, ability: String) -> Option<bool> {
     // Every answer records the tables the load reads, the one served from
     // this request's set as well as the one that ran the statement.
     observe_permission_names_read();
@@ -211,14 +212,15 @@ async fn answer(model_type: String, model_id: String, ability: String) -> Option
     // included. `in_transaction` is the condition `ExecutorChoice::resolve_read`
     // uses to put this read on the transaction.
     let names = if in_transaction() {
-        load(&model_type, &model_id).await
+        load(&model_types, &model_id).await
     } else {
-        match request_load(&model_type, &model_id) {
+        let model_type = model_types.first().map(String::as_str).unwrap_or_default();
+        match request_load(model_type, &model_id) {
             Some(cell) => {
-                let loaded = cell.get_or_init(|| load(&model_type, &model_id)).await;
+                let loaded = cell.get_or_init(|| load(&model_types, &model_id)).await;
                 loaded.clone()
             }
-            None => load(&model_type, &model_id).await,
+            None => load(&model_types, &model_id).await,
         }
     };
     match names {
@@ -258,10 +260,11 @@ fn request_load(model_type: &str, model_id: &str) -> Option<Arc<OnceCell<Loaded>
 /// request neither retries the read nor logs the failure again; inside one
 /// [`answer`] keeps nothing. The model id stays out of the log; the model
 /// type says which kind of user it was.
-async fn load(model_type: &str, model_id: &str) -> Loaded {
-    match permission_names_for_model(model_type, model_id).await {
+async fn load(model_types: &[String], model_id: &str) -> Loaded {
+    match permission_names_for_model(model_types, model_id).await {
         Ok(names) => Some(Arc::new(names)),
         Err(error) => {
+            let model_type = model_types.first().map(String::as_str).unwrap_or_default();
             tracing::error!(
                 model_type = %model_type,
                 error = %error,

@@ -191,7 +191,9 @@ perspective.
 
 ### Cookie attributes
 
-Defaults match `SessionConfig::default()`: `Path=/`, `Secure`,
+Defaults match `SessionConfig::default()`: the public root of each request
+as the `Path` (`/` at the host root, `/billing` behind a trusted
+`X-Forwarded-Prefix: /billing`, and `/` for a `__Host-` name), `Secure`,
 `SameSite=Lax`, `Max-Age=7200` (2 hours), no `Domain`. Override per
 builder:
 

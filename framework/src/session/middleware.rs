@@ -777,7 +777,7 @@ impl SessionMiddleware {
         let mut cookie = base
             .http_only(self.config.cookie_http_only)
             .secure(self.config.cookie_secure)
-            .path(&self.config.cookie_path)
+            .path(self.config.response_cookie_path())
             .partitioned(self.config.cookie_partitioned);
 
         // `expire_on_close = true` → omit `Max-Age` so the browser
@@ -804,7 +804,7 @@ impl SessionMiddleware {
         let mut cookie = Cookie::forget(self.config.cookie_prefix.apply(&self.config.cookie_name))
             .http_only(self.config.cookie_http_only)
             .secure(self.config.cookie_secure)
-            .path(&self.config.cookie_path)
+            .path(self.config.response_cookie_path())
             .partitioned(self.config.cookie_partitioned);
 
         if let Some(ref domain) = self.config.cookie_domain {
@@ -1011,7 +1011,7 @@ pub fn create_remember_cookie(
     let mut cookie = base
         .http_only(true)
         .secure(config.cookie_secure)
-        .path(&config.cookie_path)
+        .path(config.response_cookie_path())
         .partitioned(config.cookie_partitioned)
         .max_age(max_age);
 
@@ -1042,7 +1042,7 @@ pub fn create_forget_remember_cookie(config: &SessionConfig) -> Cookie {
             .cookie_prefix
             .apply(super::super::auth::remember::COOKIE_NAME),
     )
-    .path(&config.cookie_path)
+    .path(config.response_cookie_path())
     .secure(config.cookie_secure)
     .partitioned(config.cookie_partitioned)
     .same_site(SameSite::Lax);
@@ -1989,13 +1989,9 @@ impl SessionMiddleware {
             .and_then(|v| v.to_str().ok())
             .map(|v| v.contains("application/json") && !v.contains("text/html"))
             .unwrap_or(false);
-        let current_url = {
-            let path = request.path().to_string();
-            match request.uri().query() {
-                Some(q) if !q.is_empty() => format!("{path}?{q}"),
-                _ => path,
-            }
-        };
+        // The URL the browser asked for, public root included, so
+        // `Redirect::back` sends it back under the same root (PFX-004).
+        let current_url = crate::routing::url::current(request);
 
         PreviousUrlCandidate {
             is_get,

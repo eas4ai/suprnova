@@ -38,45 +38,19 @@ impl MigrationName for AppSessionsMigration {
 #[async_trait::async_trait]
 impl MigrationTrait for AppSessionsMigration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .create_table(
-                Table::create()
-                    .table(AppSessions::Table)
-                    .col(
-                        ColumnDef::new(AppSessions::Id)
-                            .string()
-                            .not_null()
-                            .primary_key(),
-                    )
-                    .col(ColumnDef::new(AppSessions::UserId).string().null())
-                    .col(ColumnDef::new(AppSessions::Payload).text().not_null())
-                    .col(ColumnDef::new(AppSessions::CsrfToken).string().not_null())
-                    .col(
-                        ColumnDef::new(AppSessions::LastActivity)
-                            .timestamp()
-                            .not_null()
-                            .default(Expr::current_timestamp()),
-                    )
-                    .to_owned(),
-            )
-            .await
+        suprnova::session::migrations::create_sessions_table(
+            manager,
+            TABLE,
+            suprnova::session::migrations::SessionUserKey::Integer,
+        )
+        .await
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(AppSessions::Table).to_owned())
+            .drop_table(Table::drop().table(Alias::new(TABLE)).to_owned())
             .await
     }
-}
-
-#[derive(DeriveIden)]
-enum AppSessions {
-    Table,
-    Id,
-    UserId,
-    Payload,
-    CsrfToken,
-    LastActivity,
 }
 
 fn driver() -> DatabaseSessionDriver {
@@ -172,7 +146,8 @@ async fn destroy_for_user_and_gc_act_on_the_named_table() {
     let fresh = SessionData::new("fresh-sess".into(), "csrf4".into());
     driver.write(&fresh).await.unwrap();
     db.execute_unprepared(
-        "UPDATE app_sessions SET last_activity = '2000-01-01 00:00:00' WHERE id = 'bob-sess'",
+        // 2000-01-01 00:00:00 UTC, as the epoch seconds the column holds.
+        "UPDATE app_sessions SET last_activity = 946684800 WHERE id = 'bob-sess'",
     )
     .await
     .unwrap();
@@ -277,5 +252,14 @@ async fn session_middleware_persists_to_the_configured_table() {
         .await
         .unwrap();
     let payload: String = row.try_get("", "payload").unwrap();
-    assert!(payload.contains("visited"), "{payload}");
+    // The payload is base64-encoded JSON, as the Laravel 13 skeleton
+    // stores it.
+    let decoded = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .decode(&payload)
+            .expect("a base64 payload")
+    };
+    let decoded = String::from_utf8(decoded).expect("UTF-8 JSON");
+    assert!(decoded.contains("visited"), "{decoded}");
 }

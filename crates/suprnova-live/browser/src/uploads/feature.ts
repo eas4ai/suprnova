@@ -16,6 +16,7 @@ import {
   type UploadProgressView,
 } from "./progress.js";
 import { SERVER_DEFAULT_LIMITS, type LiveLimits } from "../limits.js";
+import { reservedRoutePath } from "../reserved-routes.js";
 import {
   type UploadConnectivity,
   type UploadApplicationPort,
@@ -27,8 +28,6 @@ import {
   type UploadTransportResponse,
   type UploadHandle,
 } from "./types.js";
-
-const DEFAULT_UPLOAD_ENDPOINT = "/__live/upload";
 
 export interface UploadFeatureOptions {
   readonly application?: UploadApplicationPort;
@@ -187,7 +186,7 @@ export class FetchUploadTransport implements UploadTransport {
       }
       body = JSON.stringify(controlBody(request));
     }
-    const response = await this.#fetch(DEFAULT_UPLOAD_ENDPOINT, {
+    const response = await this.#fetch(reservedRoutePath("upload"), {
       body,
       cache: "no-store",
       credentials: "same-origin",

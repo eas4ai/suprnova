@@ -57,9 +57,21 @@
 //! inflates past what its header declares is refused at that point, and only
 //! the first frame of a GIF is decoded. Path and disk sources are read no
 //! further than the same cap.
+//!
+//! # Orientation and metadata
+//!
+//! Both drivers apply the source's EXIF orientation as they decode, as
+//! Laravel's do, unless `IMAGE_AUTO_ORIENT=false`. Processed output carries
+//! the source's ICC profile and nothing else of its metadata: no EXIF (so no
+//! GPS position), XMP, IPTC, comments or text chunks. See the `metadata`
+//! module.
 
+mod color;
+mod custom;
 mod driver;
 mod magick;
+mod metadata;
+mod orientation;
 mod oxideav;
 mod sniff;
 
@@ -72,6 +84,8 @@ use crate::config::env_optional;
 use crate::error::FrameworkError;
 use crate::http::HttpResponse;
 
+pub use color::Color;
+pub use custom::{CustomTransformation, ImagePixels, register_transformation};
 pub use driver::{DEFAULT_IMAGE_QUALITY, ImageDriver, ImagePipeline, OutputFormat, Transformation};
 pub use magick::MagickCliDriver;
 pub use oxideav::OxideAvImageDriver;
@@ -134,7 +148,7 @@ impl ImageDriverKind {
     }
 }
 
-/// Decode limits for the image subsystem.
+/// Decode limits and decode behaviour for the image subsystem.
 ///
 /// # Environment variables
 ///
@@ -142,11 +156,20 @@ impl ImageDriverKind {
 ///   (default 16384).
 /// - `IMAGE_MAX_ALLOC_BYTES` - cap on the bytes one decode may allocate
 ///   (default 1 GiB).
+/// - `IMAGE_MAGICK_TIMEOUT_SECS` - wall-clock cap on one ImageMagick run
+///   (default 30).
+/// - `IMAGE_AUTO_ORIENT` - apply the EXIF orientation on decode
+///   (default `true`).
 ///
 /// Out-of-range values clamp with a warning rather than failing boot: a
 /// misconfigured limit should be loud, not fatal, and a limit of zero would
 /// reject every image in the application.
+///
+/// `#[non_exhaustive]` so a field can be added without breaking callers:
+/// start from [`ImageConfig::default`] or [`ImageConfig::from_env`] and set
+/// the fields to change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ImageConfig {
     /// Maximum width or height, in pixels, of a decoded image.
     pub max_dimension: u32,
@@ -168,6 +191,13 @@ pub struct ImageConfig {
     /// Only the `magick` driver reads it. Without a bound, a delegate that
     /// stalls holds a blocking worker for the life of the process.
     pub magick_timeout_secs: u32,
+    /// Whether decoding applies the source's EXIF orientation.
+    ///
+    /// On by default, as in Laravel: a phone photo comes out upright. Off
+    /// keeps the pixels as the sensor wrote them, and the output keeps the
+    /// `Orientation` tag so a viewer can still turn them; the pipeline's
+    /// [`Image::orient`] applies it at a chosen place instead.
+    pub auto_orient: bool,
 }
 
 impl Default for ImageConfig {
@@ -176,6 +206,29 @@ impl Default for ImageConfig {
             max_dimension: DEFAULT_IMAGE_MAX_DIMENSION,
             max_alloc_bytes: DEFAULT_IMAGE_MAX_ALLOC_BYTES,
             magick_timeout_secs: DEFAULT_IMAGE_MAGICK_TIMEOUT_SECS,
+            auto_orient: true,
+        }
+    }
+}
+
+/// Read a raw `IMAGE_AUTO_ORIENT`: `false`, `0`, `no` or `off` turn
+/// orientation on decode off, `true`, `1`, `yes` or `on` (or no value) keep
+/// it. Anything else keeps the default with a warning, as the other image
+/// settings clamp rather than fail boot.
+fn parse_auto_orient(raw: Option<&str>) -> bool {
+    let Some(raw) = raw else {
+        return true;
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "false" | "0" | "no" | "off" => false,
+        "true" | "1" | "yes" | "on" => true,
+        _ => {
+            tracing::warn!(
+                env = "IMAGE_AUTO_ORIENT",
+                value = raw,
+                "IMAGE_AUTO_ORIENT is not true or false; orienting on decode, the default"
+            );
+            true
         }
     }
 }
@@ -243,10 +296,13 @@ impl ImageConfig {
             .map(clamp_magick_timeout_secs)
             .unwrap_or(defaults.magick_timeout_secs);
 
+        let auto_orient = parse_auto_orient(std::env::var("IMAGE_AUTO_ORIENT").ok().as_deref());
+
         Self {
             max_dimension,
             max_alloc_bytes,
             magick_timeout_secs,
+            auto_orient,
         }
     }
 }
@@ -254,6 +310,8 @@ impl ImageConfig {
 static CONFIG: OnceLock<ImageConfig> = OnceLock::new();
 static CONFIG_OVERRIDE: RwLock<Option<ImageConfig>> = RwLock::new(None);
 static DEFAULT_DRIVER: OnceLock<Box<dyn ImageDriver>> = OnceLock::new();
+static OXIDEAV_DRIVER: OnceLock<OxideAvImageDriver> = OnceLock::new();
+static MAGICK_DRIVER: OnceLock<MagickCliDriver> = OnceLock::new();
 
 /// The active decode limits.
 ///
@@ -303,6 +361,19 @@ pub fn default_driver() -> Result<&'static dyn ImageDriver, FrameworkError> {
         .as_ref())
 }
 
+/// The built-in driver of `kind`, for an image that chose its driver with
+/// [`Image::using`].
+///
+/// Each is built once, from the environment, beside the default driver
+/// rather than in place of it: one image's choice never changes the driver
+/// another image or the process default runs.
+fn driver_of(kind: ImageDriverKind) -> &'static dyn ImageDriver {
+    match kind {
+        ImageDriverKind::OxideAv => OXIDEAV_DRIVER.get_or_init(OxideAvImageDriver::new),
+        ImageDriverKind::Magick => MAGICK_DRIVER.get_or_init(MagickCliDriver::from_env),
+    }
+}
+
 /// Install a custom image driver.
 ///
 /// This is the supported escape hatch for formats the framework does not
@@ -349,6 +420,8 @@ enum Source {
 pub struct Image {
     source: Source,
     pipeline: ImagePipeline,
+    /// The built-in driver this image chose, over the process default.
+    driver: Option<ImageDriverKind>,
 }
 
 impl Image {
@@ -356,6 +429,7 @@ impl Image {
         Self {
             source,
             pipeline: ImagePipeline::default(),
+            driver: None,
         }
     }
 
@@ -467,8 +541,26 @@ impl Image {
     }
 
     /// Rotate clockwise by an arbitrary angle, growing the canvas to fit.
+    ///
+    /// The corners the turn exposes are white when the output is JPEG or
+    /// GIF, which cannot hold transparency, and transparent when it is PNG,
+    /// WebP or BMP. [`Image::rotate_with_background`] names the colour.
     pub fn rotate(self, angle: f32) -> Self {
-        self.push(Transformation::Rotate(angle))
+        self.push(Transformation::Rotate {
+            degrees: angle,
+            background: None,
+        })
+    }
+
+    /// Rotate clockwise, filling the exposed corners with `background`
+    /// (Laravel's `rotate($angle, $background)`).
+    ///
+    /// JPEG and GIF output also flattens any transparency onto this colour.
+    pub fn rotate_with_background(self, angle: f32, background: Color) -> Self {
+        self.push(Transformation::Rotate {
+            degrees: angle,
+            background: Some(background),
+        })
     }
 
     /// Mirror top-to-bottom (Laravel's `flip`).
@@ -479,6 +571,34 @@ impl Image {
     /// Mirror left-to-right (Laravel's `flop`).
     pub fn flip_horizontally(self) -> Self {
         self.push(Transformation::FlipHorizontally)
+    }
+
+    /// Mirror top-to-bottom: Laravel's name for
+    /// [`Image::flip_vertically`].
+    pub fn flip(self) -> Self {
+        self.flip_vertically()
+    }
+
+    /// Mirror left-to-right: Laravel's name for
+    /// [`Image::flip_horizontally`].
+    pub fn flop(self) -> Self {
+        self.flip_horizontally()
+    }
+
+    /// Apply the source's EXIF orientation at this point in the pipeline.
+    ///
+    /// Decoding already orients by default, so this does nothing then.
+    /// With `IMAGE_AUTO_ORIENT=false` the pixels arrive as the sensor wrote
+    /// them, and this is where they turn upright.
+    pub fn orient(self) -> Self {
+        self.push(Transformation::Orient)
+    }
+
+    /// Add any transformation to the pipeline: a built-in one, or a custom
+    /// one registered with [`register_transformation`], as
+    /// `Transformation::custom(name)` (Laravel's `transform`).
+    pub fn transform(self, transformation: Transformation) -> Self {
+        self.push(transformation)
     }
 
     /// Gaussian blur. `amount` clamps to `0..=100`; `0` is a no-op.
@@ -510,6 +630,51 @@ impl Image {
         self
     }
 
+    /// Encode to `format` at `quality`, in one call (Laravel's `optimize`).
+    pub fn optimize(self, format: OutputFormat, quality: u8) -> Self {
+        self.to_format(format).quality(quality)
+    }
+
+    /// Encode to WebP: [`OutputFormat::WebP`].
+    pub fn to_webp(self) -> Self {
+        self.to_format(OutputFormat::WebP)
+    }
+
+    /// Encode to JPEG: [`OutputFormat::Jpeg`].
+    pub fn to_jpg(self) -> Self {
+        self.to_format(OutputFormat::Jpeg)
+    }
+
+    /// Encode to JPEG: [`OutputFormat::Jpeg`], under Laravel's other name.
+    pub fn to_jpeg(self) -> Self {
+        self.to_format(OutputFormat::Jpeg)
+    }
+
+    /// Encode to PNG: [`OutputFormat::Png`].
+    pub fn to_png(self) -> Self {
+        self.to_format(OutputFormat::Png)
+    }
+
+    /// Encode to GIF: [`OutputFormat::Gif`].
+    pub fn to_gif(self) -> Self {
+        self.to_format(OutputFormat::Gif)
+    }
+
+    /// Encode to BMP: [`OutputFormat::Bmp`].
+    pub fn to_bmp(self) -> Self {
+        self.to_format(OutputFormat::Bmp)
+    }
+
+    /// Process this image with the built-in driver `driver`, whatever the
+    /// process default is (Laravel's `using`).
+    ///
+    /// The choice belongs to this image and its clones only. HEIC uploads
+    /// can go to `magick` while every other image stays on `oxideav`.
+    pub fn using(mut self, driver: ImageDriverKind) -> Self {
+        self.driver = Some(driver);
+        self
+    }
+
     // ───────────────────────── terminals ─────────────────────────
 
     /// Read the source, then run the pipeline on a blocking thread.
@@ -523,7 +688,10 @@ impl Image {
             + 'static,
         T: Send + 'static,
     {
-        let driver = default_driver()?;
+        let driver = match self.driver {
+            Some(kind) => driver_of(kind),
+            None => default_driver()?,
+        };
         let contents = read_source(self.source).await?;
         let pipeline = self.pipeline;
         tokio::task::spawn_blocking(move || op(driver, &contents, &pipeline))
@@ -557,12 +725,72 @@ impl Image {
         })
     }
 
-    /// Run the pipeline and write the result to a storage disk.
-    #[cfg(feature = "filesystem")]
-    pub async fn store(self, disk: &str, path: &str) -> Result<(), FrameworkError> {
-        use crate::DiskExt;
+    /// Run the pipeline and return the encoded bytes as standard base64,
+    /// padded (Laravel's `toBase64`).
+    pub async fn to_base64(self) -> Result<String, FrameworkError> {
+        use base64::Engine as _;
         let bytes = self.to_bytes().await?;
-        crate::Storage::disk(disk)?.put(path, bytes).await
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    /// Run the pipeline and return a `data:` URI of the result: its
+    /// [`mime_type`](Image::mime_type) and its base64 bytes (Laravel's
+    /// `toDataUri`).
+    pub async fn to_data_uri(self) -> Result<String, FrameworkError> {
+        use base64::Engine as _;
+        let (bytes, mime) = self
+            .blocking(|driver, contents, pipeline| {
+                let mime = resolve_mime(contents, pipeline)?;
+                Ok((driver.process(contents, pipeline)?, mime))
+            })
+            .await?;
+        let payload = base64::engine::general_purpose::STANDARD.encode(bytes);
+        Ok(format!("data:{mime};base64,{payload}"))
+    }
+
+    /// Run the pipeline and store the result on a disk, in `directory`,
+    /// under a generated name: 40 random letters and digits and the output
+    /// format's extension. Returns the stored path (Laravel's `store`).
+    ///
+    /// `disk` names a [`Storage`](crate::Storage) disk; `None` is the
+    /// application's default disk. A disk with a public base URL is what
+    /// makes the file public: Suprnova sets visibility per disk, not per
+    /// file, so there is no `store_publicly`.
+    #[cfg(feature = "filesystem")]
+    pub async fn store(
+        self,
+        directory: &str,
+        disk: Option<&str>,
+    ) -> Result<String, FrameworkError> {
+        let (bytes, format) = self.processed_with_format().await?;
+        let name = format!("{}.{}", generated_name(), format.extension());
+        put_on_disk(disk, &stored_path(directory, &name), bytes).await
+    }
+
+    /// Run the pipeline and store the result on a disk as
+    /// `directory/name`. Returns the stored path (Laravel's `storeAs`).
+    ///
+    /// `disk` is as for [`Image::store`].
+    #[cfg(feature = "filesystem")]
+    pub async fn store_as(
+        self,
+        directory: &str,
+        name: &str,
+        disk: Option<&str>,
+    ) -> Result<String, FrameworkError> {
+        let bytes = self.to_bytes().await?;
+        put_on_disk(disk, &stored_path(directory, name), bytes).await
+    }
+
+    /// Run the pipeline and return the encoded bytes with the format they
+    /// are in.
+    #[cfg(feature = "filesystem")]
+    async fn processed_with_format(self) -> Result<(Vec<u8>, OutputFormat), FrameworkError> {
+        self.blocking(|driver, contents, pipeline| {
+            let format = resolve_format(contents, pipeline)?;
+            Ok((driver.process(contents, pipeline)?, format))
+        })
+        .await
     }
 
     /// Dimensions of the **processed** image, as Laravel reports them.
@@ -572,6 +800,18 @@ impl Image {
             driver.dimensions(&processed)
         })
         .await
+    }
+
+    /// Width of the **processed** image: the first of
+    /// [`dimensions`](Image::dimensions).
+    pub async fn width(self) -> Result<u32, FrameworkError> {
+        Ok(self.dimensions().await?.0)
+    }
+
+    /// Height of the **processed** image: the second of
+    /// [`dimensions`](Image::dimensions).
+    pub async fn height(self) -> Result<u32, FrameworkError> {
+        Ok(self.dimensions().await?.1)
     }
 
     /// `Content-Type` of the **processed** image.
@@ -595,6 +835,74 @@ impl Image {
         })
         .await
     }
+}
+
+/// The format a pipeline will produce: its target format, or the source's
+/// own format when the pipeline does not convert.
+#[cfg(feature = "filesystem")]
+fn resolve_format(
+    contents: &[u8],
+    pipeline: &ImagePipeline,
+) -> Result<OutputFormat, FrameworkError> {
+    if let Some(format) = pipeline.format {
+        return Ok(format);
+    }
+    sniff::detect(contents)
+        .map(|format| match format {
+            sniff::InputFormat::Png => OutputFormat::Png,
+            sniff::InputFormat::Jpeg => OutputFormat::Jpeg,
+            sniff::InputFormat::WebP => OutputFormat::WebP,
+            sniff::InputFormat::Gif => OutputFormat::Gif,
+            sniff::InputFormat::Bmp => OutputFormat::Bmp,
+        })
+        .ok_or_else(|| {
+            FrameworkError::param(
+                "image format is not recognised, so its file extension cannot be chosen; \
+                 call to_format() to choose one",
+            )
+        })
+}
+
+/// A name for a stored image: 40 random letters and digits, Laravel's
+/// `Str::random(40)`. 62^40 names make two images in one directory meeting
+/// on one as likely as guessing a 238-bit key.
+#[cfg(feature = "filesystem")]
+fn generated_name() -> String {
+    use rand::RngExt;
+    let mut rng = rand::rng();
+    (0..40)
+        .map(|_| char::from(rng.sample(rand::distr::Alphanumeric)))
+        .collect()
+}
+
+/// `directory/name`, each trimmed of the slashes at its ends, as Laravel
+/// trims the joined path: an empty directory stores at the disk's root, and
+/// `avatars/` and `/avatars` name the same directory.
+#[cfg(feature = "filesystem")]
+fn stored_path(directory: &str, name: &str) -> String {
+    let (directory, name) = (directory.trim_matches('/'), name.trim_matches('/'));
+    if directory.is_empty() {
+        name.to_string()
+    } else {
+        format!("{directory}/{name}")
+    }
+}
+
+/// Write `bytes` to `path` on `disk`, or on the default disk, and return
+/// the path.
+#[cfg(feature = "filesystem")]
+async fn put_on_disk(
+    disk: Option<&str>,
+    path: &str,
+    bytes: Vec<u8>,
+) -> Result<String, FrameworkError> {
+    use crate::DiskExt;
+    let handle = match disk {
+        Some(name) => crate::Storage::disk(name)?,
+        None => crate::Storage::default_disk()?,
+    };
+    handle.put(path, bytes).await?;
+    Ok(path.to_string())
 }
 
 /// The `Content-Type` a pipeline will produce: its target format, or the
@@ -829,7 +1137,10 @@ mod tests {
                     height: 10
                 },
                 Transformation::Grayscale,
-                Transformation::Rotate(90.0),
+                Transformation::Rotate {
+                    degrees: 90.0,
+                    background: None
+                },
             ]
         );
         assert!(
@@ -916,6 +1227,80 @@ mod tests {
             "0 seconds would fail every invocation"
         );
         assert_eq!(clamp_magick_timeout_secs(30), 30);
+    }
+
+    #[test]
+    fn img_001_image_auto_orient_reads_like_the_other_flags() {
+        assert!(parse_auto_orient(None), "on by default");
+        for off in ["false", "0", "no", "off", " FALSE "] {
+            assert!(!parse_auto_orient(Some(off)), "{off:?} turns it off");
+        }
+        for on in ["true", "1", "yes", "on"] {
+            assert!(parse_auto_orient(Some(on)), "{on:?} keeps it on");
+        }
+        assert!(
+            parse_auto_orient(Some("maybe")),
+            "an unknown value keeps the default"
+        );
+        assert!(ImageConfig::default().auto_orient);
+    }
+
+    #[test]
+    fn img_007_shortcuts_record_what_to_format_and_quality_record() {
+        let image = || Image::from_bytes(vec![]);
+        for (shortcut, format) in [
+            (image().to_webp(), OutputFormat::WebP),
+            (image().to_jpg(), OutputFormat::Jpeg),
+            (image().to_jpeg(), OutputFormat::Jpeg),
+            (image().to_png(), OutputFormat::Png),
+            (image().to_gif(), OutputFormat::Gif),
+            (image().to_bmp(), OutputFormat::Bmp),
+        ] {
+            assert_eq!(shortcut.pipeline, image().to_format(format).pipeline);
+        }
+        assert_eq!(
+            image().optimize(OutputFormat::WebP, 55).pipeline,
+            image().to_format(OutputFormat::WebP).quality(55).pipeline
+        );
+        assert_eq!(
+            image().flip().pipeline,
+            image().flip_vertically().pipeline,
+            "flip is Laravel's top-to-bottom mirror"
+        );
+        assert_eq!(
+            image().flop().pipeline,
+            image().flip_horizontally().pipeline,
+            "flop is Laravel's left-to-right mirror"
+        );
+    }
+
+    #[test]
+    fn img_003_a_driver_choice_belongs_to_the_image_that_made_it() {
+        let image = Image::from_bytes(vec![]);
+        let chose = image.clone().using(ImageDriverKind::Magick);
+        assert_eq!(chose.driver, Some(ImageDriverKind::Magick));
+        assert_eq!(
+            chose.clone().resize(1, 1).driver,
+            Some(ImageDriverKind::Magick)
+        );
+        assert_eq!(image.driver, None, "the original keeps the process default");
+        assert_eq!(driver_of(ImageDriverKind::OxideAv).name(), "oxideav");
+        assert_eq!(driver_of(ImageDriverKind::Magick).name(), "magick");
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn img_005_a_stored_path_joins_directory_and_name() {
+        assert_eq!(stored_path("avatars", "me.png"), "avatars/me.png");
+        assert_eq!(stored_path("/avatars/", "/me.png"), "avatars/me.png");
+        assert_eq!(stored_path("", "me.png"), "me.png");
+        let name = generated_name();
+        assert_eq!(name.len(), 40);
+        assert!(
+            name.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+            "{name}"
+        );
+        assert_ne!(name, generated_name());
     }
 
     #[test]

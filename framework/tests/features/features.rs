@@ -498,7 +498,7 @@ async fn reload_reports_added_removed_and_flipped_features_and_nothing_else() {
     suprnova::App::bind::<dyn FeatureSync>(composite);
 
     evaluator
-        .execute_unprepared_for_test("UPDATE features SET enabled = 1 WHERE name = 'flipped'")
+        .execute_unprepared_for_test("UPDATE features SET value = 'true' WHERE name = 'flipped'")
         .await
         .expect("flip out of band");
     evaluator
@@ -507,8 +507,9 @@ async fn reload_reports_added_removed_and_flipped_features_and_nothing_else() {
         .expect("remove out of band");
     evaluator
         .execute_unprepared_for_test(
-            "INSERT INTO features (name, scope_key, enabled, created_at, updated_at) \
-             VALUES ('added', '', 1, '2026-09-08T00:00:00Z', '2026-09-08T00:00:00Z')",
+            "INSERT INTO features (name, scope, value, created_at, updated_at) \
+             VALUES ('added', '__laravel_null', 'true', '2026-09-08 00:00:00', \
+             '2026-09-08 00:00:00')",
         )
         .await
         .expect("add out of band");

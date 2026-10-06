@@ -6,10 +6,12 @@
 //! Fix:
 //!   1. New `hash_async` / `verify_async` / `hash_with_cost_async`
 //!      wrappers run bcrypt on `tokio::task::spawn_blocking`.
-//!   2. `hash` / `verify` reject passwords > `MAX_PASSWORD_BYTES`
-//!      (72) up-front. `hash` returns a `FrameworkError::param`;
-//!      `verify` returns `Ok(false)` to keep the calling auth flow's
-//!      response shape uniform.
+//!   2. `hash` rejects passwords > `MAX_PASSWORD_BYTES` up-front with a
+//!      `FrameworkError::param`, so the framework never mints a hash two
+//!      passphrases share. `verify` judges a password of any length on
+//!      its first 72 bytes, as PHP's `password_verify` does, so a long
+//!      password a Laravel application hashed signs in (LDB-004); a
+//!      different password still does not verify.
 //!   3. The underlying bcrypt call uses `non_truncating_hash` as
 //!      defense in depth.
 
@@ -50,9 +52,9 @@ fn hash_accepts_exactly_max_bytes() {
 #[test]
 fn verify_returns_false_for_oversized_password() {
     // Hash a legitimate password, then attempt to verify a >72-byte
-    // input against it. The fix returns Ok(false) so the auth flow
-    // surfaces the same "invalid credentials" response without
-    // leaking length info.
+    // input that is not that password against it: it does not verify,
+    // and the answer is `Ok(false)`, the same "invalid credentials" any
+    // wrong password gets.
     let pw = "correct horse battery staple";
     let h = hashing::hash(pw).expect("hash");
     let oversized = "x".repeat(MAX_PASSWORD_BYTES + 100);

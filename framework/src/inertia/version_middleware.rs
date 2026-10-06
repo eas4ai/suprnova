@@ -125,8 +125,8 @@ impl Middleware for InertiaVersionMiddleware {
         // whenever the page object uses the default derivation. A
         // configured `url_resolver` changes only the page object; the
         // bounce stays on the URL that arrived, since that is the one the
-        // browser can fetch.
-        let url = request.path_and_query();
+        // browser can fetch. That URL carries the public root (PFX-005).
+        let url = crate::routing::root::prefixed(&request.path_and_query());
         Err(HttpResponse::new()
             .status(409)
             .header("X-Inertia-Location", url))

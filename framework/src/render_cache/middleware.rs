@@ -1156,10 +1156,14 @@ impl RenderCacheMiddleware {
         };
         Metrics::counter(render_cache_telemetry::REBUILDS).inc();
         runtime.count_background_rebuild();
-        tokio::spawn(async move {
+        // The spawned task starts without task-locals, so the public root
+        // the request was served under is carried in: the rebuild renders
+        // the links of the root its key was derived under (PFX-002, PFX-008).
+        let root = request.public_root();
+        tokio::spawn(crate::routing::root::scope(root, async move {
             let _claim = claim;
             refresh_in_background(&runtime, request, next, &policy, job).await;
-        });
+        }));
     }
 }
 
@@ -1374,6 +1378,8 @@ pub(super) trait KeyFacts {
     fn accept(&self) -> Option<&str>;
     /// The `Accept-Encoding` header, when the request carries one.
     fn accept_encoding(&self) -> Option<&str>;
+    /// The public root the request is served under (PFX-008).
+    fn root(&self) -> String;
 }
 
 /// The locale a request without a locale of its own is rendered in: the
@@ -1424,6 +1430,10 @@ impl KeyFacts for RequestFacts<'_> {
     fn accept_encoding(&self) -> Option<&str> {
         self.0.header("accept-encoding")
     }
+
+    fn root(&self) -> String {
+        self.0.public_root().to_string()
+    }
 }
 
 /// Reads a value a caller named, for a request that carries no header to
@@ -1467,6 +1477,12 @@ impl KeyFacts for FixedFacts<'_> {
 
     fn accept_encoding(&self) -> Option<&str> {
         None
+    }
+
+    /// The root of the request being handled, or the root `APP_URL` gives
+    /// outside a request.
+    fn root(&self) -> String {
+        crate::routing::root::current().to_string()
     }
 }
 
@@ -1514,6 +1530,7 @@ pub(super) fn build_key_input(
         build: runtime.build.clone(),
         epoch,
         variance,
+        root: facts.root(),
     })
 }
 

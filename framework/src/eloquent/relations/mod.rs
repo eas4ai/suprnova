@@ -541,6 +541,55 @@ pub fn find_relation<T: 'static>(name: &str) -> Option<&'static RelationEntry> {
     relations().find(|e| (e.parent_type)() == want && e.name == name)
 }
 
+/// A relation a route binding finds a scoped child through (BIND-006).
+///
+/// The child's own query, narrowed to the rows the relation returns, so
+/// the child's global scopes, soft-delete filter and connection apply. The
+/// route binding then narrows it to the one row the route names. Every
+/// relation kind with one child type implements it; `MorphTo`, whose child
+/// type varies by row, does not, and a route that would need it is refused
+/// at startup.
+///
+/// **Not part of the public API.** It is `pub` because the code
+/// `#[suprnova::model]` generates names it.
+#[doc(hidden)]
+pub trait RouteChildRelation<C> {
+    /// The child's query, narrowed to the rows this relation returns.
+    fn __route_child_query(self) -> Result<crate::eloquent::Builder<C>, FrameworkError>;
+}
+
+/// The `IN (SELECT ...)` term that narrows a child query to the rows one
+/// parent owns through a pivot or intermediate table: `child_column` of
+/// the child's table is one of `select` in `from` where every
+/// `(column, value)` of `matches` holds. Every name is checked as an
+/// identifier, since it reaches the SQL text; the values are bound.
+pub(crate) fn owned_through_table(
+    child_table: &str,
+    child_column: &str,
+    from: &str,
+    select: &str,
+    matches: &[(&str, serde_json::Value)],
+    extra: &str,
+) -> Result<(String, Vec<serde_json::Value>), FrameworkError> {
+    for name in [child_table, child_column, from, select] {
+        crate::database::validate_identifier(name)?;
+    }
+    let mut conditions = Vec::with_capacity(matches.len());
+    let mut values = Vec::with_capacity(matches.len());
+    for (column, value) in matches {
+        crate::database::validate_identifier(column)?;
+        conditions.push(format!("{from}.{column} = ?"));
+        values.push(value.clone());
+    }
+    Ok((
+        format!(
+            "{child_table}.{child_column} IN (SELECT {from}.{select} FROM {from} WHERE {}{extra})",
+            conditions.join(" AND ")
+        ),
+        values,
+    ))
+}
+
 // ---- T2: EagerLoadDispatch trait ----------------------------------------
 //
 // `Builder<M>::with([...])` records relation names; `Builder<M>::get`

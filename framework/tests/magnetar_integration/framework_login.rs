@@ -149,10 +149,11 @@ async fn setup() -> Account {
                 .execute_unprepared(
                     "CREATE TABLE sessions (\
                         id TEXT PRIMARY KEY, \
-                        user_id TEXT NULL, \
+                        user_id INTEGER NULL, \
+                        ip_address TEXT NULL, \
+                        user_agent TEXT NULL, \
                         payload TEXT NOT NULL, \
-                        csrf_token TEXT NOT NULL, \
-                        last_activity TEXT NOT NULL\
+                        last_activity INTEGER NOT NULL\
                      )",
                 )
                 .await
@@ -947,7 +948,7 @@ async fn a_failed_session_save_retires_the_issued_magnetar_session() {
     let trigger = format!("refuse_session_insert_{}", account.id);
     magnetar_sql(&format!(
         "CREATE TRIGGER {trigger} BEFORE INSERT ON sessions \
-         WHEN NEW.user_id = '{}' \
+         WHEN NEW.user_id = {} \
          BEGIN SELECT RAISE(ABORT, 'injected session write failure'); END",
         account.id
     ))

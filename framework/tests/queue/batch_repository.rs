@@ -15,30 +15,15 @@ use suprnova::queue::{
 };
 use uuid::Uuid;
 
+/// An in-memory database with `job_batches` and `job_batch_settlements` as
+/// the shipped migration creates them.
 async fn fresh_db() -> DatabaseConnection {
+    use sea_orm_migration::{MigrationTrait, SchemaManager};
     let db = Database::connect("sqlite::memory:").await.unwrap();
-    db.execute_unprepared(
-        r"
-        CREATE TABLE job_batches (
-            id            TEXT PRIMARY KEY,
-            name          TEXT NOT NULL,
-            total_jobs    INTEGER NOT NULL,
-            options_json  TEXT NOT NULL,
-            created_at    INTEGER NOT NULL,
-            cancelled_at  INTEGER NULL,
-            finished_at   INTEGER NULL
-        );
-        CREATE TABLE job_batch_settlements (
-            batch_id   TEXT NOT NULL,
-            job_id     TEXT NOT NULL,
-            failed     INTEGER NOT NULL,
-            settled_at INTEGER NOT NULL,
-            PRIMARY KEY (batch_id, job_id)
-        );
-    ",
-    )
-    .await
-    .unwrap();
+    suprnova::queue::migrations::CreateJobBatchesTable
+        .up(&SchemaManager::new(&db))
+        .await
+        .unwrap();
     db
 }
 
@@ -550,13 +535,16 @@ async fn postgres_the_documented_schema_settles_and_reads_back() {
         db.execute_unprepared(&format!(
             "DROP TABLE IF EXISTS {settlements}; DROP TABLE IF EXISTS {batches};
              CREATE TABLE {batches} (
-                 id            TEXT PRIMARY KEY,
-                 name          TEXT NOT NULL,
-                 total_jobs    {int} NOT NULL,
-                 options_json  TEXT NOT NULL,
-                 created_at    {epoch} NOT NULL,
-                 cancelled_at  {epoch} NULL,
-                 finished_at   {epoch} NULL
+                 id              VARCHAR(255) PRIMARY KEY,
+                 name            VARCHAR(255) NOT NULL,
+                 total_jobs      {int} NOT NULL,
+                 pending_jobs    {int} NOT NULL,
+                 failed_jobs     {int} NOT NULL,
+                 failed_job_ids  TEXT NOT NULL,
+                 options         TEXT NULL,
+                 cancelled_at    {epoch} NULL,
+                 created_at      {epoch} NOT NULL,
+                 finished_at     {epoch} NULL
              );
              CREATE TABLE {settlements} (
                  batch_id   TEXT NOT NULL,

@@ -1,4 +1,4 @@
-import { useForm } from '@inertiajs/react'
+import { useForm, usePage } from '@inertiajs/react'
 
 // Validation errors arrive through the form: a failed submission is a
 // `303` back to this page with the errors flashed, and the Inertia client
@@ -6,6 +6,11 @@ import { useForm } from '@inertiajs/react'
 // takes no props - declaring an `errors` prop would replace the flashed
 // bag.
 export default function Register() {
+  // The public root the server shares with every page (`RootShare`): empty
+  // at the host root, `/billing` behind a proxy that serves the app there.
+  // Every URL this page posts to or links is built from it, so one build
+  // runs at both.
+  const { root } = usePage<{ root: string }>().props
   const { data, setData, post, processing, errors } = useForm({
     name: '',
     email: '',
@@ -15,7 +20,7 @@ export default function Register() {
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
-    post('/register')
+    post(`${root}/register`)
   }
 
   return (
@@ -113,7 +118,7 @@ export default function Register() {
           </div>
 
           <div className="text-center">
-            <a href="/login" className="text-indigo-600 hover:text-indigo-500">
+            <a href={`${root}/login`} className="text-indigo-600 hover:text-indigo-500">
               Already have an account? Sign in
             </a>
           </div>

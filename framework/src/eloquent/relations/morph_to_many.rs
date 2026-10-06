@@ -1500,3 +1500,113 @@ async fn morph_detach_one<C: ConnectionTrait>(
         .map_err(|e| FrameworkError::database(e.to_string()))?;
     Ok(())
 }
+
+/// A scoped child through a `MorphToMany` is a related row a pivot row of
+/// this parent, by id and morph type, points at.
+impl<L, R, P> super::RouteChildRelation<R> for MorphToMany<L, R, P>
+where
+    L: EloquentModel,
+    R: Model,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+    P: Model + 'static,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    fn __route_child_query(self) -> Result<Builder<R>, FrameworkError> {
+        let id_col = format!("{}_id", self.morph_name);
+        let type_col = format!("{}_type", self.morph_name);
+        let (sql, values) = super::owned_through_table(
+            R::TABLE,
+            &self.related_key,
+            &self.pivot_table,
+            &self.pivot_related_key,
+            &[
+                (id_col.as_str(), self.parent_key_value.clone()),
+                (
+                    type_col.as_str(),
+                    serde_json::Value::String(self.parent_morph_type.clone()),
+                ),
+            ],
+            "",
+        )?;
+        Ok(R::query().filter_raw(sql, values))
+    }
+}
+
+/// A scoped child through a `MorphedByMany` is a morph-side row a pivot
+/// row of this parent points at, under the target's morph type.
+impl<L, R, P> super::RouteChildRelation<R> for MorphedByMany<L, R, P>
+where
+    L: EloquentModel,
+    R: Model,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+    P: Model + 'static,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    fn __route_child_query(self) -> Result<Builder<R>, FrameworkError> {
+        let id_col = format!("{}_id", self.morph_name);
+        let type_col = format!("{}_type", self.morph_name);
+        let (sql, values) = super::owned_through_table(
+            R::TABLE,
+            &self.related_key,
+            &self.pivot_table,
+            &id_col,
+            &[
+                (self.pivot_foreign_key.as_str(), self.tag_key_value.clone()),
+                (
+                    type_col.as_str(),
+                    serde_json::Value::String(self.target_morph_type.clone()),
+                ),
+            ],
+            "",
+        )?;
+        Ok(R::query().filter_raw(sql, values))
+    }
+}

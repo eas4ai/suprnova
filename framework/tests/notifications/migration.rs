@@ -16,7 +16,8 @@ async fn index_names(db: &DatabaseConnection) -> Vec<String> {
     db.query_all_raw(Statement::from_string(
         sea_orm::DatabaseBackend::Sqlite,
         "SELECT name FROM sqlite_master \
-         WHERE type = 'index' AND tbl_name = 'notifications' AND name LIKE 'idx_%' \
+         WHERE type = 'index' AND tbl_name = 'notifications' \
+         AND name NOT LIKE 'sqlite_autoindex_%' \
          ORDER BY name"
             .to_string(),
     ))
@@ -110,7 +111,8 @@ async fn running_the_migration_twice_is_harmless() {
     assert!(manager.has_table("notifications").await.unwrap());
     assert_eq!(
         index_names(&db).await,
-        vec!["idx_notifications_notifiable", "idx_notifications_read_at"]
+        vec!["notifications_notifiable_type_notifiable_id_index"],
+        "Laravel's one index, on the morph pair"
     );
 }
 
@@ -187,14 +189,17 @@ async fn up_over_a_hand_made_table_and_indexes_succeeds() {
     up_over_the_hand_made_schema_keeps_it(&sqlite().await).await;
 }
 
+/// `down` leaves the table: one Laravel created looks the same as the one
+/// `up` creates, so a rollback that dropped it would drop Laravel's
+/// notifications too.
 #[tokio::test]
-async fn down_drops_the_table() {
+async fn down_leaves_the_table() {
     let db = sqlite().await;
     let manager = SchemaManager::new(&db);
     CreateNotificationsTable.up(&manager).await.unwrap();
 
     CreateNotificationsTable.down(&manager).await.unwrap();
 
-    assert!(!manager.has_table("notifications").await.unwrap());
-    assert!(index_names(&db).await.is_empty());
+    assert!(manager.has_table("notifications").await.unwrap());
+    assert_eq!(index_names(&db).await.len(), 1);
 }

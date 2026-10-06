@@ -4,7 +4,9 @@
 //! can register the schema in their own `Migrator`:
 //!
 //! ```rust,no_run
-//! use suprnova::features::migrations::{CreateFeaturesTable, FeatureTimestampsToDatetime};
+//! use suprnova::features::migrations::{
+//!     CreateFeaturesTable, FeatureTimestampsToDatetime, FeaturesToPennantLayout,
+//! };
 //! # struct Migrator;
 //!
 //! impl sea_orm_migration::MigratorTrait for Migrator {
@@ -12,16 +14,20 @@
 //!         vec![
 //!             Box::new(CreateFeaturesTable),
 //!             Box::new(FeatureTimestampsToDatetime),
+//!             Box::new(FeaturesToPennantLayout),
 //!         ]
 //!     }
 //! }
 //! ```
 //!
-//! [`FeatureTimestampsToDatetime`] moves a table an older version created on
-//! MySQL or MariaDB from `TIMESTAMP` to `DATETIME` time columns, and changes
-//! nothing anywhere else.
+//! The `features` table is laravel/pennant's. [`FeatureTimestampsToDatetime`]
+//! moves a table an older version created on MySQL or MariaDB from
+//! `TIMESTAMP` to `DATETIME` time columns, and [`FeaturesToPennantLayout`]
+//! moves it into Pennant's layout with its flags. A table Pennant created
+//! is left alone by all three.
 
 pub mod m_create_features_table;
+pub mod m_features_pennant_layout;
 pub mod m_features_timestamps_to_datetime;
 
 /// Public alias so consumers can write `CreateFeaturesTable` instead of
@@ -35,3 +41,14 @@ pub use m_create_features_table::Migration as CreateFeaturesTable;
 /// [`CreateFeaturesTable`] created on MySQL or MariaDB from `TIMESTAMP` to
 /// `DATETIME` time columns. Apps list it right after [`CreateFeaturesTable`].
 pub use m_features_timestamps_to_datetime::Migration as FeatureTimestampsToDatetime;
+
+/// Public alias for the upgrade that moves a `features` table an older
+/// [`CreateFeaturesTable`] created into laravel/pennant's layout, with its
+/// flags. Apps list it after [`FeatureTimestampsToDatetime`].
+pub use m_features_pennant_layout::Migration as FeaturesToPennantLayout;
+
+/// Whether `columns` are the earlier Suprnova layout of `features`, which
+/// keyed a flag by `scope_key`; Pennant's names the column `scope`.
+pub(crate) fn is_earlier_layout(columns: &[crate::database::catalog::CatalogColumn]) -> bool {
+    crate::database::catalog::column(columns, "scope_key").is_some()
+}

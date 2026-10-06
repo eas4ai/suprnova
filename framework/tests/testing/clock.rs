@@ -185,10 +185,11 @@ async fn a_session_idles_out_when_the_clock_passes_its_lifetime() {
     db.execute_unprepared(
         "CREATE TABLE sessions (\
             id TEXT PRIMARY KEY, \
-            user_id TEXT NULL, \
+            user_id INTEGER NULL, \
+            ip_address TEXT NULL, \
+            user_agent TEXT NULL, \
             payload TEXT NOT NULL, \
-            csrf_token TEXT NOT NULL, \
-            last_activity TEXT NOT NULL\
+            last_activity INTEGER NOT NULL\
          )",
     )
     .await

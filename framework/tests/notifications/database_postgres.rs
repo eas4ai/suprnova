@@ -159,7 +159,7 @@ pub(crate) async fn mark_read_unread_and_partitioned_reads(db: &DatabaseConnecti
     assert_eq!(read.len(), 1);
     assert!(read[0].read_at.is_some());
     assert!(
-        read[0].read_at.unwrap() >= read[0].created_at,
+        read[0].read_at.unwrap() >= read[0].created_at.unwrap(),
         "read_at decodes as the time it was marked"
     );
 
