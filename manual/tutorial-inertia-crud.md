@@ -116,8 +116,8 @@ pub mod todo;
 
 The `fillable` list gates mass assignment; `timestamps` auto-manages
 `created_at` / `updated_at` on every save. The user-facing `Todo` struct
-is the type you'll work with in handlers; the inner `todo::Model` is the
-SeaORM shape that route model binding fetches.
+is the type you'll work with in handlers, route model binding included;
+the inner `todo` module holds the SeaORM entity the macro generates.
 
 ## 4. Controller
 
@@ -133,7 +133,7 @@ use suprnova::{
     Model, Request, Response,
 };
 
-use crate::models::todo::{todo, Todo};
+use crate::models::todo::Todo;
 
 #[derive(InertiaProps)]
 pub struct TodoIndexProps {
@@ -152,14 +152,14 @@ pub struct TodoForm {
 }
 
 #[handler]
-pub async fn index(_req: Request) -> Response {
+pub async fn index(req: Request) -> Response {
     let todos = Todo::all().await?.into_vec();
-    inertia_response!("Todos/Index", TodoIndexProps { todos })
+    inertia_response!(&req, "Todos/Index", TodoIndexProps { todos })
 }
 
 #[handler]
-pub async fn create(_req: Request) -> Response {
-    inertia_response!("Todos/Create", TodoFormProps { todo: None })
+pub async fn create(req: Request) -> Response {
+    inertia_response!(&req, "Todos/Create", TodoFormProps { todo: None })
 }
 
 #[handler]
@@ -173,29 +173,25 @@ pub async fn store(form: TodoForm) -> Response {
 }
 
 #[handler]
-pub async fn edit(todo: todo::Model) -> Response {
-    let todo: Todo = todo.into();
-    inertia_response!("Todos/Edit", TodoFormProps { todo: Some(todo) })
+pub async fn edit(todo: Todo, req: Request) -> Response {
+    inertia_response!(&req, "Todos/Edit", TodoFormProps { todo: Some(todo) })
 }
 
 #[handler]
-pub async fn update(todo: todo::Model, form: TodoForm) -> Response {
-    let todo: Todo = todo.into();
+pub async fn update(todo: Todo, form: TodoForm) -> Response {
     todo.update(attrs! { title: form.title }).await?;
     redirect_to("/todos").into()
 }
 
 #[handler]
-pub async fn toggle(todo: todo::Model) -> Response {
-    let todo: Todo = todo.into();
+pub async fn toggle(todo: Todo) -> Response {
     let next = !todo.completed;
     todo.update(attrs! { completed: next }).await?;
     redirect_to("/todos").into()
 }
 
 #[handler]
-pub async fn destroy(todo: todo::Model) -> Response {
-    let todo: Todo = todo.into();
+pub async fn destroy(todo: Todo) -> Response {
     todo.delete().await?;
     redirect_to("/todos").into()
 }
@@ -203,15 +199,15 @@ pub async fn destroy(todo: todo::Model) -> Response {
 
 A few things to notice:
 
-- **Route model binding is automatic.** Declaring `todo: todo::Model` tells
-  the `#[handler]` macro to look up `{todo}` in the route path, fetch the
-  SeaORM row by primary key, and 404 if it's missing. The parameter name
-  must match the route placeholder.
-- **The macro hands you `todo::Model`; the Eloquent surface lives on
-  `Todo`.** The two are bridged by a `From` impl emitted by
-  `#[suprnova::model]`, so `let todo: Todo = todo.into();` is the
-  one-line conversion. `Todo` is the type that carries `update`,
-  `delete`, and the rest of the user-facing API.
+- **Route model binding is automatic.** `#[suprnova::model]` makes `Todo`
+  bindable, so declaring `todo: Todo` tells the `#[handler]` macro to read
+  `{todo}` from the route path and fetch the row through `Todo::query()` by
+  its primary key. A value that matches no row, or is not a number, answers
+  404 before the handler runs, and before `update` reads its form. The
+  argument's name must match the route placeholder; the router checks that
+  when it starts.
+- **The bound value is the model.** `todo` is a `Todo`, the type that
+  carries `update`, `delete`, and the rest of the user-facing API.
 - **`#[request]` covers validation.** Adding it to a struct generates
   `Deserialize`, `Validate`, and `FormRequest` - the framework rejects
   malformed input with a 422 before your handler runs. There's no need
@@ -262,10 +258,11 @@ routes! {
 ```
 
 The `{todo}` placeholder is what route model binding hooks onto: it has
-to match the handler parameter name (`todo`), and it has to match the
-SeaORM model's primary-key type (here, `i64`). The optional `.name(...)`
-suffix is what the route-type generator in the next step uses to build
-the frontend helpers.
+to match the handler parameter name (`todo`), and its value is parsed as
+the model's primary-key type (here, `i64`). A route whose handler reads a
+parameter its path does not declare stops the server at startup. The
+optional `.name(...)` suffix is what the route-type generator in the next
+step uses to build the frontend helpers.
 
 ## 6. Generate TypeScript types
 
@@ -292,7 +289,7 @@ in sync as you go.
 ## 7. Pages
 
 Each page lives under `frontend/src/pages/Todos/`. The names match the
-strings you pass to `inertia_response!`, so `inertia_response!("Todos/Index", ...)`
+strings you pass to `inertia_response!`, so `inertia_response!(&req, "Todos/Index", ...)`
 resolves to `frontend/src/pages/Todos/Index.svelte`.
 
 ### Index

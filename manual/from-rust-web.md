@@ -77,7 +77,7 @@ layer. Suprnova ships that layer:
 | Capability | Hand-roll on Axum | In Suprnova |
 |---|---|---|
 | Routing macros that scale to hundreds of routes | Builder API, can get noisy | `routes!` macro with grouping, prefixes, middleware, naming |
-| Route model binding (path id → loaded model) | Custom extractor per type | `#[handler]` resolves `post::Model` from `{id}` automatically |
+| Route model binding (path value → loaded model) | Custom extractor per type | `#[handler]` binds `post: Post` from `{post}` automatically |
 | Eloquent-style chainable query builder | Use SeaORM directly | `Post::query().db_where(...).order_by(...).get().await?` |
 | Soft deletes, observers, lifecycle events | Build per-model | `#[model(soft_deletes)] + impl Observer<Post>` |
 | Migrations + entity generation | Wire sea-orm-cli + scripts | `suprnova db:sync` runs migrations and regenerates entities |
@@ -152,7 +152,7 @@ mental model is the same.
 If you've used Axum's extractor pattern: Suprnova's `#[handler]` macro
 plays the same role, but resolves through the service container rather
 than via traits, which lets it inject app services as well as request
-data. Route model binding (`Post` from `{id}`) is built in.
+data. Route model binding (`post: Post` from `{post}`) is built in.
 
 If you've used `sqlx` directly: Suprnova's ORM sits over SeaORM, which
 sits over sqlx. You can drop to raw SQL via `DB::select(...)` /

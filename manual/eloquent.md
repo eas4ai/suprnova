@@ -115,6 +115,8 @@ configuration.
 | `updated_at` | string | `"updated_at"` | Override the column name |
 | `touches` | list of relation names | `[]` | `BelongsTo` or `MorphTo` relations whose owner row gets its `updated_at` bumped after this model is created, saved, updated, or deleted |
 | `mutators` | list of strings | `[]` | Field names whose JSON-fill path routes through a `set_<field>(value)` mutator method |
+| `route_key` | string | the primary key | The column a route parameter without a binding field matches (Laravel's `getRouteKeyName()`). A name that is no column of the model fails the build. See [Route model binding](routing.md#route-model-binding) |
+| `custom_route_binding` | flag | off | The model implements `RouteBinding` itself; the macro emits none. `suprnova::database::resolve_model_route_binding` stays callable from your impl |
 
 ### Full example
 
@@ -1603,7 +1605,7 @@ it when the query runs.
 | `Model::without_global_scopes()` | No |
 | `Model::query().without_global_scope::<S>()` | Yes, minus `S`, wherever it is chained |
 | `Model::with_trashed()` / `Model::only_trashed()` | Yes - only the soft-delete filter is lifted |
-| `RouteParam<Model>` route binding | Yes - the bound row is read through `Model::query()` |
+| Route binding (`post: Post`, `RouteParam<Post>`) | Yes - the bound row is read through `Model::query()` |
 | `Model::find(id)` | No - PK lookup goes through SeaORM directly |
 | `Model::find_many([...])` | No - same reason |
 | `Model::all()` | No - same reason |

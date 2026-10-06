@@ -5,13 +5,25 @@
 //! scoping, resource controllers, signed URL generation, and URL
 //! lookup by named route.
 
+pub(crate) mod binding;
 mod group;
 mod macros;
 mod params;
 mod resource;
+mod route_values;
 mod router;
 mod signed;
 pub mod url;
+
+#[doc(hidden)]
+pub use binding::{
+    __ArgBinds, __ArgProbe, __ArgReadsBody, __OptionalArgBinds, __OptionalArgProbe,
+    __OptionalArgReadsBody, __authorize_target, __type_id_of, HandlerInput,
+};
+pub use binding::{
+    BoundArg, HandlerArg, HandlerArgKind, HandlerRecord, MatchedRoute, MissingHandler,
+};
+pub use route_values::{NamedRouteValue, RouteParameters, RouteValue, bound_route_value};
 
 pub use group::{GroupBuilder, GroupRouter};
 pub use macros::{
@@ -39,7 +51,7 @@ pub use macros::{
     validate_route_path,
 };
 pub use params::{ParamConstraint, WholeValuePattern};
-pub use resource::{ResourceAction, ResourceController, ResourceRoutes};
+pub use resource::{ResourceAction, ResourceController, ResourceDef, ResourceRoutes};
 pub use router::{
     BoxedHandler, MultiMethodRouteBuilder, RouteBuilder, RouteUrlError, Router, WsMatch,
     clear_route_names_for_test, register_route_name, route, route_name_for_pattern,

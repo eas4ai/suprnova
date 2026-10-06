@@ -532,3 +532,65 @@ where
         self.inner.foreign_key()
     }
 }
+
+/// A scoped child through a `HasManyThrough` is a target row an
+/// intermediate row of this parent points at. The intermediate's own
+/// soft-delete filter applies, as it does to the relation's reads.
+impl<A, B, C> super::RouteChildRelation<C> for HasManyThrough<A, B, C>
+where
+    A: EloquentModel,
+    B: EloquentModel,
+    C: Model,
+    C: From<<C::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <C::Entity as sea_orm::EntityTrait>::Model: From<C>
+        + sea_orm::IntoActiveModel<<C::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <C::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<C::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    fn __route_child_query(self) -> Result<Builder<C>, FrameworkError> {
+        let through = <B as EloquentModel>::TABLE;
+        let (sql, values) = super::owned_through_table(
+            <C as EloquentModel>::TABLE,
+            &self.second_key,
+            through,
+            &self.second_local_key,
+            &[(self.first_key.as_str(), self.parent_key_value.clone())],
+            &super::__soft_delete_guard::<B>(through),
+        )?;
+        Ok(C::query().filter_raw(sql, values))
+    }
+}
+
+/// A scoped child through a `HasOneThrough` is the row the
+/// `HasManyThrough` inside it reads.
+impl<A, B, C> super::RouteChildRelation<C> for HasOneThrough<A, B, C>
+where
+    A: EloquentModel,
+    B: EloquentModel,
+    C: Model,
+    C: From<<C::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <C::Entity as sea_orm::EntityTrait>::Model: From<C>
+        + sea_orm::IntoActiveModel<<C::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <C::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<C::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    fn __route_child_query(self) -> Result<Builder<C>, FrameworkError> {
+        super::RouteChildRelation::__route_child_query(self.inner)
+    }
+}

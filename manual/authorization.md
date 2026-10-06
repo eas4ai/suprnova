@@ -299,7 +299,7 @@ Laravel's `#[Authorize]` controller attribute does:
 
 ```rust
 use suprnova::http::text;
-use suprnova::{Response, RouteParam, authorize, handler};
+use suprnova::{Response, authorize, handler};
 use crate::models::Post;
 use crate::requests::StorePost;
 
@@ -313,7 +313,7 @@ pub async fn store(form: StorePost) -> Response {
 // Route: put!("/posts/{post}", controllers::post::update)
 #[handler]
 #[authorize("update-post", post)]
-pub async fn update(post: RouteParam<Post>) -> Response {
+pub async fn update(post: Post) -> Response {
     text(format!("updated {}", post.id))
 }
 ```
@@ -322,8 +322,9 @@ The second argument is either a parameter or a type:
 
 - A single name that starts with a lowercase letter, such as `post`, is a
   parameter of the handler. The check runs against the value the route
-  binds to it. For a `RouteParam<Post>` parameter, that is the `Post`
-  inside. The name can also be the binding of a pattern, as in
+  binds to it, or the path value it reads (`id: i64`). For a
+  `RouteParam<Post>` parameter, that is the `Post` inside. The name can
+  also be the binding of a pattern, as in
   `RouteParam(post): RouteParam<Post>`. A name the handler does not take
   is a compile error.
 - Anything else, such as `Post` or `post::Model`, is a type. The gate is
@@ -338,8 +339,8 @@ that policy names `"update-post"`. An ability registered with
 
 The check runs at a fixed point in the request:
 
-1. The route parameters are bound. A model that does not exist answers
-   `404 Not Found`, whatever the gate would decide.
+1. The route parameters are bound and the path values read. A model that
+   does not exist answers `404 Not Found`, whatever the gate would decide.
 2. Each `#[authorize]` runs, in the order written. The first one that
    fails ends the request.
 3. The request body is read and validated, so a denied user never sees a
@@ -384,8 +385,9 @@ When the check fails, it answers the request with one of these statuses:
 
 `#[authorize]` may sit above or below `#[handler]`, and a handler may carry
 several. Without `#[handler]` it is a compile error. The handler must be an
-`async fn`, and the parameter it names must come from the route: a
-`RouteParam<M>`, a `...::Model`, or a path value such as `id: i64`. A form
+`async fn`, and the parameter it names must come from the route: its type
+must implement `RouteBinding`, as every `#[suprnova::model]` does, or be a
+primitive path value read through `FromParam`, such as `id: i64`. A form
 request or a `Request` reads the body, and the check runs before the body
 is read, so naming one is a compile error too.
 

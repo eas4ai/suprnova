@@ -243,7 +243,7 @@ fn resolve_live_route_with_snapshot(
     drop(routes);
     let pattern = resolved_pattern.ok_or(LiveRouteResolutionError::UnknownRoute)?;
     after_snapshot();
-    substitute_strict(&pattern, |key| parameters.get(key).cloned())
+    substitute_strict(&pattern, |key, _field| parameters.get(key).cloned())
         .map_err(|_| LiveRouteResolutionError::InvalidParameters)
 }
 
@@ -327,10 +327,12 @@ where
 /// `next_value` returns the raw value; this encodes it. A value is encoded
 /// as one path segment. A catch-all, `{*rest}`, is looked up as `rest`, the
 /// name the router captures it under, and spans segments: each segment is
-/// encoded and the slashes between them stay.
+/// encoded and the slashes between them stay. A `{post:slug}` placeholder
+/// is looked up as `post`, and `next_value` is told its binding field,
+/// `slug`, so a bound value can give that column's value (BIND-012).
 fn substitute<F>(pattern: &str, mut next_value: F) -> String
 where
-    F: FnMut(&str) -> Option<String>,
+    F: FnMut(&str, Option<&str>) -> Option<String>,
 {
     let values = optional_values(pattern, &mut next_value);
     let mut out = String::with_capacity(pattern.len() + 16);
@@ -369,17 +371,19 @@ where
 }
 
 /// The name a placeholder's value is looked up by: `rest` for the
-/// catch-all `{*rest}`, the text itself otherwise.
+/// catch-all `{*rest}`, `post` for `{post:slug}`, the text itself
+/// otherwise.
 fn placeholder_name(key: &str) -> &str {
-    key.strip_prefix('*').unwrap_or(key)
+    super::binding::split_placeholder(key).0
 }
 
 /// Look up and encode the value of the placeholder written `key`.
 fn placeholder_value<F>(key: &str, next_value: &mut F) -> Option<String>
 where
-    F: FnMut(&str) -> Option<String>,
+    F: FnMut(&str, Option<&str>) -> Option<String>,
 {
-    next_value(placeholder_name(key)).map(|value| encode_placeholder(key, &value))
+    let (name, field, _) = super::binding::split_placeholder(key);
+    next_value(name, field).map(|value| encode_placeholder(key, &value))
 }
 
 /// Encode `value` for the placeholder written `key`: one segment, or for a
@@ -411,7 +415,7 @@ enum Filled {
 /// One entry for each optional placeholder of `pattern`, in order.
 fn optional_values<F>(pattern: &str, next_value: &mut F) -> Vec<Filled>
 where
-    F: FnMut(&str) -> Option<String>,
+    F: FnMut(&str, Option<&str>) -> Option<String>,
 {
     let values: Vec<Option<String>> = pattern
         .split('{')
@@ -421,7 +425,8 @@ where
         // An empty value is no value. `/posts/` is a URL no form of
         // `/posts/{id?}` matches, so the segment is left out.
         .map(|key| {
-            next_value(placeholder_name(key))
+            let (name, field, _) = super::binding::split_placeholder(key);
+            next_value(name, field)
                 .filter(|value| !value.is_empty())
                 .map(|value| encode_placeholder(key, &value))
         })
@@ -453,7 +458,7 @@ fn leave_segment_out(out: &mut String) {
 /// only care that the URL is unsafe to emit.
 fn substitute_strict<F>(pattern: &str, mut next_value: F) -> Result<String, Vec<String>>
 where
-    F: FnMut(&str) -> Option<String>,
+    F: FnMut(&str, Option<&str>) -> Option<String>,
 {
     let values = optional_values(pattern, &mut next_value);
     let mut optional = values.iter();
@@ -514,7 +519,13 @@ where
 ///
 /// # Arguments
 /// * `name` - The route name (e.g., "users.show")
-/// * `params` - Slice of (key, value) tuples for path parameters
+/// * `params` - The parameter values: `(name, value)` string pairs, a
+///   bound value alone, or named pairs whose values are strings or bound
+///   values. See [`RouteParameters`](super::RouteParameters).
+///
+/// A bound value, a `#[model]` row or a `#[derive(RouteBinding)]` enum,
+/// fills its parameter with its route key, or with the column a
+/// `{post:slug}` parameter names (BIND-012).
 ///
 /// # Returns
 /// * `Some(String)` - The generated URL with parameters substituted
@@ -531,13 +542,12 @@ where
 /// let url = route("users.show", &[("id", "../../etc/passwd")]);
 /// assert_eq!(url, Some("/users/..%2F..%2Fetc%2Fpasswd".to_string()));
 /// ```
-pub fn route(name: &str, params: &[(&str, &str)]) -> Option<String> {
+pub fn route(name: &str, params: impl super::RouteParameters) -> Option<String> {
     let path_pattern = lookup_route(name)?;
-    Some(substitute(&path_pattern, |key| {
-        params
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| (*v).to_string())
+    let order = super::binding::placeholders(&path_pattern);
+    Some(substitute(&path_pattern, |key, field| {
+        let position = order.iter().position(|p| p.name == key)?;
+        params.__route_value(key, field, position)
     }))
 }
 
@@ -547,7 +557,9 @@ pub fn route(name: &str, params: &[(&str, &str)]) -> Option<String> {
 /// encoding policy.
 pub fn route_with_params(name: &str, params: &HashMap<String, String>) -> Option<String> {
     let path_pattern = lookup_route(name)?;
-    Some(substitute(&path_pattern, |key| params.get(key).cloned()))
+    Some(substitute(&path_pattern, |key, _field| {
+        params.get(key).cloned()
+    }))
 }
 
 /// Error returned by [`try_route`] / [`try_route_with_params`] when a
@@ -602,14 +614,13 @@ impl std::error::Error for RouteUrlError {}
 /// follows (a `Location` header, a redirect, an email link). Use
 /// [`route`] when a partial URL is acceptable (debug logging, dev
 /// dashboards).
-pub fn try_route(name: &str, params: &[(&str, &str)]) -> Result<String, RouteUrlError> {
+pub fn try_route(name: &str, params: impl super::RouteParameters) -> Result<String, RouteUrlError> {
     let path_pattern =
         lookup_route(name).ok_or_else(|| RouteUrlError::NameNotFound(name.into()))?;
-    substitute_strict(&path_pattern, |key| {
-        params
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| (*v).to_string())
+    let order = super::binding::placeholders(&path_pattern);
+    substitute_strict(&path_pattern, |key, field| {
+        let position = order.iter().position(|p| p.name == key)?;
+        params.__route_value(key, field, position)
     })
     .map_err(|missing| RouteUrlError::MissingParams {
         name: name.into(),
@@ -627,7 +638,7 @@ pub fn try_route_with_params(
 ) -> Result<String, RouteUrlError> {
     let path_pattern =
         lookup_route(name).ok_or_else(|| RouteUrlError::NameNotFound(name.into()))?;
-    substitute_strict(&path_pattern, |key| params.get(key).cloned()).map_err(|missing| {
+    substitute_strict(&path_pattern, |key, _field| params.get(key).cloned()).map_err(|missing| {
         RouteUrlError::MissingParams {
             name: name.into(),
             missing,
@@ -734,6 +745,12 @@ pub struct Router {
     fallback_handler: Option<Arc<BoxedHandler>>,
     /// Middleware for the fallback route
     fallback_middleware: Vec<BoxedMiddleware>,
+    /// The handler record and binding settings of every route, the
+    /// router-wide binders, and the checked plans. See
+    /// [`crate::routing::binding`]. Boxed, because a router is moved by
+    /// value through every builder call of a route table, and each of
+    /// those moves copies the whole struct.
+    pub(crate) bindings: Box<super::binding::RouterBindings>,
 }
 
 /// Register `pattern` with one method's matcher: once when it has no
@@ -750,7 +767,10 @@ fn insert_every_form(
     pattern: &str,
     handler: Arc<BoxedHandler>,
 ) -> Result<(), String> {
-    let forms = super::params::expand_optional(pattern).map_err(|e| e.message().to_owned())?;
+    // `{post:slug}` names the parameter `post`; the field is the route
+    // binding's, and the matcher sees the name alone.
+    let matched = super::binding::without_binding_fields(pattern);
+    let forms = super::params::expand_optional(&matched).map_err(|e| e.message().to_owned())?;
     for form in forms {
         routes
             .insert(form, (pattern.to_string(), Arc::clone(&handler)))
@@ -789,6 +809,7 @@ impl Router {
             route_constraints: HashMap::new(),
             fallback_handler: None,
             fallback_middleware: Vec::new(),
+            bindings: Box::default(),
         }
     }
 
@@ -1073,6 +1094,105 @@ impl Router {
         self.fallback_handler = Some(handler);
     }
 
+    /// Record the `#[handler]` record of the fallback route's handler, so
+    /// the startup checks see it (BIND-013).
+    pub(crate) fn note_fallback_record(
+        &mut self,
+        record: Option<&'static super::binding::HandlerRecord>,
+    ) {
+        self.bindings.note_fallback(record);
+    }
+
+    /// Record the `#[handler]` record of the route `(method, pattern)`,
+    /// for a registration site that boxed the handler itself.
+    pub(crate) fn note_route_record(
+        &mut self,
+        method: Method,
+        pattern: &str,
+        record: Option<&'static super::binding::HandlerRecord>,
+    ) {
+        self.bindings.note_route(method, pattern, record);
+    }
+
+    /// Bind the route parameter `name` with `resolver` on every route,
+    /// those registered before this call and those after: Laravel's
+    /// `Route::bind`. `-` in `name` is read as `_`, so `bind("user-id", ..)`
+    /// covers `{user_id}`.
+    ///
+    /// The resolver receives the parameter's raw value and the matched
+    /// route, and returns the value, or `None` for "no such value", which
+    /// answers the route's `missing()` response or a 404. It takes
+    /// precedence over the argument type's own binding, ignores binding
+    /// fields, and is never scoped to a parent (BIND-007). The handler
+    /// argument it binds must implement [`RouteBinding`](crate::RouteBinding)
+    /// as the type the resolver returns; any other route that reads `name`
+    /// is refused at startup.
+    ///
+    /// ```rust,ignore
+    /// Router::new()
+    ///     .bind("user", |value: String, _route| async move {
+    ///         User::query().filter("name", value).first().await
+    ///     })
+    ///     .get("/users/{user}", users::show);
+    /// ```
+    pub fn bind<R, F, Fut>(mut self, name: &str, resolver: F) -> Self
+    where
+        R: Send + Sync + 'static,
+        F: Fn(String, super::MatchedRoute) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Option<R>, FrameworkError>> + Send + 'static,
+    {
+        self.bindings
+            .add_binder(name, super::binding::Binder::bind(resolver));
+        self
+    }
+
+    /// Bind the route parameter `name` to `M` by its route key on every
+    /// route, registered before or after this call: Laravel's
+    /// `Route::model`. When no row matches, `fallback` receives the raw
+    /// value and its result is bound instead, so the route does not answer
+    /// 404. `-` in `name` is read as `_`.
+    ///
+    /// ```rust,ignore
+    /// Router::new()
+    ///     .model::<User, _, _>("author", |_value| async { Ok(User::guest()) })
+    ///     .get("/posts/by/{author}", posts::by_author);
+    /// ```
+    pub fn model<M, F, Fut>(mut self, name: &str, fallback: F) -> Self
+    where
+        M: crate::RouteBinding,
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<M, FrameworkError>> + Send + 'static,
+    {
+        self.bindings
+            .add_binder(name, super::binding::Binder::model(fallback));
+        self
+    }
+
+    /// Run the route-binding checks on every route whose handler
+    /// `#[handler]` recorded, and build the plans requests run (BIND-004,
+    /// BIND-006, BIND-007, BIND-013, BIND-015). The server runs this at boot
+    /// and refuses to start on an error; a router driven through
+    /// [`handle_request`](crate::handle_request) runs it before its first
+    /// request, which then answers 500 with the same error. Calling it
+    /// again changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Every route the checks refuse, each naming the route, the parameter
+    /// and what is wrong with it.
+    pub fn prepare_bindings(&self) -> Result<(), FrameworkError> {
+        self.bindings.prepare()
+    }
+
+    /// The binding plan of the route `(method, pattern)`, checked once.
+    pub(crate) fn binding_plan(
+        &self,
+        method: &Method,
+        pattern: &str,
+    ) -> Result<Option<Arc<super::binding::RoutePlan>>, FrameworkError> {
+        self.bindings.plan(method, pattern)
+    }
+
     /// Add middleware to the fallback route
     pub(crate) fn add_fallback_middleware(&mut self, middleware: BoxedMiddleware) {
         self.fallback_middleware.push(middleware);
@@ -1348,6 +1468,8 @@ impl Router {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.try_insert_get(&converted, Arc::new(handler))?;
+        self.bindings
+            .note_route(Method::GET, &converted, super::binding::record_of::<H>());
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1386,6 +1508,8 @@ impl Router {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.try_insert_post(&converted, Arc::new(handler))?;
+        self.bindings
+            .note_route(Method::POST, &converted, super::binding::record_of::<H>());
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1420,6 +1544,8 @@ impl Router {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.try_insert_put(&converted, Arc::new(handler))?;
+        self.bindings
+            .note_route(Method::PUT, &converted, super::binding::record_of::<H>());
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1458,6 +1584,8 @@ impl Router {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.try_insert_delete(&converted, Arc::new(handler))?;
+        self.bindings
+            .note_route(Method::DELETE, &converted, super::binding::record_of::<H>());
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1496,6 +1624,8 @@ impl Router {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.try_insert_patch(&converted, Arc::new(handler))?;
+        self.bindings
+            .note_route(Method::PATCH, &converted, super::binding::record_of::<H>());
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1550,6 +1680,8 @@ impl Router {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.try_insert_head(&converted, Arc::new(handler))?;
+        self.bindings
+            .note_route(Method::HEAD, &converted, super::binding::record_of::<H>());
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1594,6 +1726,11 @@ impl Router {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.try_insert_options(&converted, Arc::new(handler))?;
+        self.bindings.note_route(
+            Method::OPTIONS,
+            &converted,
+            super::binding::record_of::<H>(),
+        );
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1661,9 +1798,11 @@ impl Router {
         let converted = crate::routing::macros::convert_route_params(path);
         let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         let handler_arc = Arc::new(boxed);
+        let record = super::binding::record_of::<H>();
         let mut registered = Vec::with_capacity(methods.len());
         for method in methods {
             self.try_insert_method(method, &converted, handler_arc.clone())?;
+            self.bindings.note_route(method.clone(), &converted, record);
             registered.push(method.clone());
         }
         Ok(MultiMethodRouteBuilder {
@@ -2405,6 +2544,67 @@ impl RouteBuilder {
         self
     }
 
+    /// Apply the binding settings a route macro collected.
+    pub(crate) fn with_binding_options(
+        mut self,
+        options: super::binding::RouteBindingOptions,
+    ) -> RouteBuilder {
+        let current = self
+            .router
+            .bindings
+            .options_mut(self.last_method.clone(), &self.last_path);
+        *current = options.within(&std::mem::take(current));
+        self
+    }
+
+    /// Bind soft-deleted rows on this route: every binding of the route,
+    /// scoped children included, goes through the soft-deletable lookups
+    /// (BIND-008). Laravel's `withTrashed()`.
+    pub fn with_trashed(mut self) -> RouteBuilder {
+        self.router
+            .bindings
+            .options_mut(self.last_method.clone(), &self.last_path)
+            .with_trashed = true;
+        self
+    }
+
+    /// Look every bound child parameter of this route up through its
+    /// parent's relation, even one without a binding field (BIND-006).
+    /// Laravel's `scopeBindings()`.
+    pub fn scope_bindings(mut self) -> RouteBuilder {
+        self.router
+            .bindings
+            .options_mut(self.last_method.clone(), &self.last_path)
+            .scoped = Some(true);
+        self
+    }
+
+    /// Never scope this route's bindings to a parent, even a child with a
+    /// binding field. Laravel's `withoutScopedBindings()`.
+    pub fn without_scoped_bindings(mut self) -> RouteBuilder {
+        self.router
+            .bindings
+            .options_mut(self.last_method.clone(), &self.last_path)
+            .scoped = Some(false);
+        self
+    }
+
+    /// Answer with `handler` instead of a 404 when a binding of this route
+    /// finds no row, finds no row its parent owns, or gets a value that
+    /// does not parse (BIND-009). It receives the request. An enum's miss
+    /// still answers 404. Laravel's `missing()`.
+    pub fn missing<H, Fut>(mut self, handler: H) -> RouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router
+            .bindings
+            .options_mut(self.last_method.clone(), &self.last_path)
+            .missing = Some(super::binding::boxed_missing(handler));
+        self
+    }
+
     /// Register a GET route (for chaining without .name())
     pub fn get<H, Fut>(self, path: &str, handler: H) -> RouteBuilder
     where
@@ -2761,6 +2961,68 @@ impl MultiMethodRouteBuilder {
     pub fn block_session(self, block: crate::session::SessionBlock) -> Self {
         for method in &self.methods {
             crate::session::blocking::register_route_block(method, &self.path, block);
+        }
+        self
+    }
+
+    /// Apply the binding settings a route macro collected, to every method.
+    pub(crate) fn with_binding_options(
+        mut self,
+        options: super::binding::RouteBindingOptions,
+    ) -> Self {
+        for method in &self.methods {
+            let current = self.router.bindings.options_mut(method.clone(), &self.path);
+            *current = options.clone().within(&std::mem::take(current));
+        }
+        self
+    }
+
+    /// [`RouteBuilder::with_trashed`] for every method of the route.
+    pub fn with_trashed(mut self) -> Self {
+        for method in &self.methods {
+            self.router
+                .bindings
+                .options_mut(method.clone(), &self.path)
+                .with_trashed = true;
+        }
+        self
+    }
+
+    /// [`RouteBuilder::scope_bindings`] for every method of the route.
+    pub fn scope_bindings(mut self) -> Self {
+        for method in &self.methods {
+            self.router
+                .bindings
+                .options_mut(method.clone(), &self.path)
+                .scoped = Some(true);
+        }
+        self
+    }
+
+    /// [`RouteBuilder::without_scoped_bindings`] for every method of the
+    /// route.
+    pub fn without_scoped_bindings(mut self) -> Self {
+        for method in &self.methods {
+            self.router
+                .bindings
+                .options_mut(method.clone(), &self.path)
+                .scoped = Some(false);
+        }
+        self
+    }
+
+    /// [`RouteBuilder::missing`] for every method of the route.
+    pub fn missing<H, Fut>(mut self, handler: H) -> Self
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let missing = super::binding::boxed_missing(handler);
+        for method in &self.methods {
+            self.router
+                .bindings
+                .options_mut(method.clone(), &self.path)
+                .missing = Some(missing.clone());
         }
         self
     }

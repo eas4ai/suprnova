@@ -719,12 +719,12 @@ the user is visible to every later middleware and the handler.
 
 ## Testing route model binding
 
-`RouteParam<User>` hydrates a typed `User` through the handler's
-extractor chain, so the test must pass that extractor to a
-`#[handler]` function:
+A `#[suprnova::model]` struct binds from the route parameter its argument
+names. Drive the binding through a router, so the router's checks and the
+handler's extraction both run:
 
 ```rust
-use suprnova::{RouteParam, Response, handler};
+use suprnova::{Response, handler};
 
 #[suprnova::model(table = "users")]
 pub struct User {
@@ -735,23 +735,23 @@ pub struct User {
 }
 
 #[handler]
-async fn show(RouteParam(user): RouteParam<User>) -> Response {
+async fn show(user: User) -> Response {
     suprnova::http::json(serde_json::json!({ "email": user.email }))
 }
 
 #[tokio::test]
-async fn show_user_binds_from_route_param() {
+async fn show_user_binds_from_the_route() {
     // Insert a test user via the model. Database setup omitted -
     // see the testing chapter for `TestDatabase` patterns.
     let user = User::create(suprnova::attrs! {
         email: "bound@example.com"
     }).await.unwrap();
 
-    // A destructured RouteParam currently uses `param` as the handler
-    // macro's route-parameter name.
+    // The placeholder carries the argument's name.
     let router: Router = Router::new()
-        .get("/users/{param}", show)
+        .get("/users/{user}", show)
         .into();
+    router.prepare_bindings().expect("the route declares `user`");
 
     let addr = spawn_server(router, MiddlewareRegistry::new(), 1).await;
     let (status, body) = send_get(addr, &format!("/users/{}", user.id)).await;
@@ -762,16 +762,16 @@ async fn show_user_binds_from_route_param() {
 }
 ```
 
-For a `{user}` route parameter instead, accept
-`user: RouteParam<User>` without destructuring; `RouteParam` dereferences
-to `User` for field access. Calling `req.param(...).parse()` and then
-`User::find_or_fail(...)` tests parameter parsing and model lookup, not
-route-model binding.
+`router.prepare_bindings()` runs the router's startup checks and returns
+the refusal as an error, so a test can assert that a route whose handler
+reads an undeclared parameter, such as `/users/{id}` with `user: User`,
+is refused. A router driven through `handle_request` runs the same checks
+before its first request and answers 500 when they fail.
 
 For binding-in-isolation tests, call
-`<RouteParam<User> as AutoRouteBinding>::from_route_param(...)`
-directly. That checks the binding implementation without a router, but
-it does not exercise the `#[handler]` extractor chain.
+`<User as suprnova::RouteBinding>::resolve_route_binding(value, None)`
+directly. It returns `Ok(None)` for a value that does not parse or
+matches no row, and checks the lookup without a router.
 
 ## Testing auth flows end-to-end
 

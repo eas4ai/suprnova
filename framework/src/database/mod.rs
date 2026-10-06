@@ -144,7 +144,16 @@ pub use identifier::{validate_identifier, validate_sql_operator};
 pub use model::{EntityExt, EntityExtMut};
 pub use monitor::ConnectionCount;
 pub use query_builder::QueryBuilder;
-pub use route_binding::{AutoRouteBinding, RouteBinding, RouteParam};
+#[doc(hidden)]
+pub use route_binding::{
+    __ColumnJson, __ColumnOptional, __ColumnOther, __ColumnParses, __ColumnProbe,
+    __route_child_lookup, SoftDeleteTable,
+};
+pub use route_binding::{
+    AutoRouteBinding, BoundChild, ChildBindings, ModelRouteBinding, RouteBinding, RouteBindingInfo,
+    RouteColumn, RouteLookup, RouteParam, model_route_binding_info, model_route_field,
+    resolve_model_child_route_binding, resolve_model_route_binding,
+};
 pub use schema_dump::{PrunedMigration, SchemaDump};
 pub use stored_datetime::StoredDateTime;
 pub use testing::TestDatabase;

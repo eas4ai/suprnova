@@ -145,20 +145,13 @@ pub(crate) fn expand_optional(pattern: &str) -> Result<Vec<String>, FrameworkErr
 }
 
 /// The names of the parameters of `pattern`, in order, without the `?` of
-/// an optional one. A catch-all `{*rest}` is named `rest`.
+/// an optional one or the binding field of `{post:slug}`. A catch-all
+/// `{*rest}` is named `rest`.
 pub(crate) fn param_names(pattern: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut rest = pattern;
-    while let Some(open) = rest.find('{') {
-        rest = &rest[open + 1..];
-        let Some(close) = rest.find('}') else {
-            break;
-        };
-        let name = rest[..close].trim_start_matches('*').trim_end_matches('?');
-        names.push(name.to_owned());
-        rest = &rest[close + 1..];
-    }
-    names
+    super::binding::placeholders(pattern)
+        .into_iter()
+        .map(|placeholder| placeholder.name)
+        .collect()
 }
 
 /// What a route parameter may hold. Attach one to a route with

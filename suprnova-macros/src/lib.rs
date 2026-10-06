@@ -33,6 +33,8 @@ mod package_settings;
 mod policy;
 mod redirect;
 mod request;
+mod resource;
+mod route_binding_derive;
 mod scopes;
 mod serde_attrs;
 mod service;
@@ -138,6 +140,74 @@ pub fn derive_data(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(InertiaProps, attributes(serde))]
 pub fn derive_inertia_props(input: TokenStream) -> TokenStream {
     inertia::derive_inertia_props_impl(input)
+}
+
+/// A resource whose actions are the `#[handler]` functions of one module,
+/// found by action name (BIND-011).
+///
+/// `resource!("posts", controllers::posts)` registers the seven actions,
+/// `index`, `create`, `store`, `show`, `edit`, `update` and `destroy`, each
+/// the function of that name in `controllers::posts`. `only = [...]` or
+/// `except = [...]` selects actions; an action selected whose function the
+/// module does not define fails to compile. The actions take bound
+/// arguments as any handler does. A dotted name nests: `users.posts`
+/// registers `/users/{user}/posts/{post}` under `users.posts.*`.
+///
+/// ```rust,ignore
+/// routes! {
+///     resource!("posts", controllers::posts),
+///     resource!("users.posts", controllers::user_posts, only = [index, show])
+///         .scoped([("post", "slug")])
+///         .missing(|_req| async { Ok(suprnova::redirect_to("/posts").into()) }),
+/// }
+/// ```
+#[proc_macro]
+pub fn resource(input: TokenStream) -> TokenStream {
+    match resource::expand(input.into(), false) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// [`resource!`] without the `create` and `edit` actions, the forms an API
+/// does not serve. Mirrors Laravel's `Route::apiResource`.
+#[proc_macro]
+pub fn api_resource(input: TokenStream) -> TokenStream {
+    match resource::expand(input.into(), true) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Binds a unit-only enum from a route parameter (BIND-010).
+///
+/// Each variant binds from one string: its `#[route(value = "...")]`, else
+/// its name in snake case, matched exactly and case-sensitively. A handler
+/// argument of the enum's type then binds from the route parameter named
+/// after it, and a value that matches no variant answers 404, without the
+/// route's `missing()` handler. `route()` fills a parameter with the
+/// variant's string.
+///
+/// ```rust,ignore
+/// #[derive(suprnova::RouteBinding)]
+/// enum Category {
+///     Fruits,                   // "fruits"
+///     #[route(value = "veg")]
+///     Vegetables,               // "veg"
+///     PantryStaples,            // "pantry_staples"
+/// }
+///
+/// // GET /categories/{category}
+/// #[handler]
+/// pub async fn show(category: Category) -> Response { ... }
+/// ```
+#[proc_macro_derive(RouteBinding, attributes(route))]
+pub fn derive_route_binding(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    match route_binding_derive::expand(input) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
 }
 
 /// Registers a struct's input names - the keys serde reads each field
@@ -398,10 +468,32 @@ pub fn domain_error(attr: TokenStream, input: TokenStream) -> TokenStream {
 
 /// Attribute macro for controller handler methods
 ///
-/// Transforms handler functions to automatically extract typed parameters
-/// from HTTP requests using the `FromRequest` trait.
+/// Transforms handler functions to extract typed arguments from the
+/// request. `Request` passes the request through; an integer type or
+/// `String` is a path value read from the route parameter of its name; a
+/// type that implements `RouteBinding`, such as a `#[suprnova::model]`
+/// struct, binds from the route parameter of its name; any other type is
+/// read from the body through `FromRequest`. The generated code chooses
+/// between binding and the body at compile time.
+///
+/// The macro also records every argument for the router, which refuses at
+/// startup a route whose handler reads a parameter its path does not
+/// declare, or reads the request body twice. See the routing chapter's
+/// route model binding section.
 ///
 /// # Examples
+///
+/// ## With a bound model:
+/// ```rust,ignore
+/// use suprnova::{handler, Response, json_response};
+/// use crate::models::Post;
+///
+/// // GET /posts/{post}
+/// #[handler]
+/// pub async fn show(post: Post) -> Response {
+///     json_response!({ "title": post.title })
+/// }
+/// ```
 ///
 /// ## With Request parameter:
 /// ```rust,ignore
@@ -461,7 +553,7 @@ pub fn handler(attr: TokenStream, input: TokenStream) -> TokenStream {
 /// // Against the model the route binds to a parameter.
 /// #[handler]
 /// #[authorize("update-post", post)]
-/// pub async fn update(post: RouteParam<Post>) -> Response { ... }
+/// pub async fn update(post: Post) -> Response { ... }
 /// ```
 ///
 /// The second argument is a parameter when it is a single identifier that
@@ -469,12 +561,12 @@ pub fn handler(attr: TokenStream, input: TokenStream) -> TokenStream {
 /// else (`Post`, `post::Model`, `crate::models::Post`) is a type.
 ///
 /// - A parameter must be the binding of one the handler takes, written
-///   `post: RouteParam<Post>` or `RouteParam(post): RouteParam<Post>`, or
-///   the handler does not compile.
-///   It must come from the route: a `RouteParam<M>` (checked as the `M`
-///   inside), a `...::Model`, or a path value such as `i64`. A form request
-///   or `Request` reads the body, which the check runs before, so naming one
-///   does not compile either.
+///   `post: Post` or `RouteParam(post): RouteParam<Post>`, or the handler
+///   does not compile. It must come from the route: its type implements
+///   `RouteBinding` (a `RouteParam<M>` is checked as the `M` inside), or it
+///   is a primitive path value read through `FromParam`, such as `i64`.
+///   The build checks both. A form request or `Request` reads the body,
+///   which the check runs before, so naming one does not compile either.
 /// - A type is checked as `<Type as Default>::default()`: the gate is keyed
 ///   by type, so a default value stands in for it, as it does for
 ///   `authorize_resource`. Every `#[suprnova::model]` struct implements
