@@ -94,6 +94,18 @@ pub struct Request {
     connection_holds: Vec<ConnectionHold>,
 }
 
+/// A value a route binding resolved, held until the handler takes it.
+pub(crate) type RouteBound = Box<dyn std::any::Any + Send + Sync>;
+
+/// The values a route's bindings resolved, by handler argument, kept in the
+/// request's extensions rather than in a field: a request is moved by value
+/// through every middleware, and each move copies the struct, so a field
+/// would grow every frame of a deep middleware stack. The mutex makes the
+/// cell `Sync` and `Clone`, which the extension map requires; the value is
+/// taken out once.
+#[derive(Clone)]
+struct RouteBindings(std::sync::Arc<std::sync::Mutex<Option<Vec<Option<RouteBound>>>>>);
+
 /// The address one entry of `X-Forwarded-For` names, in its canonical
 /// form, so an IPv4 address written as an IPv6 one is the IPv4 address.
 ///
@@ -158,6 +170,27 @@ impl Request {
     pub fn with_params(mut self, params: HashMap<String, String>) -> Self {
         self.params = params;
         self
+    }
+
+    /// Hand the handler the values the route's bindings resolved, one slot
+    /// per handler argument.
+    pub(crate) fn set_route_bindings(&mut self, values: Vec<Option<RouteBound>>) {
+        self.parts
+            .extensions
+            .insert(RouteBindings(std::sync::Arc::new(std::sync::Mutex::new(
+                Some(values),
+            ))));
+    }
+
+    /// Take the values the route's bindings resolved, once. `None` when the
+    /// router ran no binding plan for this request.
+    pub(crate) fn take_route_bindings(&mut self) -> Option<Vec<Option<RouteBound>>> {
+        let RouteBindings(cell) = self.parts.extensions.remove::<RouteBindings>()?;
+        let mut slot = match cell.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        slot.take()
     }
 
     /// Record the matched route pattern (e.g. `/users/{id}`) on the

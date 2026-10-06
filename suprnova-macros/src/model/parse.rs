@@ -263,6 +263,13 @@ pub struct ModelInput {
     /// Laravel's `HasUuids` / `HasUlids` / `HasVersion4Uuids` trait
     /// family.
     pub unique_id: Option<String>,
+    /// `route_key = "slug"` - the column a route parameter without a
+    /// binding field matches (BIND-005), with the attribute's span. `None`
+    /// means the primary key.
+    pub route_key: Option<(String, Span)>,
+    /// `custom_route_binding` - the model implements `RouteBinding` itself,
+    /// so the macro emits none (BIND-007).
+    pub custom_route_binding: bool,
 }
 
 impl ModelInput {
@@ -594,6 +601,30 @@ impl ModelInput {
             }
         }
 
+        // BIND-005: the route key must be one of the model's columns. The
+        // injected `__eager` / `__pivot` fields are not columns.
+        let route_key = match attrs.route_key {
+            Some((column, span)) => {
+                let is_column = column != "__eager"
+                    && column != "__pivot"
+                    && matches!(&item.fields, syn::Fields::Named(named)
+                    if named.named.iter().any(|field| {
+                        field.ident.as_ref().is_some_and(|ident| ident == column.as_str())
+                    }));
+                if !is_column {
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "`route_key = \"{column}\"` names no column of `{struct_name}`: \
+                             a route key must be one of the model's fields"
+                        ),
+                    ));
+                }
+                Some((column, span))
+            }
+            None => None,
+        };
+
         Ok(Self {
             item,
             table,
@@ -619,6 +650,8 @@ impl ModelInput {
             morph_type: attrs.morph_type,
             observers: attrs.observers,
             unique_id: attrs.unique_id,
+            route_key,
+            custom_route_binding: attrs.custom_route_binding,
         })
     }
 
@@ -923,6 +956,8 @@ struct ModelAttrs {
     morph_type: Option<String>,
     observers: Option<ObserversAttr>,
     unique_id: Option<String>,
+    route_key: Option<(String, Span)>,
+    custom_route_binding: bool,
 }
 
 impl Parse for ModelAttrs {
@@ -934,12 +969,15 @@ impl Parse for ModelAttrs {
         loop {
             let key: Ident = input.parse()?;
             // Flag-style attributes (no `=`):
-            if matches!(key.to_string().as_str(), "soft_deletes" | "timestamps")
-                && (input.is_empty() || input.peek(Token![,]))
+            if matches!(
+                key.to_string().as_str(),
+                "soft_deletes" | "timestamps" | "custom_route_binding"
+            ) && (input.is_empty() || input.peek(Token![,]))
             {
                 match key.to_string().as_str() {
                     "soft_deletes" => out.soft_deletes = Some(true),
                     "timestamps" => out.timestamps = Some(true),
+                    "custom_route_binding" => out.custom_route_binding = true,
                     _ => unreachable!(),
                 }
             } else {
@@ -976,6 +1014,10 @@ impl Parse for ModelAttrs {
                     "touches" => out.touches = Some(parse_str_array(input)?),
                     "relations" => out.relations = Some(parse_relations_map(input)?),
                     "morph_type" => out.morph_type = Some(input.parse::<LitStr>()?.value()),
+                    "route_key" => {
+                        let lit = input.parse::<LitStr>()?;
+                        out.route_key = Some((lit.value(), lit.span()));
+                    }
                     "unique_id" => {
                         let lit = input.parse::<LitStr>()?;
                         let val = lit.value();

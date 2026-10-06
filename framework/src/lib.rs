@@ -164,13 +164,13 @@ pub use data::{
     current_include_set, scope_include_set, with_include_overrides,
 };
 pub use database::{
-    AutoRouteBinding, AvgValue, ColumnValue, ConnectionCount, ConnectionEstablished,
-    ConnectionRegistry, DB, Database, DatabaseBusy, DatabaseConfig, DatabaseType, DbConnection,
-    DbTableBuilder, DynamicRow, EntityExt, EntityExtMut, IntoWhereIn, JoinClause,
-    PRIMARY_CONNECTION_NAME, PrunedMigration, QueryExecuted, QueryListener,
-    READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, RouteParam, SchemaDump,
-    StoredDateTime, Transaction, TransactionBeginning, TransactionCommitted, TransactionRolledBack,
-    TxHandle, UrlSource, WhereIn,
+    AutoRouteBinding, AvgValue, BoundChild, ChildBindings, ColumnValue, ConnectionCount,
+    ConnectionEstablished, ConnectionRegistry, DB, Database, DatabaseBusy, DatabaseConfig,
+    DatabaseType, DbConnection, DbTableBuilder, DynamicRow, EntityExt, EntityExtMut, IntoWhereIn,
+    JoinClause, ModelRouteBinding, PRIMARY_CONNECTION_NAME, PrunedMigration, QueryExecuted,
+    QueryListener, READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, RouteBindingInfo,
+    RouteColumn, RouteParam, SchemaDump, StoredDateTime, Transaction, TransactionBeginning,
+    TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource, WhereIn,
 };
 #[cfg(feature = "magnetar-oauth")]
 pub use magnetar::{
@@ -410,22 +410,28 @@ pub use routing::{
     GroupRoute,
     GroupRouter,
     IntoGroupItem,
+    MatchedRoute,
+    NamedRouteValue,
     ParamConstraint,
     ResourceAction,
     ResourceController,
     ResourceRoutes,
     RouteBuilder,
     RouteDefBuilder,
+    RouteParameters,
+    RouteValue,
     Router,
     SignatureVerdict,
     WholeValuePattern,
     WsRouteDef,
+    bound_route_value,
     clear_route_names_for_test,
     redirect,
     redirect_to,
     route,
     sign_route,
     sign_url,
+    try_route,
     url,
     validate_route_path,
     verify_signature,
@@ -728,7 +734,9 @@ pub use suprnova_macros::{view, view_filter};
 pub use suprnova_macros::Factory;
 pub use suprnova_macros::MultipartRequest;
 pub use suprnova_macros::NotificationMailable;
+pub use suprnova_macros::RouteBinding;
 pub use suprnova_macros::suprnova_test;
+pub use suprnova_macros::{api_resource, resource};
 
 // Re-export Jest-like testing macros
 pub use suprnova_macros::describe;

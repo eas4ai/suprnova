@@ -296,3 +296,31 @@ where
         &self.foreign_key
     }
 }
+
+/// A scoped child through a `BelongsTo` is the owner row the child's
+/// foreign key names. A null foreign key owns nothing.
+impl<C, P> super::RouteChildRelation<P> for BelongsTo<C, P>
+where
+    C: EloquentModel,
+    P: Model,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    fn __route_child_query(self) -> Result<Builder<P>, FrameworkError> {
+        Ok(match self.parent_key_value {
+            Some(key) => P::query().filter(self.owner_key.as_str(), key),
+            None => P::query().filter_raw("1 = 0", Vec::new()),
+        })
+    }
+}

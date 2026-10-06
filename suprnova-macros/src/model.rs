@@ -25,6 +25,7 @@ mod observers;
 mod parse;
 pub mod prunable;
 mod relations;
+mod route_binding;
 mod serialization;
 
 use parse::ModelInput;
@@ -87,6 +88,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let relations_tokens = relations::emit(&input)?;
     let registry = emit_registry(&input);
     let morph_registry = emit_morph_registry(&input);
+    let route_binding = route_binding::emit(&input);
 
     let module_name = input.module_name();
     let struct_def = input.struct_def();
@@ -138,6 +140,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         #relations_tokens
         #registry
         #morph_registry
+        #route_binding
         #events_dispatch_impl
         #observers_attestation
         #observe_shim

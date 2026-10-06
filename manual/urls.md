@@ -74,6 +74,39 @@ under a *different* path panics; that collision is a security-shaped
 bug because helpers like `Redirect::route` would silently target
 whichever side won the race.
 
+### Bound values
+
+A parameter takes a string or a bound value, such as a `#[model]` row or
+a `#[derive(RouteBinding)]` enum. A bound value fills a `{post}`
+parameter with its route key and a `{post:slug}` parameter with its
+`slug` column, encoded as any value is:
+
+```rust
+use suprnova::route;
+
+// get!("/posts/{post:slug}", ...).name("posts.show")
+let url = route("posts.show", &post);
+// Some("/posts/hello-world")
+
+// One value fills the route's first parameter. Name the values to fill
+// several, mixing strings and bound values:
+let url = route("users.posts.show", (("user", &user), ("post", &post)));
+// Some("/users/7/posts/hello-world")
+let url = route("users.posts.show", (("user", "7"), ("post", "hello-world")));
+```
+
+Every call written with `&[("name", "value")]` pairs keeps working and
+builds the same URL. A type that implements `RouteBinding` by hand
+implements `RouteValue` to be passed here:
+
+```rust
+impl suprnova::RouteValue for Region {
+    fn route_value(&self, field: Option<&str>) -> Option<String> {
+        suprnova::bound_route_value(self, field)
+    }
+}
+```
+
 ### The lookup helpers
 
 | Function | Returns | When the route is missing |

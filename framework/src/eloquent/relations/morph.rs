@@ -844,3 +844,54 @@ where
     Column: MorphIdColumnHoldsKey<Key, Child, Target, Relation>,
 {
 }
+
+/// A scoped child through a `MorphMany` is one of the rows its own
+/// pre-filtered builder reads: the `<name>_id` and `<name>_type` columns
+/// both name the parent.
+impl<L, R> super::RouteChildRelation<R> for MorphMany<L, R>
+where
+    L: EloquentModel,
+    R: Model,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    fn __route_child_query(self) -> Result<Builder<R>, FrameworkError> {
+        Ok(self.inner)
+    }
+}
+
+/// A scoped child through a `MorphOne` is the row the `MorphMany` inside
+/// it reads.
+impl<L, R> super::RouteChildRelation<R> for MorphOne<L, R>
+where
+    L: EloquentModel,
+    R: Model,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    fn __route_child_query(self) -> Result<Builder<R>, FrameworkError> {
+        super::RouteChildRelation::__route_child_query(self.inner)
+    }
+}

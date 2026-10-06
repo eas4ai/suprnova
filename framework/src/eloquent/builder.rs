@@ -2780,6 +2780,17 @@ impl<M> Builder<M> {
         self.skip_all_scopes = true;
         self
     }
+
+    /// Lift the soft-delete filter, as `with_trashed()` does, on a builder
+    /// whose model may not soft-delete: a route binding asks for trashed
+    /// rows without knowing whether the model has any. On a model without
+    /// soft deletes there is no filter to lift, and nothing changes.
+    pub(crate) fn lift_soft_deletes(mut self) -> Self {
+        if !self.global_scopes_disabled.contains(&"soft_deletes") {
+            self.global_scopes_disabled.push("soft_deletes");
+        }
+        self
+    }
 }
 
 // ---- SQL rendering -- placeholder dialect --------------------------------

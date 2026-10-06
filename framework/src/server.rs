@@ -147,6 +147,7 @@ impl Server {
         let router = router.into();
         let runtime = crate::live::LiveRuntime::bind()?;
         Self::prepare_live_router(&router, &runtime)?;
+        router.prepare_bindings()?;
         Ok(Self::from_prepared_config(router, config))
     }
 
@@ -215,6 +216,7 @@ impl Server {
         config: ServerConfig,
     ) -> Result<Self, crate::FrameworkError> {
         Self::prepare_live_router(&router, runtime)?;
+        router.prepare_bindings()?;
         Ok(Self::from_prepared_config(router, config))
     }
 
@@ -377,6 +379,7 @@ impl Server {
             let _ = Self::prepare_config()?;
             let runtime = crate::live::LiveRuntime::bind()?;
             Self::prepare_live_router(&self.router, &runtime)?;
+            self.router.prepare_bindings()?;
             self.prepared = true;
         }
 
@@ -1022,6 +1025,17 @@ async fn handle_request_inner(
     match router.match_route(&method, path) {
         Some((pattern, handler, params)) => {
             crate::error::debug_page::note_route_pattern(&pattern);
+            // The route's bindings run after its middleware, right before
+            // the handler (BIND-015). A router whose binding checks fail
+            // answers every request with that error, as a server built from
+            // it would refuse to start.
+            let handler = match router.binding_plan(&effective_method, &pattern) {
+                Ok(Some(plan)) => crate::routing::binding::planned_handler(plan, handler),
+                Ok(None) => handler,
+                Err(error) => {
+                    return into_hyper_in_scope(crate::http::HttpResponse::from(error));
+                }
+            };
             let mut request = stamp_peer(
                 Request::new(req)
                     .with_params(params)

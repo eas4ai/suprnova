@@ -233,94 +233,287 @@ builds the list form.
 
 ## Route model binding
 
-When a handler parameter is a SeaORM `*::Model` type, `#[handler]`
-extracts the matching path parameter, parses it as the primary-key type,
-and fetches the row from the database. A missing row yields 404; a
-parameter the PK type can't parse yields 400.
+A handler argument binds from the route parameter its name names whenever
+its type implements `RouteBinding`. Every `#[suprnova::model]` struct does,
+so naming the model is enough:
 
 ```rust
 use suprnova::{handler, json_response, Response};
-use crate::models::users;
+use crate::models::Post;
 
-// Route: GET /users/{user}
+// Route: GET /posts/{post}
 #[handler]
-pub async fn show(user: users::Model) -> Response {
-    json_response!({ "name": user.name, "email": user.email })
+pub async fn show(post: Post) -> Response {
+    json_response!({ "title": post.title })
 }
 ```
 
-The parameter name (`user`) is what `#[handler]` looks up in the matched
-route's params - so the placeholder must match (`/users/{user}`, not
-`/users/{id}`).
+`#[handler]` reads `{post}`, and the router looks the row up through
+`Post::query()` before the handler runs. Global scopes, the soft-delete
+filter, and the model's `#[model(connection = "...")]` apply, as they do
+to every query of the model. The value is parsed as the key's type, and a
+`unique_id` key's value must also be a well-formed identifier. A value
+that does not parse and a value that matches no row both answer a 404
+whose body names the model, `{"message": "Post not found"}`, without the
+value.
 
-Multiple models in one signature work the same way; mix them with form
-requests, primitives, or `Request`:
+The argument's name must match the placeholder (`/posts/{post}`, not
+`/posts/{id}`). Primitives (`id: i64`, `slug: String`) stay path values
+read through `FromParam`, and any other type stays a form request. Mix
+them freely; one argument at most reads the request body:
 
 ```rust
 // Route: PUT /posts/{post}/comments/{comment}
 #[handler]
-pub async fn update(
-    post: posts::Model,
-    comment: comments::Model,
-    form: UpdateCommentRequest,
-) -> Response {
-    // post and comment are already fetched; form is validated.
+pub async fn update(form: UpdateComment, post: Post, comment: Comment) -> Response {
+    // post and comment are bound; form is validated.
     json_response!({ "post_id": post.id, "comment_id": comment.id })
 }
 ```
 
-### Requirements
+The router binds every bound argument, in path order, after the route's
+middleware and before the handler. A missing row is a 404 before the form
+is read, even with the form declared first. An `Option<Post>` argument
+binds `None` when its optional parameter, `{post?}`, is absent.
 
-Binding is automatic for any SeaORM model whose `Entity` implements
-`suprnova::database::EntityExt` and whose primary-key type implements
-`FromStr`. `EntityExt`'s blanket-friendly add-on traits give you
-`Entity::find_by_pk(id)`, `::all()`, `::first()`, and friends; route
-model binding is just `find_by_pk` driven by the path parameter.
+### Binding by another column
+
+A `{name:column}` segment registers the parameter `name` and binds it by
+`column`. `req.param("post")`, `where_alpha("post")` and `route()` all use
+the name:
 
 ```rust
-// src/models/users.rs (the legacy SeaORM-style layout)
-pub use super::entities::users::*;
-use sea_orm::entity::prelude::*;
-
-impl ActiveModelBehavior for ActiveModel {}
-
-// Enables route model binding (and the Laravel-shaped reader surface).
-impl suprnova::database::EntityExt for Entity {}
-impl suprnova::database::EntityExtMut for Entity {}
+routes! {
+    get!("/posts/{post:slug}", controllers::posts::show).name("posts.show"),
+}
 ```
 
-If your model is declared with the `#[suprnova::model]` macro (the
-Eloquent surface in [Eloquent](eloquent.md)), you reach for it directly:
-`User::find_by_pk(id).await?`. Route model binding via `#[handler]` still
-expects the `*::Model` shape - pass the SeaORM model type, not the
-wrapper struct.
+`{post:slug?}` is the optional form. To bind a model by another column on
+every route, set its route key:
+
+```rust
+#[model(table = "posts", route_key = "slug")]
+pub struct Post {
+    pub id: i64,
+    pub slug: String,
+    pub title: String,
+}
+```
+
+The build fails when `route_key` names no column of the model.
+
+### Scoped bindings
+
+When two bound parameters follow each other, the first is the parent of
+the second. A child whose segment names a column is looked up through the
+parent's relation named by the child in the plural, as `Str::plural` forms
+it, so a row the parent does not own answers 404:
+
+```rust
+#[model(table = "users", relations = { posts: HasMany<Post> })]
+pub struct User {
+    pub id: i64,
+    pub name: String,
+}
+
+// GET /users/{user}/posts/{post:slug}: only the user's own posts bind.
+#[handler]
+pub async fn show(user: User, post: Post) -> Response {
+    json_response!({ "author": user.name, "title": post.title })
+}
+```
+
+`scope_bindings()` on a route or a group scopes children without a field
+too, and `without_scoped_bindings()` turns scoping off. A child bound by
+`bind()` is never scoped. Every relation kind with one child type works,
+`BelongsToMany` and `HasManyThrough` included; a `MorphTo` cannot scope a
+child.
+
+### Custom resolution
+
+A model can replace its binding. `#[model(custom_route_binding)]` leaves
+`RouteBinding` to you, and the default lookup stays callable:
+
+```rust
+#[model(table = "tags", custom_route_binding)]
+pub struct Tag {
+    pub id: i64,
+    pub name: String,
+}
+
+#[suprnova::async_trait]
+impl suprnova::RouteBinding for Tag {
+    fn route_key_name() -> &'static str {
+        "name"
+    }
+    fn route_key(&self) -> String {
+        self.name.clone()
+    }
+    async fn resolve_route_binding(
+        value: &str,
+        _field: Option<&str>,
+    ) -> Result<Option<Self>, suprnova::FrameworkError> {
+        suprnova::database::resolve_model_route_binding::<Self>(
+            &value.to_lowercase(),
+            Some("name"),
+            false,
+        )
+        .await
+    }
+}
+```
+
+Any other type that implements `RouteBinding` binds the same way. To pass
+it to `route()`, implement `RouteValue` with `suprnova::bound_route_value`.
+A type that is a scoped parent finds its children in
+`resolve_child_route_binding` and says so from `route_binding_info()`
+with `.with_children(ChildBindings::Custom)`; without that, a route that
+scopes a child under it is refused at startup.
+
+The router binds a parameter name on every route, those registered before
+the call and those after. `bind` takes the raw value and the matched route
+and wins over the type's own binding; `model` binds by the route key and
+calls its fallback when no row matches. A `-` in the name reads as `_`:
+
+```rust
+let router = Router::new()
+    .bind("user", |value: String, _route| async move {
+        User::query().filter("name", value).first().await
+    })
+    .model::<Team, _, _>("team", |_value| async { Ok(Team::default()) })
+    .get("/users/{user}/teams/{team}", controllers::teams::show);
+```
+
+### Soft-deleted rows
+
+A soft-deleted row binds only on a route that calls `with_trashed()`.
+There, every binding goes through the soft-deletable lookups, scoped
+children and the bare SeaORM form included:
+
+```rust
+let router = Router::new()
+    .get("/admin/posts/{post}", controllers::admin::posts::show)
+    .with_trashed();
+```
+
+### Missing rows
+
+`missing(handler)` on a route, a group or a resource answers instead of
+the 404 when a binding finds no row, finds no row its parent owns, or gets
+a value that does not parse. The handler receives the request:
+
+```rust
+let router = Router::new()
+    .get("/posts/{post}", controllers::posts::show)
+    .missing(|_req| async { suprnova::redirect_to("/posts").into() });
+```
+
+### Enums
+
+A unit-only enum derives `RouteBinding`. Each variant binds from its
+`#[route(value = "...")]`, or else from its name in snake case, matched
+exactly. Any other value answers 404, and never reaches `missing()`:
+
+```rust
+#[derive(suprnova::RouteBinding)]
+pub enum Category {
+    Fruits,                // /categories/fruits
+    PantryStaples,         // /categories/pantry_staples
+    #[route(value = "veg")]
+    Vegetables,            // /categories/veg
+}
+
+#[handler]
+pub async fn show(category: Category) -> Response {
+    suprnova::http::text(suprnova::RouteBinding::route_key(&category))
+}
+```
+
+### Startup checks
+
+`#[handler]` records every argument of a handler: the parameter it reads,
+its type, and whether it binds, reads a path value, or reads the body.
+Before the first request, the router checks every route against its
+record and refuses to start, naming the route and the parameter, when:
+
+- An argument reads a parameter the path does not declare, such as
+  `/users/{user}` with `id: i64`.
+- A binding field names no column of the model, or a column whose type
+  cannot be parsed from a path segment.
+- A scoped child needs a relation the parent does not declare, one of
+  another type, or a `MorphTo`.
+- A binder returns another type than the argument it binds, or covers a
+  parameter the handler reads without binding.
+- A handler reads the request body twice.
+
+`Server::from_config` returns the refusal as an error. A router driven
+through `handle_request` in a test runs the same checks before its first
+request and answers every request with a 500 when they fail;
+`router.prepare_bindings()` returns the error itself. A closure handler
+and a generic `#[handler]` function carry no record and are not checked.
+
+### Older binding forms
+
+Two older forms keep working. `RouteParam<Post>` binds as `Post` does. A
+SeaORM row whose entity implements `EntityExt` binds by its primary key
+through `EntityExt::find_by_pk`, with no global scope and on the default
+connection; its 404 names the entity's module:
+
+```rust
+impl suprnova::database::EntityExt for post::Entity {}
+
+#[handler]
+pub async fn show(post: post::Model) -> Response {
+    json_response!({ "title": post.title })
+}
+```
+
+Bind the `#[model]` struct in new code: its lookup applies the model's
+scopes and connection.
 
 ### Binding is identity, not authorization
 
 Route model binding answers "does this row exist?" - it does **not**
 answer "is the current user allowed to see this row?". A bare bound
 handler lets any authenticated user view any post by guessing
-`/posts/N`. Authorize against the bound model using `Gate::authorize` or
-the `#[policy]` macro - see [Authorization](authorization.md).
+`/posts/N`. Authorize against the bound model with
+`#[authorize("view", post)]` or `Gate::authorize` - see
+[Authorization](authorization.md).
 
 ### Opting out
 
-Don't use the `*::Model` parameter type. Extract the ID and query
-manually:
+Take the key as a path value and query yourself:
 
 ```rust
-use suprnova::{handler, json_response, Response, FrameworkError};
-use crate::models::users;
-use suprnova::database::EntityExt;
+use suprnova::{handler, json_response, FrameworkError, Model, Response};
+use crate::models::User;
 
 #[handler]
-pub async fn show(id: i32) -> Response {
-    let user = users::Entity::find_by_pk(id)
+pub async fn show(id: i64) -> Response {
+    let user = User::find(id)
         .await?
-        .ok_or(FrameworkError::not_found("User"))?;
+        .ok_or(FrameworkError::model_not_found("User"))?;
     json_response!({ "id": user.id, "name": user.name })
 }
 ```
+
+### Why Suprnova diverges
+
+- **A value is parsed before the query.** Laravel passes the raw value to
+  the query, so MySQL reads `7abc` as `7` and binds row 7, and Postgres
+  raises an error. Here a value that does not parse as the column's type,
+  or breaks a `unique_id` key's format, answers the same 404 a missing row
+  does.
+- **The 404 never repeats the value.** Laravel's message carries the
+  requested value; Suprnova's names the model alone.
+- **An enum binds by name.** Rust enums carry no backing value, so a
+  variant without `#[route(value = "...")]` binds from its name in snake
+  case.
+- **Mistakes stop the server at startup.** Laravel finds a missing
+  relationship at request time, as a 500, and injects an empty model for
+  an argument the route does not declare. Suprnova refuses those routes,
+  and the other mistakes the startup checks list, before the first
+  request.
 
 ## Named routes
 
@@ -348,6 +541,11 @@ let home = route("home", &[]);
 
 let profile = route("users.show", &[("id", "123")]);
 //   Some("/users/123")
+
+// A bound value fills its parameter with its route key, or with the
+// column a `{post:slug}` parameter names.
+let post_url = route("posts.show", &post);
+//   Some("/posts/hello-world")
 ```
 
 `route` returns `Option<String>` and percent-encodes parameter values
@@ -556,8 +754,9 @@ If no fallback is registered, the framework returns a plain-text
 ## Resource routing
 
 For a standard 7-action REST surface, implement `ResourceController` and
-register the resource through the `Router` builder. Laravel parity for
-`Route::resource()` and `Route::apiResource()`.
+register the resource through the `Router` builder, or name a module of
+`#[handler]` functions with `resource!` (see [Actions that bind](#actions-that-bind)).
+Laravel parity for `Route::resource()` and `Route::apiResource()`.
 
 ```rust
 use suprnova::{Router, ResourceController, ResourceAction, Request, Response, HttpResponse};
@@ -616,6 +815,60 @@ Router::new()
 Rust-side aliases that read better in some call sites: `.keep(...)` for
 `.only(...)`, `.drop(...)` for `.except(...)`, `.rename(...)` for
 `.names(...)`.
+
+### Actions that bind
+
+A `ResourceController` action takes the request. For actions that take
+bound arguments, name a module of `#[handler]` functions with `resource!`
+instead; each action is the function of its name:
+
+```rust
+use suprnova::{routes, resource, api_resource};
+
+// controllers::posts::{index, create, store, show, edit, update, destroy}
+routes! {
+    resource!("posts", controllers::posts),
+    resource!("photos", controllers::photos, only = [index, show]),
+    api_resource!("tags", controllers::tags, except = [destroy]),
+}
+```
+
+```rust
+// src/controllers/posts.rs
+#[handler]
+pub async fn show(post: Post) -> Response {
+    json_response!({ "title": post.title })
+}
+```
+
+`only = [...]` and `except = [...]` go inside the macro: an action the
+selection keeps whose function the module does not define fails to
+compile, and an action it leaves out needs no function. The builder takes
+`.names(...)`, `.parameter(...)`, `.parameters(...)`, `.unnamed()` and
+`.authorize_resource::<U, R>()` as the controller form does.
+
+### Nested resources
+
+A dotted name nests one resource in another. `users.posts` registers
+`/users/{user}/posts` and `/users/{user}/posts/{post}`, named
+`users.posts.index` through `users.posts.destroy`:
+
+```rust
+routes! {
+    resource!("users.posts", controllers::user_posts)
+        .parameters([("users", "author")])   // /users/{author}/posts/{post}
+        .scoped([("post", "slug")])          // /users/{author}/posts/{post:slug}
+        .with_trashed(&[])                   // show, edit and update bind trashed rows
+        .missing(|_req| async { suprnova::redirect_to("/posts").into() }),
+}
+```
+
+`parameters` renames a segment's parameter. `scoped` gives parameters a
+binding field and scopes every nested parameter to its parent; an empty
+list scopes without fields. `with_trashed` binds soft-deleted rows on the
+actions it names, `show`, `edit` and `update` when it names none.
+`missing` answers for every route of the resource when a binding finds
+nothing. The controller form takes the same four.
 
 ### Bulk registration
 

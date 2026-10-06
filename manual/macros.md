@@ -381,21 +381,38 @@ let rows = User::query().with_casts(map).get().await?;
 
 See [Mutators & Casts](eloquent-mutators.md).
 
-### `route_binding!`
+### `#[derive(RouteBinding)]`
 
-Implements `RouteBinding` for a hand-rolled SeaORM entity so it
-resolves automatically from a route parameter. Models defined with
-`#[suprnova::model]` register automatically and don't need this; reach
-for `route_binding!` when you wrote the entity by hand:
+Binds a unit-only enum from a route parameter. Each variant binds from
+its `#[route(value = "...")]`, or else from its name in snake case, and
+any other value answers 404:
 
 ```rust
-use suprnova::route_binding;
-
-route_binding!(crate::entities::user::Entity, User, "user");
+#[derive(suprnova::RouteBinding)]
+pub enum Status {
+    Draft,                    // "draft"
+    #[route(value = "live")]
+    Published,                // "live"
+}
 ```
 
-After that, `get!("/users/{user}", controllers::user::show)` passes
-a fully-loaded `User` to your handler. See [Routing](routing.md).
+A `#[suprnova::model]` struct needs no derive: the model macro implements
+`RouteBinding` itself. See [Route model binding](routing.md#route-model-binding).
+
+### `resource!` and `api_resource!`
+
+Register a resource whose actions are the `#[handler]` functions of one
+module, found by action name. `only = [...]` or `except = [...]` selects
+actions; a selected action whose function is missing fails to compile:
+
+```rust
+routes! {
+    resource!("posts", controllers::posts),
+    api_resource!("tags", controllers::tags, only = [index, show]),
+}
+```
+
+See [Resource routing](routing.md#resource-routing).
 
 ## Data and Inertia
 

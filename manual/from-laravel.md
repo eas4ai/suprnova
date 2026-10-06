@@ -161,17 +161,20 @@ signature:
 use suprnova::handler;
 
 #[handler]
-pub async fn show(post: post::Model) -> Response {
+pub async fn show(post: Post) -> Response {
     // Route model binding ran automatically; `post` is the loaded row.
     json_response!({ "post": post })
 }
 ```
 
-The `post::Model` type comes from the model's generated module - that's
-the signal `#[handler]` uses to pick route model binding over the
-default form-request extraction. If the row doesn't exist, the binding
-returns a 404 before your code runs - same behaviour as Laravel's
-implicit binding.
+As in Laravel, the type hint is the signal: every `#[suprnova::model]`
+struct implements `RouteBinding`, so `post: Post` binds from `{post}`,
+and a type that does not implement it is read as a form request. If the
+row doesn't exist, the binding returns a 404 before your code runs - same
+behaviour as Laravel's implicit binding. Unlike Laravel, a value that
+does not parse as the key's type is a 404 too, and a route whose handler
+reads a parameter its path does not declare stops the server at startup.
+See [Route model binding](routing.md#route-model-binding).
 
 Action structs (single-method "invokable" controllers, Laravel-style) are
 supported too: see [Actions](actions.md).
