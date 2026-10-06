@@ -75,14 +75,8 @@ fn grey_png(width: u32, height: u32, level: u8) -> Vec<u8> {
 }
 
 /// `source` re-encoded by the built-in driver, under the default config.
-///
-/// A JPEG loses its JFIF segment. The built-in encoder writes RGB samples
-/// with both a JFIF `APP0` and an Adobe `APP14` (transform 0), and libjpeg,
-/// which ImageMagick decodes with, takes JFIF to mean YCbCr: it would read
-/// the fixture as other colours than the built-in decoder does. Without
-/// the JFIF segment both read RGB.
 fn convert(source: &[u8], format: OutputFormat, quality: u8) -> Vec<u8> {
-    let out = OxideAvImageDriver::new()
+    OxideAvImageDriver::new()
         .process(
             source,
             &ImagePipeline {
@@ -91,21 +85,7 @@ fn convert(source: &[u8], format: OutputFormat, quality: u8) -> Vec<u8> {
                 ..ImagePipeline::default()
             },
         )
-        .expect("the fixture converts");
-    if format != OutputFormat::Jpeg {
-        return out;
-    }
-    let mut kept = out[..2].to_vec();
-    let mut pos = 2;
-    while out[pos + 1] != 0xDA {
-        let length = u16::from_be_bytes([out[pos + 2], out[pos + 3]]) as usize;
-        if !(out[pos + 1] == 0xE0 && out[pos + 4..].starts_with(b"JFIF\0")) {
-            kept.extend_from_slice(&out[pos..pos + 2 + length]);
-        }
-        pos += 2 + length;
-    }
-    kept.extend_from_slice(&out[pos..]);
-    kept
+        .expect("the fixture converts")
 }
 
 /// A big-endian TIFF holding an `Orientation` tag, and a GPS IFD with a
@@ -1185,10 +1165,22 @@ fn assert_gif_output_is_srgb(driver: &dyn ImageDriver) {
             moxcms::TransformOptions::default(),
         )
         .unwrap();
-    let mut expected = [0u8; 3];
-    transform.transform(&colour, &mut expected).unwrap();
     let rgba = flat(16, 16, [colour[0], colour[1], colour[2], 255]);
     for (name, source) in sources_with_profile(&rgba, 16, 16, &p3) {
+        // The colour the driver decodes, which a lossy JPEG moves a level
+        // or two from the one it was written with. A PNG keeps the profile,
+        // so its pixels are the decoded ones, unconverted.
+        let decoded = driver
+            .process(&source, &pipeline(vec![], OutputFormat::Png))
+            .unwrap();
+        assert_eq!(
+            output_profile(OutputFormat::Png, &decoded).as_deref(),
+            Some(&p3[..])
+        );
+        let decoded = pixel_at(&decoded, 8, 8);
+        let mut expected = [0u8; 3];
+        transform.transform(&decoded[..3], &mut expected).unwrap();
+
         let gif = driver
             .process(&source, &pipeline(vec![], OutputFormat::Gif))
             .unwrap();
@@ -1200,9 +1192,10 @@ fn assert_gif_output_is_srgb(driver: &dyn ImageDriver) {
             for (channel, want) in pixel[..3].iter().zip(expected) {
                 assert!(
                     channel.abs_diff(want) <= 1,
-                    "{name} through {}: {:?} is not the sRGB form {expected:?} of P3 {colour:?}",
+                    "{name} through {}: {:?} is not the sRGB form {expected:?} of P3 {:?}",
                     driver.name(),
-                    &pixel[..3]
+                    &pixel[..3],
+                    &decoded[..3]
                 );
             }
         }
@@ -1279,6 +1272,70 @@ fn img_002_oxideav_keeps_png_colour_chunks_with_their_profile() {
 #[ignore = "requires a host ImageMagick 7 binary"]
 fn img_002_magick_keeps_png_colour_chunks_with_their_profile() {
     assert_png_colour_chunks_are_kept(magick().as_ref());
+}
+
+/// Decode `jpeg` with the host ImageMagick, whose JPEG decoder is libjpeg,
+/// the decoder browsers use too; packed RGBA.
+fn libjpeg_pixels(jpeg: &[u8]) -> (u32, u32, Vec<u8>) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(MagickCliDriver::from_env().binary())
+        .args(["jpeg:-", "-depth", "8", "png:-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("the host ImageMagick runs");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(jpeg)
+        .expect("the JPEG goes in");
+    let output = child.wait_with_output().expect("ImageMagick finishes");
+    assert!(output.status.success(), "ImageMagick decodes the JPEG");
+    png_pixels(&output.stdout)
+}
+
+/// A JPEG the built-in driver writes decodes to the same colours in the
+/// framework's decoder and in libjpeg. It used to carry RGB samples behind
+/// a JFIF header, which libjpeg reads as YCbCr: a flat (200, 60, 40) came
+/// back as (77, 255, 80).
+#[test]
+#[serial]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn img_002_a_jpeg_decodes_to_the_same_colours_in_libjpeg() {
+    let colour = [200u8, 60, 40];
+    let flat_png = png_of(16, 16, flat(16, 16, [colour[0], colour[1], colour[2], 255]));
+    let pattern_png = png_of(WIDTH, HEIGHT, pattern(WIDTH, HEIGHT));
+    let driver = OxideAvImageDriver::new();
+    for (name, source, against_source) in
+        [("flat", flat_png, true), ("pattern", pattern_png, false)]
+    {
+        let jpeg = driver
+            .process(&source, &pipeline(vec![], OutputFormat::Jpeg))
+            .expect("the driver writes a JPEG");
+        let own = png_pixels(
+            &driver
+                .process(&jpeg, &pipeline(vec![], OutputFormat::Png))
+                .expect("the framework decodes its own JPEG"),
+        );
+        let libjpeg = libjpeg_pixels(&jpeg);
+        assert_eq!((own.0, own.1), (libjpeg.0, libjpeg.1), "{name}: sizes");
+        for (index, (a, b)) in own.2.chunks(4).zip(libjpeg.2.chunks(4)).enumerate() {
+            assert!(
+                close([a[0], a[1], a[2], a[3]], [b[0], b[1], b[2]], 4),
+                "{name} pixel {index}: the framework reads {a:?}, libjpeg reads {b:?}"
+            );
+            if against_source {
+                for (decoded, label) in [(a, "the framework"), (b, "libjpeg")] {
+                    assert!(
+                        close([decoded[0], decoded[1], decoded[2], 255], colour, 6),
+                        "{name} pixel {index}: {label} reads {decoded:?} for {colour:?}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 // ───────────────────────── IMG-003 ─────────────────────────

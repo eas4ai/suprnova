@@ -533,12 +533,9 @@ impl OxideAvImageDriver {
         let (width, height) = (canvas.width, canvas.height);
         let (codec, frame, pixel_format) = match format {
             // The MJPEG encoder rejects RGBA outright, so the conversion is
-            // mandatory rather than an optimisation.
-            OutputFormat::Jpeg => (
-                "mjpeg",
-                convert_frame(&canvas.into_frame(), width, height, PixelFormat::Rgb24)?,
-                PixelFormat::Rgb24,
-            ),
+            // mandatory rather than an optimisation. See `jpeg_frame` for why
+            // it is YCbCr.
+            OutputFormat::Jpeg => ("mjpeg", jpeg_frame(canvas)?, PixelFormat::Yuv444P),
             OutputFormat::Png => ("png", canvas.into_frame(), PixelFormat::Rgba),
             // The VP8L (lossless) encoder is the only WebP encoder in the
             // registry; codec id "webp" has a decoder but no encoder. `WebP`
@@ -1202,15 +1199,57 @@ fn cover(
 
 // ───────────────────────── encode helpers ─────────────────────────
 
-fn convert_frame(
-    frame: &VideoFrame,
-    width: u32,
-    height: u32,
-    target: PixelFormat,
-) -> Result<VideoFrame, FrameworkError> {
-    let info = FrameInfo::new(PixelFormat::Rgba, width, height);
-    pix_convert(frame, info, target, &ConvertOptions::default())
-        .map_err(|e| FrameworkError::internal(format!("image pixel conversion failed: {e}")))
+/// Convert the canvas to the samples a JPEG stores: YCbCr as JFIF defines
+/// it (ITU-T T.871, full-range BT.601), every component at full resolution
+/// (4:4:4).
+///
+/// This is the form every decoder reads the same way. The encoder used to
+/// be handed RGB, which it wrote as RGB samples behind both a JFIF header
+/// and an Adobe marker saying "no transform". libjpeg, behind ImageMagick
+/// and most browsers, takes the JFIF header to mean YCbCr and showed those
+/// files in the wrong colours: a flat (200, 60, 40) came back as
+/// (77, 255, 80). So the output's header changes with the samples:
+/// component ids 1, 2 and 3 instead of `R`, `G` and `B`, no Adobe segment,
+/// and a chroma quantisation table beside the luma one.
+///
+/// The conversion is T.871's, in 16-bit fixed point as libjpeg does it,
+/// rather than the pixel-format crate's `Bt601Full`, whose chroma range is
+/// not JFIF's and pulls colours toward grey. 4:4:4 keeps the chroma as
+/// sharp as the RGB coding did. The three planes together are the size of
+/// the RGB copy the encoder took before.
+fn jpeg_frame(canvas: Canvas) -> Result<VideoFrame, FrameworkError> {
+    const HALF: i32 = 1 << 15;
+    const CENTRE: i32 = 128 << 16;
+    let (width, height) = (canvas.width as usize, canvas.height as usize);
+    let count = width.checked_mul(height).ok_or_else(|| {
+        FrameworkError::internal("image dimensions overflow the addressable pixel buffer")
+    })?;
+    let (mut luma, mut blue, mut red) = (
+        Vec::with_capacity(count),
+        Vec::with_capacity(count),
+        Vec::with_capacity(count),
+    );
+    let sample = |value: i32| (value >> 16).clamp(0, 255) as u8;
+    for pixel in canvas.pixels.as_chunks::<4>().0 {
+        let (r, g, b) = (
+            i32::from(pixel[0]),
+            i32::from(pixel[1]),
+            i32::from(pixel[2]),
+        );
+        luma.push(sample(19_595 * r + 38_470 * g + 7_471 * b + HALF));
+        blue.push(sample(
+            -11_059 * r - 21_709 * g + 32_768 * b + CENTRE + HALF,
+        ));
+        red.push(sample(32_768 * r - 27_439 * g - 5_329 * b + CENTRE + HALF));
+    }
+    let plane = |data: Vec<u8>| VideoPlane {
+        stride: width,
+        data,
+    };
+    Ok(VideoFrame {
+        pts: Some(0),
+        planes: vec![plane(luma), plane(blue), plane(red)],
+    })
 }
 
 /// The largest width or height a VP8 frame can have.
