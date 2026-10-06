@@ -754,9 +754,11 @@ fn request_root(
     let trusted = config
         .as_ref()
         .is_some_and(|config| config.trusted_proxies.trusts(peer_ip));
-    Arc::from(crate::routing::root::resolve(req.headers(), trusted, || {
-        crate::routing::root::root_of_app_url(&crate::routing::url::app_url_of(config.as_ref()))
-    }))
+    Arc::from(crate::routing::root::resolve(
+        req.headers(),
+        trusted,
+        || crate::routing::root::root_of_app_url(&crate::routing::url::app_url_of(config.as_ref())),
+    ))
 }
 
 /// The body of [`handle_request_with_peer`], run inside the request's
