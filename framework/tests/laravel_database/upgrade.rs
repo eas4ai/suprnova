@@ -6,10 +6,12 @@
 //! keeps working.
 //!
 //! The earlier tables are built here with the statements the earlier
-//! migrations ran: the dogfood application's `m_2026_08_01_queue_tables`
-//! for `jobs` and `failed_jobs`, the batch repository's documented schema,
-//! the earlier scaffold's sessions migration, and the earlier framework
-//! migrations for `notifications`, `features` and the RBAC tables.
+//! migrations ran, their indexes included (as of `c04577b96`): the dogfood
+//! application's `m_2026_08_01_queue_tables` for `jobs` and `failed_jobs`,
+//! with the index the failed-job store's documented schema adds, the batch
+//! repository's documented schema, the earlier scaffold's sessions
+//! migration, and the earlier framework migrations for `notifications`,
+//! `features` and the RBAC tables.
 
 use std::time::Duration;
 
@@ -42,6 +44,22 @@ async fn create(
     table: sea_orm_migration::sea_query::TableCreateStatement,
 ) {
     conn.execute(&table).await.expect("create an earlier table");
+}
+
+/// Create the index `name` on `table`'s `columns`, as an earlier migration
+/// did.
+async fn index(conn: &DatabaseConnection, table: &str, name: &str, columns: &[&str], unique: bool) {
+    let mut statement = Index::create();
+    statement.name(name).table(Alias::new(table));
+    for column in columns {
+        statement.col(Alias::new(*column));
+    }
+    if unique {
+        statement.unique();
+    }
+    conn.execute(&statement)
+        .await
+        .unwrap_or_else(|e| panic!("create the earlier index {name}: {e}"));
 }
 
 async fn insert(conn: &DatabaseConnection, table: &str, columns: &[&str], values: Vec<SimpleExpr>) {
@@ -111,6 +129,22 @@ async fn earlier_database(engine: Engine) -> (support::Db, Earlier) {
             .col(col("exception").text().not_null())
             .col(col("failed_at").big_integer().not_null())
             .to_owned(),
+    )
+    .await;
+    index(
+        conn,
+        "jobs",
+        "idx_jobs_available_at",
+        &["available_at"],
+        false,
+    )
+    .await;
+    index(
+        conn,
+        "failed_jobs",
+        "idx_failed_jobs_failed_at",
+        &["failed_at"],
+        false,
     )
     .await;
     let earlier = Earlier {
@@ -274,6 +308,22 @@ async fn earlier_database(engine: Engine) -> (support::Db, Earlier) {
             .to_owned(),
     )
     .await;
+    index(
+        conn,
+        "sessions",
+        "idx_sessions_user_id",
+        &["user_id"],
+        false,
+    )
+    .await;
+    index(
+        conn,
+        "sessions",
+        "idx_sessions_last_activity",
+        &["last_activity"],
+        false,
+    )
+    .await;
     let mut session =
         suprnova::session::SessionData::new(earlier.session.clone(), earlier.session_csrf.clone());
     session.set_auth_guard_for_test("web", "1", None);
@@ -306,6 +356,22 @@ async fn earlier_database(engine: Engine) -> (support::Db, Earlier) {
             .col(col("created_at").date_time().not_null())
             .col(col("updated_at").date_time().not_null())
             .to_owned(),
+    )
+    .await;
+    index(
+        conn,
+        "notifications",
+        "idx_notifications_notifiable",
+        &["notifiable_type", "notifiable_id"],
+        false,
+    )
+    .await;
+    index(
+        conn,
+        "notifications",
+        "idx_notifications_read_at",
+        &["read_at"],
+        false,
     )
     .await;
     let at = chrono::Timelike::with_nanosecond(
@@ -375,6 +441,14 @@ async fn earlier_database(engine: Engine) -> (support::Db, Earlier) {
             .to_owned(),
     )
     .await;
+    index(
+        conn,
+        "features",
+        "idx_features_name_scope_key",
+        &["name", "scope_key"],
+        true,
+    )
+    .await;
     for (name, scope, enabled, description) in [
         ("beta", "", true, Some("The beta")),
         ("beta", "user:2", false, None),
@@ -420,10 +494,22 @@ async fn earlier_database(engine: Engine) -> (support::Db, Earlier) {
                 .to_owned(),
         )
         .await;
+        index(
+            conn,
+            table,
+            &format!("idx_{table}_name_guard_name"),
+            &["name", "guard_name"],
+            true,
+        )
+        .await;
     }
-    for (table, owner) in [
-        ("model_roles", "role_id"),
-        ("model_permissions", "permission_id"),
+    for (table, owner, name) in [
+        ("model_roles", "role_id", "idx_model_roles_model_role"),
+        (
+            "model_permissions",
+            "permission_id",
+            "idx_model_permissions_model_permission",
+        ),
     ] {
         create(
             conn,
@@ -442,6 +528,7 @@ async fn earlier_database(engine: Engine) -> (support::Db, Earlier) {
                 .to_owned(),
         )
         .await;
+        index(conn, table, name, &["model_type", "model_id", owner], true).await;
     }
     create(
         conn,
@@ -457,6 +544,14 @@ async fn earlier_database(engine: Engine) -> (support::Db, Earlier) {
             .col(col("role_id").big_integer().not_null())
             .col(col("permission_id").big_integer().not_null())
             .to_owned(),
+    )
+    .await;
+    index(
+        conn,
+        "role_permissions",
+        "idx_role_permissions_role_permission",
+        &["role_id", "permission_id"],
+        true,
     )
     .await;
     insert(

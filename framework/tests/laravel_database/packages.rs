@@ -39,6 +39,51 @@ async fn stored_flag(db: &support::Db, name: &str) -> Vec<(String, String)> {
     .collect()
 }
 
+/// Values Pennant may store for a flag, each as `json_encode` writes it,
+/// that its `active()` counts active: anything but `false`.
+const PENNANT_ACTIVE_VALUES: [&str; 12] = [
+    "0",
+    "1",
+    "-1",
+    "2.5",
+    "null",
+    "\"\"",
+    "\"false\"",
+    "\"0\"",
+    "[]",
+    "{}",
+    "[false]",
+    "{\"enabled\":false}",
+];
+
+/// Store `value` for flag `name` in the global scope, as Pennant's
+/// database driver inserts it.
+async fn store_pennant_row(db: &support::Db, name: &str, value: &str) {
+    use sea_orm::ConnectionTrait;
+    use sea_orm_migration::prelude::{Alias, Expr, Query};
+    let at = chrono::Utc::now().naive_utc();
+    let mut insert = Query::insert();
+    insert
+        .into_table(Alias::new("features"))
+        .columns(
+            ["name", "scope", "value", "created_at", "updated_at"]
+                .into_iter()
+                .map(Alias::new),
+        )
+        .values([
+            Expr::value(name),
+            Expr::value("__laravel_null"),
+            Expr::value(value),
+            Expr::value(at),
+            Expr::value(at),
+        ])
+        .expect("a features row");
+    db.conn
+        .execute(&insert)
+        .await
+        .unwrap_or_else(|e| panic!("store {name} = {value}: {e}"));
+}
+
 /// Pennant's stored flags read the same through the framework, any value
 /// other than `false` is enabled, and the rows the framework writes are
 /// the rows Pennant writes.
@@ -74,6 +119,21 @@ async fn pennant_flags(engine: Engine) {
         (None, Some(true)),
         "{engine:?}"
     );
+
+    // Every other value Pennant can store, as `json_encode` writes it, is
+    // active, as Pennant's `active()` (`value !== false`) answers: numbers,
+    // `null`, strings (`"false"` and `"0"` included), arrays and objects.
+    for (index, value) in PENNANT_ACTIVE_VALUES.iter().enumerate() {
+        store_pennant_row(&db, &format!("stored-{index}"), value).await;
+    }
+    evaluator.reload().await.expect("reload");
+    for (index, value) in PENNANT_ACTIVE_VALUES.iter().enumerate() {
+        assert_eq!(
+            answers(&evaluator, &format!("stored-{index}"), 1),
+            (Some(true), Some(true)),
+            "{engine:?}: Pennant counts the stored value {value} active"
+        );
+    }
 
     // Writes take Pennant's form: the `__laravel_null` and
     // `App\Models\User|{id}` scopes, the values `true` and `false`, one
