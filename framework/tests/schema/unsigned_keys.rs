@@ -191,7 +191,16 @@ pub async fn route_binding_finds_a_u64_key(conn: &DatabaseConnection) {
     ] {
         let (status, body) = get(addr, path).await;
         assert_eq!((status, message(&body).as_str()), (404, named), "{path}");
-        assert!(!body.contains("abc"), "{path} repeated the value: {body}");
+        // The request id is random hex, which may hold `abc` itself, so the
+        // body is read without it.
+        let mut fields: serde_json::Value = serde_json::from_str(&body).expect("a JSON error body");
+        if let Some(object) = fields.as_object_mut() {
+            object.remove("request_id");
+        }
+        assert!(
+            !fields.to_string().contains("abc"),
+            "{path} repeated the value: {body}"
+        );
     }
 
     if conn.get_database_backend() == DbBackend::MySql {
