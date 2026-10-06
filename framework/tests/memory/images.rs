@@ -61,6 +61,62 @@ async fn mem_audit_an_image_pipeline_moves_its_planes() {
     );
 }
 
+/// MEM-003: an image made with `Image::from_bytes` hands its driver the
+/// caller's bytes, so running it allocates what calling the driver on those
+/// bytes does, not the size of the source once more, and writes the same
+/// output.
+#[tokio::test]
+async fn mem_audit_an_image_from_bytes_reads_the_callers_bytes() {
+    let _lock = exclusive().await;
+    let driver = OxideAvImageDriver::new();
+    let bmp = driver
+        .process(
+            RED_PNG_1X1,
+            &ImagePipeline {
+                transformations: vec![Transformation::Resize {
+                    width: 1024,
+                    height: 1024,
+                }],
+                format: Some(OutputFormat::Bmp),
+                ..Default::default()
+            },
+        )
+        .expect("a 1024 by 1024 bitmap");
+    let source = bytes::Bytes::from(bmp);
+    let through_image = || {
+        suprnova::Image::from_bytes(source.clone())
+            .using(suprnova::ImageDriverKind::OxideAv)
+            .to_bytes()
+    };
+    driver
+        .process(&source, &ImagePipeline::default())
+        .expect("a warm-up");
+    through_image().await.expect("a warm-up");
+
+    let heap = Heap::start();
+    let before = heap.bytes();
+    let direct = driver
+        .process(&source, &ImagePipeline::default())
+        .expect("the driver");
+    let by_driver = heap.bytes() - before;
+    let before = heap.bytes();
+    let through = through_image().await.expect("the image");
+    let by_image = heap.bytes() - before;
+    drop(heap);
+
+    assert!(
+        through == direct,
+        "the image wrote other bytes than its driver"
+    );
+    let extra = by_image.saturating_sub(by_driver);
+    assert!(
+        extra < source.len() as u64 / 2,
+        "a {}-byte source allocated {by_image} bytes through the image and {by_driver} \
+         through its driver: {extra} more",
+        source.len()
+    );
+}
+
 /// Installs an `ImageConfig` override and clears it on drop, so a failed
 /// assertion cannot leak a tightened budget into the next test.
 struct ConfigGuard;

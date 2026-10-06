@@ -902,6 +902,17 @@ pub(crate) fn output_orientation(format: OutputFormat, bytes: &[u8]) -> Option<O
     source_orientation(input_of(format), bytes)
 }
 
+/// The orientation ImageMagick holds for an image, as it writes it into a
+/// PNG: its own one-byte `orNT` chunk, or the `eXIf` chunk, whose tag it
+/// writes alike. Only `orNT` is always there: a TIFF's tag lives in the
+/// TIFF's own directory, so ImageMagick has no EXIF to write it in.
+pub(crate) fn magick_png_orientation(bytes: &[u8]) -> Option<Orientation> {
+    match png_chunk(bytes, b"orNT") {
+        Some(&[tag]) => Orientation::from_tag(tag),
+        _ => output_orientation(OutputFormat::Png, bytes),
+    }
+}
+
 /// The colour class of the pixels encoded output stores: grey for a
 /// one-component JPEG and a greyscale PNG, other for a four-component
 /// (CMYK) JPEG, RGB for everything else (WebP, GIF and BMP palettes, and
