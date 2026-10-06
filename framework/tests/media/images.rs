@@ -996,16 +996,28 @@ fn magick_tiff(rgba: &[u8], width: u32, height: u32, tag: u16) -> Vec<u8> {
 }
 
 /// A format the framework cannot read takes ImageMagick's own reading of
-/// its orientation: every orientation is applied and leaves no tag; the
-/// opt-out keeps the sensor's pixels and carries the tag alone in JPEG,
-/// PNG and WebP; and `orient()` applies it under the opt-out.
+/// its orientation: every orientation is applied once and leaves no tag;
+/// the opt-out keeps the sensor's pixels and carries the tag alone in JPEG,
+/// PNG and WebP; and `orient()` applies it under the opt-out, after a
+/// custom step too, where ImageMagick's reading (a TIFF's tag, which it
+/// writes as the PNG `orNT` chunk) has to cross the PNG between two runs.
 #[test]
 #[serial]
 #[ignore = "requires a host ImageMagick 7 binary"]
 fn img_001_magick_orients_a_format_the_framework_cannot_read() {
+    suprnova::register_transformation("img-001-identity", Ok);
     let rgba = pattern(WIDTH, HEIGHT);
     let driver = magick();
     let carriers = [OutputFormat::Jpeg, OutputFormat::Png, OutputFormat::WebP];
+    let custom_then_orient = || {
+        pipeline(
+            vec![
+                Transformation::custom("img-001-identity"),
+                Transformation::Orient,
+            ],
+            OutputFormat::Png,
+        )
+    };
     for tag in 1..=8u16 {
         let tiff = magick_tiff(&rgba, WIDTH, HEIGHT, tag);
         let label = format!("a TIFF with orientation {tag}");
@@ -1016,6 +1028,14 @@ fn img_001_magick_orients_a_format_the_framework_cannot_read() {
             png_pixels(&upright),
             turned(&rgba, WIDTH, HEIGHT, tag),
             "{label} must be turned by its orientation"
+        );
+        let once = driver
+            .process(&tiff, &custom_then_orient())
+            .unwrap_or_else(|e| panic!("{label}, a custom step then orient(): {e}"));
+        assert_eq!(
+            png_pixels(&once),
+            turned(&rgba, WIDTH, HEIGHT, tag),
+            "{label}: orient() after a custom step turns an image decode oriented again"
         );
         for target in carriers {
             let out = driver.process(&tiff, &pipeline(vec![], target)).unwrap();
@@ -1064,6 +1084,39 @@ fn img_001_magick_orients_a_format_the_framework_cannot_read() {
             metadata_found(OutputFormat::Png, &oriented),
             Vec::<String>::new(),
             "{label}: a tag after orient()"
+        );
+        let after_custom = driver
+            .process(&tiff, &custom_then_orient())
+            .unwrap_or_else(|e| panic!("{label}, opt-out, a custom step then orient(): {e}"));
+        assert_eq!(
+            png_pixels(&after_custom),
+            turned(&rgba, WIDTH, HEIGHT, tag),
+            "{label}: orient() after a custom step under the opt-out"
+        );
+        assert_eq!(
+            metadata_found(OutputFormat::Png, &after_custom),
+            Vec::<String>::new(),
+            "{label}: a tag after a custom step and orient()"
+        );
+        let custom_only = driver
+            .process(
+                &tiff,
+                &pipeline(
+                    vec![Transformation::custom("img-001-identity")],
+                    OutputFormat::Png,
+                ),
+            )
+            .unwrap_or_else(|e| panic!("{label}, opt-out, a custom step: {e}"));
+        assert_eq!(
+            png_pixels(&custom_only),
+            (WIDTH, HEIGHT, rgba.clone()),
+            "{label}: a custom step under the opt-out keeps the sensor's pixels"
+        );
+        let exif = output_exif(OutputFormat::Png, &custom_only).expect("the opt-out's EXIF");
+        assert_eq!(
+            image::metadata::Orientation::from_exif_chunk(&exif).map(|o| o.to_exif()),
+            Some(tag as u8),
+            "{label}: a custom step under the opt-out keeps the tag's value"
         );
     }
 }
@@ -1770,6 +1823,20 @@ fn img_001_both_drivers_report_a_tagged_source_at_its_turned_size() {
             );
         }
     }
+    // A format only `magick` reads takes ImageMagick's reading of the tag,
+    // the one its decode applies.
+    let tiff = magick_tiff(&pattern(WIDTH, HEIGHT), WIDTH, HEIGHT, 6);
+    assert_eq!(
+        magick().dimensions(&tiff).unwrap(),
+        (HEIGHT, WIDTH),
+        "a TIFF with orientation 6 through magick"
+    );
+    let _config = opt_out();
+    assert_eq!(
+        magick().dimensions(&tiff).unwrap(),
+        (WIDTH, HEIGHT),
+        "a TIFF with orientation 6 through magick, opt-out"
+    );
 }
 
 /// How many times `img-004-counted` ran.

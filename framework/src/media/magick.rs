@@ -412,10 +412,11 @@ impl Orienting {
 
     /// Whether ImageMagick keeps the source's EXIF while orientation is
     /// unapplied: only for a format the framework cannot read, so the PNG
-    /// between two runs carries the tag that EXIF holds to an `orient()`
-    /// after a custom step. The tag the output keeps comes from the
-    /// orientation probe instead, and [`MagickCliDriver::settle`] strips
-    /// the EXIF ImageMagick wrote.
+    /// between two runs carries ImageMagick's reading of the tag to an
+    /// `orient()` after a custom step (see
+    /// [`metadata::magick_png_orientation`]). The tag the output keeps
+    /// comes from the orientation probe instead, and
+    /// [`MagickCliDriver::settle`] strips the EXIF ImageMagick wrote.
     fn keeps_exif(self, applied: bool) -> bool {
         !self.known && !applied
     }
@@ -745,10 +746,11 @@ fn intermediate_args(keeps_exif: bool) -> Vec<String> {
 /// Run a Rust stage on the PNG one ImageMagick run wrote, and encode the
 /// PNG the next run reads.
 ///
-/// The next PNG carries the profile when it is an RGB one, and the EXIF
-/// orientation when `keeps_exif`; the encoder writes both itself, so the
-/// PNG is not copied to add them. A grey profile, or any profile at the
-/// sRGB stage, is converted away here, since the PNG between runs is RGBA.
+/// The next PNG carries the profile when it is an RGB one, and, when
+/// `keeps_exif`, the orientation ImageMagick read, as EXIF the next run
+/// reads back; the encoder writes both itself, so the PNG is not copied to
+/// add them. A grey profile, or any profile at the sRGB stage, is
+/// converted away here, since the PNG between runs is RGBA.
 fn rust_stage(
     intermediate: &[u8],
     after: AfterStage,
@@ -758,7 +760,7 @@ fn rust_stage(
     let decoder = OxideAvImageDriver::new();
     let pixels = decoder.decode_unoriented(intermediate, config)?;
     let orientation = if keeps_exif {
-        metadata::output_orientation(OutputFormat::Png, intermediate)
+        metadata::magick_png_orientation(intermediate)
     } else {
         None
     };
@@ -931,18 +933,26 @@ impl ImageDriver for MagickCliDriver {
         }
     }
 
-    /// The size of the image as decoding presents it: for a format the
-    /// framework reads, a tag that turns it a quarter swaps the sides
-    /// `identify` reports, as the built-in driver's answer does.
+    /// The size of the image as decoding presents it: a tag that turns it
+    /// a quarter swaps the sides `identify` reports, as the built-in
+    /// driver's answer does. The tag is the one decoding applies: the
+    /// framework's reading for a format it reads, and ImageMagick's own,
+    /// from a second probe, for one it cannot (HEIC, TIFF).
     fn dimensions(&self, contents: &[u8]) -> Result<(u32, u32), FrameworkError> {
         let config = super::config();
         let detected = Self::guard(contents, &config)?;
         let raw = self.run(&dimensions_args(&config, detected), contents, &config)?;
         let (width, height) = parse_dimensions(&String::from_utf8_lossy(&raw))?;
-        let swaps = config.auto_orient
-            && detected
-                .and_then(|format| metadata::source_orientation(format, contents))
-                .is_some_and(Orientation::swaps_axes);
+        let tag = match detected {
+            _ if !config.auto_orient => None,
+            Some(format) => metadata::source_orientation(format, contents),
+            None => parse_orientation(&String::from_utf8_lossy(&self.run(
+                &orientation_args(&config),
+                contents,
+                &config,
+            )?)),
+        };
+        let swaps = tag.is_some_and(Orientation::swaps_axes);
         Ok(if swaps {
             (height, width)
         } else {
