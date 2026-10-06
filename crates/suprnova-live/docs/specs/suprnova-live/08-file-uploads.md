@@ -1,7 +1,7 @@
 # Suprnova Live -- 08 File Uploads
 
 Status: Normative design specification
-Last revised: 2026-10-04
+Last revised: 2026-10-05
 
 ## Scope
 
