@@ -384,6 +384,20 @@ Requirements: BIND-001, BIND-002, BIND-003, BIND-004, BIND-005, BIND-006, BIND-0
    `route-binding`, `path-prefix`, `images`, `laravel-database`,
    `mem-footprint` and `registries-scan` pass on a committed tree.
 
+## application-port-third-round-bind
+
+Requirements: BIND-001, BIND-002, BIND-003, BIND-004, BIND-005, BIND-006, BIND-007, BIND-008, BIND-009, BIND-010, BIND-011, BIND-012, BIND-013, BIND-014, BIND-015, PFX-001, PFX-002, PFX-003, PFX-004, PFX-005, PFX-006, PFX-007, PFX-008, PFX-009, PFX-010, PFX-011, PFX-012, PFX-013, IMG-001, IMG-002, IMG-003, IMG-004, IMG-005, IMG-006, IMG-007, IMG-008, LDB-001, LDB-002, LDB-003, LDB-004, LDB-005, LDB-006, LDB-007, LDB-008, LDB-009, LDB-010, LDB-011, LDB-012, MEM-003, REG-031
+
+31. application-port-third-round-bind - application-port-third-round-revised
+   carried over unchanged, except that BIND-003 adds a fifth change (a
+   `#[handler]` inside an `impl` block names its type with
+   `#[handler(Self = Type)]`) and BIND-012 defines a bound value as a
+   `RouteValue` and lists the four string-pair forms that compiled only
+   through the old slice parameter (the developer's answer to escalation
+   0c8024de on 2026-10-06). Same requirements, delivery and mechanisms:
+   done when `route-binding`, `path-prefix`, `images`, `laravel-database`,
+   `mem-footprint` and `registries-scan` pass on a committed tree.
+
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
 layouts), tag input, nested menus, command palette, drag-reorder,

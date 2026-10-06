@@ -211,11 +211,13 @@ soft-deleted row only on a route that calls `with_trashed()` (BIND-008),
 the documented way to reach soft-deleted rows; and a route whose handler
 reads a parameter, bound or primitive, that its path does not declare is
 refused at startup (BIND-013), where today it answers 400 on every
-request.
-Falsifier: a handler written today with `RouteParam<User>`, `user::Model` or `#[authorize("show", id)]` over `id: i64` stops compiling or binds differently, apart from the four changes listed.
+request; and a `#[handler]` function inside an `impl` block names its
+type, `#[handler(Self = Posts)]`, so the record BIND-004 needs can name
+the function, and is checked at startup as a free function is.
+Falsifier: a handler written today with `RouteParam<User>`, `user::Model` or `#[authorize("show", id)]` over `id: i64` stops compiling or binds differently, apart from the five changes listed; or a `#[handler(Self = Posts)]` function inside `impl Posts` fails to compile or escapes the startup checks.
 Mechanism: `route-binding`.
-Rationale: The developer's limit on the replacement: "existing routes keep working". Ruled 2026-10-05: a primitive `#[authorize]` target keeps working, and a route whose handler reads an undeclared primitive parameter is refused at startup.
-Status: Agreed 2026-10-05
+Rationale: The developer's limit on the replacement: "existing routes keep working". Ruled 2026-10-05: a primitive `#[authorize]` target keeps working, and a route whose handler reads an undeclared primitive parameter is refused at startup. Ruled 2026-10-06 (escalation 0c8024de): a record emitted inside an `impl` block cannot name its function, so a handler there names its type.
+Status: Agreed 2026-10-06
 
 ## Keys and columns
 
@@ -364,13 +366,22 @@ Status: Agreed 2026-10-05
 string or a bound value, named or, for a single value, positional, and
 fill a bound value with its binding field (`route_field`) when the route
 names one, else its route key, percent-encoded as other values are; the
-named-route registry MUST keep each route's binding fields. Every call
-written today with string values MUST keep compiling and produce the same
-URL, apart from the root PFX-003 adds.
-Falsifier: `route("posts.show", post)` on `/posts/{post:slug}` produces anything but the post's slug in the path, or on `/posts/{post}` anything but its route key; `try_route` produces a different path for a bound value or rejects one; or a call written today with string values stops compiling or produces a different URL other than by the root PFX-003 adds.
+named-route registry MUST keep each route's binding fields. A bound value
+is a value whose type implements `RouteValue`: `#[model]` rows,
+`#[derive(RouteBinding)]` enums and `RouteParam<T>` do, and a hand-written
+`RouteBinding` type or a bare SeaORM model implements it with one call to
+`bound_route_value`, which the manual shows. Every call written today with string values MUST
+keep compiling and produce the same URL, apart from the root PFX-003 adds,
+except the forms that compiled only because the old slice parameter set
+the pairs' type: a value written `s.as_ref()` inside an array of pairs, an
+array whose pairs mix `&String` and `&str` values, an array of more than
+32 pairs holding `&String` values, and `route` used as a
+`fn(&str, &[(&str, &str)])` pointer. Those take `.as_str()`, or a closure
+in place of the pointer.
+Falsifier: `route("posts.show", post)` on `/posts/{post:slug}` produces anything but the post's slug in the path, or on `/posts/{post}` anything but its route key; `try_route` produces a different path for a bound value or rejects one; a type that implements `RouteValue` is refused as a bound value; or a call written today with string values, other than the four forms listed, stops compiling or produces a different URL other than by the root PFX-003 adds.
 Mechanism: `route-binding`.
-Rationale: `Routing/RouteUrlGenerator.php:296-300`, `Routing/UrlGenerator.php:606-617`.
-Status: Agreed 2026-10-05
+Rationale: `Routing/RouteUrlGenerator.php:296-300`, `Routing/UrlGenerator.php:606-617`. Ruled 2026-10-06 (escalation 0c8024de): a blanket implementation over `RouteBinding` collides with the string implementations, so a bound value is a `RouteValue`, and the slice-inferred forms are listed.
+Status: Agreed 2026-10-06
 
 ## Startup checks and documentation
 
