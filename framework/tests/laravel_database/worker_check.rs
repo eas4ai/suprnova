@@ -326,3 +326,137 @@ fn queue_work_child() {
             .await;
     });
 }
+
+/// A schema-qualified queue table works on Postgres as an unqualified one
+/// does: the shipped migrations upgrade an earlier-layout `failed_jobs` in
+/// that schema in place and create `jobs` there, a second `migrate` leaves
+/// both alone, the worker's check accepts the table and the worker writes
+/// its dead letter into it, and the driver queues and pops through the
+/// qualified `jobs`.
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires a throwaway Postgres at PG_TEST_URL"]
+async fn ldb_003_schema_qualified_queue_tables_work_postgres() {
+    let db = support::empty(Engine::Postgres).await;
+    db.conn
+        .execute_unprepared("DROP SCHEMA IF EXISTS ldb_queue CASCADE")
+        .await
+        .unwrap();
+    db.conn
+        .execute_unprepared("CREATE SCHEMA ldb_queue")
+        .await
+        .unwrap();
+    let jobs = "ldb_queue.jobs";
+    let failed = "ldb_queue.failed_jobs";
+    db.conn
+        .execute_unprepared(&format!(
+            "CREATE TABLE {failed} (id VARCHAR(64) PRIMARY KEY, connection TEXT NOT NULL, \
+             queue TEXT NOT NULL, job_name TEXT NOT NULL, envelope_json TEXT NOT NULL, \
+             exception TEXT NOT NULL, failed_at BIGINT NOT NULL)"
+        ))
+        .await
+        .unwrap();
+    let earlier = uuid::Uuid::new_v4();
+    let mut env = envelope("Ldb.Earlier", serde_json::json!({}));
+    env.id = earlier;
+    db.conn
+        .execute_unprepared(&format!(
+            "INSERT INTO {failed} (id, connection, queue, job_name, envelope_json, exception, \
+             failed_at) VALUES ('{earlier}', 'database', 'default', 'Ldb.Earlier', '{}', \
+             'boom', {})",
+            env.to_json().unwrap(),
+            chrono::Utc::now().timestamp()
+        ))
+        .await
+        .unwrap();
+
+    crate::failed_jobs::migrate_queue_tables(&db, jobs, failed).await;
+    crate::failed_jobs::migrate_queue_tables(&db, jobs, failed).await;
+    let moved = support::rows(&db.conn, &format!("SELECT uuid FROM {failed}")).await;
+    assert_eq!(moved.len(), 1, "the earlier failed job");
+    assert_eq!(support::text(&moved[0], "uuid"), earlier.to_string());
+    let public = support::rows(
+        &db.conn,
+        "SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema = 'public'",
+    )
+    .await;
+    assert_eq!(support::int(&public[0], "n"), 0, "a table landed in public");
+
+    run_on_qualified_tables(&db, jobs, failed).await;
+    assert_eq!(support::count(&db.conn, failed, "").await, 2);
+}
+
+/// On MySQL, where a schema is a database, the stores and the worker's
+/// check work on queue tables named with their database. The schema
+/// builder refuses to create such a table, naming it, rather than failing
+/// inside SeaQuery.
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires a throwaway MySQL at MYSQL_TEST_URL"]
+async fn ldb_003_schema_qualified_queue_tables_work_mysql() {
+    let db = support::empty(Engine::Mysql).await;
+    let rows = support::rows(&db.conn, "SELECT DATABASE() AS name").await;
+    let schema = support::text(&rows[0], "name");
+    let jobs = format!("{schema}.jobs");
+    let failed = format!("{schema}.failed_jobs");
+    for statement in [
+        format!(
+            "CREATE TABLE {failed} (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
+             uuid VARCHAR(255) NOT NULL UNIQUE, connection TEXT NOT NULL, \
+             queue TEXT NOT NULL, payload LONGTEXT NOT NULL, exception LONGTEXT NOT NULL, \
+             failed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        ),
+        format!(
+            "CREATE TABLE {jobs} (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
+             queue VARCHAR(255) NOT NULL, payload LONGTEXT NOT NULL, \
+             attempts SMALLINT UNSIGNED NOT NULL, reserved_at INT UNSIGNED NULL, \
+             available_at INT UNSIGNED NOT NULL, created_at INT UNSIGNED NOT NULL)"
+        ),
+        format!(
+            "CREATE TABLE {schema}.suprnova_jobs_reservations (job_id BIGINT UNSIGNED PRIMARY KEY, \
+             token CHAR(36) NOT NULL UNIQUE, reserved_until BIGINT NOT NULL)"
+        ),
+    ] {
+        db.conn.execute_unprepared(&statement).await.unwrap();
+    }
+    run_on_qualified_tables(&db, &jobs, &failed).await;
+    assert_eq!(support::count(&db.conn, &failed, "").await, 1);
+
+    // SAFETY: the test is serial within its process.
+    unsafe { std::env::set_var("QUEUE_DB_TABLE", &jobs) };
+    let refused = CreateJobsTable.up(&SchemaManager::new(&db.conn)).await;
+    // SAFETY: as above.
+    unsafe { std::env::remove_var("QUEUE_DB_TABLE") };
+    let refused = refused.expect_err("the builder took a qualified table on MySQL");
+    assert!(
+        refused
+            .to_string()
+            .contains(&format!("{schema}.suprnova_jobs_reservations")),
+        "{refused}"
+    );
+}
+
+/// The worker's check accepts the qualified `failed`, the worker writes its
+/// dead letter into it, and the driver queues and pops through `jobs`.
+async fn run_on_qualified_tables(db: &Db, jobs: &str, failed: &str) {
+    let store = DatabaseFailedJobStore::new(db.conn.clone(), failed.to_owned()).unwrap();
+    Queue::set_failed_store(Arc::new(store));
+    let memory = queue_with_one_job().await;
+    run_worker(memory.clone(), one_job_config(), CancellationToken::new())
+        .await
+        .unwrap_or_else(|e| panic!("the worker refused {failed}: {e}"));
+    assert_eq!(memory.size().await.unwrap(), 0, "the job ran");
+
+    let driver = DatabaseQueueDriver::new(db.conn.clone(), jobs.to_owned()).unwrap();
+    driver
+        .push(envelope("Ldb.Qualified", serde_json::json!({})))
+        .await
+        .unwrap_or_else(|e| panic!("push onto {jobs}: {e}"));
+    let popped = driver
+        .pop(Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|e| panic!("pop from {jobs}: {e}"))
+        .expect("the job just pushed");
+    driver.ack(&popped.token).await.unwrap();
+    assert_eq!(driver.size().await.unwrap(), 0);
+}

@@ -8,9 +8,9 @@
 //! `NOTIFICATIONS_MORPH_KEY` names. Every notification keeps its id, its
 //! recipient, its data and its read state. A recipient id that the chosen
 //! form cannot hold (text under `int`) stops the migration with the row
-//! named, rather than losing the notification; set
-//! `NOTIFICATIONS_MORPH_KEY` to the form the application's keys take and
-//! run it again.
+//! named, before any table changes, rather than losing the notification;
+//! set `NOTIFICATIONS_MORPH_KEY` to the form the application's keys take
+//! and run it again.
 //!
 //! A table Laravel created, a missing table, and a table already in the
 //! new layout are left alone.
@@ -20,7 +20,8 @@ use sea_orm_migration::sea_orm::Statement;
 
 use super::m_create_notifications_table::{MorphKey, create_table, morph_key};
 use crate::database::migration_guard::{
-    MovedRow, UpgradeState, move_earlier_rows, quote, resume_set_aside, set_aside, upgrade_state,
+    MovedRow, UpgradeState, earlier_table_name, first_misfit, move_earlier_rows, quote,
+    resume_set_aside, set_aside, upgrade_state,
 };
 use crate::database::stored_datetime::StoredDateTime;
 
@@ -37,7 +38,26 @@ impl MigrationName for Migration {
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let key = morph_key()?;
-        match upgrade_state(manager, "notifications", super::is_earlier_layout).await? {
+        let state = upgrade_state(manager, "notifications", super::is_earlier_layout).await?;
+        // Every recipient the rows hold has to fit the chosen form before
+        // any table changes: a refusal part way would leave the new table
+        // created in a form the corrected setting does not make.
+        let source = match state {
+            UpgradeState::Untouched | UpgradeState::Fresh => return Ok(()),
+            UpgradeState::Earlier => "notifications".to_owned(),
+            UpgradeState::Resume => earlier_table_name("notifications"),
+        };
+        if key == MorphKey::Int
+            && crate::database::catalog::table_exists(manager.get_connection(), &source).await?
+            && let Some((id, notifiable_id)) =
+                first_misfit(manager, &source, "id", false, "notifiable_id", |value| {
+                    value.parse::<i64>().is_ok()
+                })
+                .await?
+        {
+            return Err(int_refusal(&id, &notifiable_id));
+        }
+        match state {
             UpgradeState::Untouched | UpgradeState::Fresh => return Ok(()),
             UpgradeState::Earlier => {
                 set_aside(manager, "notifications").await?;
@@ -45,9 +65,7 @@ impl MigrationTrait for Migration {
             }
             UpgradeState::Resume => {
                 resume_set_aside(manager, "notifications", super::is_earlier_layout).await?;
-                if !manager.has_table("notifications").await? {
-                    create_table(manager, key).await?;
-                }
+                create_table(manager, key).await?;
             }
         }
         let backend = manager.get_database_backend();
@@ -60,15 +78,10 @@ impl MigrationTrait for Migration {
                 let id: String = row.try_get("", "id")?;
                 let notifiable_id: String = row.try_get("", "notifiable_id")?;
                 let notifiable = match key {
-                    MorphKey::Int => {
-                        notifiable_id.parse::<i64>().map(Into::into).map_err(|_| {
-                            DbErr::Migration(format!(
-                                "notification {id} is for notifiable_id {notifiable_id:?}, which \
-                             NOTIFICATIONS_MORPH_KEY=int cannot hold; set \
-                             NOTIFICATIONS_MORPH_KEY to uuid or ulid and run migrate again"
-                            ))
-                        })?
-                    }
+                    MorphKey::Int => notifiable_id
+                        .parse::<i64>()
+                        .map(Into::into)
+                        .map_err(|_| int_refusal(&id, &notifiable_id))?,
                     MorphKey::Uuid | MorphKey::Ulid => {
                         crate::notifications::uuid_value(backend, &notifiable_id)
                     }
@@ -112,4 +125,14 @@ impl MigrationTrait for Migration {
     async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
         Ok(())
     }
+}
+
+/// The refusal for a recipient id `NOTIFICATIONS_MORPH_KEY=int` cannot
+/// hold, naming the notification and the setting that would.
+fn int_refusal(id: &str, notifiable_id: &str) -> DbErr {
+    DbErr::Migration(format!(
+        "notification {id} is for notifiable_id {notifiable_id:?}, which \
+         NOTIFICATIONS_MORPH_KEY=int cannot hold; set NOTIFICATIONS_MORPH_KEY to uuid or ulid \
+         and run migrate again"
+    ))
 }

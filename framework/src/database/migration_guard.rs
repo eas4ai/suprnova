@@ -198,9 +198,13 @@ async fn alter_in_utc(connection: &impl ConnectionTrait, alter: &str) -> Result<
 }
 
 /// The table an upgrade keeps a table's earlier rows in while it reshapes
-/// them into a new layout under the original name.
+/// them into a new layout under the original name: in the same schema when
+/// the name is schema-qualified.
 pub(crate) fn earlier_table_name(table: &str) -> String {
-    format!("suprnova_earlier_{table}")
+    match table.rsplit_once('.') {
+        Some((schema, name)) => format!("{schema}.suprnova_earlier_{name}"),
+        None => format!("suprnova_earlier_{table}"),
+    }
 }
 
 /// Where an upgrade of `table` stands, read from the catalog: the earlier
@@ -293,6 +297,87 @@ pub(crate) async fn resume_set_aside(
             .await?;
     }
     Ok(())
+}
+
+/// How many rows one read of [`first_misfit`] takes.
+const SCAN_CHUNK: u64 = 1000;
+
+/// The first row of `table`, in the order of its `key` column, whose text
+/// `column` `fits` refuses, as `(key, value)`; `None` when every row fits.
+///
+/// An upgrade whose layout takes a setting (a key type) runs this over the
+/// rows it is about to move, before it changes any table: a row the setting
+/// cannot hold then stops the migration with nothing set aside and no new
+/// table created in the wrong form, and running it again under the setting
+/// the error advises starts from the earlier layout. `key` is a unique
+/// column, an integer one when `integer_key` says so and text otherwise;
+/// the rows are read in chunks from the last key seen.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a statement fails or a row cannot be read.
+pub(crate) async fn first_misfit(
+    manager: &SchemaManager<'_>,
+    table: &str,
+    key: &str,
+    integer_key: bool,
+    column: &str,
+    fits: impl Fn(&str) -> bool,
+) -> Result<Option<(String, String)>, DbErr> {
+    let connection = manager.get_connection();
+    let backend = connection.get_database_backend();
+    let mut after: Option<sea_orm_migration::sea_orm::Value> = None;
+    loop {
+        let (filter, values) = match &after {
+            Some(last) => (
+                format!(
+                    " WHERE {} > {}",
+                    quote(backend, key),
+                    crate::database::placeholder::placeholder(backend, 1)
+                        .map_err(|e| DbErr::Migration(e.to_string()))?
+                ),
+                vec![last.clone()],
+            ),
+            None => (String::new(), Vec::new()),
+        };
+        let rows = connection
+            .query_all_raw(Statement::from_sql_and_values(
+                backend,
+                format!(
+                    "SELECT {key_column} AS row_key, {value_column} AS row_value FROM {table}\
+                     {filter} ORDER BY {key_column} LIMIT {SCAN_CHUNK}",
+                    key_column = quote(backend, key),
+                    value_column = quote(backend, column),
+                    table = quote(backend, table),
+                ),
+                values,
+            ))
+            .await?;
+        let Some(last) = rows.last() else {
+            return Ok(None);
+        };
+        let read_key = |row: &sea_orm_migration::sea_orm::QueryResult| {
+            if integer_key {
+                row.try_get::<i64>("", "row_key")
+                    .map(sea_orm_migration::sea_orm::Value::from)
+            } else {
+                row.try_get::<String>("", "row_key")
+                    .map(sea_orm_migration::sea_orm::Value::from)
+            }
+        };
+        for row in &rows {
+            let value: String = row.try_get("", "row_value")?;
+            if !fits(&value) {
+                let key = match read_key(row)? {
+                    sea_orm_migration::sea_orm::Value::BigInt(Some(key)) => key.to_string(),
+                    sea_orm_migration::sea_orm::Value::String(Some(key)) => key,
+                    other => format!("{other:?}"),
+                };
+                return Ok(Some((key, value)));
+            }
+        }
+        after = Some(read_key(last)?);
+    }
 }
 
 /// One earlier row, converted: the statements that write it into the new

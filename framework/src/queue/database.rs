@@ -36,6 +36,7 @@
 //! listing and `clear` reads only those rows. So a Suprnova worker never
 //! reserves a Laravel job, whatever its queue filter says.
 
+use crate::database::clauses::quote_identifier;
 use crate::database::placeholder::{placeholder, placeholder_list};
 use crate::database::validate_identifier;
 use crate::error::FrameworkError;
@@ -64,7 +65,12 @@ pub(crate) const MAX_STORED_ATTEMPTS: u32 = 32_767;
 /// [module docs](self).
 pub struct DatabaseQueueDriver {
     db: DatabaseConnection,
+    /// The jobs table, quoted for the connection's backend. Every statement
+    /// names it this way, as the migration that created it did, so Postgres
+    /// does not fold `QueueJobs` to `queuejobs` and no engine reads `order`
+    /// as a keyword.
     table: String,
+    /// The reservations table, quoted the same way.
     reservations: String,
 }
 
@@ -81,12 +87,14 @@ pub fn reservations_table(table: &str) -> String {
 impl DatabaseQueueDriver {
     /// Construct a driver bound to the given connection and `jobs` table.
     ///
-    /// The `table` argument is interpolated directly into every SQL
-    /// statement (push/pop/ack/nack), so it MUST validate as a SQL
-    /// identifier - operator-controlled env input doesn't excuse the
-    /// composition. Validation happens once, here, rather than on every
-    /// query. The reservations table, [`reservations_table`] of `table`,
-    /// is validated the same way.
+    /// The `table` argument is interpolated into every SQL statement
+    /// (push/pop/ack/nack), so it MUST validate as a SQL identifier -
+    /// operator-controlled env input doesn't excuse the composition.
+    /// Validation happens once, here, rather than on every query, and so
+    /// does the quoting every statement uses: each segment of the name is
+    /// quoted for the backend, as the migrations quote it. The
+    /// reservations table, [`reservations_table`] of `table`, is validated
+    /// and quoted the same way.
     ///
     /// # Errors
     ///
@@ -97,10 +105,11 @@ impl DatabaseQueueDriver {
         validate_identifier(&table)?;
         let reservations = reservations_table(&table);
         validate_identifier(&reservations)?;
+        let backend = db.get_database_backend();
         Ok(Self {
+            table: quote_identifier(backend, &table),
+            reservations: quote_identifier(backend, &reservations),
             db,
-            table,
-            reservations,
         })
     }
 

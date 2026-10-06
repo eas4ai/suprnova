@@ -663,7 +663,11 @@ An assignment is stored with the user model's `morph_type` as its
 `model_type`, as spatie stores the model's morph class. Declare
 `#[model(morph_type = "App\\Models\\User")]` on your user model to share
 assignments with a Laravel application; without a `morph_type`, the
-`model_type` is the model's Rust type path. See
+`model_type` is the model's Rust type path. The `HasRoles` methods also
+read and remove assignments stored under the model's `morph_aliases` and
+under its Rust type path, the default before it followed `morph_type`, so
+the roles an earlier release assigned still apply; `rbac_model_types()`
+lists them all. See
 [Running on a Laravel Database](laravel-database.md).
 
 Implement `HasRoles` on the user model. It has no required methods:

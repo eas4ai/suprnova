@@ -52,9 +52,7 @@ impl MigrationTrait for Migration {
             }
             UpgradeState::Resume => {
                 resume_set_aside(manager, FEATURES_TABLE, super::is_earlier_layout).await?;
-                if !manager.has_table(FEATURES_TABLE).await? {
-                    create_features(manager).await?;
-                }
+                create_features(manager).await?;
             }
         }
         create_details(manager).await?;

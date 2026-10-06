@@ -33,7 +33,10 @@ impl MigrationTrait for Migration {
         .await
     }
 
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        Schema::drop_if_exists(manager, "users").await
+    /// Leaves the table. `up` skips a `users` table that already exists, so
+    /// the table may be Laravel's, with its users, and rolling back must not
+    /// drop them.
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Ok(())
     }
 }

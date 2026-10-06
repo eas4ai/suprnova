@@ -954,3 +954,272 @@ on_every_engine!(the_manuals_users_migration_works =>
     ldb_010_the_manuals_users_migration_moves_an_earlier_scaffold_sqlite,
     ldb_010_the_manuals_users_migration_moves_an_earlier_scaffold_postgres,
     ldb_010_the_manuals_users_migration_moves_an_earlier_scaffold_mysql);
+
+/// Assignments an earlier release stored under its default discriminator,
+/// the model's Rust type path, still apply after the upgrade, now that the
+/// default follows the model's `morph_type`. A new grant does not duplicate
+/// them, and a removal takes them away.
+async fn earlier_default_discriminator_still_applies(engine: Engine) {
+    use suprnova::{HasRoles, Model};
+    let (db, _) = earlier_database(engine).await;
+    let earlier_default = std::any::type_name::<crate::models::LdbUser>();
+    for table in ["model_roles", "model_permissions"] {
+        db.conn
+            .execute_unprepared(&format!(
+                "UPDATE {table} SET model_type = '{earlier_default}'"
+            ))
+            .await
+            .expect("store the earlier default discriminator");
+    }
+    crate::scaffold::migrate(&db.conn)
+        .await
+        .unwrap_or_else(|e| panic!("{engine:?}: migrate over the earlier layouts: {e}"));
+    let _bound = support::bind(&db.conn);
+    db.conn
+        .execute_unprepared(
+            "INSERT INTO users (id, name, email, password) VALUES \
+             (1, 'Earlier', '1@example.com', 'x'), (2, 'Earlier', '2@example.com', 'x')",
+        )
+        .await
+        .expect("the two users");
+    let first = crate::models::LdbUser::find(1u64)
+        .await
+        .expect("find")
+        .expect("user 1");
+    let second = crate::models::LdbUser::find(2u64)
+        .await
+        .expect("find")
+        .expect("user 2");
+    let user = |id: u64| if id == 1 { &first } else { &second };
+    assert!(
+        user(1).has_role("writer").await.expect("check"),
+        "{engine:?}: the role an earlier release assigned is gone"
+    );
+    assert!(
+        user(1)
+            .has_permission_to("edit articles")
+            .await
+            .expect("check"),
+        "{engine:?}: the permission through that role is gone"
+    );
+    assert!(
+        user(2)
+            .has_permission_to("delete articles")
+            .await
+            .expect("check"),
+        "{engine:?}: the direct permission an earlier release gave is gone"
+    );
+    user(1).assign_role("writer").await.expect("assign again");
+    assert_eq!(
+        support::count(&db.conn, "model_has_roles", "").await,
+        1,
+        "{engine:?}: a grant the model already held was written twice"
+    );
+    user(1)
+        .remove_role("writer")
+        .await
+        .expect("remove the role");
+    assert!(
+        !user(1).has_role("writer").await.expect("check"),
+        "{engine:?}: the earlier assignment survived its removal"
+    );
+    user(2)
+        .remove_permission_to("delete articles")
+        .await
+        .expect("remove the permission");
+    assert!(
+        !user(2)
+            .has_permission_to("delete articles")
+            .await
+            .expect("check"),
+        "{engine:?}: the earlier grant survived its removal"
+    );
+}
+
+on_every_engine!(earlier_default_discriminator_still_applies =>
+    ldb_010_assignments_under_the_earlier_default_discriminator_still_apply_sqlite,
+    ldb_010_assignments_under_the_earlier_default_discriminator_still_apply_postgres,
+    ldb_010_assignments_under_the_earlier_default_discriminator_still_apply_mysql);
+
+/// An upgrade that stopped after it created the new `features`,
+/// `notifications` and `roles` tables and before their indexes resumes on
+/// the next `migrate` and completes them: every index of the package's or
+/// Laravel's layout, and the uniqueness the index enforces.
+async fn a_resume_completes_the_indexes(engine: Engine) {
+    use suprnova::schema::Schema;
+    let laravel = crate::tables::laravel_shapes(engine).await;
+    let (db, _) = earlier_database(engine).await;
+    let manager = sea_orm_migration::SchemaManager::new(&db.conn);
+    for table in ["features", "notifications", "roles"] {
+        db.conn
+            .execute_unprepared(&format!(
+                "CREATE TABLE suprnova_earlier_{table} AS SELECT * FROM {table}"
+            ))
+            .await
+            .expect("set the earlier rows aside");
+        db.conn
+            .execute_unprepared(&format!("DROP TABLE {table}"))
+            .await
+            .expect("drop the earlier table");
+    }
+    // The new tables as the stopped upgrade left them: created, without the
+    // indexes the next statements would have added.
+    Schema::create(&manager, "features", |t| {
+        t.unsigned_id();
+        t.string("name");
+        t.string("scope");
+        t.text("value");
+        t.date_time("created_at").precision(0).nullable();
+        t.date_time("updated_at").precision(0).nullable();
+    })
+    .await
+    .expect("features without its index");
+    Schema::create(&manager, "notifications", |t| {
+        t.uuid("id").primary();
+        t.string("type");
+        t.string("notifiable_type");
+        t.unsigned_big_integer("notifiable_id");
+        t.text("data");
+        t.date_time("read_at").precision(0).nullable();
+        t.date_time("created_at").precision(0).nullable();
+        t.date_time("updated_at").precision(0).nullable();
+    })
+    .await
+    .expect("notifications without its index");
+    Schema::create(&manager, "roles", |t| {
+        t.unsigned_id();
+        t.string("name");
+        t.string("guard_name");
+        t.date_time("created_at").precision(0).nullable();
+        t.date_time("updated_at").precision(0).nullable();
+    })
+    .await
+    .expect("roles without its index");
+
+    crate::scaffold::migrate(&db.conn)
+        .await
+        .unwrap_or_else(|e| panic!("{engine:?}: the resumed migrate: {e}"));
+    for table in ["features", "notifications", "roles"] {
+        let ours = crate::catalog::shape(&db.conn, table).await;
+        crate::tables::assert_same_layout(engine, table, &laravel[table], &ours);
+    }
+    for (table, rows) in [("features", 3), ("notifications", 2), ("roles", 1)] {
+        assert_eq!(
+            support::count(&db.conn, table, "").await,
+            rows,
+            "{engine:?}: {table} lost or doubled a row"
+        );
+    }
+    let duplicate = db
+        .conn
+        .execute_unprepared(
+            "INSERT INTO features (name, scope, value) VALUES ('beta', '__laravel_null', 'true')",
+        )
+        .await;
+    assert!(
+        duplicate.is_err(),
+        "{engine:?}: features took a second row for one flag and scope"
+    );
+}
+
+on_every_engine!(a_resume_completes_the_indexes =>
+    ldb_010_a_resume_between_a_table_and_its_index_completes_the_schema_sqlite,
+    ldb_010_a_resume_between_a_table_and_its_index_completes_the_schema_postgres,
+    ldb_010_a_resume_between_a_table_and_its_index_completes_the_schema_mysql);
+
+/// Sets an environment variable for as long as it lives.
+struct EnvVar(&'static str);
+
+impl EnvVar {
+    fn set(name: &'static str, value: &str) -> Self {
+        // SAFETY: the tests are serial within their process, and nothing
+        // else reads the environment while a migration runs.
+        unsafe { std::env::set_var(name, value) };
+        Self(name)
+    }
+}
+
+impl Drop for EnvVar {
+    fn drop(&mut self) {
+        // SAFETY: as in `set`.
+        unsafe { std::env::remove_var(self.0) };
+    }
+}
+
+/// Notifications and assignments whose recipient key is a UUID, migrated
+/// first under the default `int` settings, which refuse them, and then
+/// under the `uuid` settings each refusal advises, end in the `uuid`
+/// layout with every row.
+async fn the_advised_key_setting_upgrades(engine: Engine) {
+    let laravel = crate::tables::laravel_shapes(engine).await;
+    let (db, _) = earlier_database(engine).await;
+    let recipient = Uuid::new_v4().to_string();
+    for (table, column) in [
+        ("notifications", "notifiable_id"),
+        ("model_roles", "model_id"),
+        ("model_permissions", "model_id"),
+    ] {
+        db.conn
+            .execute_unprepared(&format!("UPDATE {table} SET {column} = '{recipient}'"))
+            .await
+            .expect("a UUID recipient");
+    }
+    let refused = crate::scaffold::migrate(&db.conn)
+        .await
+        .expect_err("NOTIFICATIONS_MORPH_KEY=int took a UUID recipient");
+    assert!(
+        refused.to_string().contains("NOTIFICATIONS_MORPH_KEY"),
+        "{engine:?}: {refused}"
+    );
+    let _notifications = EnvVar::set("NOTIFICATIONS_MORPH_KEY", "uuid");
+    let refused = crate::scaffold::migrate(&db.conn)
+        .await
+        .expect_err("RBAC_MODEL_KEY=int took a UUID model id");
+    assert!(
+        refused.to_string().contains("RBAC_MODEL_KEY"),
+        "{engine:?}: {refused}"
+    );
+    let _rbac = EnvVar::set("RBAC_MODEL_KEY", "uuid");
+    crate::scaffold::migrate(&db.conn)
+        .await
+        .unwrap_or_else(|e| panic!("{engine:?}: migrate under the advised settings: {e}"));
+
+    for (table, column) in [
+        ("notifications", "notifiable_id"),
+        ("model_has_roles", "model_id"),
+        ("model_has_permissions", "model_id"),
+    ] {
+        let mut expected = laravel[table].clone();
+        expected
+            .columns
+            .iter_mut()
+            .find(|c| c.name == column)
+            .expect("the key column")
+            .kind = crate::tables::laravel_key_kind(engine, "uuid").to_owned();
+        let ours = crate::catalog::shape(&db.conn, table).await;
+        crate::tables::assert_same_layout(engine, table, &expected, &ours);
+    }
+    for (table, rows) in [
+        ("notifications", 2),
+        ("model_has_roles", 1),
+        ("model_has_permissions", 1),
+    ] {
+        assert_eq!(
+            support::count(&db.conn, table, "").await,
+            rows,
+            "{engine:?}: {table} lost a row"
+        );
+    }
+    let _bound = support::bind(&db.conn);
+    assert!(
+        suprnova::rbac::has_role_for_model("App\\Models\\User", &recipient, "writer")
+            .await
+            .expect("check"),
+        "{engine:?}: the UUID model lost its role"
+    );
+}
+
+on_every_engine!(the_advised_key_setting_upgrades =>
+    ldb_010_a_wrong_key_setting_then_the_advised_one_upgrades_every_row_sqlite,
+    ldb_010_a_wrong_key_setting_then_the_advised_one_upgrades_every_row_postgres,
+    ldb_010_a_wrong_key_setting_then_the_advised_one_upgrades_every_row_mysql);

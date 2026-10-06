@@ -112,7 +112,7 @@ on_every_engine!(created_tables_take_laravels_layout =>
 
 /// The type Laravel's grammar gives a `uuid` or `ulid` column on `engine`
 /// (`typeUuid`, `typeChar`), normalized as the catalog normalizes.
-fn laravel_key_kind(engine: Engine, key: &str) -> &'static str {
+pub(crate) fn laravel_key_kind(engine: Engine, key: &str) -> &'static str {
     match (engine, key) {
         (Engine::Sqlite, _) => "text",
         (Engine::Postgres, "uuid") => "uuid",
@@ -343,3 +343,47 @@ async fn ldb_011_tables_suprnova_creates_have_no_timestamp_column_mysql() {
         }
     }
 }
+
+/// Rolling every migration back leaves each table Laravel or a package
+/// created, with its rows: the scaffold's `users` and `sessions` migrations
+/// skipped those tables on the way up, so their `down` must not drop them.
+async fn rollback_leaves_laravels_tables(engine: Engine) {
+    let (db, _) = support::laravel(engine).await;
+    let laravel_tables = catalog::tables(&db.conn).await;
+    let mut before = BTreeMap::new();
+    for table in &laravel_tables {
+        before.insert(
+            table.clone(),
+            (
+                catalog::shape(&db.conn, table).await,
+                support::count(&db.conn, table, "").await,
+            ),
+        );
+    }
+    crate::scaffold::migrate(&db.conn)
+        .await
+        .expect("migrate on Laravel's database");
+    <crate::scaffold::Migrator as sea_orm_migration::MigratorTrait>::down(&db.conn, None)
+        .await
+        .expect("roll every migration back");
+    let left = catalog::tables(&db.conn).await;
+    for table in &laravel_tables {
+        assert!(
+            left.contains(table),
+            "{engine:?}: the rollback dropped Laravel's {table}"
+        );
+        let after = (
+            catalog::shape(&db.conn, table).await,
+            support::count(&db.conn, table, "").await,
+        );
+        assert_eq!(
+            after, before[table],
+            "{engine:?}: the rollback changed Laravel's {table}"
+        );
+    }
+}
+
+on_every_engine!(rollback_leaves_laravels_tables =>
+    ldb_011_a_rollback_leaves_laravels_tables_and_rows_sqlite,
+    ldb_011_a_rollback_leaves_laravels_tables_and_rows_postgres,
+    ldb_011_a_rollback_leaves_laravels_tables_and_rows_mysql);
