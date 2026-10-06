@@ -109,7 +109,8 @@ randomness, and the optional application reacquisition port are injected before
 runtime boot through `configureUploads`; `resumeUpload` is the supported
 document/island-scoped explicit reacquisition entry rather than a second feature
 registration. The
-reference fetch adapter uses the fixed reserved `/__live/upload` endpoint and
+reference fetch adapter uses the reserved `/__live/upload` endpoint under the
+application's public root (`docs/spec/path-prefix.md`, PFX-006) and
 places a transfer grant only in the `Authorization` header, never in the URL,
 history, diagnostics, or model proposal. It reads upload control responses
 whole as the framework server's own small typed reply; it has no byte cap of
@@ -327,6 +328,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-05 -- The reserved `/__live/upload` endpoint sits under the
+  application's public root, so an application served under a path prefix
+  (`X-Forwarded-Prefix` or the `APP_URL` path) uploads to
+  `/<prefix>/__live/upload`; the route the framework mounts and the transfer
+  and trust model are unchanged (`docs/spec/path-prefix.md`, PFX-006).
 - 2026-10-04 -- The framework host retires a finalized direct-storage upload
   through the application's direct provider and its
   `UploadProvider::retire_after_finalization`, as the cleanup rules above
