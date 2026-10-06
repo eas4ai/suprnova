@@ -12,6 +12,8 @@
 
 #[path = "../support/env_lock.rs"]
 mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
 #[path = "../support/live_dogfood_support/mod.rs"]
 mod live_dogfood_support;
 #[path = "../support/own_process.rs"]

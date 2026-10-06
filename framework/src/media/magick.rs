@@ -84,6 +84,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// already met its deadline.
 const READER_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
+/// The least the output buffer grows by when it has no room left to read
+/// into: `read_to_end`'s own default read size.
+const MIN_OUTPUT_READ: usize = 8 * 1024;
+
 /// An [`ImageDriver`] that shells out to a host-installed ImageMagick 7.
 ///
 /// Selected with `IMAGE_DRIVER=magick`. The binary name comes from
@@ -147,6 +151,18 @@ impl MagickCliDriver {
         args: &[String],
         input: &[u8],
         config: &ImageConfig,
+    ) -> Result<Vec<u8>, FrameworkError> {
+        self.run_leaving_room(args, input, config, 0)
+    }
+
+    /// [`Self::run`], with the stdout buffer keeping `room` bytes of
+    /// capacity past the output, for the metadata [`Self::settle`] adds.
+    fn run_leaving_room(
+        &self,
+        args: &[String],
+        input: &[u8],
+        config: &ImageConfig,
+        room: usize,
     ) -> Result<Vec<u8>, FrameworkError> {
         // The driver makes the stdin pipe itself, rather than through
         // `Stdio::piped()`, to keep a read end of its own: see the writer
@@ -212,9 +228,7 @@ impl MagickCliDriver {
 
         let (out_tx, out_rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let mut buffer = Vec::new();
-            let _ = stdout.read_to_end(&mut buffer);
-            let _ = out_tx.send(buffer);
+            let _ = out_tx.send(read_leaving_room(&mut stdout, room));
         });
         let (err_tx, err_rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -515,7 +529,8 @@ impl MagickCliDriver {
 
     /// Run the end of the pipeline under `plan`: one ImageMagick run, or
     /// two around a conversion to sRGB in Rust. Returns the output and
-    /// whether orientation was applied.
+    /// whether orientation was applied. The output keeps `room` bytes of
+    /// capacity past its end.
     fn run_tail(
         &self,
         contents: &[u8],
@@ -523,6 +538,7 @@ impl MagickCliDriver {
         pipeline: &ImagePipeline,
         run: &Run<'_>,
         plan: ColourPlan,
+        room: usize,
     ) -> Result<(Vec<u8>, bool), FrameworkError> {
         let mut applied = tail.applied;
         let first = tail.input.is_none();
@@ -534,7 +550,10 @@ impl MagickCliDriver {
             args.extend(output_args(
                 pipeline, run.target, plan, keeps_exif, background,
             ));
-            return Ok((self.run(&args, source, run.config)?, applied));
+            return Ok((
+                self.run_leaving_room(&args, source, run.config, room)?,
+                applied,
+            ));
         }
         args.extend(intermediate_args(keeps_exif));
         let intermediate = self.run(&args, source, run.config)?;
@@ -543,7 +562,10 @@ impl MagickCliDriver {
         args.extend(output_args(
             pipeline, run.target, plan, keeps_exif, background,
         ));
-        Ok((self.run(&args, &converted, run.config)?, applied))
+        Ok((
+            self.run_leaving_room(&args, &converted, run.config, room)?,
+            applied,
+        ))
     }
 
     /// Keep, of what ImageMagick wrote, what IMG-002 keeps, in place.
@@ -900,11 +922,22 @@ impl ImageDriver for MagickCliDriver {
         } else {
             Vec::new()
         };
+        // The most `settle` can add: every colour chunk and the tag. The
+        // last run's output keeps that much room, so adding them moves bytes
+        // within it rather than copying the output into a larger buffer
+        // (MEM-003).
+        let room = Kept {
+            icc: None,
+            orientation: run.orienting.tag,
+            png_colour: &png_colour,
+        }
+        .prepare(target)?
+        .len();
         let tail = self.run_custom_steps(contents, pipeline, &run)?;
         let mut plan = ColourPlan::before(source_class, target);
         let mut retried = false;
         loop {
-            let (output, applied) = self.run_tail(contents, &tail, pipeline, &run, plan)?;
+            let (output, applied) = self.run_tail(contents, &tail, pipeline, &run, plan, room)?;
             let orientation = if applied { None } else { run.orienting.tag };
             let colour = if plan.srgb { &[][..] } else { &png_colour[..] };
             match self.settle(
@@ -1314,6 +1347,31 @@ fn dominant_color_args(config: &ImageConfig, detected: Option<sniff::InputFormat
     // and always includes a `#RRGGBB` token.
     args.push("txt:-".into());
     args
+}
+
+/// Read `reader` to its end into a buffer that keeps `room` bytes of
+/// capacity past what it read (MEM-003).
+///
+/// `read_to_end` can end with no capacity to spare, and then the metadata
+/// the driver inserts afterwards grows the buffer, which copies the whole
+/// output. Here the buffer grows by doubling as `read_to_end` grows one, but
+/// every read stops `room` bytes short of its capacity, so the insert moves
+/// bytes within it. A read error ends the output where it stopped, as it
+/// does in `read_to_end`; the exit status is what judges the run.
+fn read_leaving_room(reader: &mut impl Read, room: usize) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    loop {
+        if buffer.capacity() - buffer.len() <= room {
+            buffer.reserve(room + MIN_OUTPUT_READ);
+        }
+        let limit = buffer.capacity() - buffer.len() - room;
+        // `Take` reads into the capacity already there and never grows the
+        // buffer: only a read that filled all of it can have more after it.
+        match reader.by_ref().take(limit as u64).read_to_end(&mut buffer) {
+            Ok(read) if read == limit => {}
+            _ => return buffer,
+        }
+    }
 }
 
 /// Reduce ImageMagick's stderr to the part a caller should see.

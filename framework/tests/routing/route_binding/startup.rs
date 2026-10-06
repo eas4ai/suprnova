@@ -337,6 +337,10 @@ fn bind_004_every_registration_site_is_checked() {
             "nested group! macro",
             group!("/outer", { group!("/inner", { get!("/{x}", by_id) }) }).register(Router::new()),
         ),
+        (
+            "any! inside group! macro",
+            group!("/g", { any!("/{x}", by_id) }).register(Router::new()),
+        ),
         ("fallback! macro", fallback!(by_id).register(Router::new())),
         (
             "resource! function form",
