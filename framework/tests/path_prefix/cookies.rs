@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use suprnova::http::{CookiePrefix, parse_cookies};
+use suprnova::http::{Cookie, CookiePrefix, parse_cookies};
 use suprnova::{
     CsrfMiddleware, FileMaintenanceMode, HttpResponse, MaintenanceMiddleware, MaintenanceMode,
     MaintenancePayload, MiddlewareRegistry, Request, Router, SessionConfig, SessionMiddleware,
@@ -19,9 +19,35 @@ fn session_config() -> SessionConfig {
     config
 }
 
+/// The remember-me cookie and the cookie that forgets it, as the response
+/// of a request would set them, one `Set-Cookie` value per line.
+fn remember_cookies(prefix: CookiePrefix) -> suprnova::Response {
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    config.cookie_prefix = prefix;
+    let cookie = suprnova::session::middleware::create_remember_cookie(
+        &config,
+        "token",
+        Duration::from_secs(60),
+    )
+    .map_err(|error| HttpResponse::text(error.to_string()).status(500))?;
+    let forget = suprnova::session::middleware::create_forget_remember_cookie(&config);
+    Ok(HttpResponse::text(format!(
+        "{}\n{}",
+        cookie.to_header_value(),
+        forget.to_header_value()
+    )))
+}
+
 /// A session, its CSRF middleware, and two routes: one that starts a
 /// session and one that reads and writes a marker in it.
 fn stack(config: SessionConfig) -> (Router, MiddlewareRegistry) {
+    let csrf = CsrfMiddleware::new().with_session_config(&config);
+    stack_with(config, csrf)
+}
+
+/// [`stack`] with the CSRF middleware the caller built.
+fn stack_with(config: SessionConfig, csrf: CsrfMiddleware) -> (Router, MiddlewareRegistry) {
     let router: Router = Router::new()
         .get("/start", |_request: Request| async {
             suprnova::session::session_mut(|session| session.put("started", true));
@@ -39,20 +65,10 @@ fn stack(config: SessionConfig) -> (Router, MiddlewareRegistry) {
             Ok(HttpResponse::text(marker))
         })
         .get("/remember", |_request: Request| async {
-            let mut config = SessionConfig::default();
-            config.cookie_secure = false;
-            let cookie = suprnova::session::middleware::create_remember_cookie(
-                &config,
-                "token",
-                Duration::from_secs(60),
-            )
-            .map_err(|error| HttpResponse::text(error.to_string()).status(500))?;
-            let forget = suprnova::session::middleware::create_forget_remember_cookie(&config);
-            Ok(HttpResponse::text(format!(
-                "{}\n{}",
-                cookie.to_header_value(),
-                forget.to_header_value()
-            )))
+            remember_cookies(CookiePrefix::None)
+        })
+        .get("/remember-host", |_request: Request| async {
+            remember_cookies(CookiePrefix::Host)
         })
         .get("/cookie/{name}", |request: Request| async move {
             let name = request.param("name").unwrap_or_default().to_owned();
@@ -66,7 +82,7 @@ fn stack(config: SessionConfig) -> (Router, MiddlewareRegistry) {
             config.clone(),
             Arc::new(MemorySessionStore::default()),
         ))
-        .append(CsrfMiddleware::new().with_session_config(&config));
+        .append(csrf);
     (router, middleware)
 }
 
@@ -129,9 +145,25 @@ async fn pfx_007_a_host_prefixed_cookie_keeps_path_slash() {
     }
     let mut config = session_config();
     config.cookie_prefix = CookiePrefix::Host;
-    let address = served(config).await;
+    support::ensure_crypt();
+    support::install("http://localhost");
+    let csrf = CsrfMiddleware::new()
+        .with_session_config(&config)
+        .xsrf_cookie_name("__Host-XSRF-TOKEN");
+    let (router, middleware) = stack_with(config, csrf);
+    let address = support::serve(router, middleware).await;
     let behind = support::get_prefixed(address, "/start").await;
     assert_eq!(behind.cookie_path("__Host-suprnova_session"), "/");
+    assert_eq!(behind.cookie_path("__Host-XSRF-TOKEN"), "/");
+
+    // The remember-me cookie, and the cookie that forgets it.
+    let remember = support::get_prefixed(address, "/remember-host").await;
+    let lines: Vec<&str> = remember.body.lines().collect();
+    assert_eq!(lines.len(), 2, "{}", remember.body);
+    for line in lines {
+        assert!(line.starts_with("__Host-remember_me="), "{line}");
+        assert_eq!(path_of(line), "/", "{line}");
+    }
 }
 
 #[tokio::test]
@@ -281,4 +313,72 @@ async fn pfx_013_the_session_middleware_loads_the_session_sent_first() {
     let reversed = format!("{stale}; {scoped}");
     let reply = support::get_prefixed_with_cookie(address, "/marker", &reversed).await;
     assert_eq!(reply.body, "stale");
+}
+
+#[tokio::test]
+async fn pfx_013_the_remember_me_and_bypass_readers_take_the_first_cookie() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "pfx_013_the_remember_me_and_bypass_readers_take_the_first_cookie",
+    )
+    .await
+    {
+        return;
+    }
+    // The session middleware's remember-me reader: a carrier of a later
+    // version is left alone, a value that does not decrypt is forgotten
+    // with a clearing cookie. Which of the two it read shows on the reply.
+    let address = served(session_config()).await;
+    let later = Cookie::encrypted("remember_me", "suprnova.remember.v9:later")
+        .expect("an encrypted cookie")
+        .to_header_value();
+    let later = later.split(';').next().expect("a pair");
+    let garbage = "remember_me=garbage";
+
+    let first_later =
+        support::get_prefixed_with_cookie(address, "/marker", &format!("{later}; {garbage}")).await;
+    assert_eq!(
+        first_later.set_cookies("remember_me"),
+        Vec::<String>::new(),
+        "the reader took the second remember-me cookie"
+    );
+    let first_garbage =
+        support::get_prefixed_with_cookie(address, "/marker", &format!("{garbage}; {later}")).await;
+    assert_eq!(
+        first_garbage.set_cookies("remember_me").len(),
+        1,
+        "the reader did not take the first remember-me cookie"
+    );
+
+    // Maintenance mode's bypass reader: a valid bypass cookie sent first
+    // lets the request through, sent second it does not.
+    let dir = tempfile::tempdir().expect("a directory for the down file");
+    let mode = Arc::new(FileMaintenanceMode::with_path(dir.path().join("down")));
+    mode.activate(&MaintenancePayload {
+        secret: Some("s3cret".to_owned()),
+        ..MaintenancePayload::new()
+    })
+    .await
+    .expect("go down");
+    let router: Router = Router::new()
+        .get("/", |_request: Request| async {
+            Ok(HttpResponse::text("home"))
+        })
+        .into();
+    let address = support::serve(
+        router,
+        MiddlewareRegistry::new().append(MaintenanceMiddleware::with_driver(mode)),
+    )
+    .await;
+    let bypass = support::get_prefixed(address, "/s3cret")
+        .await
+        .cookie_pair("suprnova_maintenance");
+    let garbage = "suprnova_maintenance=garbage";
+
+    let first_valid =
+        support::get_prefixed_with_cookie(address, "/", &format!("{bypass}; {garbage}")).await;
+    assert_eq!(first_valid.status, 200, "{}", first_valid.body);
+    let first_garbage =
+        support::get_prefixed_with_cookie(address, "/", &format!("{garbage}; {bypass}")).await;
+    assert_eq!(first_garbage.status, 503, "{}", first_garbage.body);
 }

@@ -7,9 +7,10 @@ use serde_json::json;
 use suprnova::{
     App, HttpResponse, InertiaConfig, InertiaResponse, InertiaValidationRedirectMiddleware,
     InertiaVersionMiddleware, LocaleShare, MiddlewareRegistry, Request, RootShare, Router,
+    SessionConfig, SessionMiddleware,
 };
 
-use crate::support::{self, PREFIX};
+use crate::support::{self, MemorySessionStore, PREFIX};
 
 fn page_router() -> Router {
     Router::new()
@@ -69,6 +70,9 @@ async fn pfx_005_the_page_url_and_the_version_409_carry_the_root() {
 
 fn validation_router() -> Router {
     Router::new()
+        .get("/form", |_request: Request| async {
+            Ok(HttpResponse::text("form"))
+        })
         .post("/submit", |_request: Request| async {
             Err(HttpResponse::json(json!({
                 "message": "The given data was invalid.",
@@ -134,6 +138,57 @@ async fn pfx_005_the_validation_redirect_follows_only_a_referer_under_the_root()
     assert_eq!(
         validation_target(address, &[("referer", "http://app.test/form")]).await,
         "/form"
+    );
+}
+
+#[tokio::test]
+async fn pfx_005_the_validation_redirect_falls_back_to_the_previous_url_once() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "pfx_005_the_validation_redirect_falls_back_to_the_previous_url_once",
+    )
+    .await
+    {
+        return;
+    }
+    support::ensure_crypt();
+    support::install("http://localhost");
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    let address = support::serve(
+        validation_router(),
+        MiddlewareRegistry::new().append(SessionMiddleware::with_store(
+            config,
+            Arc::new(MemorySessionStore::default()),
+        )),
+    )
+    .await;
+    let prefix = ("x-forwarded-prefix", PREFIX);
+
+    // A full visit records the previous URL, root included.
+    let form = support::get(address, "/form?step=2", &[prefix]).await;
+    let cookie = form.cookie_pair("suprnova_session");
+    let with_cookie = [prefix, ("cookie", cookie.as_str())];
+
+    // No Referer, then a foreign one: the redirect goes back to the
+    // recorded previous URL, which already carries the root once.
+    assert_eq!(
+        validation_target(address, &with_cookie).await,
+        "/billing/form?step=2"
+    );
+    let mut foreign = with_cookie.to_vec();
+    foreign.push(("referer", "http://app.test/other/form"));
+    assert_eq!(
+        validation_target(address, &foreign).await,
+        "/billing/form?step=2"
+    );
+
+    // At the host root the previous URL is sent back unchanged.
+    let form = support::get(address, "/form?step=3", &[]).await;
+    let cookie = form.cookie_pair("suprnova_session");
+    assert_eq!(
+        validation_target(address, &[("cookie", cookie.as_str())]).await,
+        "/form?step=3"
     );
 }
 
@@ -307,6 +362,30 @@ async fn pfx_005_the_vite_tags_carry_the_root_escaped_and_never_on_a_cdn() {
     );
 }
 
+/// A backend template of the scaffold, read from the CLI crate beside the
+/// framework.
+fn scaffold_template(name: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the framework sits in the workspace")
+        .join("suprnova-cli/src/templates/files/backend")
+        .join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+/// Run a statement and give back its source text, so a test runs exactly
+/// the statement it compares with a template.
+macro_rules! run_quoted {
+    ($($code:tt)*) => {{
+        $($code)*;
+        stringify!($($code)*)
+    }};
+}
+
+fn without_whitespace(text: &str) -> String {
+    text.split_whitespace().collect()
+}
+
 #[tokio::test]
 async fn pfx_012_root_share_gives_every_page_the_root() {
     if crate::own_process_async::delegate(
@@ -318,7 +397,38 @@ async fn pfx_012_root_share_gives_every_page_the_root() {
         return;
     }
     support::install("http://localhost");
-    App::register_inertia_shared(Arc::new(RootShare::around(Arc::new(LocaleShare))));
+    // The scaffold's own registration, run here as a scaffolded application
+    // runs it on every HTTP boot.
+    let registration = run_quoted!(App::register_inertia_shared(Arc::new(RootShare::around(
+        Arc::new(LocaleShare)
+    ))));
+    let bootstrap = scaffold_template("bootstrap.rs.tpl");
+    let registrations: Vec<&str> = bootstrap
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//") && line.contains("register_inertia_shared("))
+        .collect();
+    // The provider slot keeps the last registration, so one other provider
+    // registered after it would drop the `root` prop.
+    assert_eq!(registrations.len(), 1, "{registrations:?}");
+    assert_eq!(
+        without_whitespace(registrations[0].trim_end_matches(';')),
+        without_whitespace(registration),
+        "the scaffold registers another provider than the one tested here"
+    );
+    let http_stack = bootstrap
+        .find("pub fn register_http_stack()")
+        .map(|at| &bootstrap[at..])
+        .expect("the scaffold's `register_http_stack`");
+    assert!(
+        http_stack.contains(registrations[0]),
+        "the registration is outside `register_http_stack`"
+    );
+    assert!(
+        scaffold_template("cmd/main.rs.tpl")
+            .contains(".http_bootstrap(|| async { bootstrap::register_http_stack() })"),
+        "the scaffold's entry point does not run `register_http_stack`"
+    );
     let address = support::serve(page_router(), MiddlewareRegistry::new()).await;
 
     let behind = support::get(

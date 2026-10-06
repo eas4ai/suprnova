@@ -148,10 +148,21 @@ impl MagickCliDriver {
         input: &[u8],
         config: &ImageConfig,
     ) -> Result<Vec<u8>, FrameworkError> {
+        // The driver makes the stdin pipe itself, rather than through
+        // `Stdio::piped()`, to keep a read end of its own: see the writer
+        // below.
+        let pipe_error = |e: std::io::Error| {
+            FrameworkError::internal(format!(
+                "image: could not open a pipe to `{}`: {e}",
+                self.binary
+            ))
+        };
+        let (stdin_reader, mut stdin) = std::io::pipe().map_err(pipe_error)?;
+        let mut unread = stdin_reader.try_clone().map_err(pipe_error)?;
         let mut command = Command::new(&self.binary);
         command
             .args(args)
-            .stdin(Stdio::piped())
+            .stdin(stdin_reader)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -179,21 +190,17 @@ impl MagickCliDriver {
             }
         })?;
 
-        // Every pipe gets its own detached thread, each reporting through a
-        // channel rather than a join handle. Writing the whole input before
+        // Every pipe gets its own thread. Writing the whole input before
         // reading stdout deadlocks the moment the output outgrows the pipe
         // buffer, and polling for the child's exit without draining stdout
         // deadlocks the same way - so all three have to move concurrently.
         //
-        // Channels rather than `join()` because a thread blocked in
+        // The two readers are detached, each reporting through a channel
+        // rather than a join handle, because a thread blocked in
         // `read_to_end` cannot be joined: the read only returns when every
         // write end of the pipe is closed, and an orphaned delegate holds one.
         // `recv_timeout` lets this function walk away from a worker that is
         // never coming back, which is what bounds the call.
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| FrameworkError::internal("image: could not open the magick stdin"))?;
         let mut stdout = child
             .stdout
             .take()
@@ -203,12 +210,6 @@ impl MagickCliDriver {
             .take()
             .ok_or_else(|| FrameworkError::internal("image: could not open the magick stderr"))?;
 
-        let payload = input.to_vec();
-        std::thread::spawn(move || {
-            // A broken pipe here just means the child rejected the input and
-            // exited early; its stderr is the useful diagnostic, not this.
-            let _ = stdin.write_all(&payload);
-        });
         let (out_tx, out_rx) = mpsc::channel();
         std::thread::spawn(move || {
             let mut buffer = Vec::new();
@@ -222,7 +223,27 @@ impl MagickCliDriver {
             let _ = err_tx.send(buffer);
         });
 
-        let Some(status) = self.wait_with_deadline(&mut child, config)? else {
+        // The writer borrows the input rather than a copy of it (MEM-003),
+        // so it is scoped and has to end before this function returns. A
+        // write blocks while the pipe is full and nothing reads it: a child
+        // that exits, or is killed, before it has read all of its input, or
+        // a delegate that inherited stdin and outlives it. So once the child
+        // is gone, the driver reads whatever is left through its own read
+        // end, which lets the write finish; that is at most the unread part
+        // of the input. Dropping the write end when the write finishes is
+        // what tells the child its input has ended.
+        let waited = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                // An error here means the child stopped reading early; its
+                // stderr is the useful diagnostic, not this.
+                let _ = stdin.write_all(input);
+            });
+            let waited = self.wait_with_deadline(&mut child, config);
+            let _ = std::io::copy(&mut unread, &mut std::io::sink());
+            waited
+        });
+
+        let Some(status) = waited? else {
             // Timed out. Do NOT wait on the readers here: their buffers are
             // discarded on this path anyway, and if something survived the
             // signal they will never report. Walking away is what makes the
@@ -389,9 +410,12 @@ impl Orienting {
             .collect()
     }
 
-    /// Whether ImageMagick has to keep the EXIF while orientation is
-    /// unapplied: only for a format the framework cannot read, whose tag
-    /// the driver then takes from ImageMagick's output.
+    /// Whether ImageMagick keeps the source's EXIF while orientation is
+    /// unapplied: only for a format the framework cannot read, so the PNG
+    /// between two runs carries the tag that EXIF holds to an `orient()`
+    /// after a custom step. The tag the output keeps comes from the
+    /// orientation probe instead, and [`MagickCliDriver::settle`] strips
+    /// the EXIF ImageMagick wrote.
     fn keeps_exif(self, applied: bool) -> bool {
         !self.known && !applied
     }
@@ -842,13 +866,29 @@ impl ImageDriver for MagickCliDriver {
         let source_class = found
             .filter(|_| !drops_profile)
             .map(|found| found.header.class);
+        // The tag the output keeps when orientation stays unapplied. For a
+        // format the framework cannot read it is ImageMagick's own reading,
+        // the one `-auto-orient` applies: ImageMagick keeps a TIFF's tag in
+        // none of the EXIF it writes, so it cannot be read back from the
+        // output. It is asked for only when the output keeps it.
+        let unapplied =
+            !config.auto_orient && !pipeline.transformations.contains(&Transformation::Orient);
+        let tag = match detected {
+            Some(format) => metadata::source_orientation(format, contents),
+            None if unapplied => parse_orientation(&String::from_utf8_lossy(&self.run(
+                &orientation_args(&config),
+                contents,
+                &config,
+            )?)),
+            None => None,
+        };
         let run = Run {
             config: &config,
             detected,
             target,
             orienting: Orienting {
                 known: detected.is_some(),
-                tag: detected.and_then(|format| metadata::source_orientation(format, contents)),
+                tag,
             },
             drops_profile,
         };
@@ -863,11 +903,7 @@ impl ImageDriver for MagickCliDriver {
         let mut retried = false;
         loop {
             let (output, applied) = self.run_tail(contents, &tail, pipeline, &run, plan)?;
-            let orientation = match (applied, run.orienting.known) {
-                (true, _) => None,
-                (false, true) => run.orienting.tag,
-                (false, false) => metadata::output_orientation(target, &output),
-            };
+            let orientation = if applied { None } else { run.orienting.tag };
             let colour = if plan.srgb { &[][..] } else { &png_colour[..] };
             match self.settle(
                 output,
@@ -1161,9 +1197,9 @@ fn output_args(
         args.push("off".into());
     }
     // ImageMagick keeps every profile it read unless told otherwise. The
-    // EXIF stays only when the driver takes the orientation tag from it (a
-    // format the framework cannot read, orientation unapplied); the driver
-    // strips everything else it writes.
+    // EXIF stays only while orientation is unapplied in a format the
+    // framework cannot read (see `Orienting::keeps_exif`); the driver
+    // strips it and everything else it writes, and adds the tag alone.
     args.push("+profile".into());
     args.push(if keeps_exif { "!icc,!exif,*" } else { "!icc,*" }.into());
     if plan.jpeg_true_colour && target == OutputFormat::Jpeg {
@@ -1219,6 +1255,35 @@ fn dimensions_args(config: &ImageConfig, detected: Option<sniff::InputFormat>) -
     });
     args.push(format!("{}[0]", input_spec(detected)));
     args
+}
+
+/// Full argv for an orientation probe of a format the framework cannot
+/// read: ImageMagick's own reading of the first frame's tag, which is what
+/// `-auto-orient` applies.
+fn orientation_args(config: &ImageConfig) -> Vec<String> {
+    let mut args = vec!["identify".to_string()];
+    args.extend(limit_args(config));
+    args.push("-format".into());
+    args.push("%[orientation]".into());
+    args.push(format!("{}[0]", input_spec(None)));
+    args
+}
+
+/// The orientation an orientation probe printed, by ImageMagick's names
+/// for the EXIF values 1 to 8. `Undefined`, or anything else, is none.
+fn parse_orientation(raw: &str) -> Option<Orientation> {
+    let tag = match raw.trim() {
+        "TopLeft" => 1,
+        "TopRight" => 2,
+        "BottomRight" => 3,
+        "BottomLeft" => 4,
+        "LeftTop" => 5,
+        "RightTop" => 6,
+        "RightBottom" => 7,
+        "LeftBottom" => 8,
+        _ => return None,
+    };
+    Orientation::from_tag(tag)
 }
 
 /// Full argv for an average-colour probe.
@@ -1891,6 +1956,25 @@ mod tests {
             elapsed >= Duration::from_secs(1),
             "it must not fire before the configured timeout: {elapsed:?}"
         );
+    }
+
+    /// MEM-003: the writer borrows the input, so the call waits for it. A
+    /// child that exits without reading any of a 4 MiB input leaves the
+    /// write blocked on a full pipe until the driver reads the rest itself.
+    #[cfg(unix)]
+    #[test]
+    fn mem_audit_a_child_that_reads_none_of_its_input_does_not_hold_the_call() {
+        let (done, finished) = mpsc::channel();
+        std::thread::spawn(move || {
+            let input = vec![b'x'; 4 * 1024 * 1024];
+            let result = MagickCliDriver::new("true").run(&[], &input, &ImageConfig::default());
+            let _ = done.send(result);
+        });
+        let result = finished
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the unread input held the call");
+        let err = result.expect_err("`true` writes nothing");
+        assert!(err.to_string().contains("no output"), "got: {err}");
     }
 
     #[test]

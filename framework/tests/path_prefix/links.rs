@@ -1,12 +1,14 @@
 //! PFX-006: the localization catalog URL, pagination links built from a
 //! path, and a `Storage::url` with a root-relative base carry the root.
+//! PFX-010: an absolute URL or a network-path reference given to a URL
+//! builder is left as it is.
 
 use std::sync::Arc;
 
 use suprnova::{
     App, FluentTranslator, HttpResponse, InertiaResponse, LengthAwarePaginator, Locale,
     LocaleShare, LocalizationConfig, MiddlewareRegistry, Paginator, Request, Router, Storage,
-    Translator,
+    Translator, url,
 };
 
 use crate::support::{self, PREFIX};
@@ -169,4 +171,49 @@ async fn pfx_006_a_storage_url_with_a_root_relative_base_carries_the_root() {
     );
     let at_host_root = support::get(address, "/files", &[]).await;
     assert_eq!(at_host_root.body.lines().next(), Some("/storage/a%20b.png"));
+}
+
+#[tokio::test]
+async fn pfx_010_an_absolute_url_or_a_network_path_given_to_a_url_builder_is_left_alone() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "pfx_010_an_absolute_url_or_a_network_path_given_to_a_url_builder_is_left_alone",
+    )
+    .await
+    {
+        return;
+    }
+    support::install("http://localhost");
+    let router: Router = Router::new()
+        .get("/builders", |_request: Request| async {
+            Ok(HttpResponse::text(
+                [
+                    url::to("https://other.example/x"),
+                    url::to("http://other.example/x?q=1"),
+                    url::to("//cdn.example/x"),
+                    url::secure("//cdn.example/x"),
+                ]
+                .join("\n"),
+            ))
+        })
+        .into();
+    let address = support::serve(router, MiddlewareRegistry::new()).await;
+    let behind = support::get_prefixed(address, "/builders").await;
+    assert_eq!(
+        behind.body.lines().collect::<Vec<_>>(),
+        [
+            "https://other.example/x",
+            "http://other.example/x?q=1",
+            "//cdn.example/x",
+            "//cdn.example/x",
+        ]
+    );
+
+    // A storage disk cannot be given a network-path base at all, so no
+    // storage URL starts from one.
+    Storage::register_memory("network");
+    assert!(
+        Storage::set_public_url("network", "//cdn.example/files").is_err(),
+        "a network-path public base was accepted"
+    );
 }

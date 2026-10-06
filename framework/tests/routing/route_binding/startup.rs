@@ -5,12 +5,13 @@
 //! registration site, refuses the router before the first request, naming
 //! the route and the parameter, as an error and never a panic.
 
+use suprnova::database::EntityExt;
 use suprnova::http::text;
 use suprnova::testing::TestDatabase;
 use suprnova::{
     BoundChild, FrameworkError, Request, ResourceController, Response, RouteBinding,
-    RouteBindingInfo, Router, Server, any, fallback, get, group, handler, model, request, resource,
-    route, routes,
+    RouteBindingInfo, RouteParam, Router, Server, any, fallback, get, group, handler, model,
+    request, resource, route, routes,
 };
 
 use super::{get as get_path, refusal, run_sql, serve};
@@ -155,6 +156,8 @@ fn bind_004_a_field_that_is_not_a_column_is_refused_naming_route_parameter_and_f
 fn bind_004_a_field_whose_type_cannot_be_parsed_from_a_segment_is_refused() {
     let router: Router = Router::new().get("/posts/{post:meta}", show).into();
     let error = refusal(&router);
+    assert!(error.contains("GET /posts/{post:meta}"), "{error}");
+    assert!(error.contains("parameter `post`"), "{error}");
     assert!(error.contains("`meta`"), "{error}");
     assert!(error.contains("cannot be parsed"), "{error}");
 }
@@ -179,6 +182,47 @@ fn bind_013_a_bound_argument_for_an_undeclared_parameter_is_refused() {
     assert!(error.contains("GET /users/{user}"), "{error}");
     assert!(error.contains("`post`"), "{error}");
     assert!(error.contains("does not declare"), "{error}");
+}
+
+#[handler]
+pub async fn show_wrapped(post: RouteParam<SuPost>) -> Response {
+    text(post.title.clone())
+}
+
+#[handler]
+pub async fn show_bare(post: su_post::Model) -> Response {
+    text(post.title)
+}
+
+impl EntityExt for su_post::Entity {}
+
+#[test]
+fn bind_013_a_route_param_or_bare_argument_for_an_undeclared_parameter_is_refused() {
+    for (form, router) in [
+        (
+            "RouteParam<SuPost>",
+            Router::new().get("/users/{user}", show_wrapped),
+        ),
+        (
+            "su_post::Model",
+            Router::new().get("/users/{user}", show_bare),
+        ),
+    ] {
+        let router: Router = router.into();
+        let error = refusal(&router);
+        assert!(error.contains("GET /users/{user}"), "{form}: {error}");
+        assert!(error.contains("`post`"), "{form}: {error}");
+        assert!(error.contains(form), "{form}: {error}");
+        assert!(error.contains("does not declare"), "{form}: {error}");
+    }
+    // Both forms start on a path that declares the parameter.
+    let router: Router = Router::new()
+        .get("/wrapped/{post}", show_wrapped)
+        .get("/bare/{post}", show_bare)
+        .into();
+    router
+        .prepare_bindings()
+        .expect("both forms read a declared parameter");
 }
 
 #[test]
@@ -241,6 +285,51 @@ fn bind_004_every_registration_site_is_checked() {
             "fluent group any",
             Router::new().group("/g", |r| r.any("/{x}", by_id)).into(),
         ),
+        (
+            "fluent group post",
+            Router::new().group("/g", |r| r.post("/{x}", by_id)).into(),
+        ),
+        (
+            "fluent group put",
+            Router::new().group("/g", |r| r.put("/{x}", by_id)).into(),
+        ),
+        (
+            "fluent group patch",
+            Router::new().group("/g", |r| r.patch("/{x}", by_id)).into(),
+        ),
+        (
+            "fluent group delete",
+            Router::new()
+                .group("/g", |r| r.delete("/{x}", by_id))
+                .into(),
+        ),
+        (
+            "fluent group head",
+            Router::new().group("/g", |r| r.head("/{x}", by_id)).into(),
+        ),
+        (
+            "fluent group options",
+            Router::new()
+                .group("/g", |r| r.options("/{x}", by_id))
+                .into(),
+        ),
+        (
+            "fluent group methods",
+            Router::new()
+                .group("/g", |r| {
+                    r.methods(&[hyper::Method::PUT, hyper::Method::DELETE], "/{x}", by_id)
+                })
+                .into(),
+        ),
+        (
+            "fluent group try_methods",
+            Router::new()
+                .group("/g", |r| {
+                    r.try_methods(&[hyper::Method::PATCH], "/{x}", by_id)
+                        .expect("PATCH is a supported verb")
+                })
+                .into(),
+        ),
         ("get! macro", get!("/a/{x}", by_id).register(Router::new())),
         ("any! macro", any!("/a/{x}", by_id).register(Router::new())),
         ("group! macro", register()),
@@ -277,14 +366,163 @@ async fn bind_004_the_checks_run_for_a_router_driven_through_handle_request() {
     assert_eq!(status, 500, "{body}");
 }
 
+/// A router the startup checks refuse: `show` binds `post`, which
+/// `/users/{user}` does not declare.
+fn refused_router() -> Router {
+    Router::new().get("/users/{user}", show).into()
+}
+
+/// Run `boot` and return its refusal as text. A panic, or a boot that
+/// succeeds, fails the test.
+fn refusal_of<F, T, E>(path: &str, boot: F) -> String
+where
+    F: FnOnce() -> Result<T, E>,
+    E: std::fmt::Display,
+{
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(boot))
+        .unwrap_or_else(|_| panic!("{path}: a refused router must not panic the boot"));
+    match outcome {
+        Ok(_) => panic!("{path}: the boot must return the refusal, yet it succeeded"),
+        Err(error) => error.to_string(),
+    }
+}
+
 #[test]
 fn bind_004_a_refusal_is_an_error_from_the_boot_path() {
-    let router: Router = Router::new().get("/users/{user}", show).into();
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Server::from_config(router)));
-    let outcome = result.expect("a refused router must not panic the boot");
-    let error = outcome.err().expect("the boot must return the refusal");
-    assert!(error.to_string().contains("GET /users/{user}"), "{error}");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let errors = [
+        (
+            "Server::from_config",
+            refusal_of("Server::from_config", || {
+                Server::from_config(refused_router())
+            }),
+        ),
+        (
+            "Server::try_from_config_with_routes",
+            refusal_of("Server::try_from_config_with_routes", || {
+                Server::try_from_config_with_routes(|| Ok(refused_router()))
+            }),
+        ),
+        // The constructor `Application` serves through.
+        (
+            "Server::try_from_config_with_routes_async",
+            refusal_of("Server::try_from_config_with_routes_async", || {
+                runtime.block_on(Server::try_from_config_with_routes_async(|| async {
+                    Ok(refused_router())
+                }))
+            }),
+        ),
+        // A server built with `Server::new` checks when it runs, before it
+        // binds a socket. Port 0, so a run past the checks cannot collide.
+        (
+            "Server::run",
+            refusal_of("Server::run", || {
+                runtime.block_on(async {
+                    // Still serving after the wait is a boot that succeeded.
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        Server::new(refused_router()).port(0).run(),
+                    )
+                    .await
+                    {
+                        Ok(served) => served.map_err(|error| error.to_string()),
+                        Err(_) => Ok(()),
+                    }
+                })
+            }),
+        ),
+    ];
+    for (path, error) in errors {
+        assert!(error.contains("GET /users/{user}"), "{path}: {error}");
+        assert!(error.contains("`post`"), "{path}: {error}");
+    }
+}
+
+/// What [`bind_004_the_application_boot_child`] prints before the error
+/// `run_with_args` returned to it.
+const APPLICATION_RETURNED: &str = "run_with_args returned: ";
+
+/// The child half of
+/// [`bind_004_a_refusal_stops_the_application_boot_without_a_panic`]: an
+/// `Application` serving a refused router, through `serve`. It does nothing
+/// unless the parent started it.
+#[test]
+fn bind_004_the_application_boot_child() {
+    if std::env::var("BIND_APPLICATION_BOOT_CHILD").is_err() {
+        return;
+    }
+    suprnova::boot::load_env().expect("load the configuration");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let outcome = runtime.block_on(async {
+        suprnova::Application::new()
+            .routes(refused_router)
+            .run_with_args(["app", "serve", "--no-migrate"])
+            .await
+    });
+    // The executable boundary: the failure came back to this caller, which
+    // prints it and exits non-zero, as `Application::run` does.
+    match outcome {
+        Err(e) => {
+            eprintln!("{APPLICATION_RETURNED}{}", e.message());
+            std::process::exit(1);
+        }
+        Ok(()) => {
+            eprintln!("the application served a refused router and stopped cleanly");
+            std::process::exit(2);
+        }
+    }
+}
+
+#[test]
+fn bind_004_a_refusal_stops_the_application_boot_without_a_panic() {
+    let mut child = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+        .args([
+            "--exact",
+            "route_binding::startup::bind_004_the_application_boot_child",
+            "--nocapture",
+        ])
+        .env("BIND_APPLICATION_BOOT_CHILD", "1")
+        .env("APP_ENV", "testing")
+        .env("SERVER_HOST", "127.0.0.1")
+        .env("SERVER_PORT", "0")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the child");
+    // A boot past the checks would serve until killed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while child.try_wait().expect("poll the child").is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().expect("collect the child");
+            panic!(
+                "the application served a refused router:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().expect("collect the child");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the boot must return the refusal to its caller: {stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "the boot panicked: {stderr}");
+    // The error runs to the end of the output, over several lines.
+    let returned = stderr
+        .find(APPLICATION_RETURNED)
+        .map(|at| &stderr[at + APPLICATION_RETURNED.len()..])
+        .unwrap_or_else(|| panic!("run_with_args returned no error: {stderr}"));
+    assert!(returned.contains("GET /users/{user}"), "{returned}");
+    assert!(returned.contains("`post`"), "{returned}");
 }
 
 // ── The fallback and the `missing()` handlers ─────────────────────────────

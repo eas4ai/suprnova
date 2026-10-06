@@ -100,6 +100,43 @@ impl ResourceController for PostsCtl {
     }
 }
 
+/// A resource controller that answers every action with its name and the
+/// `post` parameter, if any.
+struct FullCtl;
+
+/// What one `FullCtl` action answers.
+fn full_ctl(action: &'static str, req: &Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+    let answer = match req.param("post") {
+        Ok(post) => format!("{action} {post}"),
+        Err(_) => action.to_owned(),
+    };
+    Box::pin(async move { text(answer) })
+}
+
+impl ResourceController for FullCtl {
+    fn index(&self, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+        full_ctl("index", &req)
+    }
+    fn create(&self, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+        full_ctl("create", &req)
+    }
+    fn store(&self, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+        full_ctl("store", &req)
+    }
+    fn show(&self, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+        full_ctl("show", &req)
+    }
+    fn edit(&self, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+        full_ctl("edit", &req)
+    }
+    fn update(&self, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+        full_ctl("update", &req)
+    }
+    fn destroy(&self, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+        full_ctl("destroy", &req)
+    }
+}
+
 async fn fixture() -> TestDatabase {
     let db = TestDatabase::sqlite_memory().await.unwrap();
     run_sql(
@@ -253,6 +290,73 @@ async fn bind_011_a_resource_controller_routes_as_it_did() {
         get(addr, "/rs-ctl/posts").await,
         (200, "controller index".to_owned())
     );
+
+    // Every action of a controller resource routes to its method under the
+    // verb and path it had, `update` under PUT and PATCH, and claims the
+    // name it had.
+    let router: Router = Router::new().resource("rsfull/posts", FullCtl).into();
+    router
+        .prepare_bindings()
+        .expect("controller actions carry no record");
+    let addr = serve(router).await;
+    for (method, path, answer) in [
+        ("GET", "/rsfull/posts", "index"),
+        ("GET", "/rsfull/posts/create", "create"),
+        ("POST", "/rsfull/posts", "store"),
+        ("GET", "/rsfull/posts/7", "show 7"),
+        ("GET", "/rsfull/posts/7/edit", "edit 7"),
+        ("PUT", "/rsfull/posts/7", "update 7"),
+        ("PATCH", "/rsfull/posts/7", "update 7"),
+        ("DELETE", "/rsfull/posts/7", "destroy 7"),
+    ] {
+        assert_eq!(
+            send(addr, method, path, &[], None).await,
+            (200, answer.to_owned()),
+            "{method} {path}"
+        );
+    }
+    for (name, url) in [
+        ("rsfull.posts.index", "/rsfull/posts"),
+        ("rsfull.posts.create", "/rsfull/posts/create"),
+        ("rsfull.posts.store", "/rsfull/posts"),
+    ] {
+        assert_eq!(route(name, &[]).as_deref(), Some(url), "{name}");
+    }
+    for (name, url) in [
+        ("rsfull.posts.show", "/rsfull/posts/7"),
+        ("rsfull.posts.edit", "/rsfull/posts/7/edit"),
+        ("rsfull.posts.update", "/rsfull/posts/7"),
+        ("rsfull.posts.destroy", "/rsfull/posts/7"),
+    ] {
+        assert_eq!(
+            route(name, &[("post", "7")]).as_deref(),
+            Some(url),
+            "{name}"
+        );
+    }
+
+    // `except` leaves the other actions as they were.
+    let router: Router = Router::new()
+        .resource("rsfew/posts", FullCtl)
+        .except(&[ResourceAction::Destroy, ResourceAction::Update])
+        .unnamed()
+        .into();
+    let addr = serve(router).await;
+    assert_eq!(
+        send(addr, "POST", "/rsfew/posts", &[], None).await,
+        (200, "store".to_owned())
+    );
+    assert_eq!(
+        get(addr, "/rsfew/posts/3/edit").await,
+        (200, "edit 3".to_owned())
+    );
+    for method in ["PUT", "PATCH", "DELETE"] {
+        assert_ne!(
+            send(addr, method, "/rsfew/posts/3", &[], None).await.0,
+            200,
+            "{method} is excepted"
+        );
+    }
 
     // A nested controller resource registers the nested paths too.
     let nested: Router = Router::new()

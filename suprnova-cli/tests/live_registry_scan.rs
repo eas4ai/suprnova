@@ -3,14 +3,20 @@
 //! file and line named, and accept every shipped component (REG-016,
 //! REG-022, REG-030, REG-031, REG-032).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
 use suprnova_cli::registry::Capability;
+use suprnova_cli::registry::address::LibraryAddress;
+use suprnova_cli::registry::project::ProjectFile;
 use suprnova_cli::registry::scan::allowlist::{self, Admission, AllowedItem, Allowlist};
 use suprnova_cli::registry::scan::{
     ComponentFiles, ScanReport, scan_component, scan_component_with_manifest,
 };
+use suprnova_cli::registry::signing::{self, SecretKey};
+use suprnova_cli::registry::statement::{Digest, Statement};
 
 fn corpus() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/registry/bypass")
@@ -1163,6 +1169,141 @@ fn reg_031_url_root_before_anything_but_a_rooted_constant_is_refused() {
                 .any(|finding| finding.check == "view-url" && finding.line == Some(1)),
             "{view} was not refused: {:?}",
             report.findings
+        );
+    }
+}
+
+/// The key the vendored library below signs with.
+const LIBRARY_SEED: [u8; 32] = [7; 32];
+
+/// A project to install into, holding a signed library under
+/// `vendor/acme-ui` whose one component, `widget`, has the view `view`, with
+/// the library's key pinned (REG-024). Returns the project and the
+/// component's manifest.
+fn project_with_widget(view: &str) -> (tempfile::TempDir, PathBuf) {
+    let project = tempfile::tempdir().expect("tempdir");
+    let root = project.path();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"demo-app\"\nversion = \"0.1.0\"\n\n[dependencies]\nsuprnova = { git = \"https://github.com/eas4ai/suprnova.git\", tag = \"v3.2.1\" }\n",
+    )
+    .expect("manifest");
+    let library = root.join("vendor/acme-ui");
+    let component = library.join("components/widget");
+    fs::create_dir_all(&component).expect("vendor dir");
+    let secret = SecretKey::from_bytes(LIBRARY_SEED);
+    let library_json = serde_json::to_vec_pretty(&serde_json::json!({
+        "namespace": "acme",
+        "source": "github.com/acme/acme-ui",
+        "version": "1.0.0",
+        "framework": ">=3.0.0",
+        "publicKey": secret.public_key().encode(),
+    }))
+    .expect("library.json");
+    let manifest = serde_json::to_vec_pretty(&serde_json::json!({
+        "name": "acme.widget",
+        "root": "acme-ui/widget",
+        "files": ["widget.html", "widget.css"],
+    }))
+    .expect("manifest.json");
+    let css = b".acme-widget { display: block; }\n";
+    fs::write(library.join("library.json"), &library_json).expect("library.json");
+    fs::write(component.join("manifest.json"), &manifest).expect("manifest.json");
+    fs::write(component.join("widget.html"), view).expect("view");
+    fs::write(component.join("widget.css"), css).expect("stylesheet");
+    let statement = Statement {
+        library: "github.com/acme/acme-ui".to_owned(),
+        version: semver::Version::parse("1.0.0").expect("semver"),
+        component: "widget".to_owned(),
+        library_json: Digest::of(&library_json),
+        manifest: Digest::of(&manifest),
+        files: BTreeMap::from([
+            ("widget.css".to_owned(), Digest::of(css)),
+            ("widget.html".to_owned(), Digest::of(view.as_bytes())),
+        ]),
+    };
+    let signature = signing::sign(&secret, &statement.verification_hash()).expect("sign");
+    fs::write(component.join("manifest.sig"), signature.encode()).expect("signature");
+
+    let canonical = fs::canonicalize(&library).expect("canonical");
+    let mut file = ProjectFile::load(root).expect("load the project file");
+    file.set_library(
+        &LibraryAddress(canonical.to_str().expect("utf-8").to_owned()),
+        None,
+        Some(&secret.public_key()),
+    )
+    .expect("pin the library's key");
+    file.save().expect("save the project file");
+    (project, component.join("manifest.json"))
+}
+
+/// `suprnova live:add --manifest <manifest> --yes` in `root`: the install
+/// path, which scans the component with its manifest's context
+/// (`scan_component_in`) before it writes a file.
+fn live_add(root: &Path, manifest: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_suprnova"))
+        .args(["live:add", "--manifest"])
+        .arg(manifest)
+        .arg("--yes")
+        .current_dir(root)
+        .output()
+        .expect("run suprnova live:add")
+}
+
+fn printed(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+/// REG-031 through the install path: `live:add` refuses a component whose
+/// view breaks a view rule, naming the check, and writes nothing; a clean
+/// view, `url::root()` before a rooted constant path included, installs.
+#[test]
+fn reg_031_live_add_refuses_a_view_that_breaks_a_rule_and_installs_a_clean_one() {
+    for (view, check) in [
+        ("<div onclick=\"steal()\">Widget</div>\n", "onclick"),
+        ("<a href=\"javascript:steal()\">Widget</a>\n", "javascript:"),
+        ("<script>steal()</script>\n", "script"),
+        (
+            "<a href=\"{{ suprnova::url::root() }}//evil.example/x\">x</a>\n",
+            "view-url",
+        ),
+    ] {
+        let (project, manifest) = project_with_widget(view);
+        let output = live_add(project.path(), &manifest);
+        assert!(
+            !output.status.success(),
+            "{view:?} installed: {}",
+            printed(&output)
+        );
+        assert!(
+            printed(&output).contains("widget.html:1: [view-") && printed(&output).contains(check),
+            "{view:?}: the refusal is not the view finding naming {check}: {}",
+            printed(&output)
+        );
+        assert!(
+            !project.path().join("templates/acme-ui").exists(),
+            "{view:?}: a refused component wrote files"
+        );
+    }
+    for view in [
+        "<div class=\"acme-widget\">Widget</div>\n",
+        "<a href=\"{{ suprnova::url::root() }}/x\">x</a>\n",
+    ] {
+        let (project, manifest) = project_with_widget(view);
+        let output = live_add(project.path(), &manifest);
+        assert!(
+            output.status.success(),
+            "{view:?} was refused: {}",
+            printed(&output)
+        );
+        assert_eq!(
+            fs::read_to_string(project.path().join("templates/acme-ui/widget/widget.html"))
+                .expect("the installed view"),
+            view
         );
     }
 }

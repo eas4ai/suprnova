@@ -10,6 +10,7 @@ import {
   type BrowserAsyncTransportOptions,
   type DocumentTransportConnectRequest,
 } from "../src/async-updates/connections.js";
+import { applyUrlReflection, UrlReflectionError } from "../src/application/url.js";
 import { RESERVED_ROUTES_CONFIG_ELEMENT_ID, reservedRoutePath } from "../src/reserved-routes.js";
 import { CONFIG_ELEMENT_ID } from "../src/runtime/config.js";
 import { FetchUploadTransport } from "../src/uploads/feature.js";
@@ -165,9 +166,12 @@ describe("PFX-006 reserved Live routes follow the configured endpoint", () => {
       close: vi.fn(),
       send: vi.fn(),
     }));
+    // The bearer-authorised stream reads through `fetch`; the request stays
+    // open for the length of the test.
+    const fetchPort = vi.fn<typeof globalThis.fetch>(() => new Promise<Response>(() => undefined));
     const ports = new BrowserAsyncTransportPorts({
       eventSource,
-      fetch: vi.fn<typeof globalThis.fetch>(),
+      fetch: fetchPort,
       membershipTimeoutMs: 5_000,
       sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
       timers: { clearTimeout: vi.fn(), timeout: vi.fn(() => 1) },
@@ -187,5 +191,30 @@ describe("PFX-006 reserved Live routes follow the configured endpoint", () => {
 
     ports.webSocket(request("websocket"));
     expect(webSocket.mock.calls[0]?.[0]).toBe("wss://app.test/billing/__live/async/socket");
+
+    const bearer = ports.eventSource({
+      ...request("sse"),
+      authorization: Object.freeze({ credential: "cred-1", kind: "bearer" as const }),
+    });
+    expect(fetchPort.mock.calls.map(([input]) => urlOf(input))).toEqual([
+      "https://app.test/billing/__live/async/events",
+    ]);
+    bearer.close("document_retired");
+  });
+
+  it("PFX-006 accepts the reflected URL of a document under the root", () => {
+    // The server reflects the document's own path, root included
+    // (`pfx_006_a_reflected_url_carries_the_root`).
+    const current = new URL("https://app.test/billing/catalog/books");
+    const replaced: string[] = [];
+    applyUrlReflection(current, "/billing/catalog/books?q=red+shoes", (target) => {
+      replaced.push(target.href);
+    });
+    expect(replaced).toEqual(["https://app.test/billing/catalog/books?q=red+shoes"]);
+
+    // Without the root the target names another path, which is refused.
+    expect(() =>
+      applyUrlReflection(current, "/catalog/books?q=red+shoes", () => undefined),
+    ).toThrow(new UrlReflectionError("path"));
   });
 });

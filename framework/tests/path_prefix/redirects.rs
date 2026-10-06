@@ -2,11 +2,14 @@
 //! `X-Inertia-Redirect` the framework emits for a root-relative path carries
 //! the root exactly once, and the targets PFX-010 names are left alone.
 
+use std::any::Any;
 use std::sync::Arc;
 
 use suprnova::{
-    AuthMiddleware, HttpResponse, InertiaResponse, MiddlewareRegistry, Redirect, Request, Response,
-    Router, SessionConfig, SessionMiddleware,
+    AuthMiddleware, Authenticatable, EnsureEmailVerifiedMiddleware, FileMaintenanceMode, HasRoles,
+    HttpResponse, InertiaResponse, MaintenanceMiddleware, MaintenanceMode, MaintenancePayload,
+    MiddlewareRegistry, PermissionMiddleware, Redirect, Request, Response, RoleMiddleware, Router,
+    SessionConfig, SessionMiddleware, TwoFactor, TwoFactorChallengeMiddleware,
 };
 
 use crate::support::{self, MemorySessionStore, PREFIX};
@@ -376,5 +379,181 @@ async fn pfx_004_a_request_target_naming_another_host_never_leaves_the_origin() 
     assert_eq!(
         signed_in.header("location").as_deref(),
         Some("https://sso.example/x")
+    );
+}
+
+/// The user type the RBAC middleware checks; no request here signs one in.
+struct RbacUser;
+
+impl Authenticatable for RbacUser {
+    fn get_auth_identifier(&self) -> String {
+        "7".to_owned()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+}
+
+impl HasRoles for RbacUser {}
+
+/// The redirects written outside `Redirect`'s builders: `Redirect::refresh`
+/// from the session's previous URL, and the email-verified, two-factor and
+/// RBAC middleware, each sending a guest to its configured path.
+fn emitter_router() -> Router {
+    Router::new()
+        .get("/page", |_request: Request| async {
+            Ok(HttpResponse::text("page"))
+        })
+        .get("/refresh", |_request: Request| async {
+            Redirect::refresh().into()
+        })
+        .get("/challenge", |_request: Request| async {
+            TwoFactor::start_challenge("7", false)
+                .await
+                .map_err(|error| HttpResponse::text(error.to_string()).status(500))?;
+            Ok(HttpResponse::text("challenge pending"))
+        })
+        .get("/verified", |_request: Request| async {
+            Ok(HttpResponse::text("verified"))
+        })
+        .middleware(EnsureEmailVerifiedMiddleware::redirect_to("/email/verify"))
+        .get("/two-factor", |_request: Request| async {
+            Ok(HttpResponse::text("cleared"))
+        })
+        .middleware(TwoFactorChallengeMiddleware::redirect_to(
+            "/two-factor-challenge",
+        ))
+        .get("/role", |_request: Request| async {
+            Ok(HttpResponse::text("admin"))
+        })
+        .middleware(RoleMiddleware::<RbacUser>::redirect_to("admin", "/no-role"))
+        .get("/permission", |_request: Request| async {
+            Ok(HttpResponse::text("editor"))
+        })
+        .middleware(PermissionMiddleware::<RbacUser>::redirect_to(
+            "posts.edit",
+            "/no-permission",
+        ))
+        .into()
+}
+
+#[tokio::test]
+async fn pfx_004_refresh_and_the_guard_middleware_redirect_under_the_root() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "pfx_004_refresh_and_the_guard_middleware_redirect_under_the_root",
+    )
+    .await
+    {
+        return;
+    }
+    support::ensure_crypt();
+    support::install("http://localhost");
+    let address = support::serve(emitter_router(), session_middleware()).await;
+    let prefix = ("x-forwarded-prefix", PREFIX);
+
+    let page = support::get(address, "/page?tab=2", &[prefix]).await;
+    let cookie = page.cookie_pair("suprnova_session");
+    let with_cookie = [prefix, ("cookie", cookie.as_str())];
+    let refresh = support::get(address, "/refresh", &with_cookie).await;
+    assert_eq!(refresh.status, 302, "{}", refresh.body);
+    assert_eq!(
+        refresh.header("location").as_deref(),
+        Some("/billing/page?tab=2"),
+        "refresh sends the previous URL back with the root once"
+    );
+
+    for (path, expected) in [
+        ("/verified", "/billing/email/verify"),
+        ("/role", "/billing/no-role"),
+        ("/permission", "/billing/no-permission"),
+    ] {
+        let plain = support::get(address, path, &[prefix]).await;
+        assert_eq!(plain.status, 302, "{path}: {}", plain.body);
+        assert_eq!(
+            plain.header("location").as_deref(),
+            Some(expected),
+            "{path}"
+        );
+        let inertia = support::get(address, path, &[prefix, ("x-inertia", "true")]).await;
+        assert_eq!(inertia.status, 409, "{path}: {}", inertia.body);
+        assert_eq!(
+            inertia.header("x-inertia-location").as_deref(),
+            Some(expected),
+            "{path} (Inertia)"
+        );
+    }
+
+    let started = support::get(address, "/challenge", &with_cookie).await;
+    assert_eq!(started.status, 200, "{}", started.body);
+    let plain = support::get(address, "/two-factor", &with_cookie).await;
+    assert_eq!(plain.status, 302, "{}", plain.body);
+    assert_eq!(
+        plain.header("location").as_deref(),
+        Some("/billing/two-factor-challenge")
+    );
+    let mut inertia = with_cookie.to_vec();
+    inertia.push(("x-inertia", "true"));
+    let inertia = support::get(address, "/two-factor", &inertia).await;
+    assert_eq!(inertia.status, 409, "{}", inertia.body);
+    assert_eq!(
+        inertia.header("x-inertia-location").as_deref(),
+        Some("/billing/two-factor-challenge")
+    );
+
+    // At the host root each target is sent as configured.
+    let at_host_root = support::get(address, "/verified", &[]).await;
+    assert_eq!(
+        at_host_root.header("location").as_deref(),
+        Some("/email/verify")
+    );
+}
+
+#[tokio::test]
+async fn pfx_004_the_maintenance_redirect_carries_the_root() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "pfx_004_the_maintenance_redirect_carries_the_root",
+    )
+    .await
+    {
+        return;
+    }
+    support::ensure_crypt();
+    support::install("http://localhost");
+    let dir = tempfile::tempdir().expect("a directory for the down file");
+    let mode = Arc::new(FileMaintenanceMode::with_path(dir.path().join("down")));
+    mode.activate(&MaintenancePayload {
+        redirect: Some("/maintenance".to_owned()),
+        ..MaintenancePayload::new()
+    })
+    .await
+    .expect("go down");
+    let router: Router = Router::new()
+        .get("/dashboard", |_request: Request| async {
+            Ok(HttpResponse::text("dashboard"))
+        })
+        .into();
+    let address = support::serve(
+        router,
+        MiddlewareRegistry::new().append(MaintenanceMiddleware::with_driver(mode)),
+    )
+    .await;
+
+    let behind = support::get_prefixed(address, "/dashboard").await;
+    assert_eq!(behind.status, 302, "{}", behind.body);
+    assert_eq!(
+        behind.header("location").as_deref(),
+        Some("/billing/maintenance")
+    );
+    let at_host_root = support::get(address, "/dashboard", &[]).await;
+    assert_eq!(
+        at_host_root.header("location").as_deref(),
+        Some("/maintenance")
     );
 }

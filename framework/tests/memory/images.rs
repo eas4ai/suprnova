@@ -1089,6 +1089,18 @@ fn allocated_by(
     (used, out.len())
 }
 
+/// `jpeg` with `profile` in one APP2 segment after its start-of-image
+/// marker.
+fn jpeg_with_profile(jpeg: &[u8], profile: &[u8]) -> Vec<u8> {
+    let mut out = vec![0xFF, 0xD8, 0xFF, 0xE2];
+    out.extend_from_slice(&((2 + 14 + profile.len()) as u16).to_be_bytes());
+    out.extend_from_slice(b"ICC_PROFILE\0");
+    out.extend_from_slice(&[1, 1]);
+    out.extend_from_slice(profile);
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
 /// MEM-003: the metadata an image keeps is written into the one output
 /// buffer the encoder fills, not by copying the encoded file again. The
 /// same image with and without a profile allocates the same, give or take
@@ -1099,16 +1111,35 @@ async fn mem_audit_an_image_with_a_profile_is_written_in_one_buffer() {
     let _lock = exclusive().await;
     let driver = OxideAvImageDriver::new();
     let profile = p3_profile_of(0);
-    // Noise, so the encoded outputs are as large as the pixels. WebP adds
-    // its metadata through the same in-place insertion (the unit test
-    // `img_002_adding_metadata_moves_bytes_within_the_reserved_buffer`
-    // covers it); its encoders allocate too much for dhat to record
-    // quickly.
-    for (format, side) in [(OutputFormat::Png, 512), (OutputFormat::Jpeg, 512)] {
-        let plain = encode_png(side, side, PngPixelFormat::Rgba, 4, false);
-        let tagged = png_with_chunks(&plain, &[(b"iCCP", iccp_chunk(&profile))]);
+    // Noise, so the encoded outputs are as large as the pixels. The WebP
+    // images come from an opaque JPEG, so the driver writes `WebP` lossy,
+    // and the JPEG's profile is read whole: inflating a PNG's profile
+    // allocates more than a small output holds, and would hide a copy of
+    // it. The lossless WebP encoder allocates too much for dhat to record
+    // a large image quickly, so its image is small; the lossy one is
+    // written at full quality, so its output is not.
+    let default_quality = ImagePipeline::default().quality;
+    for (format, side, quality) in [
+        (OutputFormat::Png, 512, default_quality),
+        (OutputFormat::Jpeg, 512, default_quality),
+        (OutputFormat::WebPLossless, 64, default_quality),
+        (OutputFormat::WebP, 128, 100),
+    ] {
+        let (plain, tagged) = if matches!(format, OutputFormat::Png | OutputFormat::Jpeg) {
+            let plain = encode_png(side, side, PngPixelFormat::Rgba, 4, false);
+            let tagged = png_with_chunks(&plain, &[(b"iCCP", iccp_chunk(&profile))]);
+            (plain, tagged)
+        } else {
+            let plain = convert(
+                &encode_png(side, side, PngPixelFormat::Rgb24, 3, false),
+                OutputFormat::Jpeg,
+            );
+            let tagged = jpeg_with_profile(&plain, &profile);
+            (plain, tagged)
+        };
         let pipeline = ImagePipeline {
             format: Some(format),
+            quality,
             ..Default::default()
         };
         let (without, out_len) = allocated_by(&driver, &plain, &pipeline);
@@ -1162,4 +1193,51 @@ async fn img_001_dimensions_and_dominant_color_do_not_turn_the_image() {
              turned the pixels"
         );
     }
+}
+
+/// MEM-003: the `magick` driver hands ImageMagick the bytes it was given
+/// over stdin without copying them first. A stand-in for the binary reads
+/// all of stdin and answers with a small PNG, so what the driver allocates
+/// beside a 4 MiB input is a few kilobytes; a copy of the input would be
+/// all of it. No host ImageMagick is needed.
+#[cfg(unix)]
+#[tokio::test]
+async fn mem_audit_the_magick_driver_writes_its_input_without_copying_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = exclusive().await;
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mem-003-magick-input");
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).unwrap();
+    let answer = scratch.join("answer.png");
+    std::fs::write(&answer, RED_PNG_1X1).unwrap();
+    let stand_in = scratch.join("magick-stand-in");
+    std::fs::write(
+        &stand_in,
+        format!(
+            "#!/bin/sh\ncat > /dev/null\nexec cat '{}'\n",
+            answer.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let input = encode_png(1024, 1024, PngPixelFormat::Rgba, 4, false);
+    let driver = suprnova::MagickCliDriver::new(stand_in.to_string_lossy());
+    let to_png = ImagePipeline {
+        format: Some(OutputFormat::Png),
+        ..Default::default()
+    };
+    driver.process(&input, &to_png).expect("a warm-up");
+    let heap = Heap::start();
+    let before = heap.bytes();
+    driver
+        .process(&input, &to_png)
+        .expect("the stand-in answers");
+    let used = heap.bytes() - before;
+    drop(heap);
+    assert!(
+        used < input.len() as u64 / 4,
+        "the driver allocated {used} bytes beside a {}-byte input: it copied the input",
+        input.len()
+    );
 }
