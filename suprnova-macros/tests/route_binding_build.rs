@@ -160,10 +160,93 @@ fn bind_001_auto_route_binding_is_reachable_through_both_paths() {
     );
 }
 
+/// Every `.rs` file under `dir`.
+fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).expect("read a source directory") {
+        let path = entry.expect("a directory entry").path();
+        if path.is_dir() {
+            rust_files(&path, found);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            found.push(path);
+        }
+    }
+}
+
+/// The source files of every workspace member, read from the root manifest.
+fn workspace_sources() -> Vec<PathBuf> {
+    let root = macros_dir().join("..");
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo.toml");
+    let start = manifest
+        .find("members = [")
+        .expect("the workspace lists its members");
+    let list = &manifest[start..];
+    let list = &list[..list.find(']').expect("the member list is closed")];
+    let mut sources = Vec::new();
+    for member in list.split('"').skip(1).step_by(2) {
+        let src = root.join(member).join("src");
+        if src.is_dir() {
+            rust_files(&src, &mut sources);
+        }
+    }
+    sources
+}
+
+/// Whether `rest` starts with the identifier `name`, not a longer one.
+fn starts_with_ident(rest: &str, name: &str) -> bool {
+    rest.strip_prefix(name).is_some_and(|after| {
+        !after
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
 #[test]
 fn bind_001_the_route_binding_macro_is_gone() {
+    // Not exported: the path does not resolve at all. A macro that still
+    // existed but failed to expand would fail with another error.
     let dir = workspace("removed-macro");
-    assert_rejected(&cargo_check(&dir, "removed-macro"), &["route_binding"]);
+    assert_rejected(
+        &cargo_check(&dir, "removed-macro"),
+        &["could not find `route_binding` in `suprnova`"],
+    );
+
+    // Nor defined anywhere in the workspace, exported or not: no
+    // `macro_rules! route_binding` and no proc macro of that name.
+    let mut definitions = Vec::new();
+    let sources = workspace_sources();
+    assert!(
+        sources
+            .iter()
+            .any(|path| path.ends_with("suprnova-macros/src/lib.rs")),
+        "the scan must read the macros crate"
+    );
+    for path in sources {
+        let text = fs::read_to_string(&path).expect("read a source file");
+        let lines: Vec<&str> = text.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            if let Some(at) = line.find("macro_rules!")
+                && starts_with_ident(
+                    line[at + "macro_rules!".len()..].trim_start(),
+                    "route_binding",
+                )
+            {
+                definitions.push(format!("{}:{}: {line}", path.display(), index + 1));
+            }
+            if line.trim_start().starts_with("#[proc_macro")
+                && let Some(signature) = lines[index + 1..].iter().find(|next| next.contains("fn "))
+                && let Some(at) = signature.find("fn ")
+                && starts_with_ident(signature[at + 3..].trim_start(), "route_binding")
+            {
+                definitions.push(format!("{}:{}: {signature}", path.display(), index + 1));
+            }
+        }
+    }
+    assert!(
+        definitions.is_empty(),
+        "the removed `route_binding!` macro is defined:\n{}",
+        definitions.join("\n")
+    );
 }
 
 #[test]

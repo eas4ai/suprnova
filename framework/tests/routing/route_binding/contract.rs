@@ -81,34 +81,151 @@ async fn bind_001_from_route_param_resolves_by_the_route_key() {
     );
 }
 
+/// The id of the essay a child lookup found, `Err` when the lookup failed.
+fn child_id(
+    found: Result<Option<BoundChild>, suprnova::FrameworkError>,
+) -> Result<Option<i64>, ()> {
+    match found {
+        Ok(found) => Ok(found.map(|child| {
+            child
+                .downcast::<CtEssay>()
+                .map_err(|child| child.type_name())
+                .expect("a child lookup through `essays` finds a CtEssay")
+                .id
+        })),
+        Err(_) => Err(()),
+    }
+}
+
 #[tokio::test]
 async fn bind_001_route_param_resolves_as_its_type_does() {
     let _db = fixture().await;
-    for value in ["engines", "notes", "missing", "cobol"] {
-        let plain = CtEssay::resolve_route_binding(value, None)
+    // Every lookup, by the route key and by a binding field, plain and
+    // soft-deletable, finds through `RouteParam<T>` what it finds through `T`.
+    let lookups = [
+        ("engines", None),
+        ("notes", None),
+        ("missing", None),
+        ("cobol", None),
+        ("Engines", Some("title")),
+        ("Notes", Some("title")),
+        ("1", Some("id")),
+        ("2", Some("id")),
+        ("1x", Some("id")),
+        ("engines", Some("slug")),
+    ];
+    for (value, field) in lookups {
+        let plain = CtEssay::resolve_route_binding(value, field)
             .await
             .unwrap()
             .map(|essay| essay.id);
-        let wrapped = RouteParam::<CtEssay>::resolve_route_binding(value, None)
+        let wrapped = RouteParam::<CtEssay>::resolve_route_binding(value, field)
             .await
             .unwrap()
             .map(|essay| essay.id);
-        assert_eq!(plain, wrapped, "{value}");
-        let plain_trashed = CtEssay::resolve_soft_deletable_route_binding(value, None)
+        assert_eq!(plain, wrapped, "{value} by {field:?}");
+        let plain_trashed = CtEssay::resolve_soft_deletable_route_binding(value, field)
             .await
             .unwrap()
             .map(|essay| essay.id);
         let wrapped_trashed =
-            RouteParam::<CtEssay>::resolve_soft_deletable_route_binding(value, None)
+            RouteParam::<CtEssay>::resolve_soft_deletable_route_binding(value, field)
                 .await
                 .unwrap()
                 .map(|essay| essay.id);
-        assert_eq!(plain_trashed, wrapped_trashed, "{value}");
+        assert_eq!(plain_trashed, wrapped_trashed, "{value} by {field:?}");
     }
+    // The fixture tells the lookups apart, so equal results mean something.
+    assert_eq!(
+        CtEssay::resolve_route_binding("Engines", Some("title"))
+            .await
+            .unwrap()
+            .map(|essay| essay.id),
+        Some(1)
+    );
+    assert_eq!(
+        CtEssay::resolve_soft_deletable_route_binding("2", Some("id"))
+            .await
+            .unwrap()
+            .map(|essay| essay.id),
+        Some(2)
+    );
     assert_eq!(
         RouteParam::<CtEssay>::route_key_name(),
         CtEssay::route_key_name()
     );
+
+    // The values URLs use.
+    let essay = CtEssay::find(1_i64).await.unwrap().expect("essay 1");
+    let wrapped = RouteParam(essay.clone());
+    assert_eq!(wrapped.route_key(), essay.route_key());
+    for field in ["slug", "title", "id", "ct_author_id", "no_such_column"] {
+        assert_eq!(
+            wrapped.route_field(field),
+            essay.route_field(field),
+            "{field}"
+        );
+    }
+    assert_eq!(wrapped.route_field("title").as_deref(), Some("Engines"));
+
+    // The child lookups, through the author's `essays` relation.
+    let ada = CtAuthor::find(1_i64).await.unwrap().expect("Ada");
+    let wrapped_ada = RouteParam(ada.clone());
+    let children = [
+        ("essay", "engines", None),
+        ("essay", "notes", None),
+        ("essay", "cobol", None),
+        ("essay", "Notes", Some("title")),
+        ("essay", "1", Some("id")),
+        ("essay", "3", Some("id")),
+        ("essay", "1x", Some("id")),
+        ("comment", "engines", None),
+    ];
+    for (child, value, field) in children {
+        let plain = child_id(ada.resolve_child_route_binding(child, value, field).await);
+        let through = child_id(
+            wrapped_ada
+                .resolve_child_route_binding(child, value, field)
+                .await,
+        );
+        assert_eq!(plain, through, "{child} {value} by {field:?}");
+        let plain_trashed = child_id(
+            ada.resolve_soft_deletable_child_route_binding(child, value, field)
+                .await,
+        );
+        let through_trashed = child_id(
+            wrapped_ada
+                .resolve_soft_deletable_child_route_binding(child, value, field)
+                .await,
+        );
+        assert_eq!(
+            plain_trashed, through_trashed,
+            "{child} {value} by {field:?}, soft-deletable"
+        );
+    }
+    assert_eq!(
+        child_id(
+            wrapped_ada
+                .resolve_soft_deletable_child_route_binding("essay", "Notes", Some("title"))
+                .await
+        ),
+        Ok(Some(2)),
+        "the trashed child is found by a binding field through the wrapper"
+    );
+    assert_eq!(
+        child_id(
+            wrapped_ada
+                .resolve_child_route_binding("essay", "Notes", Some("title"))
+                .await
+        ),
+        Ok(None),
+        "the plain child lookup leaves it out through the wrapper"
+    );
+
+    let info = RouteParam::<CtEssay>::route_binding_info();
+    let inner = CtEssay::route_binding_info();
+    assert_eq!(info.name(), inner.name());
+    assert_eq!(info.type_id(), inner.type_id());
 }
 
 #[tokio::test]
