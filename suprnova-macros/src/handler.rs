@@ -400,14 +400,19 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
 }
 
 /// How a misuse of `#[handler]`'s argument is answered.
-const HANDLER_ARGS_USAGE: &str = "#[handler] takes no argument, or `Self = <Type>` on a \
-                                  function inside an `impl` block: \
-                                  `#[handler(Self = Posts)]` inside `impl Posts`";
+const HANDLER_ARGS_USAGE: &str = "#[handler] takes `Self = <Type>` on a function inside an \
+                                  `impl` block: `#[handler(Self = Posts)]` inside `impl Posts`";
 
 /// The attribute's argument: `Self = Type` for a handler inside an `impl`
-/// block, or nothing for a free function.
+/// block, or nothing for a free function. An argument that does not start
+/// with `Self` is ignored, as every argument was before `Self = Type`
+/// existed, so a handler written then keeps compiling (BIND-003).
 fn parse_handler_args(attr: TokenStream2) -> syn::Result<Option<Type>> {
-    if attr.is_empty() {
+    let starts_with_self = matches!(
+        attr.clone().into_iter().next(),
+        Some(proc_macro2::TokenTree::Ident(ident)) if ident == "Self"
+    );
+    if !starts_with_self {
         return Ok(None);
     }
     let parser = |input: ParseStream| -> syn::Result<Type> {
@@ -1205,13 +1210,27 @@ mod tests {
     }
 
     #[test]
-    fn bind_003_an_argument_other_than_self_is_a_compile_error() {
+    fn bind_003_an_argument_that_does_not_start_with_self_is_ignored_as_before() {
+        // `#[handler]` ignored its arguments before `Self = Type` existed, so
+        // a handler written then with one keeps compiling (BIND-003).
+        let item = quote! { pub async fn show(id: i64) -> Response { todo!() } };
+        let plain = expansion_with(quote! {}, item.clone());
         for attr in [
-            quote! { Self },
-            quote! { Self = },
             quote! { self = Posts },
             quote! { Type = Posts },
             quote! { Posts },
+            quote! { anything(1, 2) },
+        ] {
+            let out = expansion_with(attr.clone(), item.clone());
+            assert_eq!(out, plain, "`{attr}` must be ignored as it was before");
+        }
+    }
+
+    #[test]
+    fn bind_003_a_malformed_self_argument_is_a_compile_error() {
+        for attr in [
+            quote! { Self },
+            quote! { Self = },
             quote! { Self = Posts, Self = Posts },
         ] {
             let out = expansion_with(
