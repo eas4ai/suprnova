@@ -582,7 +582,8 @@ async fn queued_mail_fires_message_sending_and_message_sent() {
         },
         CancellationToken::new(),
     )
-    .await;
+    .await
+    .expect("the worker starts");
 
     assert_eq!(capture.captured().len(), 1, "the queued mail was delivered");
     let sending = dispatched::<MessageSending>(|e| e.subject == "Welcome, Alice");
@@ -627,7 +628,8 @@ async fn a_failed_queued_send_fires_message_sending_but_not_message_sent() {
         },
         CancellationToken::new(),
     )
-    .await;
+    .await
+    .expect("the worker starts");
 
     assert_eq!(
         dispatched::<MessageSending>(|e| e.subject == "Welcome, Bob").len(),
@@ -675,7 +677,8 @@ async fn scaffold_shaped_mail_worker_child() {
         },
         CancellationToken::new(),
     )
-    .await;
+    .await
+    .expect("the worker starts");
 
     let exceptions: Vec<String> =
         suprnova::events::dispatched::<suprnova::queue::events::JobExceptionOccurred>(|_| true)

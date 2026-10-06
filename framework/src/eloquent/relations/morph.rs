@@ -169,10 +169,18 @@ where
         // type-string in `serde_json::Value::String` so the inner
         // WhereTerm storage stays homogeneous with the rest of the
         // dual-API.
-        let type_val = serde_json::Value::String(morph_type_value.clone());
+        //
+        // Every name the parent answers to: its `morph_type` and each of
+        // its `morph_aliases`, so a row a Laravel application wrote under
+        // either belongs to it.
+        let type_vals: Vec<serde_json::Value> =
+            crate::eloquent::relations::morph_registry::morph_type_names(&morph_type_value)
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect();
         let inner = R::query()
             .filter(id_col.as_str(), parent_key_value.clone())
-            .filter(type_col.as_str(), type_val);
+            .filter_in(type_col.as_str(), type_vals);
         Self {
             parent_key_value,
             morph_name,

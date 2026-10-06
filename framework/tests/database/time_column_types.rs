@@ -21,7 +21,7 @@ const WITH_ZONE: &str = concat!(".timestamp_with", "_time_zone()");
 const BARE: &str = concat!(".timest", "amp()");
 
 /// Files that still spell one, how many lines, and why.
-const EXCEPTIONS: [(&str, usize, &str); 7] = [
+const EXCEPTIONS: [(&str, usize, &str); 6] = [
     (
         "framework/src/schema/column.rs",
         1,
@@ -32,11 +32,6 @@ const EXCEPTIONS: [(&str, usize, &str); 7] = [
         "framework/src/payments/migrations/m_2026_05_22_000001_create_payments_tables.rs",
         16,
         "The payments tables are still TIMESTAMP on MySQL until their upgrade lands.",
-    ),
-    (
-        "framework/src/rbac/migrations/m_create_rbac_tables.rs",
-        4,
-        "The RBAC tables are still TIMESTAMP on MySQL until their upgrade lands.",
     ),
     (
         "framework/src/auth_flows/two_factor/migration.rs",

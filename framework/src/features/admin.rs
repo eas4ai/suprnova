@@ -1,4 +1,4 @@
-//! Admin CRUD for the `features` table.
+//! Admin CRUD for the `features` table, which is laravel/pennant's.
 //!
 //! Intended to back Phase 8's admin panel + any custom admin UI a
 //! consumer builds. All mutations fire the appropriate event
@@ -14,17 +14,13 @@
 
 use crate::database::DB;
 use crate::error::FrameworkError;
-use crate::features::entity;
 use crate::features::events::{FeatureDeleted, FeatureUpdated};
-use sea_orm::{
-    ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, sea_query::OnConflict,
-};
+use crate::features::store;
 use serde::Serialize;
 
-/// One row in the `features` table, projected for admin consumers.
-/// Mirrors the entity but lives separately so it can carry a
-/// `Serialize` impl without forcing one onto the active-record
-/// entity.
+/// One flag, projected for admin consumers: the row in Pennant's
+/// `features` table, in the framework's terms, with the description and
+/// actor the framework keeps beside it.
 #[derive(Debug, Clone, Serialize)]
 pub struct FeatureRow {
     /// Primary key from the `features` table.
@@ -33,58 +29,62 @@ pub struct FeatureRow {
     pub name: String,
     /// Scope discriminator; empty string for the global default, otherwise `kind:identifier`.
     pub scope_key: String,
-    /// Whether the flag resolves to enabled for this `(name, scope_key)` pair.
+    /// Whether the flag resolves to enabled for this `(name, scope_key)`
+    /// pair: any stored value other than `false`, as Pennant reads it.
     pub enabled: bool,
     /// Operator-facing description shown in the admin UI.
     pub description: Option<String>,
     /// Opaque identifier of the user who last toggled the flag, or `None` for system changes.
     pub updated_by: Option<String>,
-    /// Timestamp at which the row was first inserted.
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    /// Timestamp at which the row was last mutated.
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// Timestamp at which the row was first inserted. Pennant's table
+    /// allows `NULL` here.
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Timestamp at which the row was last mutated. Pennant's table
+    /// allows `NULL` here.
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-impl From<entity::Model> for FeatureRow {
-    fn from(m: entity::Model) -> Self {
-        Self {
-            id: m.id,
-            name: m.name,
-            scope_key: m.scope_key,
-            enabled: m.enabled,
-            description: m.description,
-            updated_by: m.updated_by,
-            created_at: m.created_at,
-            updated_at: m.updated_at,
-        }
-    }
+async fn row_of(
+    conn: &sea_orm::DatabaseConnection,
+    flag: store::StoredFlag,
+) -> Result<FeatureRow, FrameworkError> {
+    let (description, updated_by) = store::details(conn, &flag.name, &flag.scope_key).await?;
+    Ok(FeatureRow {
+        id: flag.id,
+        name: flag.name,
+        scope_key: flag.scope_key,
+        enabled: flag.enabled,
+        description,
+        updated_by,
+        created_at: flag.created_at,
+        updated_at: flag.updated_at,
+    })
 }
 
-/// List every flag row, sorted by `(name, scope_key)`. Use this to
-/// populate the admin panel's "all flags" table.
+/// List every flag row, sorted by name, then by scope key, the global
+/// `""` first. Use this to populate the admin panel's "all flags" table.
+///
+/// The sort runs here rather than in SQL: the stored scopes are Pennant's
+/// (`__laravel_null`, `App\Models\User|42`), whose order differs from the
+/// scope keys' and from one database collation to another.
 pub async fn list() -> Result<Vec<FeatureRow>, FrameworkError> {
     let db = DB::connection()?;
-    let rows = entity::Entity::find()
-        .order_by_asc(entity::Column::Name)
-        .order_by_asc(entity::Column::ScopeKey)
-        .all(db.inner())
-        .await
-        .map_err(|e| FrameworkError::database(format!("features list: {e}")))?;
-    Ok(rows.into_iter().map(FeatureRow::from).collect())
+    let mut rows = Vec::new();
+    for flag in store::all(db.inner()).await? {
+        rows.push(row_of(db.inner(), flag).await?);
+    }
+    rows.sort_by(|a, b| (&a.name, &a.scope_key).cmp(&(&b.name, &b.scope_key)));
+    Ok(rows)
 }
 
 /// Fetch one flag row by name + scope_key. Returns `None` when the
 /// row isn't present.
 pub async fn get(name: &str, scope_key: &str) -> Result<Option<FeatureRow>, FrameworkError> {
     let db = DB::connection()?;
-    let row = entity::Entity::find()
-        .filter(entity::Column::Name.eq(name))
-        .filter(entity::Column::ScopeKey.eq(scope_key))
-        .one(db.inner())
-        .await
-        .map_err(|e| FrameworkError::database(format!("features get: {e}")))?
-        .map(FeatureRow::from);
-    Ok(row)
+    match store::find(db.inner(), name, scope_key).await? {
+        Some(flag) => Ok(Some(row_of(db.inner(), flag).await?)),
+        None => Ok(None),
+    }
 }
 
 /// Create or update a flag. `scope_key = ""` means a global flag;
@@ -106,35 +106,15 @@ pub async fn upsert(
     actor_id: Option<String>,
 ) -> Result<FeatureRow, FrameworkError> {
     let db = DB::connection()?;
-    // The entity casts both timestamps native, so the active model takes
-    // the moment itself.
-    let now = crate::clock::now();
-
-    let active = entity::ActiveModel {
-        name: Set(name.to_string()),
-        scope_key: Set(scope_key.to_string()),
-        enabled: Set(enabled),
-        description: Set(description.clone()),
-        updated_by: Set(actor_id.clone()),
-        created_at: Set(now),
-        updated_at: Set(now),
-        ..Default::default()
-    };
-
-    entity::Entity::insert(active)
-        .on_conflict(
-            OnConflict::columns([entity::Column::Name, entity::Column::ScopeKey])
-                .update_columns([
-                    entity::Column::Enabled,
-                    entity::Column::Description,
-                    entity::Column::UpdatedBy,
-                    entity::Column::UpdatedAt,
-                ])
-                .to_owned(),
-        )
-        .exec(db.inner())
-        .await
-        .map_err(|e| FrameworkError::database(format!("features upsert: {e}")))?;
+    store::upsert(db.inner(), name, scope_key, enabled).await?;
+    store::upsert_details(
+        db.inner(),
+        name,
+        scope_key,
+        description.clone(),
+        actor_id.clone(),
+    )
+    .await?;
 
     // Re-fetch to return the canonical row (especially the id +
     // created_at, which the insert above doesn't surface).
@@ -171,14 +151,7 @@ pub async fn delete(
     actor_id: Option<String>,
 ) -> Result<bool, FrameworkError> {
     let db = DB::connection()?;
-    let result = entity::Entity::delete_many()
-        .filter(entity::Column::Name.eq(name))
-        .filter(entity::Column::ScopeKey.eq(scope_key))
-        .exec(db.inner())
-        .await
-        .map_err(|e| FrameworkError::database(format!("features delete: {e}")))?;
-
-    let deleted = result.rows_affected > 0;
+    let deleted = store::delete(db.inner(), name, scope_key).await?;
     if deleted {
         // Propagate the deletion: DB snapshots drop the row, caches
         // drop matching entries. After this, `is_enabled!` falls back

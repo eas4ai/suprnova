@@ -213,7 +213,9 @@ async fn batch_dispatches_every_job_and_fires_then_finally() {
         queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
-    run_worker(driver.clone(), cfg, cancel).await;
+    run_worker(driver.clone(), cfg, cancel)
+        .await
+        .expect("the worker starts");
 
     assert_eq!(BATCHED_RUNS.load(Ordering::SeqCst), 7);
     let repo = Queue::batch_repository().unwrap();
@@ -265,7 +267,9 @@ async fn batch_records_failure_and_cancels_when_allow_failures_off() {
         queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
-    run_worker(driver.clone(), cfg, cancel).await;
+    run_worker(driver.clone(), cfg, cancel)
+        .await
+        .expect("the worker starts");
 
     let repo = Queue::batch_repository().unwrap();
     let snap = repo.find(&batch_id).await.unwrap().unwrap();
@@ -390,7 +394,9 @@ async fn allow_failures_batch_with_late_success_fires_catch_not_then() {
         queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
-    run_worker(driver.clone(), cfg, cancel).await;
+    run_worker(driver.clone(), cfg, cancel)
+        .await
+        .expect("the worker starts");
 
     let repo = Queue::batch_repository().unwrap();
     let snap = repo.find(&batch_id).await.unwrap().unwrap();
@@ -453,7 +459,9 @@ async fn multi_job_batch_fires_finally_even_when_first_fails_and_rest_skipped() 
         queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
-    run_worker(driver.clone(), cfg, cancel).await;
+    run_worker(driver.clone(), cfg, cancel)
+        .await
+        .expect("the worker starts");
 
     let repo = Queue::batch_repository().unwrap();
     let snap = repo.find(&batch_id).await.unwrap().unwrap();
@@ -819,7 +827,8 @@ mod terminal_settlement {
             run_worker(driver.clone(), cfg, CancellationToken::new()),
         )
         .await
-        .expect("the worker settled the queued job");
+        .expect("the worker settled the queued job")
+        .expect("the worker starts");
         release.notify_one();
         dispatch
             .await

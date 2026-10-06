@@ -695,18 +695,29 @@ async fn raise_paused_queue_events(
 /// registered with
 /// [`Queue::register_connection`](crate::queue::Queue::register_connection),
 /// use [`run_worker_on`], which labels the worker with that connection.
+///
+/// # Errors
+///
+/// Returns before the first poll when the failed-jobs store cannot write a
+/// record ([`FailedJobStore::check`](crate::queue::FailedJobStore::check)):
+/// for the database store, a failed-jobs table that is missing, lacks a
+/// column the store writes, is in the earlier Suprnova layout, or holds a
+/// `payload` or `exception` narrower than `LONGTEXT` on MySQL. The error
+/// names the table and the column. A worker that started anyway would fail
+/// its first dead letter and retry it on every visibility timeout without
+/// end.
 pub async fn run_worker(
     driver: Arc<dyn QueueDriver>,
     cfg: WorkerConfig,
     shutdown: CancellationToken,
-) {
+) -> Result<(), FrameworkError> {
     run_labelled_worker(
         driver,
         crate::queue::Queue::connection_name(),
         cfg,
         shutdown,
     )
-    .await;
+    .await
 }
 
 /// [`run_worker`] for the queue connection `connection`: a connection
@@ -721,16 +732,16 @@ pub async fn run_worker(
 ///
 /// # Errors
 ///
-/// Returns before the first poll when `connection` names no connection. The
-/// errors are those of a push to it.
+/// Returns before the first poll when `connection` names no connection (the
+/// errors are those of a push to it), or when the failed-jobs store cannot
+/// write a record, as [`run_worker`] does.
 pub async fn run_worker_on(
     connection: &str,
     cfg: WorkerConfig,
     shutdown: CancellationToken,
 ) -> Result<(), FrameworkError> {
     let target = crate::queue::connections::target(connection)?;
-    run_labelled_worker(target.driver, target.label, cfg, shutdown).await;
-    Ok(())
+    run_labelled_worker(target.driver, target.label, cfg, shutdown).await
 }
 
 async fn run_labelled_worker(
@@ -738,7 +749,12 @@ async fn run_labelled_worker(
     connection: String,
     cfg: WorkerConfig,
     shutdown: CancellationToken,
-) {
+) -> Result<(), FrameworkError> {
+    // Before the first pop: a store that cannot write turns the first dead
+    // letter into a redelivery loop (see `handle_dead_letter`).
+    if let Some(store) = crate::queue::failed::current() {
+        store.check().await?;
+    }
     let worker_started_at = crate::clock::now().timestamp_millis();
     // Read once per worker lifetime, mirroring Laravel's `Worker::$pausable`
     // static: an operator's escape hatch, not something that should change
@@ -1274,6 +1290,7 @@ async fn run_labelled_worker(
     })
     .await;
     let _ = result;
+    Ok(())
 }
 
 #[derive(Debug)]

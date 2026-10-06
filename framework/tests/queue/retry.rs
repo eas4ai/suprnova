@@ -179,7 +179,9 @@ async fn the_worker_releases_a_throttled_job_for_as_long_as_the_service_asked() 
         max_jobs: Some(1),
         queues: Vec::new(),
     };
-    run_worker(driver, cfg, CancellationToken::new()).await;
+    run_worker(driver, cfg, CancellationToken::new())
+        .await
+        .expect("the worker starts");
 
     let released = dispatched::<JobReleasedAfterException>(|_| true);
     assert_eq!(released.len(), 1, "one failed attempt, one release");

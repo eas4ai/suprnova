@@ -80,7 +80,8 @@ async fn work_one(driver: Arc<MemoryQueueDriver>) {
         ),
     )
     .await
-    .expect("worker did not settle a job within 15s");
+    .expect("worker did not settle a job within 15s")
+    .expect("the worker starts");
 }
 
 #[tokio::test]

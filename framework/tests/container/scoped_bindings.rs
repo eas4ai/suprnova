@@ -1241,7 +1241,8 @@ async fn each_attempt_of_a_queued_job_gets_a_scope_of_its_own() {
         run_worker(driver, config, CancellationToken::new()),
     )
     .await
-    .expect("the worker settles both attempts");
+    .expect("the worker settles both attempts")
+    .expect("the worker starts");
 
     let seen = ATTEMPTS_SEEN.lock().expect("unpoisoned").clone();
     assert_eq!(seen.len(), 2, "one failed attempt and its retry: {seen:?}");

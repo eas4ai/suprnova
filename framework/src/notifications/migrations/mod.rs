@@ -2,15 +2,16 @@
 //!
 //! [`CreateNotificationsTable`] creates the `notifications` table that
 //! [`DatabaseChannel`](crate::notifications::channels::database::DatabaseChannel)
-//! writes and the inbox helpers in [`crate::notifications`] read, and
-//! [`NotificationTimestampsToDatetime`] upgrades a table an older version of
-//! it created on MySQL or MariaDB. Consumer apps register both, in that
-//! order, in their own `Migrator`:
+//! writes and the inbox helpers in [`crate::notifications`] read, in
+//! Laravel 13's layout. [`NotificationTimestampsToDatetime`] and
+//! [`NotificationsToLaravelLayout`] upgrade a table an older version of it
+//! created; a table Laravel created is left alone by all three. Consumer
+//! apps register them, in that order, in their own `Migrator`:
 //!
 //! ```rust,no_run
 //! use sea_orm_migration::MigratorTrait;
 //! use suprnova::notifications::migrations::{
-//!     CreateNotificationsTable, NotificationTimestampsToDatetime,
+//!     CreateNotificationsTable, NotificationTimestampsToDatetime, NotificationsToLaravelLayout,
 //! };
 //!
 //! pub struct Migrator;
@@ -21,6 +22,7 @@
 //!             // ... the app's own migrations ...
 //!             Box::new(CreateNotificationsTable),
 //!             Box::new(NotificationTimestampsToDatetime),
+//!             Box::new(NotificationsToLaravelLayout),
 //!         ]
 //!     }
 //! }
@@ -34,6 +36,7 @@
 //! [`crate::features::migrations`] and [`crate::payments::migrations`].
 
 pub mod m_create_notifications_table;
+pub mod m_notifications_laravel_layout;
 pub mod m_notifications_timestamps_to_datetime;
 
 /// Public alias so consumers can write `CreateNotificationsTable` instead
@@ -47,3 +50,17 @@ pub use m_create_notifications_table::Migration as CreateNotificationsTable;
 /// `TIMESTAMP` to `DATETIME` time columns. Apps list it right after
 /// [`CreateNotificationsTable`].
 pub use m_notifications_timestamps_to_datetime::Migration as NotificationTimestampsToDatetime;
+
+/// Public alias for the upgrade that moves a `notifications` table an older
+/// [`CreateNotificationsTable`] created into Laravel 13's layout, with its
+/// rows. Apps list it after [`NotificationTimestampsToDatetime`].
+pub use m_notifications_laravel_layout::Migration as NotificationsToLaravelLayout;
+
+/// Whether `columns` are the earlier Suprnova layout of `notifications`:
+/// `notifiable_id` as 64-character text. Laravel's `morphs`, `uuidMorphs`
+/// and `ulidMorphs` give it an integer, a UUID or 26 characters.
+pub(crate) fn is_earlier_layout(columns: &[crate::database::catalog::CatalogColumn]) -> bool {
+    crate::database::catalog::column(columns, "notifiable_id").is_some_and(|column| {
+        !column.is_integer() && column.data_type != "uuid" && column.max_length == Some(64)
+    })
+}

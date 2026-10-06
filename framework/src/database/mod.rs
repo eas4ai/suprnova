@@ -51,6 +51,9 @@
 //! ```
 
 pub(crate) mod after_commit;
+// Internal: stores and migrations read a table's columns through here to
+// tell Laravel's layout from an earlier framework layout before they act.
+pub(crate) mod catalog;
 // The WHERE and JOIN pieces `DbTableBuilder` and the model builder share.
 // Internal; its public types re-export below.
 pub(crate) mod clauses;
@@ -66,7 +69,10 @@ pub mod identifier;
 // here, so `up` can run over a schema that already exists on every backend.
 pub(crate) mod migration_guard;
 pub mod model;
+// Internal: polymorphic keys (notifications, RBAC assignments) bind in the
+// type of the column Laravel's `morphs` gives them.
 pub mod monitor;
+pub(crate) mod morph_key;
 // Internal: hand-written SQL in the queue / notification stores renders its
 // placeholders through here so Postgres gets `$1` instead of `?`.
 pub(crate) mod placeholder;

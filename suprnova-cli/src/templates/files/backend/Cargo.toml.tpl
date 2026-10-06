@@ -35,7 +35,11 @@ default-run = "{package_name}"
 # unsigned_ids makes `id()` and `foreign_id()` create `BIGINT UNSIGNED` on
 # MySQL, as Laravel's `id()` and `foreignId()` do, in every migration this
 # package's binaries run. Postgres and SQLite have no unsigned integers and
-# keep `BIGINT`. Models read these keys into `u64` fields.
+# keep `BIGINT`. Models read these keys into `u64` fields. This scaffold's
+# `users.id` is already unsigned on MySQL: its users migration creates it with
+# `unsigned_id()`, as the Laravel 13 skeleton does, and the `User` model reads
+# it into a `u64`. An application on a Laravel database, whose `users.id` is
+# unsigned on MySQL, sets this so its own new tables match.
 #
 # [package.metadata.suprnova.schema]
 # unsigned_ids = true

@@ -82,7 +82,8 @@ async fn database_channel_inserts_notifications_row() {
         .expect("notifications row inserted");
     assert_eq!(row.try_get_by_index::<String>(0).unwrap(), "OrderShipped");
     assert_eq!(row.try_get_by_index::<String>(1).unwrap(), "users");
-    assert_eq!(row.try_get_by_index::<String>(2).unwrap(), "42");
+    // `notifiable_id` is Laravel's big integer, as `morphs` creates it.
+    assert_eq!(row.try_get_by_index::<i64>(2).unwrap(), 42);
     let data: String = row.try_get_by_index(3).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&data).unwrap();
     assert_eq!(parsed["tracking"], "1Z999");

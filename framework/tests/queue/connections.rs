@@ -521,7 +521,8 @@ async fn run_worker_with_an_explicit_driver_keeps_the_default_label() {
         worker_for(1),
         CancellationToken::new(),
     )
-    .await;
+    .await
+    .expect("the worker starts");
 
     let started = dispatched::<WorkerStarting>(|_| true);
     assert_eq!(started[0].connection, Queue::connection_name());
@@ -580,7 +581,9 @@ async fn a_second_name_for_the_default_connection_is_the_default_connection() {
         queues: vec!["alias_fwd_src".into()],
         ..worker_for(1)
     };
-    run_worker(connections.default.clone(), cfg, CancellationToken::new()).await;
+    run_worker(connections.default.clone(), cfg, CancellationToken::new())
+        .await
+        .expect("the worker starts");
     assert_eq!(*RAN.lock().unwrap(), ["connections::PlainJob"]);
 
     // A pause set under one name is the pause a worker under the other reads.

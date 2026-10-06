@@ -643,11 +643,26 @@ assign roles and permissions to users.
 - A **role** is a named set of permissions, such as `"editor"`.
 - A user holds a permission **directly**, or **through a role** that carries it.
 
-Add `suprnova::rbac::migrations::CreateRbacTables` to your migrator. It
-creates the `roles`, `permissions`, `role_permissions`, `model_roles` and
-`model_permissions` tables. Every role and permission has a guard name. The
-helpers that take no guard use `"web"`, and so does every check on this
-page.
+Add `suprnova::rbac::migrations::CreateRbacTables` and `RbacToSpatieLayout`
+to your migrator. The tables take spatie/laravel-permission's layout:
+`roles`, `permissions`, `model_has_roles`, `model_has_permissions` and
+`role_has_permissions`. On a database where spatie's migration created them,
+the RBAC reads the roles, permissions and assignments spatie recorded, and
+the migrations leave those tables as they are. `model_id` follows
+`RBAC_MODEL_KEY`: `int` (the default), `uuid` or `ulid`. `RbacToSpatieLayout`
+moves the tables an earlier release created (`role_permissions`,
+`model_roles`, `model_permissions`, and a `display_name` on roles and
+permissions) into spatie's layout with every row; the display names move to
+`suprnova_role_details` and `suprnova_permission_details`. Every role and
+permission has a guard name. The helpers that take no guard use `"web"`,
+and so does every check on this page.
+
+An assignment is stored with the user model's `morph_type` as its
+`model_type`, as spatie stores the model's morph class. Declare
+`#[model(morph_type = "App\\Models\\User")]` on your user model to share
+assignments with a Laravel application; without a `morph_type`, the
+`model_type` is the model's Rust type path. See
+[Running on a Laravel Database](laravel-database.md).
 
 Implement `HasRoles` on the user model. It has no required methods:
 

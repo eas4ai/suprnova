@@ -248,43 +248,43 @@ async fn columns_kind(db: &DatabaseConnection, table: &str, column: &str) -> Str
         .kind
 }
 
-/// A group table an older migration created with `TIMESTAMP` time columns,
-/// holding rows written through a `+05:00` session, is moved to `DATETIME` by
-/// `migrate`, run twice over that session: every stored time stays the same
-/// UTC time, and each column keeps its nullability and its
-/// `DEFAULT CURRENT_TIMESTAMP`.
-pub async fn assert_upgrade_keeps_utc_times<F, Fut>(tables: &[&str], migrate: F)
+/// A group table an earlier release created, in its own layout with
+/// `TIMESTAMP` time columns (the statements in `earlier` create it), holding
+/// a row written through a `+05:00` session, is moved into its current
+/// layout by `migrate`, run twice over that session: every time column the
+/// table keeps is `DATETIME`, and every stored time is the same UTC time.
+pub async fn assert_upgrade_keeps_utc_times<F, Fut>(tables: &[&str], earlier: &[&str], migrate: F)
 where
     F: Fn(DatabaseConnection) -> Fut,
     Fut: Future<Output = ()>,
 {
     let db = connect(None).await;
     drop_tables(&db, tables).await;
-    migrate(db.clone()).await;
-    // The shape an older migration created: the same tables with `TIMESTAMP`
-    // time columns.
+    for sql in earlier {
+        execute(&db, sql).await;
+    }
     let shape = time_columns(&db, tables).await;
-    assert!(!shape.is_empty(), "{tables:?} have time columns");
-    for (table, column, nullable, now) in &shape {
-        let null = if *nullable { "NULL" } else { "NOT NULL" };
-        let default = if *now {
-            " DEFAULT CURRENT_TIMESTAMP"
-        } else {
-            ""
-        };
-        execute(
-            &db,
-            &format!("ALTER TABLE `{table}` MODIFY `{column}` TIMESTAMP {null}{default}"),
-        )
-        .await;
-        assert_eq!(columns_kind(&db, table, column).await, "timestamp");
+    assert!(
+        !shape.is_empty(),
+        "the earlier {tables:?} have time columns"
+    );
+    for (table, column, _, _) in &shape {
+        assert_eq!(
+            columns_kind(&db, table, column).await,
+            "timestamp",
+            "the earlier {table}.{column} is TIMESTAMP"
+        );
     }
 
     let shifted = connect(Some("+05:00")).await;
+    let mut seeded = Vec::new();
     for table in tables {
-        seed(&shifted, table, Value::from(SHIFTED_LOCAL)).await;
+        if !columns(&db, table).await.is_empty() {
+            seed(&shifted, table, Value::from(SHIFTED_LOCAL)).await;
+            seeded.push(*table);
+        }
     }
-    let before = stored_times(&db, tables).await;
+    let before = stored_times(&db, &seeded).await;
     for (table, column, value) in &before {
         assert_eq!(
             value.as_deref(),
@@ -296,19 +296,15 @@ where
     migrate(shifted.clone()).await;
     migrate(shifted).await;
 
-    let after: Vec<(String, String, bool, bool)> = time_columns(&db, tables).await;
-    assert_eq!(after, shape, "nullability and defaults are kept");
-    for (table, column, _, _) in &after {
+    let after = stored_times(&db, &seeded).await;
+    assert_eq!(after.len(), before.len(), "every time column is kept");
+    for (table, column, _) in &after {
         assert_eq!(
             columns_kind(&db, table, column).await,
             "datetime",
             "{table}.{column} is DATETIME"
         );
     }
-    assert_eq!(
-        stored_times(&db, tables).await,
-        before,
-        "every stored time is the same UTC time"
-    );
+    assert_eq!(after, before, "every stored time is the same UTC time");
     drop_tables(&db, tables).await;
 }

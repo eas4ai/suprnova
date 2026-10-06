@@ -12,7 +12,9 @@ use magnetar::default_schema::{
     DefaultAuthSchema, DefaultSecondFactorSchema, lifecycle_deliveries, users,
 };
 use magnetar::passkey::PasskeyConfig;
-use magnetar::password::hash::{PasswordHashConfig, PasswordVerifier, StandardPasswordHashDriver};
+use magnetar::password::hash::{
+    PasswordHashConfig, PasswordTarget, PasswordVerifier, StandardPasswordHashDriver,
+};
 use magnetar::password::lockout::{LockoutConfig, LockoutService};
 use magnetar::plugins::password::PasswordAuthService;
 use magnetar::sessions::OpaqueConfig;
@@ -557,12 +559,21 @@ async fn build_default_engines(
         )
         .with_other_second_factor(Arc::new(super::engine::FrameworkTotpEnrollment)),
     );
+    // An application sharing its database with Laravel mints and keeps
+    // Laravel's `$2y$` bcrypt, never Argon2id, so Laravel's hasher accepts
+    // every password Magnetar writes.
+    let target = if crate::LaravelDatabase::is_shared() {
+        PasswordTarget::LaravelBcrypt
+    } else {
+        PasswordTarget::Argon2id
+    };
     let verifier = Arc::new(
         PasswordVerifier::new(
             Arc::new(StandardPasswordHashDriver),
             PasswordHashConfig::default(),
         )
-        .map_err(map_error)?,
+        .map_err(map_error)?
+        .with_target(target),
     );
     let password = Arc::new(PasswordAuthService::new(
         storage.clone(),

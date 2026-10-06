@@ -17,6 +17,7 @@
 //! at boot.
 
 use crate::database::placeholder::{placeholder, placeholder_list};
+use crate::database::stored_datetime::StoredDateTime;
 use crate::database::validate_identifier;
 use crate::error::FrameworkError;
 use crate::queue::envelope::Envelope;
@@ -104,6 +105,24 @@ pub trait FailedJobStore: Send + Sync {
 
     /// Number of records. Mirrors Laravel's `count()`.
     async fn count(&self) -> Result<u64, FrameworkError>;
+
+    /// Confirm the store can write a record, before a worker pops its first
+    /// job. A worker over a store that cannot write fails its first dead
+    /// letter, keeps the reservation and fails it again on every visibility
+    /// timeout, so `queue:work`, [`run_worker`](crate::queue::worker::run_worker)
+    /// and [`run_worker_on`](crate::queue::worker::run_worker_on) refuse to
+    /// start instead.
+    ///
+    /// The default accepts: a store with nothing outside the process to
+    /// check, such as the memory and null stores, can always write.
+    /// [`DatabaseFailedJobStore`] checks its table's columns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] naming what the store cannot write to.
+    async fn check(&self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -260,20 +279,53 @@ impl FailedJobStore for NullFailedJobStore {
 // Database backend
 // ---------------------------------------------------------------------------
 
-/// SeaORM-backed failed-job store. Schema (operator-managed):
+/// What the `connection` column holds before the Suprnova connection name.
+///
+/// Laravel's `queue:retry` pushes a row's payload to the connection the row
+/// names and deletes the row once the push succeeds. A Suprnova row naming
+/// `database` would reach Laravel's own `database` connection, whose worker
+/// cannot run the job. No connection in Laravel 13's default
+/// `config/queue.php` takes a name with this prefix, so Laravel's retry
+/// throws "connection has not been configured" before it forgets the row.
+pub const SUPRNOVA_CONNECTION_PREFIX: &str = "suprnova:";
+
+/// The columns the database store writes, in the order it writes them.
+const WRITTEN_COLUMNS: [&str; 6] = [
+    "uuid",
+    "connection",
+    "queue",
+    "payload",
+    "exception",
+    "failed_at",
+];
+
+/// SeaORM-backed failed-job store over Laravel 13's `failed_jobs` layout.
+///
+/// [`CreateFailedJobsTable`](crate::queue::migrations::CreateFailedJobsTable)
+/// creates the table; a table Laravel's own migration created works the
+/// same:
 ///
 /// ```sql
 /// CREATE TABLE failed_jobs (
-///     id              TEXT PRIMARY KEY,
-///     connection      TEXT NOT NULL,
-///     queue           TEXT NOT NULL,
-///     job_name        TEXT NOT NULL,
-///     envelope_json   TEXT NOT NULL,
-///     exception       TEXT NOT NULL,
-///     failed_at       INTEGER NOT NULL
+///     id         BIGINT PRIMARY KEY AUTO_INCREMENT,
+///     uuid       VARCHAR(255) NOT NULL UNIQUE,
+///     connection VARCHAR(255) NOT NULL,
+///     queue      VARCHAR(255) NOT NULL,
+///     payload    LONGTEXT NOT NULL,
+///     exception  LONGTEXT NOT NULL,
+///     failed_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 /// );
-/// CREATE INDEX idx_failed_jobs_failed_at ON failed_jobs(failed_at);
+/// CREATE INDEX failed_jobs_connection_queue_failed_at_index
+///     ON failed_jobs (connection, queue, failed_at);
 /// ```
+///
+/// Each record gets a fresh `uuid`, never the envelope's id: a dead letter
+/// whose acknowledgement failed is redelivered and dead-lettered again, and
+/// a second row with the envelope's id would break `uuid UNIQUE`, keep the
+/// reservation and loop. `payload` is the envelope with the job's name
+/// added as `displayName` and the row's uuid as `uuid`, the two keys
+/// Laravel's readers take from a payload. `connection` is the Suprnova
+/// connection behind [`SUPRNOVA_CONNECTION_PREFIX`].
 ///
 /// The `table` argument is validated as a SQL identifier once at construction
 /// (same shape as [`crate::queue::database::DatabaseQueueDriver::new`]).
@@ -294,6 +346,44 @@ impl DatabaseFailedJobStore {
     fn backend(&self) -> DatabaseBackend {
         self.db.get_database_backend()
     }
+
+    fn select_columns(&self) -> String {
+        format!(
+            "SELECT uuid, connection, queue, payload, exception, failed_at FROM {}",
+            self.table
+        )
+    }
+}
+
+/// The `payload` a failed-job row stores for `env`: the envelope's JSON
+/// object with `displayName` set to the job's name and `uuid` to the row's
+/// uuid. [`Envelope`] ignores fields it does not know, so the payload
+/// decodes back into the envelope for `queue:retry`.
+pub(crate) fn failed_payload(env: &Envelope, uuid: Uuid) -> Result<String, FrameworkError> {
+    let mut value = serde_json::to_value(env)
+        .map_err(|e| FrameworkError::internal(format!("encode envelope for failed_jobs: {e}")))?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        FrameworkError::internal("encode envelope for failed_jobs: not a JSON object")
+    })?;
+    object.insert(
+        "displayName".to_owned(),
+        serde_json::Value::String(env.job_name.clone()),
+    );
+    object.insert(
+        "uuid".to_owned(),
+        serde_json::Value::String(uuid.to_string()),
+    );
+    serde_json::to_string(&value)
+        .map_err(|e| FrameworkError::internal(format!("encode envelope for failed_jobs: {e}")))
+}
+
+/// The current time at whole seconds, the precision of `failed_at` on
+/// every engine Laravel's layout uses.
+fn now_whole_seconds() -> chrono::NaiveDateTime {
+    let now = crate::clock::now();
+    DateTime::<Utc>::from_timestamp(now.timestamp(), 0)
+        .unwrap_or(now)
+        .naive_utc()
 }
 
 #[async_trait]
@@ -306,25 +396,22 @@ impl FailedJobStore for DatabaseFailedJobStore {
         exception: &str,
     ) -> Result<Uuid, FrameworkError> {
         let id = Uuid::new_v4();
-        let envelope_json = env.to_json().map_err(|e| {
-            FrameworkError::internal(format!("encode envelope for failed_jobs: {e}"))
-        })?;
+        let payload = failed_payload(env, id)?;
         let stmt = Statement::from_sql_and_values(
             self.backend(),
             format!(
-                "INSERT INTO {} (id, connection, queue, job_name, envelope_json, exception, failed_at) \
+                "INSERT INTO {} (uuid, connection, queue, payload, exception, failed_at) \
                  VALUES ({})",
                 self.table,
-                placeholder_list(self.backend(), 1, 7)?
+                placeholder_list(self.backend(), 1, 6)?
             ),
             vec![
                 sea_orm::Value::from(id.to_string()),
-                sea_orm::Value::from(connection.to_string()),
+                sea_orm::Value::from(format!("{SUPRNOVA_CONNECTION_PREFIX}{connection}")),
                 sea_orm::Value::from(queue.to_string()),
-                sea_orm::Value::from(env.job_name.clone()),
-                sea_orm::Value::from(envelope_json),
+                sea_orm::Value::from(payload),
                 sea_orm::Value::from(exception.to_string()),
-                sea_orm::Value::from(crate::clock::now().timestamp()),
+                sea_orm::Value::from(now_whole_seconds()),
             ],
         );
         self.db
@@ -339,11 +426,7 @@ impl FailedJobStore for DatabaseFailedJobStore {
             .db
             .query_all_raw(Statement::from_string(
                 self.backend(),
-                format!(
-                    "SELECT id, connection, queue, job_name, envelope_json, exception, failed_at \
-             FROM {} ORDER BY failed_at DESC",
-                    self.table
-                ),
+                format!("{} ORDER BY failed_at DESC, id DESC", self.select_columns()),
             ))
             .await
             .map_err(|e| FrameworkError::internal(format!("failed_jobs select: {e}")))?;
@@ -363,9 +446,8 @@ impl FailedJobStore for DatabaseFailedJobStore {
         let stmt = Statement::from_sql_and_values(
             self.backend(),
             format!(
-                "SELECT id, connection, queue, job_name, envelope_json, exception, failed_at \
-                 FROM {} WHERE id = {}",
-                self.table,
+                "{} WHERE uuid = {}",
+                self.select_columns(),
                 placeholder(self.backend(), 1)?
             ),
             vec![sea_orm::Value::from(id.to_string())],
@@ -385,7 +467,7 @@ impl FailedJobStore for DatabaseFailedJobStore {
         let stmt = Statement::from_sql_and_values(
             self.backend(),
             format!(
-                "DELETE FROM {} WHERE id = {}",
+                "DELETE FROM {} WHERE uuid = {}",
                 self.table,
                 placeholder(self.backend(), 1)?
             ),
@@ -408,7 +490,7 @@ impl FailedJobStore for DatabaseFailedJobStore {
                     self.table,
                     placeholder(self.backend(), 1)?
                 ),
-                vec![sea_orm::Value::from(cutoff.timestamp())],
+                vec![sea_orm::Value::from(cutoff.naive_utc())],
             ),
             None => Statement::from_string(self.backend(), format!("DELETE FROM {}", self.table)),
         };
@@ -437,32 +519,115 @@ impl FailedJobStore for DatabaseFailedJobStore {
         };
         Ok(n.max(0) as u64)
     }
+
+    /// Refuse a table this store cannot write. A worker that started on one
+    /// would fail its first dead letter, leave the reservation, and fail it
+    /// again on every visibility timeout without end.
+    async fn check(&self) -> Result<(), FrameworkError> {
+        let columns = crate::database::catalog::table_columns(&self.db, &self.table)
+            .await
+            .map_err(|e| {
+                FrameworkError::internal(format!(
+                    "the failed-jobs table `{}` could not be inspected: {e}",
+                    self.table
+                ))
+            })?;
+        check_failed_jobs_columns(&self.table, &columns, self.backend())
+    }
+}
+
+/// The verdict of [`FailedJobStore::check`] on a table's columns.
+fn check_failed_jobs_columns(
+    table: &str,
+    columns: &[crate::database::catalog::CatalogColumn],
+    backend: DatabaseBackend,
+) -> Result<(), FrameworkError> {
+    use crate::database::catalog::column;
+    const REMEDY: &str = "list suprnova::queue::migrations::CreateFailedJobsTable in the \
+                          application's Migrator and run `migrate`";
+    if columns.is_empty() {
+        return Err(FrameworkError::internal(format!(
+            "the failed-jobs table `{table}` does not exist; {REMEDY}"
+        )));
+    }
+    if let Some(earlier) = ["envelope_json", "job_name"]
+        .into_iter()
+        .find(|name| column(columns, name).is_some())
+    {
+        let missing = WRITTEN_COLUMNS
+            .into_iter()
+            .find(|name| column(columns, name).is_none())
+            .unwrap_or("uuid");
+        return Err(FrameworkError::internal(format!(
+            "the failed-jobs table `{table}` is in the earlier Suprnova layout: it has the \
+             column `{earlier}` and lacks `{missing}`; {REMEDY}, which reshapes it with its rows"
+        )));
+    }
+    for name in WRITTEN_COLUMNS {
+        if column(columns, name).is_none() {
+            return Err(FrameworkError::internal(format!(
+                "the failed-jobs table `{table}` lacks the column `{name}` the failed-jobs \
+                 store writes; {REMEDY}"
+            )));
+        }
+    }
+    if backend == DatabaseBackend::MySql {
+        for name in ["payload", "exception"] {
+            if let Some(found) = column(columns, name)
+                && found.data_type != "longtext"
+            {
+                return Err(FrameworkError::internal(format!(
+                    "the column `{name}` of the failed-jobs table `{table}` is {}, narrower \
+                     than LONGTEXT: a large job or trace would be refused. Alter it to \
+                     LONGTEXT, as Laravel's migration creates it",
+                    found.data_type.to_ascii_uppercase()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn decode_row(row: &sea_orm::QueryResult) -> Result<FailedJob, FrameworkError> {
     let id_s: String = row
         .try_get_by_index(0)
-        .map_err(|e| FrameworkError::internal(format!("failed_jobs id col: {e}")))?;
-    let id = Uuid::parse_str(&id_s)
-        .map_err(|e| FrameworkError::internal(format!("failed_jobs id parse: {e}")))?;
-    let connection: String = row
+        .map_err(|e| FrameworkError::internal(format!("failed_jobs uuid col: {e}")))?;
+    let id = Uuid::parse_str(&id_s).map_err(|e| {
+        FrameworkError::internal(format!("failed_jobs uuid `{id_s}` is not a UUID: {e}"))
+    })?;
+    let stored_connection: String = row
         .try_get_by_index(1)
         .map_err(|e| FrameworkError::internal(format!("failed_jobs connection col: {e}")))?;
+    // A row Laravel wrote keeps its connection as Laravel named it; a
+    // Suprnova row names its own connection behind the prefix.
+    let connection = stored_connection
+        .strip_prefix(SUPRNOVA_CONNECTION_PREFIX)
+        .map(str::to_owned)
+        .unwrap_or(stored_connection);
     let queue: String = row
         .try_get_by_index(2)
         .map_err(|e| FrameworkError::internal(format!("failed_jobs queue col: {e}")))?;
-    let job_name: String = row
-        .try_get_by_index(3)
-        .map_err(|e| FrameworkError::internal(format!("failed_jobs job_name col: {e}")))?;
     let envelope_json: String = row
-        .try_get_by_index(4)
-        .map_err(|e| FrameworkError::internal(format!("failed_jobs envelope_json col: {e}")))?;
+        .try_get_by_index(3)
+        .map_err(|e| FrameworkError::internal(format!("failed_jobs payload col: {e}")))?;
     let exception: String = row
-        .try_get_by_index(5)
+        .try_get_by_index(4)
         .map_err(|e| FrameworkError::internal(format!("failed_jobs exception col: {e}")))?;
-    let failed_at_ts = decode_epoch_seconds(row, 6)?;
-    let failed_at = DateTime::<Utc>::from_timestamp(failed_at_ts, 0)
-        .ok_or_else(|| FrameworkError::internal("failed_jobs failed_at: invalid timestamp"))?;
+    let failed_at = row
+        .try_get_by_index::<StoredDateTime>(5)
+        .map_err(|e| FrameworkError::internal(format!("failed_jobs failed_at col: {e}")))?
+        .and_utc();
+    // Laravel's payload and this store's both carry `displayName`.
+    let job_name = serde_json::from_str::<serde_json::Value>(&envelope_json)
+        .ok()
+        .and_then(|payload| {
+            payload
+                .get("displayName")
+                .or_else(|| payload.get("job_name"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
     Ok(FailedJob {
         id,
         connection,
@@ -472,22 +637,6 @@ fn decode_row(row: &sea_orm::QueryResult) -> Result<FailedJob, FrameworkError> {
         exception,
         failed_at,
     })
-}
-
-/// Read an epoch-seconds column that may be either 32- or 64-bit wide.
-///
-/// `manual/queues.md` documents `failed_at INTEGER`, which SQLite treats as a
-/// 64-bit dynamic type but Postgres pins to `int4` - and sqlx refuses to
-/// decode an `int4` column into `i64`, so a store that had just written the
-/// row could not read it back. Widening on read (rather than demanding
-/// `BIGINT`) keeps every already-deployed `failed_jobs` table working.
-fn decode_epoch_seconds(row: &sea_orm::QueryResult, index: usize) -> Result<i64, FrameworkError> {
-    if let Ok(v) = row.try_get_by_index::<i64>(index) {
-        return Ok(v);
-    }
-    row.try_get_by_index::<i32>(index)
-        .map(i64::from)
-        .map_err(|e| FrameworkError::internal(format!("failed_jobs failed_at col: {e}")))
 }
 
 // ---------------------------------------------------------------------------

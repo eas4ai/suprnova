@@ -459,6 +459,32 @@ child's `commentable_type` column. Default is the snake-cased struct
 name, but overriding is the right move for any model you're shipping -
 table-renaming refactors shouldn't break the polymorphic key.
 
+#### Morph aliases
+
+A table may hold more than one string for one model. A Laravel database
+stores the PHP class name, `App\Models\Post`, until the application adopts
+`Relation::morphMap`, and the alias, `post`, after it. Declare the string
+writes should store as `morph_type`, and every other string as an alias:
+
+```rust
+#[model(
+    table = "posts",
+    morph_type = "App\\Models\\Post",
+    morph_aliases = ["post"],
+    relations = {
+        comments: MorphMany<Comment> { name = "commentable" },
+    },
+)]
+pub struct Post { /* ... */ }
+```
+
+Reads accept every name: `MorphMany` and `MorphOne`, direct and eager,
+`has`, `with_count` and the aggregates match rows holding either, and a
+`MorphTo` loads the post a row names by either. Writes store the
+`morph_type`. `morph_aliases` needs a `morph_type`. `MorphToMany` and
+`MorphedByMany` pivots match the `morph_type` alone. See
+[Running on a Laravel Database](laravel-database.md).
+
 ### `MorphTo` and the per-family enum
 
 `MorphTo` lives on the morph-table side. The user declares the

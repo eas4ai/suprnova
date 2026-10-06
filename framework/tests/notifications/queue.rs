@@ -128,7 +128,7 @@ async fn notification_queue_dispatches_through_queue_and_lands_in_db() {
         .expect("row present");
     assert_eq!(row.try_get_by_index::<String>(0).unwrap(), "OrderShipped");
     assert_eq!(row.try_get_by_index::<String>(1).unwrap(), "users");
-    assert_eq!(row.try_get_by_index::<String>(2).unwrap(), "7");
+    assert_eq!(row.try_get_by_index::<i64>(2).unwrap(), 7);
     let data_json: String = row.try_get_by_index(3).unwrap();
     let data: serde_json::Value = serde_json::from_str(&data_json).unwrap();
     assert_eq!(data["tracking"], "1Z");
@@ -570,7 +570,9 @@ async fn notify_queue_fail_on_timeout_dead_letters_on_the_first_timeout_with_zer
         max_jobs: Some(1),
         queues: Vec::new(),
     };
-    run_worker(driver.clone(), cfg, CancellationToken::new()).await;
+    run_worker(driver.clone(), cfg, CancellationToken::new())
+        .await
+        .expect("the worker starts");
 
     let timed_out = dispatched::<JobTimedOut>(|_| true);
     assert_eq!(timed_out.len(), 1, "one dispatch attempt, one timeout");
@@ -787,7 +789,8 @@ async fn scaffold_shaped_notification_worker_child() {
         },
         CancellationToken::new(),
     )
-    .await;
+    .await
+    .expect("the worker starts");
 
     let row = db
         .query_one_raw(Statement::from_string(

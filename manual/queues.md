@@ -56,8 +56,16 @@ let cfg = WorkerConfig {
     queues: Vec::new(),
 };
 let shutdown = CancellationToken::new();
-run_worker(driver, cfg, shutdown).await;
+run_worker(driver, cfg, shutdown).await?;
 ```
+
+`run_worker` returns a `Result`. Before its first pop, a worker whose
+failed-jobs store is the database store checks `failed_jobs` and returns an
+error naming the table and the column when the table is missing, lacks a
+column the store writes, is in the layout an earlier release created, or on
+MySQL holds `payload` or `exception` narrower than `LONGTEXT`. `queue:work`
+exits non-zero with that error. A worker that started anyway would fail to
+record its first failed job, and retry it without end.
 
 In a scaffolded app, the worker is started by the binary's `queue:work`
 subcommand - `cargo run -- queue:work` - which runs the same bootstrap your
@@ -1214,40 +1222,34 @@ the destination queue by name to see where new work is landing.
 
 ### The `jobs` table
 
-`DatabaseQueueDriver` expects this schema. The `queue` column is what makes
-`--queue` filtering possible:
+`DatabaseQueueDriver` reads Laravel 13's `jobs` table, and the framework
+ships the migration that creates it. List it in your `Migrator`:
 
-```sql
-CREATE TABLE jobs (
-    id              TEXT PRIMARY KEY,
-    job_name        TEXT NOT NULL,
-    queue           TEXT NULL,
-    envelope_json   TEXT NOT NULL,
-    available_at    BIGINT NOT NULL,
-    reserved_until  BIGINT NULL,
-    reserved_token  TEXT NULL,
-    attempts        INTEGER NOT NULL DEFAULT 0,
-    created_at      BIGINT NOT NULL
-);
-CREATE INDEX idx_jobs_available_at ON jobs(available_at);
-CREATE INDEX idx_jobs_queue ON jobs(queue);
+```rust
+use suprnova::queue::migrations::{CreateFailedJobsTable, CreateJobBatchesTable, CreateJobsTable};
+
+// in Migrator::migrations(), after your own migrations:
+Box::new(CreateJobsTable),
+Box::new(CreateJobBatchesTable),
+Box::new(CreateFailedJobsTable),
 ```
 
-`queue` is nullable, and an unrouted job stores `NULL` rather than `'default'`.
-That is deliberate: a row written by an older binary is indistinguishable from
-an unrouted row written by a new one, so a mixed-version fleet drains the same
-work during a rolling upgrade.
+`jobs` holds `id`, `queue`, `payload`, `attempts`, `reserved_at`,
+`available_at` and `created_at`, as Laravel's `jobs` migration creates
+them. A job's `payload` is its envelope with Laravel's `displayName` and
+`uuid` added. An unrouted job is stored on the queue `default`, or on
+`suprnova` when the application shares its database with a Laravel
+application (see [Running on a Laravel Database](laravel-database.md)).
 
-Adding the column to an existing table is **required**, not just for
-filtering: `push` names the `queue` column in its `INSERT` whether or not the
-job is routed, so a 0.7.0+ binary fails every push against a table that lacks
-it. Run the migration first, then roll binaries - older binaries list their
-columns explicitly and ignore the new one, so that order is safe:
+The driver keeps each reservation's token and deadline in a table of its
+own, `suprnova_jobs_reservations` (`suprnova_<table>_reservations` for
+another `QUEUE_DB_TABLE`), which `CreateJobsTable` also creates. A worker
+only reserves rows the framework wrote, so a Laravel job in the same table
+is never run by a Suprnova worker.
 
-```sql
-ALTER TABLE jobs ADD COLUMN queue TEXT NULL;
-CREATE INDEX idx_jobs_queue ON jobs(queue);
-```
+`CreateJobsTable` also upgrades a `jobs` table in the layout an earlier
+release documented, with its rows: a queued, delayed or reserved job stays
+so, and no job runs twice.
 
 ### Backoff schedules
 
@@ -1586,21 +1588,15 @@ your workers.
 
 ### `failed_jobs` schema
 
-The `DatabaseFailedJobStore` expects this table (managed by your
-migrations):
-
-```sql
-CREATE TABLE failed_jobs (
-    id              TEXT PRIMARY KEY,
-    connection      TEXT NOT NULL,
-    queue           TEXT NOT NULL,
-    job_name        TEXT NOT NULL,
-    envelope_json   TEXT NOT NULL,
-    exception       TEXT NOT NULL,
-    failed_at       BIGINT NOT NULL
-);
-CREATE INDEX idx_failed_jobs_failed_at ON failed_jobs(failed_at);
-```
+The `DatabaseFailedJobStore` reads Laravel 13's `failed_jobs` table:
+`id`, a unique `uuid`, `connection`, `queue`, long-text `payload` and
+`exception`, and `failed_at`. `CreateFailedJobsTable` creates it, with
+`failed_at` as `DATETIME` on MySQL. Each failed job gets a fresh `uuid`, and
+`queue:failed`, `queue:retry <uuid>` and `queue:forget <uuid>` use it. The
+row's `payload` is the envelope with `displayName` and `uuid` added, and its
+`connection` is `suprnova:` followed by the connection name, so Laravel's
+own `queue:retry` refuses it. A table an earlier release created is
+reshaped with its rows, and each failed job keeps its id as its `uuid`.
 
 The `table` argument to `DatabaseFailedJobStore::new` is validated as a
 SQL identifier at construction.
@@ -1664,38 +1660,31 @@ use suprnova::queue::{Queue, DatabaseBatchRepository};
 Queue::set_batch_repository(Arc::new(DatabaseBatchRepository::new(db.clone())));
 ```
 
-Two tables, which the framework does not create - add them to your
-migrations, the same way `jobs` and `failed_jobs` work:
+Two tables, which `CreateJobBatchesTable` creates: Laravel 13's
+`job_batches`, and the framework's `job_batch_settlements`, which records
+each `(batch_id, job_id)` that settled:
 
 ```sql
-CREATE TABLE job_batches (
-    id            TEXT PRIMARY KEY,
-    name          TEXT NOT NULL,
-    total_jobs    INTEGER NOT NULL,
-    options_json  TEXT NOT NULL,
-    created_at    BIGINT NOT NULL,
-    cancelled_at  BIGINT NULL,
-    finished_at   BIGINT NULL
-);
-
 CREATE TABLE job_batch_settlements (
-    batch_id   TEXT NOT NULL,
-    job_id     TEXT NOT NULL,
+    batch_id   VARCHAR(255) NOT NULL,
+    job_id     VARCHAR(255) NOT NULL,
     failed     INTEGER NOT NULL,
     settled_at BIGINT NOT NULL,
     PRIMARY KEY (batch_id, job_id)
 );
 ```
 
-The epoch columns are `BIGINT` so they outlive 2038. Tables created with
-`INTEGER` epoch columns from an earlier version of this schema keep
-working: the repository reads every integer column at either width.
+`job_batches.options` holds the batch's options as a PHP-serialized array,
+which Laravel's batch repository reads. A `job_batches` table an earlier
+release created is moved into Laravel's layout, and each batch keeps its
+counts.
 
 `DatabaseBatchRepository::with_tables(db, batches, settlements)` names them
 yourself; both names are validated as SQL identifiers at construction.
 
-Note what `pending_jobs` and `failed_jobs` are **not**: columns. They are
-derived from the settlement rows on every read -
+`pending_jobs`, `failed_jobs` and `failed_job_ids` are Laravel's columns,
+and the repository writes them, but it never decrements them. Each write
+derives them from the settlement rows -
 
 ```text
 pending_jobs = max(0, total_jobs - COUNT(settlements))
@@ -1872,7 +1861,7 @@ for job in &pending {
 
 `InspectedJob` carries `id`, `queue`, `name`, `attempts`, `payload`, and
 `created_at`. `id` and `created_at` are `Option`: the database driver's
-listings still report a row whose `envelope_json` failed to decode - as
+listings still report a row whose `payload` failed to decode - as
 `id: None` and `payload: {"unparseable": true}` - rather than dropping it
 and hiding a poison job from whoever is looking; `Queue::fake()`'s
 projection never records a dispatch timestamp separate from

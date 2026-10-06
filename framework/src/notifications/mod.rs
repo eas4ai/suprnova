@@ -435,6 +435,8 @@ pub fn set_dispatcher(d: Arc<NotificationDispatcher>) -> Result<(), FrameworkErr
     Ok(())
 }
 
+pub(crate) use crate::database::morph_key::{morph_key_value, uuid_value};
+
 pub(crate) fn dispatcher_for_queue() -> Result<Arc<NotificationDispatcher>, FrameworkError> {
     lock::read(&DISPATCHER, "notifications dispatcher")?
         .clone()
