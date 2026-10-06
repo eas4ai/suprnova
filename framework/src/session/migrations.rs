@@ -176,17 +176,20 @@ fn move_session(
     let payload =
         crate::session::driver::database::encode_payload(&data, &csrf_token, user_id.as_deref())
             .map_err(|e| DbErr::Migration(format!("session payload: {e}")))?;
-    let user_id = match (user_key, user_id) {
-        (_, None) => sea_orm_migration::sea_orm::Value::String(None),
-        (SessionUserKey::Integer, Some(id)) => {
-            sea_orm_migration::sea_orm::Value::BigInt(id.parse::<i64>().ok())
+    // A NULL carries the column's type too: Postgres refuses a text NULL
+    // for a `bigint` or `uuid` column.
+    let user_id = match user_key {
+        SessionUserKey::Integer => sea_orm_migration::sea_orm::Value::BigInt(
+            user_id.as_deref().and_then(|id| id.parse::<i64>().ok()),
+        ),
+        SessionUserKey::Uuid if backend == sea_orm_migration::sea_orm::DbBackend::Postgres => {
+            sea_orm_migration::sea_orm::Value::Uuid(
+                user_id
+                    .as_deref()
+                    .and_then(|id| uuid::Uuid::parse_str(id).ok()),
+            )
         }
-        (SessionUserKey::Uuid, Some(id))
-            if backend == sea_orm_migration::sea_orm::DbBackend::Postgres =>
-        {
-            sea_orm_migration::sea_orm::Value::Uuid(uuid::Uuid::parse_str(&id).ok())
-        }
-        (_, Some(id)) => sea_orm_migration::sea_orm::Value::String(Some(id)),
+        _ => sea_orm_migration::sea_orm::Value::String(user_id),
     };
     let placeholders = crate::database::placeholder::placeholder_list(backend, 1, 6)
         .map_err(|e| DbErr::Migration(e.to_string()))?;

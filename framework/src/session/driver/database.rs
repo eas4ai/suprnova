@@ -324,15 +324,18 @@ impl DatabaseSessionDriver {
     }
 
     /// `user_id` as the column takes it: NULL when there is no user, or
-    /// when the id does not fit the column.
+    /// when the id does not fit the column. The NULL carries the column's
+    /// type, since Postgres refuses a text NULL for a `bigint` or `uuid`
+    /// column.
     async fn user_id_value(&self, user_id: Option<&str>) -> Result<sea_orm::Value, FrameworkError> {
-        let Some(user_id) = user_id else {
-            return Ok(sea_orm::Value::String(None));
-        };
         Ok(match self.user_id_column().await? {
-            UserIdColumn::Integer => sea_orm::Value::BigInt(user_id.parse::<i64>().ok()),
-            UserIdColumn::Uuid => sea_orm::Value::Uuid(uuid::Uuid::parse_str(user_id).ok()),
-            UserIdColumn::Text => sea_orm::Value::String(Some(user_id.to_owned())),
+            UserIdColumn::Integer => {
+                sea_orm::Value::BigInt(user_id.and_then(|id| id.parse::<i64>().ok()))
+            }
+            UserIdColumn::Uuid => {
+                sea_orm::Value::Uuid(user_id.and_then(|id| uuid::Uuid::parse_str(id).ok()))
+            }
+            UserIdColumn::Text => sea_orm::Value::String(user_id.map(str::to_owned)),
         })
     }
 

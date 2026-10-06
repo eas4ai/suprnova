@@ -44,7 +44,7 @@ fn same_kind(engine: Engine, laravel: &str, ours: &str) -> bool {
 }
 
 /// Assert `ours` is `laravel` up to LDB-001's one exception.
-fn assert_same_layout(engine: Engine, table: &str, laravel: &Shape, ours: &Shape) {
+pub(crate) fn assert_same_layout(engine: Engine, table: &str, laravel: &Shape, ours: &Shape) {
     let names = |shape: &Shape| {
         shape
             .columns
@@ -82,7 +82,7 @@ fn assert_same_layout(engine: Engine, table: &str, laravel: &Shape, ours: &Shape
     );
 }
 
-async fn laravel_shapes(engine: Engine) -> BTreeMap<&'static str, Shape> {
+pub(crate) async fn laravel_shapes(engine: Engine) -> BTreeMap<&'static str, Shape> {
     let (db, _) = support::laravel_schema(engine).await;
     let mut shapes = BTreeMap::new();
     for table in LAYOUT_TABLES {
@@ -231,7 +231,7 @@ async fn stores_work_on_laravels_tables(engine: Engine) {
     use suprnova::session::SessionStore;
     let driver = suprnova::session::driver::DatabaseSessionDriver::new(Duration::from_secs(7200));
     let mut session = suprnova::session::SessionData::new(
-        "ldbsession0000000000000000000000000000000".into(),
+        format!("{:0<40}", "ldbsession"),
         "csrf-token".into(),
     );
     session.user_id = Some("1".into());

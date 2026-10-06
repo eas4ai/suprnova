@@ -492,7 +492,9 @@ where
 {
     const ALONE: &str = "LDB_ALONE";
     if std::env::var(ALONE).as_deref() == Ok(name) {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
+        // One thread, as `#[tokio::test]` runs: the container `bind`
+        // installs is the thread's, and a test server's tasks must see it.
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("a runtime for the child");

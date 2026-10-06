@@ -1377,16 +1377,9 @@ where
 {
     let mut conditions = vec![(column.to_string(), PivotMatch::In(keys))];
     if let Some((type_column, type_value)) = type_match {
-        // Every name the morph side answers to: its `morph_type` and its
-        // `morph_aliases`.
         conditions.push((
             type_column.to_string(),
-            PivotMatch::In(
-                crate::eloquent::relations::morph_registry::morph_type_names(type_value)
-                    .into_iter()
-                    .map(serde_json::Value::String)
-                    .collect(),
-            ),
+            PivotMatch::Eq(serde_json::Value::String(type_value.to_string())),
         ));
     }
     load_pivot_rows::<P>(table, connection, conditions, &PivotFilters::default()).await

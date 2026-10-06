@@ -3239,9 +3239,11 @@ fn render_exists(
             pk = spec.parent_key,
         ));
         if !spec.morph_type_column.is_empty() && !spec.morph_type_value.is_empty() {
-            let list = morph_type_list(backend, &spec.morph_type_value, values, n)?;
+            *n += 1;
+            let ph = placeholder(backend, *n)?;
+            values.push(SeaValue::String(Some(spec.morph_type_value.clone())));
             where_parts.push(format!(
-                "{pivot}.{col} IN ({list})",
+                "{pivot}.{col} = {ph}",
                 pivot = spec.pivot_table,
                 col = spec.morph_type_column,
             ));
@@ -3268,6 +3270,9 @@ fn render_exists(
             parent = parent,
             pk = spec.parent_key,
         ));
+        // A morph child (MorphOne / MorphMany) belongs to the parent under
+        // its `morph_type` or any of its `morph_aliases`, as the relation's
+        // own reads accept.
         if !spec.morph_type_column.is_empty() && !spec.morph_type_value.is_empty() {
             let list = morph_type_list(backend, &spec.morph_type_value, values, n)?;
             where_parts.push(format!(
