@@ -156,7 +156,9 @@ impl SessionConfig {
     ///   seconds (default: 3600)
     /// - `SESSION_COOKIE`: Cookie name (default: `suprnova_session`)
     /// - `SESSION_SECURE`: Set `Secure` flag (default: `true`)
-    /// - `SESSION_PATH`: Cookie path (default: `/`)
+    /// - `SESSION_PATH`: Cookie path (default: unset, so each response sets
+    ///   the public root of its request, `/` at the host root, and `/` for
+    ///   a `__Host-` cookie)
     /// - `SESSION_DOMAIN`: Cookie domain (default: unset)
     /// - `SESSION_SAME_SITE`: SameSite attribute (default: `Lax`)
     /// - `SESSION_PARTITIONED`: Emit `Partitioned` / CHIPS (default: `false`)

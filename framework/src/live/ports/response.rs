@@ -151,8 +151,9 @@ impl SuprnovaResponseIntentPort {
                             FrameworkError::internal("Live route intent could not be resolved")
                         })?;
                 // The browser follows the target as given, so it carries
-                // the public root as `route()` does (PFX-004).
-                let target = crate::routing::root::prefixed(&target);
+                // the public root as `route()` does (PFX-004). At the host
+                // root the resolved target is used as it is (MEM-003).
+                let target = crate::routing::root::prefixed_owned(target);
                 endpoint = endpoint.with_redirect(navigation_target(
                     &target,
                     self.max_redirect_bytes,
