@@ -405,23 +405,50 @@ impl<T> Default for __ArgProbe<T> {
     }
 }
 
-/// The probe of an argument that binds.
+/// [`__ArgProbe`] for an `Option<T>` argument: an `Option` of a type that
+/// binds is an optional binding; any other `Option` reads the body.
 #[doc(hidden)]
-pub trait __ArgBinds<T> {
+pub struct __OptionalArgProbe<T>(PhantomData<fn() -> T>);
+
+impl<T> __OptionalArgProbe<T> {
+    /// A probe for `Option<T>`.
+    pub const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T> Default for __OptionalArgProbe<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// How a probed argument reads the request. The generated code calls it
+/// on `&&probe`: method lookup tries the impl on `&probe` first, which
+/// binds and applies only to a type that implements [`RouteBinding`], then
+/// the impl on the probe itself, which reads the body. One trait for every
+/// probe means the generated code imports one name, and uses it wherever
+/// it imports it.
+#[doc(hidden)]
+pub trait __ArgSource {
+    /// The argument's type.
+    type Value;
     /// The argument's record.
     fn __record(&self, name: &'static str, type_name: &'static str) -> HandlerArg;
-    /// The bound value.
+    /// The bound value, or `None` for an argument that reads the body.
     fn __bind<'a>(
         &self,
         input: &'a mut HandlerInput,
         index: usize,
         name: &'a str,
-    ) -> RouteLookup<'a, Option<T>>;
-    /// Never called for an argument that binds.
-    fn __read_body<'a>(&self, input: &'a mut HandlerInput) -> RouteLookup<'a, T>;
+    ) -> RouteLookup<'a, Option<Self::Value>>;
+    /// The argument, read from the request. Never called for an argument
+    /// that binds.
+    fn __read_body<'a>(&self, input: &'a mut HandlerInput) -> RouteLookup<'a, Self::Value>;
 }
 
-impl<T: RouteBinding> __ArgBinds<T> for &__ArgProbe<T> {
+impl<T: RouteBinding> __ArgSource for &__ArgProbe<T> {
+    type Value = T;
     fn __record(&self, name: &'static str, type_name: &'static str) -> HandlerArg {
         HandlerArg::bound(name, type_name, false, BoundArg::of::<T>())
     }
@@ -442,23 +469,8 @@ impl<T: RouteBinding> __ArgBinds<T> for &__ArgProbe<T> {
     }
 }
 
-/// The probe of an argument that reads the body.
-#[doc(hidden)]
-pub trait __ArgReadsBody<T> {
-    /// The argument's record.
-    fn __record(&self, name: &'static str, type_name: &'static str) -> HandlerArg;
-    /// No bound value: the argument reads the body.
-    fn __bind<'a>(
-        &self,
-        input: &'a mut HandlerInput,
-        index: usize,
-        name: &'a str,
-    ) -> RouteLookup<'a, Option<T>>;
-    /// The argument, read from the request.
-    fn __read_body<'a>(&self, input: &'a mut HandlerInput) -> RouteLookup<'a, T>;
-}
-
-impl<T: FromRequest + 'static> __ArgReadsBody<T> for __ArgProbe<T> {
+impl<T: FromRequest + 'static> __ArgSource for __ArgProbe<T> {
+    type Value = T;
     fn __record(&self, name: &'static str, type_name: &'static str) -> HandlerArg {
         HandlerArg::body(name, type_name)
     }
@@ -475,41 +487,8 @@ impl<T: FromRequest + 'static> __ArgReadsBody<T> for __ArgProbe<T> {
     }
 }
 
-/// [`__ArgProbe`] for an `Option<T>` argument: an `Option` of a type that
-/// binds is an optional binding; any other `Option` reads the body.
-#[doc(hidden)]
-pub struct __OptionalArgProbe<T>(PhantomData<fn() -> T>);
-
-impl<T> __OptionalArgProbe<T> {
-    /// A probe for `Option<T>`.
-    pub const fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<T> Default for __OptionalArgProbe<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// The probe of an optional argument that binds.
-#[doc(hidden)]
-pub trait __OptionalArgBinds<T> {
-    /// The argument's record.
-    fn __record(&self, name: &'static str, type_name: &'static str) -> HandlerArg;
-    /// The bound value, `None` when the optional parameter is absent.
-    fn __bind<'a>(
-        &self,
-        input: &'a mut HandlerInput,
-        index: usize,
-        name: &'a str,
-    ) -> RouteLookup<'a, Option<Option<T>>>;
-    /// Never called for an argument that binds.
-    fn __read_body<'a>(&self, input: &'a mut HandlerInput) -> RouteLookup<'a, Option<T>>;
-}
-
-impl<T: RouteBinding> __OptionalArgBinds<T> for &__OptionalArgProbe<T> {
+impl<T: RouteBinding> __ArgSource for &__OptionalArgProbe<T> {
+    type Value = Option<T>;
     fn __record(&self, name: &'static str, type_name: &'static str) -> HandlerArg {
         HandlerArg::bound(name, type_name, true, BoundArg::of::<T>())
     }
@@ -530,26 +509,11 @@ impl<T: RouteBinding> __OptionalArgBinds<T> for &__OptionalArgProbe<T> {
     }
 }
 
-/// The probe of an optional argument that reads the body.
-#[doc(hidden)]
-pub trait __OptionalArgReadsBody<T> {
-    /// The argument's record.
-    fn __record(&self, name: &'static str, type_name: &'static str) -> HandlerArg;
-    /// No bound value: the argument reads the body.
-    fn __bind<'a>(
-        &self,
-        input: &'a mut HandlerInput,
-        index: usize,
-        name: &'a str,
-    ) -> RouteLookup<'a, Option<Option<T>>>;
-    /// The argument, read from the request.
-    fn __read_body<'a>(&self, input: &'a mut HandlerInput) -> RouteLookup<'a, Option<T>>;
-}
-
-impl<T> __OptionalArgReadsBody<T> for __OptionalArgProbe<T>
+impl<T> __ArgSource for __OptionalArgProbe<T>
 where
     Option<T>: FromRequest + 'static,
 {
+    type Value = Option<T>;
     fn __record(&self, name: &'static str, type_name: &'static str) -> HandlerArg {
         HandlerArg::body(name, type_name)
     }
