@@ -10,7 +10,9 @@
 //!
 //! This migration converts each of the two columns that is still
 //! `TIMESTAMP` to `DATETIME`, keeping its nullability, its
-//! `DEFAULT CURRENT_TIMESTAMP` and every stored time in UTC. A column that is
+//! `DEFAULT CURRENT_TIMESTAMP` and every stored time in UTC. It touches only
+//! a table in the earlier Suprnova layout (with `scope_key`): a table
+//! laravel/pennant created stays exactly as Pennant left it. A column that is
 //! already `DATETIME`, a missing table, and every backend but MySQL and
 //! MariaDB are left alone, so it is safe to list for every app and to run
 //! again. Postgres stores these columns as `timestamp with time zone`, which
@@ -33,6 +35,11 @@ impl MigrationName for Migration {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let columns =
+            crate::database::catalog::table_columns(manager.get_connection(), "features").await?;
+        if !super::is_earlier_layout(&columns) {
+            return Ok(());
+        }
         convert_mysql_timestamps_to_datetime(manager, "features", &["created_at", "updated_at"])
             .await
     }

@@ -245,6 +245,12 @@ pub struct ModelInput {
     /// `type_string -> TypeId` reverse lookup). Both readers honour the
     /// fallback themselves; nothing else on `ModelInput` references this.
     pub morph_type: Option<String>,
+    /// `morph_aliases = ["post"]`: further strings a polymorphic `*_type`
+    /// column may hold for this model, accepted on every read and never
+    /// written. A Laravel database that adopted `Relation::morphMap` late
+    /// holds both the class name and the alias for one model. Requires
+    /// `morph_type`, which is what writes store.
+    pub morph_aliases: Vec<String>,
     /// Phase 10C T2c - parsed `observers = [Type1, Type2, ...]` list.
     /// `None` when the attribute is omitted entirely. The list drives
     /// [`super::observers::emit_observers_attestation`] which emits a
@@ -282,6 +288,18 @@ impl ModelInput {
         let item: ItemStruct = parse2(item)?;
         let attrs = parse2::<ModelAttrs>(attr)?;
         let struct_name = item.ident.to_string();
+        if attrs
+            .morph_aliases
+            .as_ref()
+            .is_some_and(|aliases| !aliases.is_empty())
+            && attrs.morph_type.is_none()
+        {
+            return Err(syn::Error::new(
+                item.ident.span(),
+                "`morph_aliases` needs `morph_type`: writes store the `morph_type`, \
+                 and the aliases are what reads accept besides it",
+            ));
+        }
 
         let table = attrs.table.unwrap_or_else(|| pluralize_snake(&struct_name));
         let primary_key = attrs.primary_key.unwrap_or_else(|| "id".to_string());
@@ -617,6 +635,7 @@ impl ModelInput {
             touches: attrs.touches.unwrap_or_default(),
             relations: attrs.relations,
             morph_type: attrs.morph_type,
+            morph_aliases: attrs.morph_aliases.unwrap_or_default(),
             observers: attrs.observers,
             unique_id: attrs.unique_id,
         })
@@ -921,6 +940,7 @@ struct ModelAttrs {
     touches: Option<Vec<String>>,
     relations: Option<Vec<RelationDecl>>,
     morph_type: Option<String>,
+    morph_aliases: Option<Vec<String>>,
     observers: Option<ObserversAttr>,
     unique_id: Option<String>,
 }
@@ -976,6 +996,7 @@ impl Parse for ModelAttrs {
                     "touches" => out.touches = Some(parse_str_array(input)?),
                     "relations" => out.relations = Some(parse_relations_map(input)?),
                     "morph_type" => out.morph_type = Some(input.parse::<LitStr>()?.value()),
+                    "morph_aliases" => out.morph_aliases = Some(parse_str_array(input)?),
                     "unique_id" => {
                         let lit = input.parse::<LitStr>()?;
                         let val = lit.value();

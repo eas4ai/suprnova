@@ -19,7 +19,11 @@
 //! Each test is named for the requirement its falsifier belongs to,
 //! `ldb_00N_...`, and ends in the engine it runs on.
 
+mod catalog;
+mod scaffold;
 mod support;
 
 mod failed_jobs;
+mod passwords;
+mod tables;
 mod worker_check;

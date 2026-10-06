@@ -69,7 +69,10 @@ pub mod identifier;
 // here, so `up` can run over a schema that already exists on every backend.
 pub(crate) mod migration_guard;
 pub mod model;
+// Internal: polymorphic keys (notifications, RBAC assignments) bind in the
+// type of the column Laravel's `morphs` gives them.
 pub mod monitor;
+pub(crate) mod morph_key;
 // Internal: hand-written SQL in the queue / notification stores renders its
 // placeholders through here so Postgres gets `$1` instead of `?`.
 pub(crate) mod placeholder;

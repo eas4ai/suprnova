@@ -2160,13 +2160,15 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                         // the snake-cased type name - the same default
                         // the parent-side MorphMany / MorphOne uses to
                         // write the type-string column.
-                        let registered: ::std::option::Option<&'static str> =
-                            ::suprnova::find_morph_type_by_id(
-                                ::std::any::TypeId::of::<#ty>(),
-                            )
-                            .map(|e| e.morph_type);
-                        let expected: &str = registered.unwrap_or(#snake_fallback);
-                        if expected == morph_type {
+                        //
+                        // A registered target also answers to each of its
+                        // `morph_aliases`, the other names a Laravel
+                        // database may hold for it.
+                        if ::suprnova::eloquent::relations::morph_registry::names_morph_target(
+                            ::std::any::TypeId::of::<#ty>(),
+                            #snake_fallback,
+                            morph_type,
+                        ) {
                             return ::core::option::Option::Some(#index);
                         }
                     }
@@ -3390,20 +3392,21 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
-                    // Type-string predicate goes through the
-                    // standard `filter` path; the inner builder
-                    // serialises it to a bind parameter via
-                    // `IntoVal`. We pre-wrap it in a JSON `String`
-                    // value so the WhereTerm storage stays
-                    // homogeneous with the IN-list above.
-                    let morph_type_predicate =
-                        ::suprnova::serde_json::Value::String(
-                            ::std::string::String::from(#morph_type_value),
-                        );
+                    // Type-string predicate: every name the parent
+                    // answers to, its `morph_type` and its
+                    // `morph_aliases`, as an IN-list of JSON strings like
+                    // the id list above.
+                    let morph_type_predicate: ::std::vec::Vec<::suprnova::serde_json::Value> =
+                        ::suprnova::eloquent::relations::morph_registry::morph_type_names(
+                            #morph_type_value,
+                        )
+                        .into_iter()
+                        .map(::suprnova::serde_json::Value::String)
+                        .collect();
                     let __sn_builder: ::suprnova::Builder<#target_ty> =
                         <#target_ty as ::suprnova::eloquent::Model>::query()
                             .filter_in(#id_col, pk_values)
-                            .filter(#type_col, morph_type_predicate);
+                            .filter_in(#type_col, morph_type_predicate);
                     let __sn_builder = match __sn_pred.take() {
                         ::core::option::Option::Some(f) => f(__sn_builder),
                         ::core::option::Option::None => __sn_builder,

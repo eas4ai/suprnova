@@ -401,3 +401,113 @@ pub async fn count(conn: &DatabaseConnection, table: &str, filter: &str) -> i64 
         .expect("a count row");
     row.try_get::<i64>("", "n").expect("count as i64")
 }
+
+/// A notification for the database channel.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Shipped;
+
+impl suprnova::notifications::Notification for Shipped {
+    fn notification_name() -> &'static str {
+        "Shipped"
+    }
+
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["database"]
+    }
+
+    fn data(&self) -> serde_json::Value {
+        serde_json::json!({ "order": 7 })
+    }
+}
+
+/// Turns `LaravelDatabase::share` on for as long as it lives, and back to
+/// the environment's answer when dropped.
+pub struct Shared;
+
+impl Shared {
+    pub fn on() -> Self {
+        suprnova::LaravelDatabase::share(true);
+        Self
+    }
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        suprnova::LaravelDatabase::follow_environment();
+    }
+}
+
+/// Install a Crypt key, an auth manager whose `users` provider is the
+/// scaffold's `User` model, and the default rate limiter, inside the
+/// caller's container scope (see [`bind`]).
+pub async fn install_scaffold_auth() {
+    let _ = suprnova::crypto::_test_install_key(suprnova::EncryptionKey::generate());
+    suprnova::testing::TestContainer::singleton(suprnova::AuthManager::new(
+        suprnova::AuthConfig::default(),
+    ));
+    suprnova::Auth::register_provider(
+        "users",
+        std::sync::Arc::new(suprnova::EloquentUserProvider::<crate::scaffold::user::User>::new()),
+    )
+    .expect("register the users provider");
+    suprnova::rate_limit::bootstrap_default().await;
+}
+
+/// Run `fut` as one request would: with a session and the request's auth
+/// state in scope.
+pub async fn in_request<F, T>(fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let session_slot = suprnova::session::new_session_slot_for_test();
+    let pending_slot = suprnova::session::new_pending_cookies_slot_for_test();
+    suprnova::session::session_scope_for_test(
+        session_slot,
+        suprnova::session::pending_cookies_scope_for_test(
+            pending_slot,
+            suprnova::auth::request_state::request_state_scope_for_test(fut),
+        ),
+    )
+    .await
+}
+
+/// The stored password hash of the user with `email` in `users`.
+pub async fn stored_hash(conn: &DatabaseConnection, email: &str) -> String {
+    let rows = rows(
+        conn,
+        &format!("SELECT password FROM users WHERE email = '{email}'"),
+    )
+    .await;
+    text(&rows[0], "password")
+}
+
+/// Run `body` in a child process of this test binary, alone: the
+/// Magnetar engine installs once per process, and libtest runs several
+/// tests in one. `name` is the calling test's full path; the child runs
+/// that test, which finds itself the child and runs `body`.
+pub fn alone<F, Fut>(name: &str, body: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    const ALONE: &str = "LDB_ALONE";
+    if std::env::var(ALONE).as_deref() == Ok(name) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime for the child");
+        runtime.block_on(body());
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+        .args(["--exact", name, "--nocapture", "--include-ignored"])
+        .env(ALONE, name)
+        .output()
+        .expect("run the child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "the child running {name} failed:\n{stdout}\n{stderr}"
+    );
+}

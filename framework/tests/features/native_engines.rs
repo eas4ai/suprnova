@@ -91,39 +91,39 @@ async fn live_features(env: &str) {
     )
     .await
     .expect("admin upsert");
-    assert_eq!(row.created_at, at(2));
-    assert_eq!(row.updated_at, at(2));
+    assert_eq!(row.created_at, Some(at(2)));
+    assert_eq!(row.updated_at, Some(at(2)));
     let listed = admin::list().await.expect("admin list");
     assert_eq!(listed.len(), 2);
     let flag = listed
         .iter()
         .find(|row| row.name == "checkout.v2")
         .expect("the set_flag row is listed");
-    assert_eq!(flag.created_at, at(0));
-    assert_eq!(flag.updated_at, at(1));
+    assert_eq!(flag.created_at, Some(at(0)));
+    assert_eq!(flag.updated_at, Some(at(1)));
 
     clock.set(at(3));
+    // The model is Pennant's row: its serialized scope and JSON value.
     let made = Feature::create(attrs! {
         name: "search",
-        scope_key: "",
-        enabled: true,
-        description: "full-text search",
+        scope: "__laravel_null",
+        value: "true",
     })
     .await
     .expect("create a flag through the model");
-    assert_eq!(made.created_at, at(3));
+    assert_eq!(made.created_at, Some(at(3)));
     clock.set(at(4));
     let made = made
-        .update(attrs! { enabled: false })
+        .update(attrs! { value: "false" })
         .await
         .expect("update a flag through the model");
     let reread = Feature::find(made.id)
         .await
         .expect("read the flag through the model")
         .expect("the flag exists");
-    assert!(!reread.enabled);
-    assert_eq!(reread.created_at, at(3));
-    assert_eq!(reread.updated_at, at(4));
+    assert_eq!(reread.value, "false");
+    assert_eq!(reread.created_at, Some(at(3)));
+    assert_eq!(reread.updated_at, Some(at(4)));
 
     drop(clock);
     drop(guard);

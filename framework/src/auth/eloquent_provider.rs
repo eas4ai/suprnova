@@ -208,7 +208,31 @@ where
     ) -> Result<bool, FrameworkError> {
         let password = credentials.get("password").and_then(|v| v.as_str());
         match (password, user.get_auth_password()) {
-            (Some(plaintext), Some(hash)) => hashing::verify_async(plaintext, hash).await,
+            (Some(plaintext), Some(hash)) => {
+                let valid = hashing::verify_async(plaintext, hash).await?;
+                // While the application shares its database with Laravel,
+                // a valid sign-in rewrites a hash Laravel's hasher would
+                // refuse (`$2b$`, Argon2id) as the `$2y$` one it accepts,
+                // as Laravel itself rehashes on login. The sign-in stands
+                // if the rewrite fails; the next one tries again.
+                if valid && crate::LaravelDatabase::is_shared() && hashing::needs_rehash(hash) {
+                    let rewritten = match hashing::hash_async(plaintext).await {
+                        Ok(rehashed) => {
+                            self.set_password(&user.get_auth_identifier(), &rehashed)
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = rewritten {
+                        tracing::warn!(
+                            error = %error,
+                            "the password hash could not be rewritten for Laravel after a \
+                             valid sign-in; the sign-in stands"
+                        );
+                    }
+                }
+                Ok(valid)
+            }
             // A password was supplied but the matched account is
             // passwordless. Returning `Ok(false)` here with no hash work
             // would fingerprint "account exists but is passwordless": the
@@ -308,7 +332,9 @@ where
     }
 
     async fn set_password(&self, id: &str, hashed: &str) -> Result<(), FrameworkError> {
-        // Absent id → no-op.
+        // Absent id → no-op. Only the password column is written: the
+        // user's `remember_token`, which a Laravel application on the same
+        // database owns, is left as it was.
         if let Some(user) = self.find_by_identifier(id).await? {
             // `hashed` arrives ALREADY HASHED - store it verbatim: the write
             // bypasses mutators and fillable/guarded alike.

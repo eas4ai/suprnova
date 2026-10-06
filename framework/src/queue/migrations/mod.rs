@@ -478,17 +478,71 @@ async fn create_batches(manager: &SchemaManager<'_>, table: &str) -> Result<(), 
 }
 
 async fn create_settlements(manager: &SchemaManager<'_>, table: &str) -> Result<(), DbErr> {
-    if manager.has_table(table).await? {
+    if !manager.has_table(table).await? {
+        Schema::create(manager, table, |t| {
+            t.string("batch_id");
+            t.string("job_id");
+            t.integer("failed");
+            t.big_integer("settled_at");
+            t.primary(&["batch_id", "job_id"]);
+        })
+        .await?;
+    }
+    match_batch_collation(manager, table).await
+}
+
+/// On MySQL, give `job_batch_settlements` the collation of
+/// `job_batches.id`, which the batch repository joins its `batch_id` with.
+/// Laravel creates `job_batches` as `utf8mb4_unicode_ci`, and MySQL 8
+/// refuses to compare that with its own default collation, so every
+/// settlement count failed on a table Laravel created. The settlements
+/// table is the framework's own, so converting it alters nothing of
+/// Laravel's.
+async fn match_batch_collation(manager: &SchemaManager<'_>, table: &str) -> Result<(), DbErr> {
+    let connection = manager.get_connection();
+    if connection.get_database_backend() != sea_orm_migration::sea_orm::DbBackend::MySql {
         return Ok(());
     }
-    Schema::create(manager, table, |t| {
-        t.string("batch_id");
-        t.string("job_id");
-        t.integer("failed");
-        t.big_integer("settled_at");
-        t.primary(&["batch_id", "job_id"]);
-    })
-    .await
+    let collation = |table: &str, column: &str| {
+        Statement::from_sql_and_values(
+            sea_orm_migration::sea_orm::DbBackend::MySql,
+            "SELECT COLLATION_NAME AS collation FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+            [table.into(), column.into()],
+        )
+    };
+    let read = |row: Option<QueryResult>| -> Result<Option<String>, DbErr> {
+        match row {
+            Some(row) => row.try_get::<Option<String>>("", "collation"),
+            None => Ok(None),
+        }
+    };
+    let batches = read(
+        connection
+            .query_one_raw(collation(crate::queue::DEFAULT_BATCHES_TABLE, "id"))
+            .await?,
+    )?;
+    let settlements = read(
+        connection
+            .query_one_raw(collation(table, "batch_id"))
+            .await?,
+    )?;
+    let (Some(batches), Some(settlements)) = (batches, settlements) else {
+        return Ok(());
+    };
+    if batches == settlements {
+        return Ok(());
+    }
+    // A collation name is `<charset>_...`; the charset is what precedes the
+    // first underscore. Both come from the catalog, never from input.
+    let charset = batches.split('_').next().unwrap_or("utf8mb4");
+    connection
+        .execute_unprepared(&format!(
+            "ALTER TABLE {} CONVERT TO CHARACTER SET {charset} COLLATE {batches}",
+            quote(sea_orm_migration::sea_orm::DbBackend::MySql, table)
+        ))
+        .await?;
+    Ok(())
 }
 
 /// What the settlement rows say about one batch.

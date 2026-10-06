@@ -70,47 +70,21 @@ impl MigrationName for SessionsMigration {
 
 #[async_trait::async_trait]
 impl MigrationTrait for SessionsMigration {
+    /// Laravel 13's `sessions`, as the framework's migration creates it.
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .create_table(
-                Table::create()
-                    .table(Sessions::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(Sessions::Id)
-                            .string()
-                            .not_null()
-                            .primary_key(),
-                    )
-                    .col(ColumnDef::new(Sessions::UserId).string().null())
-                    .col(ColumnDef::new(Sessions::Payload).text().not_null())
-                    .col(ColumnDef::new(Sessions::CsrfToken).string().not_null())
-                    .col(
-                        ColumnDef::new(Sessions::LastActivity)
-                            .timestamp()
-                            .not_null()
-                            .default(Expr::current_timestamp()),
-                    )
-                    .to_owned(),
-            )
-            .await
+        suprnova::session::migrations::create_sessions_table(
+            manager,
+            "sessions",
+            suprnova::session::migrations::SessionUserKey::Integer,
+        )
+        .await
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(Sessions::Table).to_owned())
+            .drop_table(Table::drop().table(Alias::new("sessions")).to_owned())
             .await
     }
-}
-
-#[derive(DeriveIden)]
-enum Sessions {
-    Table,
-    Id,
-    UserId,
-    Payload,
-    CsrfToken,
-    LastActivity,
 }
 
 struct LegacySessionStore {
@@ -472,13 +446,12 @@ async fn oversized_lifetime_gc_skips_unrepresentable_database_threshold() {
     );
 }
 
-/// `column_type` is the type of `last_activity`. Each engine runs once per
-/// type its migrations create: MySQL and MariaDB with `DATETIME` and with
-/// `TIMESTAMP` (what the scaffold's `.timestamp()` creates there), Postgres
-/// with `timestamp` and `timestamptz`.
+/// `user_type` is the type of `user_id`, Laravel's `sessions` with the
+/// big integer `foreignId` makes or the text column of a UUID or ULID user;
+/// `last_activity` is Laravel's epoch-seconds integer.
 async fn live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(
     env: &str,
-    column_type: &str,
+    user_type: &str,
 ) {
     let url = std::env::var(env).expect("explicit disposable database URL required");
     let guard = TestContainer::fake();
@@ -497,8 +470,8 @@ async fn live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(
         .inner()
         .execute_unprepared(&format!(
             "CREATE TEMPORARY TABLE sessions (id VARCHAR(255) PRIMARY KEY, \
-             user_id VARCHAR(255), payload TEXT NOT NULL, csrf_token VARCHAR(255) NOT NULL, \
-             last_activity {column_type} NOT NULL)",
+             user_id {user_type} NULL, ip_address VARCHAR(45) NULL, user_agent TEXT NULL, \
+             payload TEXT NOT NULL, last_activity INTEGER NOT NULL)",
         ))
         .await
         .expect("create isolated temporary sessions table");
@@ -508,19 +481,6 @@ async fn live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(
     let session = SessionData::new("live-gc-session".into(), "csrf".into());
     huge.write(&session).await.unwrap();
     assert!(huge.read(&session.id).await.unwrap().is_some());
-    // A whole row reads through the public entity on this column type too.
-    let rows = {
-        use sea_orm::EntityTrait;
-        suprnova::session::driver::database::sessions::Entity::find()
-            .all(database.inner())
-            .await
-            .map(|rows| rows.len())
-    };
-    assert_eq!(
-        format!("{rows:?}"),
-        "Ok(1)",
-        "{column_type}: whole rows through sessions::Entity"
-    );
     assert_eq!(
         huge.gc()
             .await
@@ -532,7 +492,7 @@ async fn live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(
 
     database
         .inner()
-        .execute_unprepared("UPDATE sessions SET last_activity = '2000-01-01 00:00:00'")
+        .execute_unprepared("UPDATE sessions SET last_activity = 946684800")
         .await
         .unwrap();
     assert_eq!(huge.gc().await.unwrap(), 0);
@@ -548,17 +508,17 @@ async fn live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(
 async fn mysql_session_gc_handles_oversized_lifetime() {
     live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(
         "MYSQL_TEST_URL",
-        "DATETIME",
+        "BIGINT UNSIGNED",
     )
     .await;
 }
 
 #[tokio::test]
 #[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
-async fn mysql_session_on_a_timestamp_column_reads_writes_and_collects() {
+async fn mysql_session_with_a_text_user_column_reads_writes_and_collects() {
     live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(
         "MYSQL_TEST_URL",
-        "TIMESTAMP",
+        "CHAR(36)",
     )
     .await;
 }
@@ -566,18 +526,15 @@ async fn mysql_session_on_a_timestamp_column_reads_writes_and_collects() {
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
 async fn postgres_session_gc_handles_oversized_lifetime() {
-    live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime("PG_TEST_URL", "TIMESTAMP")
+    live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime("PG_TEST_URL", "BIGINT")
         .await;
 }
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
-async fn postgres_session_on_a_timestamptz_column_reads_writes_and_collects() {
-    live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime(
-        "PG_TEST_URL",
-        "TIMESTAMPTZ",
-    )
-    .await;
+async fn postgres_session_with_a_uuid_user_column_reads_writes_and_collects() {
+    live_session_gc_preserves_huge_lifetime_and_expires_normal_lifetime("PG_TEST_URL", "UUID")
+        .await;
 }
 
 #[tokio::test]
@@ -872,7 +829,7 @@ async fn concurrent_atomic_migrations_from_one_pending_row_elect_one_winner() {
     let blocker = database.inner().begin().await.unwrap();
     blocker
         .execute_unprepared(
-            "UPDATE sessions SET csrf_token = csrf_token WHERE id = 'shared-pending-two-factor'",
+            "UPDATE sessions SET payload = payload WHERE id = 'shared-pending-two-factor'",
         )
         .await
         .unwrap();
@@ -958,8 +915,8 @@ async fn live_guard_destroy_removes_only_that_guards_user(env: &str) {
         .inner()
         .execute_unprepared(
             "CREATE TEMPORARY TABLE sessions (id VARCHAR(255) PRIMARY KEY, \
-             user_id VARCHAR(255), payload TEXT NOT NULL, csrf_token VARCHAR(255) NOT NULL, \
-             last_activity TIMESTAMP NOT NULL)",
+             user_id BIGINT NULL, ip_address VARCHAR(45) NULL, user_agent TEXT NULL, \
+             payload TEXT NOT NULL, last_activity INTEGER NOT NULL)",
         )
         .await
         .expect("create isolated temporary sessions table");

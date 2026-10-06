@@ -33,9 +33,11 @@ use suprnova::{DB, DbConnection};
 /// migration so the columns are exactly the ones an application gets.
 pub(crate) async fn fresh_rbac_schema(database: &DbConnection) {
     for table in [
-        "model_permissions",
-        "model_roles",
-        "role_permissions",
+        "model_has_permissions",
+        "model_has_roles",
+        "role_has_permissions",
+        "suprnova_permission_details",
+        "suprnova_role_details",
         "permissions",
         "roles",
     ] {

@@ -145,11 +145,10 @@ impl Hasher for BcryptHasher {
         if hash.is_empty() {
             return Ok(false);
         }
-        if password.len() > MAX_BCRYPT_PASSWORD_BYTES {
-            // Length-based info disclosure mitigation: oversized password
-            // can't match any hash this driver produces.
-            return Ok(false);
-        }
+        // No length check: bcrypt judges a password on its first 72 bytes,
+        // as PHP does, so a Laravel user's password of 72 bytes or more
+        // verifies against the `$2y$` hash Laravel wrote. One over 71 bytes
+        // cannot match a `$2b$` hash this driver wrote.
         if self.verify_algorithm {
             let info = parse(hash);
             if !matches!(info.algo, AlgoName::Bcrypt) {

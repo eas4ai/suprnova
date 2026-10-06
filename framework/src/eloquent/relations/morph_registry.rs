@@ -31,6 +31,11 @@ pub struct MorphTypeEntry {
     /// `"post"`, `"video"`). Matches the value of `morph_type = "..."`
     /// on the model's `#[suprnova::model]` attribute.
     pub morph_type: &'static str,
+    /// Further strings the `*_type` column may hold for this model, from
+    /// `morph_aliases = [...]`: every read accepts them, no write stores
+    /// them. A Laravel database that adopted `Relation::morphMap` late
+    /// holds both `App\Models\Post` and `post` for one model.
+    pub aliases: &'static [&'static str],
     /// The Rust type name (`"Post"`).
     pub type_name: &'static str,
     /// The SQL table name (`"posts"`).
@@ -60,7 +65,20 @@ pub fn morph_types() -> impl Iterator<Item = &'static MorphTypeEntry> {
 /// `once_cell` for this one site.
 fn morph_by_name() -> &'static HashMap<&'static str, &'static MorphTypeEntry> {
     static IDX: OnceLock<HashMap<&'static str, &'static MorphTypeEntry>> = OnceLock::new();
-    IDX.get_or_init(|| morph_types().map(|e| (e.morph_type, e)).collect())
+    IDX.get_or_init(|| {
+        let mut index = HashMap::new();
+        // Aliases first, so a `morph_type` another model also lists as an
+        // alias still resolves to the model that writes it.
+        for entry in morph_types() {
+            for alias in entry.aliases {
+                index.insert(*alias, entry);
+            }
+        }
+        for entry in morph_types() {
+            index.insert(entry.morph_type, entry);
+        }
+        index
+    })
 }
 
 /// Morph-TypeId index (reverse lookup). Same shape as `morph_by_name`;
@@ -71,8 +89,8 @@ fn morph_by_type_id() -> &'static HashMap<TypeId, &'static MorphTypeEntry> {
     IDX.get_or_init(|| morph_types().map(|e| ((e.type_id)(), e)).collect())
 }
 
-/// Find a morph type by its stored `*_type` string. `None` if no model
-/// registers that string - distinguishes "registered but not in this
+/// Find a morph type by its stored `*_type` string, its `morph_type` or
+/// one of its `morph_aliases`. `None` if no model registers that string - distinguishes "registered but not in this
 /// MorphTo's target list" from "completely unknown" at runtime. O(1)
 /// after the first lookup builds the index; linear scans previously
 /// scaled with the number of `#[suprnova::model(morph_type)]` decls,
@@ -87,4 +105,28 @@ pub fn find_morph_type(name: &str) -> Option<&'static MorphTypeEntry> {
 /// string for a known concrete type. O(1) after first init.
 pub fn find_morph_type_by_id(id: TypeId) -> Option<&'static MorphTypeEntry> {
     morph_by_type_id().get(&id).copied()
+}
+
+/// Every string a `*_type` column may hold for the model `morph_type`
+/// names, the `morph_type` first and then its aliases. A string no model
+/// registers is returned alone.
+pub fn morph_type_names(morph_type: &str) -> Vec<String> {
+    match find_morph_type(morph_type) {
+        Some(entry) => std::iter::once(entry.morph_type)
+            .chain(entry.aliases.iter().copied())
+            .map(str::to_owned)
+            .collect(),
+        None => vec![morph_type.to_owned()],
+    }
+}
+
+/// Whether the stored `*_type` string `stored` names the model `type_id`:
+/// its `morph_type` or one of its aliases when it is registered, otherwise
+/// `fallback` (the snake-cased type name, the default a parent writes).
+/// The `MorphTo` fetch helper the model macro emits asks this per target.
+pub fn names_morph_target(type_id: TypeId, fallback: &str, stored: &str) -> bool {
+    match find_morph_type_by_id(type_id) {
+        Some(entry) => entry.morph_type == stored || entry.aliases.contains(&stored),
+        None => fallback == stored,
+    }
 }

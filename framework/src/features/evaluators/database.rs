@@ -25,6 +25,15 @@
 //! 3. `""` - global
 //! 4. `None` - flag absent entirely
 //!
+//! # The table
+//!
+//! The `features` table is laravel/pennant's. These keys are the
+//! framework's; the rows hold Pennant's scopes (`__laravel_null`,
+//! `App\Models\User|42`) and Pennant's JSON values, so a flag Pennant
+//! stored reads the same here and a flag set here reads the same in
+//! Pennant. A stored value other than `false` is enabled, as Pennant's
+//! `active()` reads it. See [`crate::features::store`] for the mapping.
+//!
 //! Contexts walk their parent chain at lookup time
 //! ([`Context::iter`](featureflag::context::Context::iter)) so a
 //! parent-scope context's user_id is visible to a child context with
@@ -55,9 +64,6 @@
 
 use crate::database::DB;
 use crate::error::FrameworkError;
-use crate::features::entity::{
-    self as features_entity, ActiveModel as FeatureActive, Entity as FeatureEntity,
-};
 use crate::features::fields::{IdentityScopes, TeamField, UserIdField};
 use crate::features::migrations::CreateFeaturesTable;
 use crate::features::sync::FeatureSync;
@@ -69,7 +75,7 @@ use featureflag::{
     evaluator::Evaluator,
     fields::Fields,
 };
-use sea_orm::{ActiveValue::Set, DatabaseConnection, EntityTrait, sea_query::OnConflict};
+use sea_orm::DatabaseConnection;
 use sea_orm_migration::MigratorTrait;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -280,10 +286,7 @@ impl DatabaseEvaluator {
         // no advance and replaces wholesale.
         let counter_before = self.write_counter.load(Ordering::SeqCst);
 
-        let rows = FeatureEntity::find()
-            .all(&self.conn)
-            .await
-            .map_err(|e| FrameworkError::database(format!("features select: {e}")))?;
+        let rows = crate::features::store::all(&self.conn).await?;
 
         let mut next = HashMap::with_capacity(rows.len());
         for row in rows {
@@ -349,36 +352,8 @@ impl DatabaseEvaluator {
         scope_key: &str,
         enabled: bool,
     ) -> Result<(), FrameworkError> {
-        // The entity casts both timestamps native (the migration's
-        // columns are `timestamp with time zone`), so the active model
-        // takes the moment itself.
-        let now = crate::clock::now();
-        let model = FeatureActive {
-            name: Set(name.to_string()),
-            scope_key: Set(scope_key.to_string()),
-            enabled: Set(enabled),
-            description: Set(None),
-            updated_by: Set(None),
-            created_at: Set(now),
-            updated_at: Set(now),
-            ..Default::default()
-        };
-
-        FeatureEntity::insert(model)
-            .on_conflict(
-                OnConflict::columns([
-                    features_entity::Column::Name,
-                    features_entity::Column::ScopeKey,
-                ])
-                .update_columns([
-                    features_entity::Column::Enabled,
-                    features_entity::Column::UpdatedAt,
-                ])
-                .to_owned(),
-            )
-            .exec(&self.conn)
-            .await
-            .map_err(|e| FrameworkError::database(format!("features upsert: {e}")))?;
+        // The row Pennant would store for the same flag, value and scope.
+        crate::features::store::upsert(&self.conn, name, scope_key, enabled).await?;
 
         // Update the in-memory snapshot in the same operation so
         // callers don't need to call reload() after every write. A
@@ -851,20 +826,9 @@ mod tests {
 
         // Out of band, the way another process flipping a row would be:
         // straight into the table, then a reload.
-        let now = crate::clock::now();
-        FeatureEntity::insert(FeatureActive {
-            name: Set("late-override-flag".to_string()),
-            scope_key: Set("user:bob".to_string()),
-            enabled: Set(false),
-            description: Set(None),
-            updated_by: Set(None),
-            created_at: Set(now),
-            updated_at: Set(now),
-            ..Default::default()
-        })
-        .exec(&evaluator.conn)
-        .await
-        .expect("insert bob's override out of band");
+        crate::features::store::upsert(&evaluator.conn, "late-override-flag", "user:bob", false)
+            .await
+            .expect("insert bob's override out of band");
         evaluator.reload().await.expect("reload");
 
         let principal = observations_of(&evaluator, "late-override-flag", || {
@@ -902,7 +866,7 @@ mod tests {
         // Step 1: capture counter pre-SELECT (mirrors `reload()`).
         let counter_before = eval.write_counter.load(Ordering::SeqCst);
         // Step 2: SELECT - at this point alpha is still false on disk.
-        let rows = FeatureEntity::find().all(&eval.conn).await.unwrap();
+        let rows = crate::features::store::all(&eval.conn).await.unwrap();
         let mut next = HashMap::with_capacity(rows.len());
         for row in rows {
             next.insert((row.name, row.scope_key), row.enabled);
@@ -951,20 +915,9 @@ mod tests {
         let eval = DatabaseEvaluator::new_in_memory().await.unwrap();
         // Seed via a direct insert that bypasses set_flag, so the
         // counter stays at zero and the snapshot stays empty.
-        let now = crate::clock::now();
-        FeatureEntity::insert(FeatureActive {
-            name: Set("beta".to_string()),
-            scope_key: Set(String::new()),
-            enabled: Set(true),
-            description: Set(None),
-            updated_by: Set(None),
-            created_at: Set(now),
-            updated_at: Set(now),
-            ..Default::default()
-        })
-        .exec(&eval.conn)
-        .await
-        .unwrap();
+        crate::features::store::upsert(&eval.conn, "beta", "", true)
+            .await
+            .unwrap();
 
         // Pre-state: snapshot doesn't know about beta yet.
         assert_eq!(snapshot_value(&eval, "beta", ""), None);

@@ -18,6 +18,35 @@ fn int_value(i: i64) -> Value {
     Value::from(i)
 }
 
+/// A model id bound as spatie's `model_id` column takes it: an integer for
+/// its default `unsignedBigInteger`, Postgres's `uuid` for a UUID key, text
+/// otherwise (see [`crate::database::morph_key`]).
+fn key_value(model_id: &str) -> Result<Value, FrameworkError> {
+    Ok(crate::database::morph_key::morph_key_value(
+        backend()?,
+        model_id,
+    ))
+}
+
+/// Every `model_type` an assignment for `model_type` may be stored under:
+/// the model's `morph_type` and its `morph_aliases` when the string names a
+/// registered model, otherwise the string alone. Reads accept them all;
+/// writes store the one the caller passed.
+fn model_types(model_type: &str) -> Vec<String> {
+    crate::eloquent::relations::morph_registry::morph_type_names(model_type)
+}
+
+/// The current time at whole seconds, for the `created_at` and
+/// `updated_at` spatie's tables carry.
+fn now() -> Value {
+    let now = crate::clock::now();
+    Value::from(
+        chrono::DateTime::<chrono::Utc>::from_timestamp(now.timestamp(), 0)
+            .unwrap_or(now)
+            .naive_utc(),
+    )
+}
+
 /// Rewrite this module's `?` placeholders for the active backend.
 ///
 /// `DB::select_one` / `DB::insert` / `DB::scalar` document that placeholders
@@ -81,107 +110,113 @@ const FIND_PERMISSION_ID: ObservedStatement = ObservedStatement {
     tables: &["permissions"],
 };
 const ROLE_HAS_PERMISSION: ObservedStatement = ObservedStatement {
-    sql: "SELECT COUNT(*) FROM role_permissions WHERE role_id = ? AND permission_id = ?",
-    tables: &["role_permissions"],
+    sql: "SELECT COUNT(*) FROM role_has_permissions WHERE role_id = ? AND permission_id = ?",
+    tables: &["role_has_permissions"],
 };
 const MODEL_HAS_ROLE_ID: ObservedStatement = ObservedStatement {
-    sql: "SELECT COUNT(*) FROM model_roles WHERE model_type = ? AND model_id = ? AND role_id = ?",
-    tables: &["model_roles"],
+    sql: "SELECT COUNT(*) FROM model_has_roles WHERE model_type = ? AND model_id = ? AND \
+          role_id = ?",
+    tables: &["model_has_roles"],
 };
 const MODEL_HAS_PERMISSION_ID: ObservedStatement = ObservedStatement {
-    sql: "SELECT COUNT(*) FROM model_permissions WHERE model_type = ? AND model_id = ? AND \
+    sql: "SELECT COUNT(*) FROM model_has_permissions WHERE model_type = ? AND model_id = ? AND \
           permission_id = ?",
-    tables: &["model_permissions"],
+    tables: &["model_has_permissions"],
 };
 const MODEL_HAS_ROLE_NAMED: ObservedStatement = ObservedStatement {
-    sql: "SELECT COUNT(*) FROM model_roles \
-          INNER JOIN roles ON roles.id = model_roles.role_id \
-          WHERE model_roles.model_type = ? \
-            AND model_roles.model_id = ? \
+    sql: "SELECT COUNT(*) FROM model_has_roles \
+          INNER JOIN roles ON roles.id = model_has_roles.role_id \
+          WHERE model_has_roles.model_type = ? \
+            AND model_has_roles.model_id = ? \
             AND roles.name = ? \
             AND roles.guard_name = ?",
-    tables: &["model_roles", "roles"],
+    tables: &["model_has_roles", "roles"],
 };
 const MODEL_HAS_DIRECT_PERMISSION: ObservedStatement = ObservedStatement {
-    sql: "SELECT COUNT(*) FROM model_permissions \
-          INNER JOIN permissions ON permissions.id = model_permissions.permission_id \
-          WHERE model_permissions.model_type = ? \
-            AND model_permissions.model_id = ? \
+    sql: "SELECT COUNT(*) FROM model_has_permissions \
+          INNER JOIN permissions ON permissions.id = model_has_permissions.permission_id \
+          WHERE model_has_permissions.model_type = ? \
+            AND model_has_permissions.model_id = ? \
             AND permissions.name = ? \
             AND permissions.guard_name = ?",
-    tables: &["model_permissions", "permissions"],
+    tables: &["model_has_permissions", "permissions"],
 };
 const MODEL_HAS_INHERITED_PERMISSION: ObservedStatement = ObservedStatement {
-    sql: "SELECT COUNT(*) FROM model_roles \
-          INNER JOIN roles ON roles.id = model_roles.role_id \
-          INNER JOIN role_permissions ON role_permissions.role_id = roles.id \
-          INNER JOIN permissions ON permissions.id = role_permissions.permission_id \
-          WHERE model_roles.model_type = ? \
-            AND model_roles.model_id = ? \
+    sql: "SELECT COUNT(*) FROM model_has_roles \
+          INNER JOIN roles ON roles.id = model_has_roles.role_id \
+          INNER JOIN role_has_permissions ON role_has_permissions.role_id = roles.id \
+          INNER JOIN permissions ON permissions.id = role_has_permissions.permission_id \
+          WHERE model_has_roles.model_type = ? \
+            AND model_has_roles.model_id = ? \
             AND permissions.name = ? \
             AND permissions.guard_name = ? \
             AND roles.guard_name = ?",
-    tables: &["model_roles", "roles", "role_permissions", "permissions"],
+    tables: &[
+        "model_has_roles",
+        "roles",
+        "role_has_permissions",
+        "permissions",
+    ],
 };
 /// The two existence checks above without the name filter, joined: every
 /// permission name the model holds, directly or through a role.
 const MODEL_PERMISSION_NAMES: ObservedStatement = ObservedStatement {
-    sql: "SELECT permissions.name FROM model_permissions \
-          INNER JOIN permissions ON permissions.id = model_permissions.permission_id \
-          WHERE model_permissions.model_type = ? \
-            AND model_permissions.model_id = ? \
+    sql: "SELECT permissions.name FROM model_has_permissions \
+          INNER JOIN permissions ON permissions.id = model_has_permissions.permission_id \
+          WHERE model_has_permissions.model_type = ? \
+            AND model_has_permissions.model_id = ? \
             AND permissions.guard_name = ? \
           UNION \
-          SELECT permissions.name FROM model_roles \
-          INNER JOIN roles ON roles.id = model_roles.role_id \
-          INNER JOIN role_permissions ON role_permissions.role_id = roles.id \
-          INNER JOIN permissions ON permissions.id = role_permissions.permission_id \
-          WHERE model_roles.model_type = ? \
-            AND model_roles.model_id = ? \
+          SELECT permissions.name FROM model_has_roles \
+          INNER JOIN roles ON roles.id = model_has_roles.role_id \
+          INNER JOIN role_has_permissions ON role_has_permissions.role_id = roles.id \
+          INNER JOIN permissions ON permissions.id = role_has_permissions.permission_id \
+          WHERE model_has_roles.model_type = ? \
+            AND model_has_roles.model_id = ? \
             AND permissions.guard_name = ? \
             AND roles.guard_name = ?",
     tables: &[
-        "model_permissions",
+        "model_has_permissions",
         "permissions",
-        "model_roles",
+        "model_has_roles",
         "roles",
-        "role_permissions",
+        "role_has_permissions",
     ],
 };
 
 const INSERT_ROLE: ObservedStatement = ObservedStatement {
-    sql: "INSERT INTO roles (name, display_name, guard_name) VALUES (?, ?, ?)",
+    sql: "INSERT INTO roles (name, guard_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
     tables: &["roles"],
 };
 const INSERT_PERMISSION: ObservedStatement = ObservedStatement {
-    sql: "INSERT INTO permissions (name, display_name, guard_name) VALUES (?, ?, ?)",
+    sql: "INSERT INTO permissions (name, guard_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
     tables: &["permissions"],
 };
 const INSERT_ROLE_PERMISSION: ObservedStatement = ObservedStatement {
-    sql: "INSERT INTO role_permissions (role_id, permission_id) VALUES (?, ?)",
-    tables: &["role_permissions"],
+    sql: "INSERT INTO role_has_permissions (permission_id, role_id) VALUES (?, ?)",
+    tables: &["role_has_permissions"],
 };
 const INSERT_MODEL_ROLE: ObservedStatement = ObservedStatement {
-    sql: "INSERT INTO model_roles (model_type, model_id, role_id) VALUES (?, ?, ?)",
-    tables: &["model_roles"],
+    sql: "INSERT INTO model_has_roles (role_id, model_type, model_id) VALUES (?, ?, ?)",
+    tables: &["model_has_roles"],
 };
 const INSERT_MODEL_PERMISSION: ObservedStatement = ObservedStatement {
-    sql: "INSERT INTO model_permissions (model_type, model_id, permission_id) VALUES (?, ?, ?)",
-    tables: &["model_permissions"],
+    sql: "INSERT INTO model_has_permissions (permission_id, model_type, model_id) VALUES (?, ?, ?)",
+    tables: &["model_has_permissions"],
 };
 
 const DELETE_ROLE_PERMISSION: ObservedStatement = ObservedStatement {
-    sql: "DELETE FROM role_permissions WHERE role_id = ? AND permission_id = ?",
-    tables: &["role_permissions"],
+    sql: "DELETE FROM role_has_permissions WHERE role_id = ? AND permission_id = ?",
+    tables: &["role_has_permissions"],
 };
 const DELETE_MODEL_ROLE: ObservedStatement = ObservedStatement {
-    sql: "DELETE FROM model_roles WHERE model_type = ? AND model_id = ? AND role_id = ?",
-    tables: &["model_roles"],
+    sql: "DELETE FROM model_has_roles WHERE model_type = ? AND model_id = ? AND role_id = ?",
+    tables: &["model_has_roles"],
 };
 const DELETE_MODEL_PERMISSION: ObservedStatement = ObservedStatement {
-    sql: "DELETE FROM model_permissions WHERE model_type = ? AND model_id = ? AND \
+    sql: "DELETE FROM model_has_permissions WHERE model_type = ? AND model_id = ? AND \
           permission_id = ?",
-    tables: &["model_permissions"],
+    tables: &["model_has_permissions"],
 };
 
 /// Every read statement this module issues, for the table-list contract.
@@ -276,7 +311,7 @@ async fn insert(statement: ObservedStatement, values: Vec<Value>) -> Result<bool
     let sql = format!(
         "{} {}",
         render(statement.sql, backend),
-        skip_existing_row(backend)
+        skip_existing_row(backend, table)
     );
     let rows = DB::affecting_statement_on_table(&sql, values, table).await?;
     Ok(rows > 0)
@@ -287,11 +322,18 @@ async fn insert(statement: ObservedStatement, values: Vec<Value>) -> Result<bool
 ///
 /// MySQL has no `ON CONFLICT`. `INSERT IGNORE` would also turn a value too
 /// long for its column into a truncated row, so the no-op update on the
-/// duplicate key is the one that skips only the conflict. Every table here
-/// has an `id` primary key.
-fn skip_existing_row(backend: DatabaseBackend) -> &'static str {
-    match backend {
-        DatabaseBackend::MySql => "ON DUPLICATE KEY UPDATE id = id",
+/// duplicate key is the one that skips only the conflict. It names a column
+/// of the table's own key: `id` for `roles` and `permissions`, a key column
+/// for spatie's assignment tables, which have no `id`.
+fn skip_existing_row(backend: DatabaseBackend, table: &str) -> &'static str {
+    match (backend, table) {
+        (DatabaseBackend::MySql, "role_has_permissions") => {
+            "ON DUPLICATE KEY UPDATE role_id = role_id"
+        }
+        (DatabaseBackend::MySql, "model_has_roles" | "model_has_permissions") => {
+            "ON DUPLICATE KEY UPDATE model_type = model_type"
+        }
+        (DatabaseBackend::MySql, _) => "ON DUPLICATE KEY UPDATE id = id",
         _ => "ON CONFLICT DO NOTHING",
     }
 }
@@ -374,7 +416,7 @@ pub async fn create_role_on_guard(name: &str, guard_name: &str) -> Result<i64, F
     }
     insert(
         INSERT_ROLE,
-        vec![value(name), value(name), value(guard_name)],
+        vec![value(name), value(guard_name), now(), now()],
     )
     .await?;
     find_role_id(name, guard_name)
@@ -403,7 +445,7 @@ pub async fn create_permission_on_guard(
     }
     insert(
         INSERT_PERMISSION,
-        vec![value(name), value(name), value(guard_name)],
+        vec![value(name), value(guard_name), now(), now()],
     )
     .await?;
     find_permission_id(name, guard_name).await?.ok_or_else(|| {
@@ -441,7 +483,7 @@ pub async fn give_permission_to_role_on_guard(
     }
     insert(
         INSERT_ROLE_PERMISSION,
-        vec![int_value(role_id), int_value(permission_id)],
+        vec![int_value(permission_id), int_value(role_id)],
     )
     .await?;
     Ok(())
@@ -518,17 +560,19 @@ pub async fn assign_role_to_model_on_guard(
     guard_name: &str,
 ) -> Result<(), FrameworkError> {
     let role_id = create_role_on_guard(role_name, guard_name).await?;
-    if exists(
-        MODEL_HAS_ROLE_ID,
-        vec![value(model_type), value(model_id), int_value(role_id)],
-    )
-    .await?
-    {
-        return Ok(());
+    for stored_type in model_types(model_type) {
+        if exists(
+            MODEL_HAS_ROLE_ID,
+            vec![value(stored_type), key_value(model_id)?, int_value(role_id)],
+        )
+        .await?
+        {
+            return Ok(());
+        }
     }
     insert(
         INSERT_MODEL_ROLE,
-        vec![value(model_type), value(model_id), int_value(role_id)],
+        vec![int_value(role_id), value(model_type), key_value(model_id)?],
     )
     .await?;
     Ok(())
@@ -581,11 +625,14 @@ pub async fn remove_role_from_model_on_guard(
     guard_name: &str,
 ) -> Result<(), FrameworkError> {
     let role_id = require_role_id(role_name, guard_name).await?;
-    delete(
-        DELETE_MODEL_ROLE,
-        vec![value(model_type), value(model_id), int_value(role_id)],
-    )
-    .await
+    for stored_type in model_types(model_type) {
+        delete(
+            DELETE_MODEL_ROLE,
+            vec![value(stored_type), key_value(model_id)?, int_value(role_id)],
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Give a direct permission to a model on the default `"web"` guard.
@@ -610,17 +657,27 @@ pub async fn give_permission_to_model_on_guard(
     guard_name: &str,
 ) -> Result<(), FrameworkError> {
     let permission_id = create_permission_on_guard(permission_name, guard_name).await?;
-    if exists(
-        MODEL_HAS_PERMISSION_ID,
-        vec![value(model_type), value(model_id), int_value(permission_id)],
-    )
-    .await?
-    {
-        return Ok(());
+    for stored_type in model_types(model_type) {
+        if exists(
+            MODEL_HAS_PERMISSION_ID,
+            vec![
+                value(stored_type),
+                key_value(model_id)?,
+                int_value(permission_id),
+            ],
+        )
+        .await?
+        {
+            return Ok(());
+        }
     }
     insert(
         INSERT_MODEL_PERMISSION,
-        vec![value(model_type), value(model_id), int_value(permission_id)],
+        vec![
+            int_value(permission_id),
+            value(model_type),
+            key_value(model_id)?,
+        ],
     )
     .await?;
     Ok(())
@@ -667,11 +724,18 @@ pub async fn remove_permission_from_model_on_guard(
     guard_name: &str,
 ) -> Result<(), FrameworkError> {
     let permission_id = require_permission_id(permission_name, guard_name).await?;
-    delete(
-        DELETE_MODEL_PERMISSION,
-        vec![value(model_type), value(model_id), int_value(permission_id)],
-    )
-    .await
+    for stored_type in model_types(model_type) {
+        delete(
+            DELETE_MODEL_PERMISSION,
+            vec![
+                value(stored_type),
+                key_value(model_id)?,
+                int_value(permission_id),
+            ],
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Check whether a model has a role on the default `"web"` guard.
@@ -690,16 +754,22 @@ pub async fn has_role_for_model_on_guard(
     role_name: &str,
     guard_name: &str,
 ) -> Result<bool, FrameworkError> {
-    exists(
-        MODEL_HAS_ROLE_NAMED,
-        vec![
-            value(model_type),
-            value(model_id),
-            value(role_name),
-            value(guard_name),
-        ],
-    )
-    .await
+    for stored_type in model_types(model_type) {
+        if exists(
+            MODEL_HAS_ROLE_NAMED,
+            vec![
+                value(stored_type),
+                key_value(model_id)?,
+                value(role_name),
+                value(guard_name),
+            ],
+        )
+        .await?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Check whether a model has a permission on the default `"web"` guard.
@@ -724,31 +794,40 @@ pub async fn has_permission_for_model_on_guard(
     permission_name: &str,
     guard_name: &str,
 ) -> Result<bool, FrameworkError> {
-    let direct = exists(
-        MODEL_HAS_DIRECT_PERMISSION,
-        vec![
-            value(model_type),
-            value(model_id),
-            value(permission_name),
-            value(guard_name),
-        ],
-    )
-    .await?;
-    if direct {
-        return Ok(true);
+    let types = model_types(model_type);
+    for stored_type in &types {
+        let direct = exists(
+            MODEL_HAS_DIRECT_PERMISSION,
+            vec![
+                value(stored_type.as_str()),
+                key_value(model_id)?,
+                value(permission_name),
+                value(guard_name),
+            ],
+        )
+        .await?;
+        if direct {
+            return Ok(true);
+        }
     }
 
-    exists(
-        MODEL_HAS_INHERITED_PERMISSION,
-        vec![
-            value(model_type),
-            value(model_id),
-            value(permission_name),
-            value(guard_name),
-            value(guard_name),
-        ],
-    )
-    .await
+    for stored_type in &types {
+        if exists(
+            MODEL_HAS_INHERITED_PERMISSION,
+            vec![
+                value(stored_type.as_str()),
+                key_value(model_id)?,
+                value(permission_name),
+                value(guard_name),
+                value(guard_name),
+            ],
+        )
+        .await?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Every permission name a model holds on the default `"web"` guard, the
@@ -763,25 +842,29 @@ pub(crate) async fn permission_names_for_model(
     model_type: &str,
     model_id: &str,
 ) -> Result<HashSet<String>, FrameworkError> {
-    let rows = select_all(
-        MODEL_PERMISSION_NAMES,
-        vec![
-            value(model_type),
-            value(model_id),
-            value(DEFAULT_GUARD),
-            value(model_type),
-            value(model_id),
-            value(DEFAULT_GUARD),
-            value(DEFAULT_GUARD),
-        ],
-    )
-    .await?;
-    rows.iter()
-        .map(|row| {
-            row.try_get_by_index::<String>(0)
-                .map_err(|e| FrameworkError::database(format!("rbac permission names: {e}")))
-        })
-        .collect()
+    let mut names = HashSet::new();
+    for stored_type in model_types(model_type) {
+        let rows = select_all(
+            MODEL_PERMISSION_NAMES,
+            vec![
+                value(stored_type.as_str()),
+                key_value(model_id)?,
+                value(DEFAULT_GUARD),
+                value(stored_type.as_str()),
+                key_value(model_id)?,
+                value(DEFAULT_GUARD),
+                value(DEFAULT_GUARD),
+            ],
+        )
+        .await?;
+        for row in &rows {
+            names
+                .insert(row.try_get_by_index::<String>(0).map_err(|e| {
+                    FrameworkError::database(format!("rbac permission names: {e}"))
+                })?);
+        }
+    }
+    Ok(names)
 }
 
 /// Record the tables [`permission_names_for_model`] reads, without reading
@@ -798,7 +881,11 @@ pub(crate) fn observe_permission_names_read() {
 /// Trait for authenticatable models that can receive RBAC roles and
 /// permissions.
 ///
-/// The default model discriminator is the fully-qualified Rust type path
+/// The default model discriminator is the model's `morph_type` when it
+/// declares one, which is what spatie/laravel-permission stores for the same
+/// model (its morph class, `App\\Models\\User` unless Laravel's morph map
+/// names an alias), so assignments spatie recorded apply here. Without a
+/// `morph_type` it is the fully-qualified Rust type path
 /// (`crate::models::user::User`, not the short leaf `User`). Using the full
 /// path means two distinct authenticatable types that happen to share a leaf
 /// name cannot silently collide on the same `(model_type, model_id)` rows -
@@ -817,14 +904,20 @@ pub(crate) fn observe_permission_names_read() {
 ///    return their own fixed string rather than rely on the default.
 #[async_trait]
 pub trait HasRoles: Authenticatable {
-    /// Model discriminator stored in `model_roles.model_type` and
-    /// `model_permissions.model_type`.
+    /// Model discriminator stored in `model_has_roles.model_type` and
+    /// `model_has_permissions.model_type`: the model's `morph_type` when it
+    /// declares one (`#[model(morph_type = "App\\Models\\User")]`), as
+    /// spatie/laravel-permission stores the model's morph class, otherwise
+    /// the fully-qualified Rust type path. Reads also accept the model's
+    /// `morph_aliases`.
     fn rbac_model_type(&self) -> String {
-        std::any::type_name::<Self>().to_string()
+        crate::eloquent::relations::morph_registry::find_morph_type_by_id(self.as_any().type_id())
+            .map(|entry| entry.morph_type.to_owned())
+            .unwrap_or_else(|| std::any::type_name::<Self>().to_string())
     }
 
-    /// Model identifier stored in `model_roles.model_id` and
-    /// `model_permissions.model_id`.
+    /// Model identifier stored in `model_has_roles.model_id` and
+    /// `model_has_permissions.model_id`.
     fn rbac_model_id(&self) -> String {
         self.get_auth_identifier()
     }

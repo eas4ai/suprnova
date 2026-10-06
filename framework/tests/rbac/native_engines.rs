@@ -49,7 +49,7 @@ async fn live_rbac_models(env: &str) {
     // A row the helper wrote, with the column defaults' timestamps, reads
     // back through the model.
     let helper_role = create_role("editor").await.expect("create_role");
-    let editor = Role::find(helper_role)
+    let editor = Role::find(helper_role as u64)
         .await
         .expect("read a helper-created role through the model")
         .expect("the role exists");
@@ -58,7 +58,7 @@ async fn live_rbac_models(env: &str) {
         .await
         .expect("create_permission");
     assert!(
-        Permission::find(helper_permission)
+        Permission::find(helper_permission as u64)
             .await
             .expect("read a helper-created permission through the model")
             .is_some()
@@ -68,19 +68,19 @@ async fn live_rbac_models(env: &str) {
     let auditor = Role::create(attrs! { name: "auditor", guard_name: "web" })
         .await
         .expect("create a role through the model");
-    assert_eq!(auditor.created_at, at(0));
+    assert_eq!(auditor.created_at, Some(at(0)));
     clock.set(at(1));
     let auditor = auditor
-        .update(attrs! { display_name: "Auditor" })
+        .update(attrs! { guard_name: "api" })
         .await
         .expect("update a role through the model");
     let auditor = Role::find(auditor.id)
         .await
         .expect("reread the role")
         .expect("the role exists");
-    assert_eq!(auditor.display_name.as_deref(), Some("Auditor"));
-    assert_eq!(auditor.created_at, at(0));
-    assert_eq!(auditor.updated_at, at(1));
+    assert_eq!(auditor.guard_name, "api");
+    assert_eq!(auditor.created_at, Some(at(0)));
+    assert_eq!(auditor.updated_at, Some(at(1)));
 
     clock.set(at(2));
     let delete = Permission::create(attrs! { name: "articles.delete", guard_name: "web" })
@@ -88,15 +88,15 @@ async fn live_rbac_models(env: &str) {
         .expect("create a permission through the model");
     clock.set(at(3));
     let delete = delete
-        .update(attrs! { display_name: "Delete articles" })
+        .update(attrs! { guard_name: "api" })
         .await
         .expect("update a permission through the model");
     let delete = Permission::find(delete.id)
         .await
         .expect("reread the permission")
         .expect("the permission exists");
-    assert_eq!(delete.created_at, at(2));
-    assert_eq!(delete.updated_at, at(3));
+    assert_eq!(delete.created_at, Some(at(2)));
+    assert_eq!(delete.updated_at, Some(at(3)));
     assert_eq!(Role::query().get().await.expect("list every role").len(), 2);
 
     drop(clock);

@@ -277,11 +277,13 @@ fn emit_morph_registry(input: &ModelInput) -> TokenStream {
     let type_name = input.struct_name_str();
     let table = &input.table;
     let struct_ident = &input.item.ident;
+    let aliases = &input.morph_aliases;
 
     quote! {
         ::suprnova::inventory::submit! {
             ::suprnova::MorphTypeEntry {
                 morph_type: #morph_type,
+                aliases: &[#(#aliases),*],
                 type_name: #type_name,
                 table: #table,
                 primary_key: <#struct_ident as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY,

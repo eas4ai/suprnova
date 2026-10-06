@@ -4,33 +4,15 @@
 //! it over tables that already exist: created by an earlier, differently
 //! named migration, by a scaffolded copy of the same schema, or by hand.
 //! Each framework `up` therefore creates its tables with `if_not_exists`
-//! and its indexes through [`create_index_if_missing`], and an upgrade
-//! moves an older table's MySQL `TIMESTAMP` columns through
-//! [`convert_mysql_timestamps_to_datetime`].
+//! and its indexes through [`create_index_if_missing`], an upgrade moves an
+//! older table's MySQL `TIMESTAMP` columns through
+//! [`convert_mysql_timestamps_to_datetime`], and an upgrade that reshapes a
+//! table into a new layout moves its rows through [`set_aside`] and
+//! [`move_earlier_rows`].
 
 use sea_orm_migration::SchemaManagerConnection;
-use sea_orm_migration::prelude::{
-    Alias, ColumnDef, ColumnType, DbErr, IndexCreateStatement, IntoIden, SchemaManager,
-};
+use sea_orm_migration::prelude::{Alias, DbErr, IndexCreateStatement, SchemaManager};
 use sea_orm_migration::sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
-
-/// A framework-owned point-in-time column named `name`, for `backend`.
-///
-/// sea-query renders `timestamp_with_time_zone()` as `TIMESTAMP` on MySQL and
-/// MariaDB, which refuses any time after 2038-01-19 03:14:07 UTC. There this
-/// column is `DATETIME`, which holds the UTC time the driver writes in its
-/// UTC session. Postgres keeps `timestamp with time zone` and SQLite its text
-/// type, exactly as these columns always were, so a fresh install there
-/// builds the table its migration always built. A source scan in the test
-/// suite refuses a framework migration that spells the `TIMESTAMP` builders.
-pub(crate) fn utc_timestamp_column<T: IntoIden>(name: T, backend: DbBackend) -> ColumnDef {
-    let kind = if backend == DbBackend::MySql {
-        ColumnType::DateTime
-    } else {
-        ColumnType::TimestampWithTimeZone
-    };
-    ColumnDef::new_with_type(name, kind)
-}
 
 /// Create `index` on `table` unless the table already has an index of
 /// that name.
@@ -343,11 +325,28 @@ pub(crate) async fn move_earlier_rows(
     table: &str,
     select: &str,
     key: &str,
+    convert: impl FnMut(&sea_orm_migration::sea_orm::QueryResult) -> Result<MovedRow, DbErr>,
+) -> Result<u64, DbErr> {
+    move_rows(manager, &earlier_table_name(table), select, key, convert).await
+}
+
+/// [`move_earlier_rows`] from any table `source`, which is dropped once it
+/// is empty: for an earlier table whose rows move to a table of another
+/// name.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a statement fails or `convert` refuses a row.
+pub(crate) async fn move_rows(
+    manager: &SchemaManager<'_>,
+    source: &str,
+    select: &str,
+    key: &str,
     mut convert: impl FnMut(&sea_orm_migration::sea_orm::QueryResult) -> Result<MovedRow, DbErr>,
 ) -> Result<u64, DbErr> {
     let connection = manager.get_connection();
     let backend = connection.get_database_backend();
-    let earlier = earlier_table_name(table);
+    let earlier = source.to_owned();
     let mut moved = 0;
     loop {
         let rows = connection
@@ -425,4 +424,29 @@ pub(crate) fn quote(backend: DbBackend, name: &str) -> String {
         .map(|segment| format!("{mark}{segment}{mark}"))
         .collect::<Vec<_>>()
         .join(".")
+}
+
+/// After rows were inserted with explicit ids, move a Postgres `id`
+/// sequence past them, so the next insert does not reuse one. Every other
+/// engine advances its counter on its own.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when the statement fails.
+pub(crate) async fn advance_id_sequence(
+    manager: &SchemaManager<'_>,
+    table: &str,
+) -> Result<(), DbErr> {
+    let connection = manager.get_connection();
+    if connection.get_database_backend() != DbBackend::Postgres {
+        return Ok(());
+    }
+    connection
+        .execute_unprepared(&format!(
+            "SELECT setval(pg_get_serial_sequence('{table}', 'id'), COALESCE(MAX(id), 1), \
+             MAX(id) IS NOT NULL) FROM {}",
+            quote(DbBackend::Postgres, table)
+        ))
+        .await?;
+    Ok(())
 }

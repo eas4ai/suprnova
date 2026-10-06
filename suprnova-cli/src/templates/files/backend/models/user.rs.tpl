@@ -21,25 +21,31 @@ use suprnova::{
     hidden = ["password", "remember_token"],
     timestamps,
     // The users migration creates these as DATETIME on MySQL and `timestamp`
-    // on Postgres, columns without a time zone that hold the UTC wall clock.
-    // A `DateTime<Utc>` field defaults to the text cast `AsDateTime`, which
-    // those columns refuse, so each names the cast for its column.
+    // on Postgres, nullable columns without a time zone that hold the UTC
+    // wall clock, as the Laravel 13 skeleton's are. A `DateTime<Utc>` field
+    // defaults to the text cast `AsDateTime`, which those columns refuse, so
+    // each names the cast for its column. The naive casts also read the
+    // `TIMESTAMP` columns Laravel's own migration creates on MySQL.
     casts = {
         email_verified_at = suprnova::AsOptionalNaiveDateTime,
-        created_at = suprnova::AsNaiveDateTime,
-        updated_at = suprnova::AsNaiveDateTime,
+        created_at = suprnova::AsOptionalNaiveDateTime,
+        updated_at = suprnova::AsOptionalNaiveDateTime,
     },
 )]
 pub struct User {
-    pub id: i64,
+    // `BIGINT UNSIGNED` on MySQL, as Laravel's `id()` creates it.
+    pub id: u64,
     pub name: String,
     pub email: String,
     pub password: String,
+    // Laravel's remember-me token. This application never writes it, so a
+    // Laravel application on the same database keeps its own remember-me.
     pub remember_token: Option<String>,
     // Nullable verification timestamp. `NULL` means unverified.
     pub email_verified_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    // Nullable, as Laravel's are: a row Laravel wrote may hold neither.
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 // Re-export the SeaORM types the macro emits in the inner `user` module so
@@ -77,19 +83,6 @@ impl User {
             password: hashed,
         })
         .await
-    }
-
-    /// Set (or clear) the remember-me token and persist it. `remember_token`
-    /// is deliberately outside `fillable` (it is never set from request
-    /// input), so this writes the whole row via `save` rather than a
-    /// mass-assignment update.
-    pub async fn update_remember_token(
-        &self,
-        token: Option<String>,
-    ) -> Result<(), FrameworkError> {
-        let mut updated = self.clone();
-        updated.remember_token = token;
-        <Self as suprnova::eloquent::Model>::save(&updated).await
     }
 }
 

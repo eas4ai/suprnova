@@ -3141,6 +3141,24 @@ fn render_date_part(
     })
 }
 
+/// Placeholders for every string a `*_type` column may hold for the model
+/// `morph_type` names (its `morph_type` and its `morph_aliases`), with
+/// their values pushed onto `values`.
+fn morph_type_list(
+    backend: DbBackend,
+    morph_type: &str,
+    values: &mut Vec<SeaValue>,
+    n: &mut usize,
+) -> Result<String, FrameworkError> {
+    let mut placeholders = Vec::new();
+    for name in crate::eloquent::relations::morph_registry::morph_type_names(morph_type) {
+        *n += 1;
+        placeholders.push(placeholder(backend, *n)?);
+        values.push(SeaValue::String(Some(name)));
+    }
+    Ok(placeholders.join(", "))
+}
+
 /// Render an `EXISTS (...)` / `NOT EXISTS (...)` correlated subquery.
 ///
 /// Three join shapes, dispatched on which slots the spec carries:
@@ -3221,11 +3239,9 @@ fn render_exists(
             pk = spec.parent_key,
         ));
         if !spec.morph_type_column.is_empty() && !spec.morph_type_value.is_empty() {
-            *n += 1;
-            let ph = placeholder(backend, *n)?;
-            values.push(SeaValue::String(Some(spec.morph_type_value.clone())));
+            let list = morph_type_list(backend, &spec.morph_type_value, values, n)?;
             where_parts.push(format!(
-                "{pivot}.{col} = {ph}",
+                "{pivot}.{col} IN ({list})",
                 pivot = spec.pivot_table,
                 col = spec.morph_type_column,
             ));
@@ -3253,11 +3269,9 @@ fn render_exists(
             pk = spec.parent_key,
         ));
         if !spec.morph_type_column.is_empty() && !spec.morph_type_value.is_empty() {
-            *n += 1;
-            let ph = placeholder(backend, *n)?;
-            values.push(SeaValue::String(Some(spec.morph_type_value.clone())));
+            let list = morph_type_list(backend, &spec.morph_type_value, values, n)?;
             where_parts.push(format!(
-                "{target}.{col} = {ph}",
+                "{target}.{col} IN ({list})",
                 target = spec.target_table,
                 col = spec.morph_type_column,
             ));
