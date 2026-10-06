@@ -7,7 +7,9 @@
 
 use suprnova::http::text;
 use suprnova::testing::TestDatabase;
-use suprnova::{FromRequest, Request, Response, Router, handler, model, request};
+use suprnova::{
+    FrameworkError, FromRequest, Request, Response, RouteBinding, Router, handler, model, request,
+};
 
 use super::{get, message, refusal, run_sql, send, serve};
 
@@ -66,6 +68,44 @@ pub async fn with_request(post: HfPost, req: Request) -> Response {
 #[handler]
 pub async fn generic<T: FromRequest + Send + 'static>(id: i64, _body: T) -> Response {
     text(format!("generic {id}"))
+}
+
+/// A type that both binds and reads the body, and says which one made it.
+pub struct HfBoth(&'static str);
+
+#[suprnova::async_trait]
+impl RouteBinding for HfBoth {
+    fn route_key_name() -> &'static str {
+        "key"
+    }
+    fn route_key(&self) -> String {
+        self.0.to_owned()
+    }
+    async fn resolve_route_binding(
+        _value: &str,
+        _field: Option<&str>,
+    ) -> Result<Option<Self>, FrameworkError> {
+        Ok(Some(HfBoth("the route")))
+    }
+}
+
+#[suprnova::async_trait]
+impl FromRequest for HfBoth {
+    async fn from_request(_req: Request) -> Result<Self, FrameworkError> {
+        Ok(HfBoth("the body"))
+    }
+}
+
+impl std::fmt::Display for HfBoth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+/// A generic argument whose type, as the caller picks it, binds too.
+#[handler]
+pub async fn generic_both<T: FromRequest + RouteBinding + std::fmt::Display>(thing: T) -> Response {
+    text(format!("read from {thing}"))
 }
 
 async fn fixture() -> TestDatabase {
@@ -189,5 +229,21 @@ async fn bind_015_a_generic_handler_is_exempt_from_the_startup_checks() {
     assert_eq!(
         status, 400,
         "the undeclared `id` is missing at request time"
+    );
+}
+
+#[tokio::test]
+async fn bind_015_a_generic_argument_reads_the_body_even_when_its_type_binds() {
+    // `{thing}` names the argument, so a binding would find it; the
+    // generated code cannot choose for `T`, so it reads the body.
+    let addr = serve(
+        Router::new()
+            .get("/both/{thing}", generic_both::<HfBoth>)
+            .into(),
+    )
+    .await;
+    assert_eq!(
+        get(addr, "/both/1").await,
+        (200, "read from the body".to_owned())
     );
 }

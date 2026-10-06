@@ -56,6 +56,10 @@ enum ArgKind {
     Probe,
     /// `Option` of any other type: an optional binding, or the body.
     OptionalProbe(Type),
+    /// A type that names one of the function's type or const parameters:
+    /// the body, read through `FromRequest`, even when the type the caller
+    /// picks also binds. The generated code cannot choose for it (BIND-015).
+    Generic,
 }
 
 /// One argument of the handler.
@@ -147,6 +151,7 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
     }
 
     // Classify every argument by its spelling.
+    let generic_names = generic_param_names(fn_generics);
     let mut args = Vec::with_capacity(input_fn.sig.inputs.len());
     for (index, param) in input_fn.sig.inputs.iter().enumerate() {
         let pat_type: &PatType = match param {
@@ -159,7 +164,11 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
                 .to_compile_error();
             }
         };
-        let kind = classify_param_type(&pat_type.ty);
+        let kind = if !bound_by_spelling(&pat_type.ty) && names_any(&pat_type.ty, &generic_names) {
+            ArgKind::Generic
+        } else {
+            classify_param_type(&pat_type.ty)
+        };
         let name = extract_param_name(&pat_type.pat);
         if name.is_none() && (reads_route(&kind) || bound_by_spelling(&pat_type.ty)) {
             return syn::Error::new_spanned(
@@ -196,9 +205,12 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
         .to_compile_error();
     }
     if !is_async
-        && let Some(arg) = args
-            .iter()
-            .find(|arg| matches!(arg.kind, ArgKind::Probe | ArgKind::OptionalProbe(_)))
+        && let Some(arg) = args.iter().find(|arg| {
+            matches!(
+                arg.kind,
+                ArgKind::Probe | ArgKind::OptionalProbe(_) | ArgKind::Generic
+            )
+        })
     {
         return syn::Error::new_spanned(
             arg.ty,
@@ -326,6 +338,19 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
                     body_pass.push(take);
                 }
             }
+            ArgKind::Generic => {
+                let take = quote! {
+                    let #pat: #ty = <#ty as ::suprnova::FromRequest>::from_request(
+                        __suprnova_input.request()?,
+                    )
+                    .await?;
+                };
+                if checks.is_empty() {
+                    path_pass.push(take);
+                } else {
+                    body_pass.push(take);
+                }
+            }
         }
     }
 
@@ -352,6 +377,32 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
 
         #record
     }
+}
+
+/// The names of the function's type and const parameters.
+fn generic_param_names(generics: &syn::Generics) -> Vec<Ident> {
+    generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            syn::GenericParam::Type(param) => Some(param.ident.clone()),
+            syn::GenericParam::Const(param) => Some(param.ident.clone()),
+            syn::GenericParam::Lifetime(_) => None,
+        })
+        .collect()
+}
+
+/// Whether `ty` names one of `names` anywhere in its tokens: `T`,
+/// `Option<T>`, `Form<T>`.
+fn names_any(ty: &Type, names: &[Ident]) -> bool {
+    fn walk(tokens: TokenStream2, names: &[Ident]) -> bool {
+        tokens.into_iter().any(|token| match token {
+            proc_macro2::TokenTree::Ident(ident) => names.contains(&ident),
+            proc_macro2::TokenTree::Group(group) => walk(group.stream(), names),
+            _ => false,
+        })
+    }
+    !names.is_empty() && walk(quote!(#ty), names)
 }
 
 /// Whether the function has type or const generics. A generic function has
@@ -400,7 +451,7 @@ fn emit_record(fn_name: &Ident, args: &[Arg]) -> TokenStream2 {
         let ty_text = type_text(ty);
         let name = arg.name.as_deref().unwrap_or("_");
         match &arg.kind {
-            ArgKind::Request => quote! {
+            ArgKind::Request | ArgKind::Generic => quote! {
                 ::suprnova::routing::HandlerArg::body(#name, #ty_text)
             },
             ArgKind::Path => quote! {
@@ -482,7 +533,7 @@ fn authorize_checks(
                 ));
             };
             match &arg.kind {
-                ArgKind::Request => {
+                ArgKind::Request | ArgKind::Generic => {
                     return Err(syn::Error::new_spanned(
                         name,
                         format!(
@@ -714,6 +765,37 @@ mod tests {
             out.contains("optional_path :: < u32 > (\"page\")"),
             "an `Option<u32>` must be an optional path value; got:\n{out}"
         );
+    }
+
+    #[test]
+    fn bind_015_a_generic_argument_reads_the_body_and_is_never_probed() {
+        // `T` may implement `RouteBinding` too; it still reads the body.
+        let out = expansion(quote! {
+            pub async fn store<T: FromRequest + RouteBinding>(id: i64, form: Option<T>, thing: T)
+                -> Response { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            out.contains("< Option < T > as :: suprnova :: FromRequest > :: from_request"),
+            "`form: Option<T>` must read the body; got:\n{out}"
+        );
+        assert!(
+            out.contains("< T as :: suprnova :: FromRequest > :: from_request"),
+            "`thing: T` must read the body; got:\n{out}"
+        );
+        assert!(!out.contains("__ArgProbe"), "got:\n{out}");
+        assert!(!out.contains("__OptionalArgProbe"), "got:\n{out}");
+        assert!(out.contains("path :: < i64 > (\"id\")"), "got:\n{out}");
+    }
+
+    #[test]
+    fn bind_015_a_generic_authorize_target_is_a_compile_error() {
+        let out = expansion(quote! {
+            #[authorize("update", form)]
+            pub async fn update<T: FromRequest + RouteBinding>(form: T) -> Response { todo!() }
+        });
+        assert!(out.contains("compile_error"), "got:\n{out}");
+        assert!(out.contains("reads the request body"), "got:\n{out}");
     }
 
     #[test]
