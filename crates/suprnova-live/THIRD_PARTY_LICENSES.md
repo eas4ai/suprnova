@@ -100,8 +100,8 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | bit-set | 0.8.0 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | bit-vec | 0.8.0 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | bitflags | 1.3.2 | Workspace resolved | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
-| Cargo | bitflags | 2.11.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | bitflags | 2.13.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | bitflags | 2.13.2 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | bitvec | 1.0.1 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | blake2 | 0.10.6 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | block-buffer | 0.10.4 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -170,6 +170,7 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | crypto-bigint | 0.5.5 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | crypto-common | 0.1.7 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | crypto-common | 0.2.2 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | cssparser-macros | 0.7.1 | Workspace resolved | MPL-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | cssparser | 0.37.0 | Workspace resolved | MPL-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | ctr | 0.9.2 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | ctutils | 0.4.2 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
@@ -398,7 +399,6 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | md-5 | 0.10.6 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | md-5 | 0.11.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | mea | 0.6.3 | Workspace resolved | Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
-| Cargo | memchr | 2.8.0 | Workspace resolved | Unlicense OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | memchr | 2.8.3 | Workspace resolved | Unlicense OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | memoffset | 0.9.1 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | mime_guess | 2.0.5 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
@@ -477,6 +477,7 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | phf_codegen | 0.13.1 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | phf_generator | 0.11.3 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | phf_generator | 0.13.1 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | phf_macros | 0.13.1 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | phf_shared | 0.11.3 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | phf_shared | 0.13.1 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | phf | 0.11.3 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
@@ -628,8 +629,8 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | siphasher | 1.0.3 | Workspace resolved | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | slab | 0.4.12 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | slug | 0.1.6 | Workspace resolved | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
-| Cargo | smallvec | 1.15.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | smallvec | 1.15.2 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | smallvec | 1.16.2 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | socket2 | 0.5.10 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | socket2 | 0.6.3 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | spin | 0.10.1 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
