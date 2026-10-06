@@ -214,3 +214,116 @@ async fn bind_008_a_resource_with_trashed_applies_to_show_edit_and_update() {
         (200, "destroy gone".to_owned())
     );
 }
+
+// ── Router-wide model binders ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn bind_008_a_model_binder_follows_with_trashed() {
+    let _db = fixture().await;
+    // The fallback answers its own 404, so a fallback run is told apart
+    // from the row.
+    let router: Router = Router::new()
+        .model::<TrPost, _, _>("post", |_value| async {
+            Err(FrameworkError::model_not_found("the fallback"))
+        })
+        .get("/posts/{post}", show)
+        .get("/trashed/posts/{post}", show)
+        .with_trashed()
+        .into();
+    let addr = serve(router).await;
+    assert_eq!(get(addr, "/posts/1").await, (200, "live".to_owned()));
+    let (status, body) = get(addr, "/posts/2").await;
+    assert_eq!(status, 404, "{body}");
+    assert!(body.contains("the fallback"), "{body}");
+    assert_eq!(
+        get(addr, "/trashed/posts/2").await,
+        (200, "gone".to_owned()),
+        "a model binder on a route with `with_trashed()` must use the soft-deletable lookup"
+    );
+}
+
+#[tokio::test]
+async fn bind_008_a_model_binder_gives_a_replaced_binding_the_lookup_the_route_selects() {
+    let router: Router = Router::new()
+        .model::<TrProbe, _, _>("probe", |_value| async { Ok(TrProbe("fallback")) })
+        .get("/probe/{probe}", probe)
+        .get("/trashed/probe/{probe}", probe)
+        .with_trashed()
+        .into();
+    let addr = serve(router).await;
+    assert_eq!(get(addr, "/probe/x").await, (200, "plain".to_owned()));
+    assert_eq!(
+        get(addr, "/trashed/probe/x").await,
+        (200, "soft-deletable".to_owned())
+    );
+}
+
+// ── `with_trashed()` keeps global scopes ────────────────────────────────────
+
+#[model(table = "tr_notes", soft_deletes)]
+pub struct TrNote {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub body: String,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+/// The current tenant is tenant 1.
+pub struct TrTenantScope;
+
+impl suprnova::eloquent::scopes::GlobalScope<TrNote> for TrTenantScope {
+    fn apply(&self, query: suprnova::Builder<TrNote>) -> suprnova::Builder<TrNote> {
+        query.filter("tenant_id", 1_i64)
+    }
+}
+
+#[handler]
+pub async fn note(note: TrNote) -> Response {
+    text(note.body)
+}
+
+#[tokio::test]
+async fn bind_002_with_trashed_lifts_only_the_soft_delete_filter() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    run_sql(
+        &db,
+        &[
+            "CREATE TABLE tr_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                tenant_id INTEGER NOT NULL, body TEXT NOT NULL, deleted_at TEXT)",
+            "INSERT INTO tr_notes (id, tenant_id, body, deleted_at) VALUES \
+                (1, 1, 'mine', NULL), \
+                (2, 1, 'mine, deleted', '2026-01-01T00:00:00+00:00'), \
+                (3, 2, 'theirs', NULL), \
+                (4, 2, 'theirs, deleted', '2026-01-01T00:00:00+00:00')",
+        ],
+    )
+    .await;
+    suprnova::eloquent::scopes::ScopeRegistry::register::<TrNote, _>(TrTenantScope);
+    let router: Router = Router::new()
+        .get("/notes/{note}", note)
+        .get("/trashed/notes/{note}", note)
+        .with_trashed()
+        .into();
+    let addr = serve(router).await;
+    assert_eq!(get(addr, "/notes/1").await, (200, "mine".to_owned()));
+    for id in [2, 3, 4] {
+        assert_eq!(get(addr, &format!("/notes/{id}")).await.0, 404, "note {id}");
+    }
+    // `with_trashed()` lifts the soft-delete filter for the current
+    // tenant's rows; another tenant's rows, deleted or not, stay hidden.
+    assert_eq!(
+        get(addr, "/trashed/notes/1").await,
+        (200, "mine".to_owned())
+    );
+    assert_eq!(
+        get(addr, "/trashed/notes/2").await,
+        (200, "mine, deleted".to_owned())
+    );
+    for id in [3, 4] {
+        assert_eq!(
+            get(addr, &format!("/trashed/notes/{id}")).await.0,
+            404,
+            "another tenant's note {id} must stay hidden on a `with_trashed()` route"
+        );
+    }
+}

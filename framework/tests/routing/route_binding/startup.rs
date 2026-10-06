@@ -8,8 +8,9 @@
 use suprnova::http::text;
 use suprnova::testing::TestDatabase;
 use suprnova::{
-    BoundChild, FrameworkError, Request, Response, RouteBinding, RouteBindingInfo, Router, Server,
-    any, fallback, get, group, handler, model, resource, route, routes,
+    BoundChild, FrameworkError, Request, ResourceController, Response, RouteBinding,
+    RouteBindingInfo, Router, Server, any, fallback, get, group, handler, model, request, resource,
+    route, routes,
 };
 
 use super::{get as get_path, refusal, run_sql, serve};
@@ -284,4 +285,177 @@ fn bind_004_a_refusal_is_an_error_from_the_boot_path() {
     let outcome = result.expect("a refused router must not panic the boot");
     let error = outcome.err().expect("the boot must return the refusal");
     assert!(error.to_string().contains("GET /users/{user}"), "{error}");
+}
+
+// ── The fallback and the `missing()` handlers ─────────────────────────────
+
+/// A fallback that reads `id`, which no fallback path declares.
+#[handler]
+pub async fn lost(id: i64) -> Response {
+    text(format!("fallback {id}"))
+}
+
+/// A fallback the checks accept.
+#[handler]
+pub async fn lost_quietly() -> Response {
+    text("fallback ran")
+}
+
+#[request]
+pub struct SuForm {
+    pub title: String,
+}
+
+/// A `missing()` handler that reads `id`, which `/posts/{post}` does not
+/// declare.
+#[handler]
+pub async fn missing_by_id(id: i64) -> Response {
+    text(format!("missing {id}"))
+}
+
+/// A `missing()` handler that reads the body twice.
+#[handler]
+pub async fn missing_twice(first: SuForm, second: SuForm) -> Response {
+    text(format!("{} {}", first.title, second.title))
+}
+
+/// The function form of a resource over `SuPost`.
+pub mod bound_posts {
+    use super::*;
+
+    #[handler]
+    pub async fn show(post: SuPost) -> Response {
+        text(post.title)
+    }
+}
+
+/// A resource controller whose actions take the request.
+pub struct SuController;
+
+impl ResourceController for SuController {}
+
+#[tokio::test]
+async fn bind_013_a_fallback_reading_an_undeclared_parameter_is_refused_through_handle_request() {
+    let router = fallback!(lost).register(Router::new());
+    let error = refusal(&router);
+    assert!(error.contains("the fallback route"), "{error}");
+    assert!(error.contains("`id`"), "{error}");
+    // An unmatched request reaches the fallback only past the checks.
+    let addr = serve(router).await;
+    let (status, body) = get_path(addr, "/nowhere/7").await;
+    assert_eq!(status, 500, "the fallback ran past the refusal: {body}");
+}
+
+#[tokio::test]
+async fn bind_004_a_fallback_beside_a_refused_route_answers_the_refusal() {
+    let _db = fixture().await;
+    let router = fallback!(lost_quietly).register(Router::new().get("/users/{user}", show).into());
+    refusal(&router);
+    let addr = serve(router).await;
+    let (status, body) = get_path(addr, "/nowhere").await;
+    assert_eq!(
+        status, 500,
+        "a router whose checks fail answers every request with the refusal, \
+         the fallback's too: {body}"
+    );
+}
+
+/// Every place a `missing()` handler is installed, each on a route whose
+/// own handler the checks accept.
+fn missing_sites<H, Fut>(hook: H) -> Vec<(&'static str, Router)>
+where
+    H: Fn(Request) -> Fut + Clone + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Response> + Send + 'static,
+{
+    vec![
+        (
+            "RouteBuilder::missing",
+            Router::new()
+                .get("/posts/{post}", show)
+                .missing(hook.clone())
+                .into(),
+        ),
+        (
+            "any route missing",
+            Router::new()
+                .any("/posts/{post}", show)
+                .missing(hook.clone())
+                .into(),
+        ),
+        (
+            "route macro missing",
+            get!("/posts/{post}", show)
+                .missing(hook.clone())
+                .register(Router::new()),
+        ),
+        (
+            "group! macro missing",
+            group!("/g", { get!("/posts/{post}", show) })
+                .missing(hook.clone())
+                .register(Router::new()),
+        ),
+        (
+            "fluent group missing",
+            Router::new()
+                .group("/g", |r| r.get("/posts/{post}", show))
+                .missing(hook.clone())
+                .into(),
+        ),
+        (
+            "resource! function form missing",
+            resource!("posts", bound_posts, only = [show])
+                .missing(hook.clone())
+                .unnamed()
+                .register(Router::new()),
+        ),
+        (
+            "resource controller missing",
+            Router::new()
+                .resource("posts", SuController)
+                .missing(hook)
+                .unnamed()
+                .into(),
+        ),
+    ]
+}
+
+#[test]
+fn bind_013_a_missing_handler_reading_an_undeclared_parameter_is_refused() {
+    for (site, router) in missing_sites(missing_by_id) {
+        let error = router
+            .prepare_bindings()
+            .err()
+            .unwrap_or_else(|| panic!("{site}: the hook's undeclared `id` was not refused"));
+        let error = error.to_string();
+        assert!(error.contains("`missing()` handler"), "{site}: {error}");
+        assert!(error.contains("`id`"), "{site}: {error}");
+        assert!(error.contains("/posts/{post}"), "{site}: {error}");
+    }
+}
+
+#[test]
+fn bind_015_a_missing_handler_with_two_body_readers_is_refused() {
+    for (site, router) in missing_sites(missing_twice) {
+        let error = router
+            .prepare_bindings()
+            .err()
+            .unwrap_or_else(|| panic!("{site}: the hook's two body readers were not refused"));
+        let error = error.to_string();
+        assert!(error.contains("`first: SuForm`"), "{site}: {error}");
+        assert!(error.contains("`second: SuForm`"), "{site}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn bind_013_a_refused_missing_handler_refuses_a_router_driven_through_handle_request() {
+    let _db = fixture().await;
+    let router: Router = Router::new()
+        .get("/posts/{post}", show)
+        .missing(missing_by_id)
+        .into();
+    let addr = serve(router).await;
+    // The row exists, so the hook would never run; the refusal still
+    // answers, as the server would refuse to start.
+    let (status, body) = get_path(addr, "/posts/1").await;
+    assert_eq!(status, 500, "{body}");
 }

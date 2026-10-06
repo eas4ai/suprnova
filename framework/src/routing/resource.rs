@@ -67,7 +67,7 @@
 //! - `except` (Laravel) + `drop` (Rust) - both alias.
 //! - `names` (Laravel) + `rename` (Rust) - both alias.
 
-use super::binding::{HandlerRecord, MissingHandler, RouteBindingOptions, boxed_missing};
+use super::binding::{HandlerRecord, MissingHook, RouteBindingOptions, boxed_missing};
 use super::router::{BoxedHandler, Router};
 use crate::FrameworkError;
 use crate::auth::{Auth, Authenticatable};
@@ -309,7 +309,7 @@ struct ResourceSpec {
     /// list means `show`, `edit` and `update`.
     trashed: Option<Vec<ResourceAction>>,
     /// What every route answers for a binding that finds nothing.
-    missing: Option<MissingHandler>,
+    missing: Option<MissingHook>,
     /// When `true`, route names are not registered. Used by
     /// nested-or-skip flows that want raw paths without polluting the
     /// process-global registry.

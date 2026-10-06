@@ -1055,13 +1055,20 @@ async fn handle_request_inner(
         method.clone()
     };
 
+    // The binding checks run before the route is matched, so a request the
+    // fallback answers meets the refusal a matched one does (BIND-004): a
+    // router whose checks fail answers every request with that error, as a
+    // server built from it would refuse to start.
+    if let Err(error) = router.prepare_bindings() {
+        return into_hyper_in_scope(crate::http::HttpResponse::from(error));
+    }
+
     match router.match_route(&method, path) {
         Some((pattern, handler, params)) => {
             crate::error::debug_page::note_route_pattern(&pattern);
             // The route's bindings run after its middleware, right before
-            // the handler (BIND-015). A router whose binding checks fail
-            // answers every request with that error, as a server built from
-            // it would refuse to start.
+            // the handler (BIND-015). The checks above passed, so the plan
+            // is there.
             let handler = match router.binding_plan(&effective_method, &pattern) {
                 Ok(Some(plan)) => crate::routing::binding::planned_handler(plan, handler),
                 Ok(None) => handler,
