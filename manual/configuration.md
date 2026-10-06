@@ -43,7 +43,7 @@ DB_LOGGING=false
 SESSION_LIFETIME=120         # minutes
 SESSION_COOKIE=suprnova_session
 SESSION_SECURE=false         # set true in production (HTTPS only)
-SESSION_PATH=/
+# SESSION_PATH=/             # unset: the public root of each request
 SESSION_SAME_SITE=Lax
 
 # Mail - defaults to `log` driver (writes outgoing mail to the

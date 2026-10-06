@@ -726,8 +726,37 @@ pub async fn handle_request_with_peer(
     // dropped once the response is ready and every streamed body, terminable
     // hook or after-commit callback of the request, which carry the scope,
     // has ended.
-    let request = serve_request(router, middleware_registry, req, peer_ip);
-    crate::container::scope::run_in_new_scope(request).await
+    //
+    // The public root is resolved here, before the debug page, the built-in
+    // endpoints or any middleware sees the request, and holds for the whole
+    // request (PFX-002): every URL, redirect, cookie path and cache key the
+    // request produces reads this one value.
+    //
+    // The request future is boxed before it is wrapped: it is large, and
+    // each wrapper would otherwise move a copy of it through the stack of
+    // the task that polls it, which deep render paths cannot spare.
+    let root = request_root(&req, peer_ip);
+    let request = Box::pin(serve_request(router, middleware_registry, req, peer_ip));
+    crate::container::scope::run_in_new_scope(crate::routing::root::scope(root, request)).await
+}
+
+/// The public root of `req` (PFX-001, PFX-002): a valid
+/// `X-Forwarded-Prefix` when the TCP peer is a trusted proxy, otherwise
+/// the path in `APP_URL`.
+///
+/// The trust rule is the one every other forwarded header follows: with no
+/// `AppConfig` registered, or no peer address, nothing is trusted.
+fn request_root(
+    req: &hyper::Request<hyper::body::Incoming>,
+    peer_ip: Option<std::net::IpAddr>,
+) -> Arc<str> {
+    let config = crate::config::Config::get::<crate::config::AppConfig>();
+    let trusted = config
+        .as_ref()
+        .is_some_and(|config| config.trusted_proxies.trusts(peer_ip));
+    Arc::from(crate::routing::root::resolve(req.headers(), trusted, || {
+        crate::routing::root::root_of_app_url(&crate::routing::url::app_url_of(config.as_ref()))
+    }))
 }
 
 /// The body of [`handle_request_with_peer`], run inside the request's
@@ -999,12 +1028,14 @@ async fn handle_request_inner(
     // freshly-constructed Request. `peer_ip` stays an `Option` because
     // in-process callers (the testing harness, the WS upgrade replay)
     // may invoke `handle_request` directly without a real TCP peer.
+    let root = crate::routing::root::current();
     let stamp_peer = |r: Request| -> Request {
         let r = match peer_ip {
             Some(ip) => r.with_peer_addr(ip),
             None => r,
         };
         r.with_trusted_proxies(trusted_proxies.clone())
+            .with_public_root(Arc::clone(&root))
     };
     // RFC 9110 §9.3.2: a HEAD request that lacks an explicit handler falls
     // back to GET inside `Router::match_route`. The middleware list for

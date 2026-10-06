@@ -288,7 +288,7 @@ SESSION_COOKIE=suprnova_session
 
 # Cookie attributes
 SESSION_SECURE=true          # require HTTPS; DEFAULT IS true
-SESSION_PATH=/
+SESSION_PATH=/                # optional; unset = the public root of each request
 SESSION_DOMAIN=.example.com  # optional; unset = host-only
 SESSION_SAME_SITE=Lax        # Lax | Strict | None
 SESSION_COOKIE_PREFIX=       # empty | __Secure- | __Host-

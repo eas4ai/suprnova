@@ -38,7 +38,13 @@ pub struct SessionConfig {
     pub gc_interval: Duration,
     /// Cookie name for the session ID
     pub cookie_name: String,
-    /// Cookie path
+    /// Cookie path. Empty, the default, means the application sets none:
+    /// the session and remember-me cookies then take the public root of
+    /// each request as their `Path` (`/` at the host root, `/billing`
+    /// behind a trusted `X-Forwarded-Prefix: /billing`), and a `__Host-`
+    /// cookie keeps `Path=/` (PFX-007). `SESSION_PATH` sets it from the
+    /// environment. Two applications on one host under different roots
+    /// then keep separate sessions without configuration.
     pub cookie_path: String,
     /// Cookie domain (e.g. `".example.com"`). Defaults to `None`
     /// (browser scopes the cookie to the request's host). Mirrors
@@ -61,7 +67,7 @@ pub struct SessionConfig {
     /// names (`cookie_name`, the remember constant) are what the
     /// encryption binds and what the code configures; the prefix is a
     /// rendering concern. `__Host-` requires `cookie_domain: None` and
-    /// `cookie_path: "/"` - enforced at boot by `Config::init` and at
+    /// `cookie_path` empty or `"/"` - enforced at boot by `Config::init` and at
     /// render time by `Cookie::to_header_value`.
     pub cookie_prefix: CookiePrefix,
     /// When `true`, omit `Max-Age` from the session cookie so the
@@ -102,7 +108,7 @@ impl Default for SessionConfig {
             touch_interval: Duration::from_secs(5 * 60),
             gc_interval: Duration::from_secs(60 * 60),
             cookie_name: "suprnova_session".to_string(),
-            cookie_path: "/".to_string(),
+            cookie_path: String::new(),
             cookie_domain: None,
             cookie_secure: true,
             cookie_http_only: true,
@@ -119,6 +125,20 @@ impl Default for SessionConfig {
 }
 
 impl SessionConfig {
+    /// The `Path` the session and remember-me cookies of the current
+    /// response take: the configured [`Self::cookie_path`], or, when the
+    /// application set none, `/` for a `__Host-` cookie and the public
+    /// root of the request otherwise (PFX-007).
+    pub(crate) fn response_cookie_path(&self) -> String {
+        if !self.cookie_path.is_empty() {
+            self.cookie_path.clone()
+        } else if matches!(self.cookie_prefix, CookiePrefix::Host) {
+            "/".to_owned()
+        } else {
+            crate::routing::root::cookie_path()
+        }
+    }
+
     /// Create a new session config with default values
     pub fn new() -> Self {
         Self::default()
@@ -219,7 +239,7 @@ impl SessionConfig {
             gc_interval: Duration::from_secs(gc_interval_seconds.max(1)),
             cookie_name: crate::env_optional("SESSION_COOKIE")
                 .unwrap_or_else(|| "suprnova_session".to_string()),
-            cookie_path: crate::env_optional("SESSION_PATH").unwrap_or_else(|| "/".to_string()),
+            cookie_path: crate::env_optional("SESSION_PATH").unwrap_or_default(),
             cookie_domain: crate::env_optional("SESSION_DOMAIN"),
             cookie_secure,
             cookie_http_only: true, // Always true for security

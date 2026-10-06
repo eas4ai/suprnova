@@ -33,9 +33,8 @@ import type {
   PollFallbackPolicy,
   StreamPosition,
 } from "./types.js";
+import { reservedRoutePath } from "../reserved-routes.js";
 
-const SUBSCRIPTION_PATH = "/__live/async/subscriptions";
-const MEMBERSHIP_PATH = "/__live/async/memberships";
 const CONTROL_MARKER = "async-v1";
 const MEMBERSHIP_TIMEOUT_MS = 10_000;
 const MAX_TEXT_BYTES = 1024;
@@ -313,15 +312,18 @@ export class BrowserAsyncAuthority implements AsyncAuthorityPort {
         sequence: String(request.position.sequence),
       };
     }
-    const response = await this.#host.fetch(new URL(SUBSCRIPTION_PATH, this.#host.origin).href, {
-      body: JSON.stringify(body),
-      cache: "no-store",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json", "X-Suprnova-Live": CONTROL_MARKER },
-      method: "POST",
-      redirect: "error",
-      signal: request.signal,
-    });
+    const response = await this.#host.fetch(
+      new URL(reservedRoutePath("async/subscriptions"), this.#host.origin).href,
+      {
+        body: JSON.stringify(body),
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-Suprnova-Live": CONTROL_MARKER },
+        method: "POST",
+        redirect: "error",
+        signal: request.signal,
+      },
+    );
     if (response.status !== 200 && response.status !== 201) {
       throw new Error(`async_authority_rejected_${String(response.status)}`);
     }
@@ -352,23 +354,26 @@ export async function browserSseMembership(
   }
   let response: Response;
   try {
-    response = await fetchImpl(new URL(MEMBERSHIP_PATH, request.key.origin).href, {
-      body: JSON.stringify({
-        control_nonce: request.controlNonce,
-        descriptor_binding: request.subscription.descriptorBinding,
-        operation: request.operation,
-        protocol_version: 1,
-        stream: request.subscription.stream,
-        subscription_id: request.subscription.subscriptionId,
-        transport_generation: request.transportGeneration,
-      }),
-      cache: "no-store",
-      credentials: "same-origin",
-      headers,
-      method: "POST",
-      redirect: "error",
-      signal: request.signal,
-    });
+    response = await fetchImpl(
+      new URL(reservedRoutePath("async/memberships"), request.key.origin).href,
+      {
+        body: JSON.stringify({
+          control_nonce: request.controlNonce,
+          descriptor_binding: request.subscription.descriptorBinding,
+          operation: request.operation,
+          protocol_version: 1,
+          stream: request.subscription.stream,
+          subscription_id: request.subscription.subscriptionId,
+          transport_generation: request.transportGeneration,
+        }),
+        cache: "no-store",
+        credentials: "same-origin",
+        headers,
+        method: "POST",
+        redirect: "error",
+        signal: request.signal,
+      },
+    );
   } catch {
     return Object.freeze({ kind: "rejected" as const, reason: "closed" as const });
   }

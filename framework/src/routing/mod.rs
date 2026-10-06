@@ -9,6 +9,7 @@ mod group;
 mod macros;
 mod params;
 mod resource;
+pub(crate) mod root;
 mod router;
 mod signed;
 pub mod url;

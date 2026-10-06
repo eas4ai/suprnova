@@ -851,7 +851,10 @@ one prop to every Inertia page:
 ```
 
 `catalog` is `null` when no translator is bound - the share never fails
-a page render.
+a page render. Behind a reverse proxy that serves the application under a
+path prefix, `catalog.url` starts with the public root, such as
+`/billing/_suprnova/lang/es.ftl?v=9f2c1ae4`, so the wrapper fetches it
+through the proxy as given.
 
 ### The kit wrappers
 

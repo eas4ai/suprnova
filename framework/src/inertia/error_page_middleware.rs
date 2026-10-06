@@ -184,7 +184,11 @@ impl Middleware for InertiaErrorPageMiddleware {
             page = page.with("request_id", request_id);
         }
 
-        match page.resolve(&captured).await {
+        // Rendered under the root captured before the handler ran, so the
+        // page's URL, its Vite tags and its shared props name the root the
+        // request arrived under (PFX-002).
+        let root = std::sync::Arc::clone(&captured.root);
+        match crate::routing::root::scope(root, page.resolve(&captured)).await {
             Ok(rendered) => restore(
                 rendered
                     .status(status)
@@ -250,6 +254,9 @@ struct CapturedRequest {
     path: String,
     path_and_query: String,
     headers: hyper::HeaderMap,
+    /// The public root of the request, taken with the rest before the
+    /// handler runs (PFX-002).
+    root: std::sync::Arc<str>,
 }
 
 impl CapturedRequest {
@@ -258,6 +265,7 @@ impl CapturedRequest {
             path: crate::http::Request::path(request).to_string(),
             path_and_query: InertiaRequestExt::path_and_query(request),
             headers: request.headers().clone(),
+            root: request.public_root(),
         }
     }
 }

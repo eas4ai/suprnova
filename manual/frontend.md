@@ -163,6 +163,23 @@ Three flavours, in order of precedence (later wins at the same key):
 Per-page props attached on the response builder always overwrite shared
 data at the same key.
 
+The framework ships `RootShare`, a provider that gives every page the
+public root as the `root` prop: the empty string at the host root,
+`/billing` behind a reverse proxy that serves the application under
+`/billing`. A page that builds its URLs from it, such as
+`` form.post(`${root}/login`) ``, runs from one build at `/` and under a
+prefix. An application registers one provider, so `RootShare` carries
+another one and shares its props too:
+
+```rust
+App::register_inertia_shared(Arc::new(RootShare::around(Arc::new(LocaleShare))));
+```
+
+A scaffolded application registers it this way, builds its pages' URLs
+from `root`, and builds its frontend with Vite's relative `base: './'`, so
+code-split chunks load from wherever the entry script was served. For the
+proxy setup, see [Serving under a path prefix](deployment.md#serving-under-a-path-prefix).
+
 ## Partial reloads and lazy props
 
 The same `InertiaResponse` builder exposes Inertia v3's full prop

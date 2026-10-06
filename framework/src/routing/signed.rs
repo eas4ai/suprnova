@@ -229,6 +229,11 @@ fn sort_pairs(pairs: &mut [(String, String)]) {
 /// `expires_at_epoch_seconds = Some(ts)` produces a temporary signed URL;
 /// `None` produces a permanent signed URL.
 ///
+/// A root-relative application path is signed under the public root
+/// ([`crate::url::root`]), because verification hashes the URL the
+/// browser sends, root included. A link signed behind a prefix verifies
+/// behind it and nowhere else (PFX-003).
+///
 /// # Errors
 ///
 /// Returns `FrameworkError` when the encryption key is not installed
@@ -238,7 +243,12 @@ pub fn sign_url(
     expires_at_epoch_seconds: Option<i64>,
 ) -> Result<String, FrameworkError> {
     let key = signed_url_key()?;
-    let (path, mut pairs) = split_url(url);
+    // An application path is signed under the public root, the URL the
+    // browser will send back and verification reads (PFX-003, PFX-010);
+    // a path already under the root, such as `route()`'s output, keeps it
+    // once.
+    let url = super::root::rooted(url);
+    let (path, mut pairs) = split_url(&url);
 
     // Strip any pre-existing `signature` so we never sign-over-sign;
     // strip pre-existing `expires` so the caller's argument wins.

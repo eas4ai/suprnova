@@ -1411,6 +1411,12 @@ let cfg = InertiaConfig::new()
     .production();                            // false → loads from Vite dev server
 ```
 
+A root-relative `assets_base_url` such as `/assets` gets the public root in
+front of it in the Vite tags, so behind a proxy that serves the application
+under `/billing` they load `/billing/assets/...`; an absolute or `//host`
+base, such as a CDN's, is left as it is. The page `url` carries the root the
+same way. See [Serving under a path prefix](deployment.md#serving-under-a-path-prefix).
+
 Frontend-specific defaults:
 
 | Frontend | Default entry point | Page extensions |

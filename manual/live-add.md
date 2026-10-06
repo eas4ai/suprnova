@@ -321,7 +321,9 @@ async fn render(request: Request, mount: &LiveMount<Counter>) -> Response {
 ```
 
 Its view, `templates/counter_page.html`, links the component's stylesheet
-and script from the namespace's route:
+and script from the namespace's route, with `url::root()` in front so the
+links work under a path prefix too
+([Serving under a path prefix](deployment.md#serving-under-a-path-prefix)):
 
 ```html
 <!doctype html>
@@ -329,8 +331,8 @@ and script from the namespace's route:
 <head>
 <meta charset="utf-8">
 <title>Counter</title>
-<link rel="stylesheet" href="/acme-ui/counter/counter.css">
-<script type="module" src="/acme-ui/counter/counter.js"></script>
+<link rel="stylesheet" href="{{ suprnova::url::root() }}/acme-ui/counter/counter.css">
+<script type="module" src="{{ suprnova::url::root() }}/acme-ui/counter/counter.js"></script>
 {{ bootstrap|trusted_html }}
 </head>
 <body>
