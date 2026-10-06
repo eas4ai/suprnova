@@ -453,6 +453,9 @@ runs the same checks before its first request and answers every request
 with a 500 when they fail, a request the fallback would answer included;
 `router.prepare_bindings()` returns the error itself. A closure handler
 and a generic `#[handler]` function carry no record and are not checked.
+A handler inside an `impl` block names its type,
+`#[handler(Self = Posts)]`, and is checked as a free handler is; see
+[Handlers inside an `impl` block](controllers.md#handlers-inside-an-impl-block).
 
 ### Older binding forms
 

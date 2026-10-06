@@ -24,6 +24,16 @@
 //! reads a parameter its path does not declare, or reads the body twice. A
 //! generic handler has no record and is not checked.
 //!
+//! ## A handler inside an `impl` block
+//!
+//! The record names the function, and an item the macro emits inside an
+//! `impl` block cannot name `Self`, so a handler there names its type:
+//! `#[handler(Self = Posts)]` on `show` inside `impl Posts`. The record
+//! then names `<Posts>::show`, and the build checks that `Posts` is the
+//! block's type. Without `Self = Type`, the probe the macro puts in a free
+//! handler's body fails the build inside an `impl` block, saying what to
+//! write (see `framework/src/routing/handler_site.rs`).
+//!
 //! ## Order
 //!
 //! The router binds the route-bound arguments in path order after the
@@ -37,8 +47,11 @@
 //! and a denied request never reaches validation.
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use proc_macro2::{Span, TokenStream as TokenStream2};
+use quote::{quote, quote_spanned};
+use syn::ext::IdentExt;
+use syn::parse::{ParseStream, Parser};
+use syn::spanned::Spanned;
 use syn::{FnArg, GenericArgument, Ident, ItemFn, Pat, PatIdent, PatType, PathArguments, Type};
 
 use crate::authorize::{AuthorizeSpec, Target, is_authorize_attr, parse_spec};
@@ -99,8 +112,8 @@ struct Arg<'a> {
 /// #[handler]
 /// pub async fn update(post: Post, form: UpdatePost) -> Response { ... }
 /// ```
-pub fn handler_impl(_attr: TokenStream, input: TokenStream) -> TokenStream {
-    handler_impl_inner(input.into()).into()
+pub fn handler_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
+    handler_impl_inner(attr.into(), input.into()).into()
 }
 
 /// `proc_macro2`-flavoured entry point. The outer `handler_impl` is a thin
@@ -108,7 +121,12 @@ pub fn handler_impl(_attr: TokenStream, input: TokenStream) -> TokenStream {
 /// here lets the unit tests below feed in token streams directly and assert
 /// on the rendered output - the host `proc_macro::TokenStream` cannot be
 /// constructed outside a real macro-expansion context.
-fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
+fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
+    let self_ty = match parse_handler_args(attr) {
+        Ok(self_ty) => self_ty,
+        Err(e) => return e.to_compile_error(),
+    };
+    let input_text = input.to_string();
     let mut input_fn: ItemFn = match syn::parse2(input) {
         Ok(f) => f,
         Err(e) => return e.to_compile_error(),
@@ -240,8 +258,9 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
     let record = if has_type_generics(fn_generics) {
         TokenStream2::new()
     } else {
-        emit_record(fn_name, &args)
+        record_items(fn_name, self_ty.as_ref(), &args)
     };
+    let (site_check, site_const) = handler_site(fn_name, self_ty.as_ref(), &input_text, record);
 
     let probes = quote! {
         #[allow(unused_imports)]
@@ -366,6 +385,7 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
     quote! {
         #(#fn_attrs)*
         #fn_vis #async_token fn #fn_name #fn_generics(__suprnova_req: ::suprnova::Request) #fn_output {
+            #site_check
             #probes
             #input_binding
             #(#bind_pass)*
@@ -375,7 +395,120 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
             #fn_block
         }
 
-        #record
+        #site_const
+    }
+}
+
+/// How a misuse of `#[handler]`'s argument is answered.
+const HANDLER_ARGS_USAGE: &str = "#[handler] takes `Self = <Type>` on a function inside an \
+                                  `impl` block: `#[handler(Self = Posts)]` inside `impl Posts`";
+
+/// The attribute's argument: `Self = Type` for a handler inside an `impl`
+/// block, or nothing for a free function. An argument that does not start
+/// with `Self` is ignored, as every argument was before `Self = Type`
+/// existed, so a handler written then keeps compiling (BIND-003).
+fn parse_handler_args(attr: TokenStream2) -> syn::Result<Option<Type>> {
+    let starts_with_self = matches!(
+        attr.clone().into_iter().next(),
+        Some(proc_macro2::TokenTree::Ident(ident)) if ident == "Self"
+    );
+    if !starts_with_self {
+        return Ok(None);
+    }
+    let parser = |input: ParseStream| -> syn::Result<Type> {
+        input.parse::<syn::Token![Self]>()?;
+        input.parse::<syn::Token![=]>()?;
+        let ty: Type = input.parse()?;
+        if !input.is_empty() {
+            return Err(input.error(HANDLER_ARGS_USAGE));
+        }
+        Ok(ty)
+    };
+    let span = attr.span();
+    let ty = parser
+        .parse2(attr)
+        .map_err(|e| syn::Error::new(e.span(), HANDLER_ARGS_USAGE))?;
+    if names_self(&ty) {
+        return Err(syn::Error::new(
+            span,
+            "#[handler(Self = ...)] names the type of the `impl` block, as in \
+             `#[handler(Self = Posts)]`: the record is emitted where `Self` is \
+             not that type",
+        ));
+    }
+    Ok(Some(ty))
+}
+
+/// Whether `ty` mentions `Self` anywhere.
+fn names_self(ty: &Type) -> bool {
+    fn walk(tokens: TokenStream2) -> bool {
+        tokens.into_iter().any(|token| match token {
+            proc_macro2::TokenTree::Ident(ident) => ident == "Self",
+            proc_macro2::TokenTree::Group(group) => walk(group.stream()),
+            _ => false,
+        })
+    }
+    walk(quote!(#ty))
+}
+
+/// FNV-1a over `text`: a name suffix that is the same on every build.
+fn stable_hash(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// The statement the handler's body starts with, and the const beside the
+/// handler that holds its record.
+///
+/// The const's name carries a hash of the handler's tokens, so a parent
+/// module's const reached through a glob import never stands in for a
+/// child's. With `Self = Type`, the const is an associated const: it
+/// checks that `Type` is the block's type, and the body uses it. Without,
+/// the body matches the const by its bare name, which reaches it only when
+/// the handler is free; inside an `impl` block the probe fails the build
+/// and says to write `Self = Type` (see `__FreeHandler`).
+fn handler_site(
+    fn_name: &Ident,
+    self_ty: Option<&Type>,
+    input_text: &str,
+    record: TokenStream2,
+) -> (TokenStream2, TokenStream2) {
+    let site = quote::format_ident!(
+        "__SUPRNOVA_HANDLER_{}_{:016X}",
+        fn_name.unraw().to_string().to_uppercase(),
+        stable_hash(input_text)
+    );
+    match self_ty {
+        Some(self_ty) => {
+            let same = quote_spanned! {self_ty.span()=>
+                ::suprnova::routing::__handler_self::<Self, #self_ty>();
+            };
+            (
+                quote! { let () = Self::#site; },
+                quote! {
+                    #[doc(hidden)]
+                    const #site: () = {
+                        #same
+                        #record
+                    };
+                },
+            )
+        }
+        None => (
+            quote! {
+                match &(::suprnova::routing::__FreeHandler,) {
+                    (#site,) => ::suprnova::routing::__in_free_context(#site),
+                }
+            },
+            quote! {
+                #[doc(hidden)]
+                const #site: ::suprnova::routing::__FreeHandler = {
+                    #record
+                    ::suprnova::routing::__FreeHandler
+                };
+            },
+        ),
     }
 }
 
@@ -443,9 +576,20 @@ fn type_text(ty: &Type) -> String {
 }
 
 /// The `inventory` record of the handler: its type, its name and every
-/// argument, for the router's startup checks (BIND-004).
-fn emit_record(fn_name: &Ident, args: &[Arg]) -> TokenStream2 {
-    let fn_name_str = fn_name.to_string();
+/// argument, for the router's startup checks (BIND-004). A free function
+/// is named by its name, one inside an `impl` block through its type.
+fn record_items(fn_name: &Ident, self_ty: Option<&Type>, args: &[Arg]) -> TokenStream2 {
+    // Spanned at the attribute: inside an `impl` block without `Self =
+    // Type` the name does not resolve, and the error points at `#[handler]`.
+    let mut fn_ref = fn_name.clone();
+    fn_ref.set_span(Span::call_site());
+    let (handler, display) = match self_ty {
+        Some(self_ty) => (
+            quote! { <#self_ty>::#fn_ref },
+            format!("{}::{fn_name}", type_last_segment(self_ty)),
+        ),
+        None => (quote! { #fn_ref }, fn_name.to_string()),
+    };
     let entries = args.iter().map(|arg| {
         let ty = arg.ty;
         let ty_text = type_text(ty);
@@ -470,27 +614,39 @@ fn emit_record(fn_name: &Ident, args: &[Arg]) -> TokenStream2 {
         }
     });
     quote! {
-        const _: () = {
-            fn __suprnova_handler_type() -> ::std::any::TypeId {
-                ::suprnova::routing::__type_id_of(&#fn_name)
-            }
-            fn __suprnova_handler_args() -> ::std::vec::Vec<::suprnova::routing::HandlerArg> {
-                #[allow(unused_imports)]
-                use ::suprnova::routing::{
-                    __ArgBinds as _, __ArgReadsBody as _, __OptionalArgBinds as _,
-                    __OptionalArgReadsBody as _,
-                };
-                ::std::vec![#(#entries),*]
-            }
-            ::suprnova::inventory::submit! {
-                ::suprnova::routing::HandlerRecord::new(
-                    __suprnova_handler_type,
-                    #fn_name_str,
-                    ::core::module_path!(),
-                    __suprnova_handler_args,
-                )
-            }
-        };
+        fn __suprnova_handler_type() -> ::std::any::TypeId {
+            ::suprnova::routing::__type_id_of(&#handler)
+        }
+        fn __suprnova_handler_args() -> ::std::vec::Vec<::suprnova::routing::HandlerArg> {
+            #[allow(unused_imports)]
+            use ::suprnova::routing::{
+                __ArgBinds as _, __ArgReadsBody as _, __OptionalArgBinds as _,
+                __OptionalArgReadsBody as _,
+            };
+            ::std::vec![#(#entries),*]
+        }
+        ::suprnova::inventory::submit! {
+            ::suprnova::routing::HandlerRecord::new(
+                __suprnova_handler_type,
+                #display,
+                ::core::module_path!(),
+                __suprnova_handler_args,
+            )
+        }
+    }
+}
+
+/// The last segment of a type path, `Posts` for `crate::controllers::Posts`,
+/// as the record shows it; any other type as written.
+fn type_last_segment(ty: &Type) -> String {
+    match ty {
+        Type::Path(type_path) if type_path.qself.is_none() => type_path
+            .path
+            .segments
+            .last()
+            .map(|segment| quote!(#segment).to_string().replace(' ', ""))
+            .unwrap_or_else(|| type_text(ty)),
+        _ => type_text(ty),
     }
 }
 
@@ -711,7 +867,12 @@ mod tests {
     /// Render `handler_impl_inner` against a function. A rejection renders
     /// a `compile_error! { ... }` with the message.
     fn expansion(src: proc_macro2::TokenStream) -> String {
-        handler_impl_inner(src).to_string()
+        handler_impl_inner(proc_macro2::TokenStream::new(), src).to_string()
+    }
+
+    /// Render `handler_impl_inner` with the attribute's arguments `attr`.
+    fn expansion_with(attr: proc_macro2::TokenStream, src: proc_macro2::TokenStream) -> String {
+        handler_impl_inner(attr, src).to_string()
     }
 
     /// Byte offset of `needle` in `out`, failing the test when it is absent.
@@ -922,6 +1083,176 @@ mod tests {
         });
         assert!(!out.contains("compile_error"), "got:\n{out}");
         assert!(!out.contains("HandlerRecord"), "got:\n{out}");
+    }
+
+    // ── A handler inside an `impl` block ─────────────────────────────────────
+
+    #[test]
+    fn bind_003_self_names_the_type_the_record_is_keyed_by() {
+        let out = expansion_with(
+            quote! { Self = Posts },
+            quote! { pub async fn show(post: Post) -> Response { todo!() } },
+        );
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            out.contains("__type_id_of (& < Posts > :: show)"),
+            "the record names the function through its type; got:\n{out}"
+        );
+        assert!(
+            out.contains("HandlerRecord :: new (__suprnova_handler_type , \"Posts::show\""),
+            "the record names the handler `Posts::show`; got:\n{out}"
+        );
+        assert!(
+            out.contains("__handler_self :: < Self , Posts >"),
+            "the build checks `Self = Posts` names the impl's type; got:\n{out}"
+        );
+        assert!(
+            out.contains("let () = Self :: __SUPRNOVA_HANDLER_SHOW_"),
+            "the handler uses its record, so no unused item warns; got:\n{out}"
+        );
+        assert!(
+            !out.contains("const _ :"),
+            "an `impl` block refuses `const _`; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn bind_003_self_combines_with_every_argument_form_and_authorize() {
+        let out = expansion_with(
+            quote! { Self = crate::controllers::Posts },
+            quote! {
+                #[authorize("update", post)]
+                pub async fn update(
+                    id: i64,
+                    post: Post,
+                    wrapped: RouteParam<Post>,
+                    bare: post::Model,
+                    page: Option<u32>,
+                    form: UpdatePost,
+                ) -> Response { todo!() }
+            },
+        );
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            out.contains("__type_id_of (& < crate :: controllers :: Posts > :: update)"),
+            "got:\n{out}"
+        );
+        assert!(out.contains("\"Posts::update\""), "got:\n{out}");
+        assert!(
+            out.contains("__authorize_handler (\"update\""),
+            "got:\n{out}"
+        );
+        for record in [
+            "HandlerArg :: path_value (\"id\" , \"i64\" , false)",
+            "__record (\"post\" , \"Post\")",
+            "__record (\"wrapped\" , \"RouteParam<Post>\")",
+            "__record (\"bare\" , \"post::Model\")",
+            "HandlerArg :: path_value (\"page\" , \"Option<u32>\" , true)",
+            "__record (\"form\" , \"UpdatePost\")",
+        ] {
+            assert!(out.contains(record), "missing `{record}`; got:\n{out}");
+        }
+
+        // A sync handler and a generic one take `Self` too; the generic one
+        // still has no record.
+        let out = expansion_with(
+            quote! { Self = Posts },
+            quote! { pub fn ping(id: i64) -> Response { todo!() } },
+        );
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(out.contains("< Posts > :: ping"), "got:\n{out}");
+        let out = expansion_with(
+            quote! { Self = Posts },
+            quote! { pub async fn store<T: FromRequest>(form: T) -> Response { todo!() } },
+        );
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(!out.contains("HandlerRecord"), "got:\n{out}");
+        assert!(
+            out.contains("__handler_self :: < Self , Posts >"),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn bind_003_a_free_handler_proves_it_is_outside_an_impl_block() {
+        let out = expansion(quote! {
+            pub async fn show(post: Post) -> Response { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        // The probe const is in scope by its bare name only outside an
+        // `impl` block, where the pattern matches it; inside one the name
+        // binds a reference and the free-function check fails.
+        let probe = position(&out, "const __SUPRNOVA_HANDLER_SHOW_");
+        assert!(
+            out.contains("__in_free_context (__SUPRNOVA_HANDLER_SHOW_"),
+            "got:\n{out}"
+        );
+        assert!(
+            out[probe..].contains("__type_id_of (& show)"),
+            "the free form names the function itself; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn bind_003_the_probe_name_differs_per_handler() {
+        let first = expansion(quote! { pub async fn show(id: i64) -> Response { todo!() } });
+        let second = expansion(quote! { pub async fn show(slug: String) -> Response { todo!() } });
+        let name = |out: &str| {
+            let start = position(out, "const __SUPRNOVA_HANDLER_SHOW_") + "const ".len();
+            out[start..].split_whitespace().next().map(str::to_owned)
+        };
+        assert_ne!(
+            name(&first),
+            name(&second),
+            "a parent module's probe reached through a glob import must not \
+             stand in for a child's"
+        );
+    }
+
+    #[test]
+    fn bind_003_an_argument_that_does_not_start_with_self_is_ignored_as_before() {
+        // `#[handler]` ignored its arguments before `Self = Type` existed, so
+        // a handler written then with one keeps compiling (BIND-003).
+        let item = quote! { pub async fn show(id: i64) -> Response { todo!() } };
+        let plain = expansion_with(quote! {}, item.clone());
+        for attr in [
+            quote! { self = Posts },
+            quote! { Type = Posts },
+            quote! { Posts },
+            quote! { anything(1, 2) },
+        ] {
+            let out = expansion_with(attr.clone(), item.clone());
+            assert_eq!(out, plain, "`{attr}` must be ignored as it was before");
+        }
+    }
+
+    #[test]
+    fn bind_003_a_malformed_self_argument_is_a_compile_error() {
+        for attr in [
+            quote! { Self },
+            quote! { Self = },
+            quote! { Self = Posts, Self = Posts },
+        ] {
+            let out = expansion_with(
+                attr.clone(),
+                quote! { pub async fn show(id: i64) -> Response { todo!() } },
+            );
+            assert!(
+                out.contains("compile_error"),
+                "`{attr}` must be refused; got:\n{out}"
+            );
+            assert!(out.contains("Self = <Type>"), "`{attr}`; got:\n{out}");
+        }
+    }
+
+    #[test]
+    fn bind_003_self_must_name_a_type_other_than_self() {
+        let out = expansion_with(
+            quote! { Self = Self },
+            quote! { pub async fn show(id: i64) -> Response { todo!() } },
+        );
+        assert!(out.contains("compile_error"), "got:\n{out}");
+        assert!(out.contains("Self = Posts"), "got:\n{out}");
     }
 
     // ── Order ────────────────────────────────────────────────────────────────

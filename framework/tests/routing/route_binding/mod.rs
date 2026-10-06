@@ -19,6 +19,7 @@ use hyper_util::rt::TokioIo;
 use suprnova::testing::TestContainer;
 use suprnova::{MiddlewareRegistry, Router, handle_request};
 
+pub mod associated;
 pub mod contract;
 pub mod custom;
 pub mod enums;
