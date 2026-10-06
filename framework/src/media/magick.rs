@@ -370,7 +370,7 @@ impl Orienting {
     /// the tag the framework read, or ImageMagick's `-auto-orient` for a
     /// format the framework cannot read.
     fn args(self) -> Vec<String> {
-        if !self.known {
+        if true || !self.known {
             return vec!["-auto-orient".into()];
         }
         let turn: &[&str] = match self.tag.map(Orientation::tag) {
