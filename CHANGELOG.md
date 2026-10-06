@@ -46,6 +46,75 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `live:add` names at the library's first install. See [Installing Live
   Components](manual/live-add.md) and [Live Component
   Libraries](manual/live-libraries.md).
+- **Route model binding by type.** `#[handler]` binds an argument by its
+  type alone (`post: Post`) whenever the type implements `RouteBinding`,
+  which every `#[model]` does, and `Option<T>` binds `None` when its
+  optional parameter is absent. Routes take `{post:slug}` segments,
+  `#[model(route_key = "...")]` sets a model's default column, children
+  bind through their parent's relations (`scope_bindings()`,
+  `without_scoped_bindings()`), and routes, groups and resources take
+  `with_trashed()` and `missing()`. `Router::bind` and `Router::model`
+  register custom resolution, `#[model(custom_route_binding)]` with
+  `suprnova::database::resolve_model_route_binding` overrides a model's own,
+  and `#[derive(RouteBinding)]` binds a unit-only enum. `resource!` and
+  `api_resource!` build resources from a module's `#[handler]` functions,
+  nested resources (`users.posts`) included. `route()` and `try_route()`
+  take bound values, named or as one positional value: a `#[model]` row,
+  a derived enum, a `RouteParam<T>`, or any type that implements
+  `RouteValue` with one call to `bound_route_value`. `try_route` is
+  re-exported at the crate root. `Router::prepare_bindings()` runs the
+  startup checks for a router a test builds. See [Routing](manual/routing.md).
+- **Serving under a path prefix.** Behind a trusted proxy, an application
+  serves under the prefix `X-Forwarded-Prefix` names, or under the path in
+  `APP_URL`. Every URL the framework builds for the browser carries that
+  public root once: `route()` and the signed URLs, redirects and the
+  previous and intended URLs, Inertia's page URL and Vite tags, Live's
+  endpoints, assets and reflected URLs, pagination links, storage URLs and
+  the session, XSRF and remember-me cookie paths. `url::root()` returns
+  the root for a template, and a third-party component's view may call it
+  before a constant path. `RootShare` gives every Inertia page the root,
+  and a new scaffold works under a prefix. See
+  [Deployment Overview](manual/deployment.md) and [URL Generation](manual/urls.md).
+- **The rest of Laravel's Image API.** `Image::orient`, `using`,
+  `transform`, `rotate_with_background`, `flip`, `flop`, `optimize`,
+  `width`, `height`, `to_webp`, `to_jpg`, `to_jpeg`, `to_png`, `to_gif`,
+  `to_bmp`, `to_base64`, `to_data_uri` and `store_as`, with `Color`,
+  `ImagePixels`, `CustomTransformation` and `register_transformation` for
+  a step of your own. See [Images](manual/images.md).
+- **Running on a Laravel database.** A Suprnova application runs on a
+  database a Laravel 13 application created, and beside that application.
+  `jobs`, `job_batches`, `failed_jobs`, `sessions`, `notifications`, the
+  scaffold's `users`, `features` (laravel/pennant) and `roles`,
+  `permissions`, `model_has_roles`, `model_has_permissions` and
+  `role_has_permissions` (spatie/laravel-permission) take the layouts
+  Laravel's and the packages' migrations create. Data those layouts have no
+  column for lives in `suprnova_jobs_reservations`,
+  `job_batch_settlements`, `suprnova_feature_details`,
+  `suprnova_role_details` and `suprnova_permission_details`. The framework
+  ships `queue::migrations::{CreateJobsTable, CreateJobBatchesTable,
+  CreateFailedJobsTable}` and `session::migrations::CreateSessionsTable`,
+  and each migration leaves a table Laravel or a package created exactly
+  as it is. `NOTIFICATIONS_MORPH_KEY` and `RBAC_MODEL_KEY` pick `int`,
+  `uuid` or `ulid` keys, and `FEATURES_USER_SCOPE` names the user scope
+  Pennant stores. See [Running on a Laravel
+  Database](manual/laravel-database.md).
+- **`LARAVEL_SHARED_DATABASE`.** For an application that shares its
+  database with a running Laravel application: the framework and Magnetar
+  write `$2y$` bcrypt hashes Laravel 13 accepts with `HASH_VERIFY=true`, a
+  valid sign-in rewrites a `$2b$` or Argon2id hash as `$2y$`, Magnetar no
+  longer upgrades bcrypt to Argon2id, and an unrouted database-queue job is
+  stored on the queue `suprnova`, which Laravel's worker does not read.
+  `LaravelDatabase::share` turns it on from code.
+- **Morph aliases.** `#[model(morph_type = "App\\Models\\Post",
+  morph_aliases = ["post"])]`: `MorphTo`, `MorphOne` and `MorphMany`,
+  direct and eager, `has`, `with_count` and the aggregates accept every
+  name; writes store the `morph_type`.
+- **`Application::run_with_args`** parses the given arguments instead of
+  the process's and returns its failures to the caller as a
+  `FrameworkError`; `run()` still prints them and exits.
+- **`HasRoles::rbac_model_types()`** names every `model_type` a model's
+  role and permission assignments are read under: its `morph_type`, its
+  aliases and the Rust type path an earlier release stored.
 
 ### Changed
 
@@ -64,6 +133,128 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Scaffolds ignore `live:add`'s lock and journal.** The `.gitignore` of a
   new project lists `/.suprnova-live.lock` and
   `/.suprnova-live-journal.json`; add both lines to an existing project's.
+- **`RouteBinding` is the one binding trait**, shaped like Laravel's
+  `UrlRoutable`: `route_key_name`, `route_key`, `route_field`,
+  `resolve_route_binding`, `resolve_child_route_binding` and their
+  soft-deletable forms. `AutoRouteBinding` is a second name for it, and
+  `<T as AutoRouteBinding>::from_route_param(value)` keeps working. A type
+  that implemented the old `AutoRouteBinding` by hand implements
+  `RouteBinding` instead. The unused `route_binding!` macro and the old
+  `RouteBinding` trait with `param_name` are gone.
+- **A `#[handler]` inside an `impl` block names its type**, as
+  `#[handler(Self = Posts)]`, so the startup checks can find it. Without
+  it, such a handler is a compile error that names the fix.
+- **Four string-pair `route()` calls need `.as_str()`.** `route()` and
+  `try_route()` take bound values as well as strings, so four forms that
+  compiled only because the old slice parameter set the pairs' type no
+  longer do: a value written `s.as_ref()` inside an array of pairs, an
+  array whose pairs mix `&String` and `&str` values, an array of more than
+  32 pairs holding `&String` values, and `route` used as a
+  `fn(&str, &[(&str, &str)])` pointer. Write `.as_str()`, or a closure in
+  place of the pointer. Every other string-pair call compiles as before.
+- **A route key that does not parse answers 404.** A key that does not
+  parse, or breaks a `unique_id` key's format, gets the body a missing row
+  gets, naming the model and never the value. It was a 400 that repeated
+  the value.
+- **The bare `x::Model` form no longer binds a soft-deleted row** of a
+  soft-deleting `#[model]`'s table unless the route calls `with_trashed()`.
+- **Bound arguments are bound before every other argument**, after the
+  route's middleware, so a missing row answers 404 before a form request is
+  validated, whatever the declaration order.
+- **The router refuses a route it cannot run, at startup.** A handler that
+  reads a parameter its path does not declare, reads the request body
+  twice, names a binding field that is not a parseable column of the bound
+  model, scopes a child through a relation the parent does not declare, or
+  uses a binder that cannot run is an error from the boot path. Two body
+  readers were a compile error; they are now a startup error, except two
+  `Request` arguments, still a compile error.
+- **URLs carry the public root.** When `APP_URL` has a path or a trusted
+  prefix arrives, `route()`, `try_route`, `route_with_params` and
+  `try_route_with_params` return the root in front, so an application
+  whose own routes begin with its `APP_URL` path gets that path twice.
+  Signed URLs cover the root, so a link signed before an application
+  gained a root stops verifying. `url::current` returns the root, path and
+  query, and `LiveAssetCatalog::url` includes the root. `RenderKeyInput`
+  has a public `root` field.
+- **`Redirect::intended` ignores a stored network-path reference.** A
+  stored intended URL that starts with `//`, `/\` or `\`, or that holds a
+  control character, is ignored in favour of the fallback. Store an
+  external destination as an absolute URL.
+- **Cookies follow the root.** `SessionConfig.cookie_path` and the XSRF
+  cookie path default to unset, which means the root of each request. When
+  a request carries two cookies of one name, the framework reads the first.
+- **Images are upright and carry no metadata.** Images are oriented by
+  their EXIF tag on decode (`IMAGE_AUTO_ORIENT`, on by default), and
+  processed output keeps only the ICC profile under both drivers: EXIF and
+  GPS, XMP, IPTC, comments, text chunks and date chunks are stripped.
+  Rotation corners and flattened transparency are white in JPEG and GIF,
+  not black, and GIF output is converted to sRGB.
+- **The image types changed shape.** `Transformation` and `ImageConfig`
+  are `#[non_exhaustive]`: build an `ImageConfig` from `default()` or
+  `from_env()` and set its fields, and give a match on `Transformation` a
+  wildcard arm. `Transformation::Rotate(f32)` is `Rotate { degrees,
+  background }`. `Image::store(disk, path)` is replaced by
+  `store(directory, disk)`, which stores under a generated name and
+  returns the path; `store_as(directory, name, disk)` takes a name.
+- **The shipped migrations upgrade an existing application in place.**
+  `failed_jobs`, `jobs`, `job_batches` and `sessions` move into Laravel's
+  layouts, and `notifications`, `features`, `roles` and `permissions` into
+  the layouts above, with every row. A queued, delayed or reserved job runs
+  once, a failed job keeps its id, a batch keeps its counts, and no user is
+  signed out. A `migrate` that stops part way resumes on the next run. The
+  manual gives the migration that moves an earlier scaffold's `users`.
+- **Workers check `failed_jobs` before they start.** `run_worker` returns
+  `Result<(), FrameworkError>`. A worker whose failed-jobs store is the
+  database store refuses to start on a table it cannot write, and
+  `queue:work` then exits non-zero. Each failed job gets a fresh `uuid`,
+  and its `connection` is `suprnova:<connection>`, so Laravel's
+  `queue:retry` refuses it.
+- **Laravel's `$2y$` hashes verify** through `Auth::attempt` and Magnetar
+  for passwords of 72 bytes and longer, judged on their first 72 bytes as
+  PHP does.
+- **Suprnova never writes `users.remember_token`.** The scaffold's `User`
+  drops `update_remember_token`, reads `id` as `u64` and its timestamps as
+  `Option<DateTime<Utc>>`.
+- **The RBAC, feature and notification entities follow Laravel's
+  layouts.** `rbac::entity::Role` and `Permission` have `u64` ids and no
+  `display_name`, and the earlier pivot entities are gone. `FeatureRow` and
+  `StoredNotification` timestamps are `Option`. The
+  `session::driver::database::sessions` entity is gone. The `down` of
+  `CreateNotificationsTable`, `CreateFeaturesTable` and `CreateRbacTables`
+  leaves the shared tables, so a rollback never drops rows Laravel wrote,
+  and a new scaffold's `users` and `sessions` migrations leave their table
+  on rollback too.
+- **Schema-qualified table names.** On Postgres, `Schema::create`, `table`,
+  `drop`, `drop_if_exists` and `rename` read `schema.table` as that table
+  in that schema, and a `.` becomes `_` in index and foreign key names. On
+  MySQL and SQLite a qualified name is refused with an error naming it.
+- **The naive date-time casts read MySQL `TIMESTAMP` columns.**
+
+### Fixed
+
+- **JPEGs from the built-in driver show the right colours everywhere.** The
+  `oxideav` driver wrote RGB samples behind a JFIF header, so libjpeg-based
+  decoders, ImageMagick and most browsers among them, showed the wrong
+  colours. It now writes standard JFIF YCbCr.
+- **Redirects stay on the origin for a request-target that names another
+  host.** `Redirect::refresh_for`, `Redirect::guest` and
+  `Redirect::intended` no longer send the browser elsewhere when a request
+  such as `GET //evil.example/x` or `GET /\evil.example` reaches a fallback
+  route, and `url::full` stays on the `APP_URL` origin for it.
+- **Queue and failed-job table names with capitals or reserved words
+  work.** The jobs driver and the failed-jobs store quote each part of the
+  configured table name, as the migrations do.
+- **`generate-types` reads `{post:slug}`** as the parameter `post` and no
+  longer takes a leading bound argument for the form request.
+- **The Inertia CRUD tutorial compiles**: its `inertia_response!` calls
+  pass the request, and its handlers bind `Todo`.
+- **Live upload and async routes follow the configured endpoint**, and the
+  header bar's default brand link carries the root.
+- **Batch settlement counts work on MySQL** against a `job_batches` table
+  Laravel created (`Illegal mix of collations`): `job_batch_settlements`
+  takes that table's collation.
+- **On Postgres, a session write for a guest** no longer binds a text NULL
+  to `sessions.user_id`, which a `bigint` or `uuid` column refuses.
 
 ## 3.2.1 - 2026-10-05
 
