@@ -1259,26 +1259,9 @@ async fn img_001_dimensions_and_dominant_color_do_not_turn_the_image() {
 #[cfg(unix)]
 #[tokio::test]
 async fn mem_audit_the_magick_driver_writes_its_input_without_copying_it() {
-    use std::os::unix::fs::PermissionsExt;
     let _lock = exclusive().await;
-    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mem-003-magick-input");
-    let _ = std::fs::remove_dir_all(&scratch);
-    std::fs::create_dir_all(&scratch).unwrap();
-    let answer = scratch.join("answer.png");
-    std::fs::write(&answer, RED_PNG_1X1).unwrap();
-    let stand_in = scratch.join("magick-stand-in");
-    std::fs::write(
-        &stand_in,
-        format!(
-            "#!/bin/sh\ncat > /dev/null\nexec cat '{}'\n",
-            answer.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).unwrap();
-
     let input = encode_png(1024, 1024, PngPixelFormat::Rgba, 4, false);
-    let driver = suprnova::MagickCliDriver::new(stand_in.to_string_lossy());
+    let driver = magick_stand_in("mem-003-magick-input", RED_PNG_1X1);
     let to_png = ImagePipeline {
         format: Some(OutputFormat::Png),
         ..Default::default()
@@ -1295,5 +1278,81 @@ async fn mem_audit_the_magick_driver_writes_its_input_without_copying_it() {
         used < input.len() as u64 / 4,
         "the driver allocated {used} bytes beside a {}-byte input: it copied the input",
         input.len()
+    );
+}
+
+/// A `magick` driver whose binary is a stand-in, kept in a scratch
+/// directory named `name`: it reads all of stdin and answers with `answer`,
+/// whatever it is asked. No host ImageMagick is needed.
+#[cfg(unix)]
+fn magick_stand_in(name: &str, answer: &[u8]) -> suprnova::MagickCliDriver {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).unwrap();
+    let answer_file = scratch.join("answer");
+    std::fs::write(&answer_file, answer).unwrap();
+    let stand_in = scratch.join("magick-stand-in");
+    std::fs::write(
+        &stand_in,
+        format!(
+            "#!/bin/sh\ncat > /dev/null\nexec cat '{}'\n",
+            answer_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).unwrap();
+    suprnova::MagickCliDriver::new(stand_in.to_string_lossy())
+}
+
+/// MEM-003: the `magick` driver adds the metadata a PNG source keeps (its
+/// `gAMA` chunk here) into ImageMagick's output where it stands, rather
+/// than by copying the output into a larger buffer. The stand-in answers
+/// with a PNG one byte short of 4 MiB, the length at which a buffer grown
+/// by doubling while it was read has one byte of room left. The same run
+/// with and without the chunk to add allocates the same, give or take far
+/// less than half the output: a copy of the output would be all of it.
+#[cfg(unix)]
+#[tokio::test]
+async fn mem_audit_the_magick_driver_adds_metadata_without_copying_its_output() {
+    let _lock = exclusive().await;
+    // A PNG padded to its length by an ancillary chunk the driver keeps.
+    const LENGTH: usize = 4 * 1024 * 1024 - 1;
+    let padding = LENGTH - RED_PNG_1X1.len() - 12;
+    let answer = png_with_chunks(RED_PNG_1X1, &[(b"paDd", vec![0x5A; padding])]);
+    assert_eq!(answer.len(), LENGTH);
+    let driver = magick_stand_in("mem-003-magick-output", &answer);
+
+    let gama = 45_455u32.to_be_bytes().to_vec();
+    let plain = encode_png(8, 8, PngPixelFormat::Rgba, 4, false);
+    let tagged = png_with_chunks(&plain, &[(b"gAMA", gama.clone())]);
+    let to_png = ImagePipeline {
+        format: Some(OutputFormat::Png),
+        ..Default::default()
+    };
+    let allocated = |input: &[u8]| {
+        let out = driver.process(input, &to_png).expect("a warm-up");
+        let heap = Heap::start();
+        let before = heap.bytes();
+        driver
+            .process(input, &to_png)
+            .expect("the stand-in answers");
+        let used = heap.bytes() - before;
+        drop(heap);
+        (used, out)
+    };
+    let (without, out) = allocated(&plain);
+    assert_eq!(out, answer, "no metadata to add");
+    let (with, out) = allocated(&tagged);
+    assert_eq!(
+        out,
+        png_with_chunks(&answer, &[(b"gAMA", gama)]),
+        "the source's gAMA chunk follows IHDR"
+    );
+    let allowance = LENGTH as u64 / 2;
+    assert!(
+        with < without + allowance,
+        "{with} bytes with a chunk to add against {without} without, for a {LENGTH}-byte \
+         output: the output was copied"
     );
 }

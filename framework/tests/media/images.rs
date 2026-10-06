@@ -1985,6 +1985,163 @@ async fn img_003_an_image_can_choose_oxideav_over_a_magick_default_child() {
         .expect_err("the image without the choice still runs magick");
 }
 
+/// What [`CustomDefault`] answers for every image, so the output shows
+/// which driver ran.
+const CUSTOM_OUTPUT: &[u8] = b"img-003-custom-default";
+
+/// A driver an application installs with `set_default_driver`.
+struct CustomDefault;
+
+impl ImageDriver for CustomDefault {
+    fn process(
+        &self,
+        _contents: &[u8],
+        _pipeline: &ImagePipeline,
+    ) -> Result<Vec<u8>, suprnova::FrameworkError> {
+        Ok(CUSTOM_OUTPUT.to_vec())
+    }
+
+    fn dimensions(&self, _contents: &[u8]) -> Result<(u32, u32), suprnova::FrameworkError> {
+        Ok((1, 1))
+    }
+
+    fn dominant_color(&self, _contents: &[u8]) -> Result<String, suprnova::FrameworkError> {
+        Ok("#000000".to_owned())
+    }
+
+    fn name(&self) -> &'static str {
+        "img-003-custom"
+    }
+}
+
+/// The image the custom-default tests process, with [`CustomDefault`]
+/// installed as the process default. An image without a choice runs it.
+async fn under_a_custom_default() -> (Vec<u8>, Image) {
+    suprnova::media::set_default_driver(Box::new(CustomDefault))
+        .expect("the first driver of the process");
+    let png = png_of(WIDTH, HEIGHT, pattern(WIDTH, HEIGHT));
+    let image = Image::from_bytes(png.clone()).resize(3, 2).to_png();
+    assert_eq!(
+        image.clone().to_bytes().await.expect("the custom default"),
+        CUSTOM_OUTPUT
+    );
+    (png, image)
+}
+
+/// The image's choice changed neither the process default nor the same
+/// image without it.
+async fn the_custom_default_still_runs(image: Image) {
+    assert_eq!(
+        suprnova::media::default_driver().unwrap().name(),
+        "img-003-custom"
+    );
+    assert_eq!(
+        image.to_bytes().await.expect("the custom default"),
+        CUSTOM_OUTPUT
+    );
+}
+
+/// Runs alone in a child process (see `own_process`): the child installs a
+/// custom default driver, which a process does once, and names a missing
+/// ImageMagick binary.
+#[test]
+fn img_003_an_image_choice_overrides_a_custom_default() {
+    let output = {
+        let _env = crate::env_lock::lock_env();
+        crate::own_process::child_command(
+            "images::img_003_an_image_choice_overrides_a_custom_default_child",
+        )
+        .env("IMAGE_MAGICK_BINARY", MISSING_MAGICK)
+        .env_remove("IMAGE_DRIVER")
+        .output()
+        .expect("the child runs")
+    };
+    crate::own_process::assert_child_passed(&output);
+}
+
+#[tokio::test]
+async fn img_003_an_image_choice_overrides_a_custom_default_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let (png, image) = under_a_custom_default().await;
+    let chosen = image
+        .clone()
+        .using(ImageDriverKind::OxideAv)
+        .to_bytes()
+        .await
+        .expect("an image that chose oxideav");
+    let by_oxideav = OxideAvImageDriver::new()
+        .process(
+            &png,
+            &pipeline(
+                vec![Transformation::Resize {
+                    width: 3,
+                    height: 2,
+                }],
+                OutputFormat::Png,
+            ),
+        )
+        .unwrap();
+    assert_eq!(chosen, by_oxideav, "the image that chose oxideav ran it");
+    let err = image
+        .clone()
+        .using(ImageDriverKind::Magick)
+        .to_bytes()
+        .await
+        .expect_err("the image chose magick, whose binary is missing");
+    assert!(err.to_string().contains(MISSING_MAGICK), "got: {err}");
+    the_custom_default_still_runs(image).await;
+}
+
+/// Runs alone in a child process (see `own_process`): the child installs a
+/// custom default driver, which a process does once, and runs the host's
+/// ImageMagick.
+#[test]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn img_003_an_image_can_choose_the_host_magick_over_a_custom_default() {
+    let output = {
+        let _env = crate::env_lock::lock_env();
+        crate::own_process::child_command(
+            "images::img_003_an_image_can_choose_the_host_magick_over_a_custom_default_child",
+        )
+        .env_remove("IMAGE_MAGICK_BINARY")
+        .env_remove("IMAGE_DRIVER")
+        .output()
+        .expect("the child runs")
+    };
+    crate::own_process::assert_child_passed(&output);
+}
+
+#[tokio::test]
+#[ignore = "requires a host ImageMagick 7 binary"]
+async fn img_003_an_image_can_choose_the_host_magick_over_a_custom_default_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let (png, image) = under_a_custom_default().await;
+    let chosen = image
+        .clone()
+        .using(ImageDriverKind::Magick)
+        .to_bytes()
+        .await
+        .expect("an image that chose the host magick");
+    let by_magick = magick()
+        .process(
+            &png,
+            &pipeline(
+                vec![Transformation::Resize {
+                    width: 3,
+                    height: 2,
+                }],
+                OutputFormat::Png,
+            ),
+        )
+        .unwrap();
+    assert_eq!(chosen, by_magick, "the image that chose magick ran it");
+    the_custom_default_still_runs(image).await;
+}
+
 // ───────────────────────── IMG-004 ─────────────────────────
 
 /// What a probe transformation saw: the size and pixels it received.

@@ -114,6 +114,46 @@ async fn pfx_007_the_session_and_xsrf_cookies_take_the_root_of_each_request() {
     assert_eq!(at_host_root.cookie_path("XSRF-TOKEN"), "/");
 }
 
+/// The variables `SessionConfig::from_env` reads for the session cookie's
+/// name, prefix, `Path` and `Secure` flag. Unset, each takes its default.
+const SESSION_PATH_VARS: [&str; 4] = [
+    "SESSION_PATH",
+    "SESSION_COOKIE",
+    "SESSION_COOKIE_PREFIX",
+    "SESSION_SECURE",
+];
+
+#[tokio::test]
+async fn pfx_007_from_env_with_no_session_path_takes_the_root_of_each_request() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "pfx_007_from_env_with_no_session_path_takes_the_root_of_each_request",
+    )
+    .await
+    {
+        return;
+    }
+    // The constructor the scaffold's bootstrap uses, with `SESSION_PATH`
+    // unset as the scaffold's `.env` leaves it.
+    let config = {
+        let _env = crate::env_lock::lock_env_async().await;
+        let _restore = crate::env_snapshot::EnvSnapshot::capture(&SESSION_PATH_VARS);
+        for name in SESSION_PATH_VARS {
+            crate::env_snapshot::set_env(name, None);
+        }
+        SessionConfig::from_env()
+    };
+    let address = served(config).await;
+
+    let behind = support::get_prefixed(address, "/start").await;
+    assert_eq!(behind.cookie_path("suprnova_session"), "/billing");
+    assert_eq!(behind.cookie_path("XSRF-TOKEN"), "/billing");
+
+    let at_host_root = support::get(address, "/start", &[]).await;
+    assert_eq!(at_host_root.cookie_path("suprnova_session"), "/");
+    assert_eq!(at_host_root.cookie_path("XSRF-TOKEN"), "/");
+}
+
 #[tokio::test]
 async fn pfx_007_two_applications_on_one_host_keep_their_own_session_cookie() {
     if crate::own_process_async::delegate(
