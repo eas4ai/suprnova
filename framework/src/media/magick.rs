@@ -644,7 +644,7 @@ fn rust_stage(
     let class = icc.as_deref().and_then(metadata::icc_class);
     if after == AfterStage::Srgb || class != Some(ColourClass::Rgb) {
         if let Some(conversion) = icc.as_deref().and_then(SrgbConversion::from_profile) {
-            conversion.convert_rgba(pixels.pixels_mut());
+            conversion.convert_rgba(pixels.pixels_mut())?;
         }
         icc = None;
     }

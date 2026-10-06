@@ -689,7 +689,7 @@ impl SrgbConversion {
 
     /// Convert packed RGB triples in place: a palette, or the colour part
     /// of RGBA through [`Self::convert_rgba`].
-    pub(crate) fn convert_rgb(&self, rgb: &mut [u8]) {
+    pub(crate) fn convert_rgb(&self, rgb: &mut [u8]) -> Result<(), FrameworkError> {
         match self {
             Self::Rgb(transform) => {
                 // moxcms writes into a separate buffer; a small one, reused,
@@ -697,9 +697,12 @@ impl SrgbConversion {
                 let mut out = [0u8; 3 * 1024];
                 for chunk in rgb.chunks_mut(3 * 1024) {
                     let target = &mut out[..chunk.len()];
-                    if transform.transform(chunk, target).is_ok() {
-                        chunk.copy_from_slice(target);
-                    }
+                    transform.transform(chunk, target).map_err(|e| {
+                        FrameworkError::internal(format!(
+                            "image colour conversion to sRGB failed: {e}"
+                        ))
+                    })?;
+                    chunk.copy_from_slice(target);
                 }
             }
             Self::Table(table) => {
@@ -708,21 +711,23 @@ impl SrgbConversion {
                 }
             }
         }
+        Ok(())
     }
 
     /// Convert packed RGBA in place, leaving alpha as it is.
-    pub(crate) fn convert_rgba(&self, rgba: &mut [u8]) {
+    pub(crate) fn convert_rgba(&self, rgba: &mut [u8]) -> Result<(), FrameworkError> {
         let mut rgb = [0u8; 3 * 1024];
         for chunk in rgba.chunks_mut(4 * 1024) {
             let pixels = chunk.len() / 4;
             for (index, pixel) in chunk.as_chunks::<4>().0.iter().enumerate() {
                 rgb[index * 3..index * 3 + 3].copy_from_slice(&pixel[..3]);
             }
-            self.convert_rgb(&mut rgb[..pixels * 3]);
+            self.convert_rgb(&mut rgb[..pixels * 3])?;
             for (index, pixel) in chunk.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 pixel[..3].copy_from_slice(&rgb[index * 3..index * 3 + 3]);
             }
         }
+        Ok(())
     }
 }
 
@@ -962,6 +967,7 @@ fn rewrite_webp(output: Vec<u8>, metadata: &OutputMetadata<'_>) -> Result<Vec<u8
         None => {
             let (fourcc, payload) = bitstream.ok_or_else(|| unreadable("WebP"))?;
             let (width, height, alpha) = webp_bitstream_shape(&output, &fourcc, &payload)
+                .filter(|(width, height, _)| *width > 0 && *height > 0)
                 .ok_or_else(|| unreadable("WebP"))?;
             let mut canvas = [0u8; 6];
             canvas[..3].copy_from_slice(&(width - 1).to_le_bytes()[..3]);
@@ -1051,6 +1057,7 @@ fn rewrite_gif(output: Vec<u8>, metadata: &OutputMetadata<'_>) -> Result<Vec<u8>
         return Ok(output);
     }
     let mut out = Vec::with_capacity(output.len());
+    let mut converted: Result<(), FrameworkError> = Ok(());
     let (global, trailer) = gif_walk(&output, |block| {
         if out.is_empty() {
             // The header, screen descriptor and global table, before the
@@ -1070,18 +1077,23 @@ fn rewrite_gif(output: Vec<u8>, metadata: &OutputMetadata<'_>) -> Result<Vec<u8>
                 if let Some(conversion) = &conversion {
                     let local =
                         start + (table.start - whole.start)..start + (table.end - whole.start);
-                    conversion.convert_rgb(&mut out[local]);
+                    if converted.is_ok()
+                        && let Err(error) = conversion.convert_rgb(&mut out[local])
+                    {
+                        converted = Err(error);
+                    }
                 }
             }
             GifBlock::Extension { whole, .. } => out.extend_from_slice(&output[whole.clone()]),
         }
     })
     .ok_or_else(|| unreadable("GIF"))?;
+    converted?;
     if out.is_empty() {
         out.extend_from_slice(&output[..trailer]);
     }
     if let Some(conversion) = &conversion {
-        conversion.convert_rgb(&mut out[global]);
+        conversion.convert_rgb(&mut out[global])?;
     }
     out.extend_from_slice(&output[trailer..]);
     Ok(out)

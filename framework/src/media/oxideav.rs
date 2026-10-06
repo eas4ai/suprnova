@@ -464,7 +464,7 @@ impl OxideAvImageDriver {
                 Some(ColourClass::Gray) => {
                     if let Some(conversion) = icc.as_deref().and_then(SrgbConversion::from_profile)
                     {
-                        conversion.convert_rgba(&mut canvas.pixels);
+                        conversion.convert_rgba(&mut canvas.pixels)?;
                     }
                     converted_away = true;
                 }
