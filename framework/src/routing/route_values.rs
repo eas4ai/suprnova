@@ -88,8 +88,9 @@ number_route_values!(
 ///
 /// Implemented for `(name, value)` string pairs in every form a call
 /// written before route binding passed: a borrowed or mutable array, slice
-/// or `Vec`, a borrowed slice, and, for an array of up to 32 pairs, values
-/// and names that deref to a string (`&String`, `&Cow<str>`, `&&str`); for
+/// or `Vec`, a borrowed slice, and, for a borrowed or mutable array of up to
+/// 32 pairs, values and names that deref to a string (`&String`,
+/// `&Cow<str>`, `&&str`); for
 /// one value of any [`RouteValue`] type, which fills the route's first
 /// parameter; for one `(name, value)` pair; and for a tuple of up to six
 /// `(name, value)` pairs, whose values may mix strings and bound values.
@@ -184,51 +185,62 @@ deref_texts!(
     &std::sync::Arc<str>,
 );
 
-/// Arrays of pairs whose name or value is a [`DerefText`]. They are
+/// Arrays of pairs whose name or value is a [`DerefText`], borrowed and
+/// mutably borrowed: the old slice parameter coerced `&mut [("id", &id)]`
+/// element by element just as it coerced `&[("id", &id)]`. They are
 /// implemented per length, from 1, because an impl generic over the length
-/// would also match `&[]` and leave its pair type unknown.
+/// would also match `&[]` and `&mut []` and leave their pair type unknown.
+///
+/// Slices and vectors get no such impls: the old parameter never coerced
+/// their elements, so `&mut vec![("id", &id)]` never compiled, and an impl
+/// generic over their pair type would leave `&mut vec![]` and
+/// `&mut Vec::new()`, which did compile, without a pair type.
 macro_rules! deref_text_pair_arrays {
     ($($len:literal)*) => {
         $(
-            impl<V: DerefText> RouteParameters for &[(&str, V); $len] {
-                fn __route_value(
-                    &self,
-                    name: &str,
-                    _field: Option<&str>,
-                    _position: usize,
-                ) -> Option<String> {
-                    self.iter()
-                        .find(|(key, _)| *key == name)
-                        .map(|(_, value)| value.deref_text().to_owned())
-                }
-            }
-
-            impl<K: DerefText> RouteParameters for &[(K, &str); $len] {
-                fn __route_value(
-                    &self,
-                    name: &str,
-                    _field: Option<&str>,
-                    _position: usize,
-                ) -> Option<String> {
-                    self.iter()
-                        .find(|(key, _)| key.deref_text() == name)
-                        .map(|(_, value)| (*value).to_owned())
-                }
-            }
-
-            impl<K: DerefText, V: DerefText> RouteParameters for &[(K, V); $len] {
-                fn __route_value(
-                    &self,
-                    name: &str,
-                    _field: Option<&str>,
-                    _position: usize,
-                ) -> Option<String> {
-                    self.iter()
-                        .find(|(key, _)| key.deref_text() == name)
-                        .map(|(_, value)| value.deref_text().to_owned())
-                }
-            }
+            deref_text_pair_arrays!(@borrow [&] $len);
+            deref_text_pair_arrays!(@borrow [&mut] $len);
         )*
+    };
+    (@borrow [$($borrow:tt)+] $len:literal) => {
+        impl<V: DerefText> RouteParameters for $($borrow)+ [(&str, V); $len] {
+            fn __route_value(
+                &self,
+                name: &str,
+                _field: Option<&str>,
+                _position: usize,
+            ) -> Option<String> {
+                self.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.deref_text().to_owned())
+            }
+        }
+
+        impl<K: DerefText> RouteParameters for $($borrow)+ [(K, &str); $len] {
+            fn __route_value(
+                &self,
+                name: &str,
+                _field: Option<&str>,
+                _position: usize,
+            ) -> Option<String> {
+                self.iter()
+                    .find(|(key, _)| key.deref_text() == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        }
+
+        impl<K: DerefText, V: DerefText> RouteParameters for $($borrow)+ [(K, V); $len] {
+            fn __route_value(
+                &self,
+                name: &str,
+                _field: Option<&str>,
+                _position: usize,
+            ) -> Option<String> {
+                self.iter()
+                    .find(|(key, _)| key.deref_text() == name)
+                    .map(|(_, value)| value.deref_text().to_owned())
+            }
+        }
     };
 }
 

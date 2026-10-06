@@ -246,6 +246,41 @@ fn bind_012_string_pairs_in_every_container_written_today_fill_as_before() {
 }
 
 #[test]
+fn bind_012_string_pairs_in_a_mutable_array_fill_as_in_a_borrowed_one() {
+    // `&mut [("id", &id)]` passed the old slice parameter by coercion, as
+    // `&[("id", &id)]` did, so it fills the same URL through both calls.
+    let _router = register_routes();
+    let expected = Some("/ur/plain/7".to_owned());
+    let id = String::from("7");
+    let name = String::from("id");
+    let mut owned = id.clone();
+    assert_eq!(route("ur.plain", &mut [("id", &id)]), expected);
+    assert_eq!(route("ur.plain", &mut [("id", &mut owned)]), expected);
+    assert_eq!(route("ur.plain", &mut [(&name, "7")]), expected);
+    assert_eq!(route("ur.plain", &mut [(&name, &id)]), expected);
+    assert_eq!(
+        route("ur.plain", &mut [("other", "x"), ("id", &id)]),
+        expected
+    );
+    assert_eq!(
+        try_route("ur.plain", &mut [("id", &id)]).as_deref(),
+        Ok("/ur/plain/7")
+    );
+    assert_eq!(
+        try_route("ur.plain", &mut [(&name, &id)]).as_deref(),
+        Ok("/ur/plain/7")
+    );
+    // A pair that names no parameter leaves it missing, as before.
+    assert!(try_route("ur.plain", &mut [("other", &id)]).is_err());
+    // A value is percent-encoded as in every other form.
+    let traversal = String::from("../x");
+    assert_eq!(
+        route("ur.plain", &mut [("id", &traversal)]).as_deref(),
+        Some("/ur/plain/..%2Fx")
+    );
+}
+
+#[test]
 fn bind_012_a_hand_written_binding_and_a_bare_model_are_bound_values_through_route_value() {
     let _router = register_routes();
     let region = UrRegion {
