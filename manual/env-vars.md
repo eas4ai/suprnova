@@ -105,6 +105,10 @@ Four rules decide how the list is used:
   A proxy that writes `X-Real-IP` alone must remove the client's
   `X-Forwarded-For`. The `Forwarded` header of RFC 7239 is not read.
 
+A proxy that serves the application under a path, such as `/billing`, names
+that path in `X-Forwarded-Prefix`, which counts under the same rule. See
+[Serving under a path prefix](deployment.md#serving-under-a-path-prefix).
+
 An IPv4 address written as an IPv6 one (`::ffff:10.0.0.5`) counts as the IPv4
 address, in the headers and for the peer. `Request::ips()` returns the whole
 chain. It is a record, not something to decide by.
@@ -184,7 +188,7 @@ flip it off only for local HTTP development.
 | `SESSION_TOUCH_INTERVAL` | `300` (seconds) | `u64` | Minimum sliding-expiry persistence cadence. Runtime enforcement caps it at half the session lifetime. |
 | `SESSION_GC_INTERVAL` | `3600` (seconds) | `u64` | Cadence for the supervised expired-session collector installed by `SessionMiddleware::install`. |
 | `SESSION_COOKIE` | `"suprnova_session"` | `String` | Session cookie name. |
-| `SESSION_PATH` | `"/"` | `String` | Cookie `Path=` attribute. |
+| `SESSION_PATH` | unset | `String` | Cookie `Path=` attribute. Unset, the session, remember-me and XSRF cookies take the public root of each request: `/` at the host root, `/billing` behind a trusted `X-Forwarded-Prefix: /billing`. See [Serving under a path prefix](deployment.md#serving-under-a-path-prefix). |
 | `SESSION_DOMAIN` | unset | `String` | Cookie `Domain=` attribute. Leave unset for host-only cookies (the safer default for most apps). |
 | `SESSION_SECURE` | `true` | `bool` | Cookie `Secure` attribute. Defaults to `true`; set to `false` only in local HTTP development. `cookie_http_only` is always `true` and is not env-configurable. |
 | `SESSION_SAME_SITE` | `"Lax"` | `String` | `SameSite` attribute. Accepts `Strict`, `Lax`, `None` (case-insensitive). |

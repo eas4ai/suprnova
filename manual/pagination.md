@@ -51,7 +51,9 @@ to a reader who knows Laravel:
 - A paginator does not know the base URL of the request. You give it
   one with `with_path(...)`. With no `path`, the page URLs are relative
   (`?page=2`) and `path` is left out of the JSON, where Laravel writes
-  `/`.
+  `/`. A `path` that starts with `/` gets the public root in front of it
+  in every page URL, so behind a proxy that serves the application under
+  `/billing` the next page of `/users` is `/billing/users?page=2`.
 - Give a `path` and a query string, never a URL with a host. The `path`
   is written into every URL as you give it, and the host of a request is
   whatever its `Host` header says, which the client chooses.

@@ -48,10 +48,15 @@ impl Middleware for InertiaValidationRedirectMiddleware {
             .filter(|s| !s.is_empty())
             .unwrap_or("default")
             .to_string();
+        // The host is the one the trust rule gives, so behind a trusted
+        // proxy the forwarded host decides what is same-origin (PFX-005).
+        let host = request.http_host();
+        let root = request.public_root();
         let target = back_target(
             request.header("Referer"),
-            request.header("Host"),
-            &current_path_and_query(&request),
+            host.as_deref(),
+            &root,
+            &crate::routing::url::current(&request),
         );
 
         let response = next(request).await;
@@ -90,14 +95,6 @@ impl Middleware for InertiaValidationRedirectMiddleware {
     }
 }
 
-/// The request's own path plus query - the last-resort redirect target.
-fn current_path_and_query(request: &Request) -> String {
-    match request.query() {
-        Some(q) if !q.is_empty() => format!("{}?{}", request.path(), q),
-        _ => request.path().to_string(),
-    }
-}
-
 /// Resolve where the `303` points.
 ///
 /// Mirrors Laravel's `UrlGenerator::previous()`: `Referer` first, the
@@ -108,18 +105,22 @@ fn current_path_and_query(request: &Request) -> String {
 /// just submitted. The final fallback is the failing request's own URL -
 /// exactly right for the common `GET /login` + `POST /login` pair - run
 /// through the same [`root_relative_or_none`] guard as the `Referer` leg
-/// and falling back to `/` if even that somehow fails it (an origin-form
-/// HTTP request-target is technically free to start with `//`, so this
-/// is not purely defensive), which is what makes "never worse than
-/// dropping the user on `/`" true rather than aspirational.
-fn back_target(referer: Option<&str>, host: Option<&str>, current: &str) -> String {
-    if let Some(from_referer) = referer.and_then(|r| same_origin_path(r, host)) {
+/// and falling back to the root followed by `/` if even that somehow fails
+/// it (an origin-form HTTP request-target is technically free to start with
+/// `//`, so this is not purely defensive), which is what makes "never worse
+/// than dropping the user on the home page" true rather than aspirational.
+///
+/// `current` is the request's URL with its public root, and the session
+/// records the previous URL with it, so every fallback carries the root
+/// once (PFX-005).
+fn back_target(referer: Option<&str>, host: Option<&str>, root: &str, current: &str) -> String {
+    if let Some(from_referer) = referer.and_then(|r| same_origin_path(r, host, root)) {
         return from_referer;
     }
     if let Some(previous) = crate::session::session().and_then(|s| s.previous_url()) {
         return previous;
     }
-    root_relative_or_none(current).unwrap_or_else(|| "/".to_string())
+    root_relative_or_none(current).unwrap_or_else(|| format!("{root}/"))
 }
 
 /// Reduce a `Referer` to a root-relative, same-origin path, or reject it.
@@ -129,13 +130,17 @@ fn back_target(referer: Option<&str>, host: Option<&str>, current: &str) -> Stri
 /// a path already rooted at `/` and clear of any leading `//` or `/\` or
 /// ASCII control byte (see [`root_relative_or_none`] for what that
 /// guards against), and an absolute URL whose authority equals the
-/// request's `Host`, which itself carries no control byte, and whose
-/// path and query pass the same root-relative guard. Everything else
-/// falls through.
-fn same_origin_path(referer: &str, host: Option<&str>) -> Option<String> {
+/// request's host as the trust rule gives it (`X-Forwarded-Host` from a
+/// trusted proxy, else `Host`), which itself carries no control byte, and
+/// whose path and query pass the same root-relative guard. Either way the
+/// path has to be under the public root: a `Referer` from another
+/// application on the same host is foreign, as one from another host is
+/// (PFX-005). Everything else falls through.
+fn same_origin_path(referer: &str, host: Option<&str>, root: &str) -> Option<String> {
     let referer = referer.trim();
     if referer.starts_with('/') {
-        return root_relative_or_none(referer);
+        return root_relative_or_none(referer)
+            .filter(|path| crate::routing::root::is_under(root, path));
     }
     if referer.is_empty() || has_control_byte(referer) {
         return None;
@@ -153,7 +158,7 @@ fn same_origin_path(referer: &str, host: Option<&str>) -> Option<String> {
     // authority that made it safe. `https://app.test//evil.test/x` is
     // same-host, but its path `//evil.test/x` is a network-path reference
     // a browser follows to `evil.test`.
-    root_relative_or_none(&target)
+    root_relative_or_none(&target).filter(|path| crate::routing::root::is_under(root, path))
 }
 
 /// Pull a populated `errors` object out of a `422` body.
@@ -177,25 +182,28 @@ mod tests {
     #[test]
     fn only_a_same_origin_referer_survives_sanitisation() {
         assert_eq!(
-            same_origin_path("https://app.test/register?step=2", Some("app.test")),
+            same_origin_path("https://app.test/register?step=2", Some("app.test"), ""),
             Some("/register?step=2".to_string()),
         );
         assert_eq!(
-            same_origin_path("/posts/create", Some("app.test")),
+            same_origin_path("/posts/create", Some("app.test"), ""),
             Some("/posts/create".to_string()),
         );
         // Otherwise any site could steer our `Location` by linking here.
         assert_eq!(
-            same_origin_path("https://evil.test/phish", Some("app.test")),
+            same_origin_path("https://evil.test/phish", Some("app.test"), ""),
             None
         );
         // `//evil.test/x` is a `Location` a browser reads as absolute.
-        assert_eq!(same_origin_path("//evil.test/x", Some("app.test")), None);
+        assert_eq!(
+            same_origin_path("//evil.test/x", Some("app.test"), ""),
+            None
+        );
         // `/\evil.test` is the same bypass in disguise: the WHATWG URL
         // parser folds a backslash into a slash for special schemes, so
         // a browser normalizes this to `//evil.test` before navigating.
-        assert_eq!(same_origin_path("/\\evil.test", Some("app.test")), None);
-        assert_eq!(same_origin_path("   ", Some("app.test")), None);
+        assert_eq!(same_origin_path("/\\evil.test", Some("app.test"), ""), None);
+        assert_eq!(same_origin_path("   ", Some("app.test"), ""), None);
     }
 
     /// The absolute-URL branch extracts the path, and that path lands in
@@ -204,20 +212,20 @@ mod tests {
     #[test]
     fn an_absolute_same_host_referer_cannot_carry_a_network_path() {
         assert_eq!(
-            same_origin_path("https://app.test//evil.test/x", Some("app.test")),
+            same_origin_path("https://app.test//evil.test/x", Some("app.test"), ""),
             None
         );
         assert_eq!(
-            same_origin_path("https://app.test//evil.test/x?y=1", Some("app.test")),
+            same_origin_path("https://app.test//evil.test/x?y=1", Some("app.test"), ""),
             None
         );
         assert_eq!(
-            same_origin_path("https://app.test/\\evil.test/x", Some("app.test")),
+            same_origin_path("https://app.test/\\evil.test/x", Some("app.test"), ""),
             None
         );
         // An ordinary same-host path still survives.
         assert_eq!(
-            same_origin_path("https://app.test/a//b", Some("app.test")),
+            same_origin_path("https://app.test/a//b", Some("app.test"), ""),
             Some("/a//b".to_string())
         );
     }
@@ -229,22 +237,31 @@ mod tests {
         // by the time a browser navigates it - confirmed working bypass
         // against a version of this guard that only inspected the single
         // character right after the leading `/`.
-        assert_eq!(same_origin_path("/\t/evil.test", Some("app.test")), None);
+        assert_eq!(
+            same_origin_path("/\t/evil.test", Some("app.test"), ""),
+            None
+        );
         // `\n` / `\r` can't arrive through a real HTTP/1.1 `Referer`
         // header (CR/LF terminate the field), but they're the same code
         // defect and this pins the contract regardless of reachability.
-        assert_eq!(same_origin_path("/\n/evil.test", Some("app.test")), None);
-        assert_eq!(same_origin_path("/\r/evil.test", Some("app.test")), None);
+        assert_eq!(
+            same_origin_path("/\n/evil.test", Some("app.test"), ""),
+            None
+        );
+        assert_eq!(
+            same_origin_path("/\r/evil.test", Some("app.test"), ""),
+            None
+        );
         // Not just right after the leading slash - anywhere in the
         // candidate, since the parser strips the whole input, not a
         // prefix of it.
         assert_eq!(
-            same_origin_path("/register/step\t2", Some("app.test")),
+            same_origin_path("/register/step\t2", Some("app.test"), ""),
             None
         );
         // The same guard applies to the absolute-URL branch.
         assert_eq!(
-            same_origin_path("https://app.test/reg\tister", Some("app.test")),
+            same_origin_path("https://app.test/reg\tister", Some("app.test"), ""),
             None
         );
     }
@@ -252,9 +269,9 @@ mod tests {
     #[test]
     fn no_usable_referer_falls_back_to_the_current_url() {
         // No session scope in a unit test, so this exercises the last leg.
-        assert_eq!(back_target(None, Some("app.test"), "/login"), "/login");
+        assert_eq!(back_target(None, Some("app.test"), "", "/login"), "/login");
         assert_eq!(
-            back_target(Some("garbage"), Some("app.test"), "/login"),
+            back_target(Some("garbage"), Some("app.test"), "", "/login"),
             "/login"
         );
     }
@@ -267,13 +284,16 @@ mod tests {
         // the framework `path() == "//evil.test/register"`. The final
         // fallback must not trust it verbatim.
         assert_eq!(
-            back_target(None, Some("app.test"), "//evil.test/register"),
+            back_target(None, Some("app.test"), "", "//evil.test/register"),
             "/"
         );
-        assert_eq!(back_target(None, Some("app.test"), "/\t/evil.test"), "/");
+        assert_eq!(
+            back_target(None, Some("app.test"), "", "/\t/evil.test"),
+            "/"
+        );
         // A genuinely safe current URL still passes through unchanged.
         assert_eq!(
-            back_target(None, Some("app.test"), "/register?step=2"),
+            back_target(None, Some("app.test"), "", "/register?step=2"),
             "/register?step=2"
         );
     }

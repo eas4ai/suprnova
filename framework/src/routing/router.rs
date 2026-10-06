@@ -517,6 +517,12 @@ where
 /// inject path delimiters, query strings, or fragments into the resulting
 /// URL. Unreserved characters (`A-Z a-z 0-9 - _ . ~`) pass through.
 ///
+/// The URL is relative and starts with the public root
+/// ([`crate::url::root`]): `/invoices/7` at the host root,
+/// `/billing/invoices/7` behind a trusted `X-Forwarded-Prefix: /billing`
+/// (PFX-003). A redirect or URL builder given this output leaves it as it
+/// is, so the root is never added twice.
+///
 /// # Arguments
 /// * `name` - The route name (e.g., "users.show")
 /// * `params` - The parameter values: `(name, value)` string pairs, a
@@ -545,10 +551,11 @@ where
 pub fn route(name: &str, params: impl super::RouteParameters) -> Option<String> {
     let path_pattern = lookup_route(name)?;
     let order = super::binding::placeholders(&path_pattern);
-    Some(substitute(&path_pattern, |key, field| {
+    let path = substitute(&path_pattern, |key, field| {
         let position = order.iter().position(|p| p.name == key)?;
         params.__route_value(key, field, position)
-    }))
+    });
+    Some(super::root::prefixed(&path))
 }
 
 /// Generate URL with HashMap parameters (used internally by Redirect).
@@ -557,9 +564,8 @@ pub fn route(name: &str, params: impl super::RouteParameters) -> Option<String> 
 /// encoding policy.
 pub fn route_with_params(name: &str, params: &HashMap<String, String>) -> Option<String> {
     let path_pattern = lookup_route(name)?;
-    Some(substitute(&path_pattern, |key, _field| {
-        params.get(key).cloned()
-    }))
+    let path = substitute(&path_pattern, |key, _field| params.get(key).cloned());
+    Some(super::root::prefixed(&path))
 }
 
 /// Error returned by [`try_route`] / [`try_route_with_params`] when a
@@ -622,6 +628,7 @@ pub fn try_route(name: &str, params: impl super::RouteParameters) -> Result<Stri
         let position = order.iter().position(|p| p.name == key)?;
         params.__route_value(key, field, position)
     })
+    .map(|path| super::root::prefixed(&path))
     .map_err(|missing| RouteUrlError::MissingParams {
         name: name.into(),
         missing,
@@ -638,12 +645,12 @@ pub fn try_route_with_params(
 ) -> Result<String, RouteUrlError> {
     let path_pattern =
         lookup_route(name).ok_or_else(|| RouteUrlError::NameNotFound(name.into()))?;
-    substitute_strict(&path_pattern, |key, _field| params.get(key).cloned()).map_err(|missing| {
-        RouteUrlError::MissingParams {
+    substitute_strict(&path_pattern, |key, _field| params.get(key).cloned())
+        .map(|path| super::root::prefixed(&path))
+        .map_err(|missing| RouteUrlError::MissingParams {
             name: name.into(),
             missing,
-        }
-    })
+        })
 }
 
 /// Reverse-lookup a route name from a matched route pattern.

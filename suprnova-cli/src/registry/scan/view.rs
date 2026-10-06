@@ -91,6 +91,10 @@ pub const VIEW_METHODS: &[&str] = &[
     "unwrap_or_default",
 ];
 
+/// The canonical path of the public-root accessor a URL attribute may hold
+/// in front of a rooted constant path (REG-031, PFX-011).
+const PUBLIC_ROOT: &str = "suprnova::url::root";
+
 /// How many different markup states the walker follows at once.
 const MAX_PATHS: usize = 64;
 
@@ -114,6 +118,9 @@ struct Info {
     literal: bool,
     /// The template variable it reads, for a bare read or a field of one.
     var: Option<String>,
+    /// It is the call `suprnova::url::root()`, the one value a URL
+    /// attribute may hold in front of a rooted constant path (REG-031).
+    root: bool,
 }
 
 /// One `{% call %}`, checked once the whole template is walked, when the
@@ -664,6 +671,7 @@ impl Walker<'_, '_> {
                             url_source: info.url_source,
                             var: info.var.clone(),
                             line,
+                            root: info.root,
                         },
                         self.sink,
                     );
@@ -997,6 +1005,7 @@ impl Walker<'_, '_> {
                     } else {
                         Info {
                             url_source: call,
+                            root: call && canonical == PUBLIC_ROOT,
                             ..Info::default()
                         }
                     }
@@ -1327,6 +1336,7 @@ impl Walker<'_, '_> {
                         Info {
                             url_source: info.url_source && constants_stay,
                             literal,
+                            root: info.root && args.is_empty(),
                             ..Info::default()
                         }
                     }

@@ -324,8 +324,8 @@ pub use inertia::{
     InertiaResponse, InertiaSharedData, InertiaValidationRedirectMiddleware,
     InertiaVersionMiddleware, IntoInertiaData, MANIFEST_VERSION_FALLBACK, ManifestEntry,
     MatchOnFields, MergeMode, MergeStrategy, OnceOptions, PartialFilter, Prop, PropEntry,
-    PropFuture, PropResolver, ProvidesScrollMetadata, ResolvedAssets, ScrollMetadata, SsrConfig,
-    SsrResponse, VersionResolver, Visibility, ViteManifest,
+    PropFuture, PropResolver, ProvidesScrollMetadata, ResolvedAssets, RootShare, ScrollMetadata,
+    SsrConfig, SsrResponse, VersionResolver, Visibility, ViteManifest,
 };
 pub use laravel::{LaravelDatabase, SHARED_DATABASE_ENV, SHARED_DEFAULT_QUEUE};
 #[cfg(feature = "localization")]

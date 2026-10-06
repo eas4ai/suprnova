@@ -1,11 +1,17 @@
 <script lang="ts">
-  import { router } from '@inertiajs/svelte'
+  import { router, usePage } from '@inertiajs/svelte'
   import type { DashboardProps } from '../types/inertia-props'
+
+  // The public root the server shares with every page (`RootShare`): empty
+  // at the host root, `/billing` behind a proxy that serves the app there.
+  // Every URL this page posts to or links is built from it, so one build
+  // runs at both.
+  const { root } = usePage<{ root: string }>().props
 
   let { user }: DashboardProps = $props()
 
   function handleLogout() {
-    router.post('/logout')
+    router.post(`${root}/logout`)
   }
 </script>
 

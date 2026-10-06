@@ -108,6 +108,8 @@ pub(crate) struct Dynamic {
     pub var: Option<String>,
     /// The line of the expression.
     pub line: u32,
+    /// The value is `suprnova::url::root()` (REG-031).
+    pub root: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -626,7 +628,17 @@ fn check_url_attribute(tag: &Tag, attribute: &Attribute, sink: &mut Sink) {
     let refuse =
         |sink: &mut Sink, message: String| sink.refuse("view-url", attribute.line, message);
     let list = matches!(name, "srcset" | "imagesrcset" | "ping" | "archive");
-    if let Some(text) = texts_only(&attribute.pieces) {
+    let Some(pieces) = without_roots(&attribute.pieces) else {
+        refuse(
+            sink,
+            format!(
+                "`{name}` on `<{}>` holds `suprnova::url::root()` followed by something other than a constant path starting with one `/`",
+                tag.name
+            ),
+        );
+        return;
+    };
+    if let Some(text) = texts_only(&pieces) {
         let decoded = match decode_references(&text) {
             Ok(decoded) => decoded,
             Err(reference) => {
@@ -655,7 +667,7 @@ fn check_url_attribute(tag: &Tag, attribute: &Attribute, sink: &mut Sink) {
     }
     let mut prefix = String::new();
     let mut seen_dynamic = false;
-    for piece in &attribute.pieces {
+    for piece in &pieces {
         match piece {
             Piece::Text(text) if !seen_dynamic => prefix.push_str(text),
             Piece::Text(_) => {}
@@ -677,14 +689,13 @@ fn check_url_attribute(tag: &Tag, attribute: &Attribute, sink: &mut Sink) {
             }
         }
     }
-    let dynamics = attribute
-        .pieces
+    let dynamics = pieces
         .iter()
         .filter(|piece| matches!(piece, Piece::Dynamic(_)))
         .count();
     let bare = prefix.trim().is_empty()
         && dynamics == 1
-        && attribute.pieces.iter().all(|piece| {
+        && pieces.iter().all(|piece| {
             matches!(piece, Piece::Dynamic(_))
                 || matches!(piece, Piece::Text(text) if text.trim().is_empty())
         });
@@ -701,6 +712,45 @@ fn check_url_attribute(tag: &Tag, attribute: &Attribute, sink: &mut Sink) {
             ),
         );
     }
+}
+
+/// The attribute's pieces with every `suprnova::url::root()` taken out, or
+/// `None` when one is not followed directly by a rooted constant (REG-031).
+///
+/// The root is empty at the host root and otherwise a path that starts with
+/// exactly one `/` (PFX-001, PFX-002), so in front of a constant that starts
+/// with exactly one `/` it only lengthens a path on the application's
+/// origin. The pieces without it are what the URL is at the
+/// host root, and the checks that follow judge that URL; a constant whose
+/// next character after the `/` is another `/` or a `\`, read after the
+/// character references and the tabs and newlines the URL parser removes,
+/// would make a network path at the host root and is refused here.
+fn without_roots(pieces: &[Piece]) -> Option<Vec<Piece>> {
+    let mut out: Vec<Piece> = Vec::with_capacity(pieces.len());
+    for (index, piece) in pieces.iter().enumerate() {
+        match piece {
+            Piece::Dynamic(dynamic) if dynamic.root => match pieces.get(index + 1) {
+                Some(Piece::Text(text)) if rooted_constant(text) => {}
+                _ => return None,
+            },
+            Piece::Text(text) => match out.last_mut() {
+                Some(Piece::Text(previous)) => previous.push_str(text),
+                _ => out.push(piece.clone()),
+            },
+            Piece::Dynamic(_) => out.push(piece.clone()),
+        }
+    }
+    Some(out)
+}
+
+/// Whether `text` starts with exactly one `/` whose next character is
+/// neither `/` nor `\`, as the browser reads it.
+fn rooted_constant(text: &str) -> bool {
+    let Ok(decoded) = decode_references(text) else {
+        return false;
+    };
+    let mut chars = decoded.chars().filter(|c| !matches!(c, '\t' | '\n' | '\r'));
+    chars.next() == Some('/') && !matches!(chars.next(), Some('/' | '\\'))
 }
 
 fn url_message(attribute: &str, element: &str, refusal: UrlRefusal) -> String {

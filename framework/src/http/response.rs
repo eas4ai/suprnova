@@ -568,6 +568,13 @@ impl HttpResponse {
     /// middleware would forward into a header (CORS allow-headers,
     /// `X-Forwarded-*`, custom debug headers).
     ///
+    /// A `Location`, `X-Inertia-Location` or `X-Inertia-Redirect` whose
+    /// target is a root-relative application path gets the public root
+    /// here, once, whatever built the header: a `Redirect`, a middleware,
+    /// or a handler (PFX-004, PFX-010). A target already under the root,
+    /// an absolute URL, a network-path reference and a relative reference
+    /// pass unchanged, so a header is never rooted twice.
+    ///
     /// The status code is constrained to the IANA HTTP status range
     /// `100..=599`. Anything outside that range - `Hyper`'s own
     /// `from_u16` is more permissive (it accepts the full `100..=999`
@@ -601,7 +608,14 @@ impl HttpResponse {
         };
         let mut builder = hyper::Response::builder().status(status);
 
+        let mut root: Option<std::sync::Arc<str>> = None;
         for (name, value) in self.headers {
+            let value = if is_navigation_header(&name) {
+                let root = root.get_or_insert_with(crate::routing::root::current);
+                crate::routing::root::rooted_with(root, &value).into_owned()
+            } else {
+                value
+            };
             let header_name = match hyper::header::HeaderName::try_from(name.as_str()) {
                 Ok(n) => n,
                 Err(e) => {
@@ -898,7 +912,9 @@ impl Redirect {
     /// Laravel's `Redirector::setIntendedUrl($url)`. No-op outside a
     /// `SessionMiddleware` scope.
     pub fn set_intended_url(url: impl Into<String>) {
-        let url = url.into();
+        // The session records the URL the browser will be sent to, root
+        // included (PFX-004).
+        let url = crate::routing::root::rooted(&url.into()).into_owned();
         crate::session::session_mut(|s| s.put("url.intended", url));
     }
 
@@ -1240,6 +1256,14 @@ fn drain_flash(flash: Vec<(String, serde_json::Value)>) {
             }
         }
     });
+}
+
+/// Whether `name` is a header that sends the browser to a URL, whose
+/// target therefore has to carry the public root (PFX-004).
+fn is_navigation_header(name: &str) -> bool {
+    ["location", "x-inertia-location", "x-inertia-redirect"]
+        .iter()
+        .any(|navigation| name.eq_ignore_ascii_case(navigation))
 }
 
 /// Auto-convert Redirect to Response

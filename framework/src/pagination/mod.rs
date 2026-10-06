@@ -287,8 +287,13 @@ impl Pagination {
 /// the next page has one page and not two. A fragment stays at the end,
 /// behind the query string, where a browser reads it. With no base the
 /// URL is the bare `?key=value`.
+///
+/// A root-relative base gets the public root unless it already has it
+/// (PFX-006, PFX-010); a base that is only a query, or a relative path,
+/// stays relative.
 pub(crate) fn build_query_url(path: Option<&str>, key: &str, value: &str) -> String {
-    let base = path.unwrap_or("");
+    let base = crate::routing::root::rooted(path.unwrap_or(""));
+    let base = base.as_ref();
     let (base, fragment) = match base.split_once('#') {
         Some((base, fragment)) => (base, Some(fragment)),
         None => (base, None),

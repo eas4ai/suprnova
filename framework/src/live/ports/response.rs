@@ -150,6 +150,9 @@ impl SuprnovaResponseIntentPort {
                         .map_err(|_| {
                             FrameworkError::internal("Live route intent could not be resolved")
                         })?;
+                // The browser follows the target as given, so it carries
+                // the public root as `route()` does (PFX-004).
+                let target = crate::routing::root::prefixed(&target);
                 endpoint = endpoint.with_redirect(navigation_target(
                     &target,
                     self.max_redirect_bytes,
@@ -166,7 +169,12 @@ impl SuprnovaResponseIntentPort {
                     let path = document_path.ok_or_else(|| {
                         FrameworkError::internal("Live document path authority was unavailable")
                     })?;
-                    let target = reflected_url(path, intent.query())?;
+                    // The snapshot records the path the application
+                    // received; the browser compares the reflected URL with
+                    // the path it shows, which carries the public root
+                    // (PFX-006).
+                    let path = crate::routing::root::prefixed(path);
+                    let target = reflected_url(&path, intent.query())?;
                     endpoint = endpoint.with_reflected_url(navigation_target(
                         &target,
                         self.max_redirect_bytes,

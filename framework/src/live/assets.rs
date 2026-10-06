@@ -26,6 +26,7 @@ use crate::{HttpResponse, Request, Response};
 
 use super::LiveConfig;
 use super::routes::LIVE_UPDATE_PATH;
+use crate::inertia::escape_html_attr;
 
 /// Reserved path prefix under which every Live artifact is served.
 pub const LIVE_ASSET_PATH_PREFIX: &str = "/__live/assets";
@@ -273,10 +274,17 @@ impl LiveAssetCatalog {
         }
     }
 
-    /// Returns the absolute path one served file is addressed by.
+    /// Returns the root-relative path one served file is addressed by:
+    /// the public root ([`crate::url::root`]) followed by
+    /// [`LIVE_ASSET_PATH_PREFIX`], so a document served under a path
+    /// prefix loads its assets under it too (PFX-006).
     #[must_use]
     pub fn url(&self, file: &str) -> String {
-        format!("{LIVE_ASSET_PATH_PREFIX}/{}/{file}", self.identity())
+        format!(
+            "{}{LIVE_ASSET_PATH_PREFIX}/{}/{file}",
+            crate::routing::root::current(),
+            self.identity()
+        )
     }
 
     fn lookup(&self, file: &str) -> Option<ServedAsset> {
@@ -512,7 +520,7 @@ pub(crate) fn render_bootstrap(
         html.push_str(&stylesheet_link(&catalog.url(styles.file()), styles.sri()));
     }
     let core_artifact = catalog.artifact(core);
-    let core_url = catalog.url(core_artifact.file());
+    let core_url = escape_html_attr(&catalog.url(core_artifact.file()));
     match strategy {
         LiveBootstrapStrategy::Esm => {
             html.push_str(&format!(
@@ -546,7 +554,11 @@ pub(crate) fn render_bootstrap(
                     nonce,
                 ));
             }
-            html.push_str(&classic_script(&core_url, core_artifact.sri(), nonce));
+            html.push_str(&classic_script(
+                &catalog.url(core_artifact.file()),
+                core_artifact.sri(),
+                nonce,
+            ));
             let boot = catalog.boot_script(strategy);
             html.push_str(&classic_script(
                 &catalog.url(boot.file()),
@@ -568,13 +580,19 @@ pub(crate) fn render_bootstrap(
     })
 }
 
+// The URLs below carry the public root, which may come from the path in
+// `APP_URL`, so each is attribute-escaped: a root with no character that
+// escaping changes writes the same bytes as before.
+
 fn stylesheet_link(url: &str, sri: &str) -> String {
+    let url = escape_html_attr(url);
     format!(
         "<link rel=\"stylesheet\" href=\"{url}\" integrity=\"{sri}\" crossorigin=\"anonymous\">"
     )
 }
 
 fn module_script(url: &str, sri: &str, nonce: Option<&str>) -> String {
+    let url = escape_html_attr(url);
     format!(
         "<script type=\"module\" src=\"{url}\" integrity=\"{sri}\" crossorigin=\"anonymous\"{}></script>",
         nonce_attribute(nonce)
@@ -582,6 +600,7 @@ fn module_script(url: &str, sri: &str, nonce: Option<&str>) -> String {
 }
 
 fn classic_script(url: &str, sri: &str, nonce: Option<&str>) -> String {
+    let url = escape_html_attr(url);
     format!(
         "<script defer src=\"{url}\" integrity=\"{sri}\" crossorigin=\"anonymous\"{}></script>",
         nonce_attribute(nonce)
@@ -626,7 +645,9 @@ fn config_element(identity: &str, config: LiveConfig, protocol: (u16, u16)) -> S
         ),
         (
             "endpoint",
-            serde_json::Value::String(LIVE_UPDATE_PATH.to_owned()),
+            // The browser derives every reserved Live route from this one,
+            // so the public root here reaches all six (PFX-006).
+            serde_json::Value::String(crate::routing::root::prefixed(LIVE_UPDATE_PATH)),
         ),
         ("max_html_bytes", number(config.max_html_bytes() as u64)),
         ("max_json_depth", number(config.max_json_depth() as u64)),

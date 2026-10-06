@@ -10,6 +10,7 @@ mod group;
 mod macros;
 mod params;
 mod resource;
+pub(crate) mod root;
 mod route_values;
 mod router;
 mod signed;

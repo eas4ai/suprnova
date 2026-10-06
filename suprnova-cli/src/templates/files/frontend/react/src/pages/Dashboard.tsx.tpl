@@ -1,9 +1,14 @@
-import { router } from '@inertiajs/react'
+import { router, usePage } from '@inertiajs/react'
 import type { DashboardProps } from '../types/inertia-props'
 
 export default function Dashboard({ user }: DashboardProps) {
+  // The public root the server shares with every page (`RootShare`): empty
+  // at the host root, `/billing` behind a proxy that serves the app there.
+  // Every URL this page posts to or links is built from it, so one build
+  // runs at both.
+  const { root } = usePage<{ root: string }>().props
   const handleLogout = () => {
-    router.post('/logout')
+    router.post(`${root}/logout`)
   }
 
   return (

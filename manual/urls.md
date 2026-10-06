@@ -68,6 +68,13 @@ let missing = route("does.not.exist", &[]);
 // None
 ```
 
+Behind a reverse proxy that serves the application under a path prefix,
+`route()` puts the public root in front of the path: under
+`X-Forwarded-Prefix: /billing` from a trusted proxy, the call above returns
+`Some("/billing/users/42")`. At the host root the output is unchanged. A
+redirect or URL builder given this output keeps the root once. For the
+proxy setup, see [Serving under a path prefix](deployment.md#serving-under-a-path-prefix).
+
 Re-registering the same `(name, path)` pair is idempotent - useful when
 route registration runs more than once during boot. Registering a name
 under a *different* path panics; that collision is a security-shaped
@@ -106,6 +113,23 @@ impl suprnova::RouteValue for Region {
     }
 }
 ```
+
+### The public root
+
+`url::root()` returns the public root on its own: `/billing` behind a
+trusted `X-Forwarded-Prefix: /billing`, the path in `APP_URL` when no
+trusted prefix arrives, and the empty string at the host root, never with
+a trailing slash. It is the way a
+template writes a root-relative link that `route()` does not build, such as
+a component stylesheet:
+
+```html
+<link rel="stylesheet" href="{{ suprnova::url::root() }}/suprnova-ui/button/button.css">
+```
+
+The root followed by a path that starts with `/` is a link that works at
+every root. `url::root()` carries no capability, so a third-party
+component's view may call it too, in exactly this form.
 
 ### The lookup helpers
 
@@ -218,6 +242,13 @@ The host, scheme, and port all come from `APP_URL`. If `APP_URL` is
 `"http://localhost:8765/foo"`. The trailing slash on `APP_URL` is
 normalised away so you never end up with `https://host//path`.
 
+The path between the host and your path is the public root: the path in
+`APP_URL`, or a trusted `X-Forwarded-Prefix` of the request being handled,
+which replaces it. With `APP_URL=https://example.org/billing`,
+`url::to("/foo")` yields `"https://example.org/billing/foo"`, and
+`url::to("/billing/foo")` yields the same URL, because a path that already
+carries the root keeps it once.
+
 ### Forcing HTTPS
 
 `url::secure(path)` builds the same absolute URL but upgrades the scheme
@@ -244,7 +275,7 @@ Inside a handler, the request itself is the source of truth:
 use suprnova::url;
 
 async fn breadcrumbs(req: Request) -> Response {
-    let here = url::current(&req);       // "/posts/42?expand=author"
+    let here = url::current(&req);       // "/posts/42?expand=author", root first
     let full = url::full(&req);          // "https://app.test/posts/42?expand=author"
     let back = url::previous("/");        // session-recorded previous URL
     // ...
@@ -253,7 +284,7 @@ async fn breadcrumbs(req: Request) -> Response {
 
 | Helper | Returns | Source |
 |---|---|---|
-| `url::current(&req)` | path + query of this request | The current `Request` |
+| `url::current(&req)` | public root + path + query of this request | The current `Request` |
 | `url::full(&req)` | absolute URL of this request | `APP_URL` + `current(&req)` |
 | `url::previous(fallback)` | previous URL recorded by the session middleware | `_previous.url` in the session, or `fallback` |
 
@@ -346,6 +377,11 @@ async fn reset_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
     Ok(HttpResponse::text("ok"))
 }
 ```
+
+The signature covers the public root as well as the path, because the
+browser sends both back: a link signed behind a `/billing` prefix verifies
+behind it, and not under another root or at the host root. Moving an
+application under a prefix therefore ends the links signed before the move.
 
 `has_valid_signature` returns `true` only when the HMAC matches AND the
 URL is not expired. For the three-way distinction between *invalid*,
@@ -578,11 +614,13 @@ add nothing real over named routes.
 **`URL::forceScheme()` / `URL::forceRootUrl()`**. Laravel exposes these
 for tests and for sites behind reverse proxies that don't pass
 `X-Forwarded-Proto`. Suprnova handles both cases by configuration:
-`APP_URL` carries the canonical host and scheme; for proxy environments,
-the trusted-proxy middleware ([Middleware](middleware.md)) reads
-`X-Forwarded-*` headers and updates the request URL before it reaches
-your handler. There's nothing for `forceScheme` to override - `APP_URL`
-already says what the scheme is.
+`APP_URL` carries the canonical host, scheme and path. Behind a proxy,
+the request accessors read `X-Forwarded-Proto`, `-Host`, `-Port` and
+`-Prefix` from the addresses listed in `APP_TRUSTED_PROXIES`, and the URL
+helpers build on them; the request's own path is left as it arrived, so
+routes match it. There's nothing for `forceScheme` to override - `APP_URL`
+already says what the scheme is. For a proxy that serves the application
+under a path, see [Serving under a path prefix](deployment.md#serving-under-a-path-prefix).
 
 What does land here is the user-facing shape consumers reach for, with
 the same Laravel-shaped names where they translate cleanly. The trim is

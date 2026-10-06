@@ -548,10 +548,12 @@ fn bypass_response(secret: &str) -> Response {
             "maintenance bypass cookie encode: {e}"
         )))
     })?;
+    // Scoped to the public root, so the bypass of one application does not
+    // reach another under a different root on the same host (PFX-007).
     let cookie = Cookie::encrypted(BYPASS_COOKIE, plaintext)?
         .http_only(true)
         .same_site(SameSite::Lax)
-        .path("/")
+        .path(crate::routing::root::cookie_path())
         .max_age(BYPASS_TTL);
     Err(HttpResponse::new()
         .status(302)
