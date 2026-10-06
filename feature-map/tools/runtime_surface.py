@@ -49,9 +49,25 @@ ENDPOINTS = [
 TABLES = [
     # (table, group, file, needle)
     *[(t, "framework migration `CreateRbacTables`", "framework/src/rbac/migrations/m_create_rbac_tables.rs", n) for t, n in (
-        ("roles", "enum Roles"), ("permissions", "enum Permissions"), ("role_permissions", "enum RolePermissions"),
-        ("model_roles", "enum ModelRoles"), ("model_permissions", "enum ModelPermissions"))],
-    ("features", "framework migration `CreateFeaturesTable`", "framework/src/features/migrations/m_create_features_table.rs", "enum Features"),
+        ("roles", 'for table in ["permissions", "roles"]'), ("permissions", 'for table in ["permissions", "roles"]'),
+        ("role_has_permissions", 'Schema::create(manager, "role_has_permissions"'),
+        ("model_has_roles", '("model_has_roles", "role_id", "roles"),'),
+        ("model_has_permissions", '("model_has_permissions", "permission_id", "permissions"),'),
+        ("suprnova_role_details", 'create_details(manager, "suprnova_role_details"'),
+        ("suprnova_permission_details", 'create_details(manager, "suprnova_permission_details"'))],
+    *[(t, "framework migration `CreateFeaturesTable`", "framework/src/features/migrations/m_create_features_table.rs", n) for t, n in (
+        ("features", "Schema::create_or_complete(manager, FEATURES_TABLE"),
+        ("suprnova_feature_details", "Schema::create(manager, DETAILS_TABLE"))],
+    ("notifications", "framework migration `CreateNotificationsTable`", "framework/src/notifications/migrations/m_create_notifications_table.rs",
+     'Schema::create_or_complete(manager, "notifications"'),
+    ("sessions", "framework migration `session::migrations::CreateSessionsTable`", "framework/src/session/migrations.rs",
+     "pub struct CreateSessionsTable"),
+    *[(t, f"framework migration `queue::migrations::{m}`", "framework/src/queue/migrations/mod.rs", n) for t, m, n in (
+        ("jobs", "CreateJobsTable", "pub struct CreateJobsTable;"),
+        ("suprnova_jobs_reservations", "CreateJobsTable", "Schema::create_or_complete(manager, &reservations"),
+        ("failed_jobs", "CreateFailedJobsTable", "pub struct CreateFailedJobsTable;"),
+        ("job_batches", "CreateJobBatchesTable", "pub struct CreateJobBatchesTable;"),
+        ("job_batch_settlements", "CreateJobBatchesTable", "async fn create_settlements("))],
     ("workflows", "framework migration `CreateWorkflowsTable`", "framework/src/workflow/migrations/m_create_workflows_table.rs", "enum Workflows"),
     ("workflow_steps", "framework migration `CreateWorkflowStepsTable`", "framework/src/workflow/migrations/m_create_workflow_steps_table.rs", "enum WorkflowSteps"),
     ("two_factor_credentials", "framework migration `auth_flows::two_factor::migration::Migration`", "framework/src/auth_flows/two_factor/migration.rs", "TwoFactorCredentials::Table"),
@@ -67,16 +83,12 @@ TABLES = [
         "auth_lockouts", "auth_two_factor", "auth_remember_tokens", "auth_provider_tokens",
         "auth_lifecycle_deliveries", "auth_migration_runs", "auth_migration_identities", "magnetar_migration_state")],
     *[(t, "`suprnova new` scaffold migration", f"suprnova-cli/src/templates/files/backend/migrations/{f}", n) for t, f, n in (
-        ("users", "create_users_table.rs.tpl", "enum Users"),
-        ("sessions", "create_sessions_table.rs.tpl", "enum Sessions"),
+        ("users", "create_users_table.rs.tpl", 'Schema::create(manager, "users"'),
+        ("sessions", "create_sessions_table.rs.tpl", 'create_sessions_table(manager, "sessions"'),
         ("remember_tokens", "create_remember_tokens_table.rs.tpl", "enum RememberTokens"),
         ("auth_flow_tokens", "create_auth_flow_tokens_table.rs.tpl", 'Alias::new("auth_flow_tokens")'),
         ("workflows", "create_workflows_table.rs.tpl", "enum Workflows"),
         ("workflow_steps", "create_workflow_steps_table.rs.tpl", "enum WorkflowSteps"))],
-    ("jobs", "operator-managed; default name of `QUEUE_DB_TABLE` for `QUEUE_DRIVER=database`", "framework/src/queue/mod.rs", 'unwrap_or_else(|_| "jobs".into())'),
-    ("failed_jobs", "operator-managed; schema documented on `DatabaseFailedJobStore`", "framework/src/queue/failed.rs", "CREATE TABLE failed_jobs"),
-    ("job_batches", "operator-managed; schema documented on `DatabaseBatchRepository`", "framework/src/queue/batch.rs", "CREATE TABLE job_batches"),
-    ("job_batch_settlements", "operator-managed; schema documented on `DatabaseBatchRepository`", "framework/src/queue/batch.rs", "CREATE TABLE job_batch_settlements"),
 ]
 
 
