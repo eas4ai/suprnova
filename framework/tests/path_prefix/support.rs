@@ -201,6 +201,53 @@ pub async fn get(address: SocketAddr, path: &str, headers: &[(&str, &str)]) -> R
     send(address, "GET", path, &headers, b"").await
 }
 
+/// `GET target` written to the socket byte for byte, so the request-target
+/// reaches the server exactly as a client sent it. A client library may
+/// read a target such as `//host/x` as an authority and rewrite it, which
+/// would hide the case a test is about.
+pub async fn get_raw(address: SocketAddr, target: &str, headers: &[(&str, &str)]) -> Reply {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect to the test server");
+    let mut request = format!("GET {target} HTTP/1.1\r\nhost: app.test\r\nconnection: close\r\n");
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write the request");
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut raw))
+        .await
+        .expect("the response within ten seconds")
+        .expect("read the response");
+    let raw = String::from_utf8_lossy(&raw).into_owned();
+    let (head, body) = raw.split_once("\r\n\r\n").expect("a response head");
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .and_then(|line| line.split(' ').nth(1))
+        .and_then(|code| code.parse().ok())
+        .expect("a status line");
+    let mut map = hyper::HeaderMap::new();
+    for line in lines {
+        let (name, value) = line.split_once(':').expect("a header line");
+        map.append(
+            HeaderName::from_bytes(name.trim().as_bytes()).expect("a header name"),
+            HeaderValue::from_str(value.trim()).expect("a header value"),
+        );
+    }
+    Reply {
+        status,
+        headers: map,
+        body: body.to_owned(),
+    }
+}
+
 /// `GET path` behind a trusted proxy that serves the application under
 /// [`PREFIX`].
 pub async fn get_prefixed(address: SocketAddr, path: &str) -> Reply {

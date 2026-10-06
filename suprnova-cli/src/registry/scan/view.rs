@@ -95,6 +95,11 @@ pub const VIEW_METHODS: &[&str] = &[
 /// in front of a rooted constant path (REG-031, PFX-011).
 const PUBLIC_ROOT: &str = "suprnova::url::root";
 
+/// Why the root is refused as a macro argument: inside the macro it is a
+/// parameter, which the scan cannot hold to the rooted constant that has to
+/// follow it (REG-031).
+const ROOT_ARGUMENT: &str = "`suprnova::url::root()` may stand in a URL attribute only directly before a constant path that starts with one `/`, so write it there rather than pass it to a macro";
+
 /// How many different markup states the walker follows at once.
 const MAX_PATHS: usize = 64;
 
@@ -121,6 +126,54 @@ struct Info {
     /// It is the call `suprnova::url::root()`, the one value a URL
     /// attribute may hold in front of a rooted constant path (REG-031).
     root: bool,
+}
+
+/// What a template-local name holds, as far as a URL attribute cares.
+///
+/// A local keeps the root's restriction: `{% let home = suprnova::url::root() %}`
+/// makes `home` stand in a URL attribute only where the call may, directly
+/// before a rooted constant path (REG-031).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Local {
+    /// It holds a URL source (see [`Info::url_source`]).
+    url_source: bool,
+    /// It holds `suprnova::url::root()`.
+    root: bool,
+}
+
+impl Local {
+    /// A name the template computes: neither a URL source nor the root.
+    const COMPUTED: Self = Self {
+        url_source: false,
+        root: false,
+    };
+
+    /// A name the template does not bind, such as a state field or a macro
+    /// parameter: a URL source, as a bare read is.
+    const UNBOUND: Self = Self {
+        url_source: true,
+        root: false,
+    };
+
+    fn of(info: &Info) -> Self {
+        Self {
+            url_source: info.url_source,
+            root: info.root,
+        }
+    }
+
+    /// The reading of a name bound twice: the stricter of the two. A name
+    /// bound once to the root and once to anything else may be either, so
+    /// it is neither a URL source nor a root the scan may set aside.
+    fn merge(self, other: Self) -> Self {
+        if self.root != other.root {
+            return Self::COMPUTED;
+        }
+        Self {
+            url_source: self.url_source && other.url_source,
+            root: self.root,
+        }
+    }
 }
 
 /// One `{% call %}`, checked once the whole template is walked, when the
@@ -462,8 +515,8 @@ struct Walker<'a, 'b> {
     suppress_by_default: bool,
     check_expressions: bool,
     imports: BTreeSet<String>,
-    /// Template-local names and whether each holds a URL source.
-    locals: HashMap<String, bool>,
+    /// Template-local names and what each holds.
+    locals: HashMap<String, Local>,
     /// Each macro this template defines: its parameters, their defaults,
     /// and the parameters it writes into a URL attribute.
     macros: HashMap<String, MacroShape>,
@@ -710,17 +763,17 @@ impl Walker<'_, '_> {
             Node::Let(let_node) => {
                 self.target(&let_node.var);
                 let source = match &let_node.val {
-                    LetValueOrBlock::Value(value) => self.expr(value).url_source,
+                    LetValueOrBlock::Value(value) => Local::of(&self.expr(value)),
                     LetValueOrBlock::Block { nodes, .. } => {
                         self.fragment(nodes);
-                        false
+                        Local::COMPUTED
                     }
                 };
                 self.bind_target(&let_node.var, source);
             }
             Node::Compound(compound) => {
                 if let Expr::Var(name) = &**compound.op.lhs {
-                    self.locals.insert((*name).to_string(), false);
+                    self.locals.insert((*name).to_string(), Local::COMPUTED);
                 }
                 self.expr(&compound.op.lhs);
                 self.expr(&compound.op.rhs);
@@ -734,7 +787,7 @@ impl Walker<'_, '_> {
                             if let Some(target) = &test.target {
                                 self.target(target);
                             }
-                            let source = self.expr(&test.expr).url_source;
+                            let source = Local::of(&self.expr(&test.expr));
                             if let Some(target) = &test.target {
                                 self.bind_target(target, source);
                             }
@@ -746,7 +799,7 @@ impl Walker<'_, '_> {
                 self.branches(paths, &bodies, exhaustive, if_node.span());
             }
             Node::Match(match_node) => {
-                let source = self.expr(&match_node.expr).url_source;
+                let source = Local::of(&self.expr(&match_node.expr));
                 let mut bodies: Vec<&[Box<Node<'_>>]> = Vec::new();
                 for arm in &match_node.arms {
                     for target in &arm.target {
@@ -759,7 +812,12 @@ impl Walker<'_, '_> {
             }
             Node::Loop(loop_node) => {
                 self.target(&loop_node.var);
-                let source = self.expr(&loop_node.iter).url_source;
+                // An item of what the loop walks is not the root itself.
+                let iter = self.expr(&loop_node.iter);
+                let source = Local {
+                    url_source: iter.url_source && !iter.root,
+                    root: false,
+                };
                 self.bind_target(&loop_node.var, source);
                 if let Some(cond) = &loop_node.cond {
                     self.expr(cond);
@@ -797,7 +855,7 @@ impl Walker<'_, '_> {
                     .map(|arg| arg.default.as_ref().map(|default| self.expr(default)))
                     .collect();
                 let outer = std::mem::take(&mut self.sink.url_vars);
-                let shadowed: Vec<(String, Option<bool>)> = params
+                let shadowed: Vec<(String, Option<Local>)> = params
                     .iter()
                     .map(|param| (param.clone(), self.locals.remove(param)))
                     .collect();
@@ -839,14 +897,14 @@ impl Walker<'_, '_> {
         }
     }
 
-    /// Records each name a target binds and whether it holds a URL source;
-    /// a name bound twice keeps the stricter reading.
-    fn bind_target(&mut self, target: &Target<'_>, source: bool) {
+    /// Records each name a target binds and what it holds; a name bound
+    /// twice keeps the stricter reading.
+    fn bind_target(&mut self, target: &Target<'_>, source: Local) {
         let mut names = Vec::new();
         target_names(target, &mut names);
         for name in names {
             let entry = self.locals.entry(name).or_insert(source);
-            *entry = *entry && source;
+            *entry = entry.merge(source);
         }
     }
 
@@ -880,6 +938,7 @@ impl Walker<'_, '_> {
                             Some(constant) => {
                                 check_constant(constant).err().map(UrlRefusal::describe)
                             }
+                            None if arg.root => Some(ROOT_ARGUMENT),
                             None if arg.url_source => None,
                             None => Some("the value is one the component computes"),
                         };
@@ -894,6 +953,17 @@ impl Walker<'_, '_> {
                 }
                 Some(scope) => {
                     for (_, arg) in &call.args {
+                        if arg.root {
+                            self.refuse_markup(
+                                "view-url",
+                                call.span,
+                                format!(
+                                    "`{scope}::{}` is passed `suprnova::url::root()`, and a macro the scan cannot see may write it into a URL: {ROOT_ARGUMENT}",
+                                    call.name
+                                ),
+                            );
+                            continue;
+                        }
                         let refused = match &arg.constant {
                             Some(constant) => names_another_origin(constant),
                             None => arg.literal && !arg.url_source,
@@ -1184,11 +1254,15 @@ impl Walker<'_, '_> {
                 ..Info::default()
             },
             Expr::BoolLit(_) | Expr::NumLit(..) | Expr::CharLit(_) => Info::default(),
-            Expr::Var(name) => Info {
-                url_source: self.locals.get(*name).copied().unwrap_or(true),
-                var: Some((*name).to_string()),
-                ..Info::default()
-            },
+            Expr::Var(name) => {
+                let local = self.locals.get(*name).copied().unwrap_or(Local::UNBOUND);
+                Info {
+                    url_source: local.url_source,
+                    root: local.root,
+                    var: Some((*name).to_string()),
+                    ..Info::default()
+                }
+            }
             Expr::Path(path) => {
                 for component in path {
                     if let Some(generics) = &component.generics {
@@ -1240,8 +1314,10 @@ impl Walker<'_, '_> {
                 if let Some(generics) = &item.generics {
                     self.generics(generics);
                 }
+                // A field of the root is not the root, and the root is a URL
+                // source only directly before a rooted constant.
                 Info {
-                    url_source: base.url_source,
+                    url_source: base.url_source && !base.root,
                     var: base.var,
                     literal: base.literal,
                     ..Info::default()
@@ -1404,7 +1480,7 @@ impl Walker<'_, '_> {
                 }
                 let info = self.expr(&cond.expr);
                 if let Some(target) = &cond.target {
-                    self.bind_target(target, info.url_source);
+                    self.bind_target(target, Local::of(&info));
                 }
                 Info {
                     literal: info.literal,

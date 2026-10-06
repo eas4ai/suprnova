@@ -103,6 +103,11 @@ pub fn secure(path: &str) -> String {
 /// `X-Forwarded-Prefix: /billing` gives `/billing/invoices` (PFX-002).
 /// Use [`Request::path`] directly when you need the path the
 /// application matched its routes on.
+///
+/// The value is what the client sent. At the host root a request-target
+/// such as `//evil.example/x` gives a network-path reference, which a
+/// browser reads as another host, so the framework's redirects and the
+/// intended URL check it before they use it.
 pub fn current(request: &Request) -> String {
     let root = request.public_root();
     let path = request.path();
@@ -114,8 +119,18 @@ pub fn current(request: &Request) -> String {
 
 /// Full absolute URL of the current request - `APP_URL` host +
 /// [`current`]. Mirrors Laravel's `url()->full()`.
+///
+/// The origin is joined here rather than through [`to`], which returns a
+/// target that starts with `//` unchanged: a request for `//evil.example/x`
+/// is a path on this host, and its full URL stays on `APP_URL`'s origin.
 pub fn full(request: &Request) -> String {
-    to(&current(request))
+    let current = current(request);
+    if !current.starts_with('/') {
+        return to(&current);
+    }
+    let app_url = app_url();
+    let (origin, _) = super::root::split_app_url(&app_url);
+    format!("{origin}{current}")
 }
 
 /// The public root of the request being handled, without a trailing
@@ -323,6 +338,28 @@ pub(crate) fn root_relative_or_none(candidate: &str) -> Option<String> {
     } else {
         Some(candidate.to_string())
     }
+}
+
+/// Accept a redirect destination read back from the session, or reject
+/// one a browser would read as another host while it looks like a path on
+/// this one.
+///
+/// The intended URL is written by [`crate::Redirect::guest`] from the
+/// request, and by [`crate::Redirect::set_intended_url`] from the
+/// application. A path is held to [`root_relative_or_none`], so a value an
+/// earlier release stored from a request-target such as `//evil.example/x`
+/// is not followed. An absolute URL and a relative reference come only from
+/// the application and pass. A value that starts with `\` or holds a
+/// control byte is refused, because a browser reads `\` as `/` and strips
+/// tab and newline before it resolves the URL.
+pub(crate) fn stored_destination_or_none(candidate: &str) -> Option<String> {
+    if candidate.is_empty() || has_control_byte(candidate) || candidate.starts_with('\\') {
+        return None;
+    }
+    if candidate.starts_with('/') {
+        return root_relative_or_none(candidate);
+    }
+    Some(candidate.to_string())
 }
 
 /// True when `s` contains an ASCII control byte: C0 (`0x00..=0x1F`) or

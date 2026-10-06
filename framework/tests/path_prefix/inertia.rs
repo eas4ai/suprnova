@@ -174,28 +174,95 @@ async fn pfx_005_the_validation_redirect_compares_the_forwarded_host() {
 
 /// The Vite tags of a production page whose assets sit under `base`.
 async fn vite_tags(base: &'static str) -> String {
+    vite_tags_from(base, None, true).await
+}
+
+/// The Vite tags of a production page whose assets sit under `base`, read
+/// from the Vite manifest at `manifest` when one is given (the fallback
+/// tags otherwise), requested behind [`PREFIX`] when `prefixed`.
+async fn vite_tags_from(
+    base: &'static str,
+    manifest: Option<std::path::PathBuf>,
+    prefixed: bool,
+) -> String {
     let router: Router = Router::new()
-        .get("/shell", move |request: Request| async move {
-            InertiaResponse::new("Page")
-                .with_config(
-                    InertiaConfig::new()
-                        .development(false)
-                        .assets_base_url(base),
-                )
-                .resolve(&request)
-                .await
-                .map_err(HttpResponse::from)
+        .get("/shell", move |request: Request| {
+            let manifest = manifest.clone();
+            async move {
+                let mut config = InertiaConfig::new()
+                    .development(false)
+                    .entry_point("src/main.ts")
+                    .assets_base_url(base);
+                if let Some(manifest) = manifest {
+                    config = config.manifest_path(manifest);
+                }
+                InertiaResponse::new("Page")
+                    .with_config(config)
+                    .resolve(&request)
+                    .await
+                    .map_err(HttpResponse::from)
+            }
         })
         .into();
     let address = support::serve(router, MiddlewareRegistry::new()).await;
-    let reply = support::get_prefixed(address, "/shell").await;
+    let reply = if prefixed {
+        support::get_prefixed(address, "/shell").await
+    } else {
+        support::get(address, "/shell", &[]).await
+    };
     assert_eq!(reply.status, 200, "{}", reply.body);
     reply
         .body
         .lines()
-        .filter(|line| line.contains("main.js") || line.contains("main.css"))
+        .filter(|line| line.contains("main") && (line.contains(".js") || line.contains(".css")))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[tokio::test]
+async fn pfx_005_an_assets_base_url_of_slash_carries_the_root() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "pfx_005_an_assets_base_url_of_slash_carries_the_root",
+    )
+    .await
+    {
+        return;
+    }
+    support::install("http://localhost");
+
+    let fallback = vite_tags_from("/", None, true).await;
+    assert!(fallback.contains(r#"src="/billing/main.js""#), "{fallback}");
+    assert!(
+        fallback.contains(r#"href="/billing/main.css""#),
+        "{fallback}"
+    );
+
+    let dir = tempfile::tempdir().expect("a manifest directory");
+    let manifest = dir.path().join("manifest.json");
+    std::fs::write(
+        &manifest,
+        r#"{"src/main.ts":{"file":"main-1a2b.js","css":["main-3c4d.css"],"isEntry":true}}"#,
+    )
+    .expect("write the manifest");
+    let built = vite_tags_from("/", Some(manifest.clone()), true).await;
+    assert!(built.contains(r#"src="/billing/main-1a2b.js""#), "{built}");
+    assert!(
+        built.contains(r#"href="/billing/main-3c4d.css""#),
+        "{built}"
+    );
+
+    // At the host root the tags are what they were before the root.
+    let host_fallback = vite_tags_from("/", None, false).await;
+    assert!(
+        host_fallback.contains(r#"src="/main.js""#),
+        "{host_fallback}"
+    );
+    let host_built = vite_tags_from("/", Some(manifest), false).await;
+    assert!(
+        host_built.contains(r#"src="/main-1a2b.js""#),
+        "{host_built}"
+    );
 }
 
 #[tokio::test]

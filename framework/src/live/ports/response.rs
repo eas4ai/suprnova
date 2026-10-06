@@ -169,12 +169,7 @@ impl SuprnovaResponseIntentPort {
                     let path = document_path.ok_or_else(|| {
                         FrameworkError::internal("Live document path authority was unavailable")
                     })?;
-                    // The snapshot records the path the application
-                    // received; the browser compares the reflected URL with
-                    // the path it shows, which carries the public root
-                    // (PFX-006).
-                    let path = crate::routing::root::prefixed(path);
-                    let target = reflected_url(&path, intent.query())?;
+                    let target = reflected_target(path, intent.query())?;
                     endpoint = endpoint.with_reflected_url(navigation_target(
                         &target,
                         self.max_redirect_bytes,
@@ -233,12 +228,31 @@ impl ResponseIntentPreparationPort for RequestResponseIntentPort {
     }
 }
 
-fn reflected_url(path: &str, query: &CanonicalValue) -> Result<String, FrameworkError> {
+/// The URL a Live action reflects for its document: the public root, the
+/// document path, and the query.
+///
+/// The snapshot records the path the application received; the browser
+/// compares the reflected URL with the path it shows, which carries the
+/// public root (PFX-006). At the host root a document with no query reflects
+/// its path itself, borrowed; otherwise the root, the path and the query are
+/// written into one buffer, so the path is never copied on its own first
+/// (MEM-003).
+fn reflected_target<'a>(
+    path: &'a str,
+    query: &CanonicalValue,
+) -> Result<std::borrow::Cow<'a, str>, FrameworkError> {
     let CanonicalValue::Object(query) = query else {
         return Err(FrameworkError::internal("Live URL query was rejected"));
     };
+    let root = crate::routing::root::current();
     if query.is_empty() {
-        return Ok(path.to_owned());
+        if root.is_empty() {
+            return Ok(std::borrow::Cow::Borrowed(path));
+        }
+        let mut target = String::with_capacity(root.len() + path.len());
+        target.push_str(&root);
+        target.push_str(path);
+        return Ok(std::borrow::Cow::Owned(target));
     }
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     for (key, value) in query {
@@ -257,12 +271,60 @@ fn reflected_url(path: &str, query: &CanonicalValue) -> Result<String, Framework
         };
         serializer.append_pair(key, &value);
     }
-    Ok(format!("{path}?{}", serializer.finish()))
+    Ok(std::borrow::Cow::Owned(format!(
+        "{root}{path}?{}",
+        serializer.finish()
+    )))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::navigation_target;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use suprnova_live::canonical::CanonicalValue;
+
+    use super::{navigation_target, reflected_target};
+
+    /// MEM-003: at the host root the reflected URL of a document with no
+    /// query is its path itself, not a copy of it; under a root it is one
+    /// new buffer, the root followed by the path.
+    #[tokio::test]
+    async fn mem_audit_a_reflected_url_at_the_host_root_borrows_the_document_path() {
+        let path = format!("/docs/{}", "a".repeat(4_000));
+        let empty = CanonicalValue::Object(BTreeMap::new());
+        crate::routing::root::scope(Arc::from(""), async {
+            let target = reflected_target(&path, &empty).expect("a reflected URL");
+            assert_eq!(target, path.as_str());
+            assert!(
+                std::ptr::eq(target.as_ptr(), path.as_ptr()),
+                "the document path was copied"
+            );
+        })
+        .await;
+        crate::routing::root::scope(Arc::from("/billing"), async {
+            let target = reflected_target(&path, &empty).expect("a reflected URL");
+            assert_eq!(target, format!("/billing{path}"));
+            match &target {
+                std::borrow::Cow::Owned(target) => {
+                    assert_eq!(target.capacity(), target.len(), "one exact buffer");
+                }
+                std::borrow::Cow::Borrowed(_) => panic!("the root is missing"),
+            }
+        })
+        .await;
+        let query = CanonicalValue::Object(BTreeMap::from([(
+            "q".to_owned(),
+            CanonicalValue::String("red shoes".to_owned()),
+        )]));
+        for root in ["", "/billing"] {
+            crate::routing::root::scope(Arc::from(root), async {
+                let target = reflected_target("/docs/a", &query).expect("a reflected URL");
+                assert_eq!(target, format!("{root}/docs/a?q=red+shoes"));
+            })
+            .await;
+        }
+    }
 
     #[test]
     fn a_target_is_bounded_by_the_configured_redirect_size() {
