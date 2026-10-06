@@ -1,3 +1,4 @@
+import { usePage } from '@inertiajs/react'
 import { useLang } from '../lib/lang'
 
 // These props come from the framework, not from one of your handlers:
@@ -19,6 +20,11 @@ interface ErrorProps {
 }
 
 export default function ErrorPage({ status, message, request_id }: ErrorProps) {
+  // The public root the server shares with every page (`RootShare`): empty
+  // at the host root, `/billing` behind a proxy that serves the app there.
+  // Every URL this page posts to or links is built from it, so one build
+  // runs at both.
+  const { root } = usePage<{ root: string }>().props
   const { t } = useLang()
 
   return (
@@ -32,7 +38,7 @@ export default function ErrorPage({ status, message, request_id }: ErrorProps) {
           </p>
         )}
         <p>
-          <a href="/" className="text-indigo-600 hover:text-indigo-500">
+          <a href={`${root}/`} className="text-indigo-600 hover:text-indigo-500">
             {t('error-go-home')}
           </a>
         </p>

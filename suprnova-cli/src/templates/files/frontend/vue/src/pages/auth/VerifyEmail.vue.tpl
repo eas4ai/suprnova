@@ -1,7 +1,13 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { useForm } from '@inertiajs/vue3'
+import { useForm, usePage } from '@inertiajs/vue3'
 import type { VerifyEmailProps } from '../../types/inertia-props'
+
+// The public root the server shares with every page (`RootShare`): empty
+// at the host root, `/billing` behind a proxy that serves the app there.
+// Every URL this page posts to or links is built from it, so one build
+// runs at both.
+const { root } = usePage<{ root: string }>().props
 
 defineProps<VerifyEmailProps>()
 
@@ -9,7 +15,7 @@ const form = useForm({})
 const sent = ref(false)
 
 function resend() {
-  form.post('/email/verification-notification', {
+  form.post(`${root}/email/verification-notification`, {
     onSuccess: () => {
       sent.value = true
     },
@@ -48,7 +54,7 @@ function resend() {
         </div>
 
         <div class="text-center">
-          <a href="/dashboard" class="text-indigo-600 hover:text-indigo-500">
+          <a :href="`${root}/dashboard`" class="text-indigo-600 hover:text-indigo-500">
             Continue to your dashboard
           </a>
         </div>

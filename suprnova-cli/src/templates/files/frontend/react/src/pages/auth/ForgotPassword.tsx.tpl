@@ -1,7 +1,12 @@
 import { useState } from 'react'
-import { useForm } from '@inertiajs/react'
+import { useForm, usePage } from '@inertiajs/react'
 
 export default function ForgotPassword() {
+  // The public root the server shares with every page (`RootShare`): empty
+  // at the host root, `/billing` behind a proxy that serves the app there.
+  // Every URL this page posts to or links is built from it, so one build
+  // runs at both.
+  const { root } = usePage<{ root: string }>().props
   const { data, setData, post, processing, errors } = useForm({
     email: '',
   })
@@ -12,7 +17,7 @@ export default function ForgotPassword() {
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
-    post('/forgot-password', { onSuccess: () => setSent(true) })
+    post(`${root}/forgot-password`, { onSuccess: () => setSent(true) })
   }
 
   return (
@@ -66,7 +71,7 @@ export default function ForgotPassword() {
           </div>
 
           <div className="text-center">
-            <a href="/login" className="text-indigo-600 hover:text-indigo-500">
+            <a href={`${root}/login`} className="text-indigo-600 hover:text-indigo-500">
               Back to sign in
             </a>
           </div>

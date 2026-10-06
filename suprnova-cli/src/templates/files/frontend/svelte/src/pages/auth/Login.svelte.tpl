@@ -1,5 +1,11 @@
 <script lang="ts">
-  import { useForm } from '@inertiajs/svelte'
+  import { useForm, usePage } from '@inertiajs/svelte'
+
+  // The public root the server shares with every page (`RootShare`): empty
+  // at the host root, `/billing` behind a proxy that serves the app there.
+  // Every URL this page posts to or links is built from it, so one build
+  // runs at both.
+  const { root } = usePage<{ root: string }>().props
 
   // Validation errors arrive through the form: a failed submission is a
   // `303` back to this page with the errors flashed, and the Inertia
@@ -14,7 +20,7 @@
 
   function submit(e: SubmitEvent) {
     e.preventDefault()
-    form.post('/login')
+    form.post(`${root}/login`)
   }
 </script>
 
@@ -76,7 +82,7 @@
         <label for="remember" class="ml-2 block text-sm text-gray-900">
           Remember me
         </label>
-        <a href="/forgot-password" class="ml-auto text-sm text-indigo-600 hover:text-indigo-500">
+        <a href={`${root}/forgot-password`} class="ml-auto text-sm text-indigo-600 hover:text-indigo-500">
           Forgot your password?
         </a>
       </div>
@@ -92,7 +98,7 @@
       </div>
 
       <div class="text-center">
-        <a href="/register" class="text-indigo-600 hover:text-indigo-500">
+        <a href={`${root}/register`} class="text-indigo-600 hover:text-indigo-500">
           Don't have an account? Register
         </a>
       </div>

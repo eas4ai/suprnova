@@ -3,6 +3,10 @@ import { svelte } from '@sveltejs/vite-plugin-svelte'
 import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig(({ isSsrBuild }) => ({
+  // Relative, so the built entry loads its chunks and assets from where the
+  // server's tags put it: the same build runs at `/` and behind a proxy that
+  // serves the application under a path prefix such as `/billing`.
+  base: './',
   plugins: [tailwindcss(), svelte()],
   server: {
     // `suprnova serve` sets VITE_PORT to the port it resolved (the

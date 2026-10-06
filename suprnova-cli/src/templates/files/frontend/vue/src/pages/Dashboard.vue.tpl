@@ -1,11 +1,17 @@
 <script setup lang="ts">
-import { router } from '@inertiajs/vue3'
+import { router, usePage } from '@inertiajs/vue3'
 import type { DashboardProps } from '../types/inertia-props'
+
+// The public root the server shares with every page (`RootShare`): empty
+// at the host root, `/billing` behind a proxy that serves the app there.
+// Every URL this page posts to or links is built from it, so one build
+// runs at both.
+const { root } = usePage<{ root: string }>().props
 
 defineProps<DashboardProps>()
 
 function handleLogout() {
-  router.post('/logout')
+  router.post(`${root}/logout`)
 }
 </script>
 

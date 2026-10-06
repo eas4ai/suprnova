@@ -1,5 +1,11 @@
 <script lang="ts">
-  import { useForm } from '@inertiajs/svelte'
+  import { useForm, usePage } from '@inertiajs/svelte'
+
+  // The public root the server shares with every page (`RootShare`): empty
+  // at the host root, `/billing` behind a proxy that serves the app there.
+  // Every URL this page posts to or links is built from it, so one build
+  // runs at both.
+  const { root } = usePage<{ root: string }>().props
 
   const form = useForm({
     email: '',
@@ -11,7 +17,7 @@
 
   function submit(e: SubmitEvent) {
     e.preventDefault()
-    form.post('/forgot-password', {
+    form.post(`${root}/forgot-password`, {
       onSuccess: () => {
         sent = true
       },
@@ -68,7 +74,7 @@
       </div>
 
       <div class="text-center">
-        <a href="/login" class="text-indigo-600 hover:text-indigo-500">
+        <a href={`${root}/login`} class="text-indigo-600 hover:text-indigo-500">
           Back to sign in
         </a>
       </div>

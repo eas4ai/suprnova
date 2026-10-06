@@ -1,7 +1,13 @@
 <script lang="ts">
   import { untrack } from 'svelte'
-  import { useForm } from '@inertiajs/svelte'
+  import { useForm, usePage } from '@inertiajs/svelte'
   import type { ResetPasswordProps } from '../../types/inertia-props'
+
+  // The public root the server shares with every page (`RootShare`): empty
+  // at the host root, `/billing` behind a proxy that serves the app there.
+  // Every URL this page posts to or links is built from it, so one build
+  // runs at both.
+  const { root } = usePage<{ root: string }>().props
 
   let { token }: ResetPasswordProps = $props()
 
@@ -18,7 +24,7 @@
 
   function submit(e: SubmitEvent) {
     e.preventDefault()
-    form.post('/reset-password', {
+    form.post(`${root}/reset-password`, {
       onFinish: () => form.reset('password', 'password_confirmation'),
     })
   }
@@ -37,7 +43,7 @@
     {#if form.errors.token}
       <p class="text-center text-sm text-red-600">
         {form.errors.token}
-        <a href="/forgot-password" class="text-indigo-600 hover:text-indigo-500">
+        <a href={`${root}/forgot-password`} class="text-indigo-600 hover:text-indigo-500">
           Request a new link
         </a>
       </p>
@@ -93,7 +99,7 @@
       </div>
 
       <div class="text-center">
-        <a href="/login" class="text-indigo-600 hover:text-indigo-500">
+        <a href={`${root}/login`} class="text-indigo-600 hover:text-indigo-500">
           Back to sign in
         </a>
       </div>

@@ -1,14 +1,19 @@
 import { useState } from 'react'
-import { useForm } from '@inertiajs/react'
+import { useForm, usePage } from '@inertiajs/react'
 import type { VerifyEmailProps } from '../../types/inertia-props'
 
 export default function VerifyEmail({ email }: VerifyEmailProps) {
+  // The public root the server shares with every page (`RootShare`): empty
+  // at the host root, `/billing` behind a proxy that serves the app there.
+  // Every URL this page posts to or links is built from it, so one build
+  // runs at both.
+  const { root } = usePage<{ root: string }>().props
   const { post, processing } = useForm({})
   const [sent, setSent] = useState(false)
 
   const resend = (e: React.FormEvent) => {
     e.preventDefault()
-    post('/email/verification-notification', { onSuccess: () => setSent(true) })
+    post(`${root}/email/verification-notification`, { onSuccess: () => setSent(true) })
   }
 
   return (
@@ -42,7 +47,7 @@ export default function VerifyEmail({ email }: VerifyEmailProps) {
           </div>
 
           <div className="text-center">
-            <a href="/dashboard" className="text-indigo-600 hover:text-indigo-500">
+            <a href={`${root}/dashboard`} className="text-indigo-600 hover:text-indigo-500">
               Continue to your dashboard
             </a>
           </div>

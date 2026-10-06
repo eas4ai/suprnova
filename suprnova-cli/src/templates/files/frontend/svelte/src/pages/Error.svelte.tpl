@@ -1,5 +1,12 @@
 <script lang="ts">
+  import { usePage } from '@inertiajs/svelte'
   import { t } from '../lib/lang.svelte'
+
+  // The public root the server shares with every page (`RootShare`): empty
+  // at the host root, `/billing` behind a proxy that serves the app there.
+  // Every URL this page posts to or links is built from it, so one build
+  // runs at both.
+  const { root } = usePage<{ root: string }>().props
 
   // These props come from the framework, not from one of your handlers:
   // `InertiaConfig::error_page` in `src/bootstrap.rs` routes every
@@ -35,7 +42,7 @@
       </p>
     {/if}
     <p>
-      <a href="/" class="text-indigo-600 hover:text-indigo-500">{t('error-go-home')}</a>
+      <a href={`${root}/`} class="text-indigo-600 hover:text-indigo-500">{t('error-go-home')}</a>
     </p>
   </div>
 </div>
