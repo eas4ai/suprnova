@@ -138,6 +138,51 @@ async fn bind_009_a_group_missing_handler_reaches_its_routes() {
 }
 
 #[tokio::test]
+async fn bind_009_an_outer_group_missing_handler_reaches_a_nested_groups_routes() {
+    let _db = fixture().await;
+    // `/inner` sets nothing; `/scoped` sets its own scoping and still
+    // inherits the outer group's `missing()`.
+    let router = group!("/outer", {
+        group!("/inner", {
+            get!("/posts/{post}", show),
+            get!("/users/{user}/posts/{post:slug}", user_post),
+        }),
+        group!("/scoped", {
+            get!("/users/{user}/posts/{post}", user_post),
+        })
+        .scope_bindings(),
+    })
+    .missing(redirect_home)
+    .register(Router::new());
+    let addr = serve(router).await;
+    assert_eq!(
+        get_path(addr, "/outer/inner/posts/1").await,
+        (200, "ada-post".to_owned())
+    );
+    assert_eq!(
+        get_path(addr, "/outer/scoped/users/1/posts/1").await,
+        (200, "ada ada-post".to_owned())
+    );
+    for path in [
+        // No row.
+        "/outer/inner/posts/99",
+        // A value that does not parse.
+        "/outer/inner/posts/abc",
+        "/outer/inner/users/abc/posts/ada-post",
+        // A row the parent does not own, by a binding field and by the
+        // nested group's `scope_bindings()`.
+        "/outer/inner/users/1/posts/grace-post",
+        "/outer/scoped/users/1/posts/2",
+    ] {
+        assert_eq!(
+            get_path(addr, path).await,
+            (302, format!("missing at {path}")),
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn bind_009_a_resource_missing_handler_reaches_its_routes() {
     let _db = fixture().await;
     let router = resource!("posts", posts, only = [show])
