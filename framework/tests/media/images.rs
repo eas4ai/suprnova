@@ -487,6 +487,15 @@ fn exif_tags(tiff: &[u8]) -> Vec<u16> {
         .collect()
 }
 
+/// The colour chunks of a PNG (`cHRM`, `gAMA`, `sRGB`, `cICP`), in file
+/// order.
+fn colour_chunks_of(png: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+    png_chunks(png)
+        .into_iter()
+        .filter(|(kind, _)| matches!(kind, b"cHRM" | b"gAMA" | b"sRGB" | b"cICP"))
+        .collect()
+}
+
 /// The EXIF in encoded output, as TIFF bytes.
 fn output_exif(format: OutputFormat, bytes: &[u8]) -> Option<Vec<u8>> {
     match format {
@@ -647,11 +656,38 @@ fn turned(rgba: &[u8], width: u32, height: u32, tag: u16) -> (u32, u32, Vec<u8>)
 
 // ───────────────────────── IMG-001 ─────────────────────────
 
-/// Every orientation of a JPEG, a PNG and a WebP comes out as the exact
-/// permutation of the pixels the driver decodes with orientation off.
+/// The lossless JPEG fixtures, colour and grey, each carrying the EXIF
+/// `Orientation` tag `orientation`: a frame oxideav-mjpeg decodes rather
+/// than zune-jpeg.
+fn oriented_lossless_jpegs(orientation: u16) -> Vec<(&'static str, Vec<u8>)> {
+    let tag = exif_segment(&exif_tiff(Some(orientation), false));
+    vec![
+        (
+            "lossless JPEG",
+            jpeg_with(
+                include_bytes!("fixtures/jpeg/photo-lossless-rgb-35x21.jpg"),
+                std::slice::from_ref(&tag),
+            ),
+        ),
+        (
+            "lossless grey JPEG",
+            jpeg_with(
+                include_bytes!("fixtures/jpeg/photo-lossless-grey-35x21.jpg"),
+                &[tag],
+            ),
+        ),
+    ]
+}
+
+/// Every orientation of a JPEG (baseline and lossless), a PNG and a WebP
+/// comes out as the exact permutation of the pixels the driver decodes
+/// with orientation off.
 fn assert_every_orientation_is_applied(driver: &dyn ImageDriver) {
     for tag in 1..=8u16 {
-        for (name, source) in oriented_sources(&pattern(WIDTH, HEIGHT), WIDTH, HEIGHT, tag) {
+        let sources = oriented_sources(&pattern(WIDTH, HEIGHT), WIDTH, HEIGHT, tag)
+            .into_iter()
+            .chain(oriented_lossless_jpegs(tag));
+        for (name, source) in sources {
             let sensor = {
                 let _config = opt_out();
                 driver
@@ -930,6 +966,108 @@ fn img_001_magick_reads_the_orientation_from_the_shared_sources() {
     assert_one_reader_orients(magick().as_ref());
 }
 
+/// ImageMagick's names for the EXIF orientations 1 to 8, as `-orient`
+/// takes them.
+const MAGICK_ORIENTATIONS: [&str; 8] = [
+    "TopLeft",
+    "TopRight",
+    "BottomRight",
+    "BottomLeft",
+    "LeftTop",
+    "RightTop",
+    "RightBottom",
+    "LeftBottom",
+];
+
+/// A TIFF of `rgba`, a format the framework does not read, with the
+/// orientation `tag` in its own IFD, written by the host ImageMagick.
+fn magick_tiff(rgba: &[u8], width: u32, height: u32, tag: u16) -> Vec<u8> {
+    host_magick(
+        &[
+            "png:-",
+            "-orient",
+            MAGICK_ORIENTATIONS[usize::from(tag) - 1],
+            "-compress",
+            "none",
+            "tiff:-",
+        ],
+        &png_of(width, height, rgba.to_vec()),
+    )
+}
+
+/// A format the framework cannot read takes ImageMagick's own reading of
+/// its orientation: every orientation is applied and leaves no tag; the
+/// opt-out keeps the sensor's pixels and carries the tag alone in JPEG,
+/// PNG and WebP; and `orient()` applies it under the opt-out.
+#[test]
+#[serial]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn img_001_magick_orients_a_format_the_framework_cannot_read() {
+    let rgba = pattern(WIDTH, HEIGHT);
+    let driver = magick();
+    let carriers = [OutputFormat::Jpeg, OutputFormat::Png, OutputFormat::WebP];
+    for tag in 1..=8u16 {
+        let tiff = magick_tiff(&rgba, WIDTH, HEIGHT, tag);
+        let label = format!("a TIFF with orientation {tag}");
+        let upright = driver
+            .process(&tiff, &pipeline(vec![], OutputFormat::Png))
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(
+            png_pixels(&upright),
+            turned(&rgba, WIDTH, HEIGHT, tag),
+            "{label} must be turned by its orientation"
+        );
+        for target in carriers {
+            let out = driver.process(&tiff, &pipeline(vec![], target)).unwrap();
+            assert_eq!(
+                metadata_found(target, &out),
+                Vec::<String>::new(),
+                "{label} to {target:?}: a tag after orientation was applied"
+            );
+        }
+
+        let _config = opt_out();
+        let sensor = driver
+            .process(&tiff, &pipeline(vec![], OutputFormat::Png))
+            .unwrap_or_else(|e| panic!("{label}, opt-out: {e}"));
+        assert_eq!(
+            png_pixels(&sensor),
+            (WIDTH, HEIGHT, rgba.clone()),
+            "{label}: the opt-out must keep the sensor's pixels"
+        );
+        for target in carriers {
+            let out = driver.process(&tiff, &pipeline(vec![], target)).unwrap();
+            assert_eq!(
+                metadata_found(target, &out),
+                vec!["orientation-only EXIF".to_string()],
+                "{label} to {target:?}, opt-out"
+            );
+            let exif = output_exif(target, &out).expect("the opt-out's EXIF");
+            assert_eq!(
+                image::metadata::Orientation::from_exif_chunk(&exif).map(|o| o.to_exif()),
+                Some(tag as u8),
+                "{label} to {target:?}, opt-out: the tag's value"
+            );
+        }
+        let oriented = driver
+            .process(
+                &tiff,
+                &pipeline(vec![Transformation::Orient], OutputFormat::Png),
+            )
+            .unwrap();
+        assert_eq!(
+            png_pixels(&oriented),
+            turned(&rgba, WIDTH, HEIGHT, tag),
+            "{label}: orient() under the opt-out"
+        );
+        assert_eq!(
+            metadata_found(OutputFormat::Png, &oriented),
+            Vec::<String>::new(),
+            "{label}: a tag after orient()"
+        );
+    }
+}
+
 // ───────────────────────── IMG-002 ─────────────────────────
 
 const XMP: &[u8] = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF/></x:xmpmeta>";
@@ -1152,17 +1290,23 @@ fn grey_in_srgb(profile: &[u8], level: u8) -> u8 {
 
 /// A grey profile goes with the pixels it describes, or the pixels are
 /// converted from it to sRGB and it goes: never a grey profile on RGB
-/// pixels, and never a profile kept with its colour chunks dropped.
+/// pixels, never a profile kept with its colour chunks dropped, and never
+/// a colour chunk kept after its profile is converted away.
 fn assert_a_grey_profile_never_describes_rgb(driver: &dyn ImageDriver) {
     let grey = grey_gamma_profile();
     let level = 100;
-    let source = png_with(
-        &grey_png(8, 8, level),
-        &[
-            (b"gAMA", 55_555u32.to_be_bytes().to_vec()),
-            (b"iCCP", iccp(&grey)),
-        ],
-    );
+    let colour_chunks = vec![
+        (*b"gAMA", 55_555u32.to_be_bytes().to_vec()),
+        (*b"cHRM", chrm()),
+        // BT.709 primaries, the sRGB transfer function, RGB, full range.
+        (*b"cICP", vec![1, 13, 0, 1]),
+    ];
+    let mut chunks: Vec<(&[u8; 4], Vec<u8>)> = colour_chunks
+        .iter()
+        .map(|(kind, data)| (kind, data.clone()))
+        .collect();
+    chunks.push((b"iCCP", iccp(&grey)));
+    let source = png_with(&grey_png(8, 8, level), &chunks);
     let converted = grey_in_srgb(&grey, level);
     // With and without a custom step, which under `magick` takes the image
     // through Rust as RGBA.
@@ -1194,9 +1338,10 @@ fn assert_a_grey_profile_never_describes_rgb(driver: &dyn ImageDriver) {
                     "{label}: a grey profile on RGB"
                 );
                 if target == OutputFormat::Png {
-                    assert!(
-                        png_chunks(&out).iter().any(|(kind, _)| kind == b"gAMA"),
-                        "{label}: the profile stayed but its gAMA did not"
+                    assert_eq!(
+                        colour_chunks_of(&out),
+                        colour_chunks,
+                        "{label}: the profile stayed but its colour chunks did not"
                     );
                 }
             }
@@ -1211,9 +1356,10 @@ fn assert_a_grey_profile_never_describes_rgb(driver: &dyn ImageDriver) {
                     }
                 }
                 if target == OutputFormat::Png {
-                    assert!(
-                        !png_chunks(&out).iter().any(|(kind, _)| kind == b"gAMA"),
-                        "{label}: gAMA kept after its profile was converted away"
+                    assert_eq!(
+                        colour_chunks_of(&out),
+                        Vec::new(),
+                        "{label}: colour chunks kept after their profile was converted away"
                     );
                 }
             }
@@ -1321,33 +1467,38 @@ fn img_002_magick_gif_output_is_srgb() {
     assert_gif_output_is_srgb(magick().as_ref());
 }
 
+/// A `cHRM` chunk's data: a white point and three primaries.
+fn chrm() -> Vec<u8> {
+    [
+        31_270u32, 32_900, 64_000, 33_000, 30_000, 60_000, 15_000, 6_000,
+    ]
+    .iter()
+    .flat_map(|value| value.to_be_bytes())
+    .collect()
+}
+
+/// A `cICP` chunk's data: Display P3 primaries (12), the sRGB transfer
+/// function (13), RGB (matrix 0), full range.
+const P3_CICP: [u8; 4] = [12, 13, 0, 1];
+
 /// A PNG's colour chunks travel with its profile into PNG output, byte for
 /// byte, and alone when it has no profile.
 fn assert_png_colour_chunks_are_kept(driver: &dyn ImageDriver) {
     let p3 = display_p3();
     let rgba = pattern(WIDTH, HEIGHT);
     let gama = 45_455u32.to_be_bytes().to_vec();
-    let chrm: Vec<u8> = [
-        31_270u32, 32_900, 64_000, 33_000, 30_000, 60_000, 15_000, 6_000,
-    ]
-    .iter()
-    .flat_map(|value| value.to_be_bytes())
-    .collect();
+    let chrm = chrm();
+    let cicp = P3_CICP.to_vec();
     let with_profile = png_with(
         &png_of(WIDTH, HEIGHT, rgba.clone()),
         &[
             (b"cHRM", chrm.clone()),
             (b"gAMA", gama.clone()),
+            (b"cICP", cicp.clone()),
             (b"iCCP", iccp(&p3)),
         ],
     );
     let alone = png_with(&png_of(WIDTH, HEIGHT, rgba), &[(b"sRGB", vec![0])]);
-    let colour = |png: &[u8]| -> Vec<([u8; 4], Vec<u8>)> {
-        png_chunks(png)
-            .into_iter()
-            .filter(|(kind, _)| matches!(kind, b"cHRM" | b"gAMA" | b"sRGB" | b"cICP"))
-            .collect()
-    };
     let out = driver
         .process(&with_profile, &pipeline(vec![], OutputFormat::Png))
         .unwrap();
@@ -1356,15 +1507,20 @@ fn assert_png_colour_chunks_are_kept(driver: &dyn ImageDriver) {
         Some(&p3[..])
     );
     assert_eq!(
-        colour(&out),
-        vec![(*b"cHRM", chrm), (*b"gAMA", gama)],
+        colour_chunks_of(&out),
+        vec![(*b"cHRM", chrm), (*b"gAMA", gama), (*b"cICP", cicp)],
         "{}",
         driver.name()
     );
     let out = driver
         .process(&alone, &pipeline(vec![], OutputFormat::Png))
         .unwrap();
-    assert_eq!(colour(&out), vec![(*b"sRGB", vec![0])], "{}", driver.name());
+    assert_eq!(
+        colour_chunks_of(&out),
+        vec![(*b"sRGB", vec![0])],
+        "{}",
+        driver.name()
+    );
 }
 
 #[test]
@@ -1380,13 +1536,13 @@ fn img_002_magick_keeps_png_colour_chunks_with_their_profile() {
     assert_png_colour_chunks_are_kept(magick().as_ref());
 }
 
-/// Decode `jpeg` with the host ImageMagick, whose JPEG decoder is libjpeg,
-/// the decoder browsers use too; packed RGBA.
-fn libjpeg_pixels(jpeg: &[u8]) -> (u32, u32, Vec<u8>) {
+/// Run the host ImageMagick with `args` on `input` over stdin, and return
+/// what it writes to stdout.
+fn host_magick(args: &[&str], input: &[u8]) -> Vec<u8> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let mut child = Command::new(MagickCliDriver::from_env().binary())
-        .args(["jpeg:-", "-depth", "8", "png:-"])
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -1395,11 +1551,17 @@ fn libjpeg_pixels(jpeg: &[u8]) -> (u32, u32, Vec<u8>) {
         .stdin
         .take()
         .expect("stdin")
-        .write_all(jpeg)
-        .expect("the JPEG goes in");
+        .write_all(input)
+        .expect("the input goes in");
     let output = child.wait_with_output().expect("ImageMagick finishes");
-    assert!(output.status.success(), "ImageMagick decodes the JPEG");
-    png_pixels(&output.stdout)
+    assert!(output.status.success(), "ImageMagick runs {args:?}");
+    output.stdout
+}
+
+/// Decode `jpeg` with the host ImageMagick, whose JPEG decoder is libjpeg,
+/// the decoder browsers use too; packed RGBA.
+fn libjpeg_pixels(jpeg: &[u8]) -> (u32, u32, Vec<u8>) {
+    png_pixels(&host_magick(&["jpeg:-", "-depth", "8", "png:-"], jpeg))
 }
 
 /// A JPEG the built-in driver writes decodes to the same colours in the
@@ -1697,6 +1859,65 @@ async fn img_003_an_image_can_choose_its_driver_child() {
         .expect("an image that chose oxideav");
 }
 
+/// Runs alone in a child process (see `own_process`): the process default
+/// is `magick`, naming a missing binary, so only an image that chose
+/// `oxideav` can succeed.
+#[test]
+fn img_003_an_image_can_choose_oxideav_over_a_magick_default() {
+    let output = {
+        let _env = crate::env_lock::lock_env();
+        crate::own_process::child_command(
+            "images::img_003_an_image_can_choose_oxideav_over_a_magick_default_child",
+        )
+        .env("IMAGE_DRIVER", "magick")
+        .env("IMAGE_MAGICK_BINARY", MISSING_MAGICK)
+        .output()
+        .expect("the child runs")
+    };
+    crate::own_process::assert_child_passed(&output);
+}
+
+#[tokio::test]
+async fn img_003_an_image_can_choose_oxideav_over_a_magick_default_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let png = png_of(WIDTH, HEIGHT, pattern(WIDTH, HEIGHT));
+    let image = Image::from_bytes(png.clone()).resize(3, 2).to_png();
+    let err = image
+        .clone()
+        .to_bytes()
+        .await
+        .expect_err("the default is magick, whose binary is missing");
+    assert!(err.to_string().contains(MISSING_MAGICK), "got: {err}");
+    let chosen = image
+        .clone()
+        .using(ImageDriverKind::OxideAv)
+        .to_bytes()
+        .await
+        .expect("an image that chose oxideav");
+    let by_oxideav = OxideAvImageDriver::new()
+        .process(
+            &png,
+            &pipeline(
+                vec![Transformation::Resize {
+                    width: 3,
+                    height: 2,
+                }],
+                OutputFormat::Png,
+            ),
+        )
+        .unwrap();
+    assert_eq!(chosen, by_oxideav, "the image that chose oxideav ran it");
+    // The choice changed neither the process default nor the same image
+    // without it.
+    assert_eq!(suprnova::media::default_driver().unwrap().name(), "magick");
+    image
+        .to_bytes()
+        .await
+        .expect_err("the image without the choice still runs magick");
+}
+
 // ───────────────────────── IMG-004 ─────────────────────────
 
 /// What a probe transformation saw: the size and pixels it received.
@@ -1803,6 +2024,67 @@ fn img_004_an_unregistered_step_fails_naming_it_under_magick() {
     assert_an_unregistered_step_fails_naming_it(magick().as_ref());
 }
 
+/// `pixels` widened to twice its width, the new right half transparent.
+fn widened(pixels: &ImagePixels) -> Result<ImagePixels, suprnova::FrameworkError> {
+    let (width, height) = (pixels.width() as usize, pixels.height() as usize);
+    let mut out = Vec::with_capacity(width * height * 8);
+    for row in pixels.pixels().chunks(width * 4) {
+        out.extend_from_slice(row);
+        out.resize(out.len() + width * 4, 0);
+    }
+    ImagePixels::new(pixels.width() * 2, height as u32, out)
+}
+
+/// A custom step that changes the size hands the steps after it the image
+/// it returned, and one whose result is past `IMAGE_MAX_DIMENSION` is
+/// refused with the error that limit gives.
+fn assert_a_custom_step_can_change_the_size(driver: &dyn ImageDriver) {
+    suprnova::register_transformation("img-004-widen", |pixels| widened(&pixels));
+    let rgba = pattern(WIDTH, HEIGHT);
+    let source = png_of(WIDTH, HEIGHT, rgba.clone());
+    let steps = vec![
+        Transformation::custom("img-004-widen"),
+        Transformation::FlipHorizontally,
+    ];
+    let out = driver
+        .process(&source, &pipeline(steps.clone(), OutputFormat::Png))
+        .unwrap_or_else(|e| panic!("{}: {e}", driver.name()));
+    let wide = widened(&ImagePixels::new(WIDTH, HEIGHT, rgba).unwrap()).unwrap();
+    assert_eq!(
+        png_pixels(&out),
+        turned(wide.pixels(), WIDTH * 2, HEIGHT, 2),
+        "{}: the flip did not work on the widened image",
+        driver.name()
+    );
+
+    let mut config = ImageConfig::default();
+    config.max_dimension = WIDTH * 2 - 1;
+    let _config = ConfigGuard::set(config);
+    let err = driver
+        .process(&source, &pipeline(steps, OutputFormat::Png))
+        .expect_err("the widened image is past the limit");
+    let message = err.to_string();
+    assert!(
+        message.contains(&format!("{}x{HEIGHT}", WIDTH * 2))
+            && message.contains("IMAGE_MAX_DIMENSION"),
+        "{}: got {message}",
+        driver.name()
+    );
+}
+
+#[test]
+#[serial]
+fn img_004_a_custom_step_can_change_the_size_within_the_limits_under_oxideav() {
+    assert_a_custom_step_can_change_the_size(oxideav().as_ref());
+}
+
+#[test]
+#[serial]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn img_004_a_custom_step_can_change_the_size_within_the_limits_under_magick() {
+    assert_a_custom_step_can_change_the_size(magick().as_ref());
+}
+
 /// Runs alone in a child process (see `own_process`): it points the
 /// temporary directories at directories of its own.
 #[test]
@@ -1837,16 +2119,21 @@ fn img_004_a_magick_custom_step_adds_no_argument_and_no_file_child() {
     }
     let scratch = std::path::PathBuf::from(std::env::var("IMG_004_SCRATCH").unwrap());
     let rust_tmp = std::env::temp_dir();
-    // A stand-in binary that records every argument it is given and runs
-    // the real ImageMagick with them.
+    let magick_tmp = std::path::PathBuf::from(std::env::var("MAGICK_TEMPORARY_PATH").unwrap());
+    // A stand-in binary that records every argument it is given, and what
+    // both temporary directories hold as it starts, and runs the real
+    // ImageMagick with them.
     let log = scratch.join("argv.log");
+    let listing = scratch.join("listing.log");
     let wrapper = scratch.join("magick-recording");
     std::fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nprintf -- '--end--\\n' >> '{}'\nexec magick \"$@\"\n",
-            log.display(),
-            log.display()
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{log}'\nprintf -- '--end--\\n' >> '{log}'\n\
+             ls -A \"$TMPDIR\" \"$MAGICK_TEMPORARY_PATH\" | grep -v -e ':$' -e '^$' >> '{listing}'\n\
+             exec magick \"$@\"\n",
+            log = log.display(),
+            listing = listing.display(),
         ),
     )
     .unwrap();
@@ -1900,13 +2187,29 @@ fn img_004_a_magick_custom_step_adds_no_argument_and_no_file_child() {
         runs[1].lines().any(|arg| arg == "png:-[0]"),
         "the second run reads stdin: {argv}"
     );
-    // Nothing the driver wrote is left, or was ever made, in its temporary
-    // directory.
-    assert_eq!(
-        std::fs::read_dir(&rust_tmp).unwrap().count(),
-        0,
-        "the driver wrote a file"
+    // No run reads or writes a file: the image goes in over stdin and out
+    // over stdout, so no argument names a path.
+    assert!(
+        argv.lines().all(|arg| !arg.contains('/')),
+        "an argument names a file: {argv}"
     );
+    // The driver put no file in either temporary directory before a run
+    // started, and none is left in either once the pipeline is done.
+    // (ImageMagick keeps its own copy of stdin in its directory while a run
+    // reads it, and removes it as the run ends.)
+    assert_eq!(
+        std::fs::read_to_string(&listing).unwrap(),
+        "",
+        "a temporary directory held a file as a run started"
+    );
+    for dir in [&rust_tmp, &magick_tmp] {
+        assert_eq!(
+            std::fs::read_dir(dir).unwrap().count(),
+            0,
+            "{} holds a file after the pipeline",
+            dir.display()
+        );
+    }
     // The pipeline with a custom step ends as one without: the opt-out's
     // Orientation-only EXIF is there, and nothing else of the metadata.
     assert_eq!(
