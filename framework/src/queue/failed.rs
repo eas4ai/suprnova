@@ -16,6 +16,7 @@
 //! Configure via [`Queue::set_failed_store`](crate::queue::Queue::set_failed_store)
 //! at boot.
 
+use crate::database::clauses::quote_identifier;
 use crate::database::placeholder::{placeholder, placeholder_list};
 use crate::database::stored_datetime::StoredDateTime;
 use crate::database::validate_identifier;
@@ -331,7 +332,13 @@ const WRITTEN_COLUMNS: [&str; 6] = [
 /// (same shape as [`crate::queue::database::DatabaseQueueDriver::new`]).
 pub struct DatabaseFailedJobStore {
     db: DatabaseConnection,
+    /// The table as configured, for the catalog check and for messages.
     table: String,
+    /// The table quoted for the connection's backend, segment by segment,
+    /// as every statement names it: the migration that created it quoted
+    /// it, so Postgres keeps `FailedJobs` as written and no engine reads
+    /// `select` as a keyword.
+    quoted: String,
 }
 
 impl DatabaseFailedJobStore {
@@ -340,7 +347,8 @@ impl DatabaseFailedJobStore {
     /// [`FrameworkError`] rather than reaching the database.
     pub fn new(db: DatabaseConnection, table: String) -> Result<Self, FrameworkError> {
         validate_identifier(&table)?;
-        Ok(Self { db, table })
+        let quoted = quote_identifier(db.get_database_backend(), &table);
+        Ok(Self { db, table, quoted })
     }
 
     fn backend(&self) -> DatabaseBackend {
@@ -350,7 +358,7 @@ impl DatabaseFailedJobStore {
     fn select_columns(&self) -> String {
         format!(
             "SELECT uuid, connection, queue, payload, exception, failed_at FROM {}",
-            self.table
+            self.quoted
         )
     }
 }
@@ -402,7 +410,7 @@ impl FailedJobStore for DatabaseFailedJobStore {
             format!(
                 "INSERT INTO {} (uuid, connection, queue, payload, exception, failed_at) \
                  VALUES ({})",
-                self.table,
+                self.quoted,
                 placeholder_list(self.backend(), 1, 6)?
             ),
             vec![
@@ -468,7 +476,7 @@ impl FailedJobStore for DatabaseFailedJobStore {
             self.backend(),
             format!(
                 "DELETE FROM {} WHERE uuid = {}",
-                self.table,
+                self.quoted,
                 placeholder(self.backend(), 1)?
             ),
             vec![sea_orm::Value::from(id.to_string())],
@@ -487,12 +495,12 @@ impl FailedJobStore for DatabaseFailedJobStore {
                 self.backend(),
                 format!(
                     "DELETE FROM {} WHERE failed_at < {}",
-                    self.table,
+                    self.quoted,
                     placeholder(self.backend(), 1)?
                 ),
                 vec![sea_orm::Value::from(cutoff.naive_utc())],
             ),
-            None => Statement::from_string(self.backend(), format!("DELETE FROM {}", self.table)),
+            None => Statement::from_string(self.backend(), format!("DELETE FROM {}", self.quoted)),
         };
         let r = self
             .db
@@ -507,7 +515,7 @@ impl FailedJobStore for DatabaseFailedJobStore {
             .db
             .query_one_raw(Statement::from_string(
                 self.backend(),
-                format!("SELECT COUNT(*) FROM {}", self.table),
+                format!("SELECT COUNT(*) FROM {}", self.quoted),
             ))
             .await
             .map_err(|e| FrameworkError::internal(format!("failed_jobs count: {e}")))?;

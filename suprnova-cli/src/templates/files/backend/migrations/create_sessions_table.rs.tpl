@@ -18,9 +18,10 @@ impl MigrationTrait for Migration {
         create_sessions_table(manager, "sessions", SessionUserKey::Integer).await
     }
 
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .drop_table(Table::drop().table(Alias::new("sessions")).if_exists().to_owned())
-            .await
+    /// Leaves the table. `up` skips a `sessions` table that already exists,
+    /// so the table may be Laravel's, with its signed-in sessions, and
+    /// rolling back must not drop them.
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Ok(())
     }
 }

@@ -138,8 +138,12 @@ fn failed_jobs_is_earlier(columns: &[CatalogColumn]) -> bool {
     has_column(columns, "envelope_json")
 }
 
+/// Create `table` in Laravel's `failed_jobs` layout, or add the indexes a
+/// stopped upgrade left out of the one it created (see
+/// `Schema::create_or_complete`). Reached only when the table is missing or
+/// the upgrade created it.
 async fn create_failed_jobs(manager: &SchemaManager<'_>, table: &str) -> Result<(), DbErr> {
-    Schema::create(manager, table, |t| {
+    Schema::create_or_complete(manager, table, |t| {
         t.unsigned_id();
         t.string("uuid").unique();
         t.string("connection");
@@ -165,9 +169,7 @@ impl MigrationTrait for CreateFailedJobsTable {
             }
             UpgradeState::Resume => {
                 resume_set_aside(manager, &table, failed_jobs_is_earlier).await?;
-                if !manager.has_table(&table).await? {
-                    create_failed_jobs(manager, &table).await?;
-                }
+                create_failed_jobs(manager, &table).await?;
             }
         }
         let backend = manager.get_database_backend();
@@ -283,8 +285,12 @@ fn jobs_is_earlier(columns: &[CatalogColumn]) -> bool {
     has_column(columns, "envelope_json")
 }
 
+/// Create `table` in Laravel's `jobs` layout, or add the indexes a stopped
+/// upgrade left out of the one it created (see
+/// `Schema::create_or_complete`). Reached only when the table is missing or
+/// the upgrade created it.
 async fn create_jobs(manager: &SchemaManager<'_>, table: &str) -> Result<(), DbErr> {
-    Schema::create(manager, table, |t| {
+    Schema::create_or_complete(manager, table, |t| {
         t.unsigned_id();
         t.string("queue").index();
         t.long_text("payload");
@@ -296,12 +302,11 @@ async fn create_jobs(manager: &SchemaManager<'_>, table: &str) -> Result<(), DbE
     .await
 }
 
+/// Create the reservations table of `jobs`, or add what a stopped run left
+/// out of it. The table is the framework's own, whatever created `jobs`.
 async fn create_reservations(manager: &SchemaManager<'_>, jobs: &str) -> Result<(), DbErr> {
     let reservations = crate::queue::database::reservations_table(jobs);
-    if manager.has_table(&reservations).await? {
-        return Ok(());
-    }
-    Schema::create(manager, &reservations, |t| {
+    Schema::create_or_complete(manager, &reservations, |t| {
         t.unsigned_big_integer("job_id").primary();
         t.char("token", 36).unique();
         t.big_integer("reserved_until");
@@ -326,9 +331,7 @@ impl MigrationTrait for CreateJobsTable {
             }
             UpgradeState::Resume => {
                 resume_set_aside(manager, &table, jobs_is_earlier).await?;
-                if !manager.has_table(&table).await? {
-                    create_jobs(manager, &table).await?;
-                }
+                create_jobs(manager, &table).await?;
             }
         }
         create_reservations(manager, &table).await?;
@@ -462,8 +465,11 @@ fn batches_is_earlier(columns: &[CatalogColumn]) -> bool {
     has_column(columns, "options_json")
 }
 
+/// Create `table` in Laravel's `job_batches` layout, or complete the one a
+/// stopped upgrade created (see `Schema::create_or_complete`). Reached only
+/// when the table is missing or the upgrade created it.
 async fn create_batches(manager: &SchemaManager<'_>, table: &str) -> Result<(), DbErr> {
-    Schema::create(manager, table, |t| {
+    Schema::create_or_complete(manager, table, |t| {
         t.string("id").primary();
         t.string("name");
         t.integer("total_jobs");
@@ -478,17 +484,17 @@ async fn create_batches(manager: &SchemaManager<'_>, table: &str) -> Result<(), 
     .await
 }
 
+/// Create the framework's settlements table, or complete what a stopped run
+/// left out of it.
 async fn create_settlements(manager: &SchemaManager<'_>, table: &str) -> Result<(), DbErr> {
-    if !manager.has_table(table).await? {
-        Schema::create(manager, table, |t| {
-            t.string("batch_id");
-            t.string("job_id");
-            t.integer("failed");
-            t.big_integer("settled_at");
-            t.primary(&["batch_id", "job_id"]);
-        })
-        .await?;
-    }
+    Schema::create_or_complete(manager, table, |t| {
+        t.string("batch_id");
+        t.string("job_id");
+        t.integer("failed");
+        t.big_integer("settled_at");
+        t.primary(&["batch_id", "job_id"]);
+    })
+    .await?;
     match_batch_collation(manager, table).await
 }
 
@@ -571,9 +577,7 @@ impl MigrationTrait for CreateJobBatchesTable {
             }
             UpgradeState::Resume => {
                 resume_set_aside(manager, table, batches_is_earlier).await?;
-                if !manager.has_table(table).await? {
-                    create_batches(manager, table).await?;
-                }
+                create_batches(manager, table).await?;
             }
         }
         create_settlements(manager, settlements).await?;

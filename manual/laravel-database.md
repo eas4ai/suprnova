@@ -229,9 +229,10 @@ on:
 
 - Every password hash the framework and Magnetar write is a `$2y$` bcrypt
   hash, which Laravel's hasher accepts with `HASH_VERIFY=true`. A valid
-  sign-in rewrites a `$2b$` or Argon2id hash as `$2y$`, and Magnetar no
-  longer upgrades bcrypt hashes to Argon2id. So Laravel signs in every user
-  Suprnova signed in, registered or reset.
+  sign-in rewrites a `$2b$` or Argon2id hash as `$2y$`, at the configured
+  bcrypt cost or at the stored hash's cost when that is higher, and
+  Magnetar no longer upgrades bcrypt hashes to Argon2id. So Laravel signs
+  in every user Suprnova signed in, registered or reset.
 - A job queued with default settings is stored on the queue `suprnova`
   instead of `default`. Laravel's `database` connection reads `default`, so
   Laravel's worker never reserves a Suprnova job. Inside Suprnova the

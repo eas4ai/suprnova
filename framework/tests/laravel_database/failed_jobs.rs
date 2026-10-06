@@ -418,3 +418,93 @@ on_every_engine!(a_laravel_row_lists_and_retry_refuses_it =>
     ldb_002_a_laravel_row_lists_and_retry_refuses_it_sqlite,
     ldb_002_a_laravel_row_lists_and_retry_refuses_it_postgres,
     ldb_002_a_laravel_row_lists_and_retry_refuses_it_mysql);
+
+/// Run the shipped `jobs` and `failed_jobs` migrations with the tables
+/// named `jobs` and `failed`, as `QUEUE_DB_TABLE` and
+/// `QUEUE_FAILED_DB_TABLE` name them.
+pub(crate) async fn migrate_queue_tables(db: &Db, jobs: &str, failed: &str) {
+    // SAFETY: the test is serial within its process, and nothing else reads
+    // the environment while the migrations run.
+    unsafe {
+        std::env::set_var("QUEUE_DB_TABLE", jobs);
+        std::env::set_var("QUEUE_FAILED_DB_TABLE", failed);
+    }
+    let manager = SchemaManager::new(&db.conn);
+    let migrated = match suprnova::queue::migrations::CreateJobsTable
+        .up(&manager)
+        .await
+    {
+        Ok(()) => CreateFailedJobsTable.up(&manager).await,
+        Err(e) => Err(e),
+    };
+    // SAFETY: as above.
+    unsafe {
+        std::env::remove_var("QUEUE_DB_TABLE");
+        std::env::remove_var("QUEUE_FAILED_DB_TABLE");
+    }
+    migrated.unwrap_or_else(|e| panic!("the queue migrations for {jobs} and {failed}: {e}"));
+}
+
+/// A queue table named with capitals or with a reserved word works from
+/// the shipped migration through every operation of the driver and the
+/// store. The migrations create the names quoted; the stores have to quote
+/// them the same way, or Postgres folds `FailedJobs` to `failedjobs` and
+/// every engine reads `order` as a keyword.
+async fn configured_names_are_quoted_alike(engine: Engine) {
+    for (jobs, failed) in [("QueueJobs", "FailedJobs"), ("order", "select")] {
+        let db = support::empty(engine).await;
+        migrate_queue_tables(&db, jobs, failed).await;
+
+        let driver = suprnova::DatabaseQueueDriver::new(db.conn.clone(), jobs.to_owned())
+            .expect("a valid jobs table name");
+        driver
+            .push(envelope("Ldb.Quoted", serde_json::json!({ "n": 1 })))
+            .await
+            .unwrap_or_else(|e| panic!("{engine:?} {jobs}: push: {e}"));
+        assert_eq!(driver.size().await.expect("size"), 1, "{engine:?} {jobs}");
+        let popped = driver
+            .pop(std::time::Duration::from_secs(30))
+            .await
+            .unwrap_or_else(|e| panic!("{engine:?} {jobs}: pop: {e}"))
+            .expect("the job just pushed");
+        driver
+            .nack(&popped.token, std::time::Duration::ZERO)
+            .await
+            .unwrap_or_else(|e| panic!("{engine:?} {jobs}: nack: {e}"));
+        let popped = driver
+            .pop(std::time::Duration::from_secs(30))
+            .await
+            .expect("pop again")
+            .expect("the nacked job");
+        driver
+            .ack(&popped.token)
+            .await
+            .unwrap_or_else(|e| panic!("{engine:?} {jobs}: ack: {e}"));
+        assert_eq!(driver.size().await.expect("size"), 0, "{engine:?} {jobs}");
+
+        let store = DatabaseFailedJobStore::new(db.conn.clone(), failed.to_owned())
+            .expect("a valid failed-jobs table name");
+        store.check().await.unwrap_or_else(|e| {
+            panic!("{engine:?} {failed}: the worker's check refused the migrated table: {e}")
+        });
+        let env = envelope("Ldb.Quoted", serde_json::json!({ "n": 2 }));
+        let id = store
+            .log("database", "default", &env, "boom")
+            .await
+            .unwrap_or_else(|e| panic!("{engine:?} {failed}: log: {e}"));
+        assert_eq!(store.all().await.expect("all").len(), 1, "{engine:?}");
+        assert!(store.find(id).await.expect("find").is_some(), "{engine:?}");
+        assert_eq!(store.count().await.expect("count"), 1, "{engine:?}");
+        assert!(store.forget(id).await.expect("forget"), "{engine:?}");
+        store
+            .log("database", "default", &env, "boom")
+            .await
+            .expect("log again");
+        assert_eq!(store.flush(None).await.expect("flush"), 1, "{engine:?}");
+    }
+}
+
+on_every_engine!(configured_names_are_quoted_alike =>
+    ldb_002_capitalized_and_reserved_queue_table_names_work_sqlite,
+    ldb_002_capitalized_and_reserved_queue_table_names_work_postgres,
+    ldb_002_capitalized_and_reserved_queue_table_names_work_mysql);

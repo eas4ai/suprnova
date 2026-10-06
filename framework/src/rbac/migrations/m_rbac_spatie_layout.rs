@@ -11,8 +11,8 @@
 //! and the earlier assignment tables are dropped once empty. No role,
 //! permission or assignment is lost. A model id that `RBAC_MODEL_KEY`'s
 //! form cannot hold (text under `int`) stops the migration with the row
-//! named; set `RBAC_MODEL_KEY` to the form the application's keys take and
-//! run it again.
+//! named, before any table changes; set `RBAC_MODEL_KEY` to the form the
+//! application's keys take and run it again.
 //!
 //! Tables spatie created, missing tables, and tables already in spatie's
 //! layout are left alone.
@@ -25,7 +25,7 @@ use super::m_create_rbac_tables::{
     model_key,
 };
 use crate::database::migration_guard::{
-    MovedRow, UpgradeState, advance_id_sequence, move_earlier_rows, move_rows, quote,
+    MovedRow, UpgradeState, advance_id_sequence, first_misfit, move_earlier_rows, move_rows, quote,
     resume_set_aside, set_aside, upgrade_state,
 };
 use crate::database::placeholder::placeholder_list;
@@ -148,22 +148,58 @@ fn model_id_value(
     model_id: &str,
 ) -> Result<Value, DbErr> {
     match key {
-        ModelKey::Int => model_id.parse::<i64>().map(Into::into).map_err(|_| {
-            DbErr::Migration(format!(
-                "{table} row {row_id} assigns to model_id {model_id:?}, which RBAC_MODEL_KEY=int \
-                 cannot hold; set RBAC_MODEL_KEY to uuid or ulid and run migrate again"
-            ))
-        }),
+        ModelKey::Int => model_id
+            .parse::<i64>()
+            .map(Into::into)
+            .map_err(|_| int_refusal(table, &row_id.to_string(), model_id)),
         ModelKey::Uuid | ModelKey::Ulid => {
             Ok(crate::database::morph_key::uuid_value(backend, model_id))
         }
     }
 }
 
+/// The refusal for a model id `RBAC_MODEL_KEY=int` cannot hold, naming the
+/// row and the setting that would.
+fn int_refusal(table: &str, row_id: &str, model_id: &str) -> DbErr {
+    DbErr::Migration(format!(
+        "{table} row {row_id} assigns to model_id {model_id:?}, which RBAC_MODEL_KEY=int \
+         cannot hold; set RBAC_MODEL_KEY to uuid or ulid and run migrate again"
+    ))
+}
+
+/// The earlier assignment tables and, for each, spatie's table its rows
+/// move to and the column naming the role or permission.
+const ASSIGNMENTS: [(&str, &str, &str, &str); 2] = [
+    (
+        "model_permissions",
+        "model_has_permissions",
+        "permission_id",
+        "permissions",
+    ),
+    ("model_roles", "model_has_roles", "role_id", "roles"),
+];
+
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let key = model_key()?;
+        // Every model id the earlier assignments hold has to fit the chosen
+        // form before any table changes: a refusal part way would leave
+        // spatie's tables created in a form the corrected setting does not
+        // make.
+        if key == ModelKey::Int {
+            for (source, ..) in ASSIGNMENTS {
+                if manager.has_table(source).await?
+                    && let Some((row_id, model_id)) =
+                        first_misfit(manager, source, "id", true, "model_id", |value| {
+                            value.parse::<i64>().is_ok()
+                        })
+                        .await?
+                {
+                    return Err(int_refusal(source, &row_id, &model_id));
+                }
+            }
+        }
         move_named(
             manager,
             "permissions",
@@ -172,26 +208,18 @@ impl MigrationTrait for Migration {
         )
         .await?;
         move_named(manager, "roles", "suprnova_role_details", "role_id").await?;
-        create_model_has(
-            manager,
-            "model_has_permissions",
-            "permission_id",
-            "permissions",
-            key,
-        )
-        .await?;
-        create_model_has(manager, "model_has_roles", "role_id", "roles", key).await?;
+        // While the earlier assignments remain, spatie's tables are the ones
+        // this upgrade creates, and a stopped run may have left one without
+        // its index; otherwise one that exists is spatie's own.
+        for (source, target, owner, owner_table) in ASSIGNMENTS {
+            if manager.has_table(source).await? || !manager.has_table(target).await? {
+                create_model_has(manager, target, owner, owner_table, key).await?;
+            }
+        }
         create_role_has_permissions(manager).await?;
 
         let backend = manager.get_database_backend();
-        for (source, target, owner) in [
-            (
-                "model_permissions",
-                "model_has_permissions",
-                "permission_id",
-            ),
-            ("model_roles", "model_has_roles", "role_id"),
-        ] {
+        for (source, target, owner, _) in ASSIGNMENTS {
             if !manager.has_table(source).await? {
                 continue;
             }

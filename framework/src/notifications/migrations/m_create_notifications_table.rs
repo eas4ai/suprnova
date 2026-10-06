@@ -72,9 +72,11 @@ pub(crate) fn morph_key() -> Result<MorphKey, DbErr> {
 }
 
 /// Create `notifications` in Laravel's layout, with `notifiable_id` for
-/// `key`.
+/// `key`, or add the indexes a stopped upgrade left out of the one it
+/// created (see `Schema::create_or_complete`). Callers reach it only when
+/// the table is missing or the upgrade created it.
 pub(crate) async fn create_table(manager: &SchemaManager<'_>, key: MorphKey) -> Result<(), DbErr> {
-    Schema::create(manager, "notifications", |t| {
+    Schema::create_or_complete(manager, "notifications", |t| {
         t.uuid("id").primary();
         t.string("type");
         t.string("notifiable_type");

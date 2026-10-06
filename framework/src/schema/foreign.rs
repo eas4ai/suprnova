@@ -47,11 +47,12 @@ impl ForeignSpec {
     }
 
     /// The constraint name: the one `.name(..)` gave, or
-    /// `{table}_{column}_foreign`.
+    /// `{table}_{column}_foreign`, with a schema-qualified table's `.` made
+    /// `_` as for an index.
     pub(crate) fn name(&self, table: &str) -> String {
         match &self.custom_name {
             Some(name) => name.clone(),
-            None => format!("{table}_{}_foreign", self.column),
+            None => format!("{}_{}_foreign", table.replace('.', "_"), self.column),
         }
     }
 }

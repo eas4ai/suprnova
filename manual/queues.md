@@ -122,7 +122,10 @@ QUEUE_DB_TABLE=jobs
 
 The database driver validates `QUEUE_DB_TABLE` as a SQL identifier at
 construction, so a malformed env value fails boot rather than reaching SQL
-composition. Redis uses Streams consumer groups directly (`XREADGROUP`
+composition. The driver and the failed-job store quote their table names
+as the shipped migrations do, so a capitalized name or a reserved word
+works. A schema-qualified name, such as `queues.jobs`, works on every
+engine; the shipped migrations create such a table on Postgres only. Redis uses Streams consumer groups directly (`XREADGROUP`
 for new work, `XAUTOCLAIM` to reclaim unacknowledged entries, Redis 6.2 or
 newer). The visibility timeout is the `XAUTOCLAIM` idle threshold, set once
 per connection, so the per-pop `visibility_timeout` argument is ignored on

@@ -11,7 +11,7 @@ use crate::http::{HttpResponse, Request, Response};
 use crate::middleware::{Middleware, Next};
 
 use super::HasRoles;
-use super::has_roles::{has_permission_for_model_on_guard, has_role_for_model_on_guard};
+use super::has_roles::{has_permission_as, has_role_as};
 
 /// The user the route's guard authenticated, as `U`, and the guard whose
 /// grants apply when it is not the default guard.
@@ -96,8 +96,8 @@ where
         let allowed = match guard {
             None => user.has_role(&self.role).await?,
             Some(guard) => {
-                has_role_for_model_on_guard(
-                    &user.rbac_model_type(),
+                has_role_as(
+                    &user.rbac_model_types(),
                     &user.rbac_model_id(),
                     &self.role,
                     &guard,
@@ -164,8 +164,8 @@ where
         let allowed = match guard {
             None => user.has_permission_to(&self.permission).await?,
             Some(guard) => {
-                has_permission_for_model_on_guard(
-                    &user.rbac_model_type(),
+                has_permission_as(
+                    &user.rbac_model_types(),
                     &user.rbac_model_id(),
                     &self.permission,
                     &guard,

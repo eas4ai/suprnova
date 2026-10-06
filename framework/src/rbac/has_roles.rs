@@ -559,11 +559,35 @@ pub async fn assign_role_to_model_on_guard(
     role_name: &str,
     guard_name: &str,
 ) -> Result<(), FrameworkError> {
+    assign_role_as(
+        &model_types(model_type),
+        model_type,
+        model_id,
+        role_name,
+        guard_name,
+    )
+    .await
+}
+
+/// [`assign_role_to_model_on_guard`] for a model whose assignments reads
+/// find under any of `stored_types`: a grant held under one of them is not
+/// written again, and a new one is written under `model_type`.
+async fn assign_role_as(
+    stored_types: &[String],
+    model_type: &str,
+    model_id: &str,
+    role_name: &str,
+    guard_name: &str,
+) -> Result<(), FrameworkError> {
     let role_id = create_role_on_guard(role_name, guard_name).await?;
-    for stored_type in model_types(model_type) {
+    for stored_type in stored_types {
         if exists(
             MODEL_HAS_ROLE_ID,
-            vec![value(stored_type), key_value(model_id)?, int_value(role_id)],
+            vec![
+                value(stored_type.as_str()),
+                key_value(model_id)?,
+                int_value(role_id),
+            ],
         )
         .await?
         {
@@ -624,11 +648,26 @@ pub async fn remove_role_from_model_on_guard(
     role_name: &str,
     guard_name: &str,
 ) -> Result<(), FrameworkError> {
+    remove_role_as(&model_types(model_type), model_id, role_name, guard_name).await
+}
+
+/// [`remove_role_from_model_on_guard`] for a model whose assignments are
+/// stored under any of `stored_types`: the membership goes under each.
+async fn remove_role_as(
+    stored_types: &[String],
+    model_id: &str,
+    role_name: &str,
+    guard_name: &str,
+) -> Result<(), FrameworkError> {
     let role_id = require_role_id(role_name, guard_name).await?;
-    for stored_type in model_types(model_type) {
+    for stored_type in stored_types {
         delete(
             DELETE_MODEL_ROLE,
-            vec![value(stored_type), key_value(model_id)?, int_value(role_id)],
+            vec![
+                value(stored_type.as_str()),
+                key_value(model_id)?,
+                int_value(role_id),
+            ],
         )
         .await?;
     }
@@ -656,12 +695,32 @@ pub async fn give_permission_to_model_on_guard(
     permission_name: &str,
     guard_name: &str,
 ) -> Result<(), FrameworkError> {
+    give_permission_as(
+        &model_types(model_type),
+        model_type,
+        model_id,
+        permission_name,
+        guard_name,
+    )
+    .await
+}
+
+/// [`give_permission_to_model_on_guard`] for a model whose grants reads
+/// find under any of `stored_types`: a grant held under one of them is not
+/// written again, and a new one is written under `model_type`.
+async fn give_permission_as(
+    stored_types: &[String],
+    model_type: &str,
+    model_id: &str,
+    permission_name: &str,
+    guard_name: &str,
+) -> Result<(), FrameworkError> {
     let permission_id = create_permission_on_guard(permission_name, guard_name).await?;
-    for stored_type in model_types(model_type) {
+    for stored_type in stored_types {
         if exists(
             MODEL_HAS_PERMISSION_ID,
             vec![
-                value(stored_type),
+                value(stored_type.as_str()),
                 key_value(model_id)?,
                 int_value(permission_id),
             ],
@@ -723,12 +782,29 @@ pub async fn remove_permission_from_model_on_guard(
     permission_name: &str,
     guard_name: &str,
 ) -> Result<(), FrameworkError> {
+    remove_permission_as(
+        &model_types(model_type),
+        model_id,
+        permission_name,
+        guard_name,
+    )
+    .await
+}
+
+/// [`remove_permission_from_model_on_guard`] for a model whose grants are
+/// stored under any of `stored_types`: the direct grant goes under each.
+async fn remove_permission_as(
+    stored_types: &[String],
+    model_id: &str,
+    permission_name: &str,
+    guard_name: &str,
+) -> Result<(), FrameworkError> {
     let permission_id = require_permission_id(permission_name, guard_name).await?;
-    for stored_type in model_types(model_type) {
+    for stored_type in stored_types {
         delete(
             DELETE_MODEL_PERMISSION,
             vec![
-                value(stored_type),
+                value(stored_type.as_str()),
                 key_value(model_id)?,
                 int_value(permission_id),
             ],
@@ -754,11 +830,22 @@ pub async fn has_role_for_model_on_guard(
     role_name: &str,
     guard_name: &str,
 ) -> Result<bool, FrameworkError> {
-    for stored_type in model_types(model_type) {
+    has_role_as(&model_types(model_type), model_id, role_name, guard_name).await
+}
+
+/// [`has_role_for_model_on_guard`] for a model whose assignments are stored
+/// under any of `stored_types`.
+pub(crate) async fn has_role_as(
+    stored_types: &[String],
+    model_id: &str,
+    role_name: &str,
+    guard_name: &str,
+) -> Result<bool, FrameworkError> {
+    for stored_type in stored_types {
         if exists(
             MODEL_HAS_ROLE_NAMED,
             vec![
-                value(stored_type),
+                value(stored_type.as_str()),
                 key_value(model_id)?,
                 value(role_name),
                 value(guard_name),
@@ -794,8 +881,24 @@ pub async fn has_permission_for_model_on_guard(
     permission_name: &str,
     guard_name: &str,
 ) -> Result<bool, FrameworkError> {
-    let types = model_types(model_type);
-    for stored_type in &types {
+    has_permission_as(
+        &model_types(model_type),
+        model_id,
+        permission_name,
+        guard_name,
+    )
+    .await
+}
+
+/// [`has_permission_for_model_on_guard`] for a model whose assignments are
+/// stored under any of `stored_types`.
+pub(crate) async fn has_permission_as(
+    stored_types: &[String],
+    model_id: &str,
+    permission_name: &str,
+    guard_name: &str,
+) -> Result<bool, FrameworkError> {
+    for stored_type in stored_types {
         let direct = exists(
             MODEL_HAS_DIRECT_PERMISSION,
             vec![
@@ -811,7 +914,7 @@ pub async fn has_permission_for_model_on_guard(
         }
     }
 
-    for stored_type in &types {
+    for stored_type in stored_types {
         if exists(
             MODEL_HAS_INHERITED_PERMISSION,
             vec![
@@ -835,15 +938,18 @@ pub async fn has_permission_for_model_on_guard(
 /// through its roles, resolved exactly as [`has_permission_for_model`]
 /// resolves one name.
 ///
+/// `stored_types` are the discriminators the model's assignments may be
+/// stored under, [`HasRoles::rbac_model_types`].
+///
 /// One statement for the whole set, so the gate bridge answers every
 /// ability a request asks about from a single read, where
 /// [`has_permission_for_model`] costs up to two statements per ability.
 pub(crate) async fn permission_names_for_model(
-    model_type: &str,
+    stored_types: &[String],
     model_id: &str,
 ) -> Result<HashSet<String>, FrameworkError> {
     let mut names = HashSet::new();
-    for stored_type in model_types(model_type) {
+    for stored_type in stored_types {
         let rows = select_all(
             MODEL_PERMISSION_NAMES,
             vec![
@@ -916,6 +1022,22 @@ pub trait HasRoles: Authenticatable {
             .unwrap_or_else(|| std::any::type_name::<Self>().to_string())
     }
 
+    /// Every discriminator an assignment of this model may be stored under:
+    /// [`Self::rbac_model_type`], the model's `morph_aliases`, and the
+    /// fully-qualified Rust type path. The path was the default before it
+    /// followed `morph_type`, so the roles and permissions an earlier
+    /// release stored for this model still apply. The methods below read
+    /// and remove under every one of them, and write only under
+    /// [`Self::rbac_model_type`].
+    fn rbac_model_types(&self) -> Vec<String> {
+        let mut types = model_types(&self.rbac_model_type());
+        let earlier_default = std::any::type_name::<Self>();
+        if !types.iter().any(|stored| stored == earlier_default) {
+            types.push(earlier_default.to_owned());
+        }
+        types
+    }
+
     /// Model identifier stored in `model_has_roles.model_id` and
     /// `model_has_permissions.model_id`.
     fn rbac_model_id(&self) -> String {
@@ -924,15 +1046,24 @@ pub trait HasRoles: Authenticatable {
 
     /// Assign this model a role on the default `"web"` guard.
     async fn assign_role(&self, role_name: &str) -> Result<(), FrameworkError> {
-        assign_role_to_model(&self.rbac_model_type(), &self.rbac_model_id(), role_name).await
+        assign_role_as(
+            &self.rbac_model_types(),
+            &self.rbac_model_type(),
+            &self.rbac_model_id(),
+            role_name,
+            DEFAULT_GUARD,
+        )
+        .await
     }
 
     /// Give this model a direct permission on the default `"web"` guard.
     async fn give_permission_to(&self, permission_name: &str) -> Result<(), FrameworkError> {
-        give_permission_to_model(
+        give_permission_as(
+            &self.rbac_model_types(),
             &self.rbac_model_type(),
             &self.rbac_model_id(),
             permission_name,
+            DEFAULT_GUARD,
         )
         .await
     }
@@ -948,7 +1079,13 @@ pub trait HasRoles: Authenticatable {
     /// A role name that exists on no such guard is an error; a role this
     /// model does not hold is not. See [`remove_role_from_model`].
     async fn remove_role(&self, role_name: &str) -> Result<(), FrameworkError> {
-        remove_role_from_model(&self.rbac_model_type(), &self.rbac_model_id(), role_name).await
+        remove_role_as(
+            &self.rbac_model_types(),
+            &self.rbac_model_id(),
+            role_name,
+            DEFAULT_GUARD,
+        )
+        .await
     }
 
     /// Remove a direct permission from this model on the default `"web"`
@@ -964,27 +1101,35 @@ pub trait HasRoles: Authenticatable {
     /// permission this model was never given directly is not. See
     /// [`remove_permission_from_model`].
     async fn remove_permission_to(&self, permission_name: &str) -> Result<(), FrameworkError> {
-        remove_permission_from_model(
-            &self.rbac_model_type(),
+        remove_permission_as(
+            &self.rbac_model_types(),
             &self.rbac_model_id(),
             permission_name,
+            DEFAULT_GUARD,
         )
         .await
     }
 
     /// Check whether this model has a role on the default `"web"` guard.
     async fn has_role(&self, role_name: &str) -> Result<bool, FrameworkError> {
-        has_role_for_model(&self.rbac_model_type(), &self.rbac_model_id(), role_name).await
+        has_role_as(
+            &self.rbac_model_types(),
+            &self.rbac_model_id(),
+            role_name,
+            DEFAULT_GUARD,
+        )
+        .await
     }
 
     /// Check whether this model has a permission on the default `"web"` guard.
     ///
     /// Direct permissions and role-inherited permissions are both considered.
     async fn has_permission_to(&self, permission_name: &str) -> Result<bool, FrameworkError> {
-        has_permission_for_model(
-            &self.rbac_model_type(),
+        has_permission_as(
+            &self.rbac_model_types(),
             &self.rbac_model_id(),
             permission_name,
+            DEFAULT_GUARD,
         )
         .await
     }

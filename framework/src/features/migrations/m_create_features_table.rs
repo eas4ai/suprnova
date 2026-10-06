@@ -60,9 +60,12 @@ impl MigrationName for Migration {
     }
 }
 
-/// Create `features` in Pennant's layout.
+/// Create `features` in Pennant's layout, or add the indexes a stopped
+/// upgrade left out of the one it created (see
+/// `Schema::create_or_complete`). Callers reach it only when the table is
+/// missing or the upgrade created it.
 pub(crate) async fn create_features(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
-    Schema::create(manager, FEATURES_TABLE, |t| {
+    Schema::create_or_complete(manager, FEATURES_TABLE, |t| {
         t.unsigned_id();
         t.string("name");
         t.string("scope");

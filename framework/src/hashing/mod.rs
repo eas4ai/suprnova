@@ -205,6 +205,41 @@ pub fn hash_for_laravel(password: &str, cost: u32) -> Result<String, FrameworkEr
         .map_err(|e| FrameworkError::internal(format!("bcrypt hash error: {e}")))
 }
 
+/// The `$2y$` hash a valid sign-in rewrites `stored` as while the
+/// application shares its database with a Laravel application
+/// ([`LaravelDatabase`](crate::LaravelDatabase)): [`hash_for_laravel`] at
+/// the configured cost, or at `stored`'s own bcrypt cost when that is
+/// higher. The rewrite changes the variant or the algorithm Laravel's
+/// hasher refuses; it never lowers the work a bcrypt hash already had, and
+/// Laravel accepts a `$2y$` hash at any cost.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] when the hashing configuration is invalid or
+/// the hash cannot be computed.
+pub(crate) fn rehash_for_laravel(password: &str, stored: &str) -> Result<String, FrameworkError> {
+    let configured = HashConfig::from_env()?.rounds;
+    let stored = info::parse(stored);
+    let kept = match stored.algo {
+        info::AlgoName::Bcrypt => stored.rounds.unwrap_or_default().min(MAX_BCRYPT_COST),
+        _ => 0,
+    };
+    hash_for_laravel(password, configured.max(kept))
+}
+
+/// Async-safe wrapper around [`rehash_for_laravel`]: the CPU-bound hash
+/// runs on `tokio::task::spawn_blocking`.
+pub(crate) async fn rehash_for_laravel_async(
+    password: &str,
+    stored: &str,
+) -> Result<String, FrameworkError> {
+    let password = password.to_string();
+    let stored = stored.to_string();
+    tokio::task::spawn_blocking(move || rehash_for_laravel(&password, &stored))
+        .await
+        .map_err(|e| FrameworkError::internal(format!("rehash join error: {e}")))?
+}
+
 /// Whether `hash` is not the hash [`hash_for_laravel`] would write at
 /// `cost`: another algorithm, another bcrypt variant, or a lower cost.
 fn needs_laravel_rehash(hash: &str, cost: u32) -> bool {
@@ -262,7 +297,11 @@ pub fn hash_with_cost(password: &str, cost: u32) -> Result<String, FrameworkErro
 /// When `HASH_VERIFY=true` AND the configured driver's algorithm
 /// differs from the stored hash's algorithm, [`verify`] returns
 /// `Ok(false)`. Set `HASH_VERIFY=false` (the default) while rotating
-/// from bcrypt → argon2id so legacy hashes still match.
+/// from bcrypt → argon2id so legacy hashes still match. While the
+/// application shares its database with a Laravel application, a bcrypt
+/// hash is accepted as well: every hash the application writes then is
+/// bcrypt, and a valid sign-in rewrites one of the driver's own algorithm
+/// as bcrypt.
 pub fn verify(password: &str, hash: &str) -> Result<bool, FrameworkError> {
     let driver = default_driver()?;
     verify_with(driver, password, hash)
@@ -289,15 +328,14 @@ pub fn verify_with(
     // they differ. Apply at the facade so the underlying verify still
     // dispatches on the stored algo regardless. While the application
     // shares its database with Laravel, every hash it writes is bcrypt,
-    // whatever the driver.
+    // whatever the driver, so bcrypt is accepted too; the driver's own
+    // algorithm stays accepted, so a user whose hash the application wrote
+    // before signs in and the sign-in rewrites the hash for Laravel.
     if configured_driver.verify_algorithm() {
         let stored_algo = stored.algo.supported();
-        let configured = if crate::LaravelDatabase::is_shared() {
-            Algorithm::Bcrypt
-        } else {
-            configured_driver.algorithm()
-        };
-        if stored_algo != Some(configured) {
+        let accepted = stored_algo == Some(configured_driver.algorithm())
+            || (crate::LaravelDatabase::is_shared() && stored_algo == Some(Algorithm::Bcrypt));
+        if !accepted {
             return Ok(false);
         }
     }

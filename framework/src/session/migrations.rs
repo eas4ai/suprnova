@@ -35,7 +35,7 @@ use crate::database::migration_guard::{
     MovedRow, UpgradeState, move_earlier_rows, resume_set_aside, set_aside, upgrade_state,
 };
 use crate::database::stored_datetime::StoredDateTime;
-use crate::schema::Schema;
+use crate::schema::{Blueprint, Schema};
 
 /// The key type of the default guard's user model, which decides the type
 /// of `sessions.user_id`, as Laravel's skeleton decides it with
@@ -101,7 +101,12 @@ pub async fn create_sessions_table(
     table: &str,
     user_key: SessionUserKey,
 ) -> Result<(), DbErr> {
-    Schema::create(manager, table, |t| {
+    Schema::create(manager, table, sessions_layout(user_key)).await
+}
+
+/// The columns and indexes of Laravel 13's sessions table for `user_key`.
+fn sessions_layout(user_key: SessionUserKey) -> impl FnOnce(&mut Blueprint) + Send {
+    move |t: &mut Blueprint| {
         t.string("id").primary();
         match user_key {
             SessionUserKey::Integer => t.unsigned_big_integer("user_id").nullable().index(),
@@ -112,8 +117,7 @@ pub async fn create_sessions_table(
         t.text("user_agent").nullable();
         t.long_text("payload");
         t.integer("last_activity").index();
-    })
-    .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -131,9 +135,9 @@ impl MigrationTrait for CreateSessionsTable {
             }
             UpgradeState::Resume => {
                 resume_set_aside(manager, &table, is_earlier).await?;
-                if !manager.has_table(&table).await? {
-                    create_sessions_table(manager, &table, self.user_key).await?;
-                }
+                // The table is the one this upgrade created; a stopped run
+                // may have left it without its indexes.
+                Schema::create_or_complete(manager, &table, sessions_layout(self.user_key)).await?;
             }
         }
         let backend = manager.get_database_backend();

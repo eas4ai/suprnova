@@ -58,12 +58,12 @@ pub(crate) fn model_key() -> Result<ModelKey, DbErr> {
     }
 }
 
-/// Create `roles` or `permissions` in spatie's layout.
+/// Create `roles` or `permissions` in spatie's layout, or add the indexes
+/// a stopped upgrade left out of the one it created (see
+/// `Schema::create_or_complete`). Callers reach it only when the table is
+/// missing or the upgrade created it.
 pub(crate) async fn create_named(manager: &SchemaManager<'_>, table: &str) -> Result<(), DbErr> {
-    if manager.has_table(table).await? {
-        return Ok(());
-    }
-    Schema::create(manager, table, |t| {
+    Schema::create_or_complete(manager, table, |t| {
         t.unsigned_id();
         t.string("name");
         t.string("guard_name");
@@ -75,7 +75,10 @@ pub(crate) async fn create_named(manager: &SchemaManager<'_>, table: &str) -> Re
 }
 
 /// Create `model_has_roles` or `model_has_permissions` in spatie's layout:
-/// `owner` is `role_id` or `permission_id`, referencing `owner_table`.
+/// `owner` is `role_id` or `permission_id`, referencing `owner_table`. On a
+/// table that exists, add the indexes a stopped upgrade left out (see
+/// `Schema::create_or_complete`): callers reach it only when the table is
+/// missing or the upgrade created it.
 pub(crate) async fn create_model_has(
     manager: &SchemaManager<'_>,
     table: &str,
@@ -83,10 +86,7 @@ pub(crate) async fn create_model_has(
     owner_table: &str,
     key: ModelKey,
 ) -> Result<(), DbErr> {
-    if manager.has_table(table).await? {
-        return Ok(());
-    }
-    Schema::create(manager, table, |t| {
+    Schema::create_or_complete(manager, table, |t| {
         t.unsigned_big_integer(owner);
         t.string("model_type");
         match key {
@@ -144,20 +144,24 @@ pub(crate) async fn create_details(
 /// [`RbacToSpatieLayout`](super::RbacToSpatieLayout).
 pub(crate) async fn create_all(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let key = model_key()?;
-    create_named(manager, "permissions").await?;
-    create_named(manager, "roles").await?;
+    // A table that exists is spatie's, or an earlier release's, and stays
+    // as it is.
+    for table in ["permissions", "roles"] {
+        if !manager.has_table(table).await? {
+            create_named(manager, table).await?;
+        }
+    }
     // An earlier release's tables keep their assignments in tables of
     // other names; spatie's are created only once that layout is gone.
     if !crate::rbac::migrations::is_earlier_layout(manager).await? {
-        create_model_has(
-            manager,
-            "model_has_permissions",
-            "permission_id",
-            "permissions",
-            key,
-        )
-        .await?;
-        create_model_has(manager, "model_has_roles", "role_id", "roles", key).await?;
+        for (table, owner, owner_table) in [
+            ("model_has_permissions", "permission_id", "permissions"),
+            ("model_has_roles", "role_id", "roles"),
+        ] {
+            if !manager.has_table(table).await? {
+                create_model_has(manager, table, owner, owner_table, key).await?;
+            }
+        }
         create_role_has_permissions(manager).await?;
     }
     create_details(manager, "suprnova_role_details", "role_id").await?;

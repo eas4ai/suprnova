@@ -216,6 +216,9 @@ where
     }
 }
 
+/// The highest cost bcrypt takes: a cost above it is no hash bcrypt wrote.
+const MAX_BCRYPT_COST: u32 = 31;
+
 /// The one verification service for both deployed formats.
 pub struct PasswordVerifier {
     driver: Arc<dyn PasswordHashDriver>,
@@ -272,6 +275,27 @@ impl PasswordVerifier {
         }
     }
 
+    /// The work profile a valid sign-in's rewrite of a hash stored at
+    /// `stored` mints with: [`Self::target_profile`], except that a rewrite
+    /// to [`PasswordTarget::LaravelBcrypt`] keeps a stored bcrypt cost above
+    /// the configured one. The rewrite changes the variant Laravel reads,
+    /// never lowers the work, and Laravel accepts a `$2y$` hash at any cost.
+    fn rehash_profile(&self, stored: &HashWorkProfile) -> HashWorkProfile {
+        match (self.target, stored.parameters) {
+            (PasswordTarget::LaravelBcrypt, HashParameters::Bcrypt { cost })
+                if cost > self.config.bcrypt_cost =>
+            {
+                HashWorkProfile {
+                    algorithm: HashAlgorithm::Bcrypt,
+                    parameters: HashParameters::Bcrypt {
+                        cost: cost.min(MAX_BCRYPT_COST),
+                    },
+                }
+            }
+            _ => self.target_profile(),
+        }
+    }
+
     /// Verify one attempt with fixed-format work and compute any required
     /// upgrade.
     ///
@@ -287,7 +311,7 @@ impl PasswordVerifier {
         let rehash = if valid {
             match stored_profile {
                 Some(profile) if self.needs_rehash(&profile, stored_hash.unwrap_or_default()) => {
-                    match self.driver.mint(&self.target_profile(), password) {
+                    match self.driver.mint(&self.rehash_profile(&profile), password) {
                         Ok(upgraded) => RehashOutcome::Upgraded(upgraded),
                         Err(error) => RehashOutcome::Failed {
                             message: error.to_string(),

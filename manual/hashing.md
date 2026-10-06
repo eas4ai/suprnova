@@ -167,6 +167,8 @@ HASH_VERIFY=true
 
 With the gate on, `verify()` returns `Ok(false)` for any hash whose algorithm differs from the active driver - same shape as Laravel's `RuntimeException`, but Suprnova returns false rather than throwing because the auth-flow caller expects a `Result<bool>` either way.
 
+While `LARAVEL_SHARED_DATABASE` is on, the gate accepts bcrypt hashes as well as the active driver's: the application then writes bcrypt, and a user whose hash the active driver wrote still signs in, which rewrites the hash as `$2y$`.
+
 ## Async vs sync
 
 Both bcrypt at cost 12 (~250 ms) and Argon2id at memory=64 MiB (~80 ms) are intentionally CPU-bound - that's the entire point of slow hashing. Calling the sync `hash` / `verify` directly from a Tokio request handler blocks the worker thread for the whole hash duration, starving other requests on the same worker.
