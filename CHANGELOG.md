@@ -152,6 +152,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   32 pairs holding `&String` values, and `route` used as a
   `fn(&str, &[(&str, &str)])` pointer. Write `.as_str()`, or a closure in
   place of the pointer. Every other string-pair call compiles as before.
+- **A dotted resource name nests.** `Router::resource("users.posts", ...)`
+  registers `/users/{user}/posts/{post}` with the parent bound, as
+  Laravel's `Route::resource` does; it registered
+  `/users.posts/{users.post}`.
 - **A route key that does not parse answers 404.** A key that does not
   parse, or breaks a `unique_id` key's format, gets the body a missing row
   gets, naming the model and never the value. It was a 400 that repeated
