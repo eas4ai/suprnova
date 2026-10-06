@@ -2531,7 +2531,7 @@ fn render_prod_head(config: &InertiaConfig) -> String {
     // produced before the manifest layer keep booting. The fallback
     // path emits a tracing::warn! at first read inside
     // `InertiaConfig::vite_manifest`.
-    let base = asset_base(config.assets_base_url.trim_end_matches('/'));
+    let base = asset_base(&config.assets_base_url);
     let entry = &config.entry_point;
     let url = |file: &str| escape_html_attr(&format!("{base}/{file}"));
     if let Some(assets) = config.vite_manifest().and_then(|m| m.resolve_entry(entry)) {
@@ -2572,11 +2572,16 @@ fn render_prod_head(config: &InertiaConfig) -> String {
 /// such as the default `/assets`, is served by the application and gets
 /// the public root in front. An absolute or network-path base (a CDN) is
 /// another host's path and is left as it is.
+///
+/// The base is classified before its trailing slashes are removed, so a
+/// base of `/`, which serves the assets at the root itself, is root-relative
+/// too and gives the root alone.
 fn asset_base(assets_base_url: &str) -> std::borrow::Cow<'_, str> {
+    let trimmed = assets_base_url.trim_end_matches('/');
     if assets_base_url.starts_with('/') && !assets_base_url.starts_with("//") {
-        std::borrow::Cow::Owned(crate::routing::root::prefixed(assets_base_url))
+        std::borrow::Cow::Owned(crate::routing::root::prefixed(trimmed))
     } else {
-        std::borrow::Cow::Borrowed(assets_base_url)
+        std::borrow::Cow::Borrowed(trimmed)
     }
 }
 
