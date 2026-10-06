@@ -1157,7 +1157,8 @@ impl Router {
     /// route, registered before or after this call: Laravel's
     /// `Route::model`. When no row matches, `fallback` receives the raw
     /// value and its result is bound instead, so the route does not answer
-    /// 404. `-` in `name` is read as `_`.
+    /// 404. On a route that calls `with_trashed()`, the lookup is `M`'s
+    /// soft-deletable one (BIND-008). `-` in `name` is read as `_`.
     ///
     /// ```rust,ignore
     /// Router::new()

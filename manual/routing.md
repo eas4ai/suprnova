@@ -446,9 +446,11 @@ record and refuses to start, naming the route and the parameter, when:
   parameter the handler reads without binding.
 - A handler reads the request body twice.
 
-`Server::from_config` returns the refusal as an error. A router driven
-through `handle_request` in a test runs the same checks before its first
-request and answers every request with a 500 when they fail;
+The fallback and every `missing()` handler are checked too, each against
+the path of the route it answers. `Server::from_config` returns the
+refusal as an error. A router driven through `handle_request` in a test
+runs the same checks before its first request and answers every request
+with a 500 when they fail, a request the fallback would answer included;
 `router.prepare_bindings()` returns the error itself. A closure handler
 and a generic `#[handler]` function carry no record and are not checked.
 

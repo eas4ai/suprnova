@@ -593,7 +593,7 @@ pub(crate) struct RouteBindingOptions {
     /// `with_trashed()`.
     pub(crate) with_trashed: bool,
     /// `missing(handler)`.
-    pub(crate) missing: Option<MissingHandler>,
+    pub(crate) missing: Option<MissingHook>,
 }
 
 impl RouteBindingOptions {
@@ -611,14 +611,27 @@ impl RouteBindingOptions {
     }
 }
 
-/// Box a `missing()` handler the way a route handler is boxed.
-pub(crate) fn boxed_missing<H, Fut>(handler: H) -> MissingHandler
+/// A `missing()` handler, boxed, with what `#[handler]` recorded about it,
+/// so the startup checks see it as they see a route's handler (BIND-004).
+#[derive(Clone)]
+pub(crate) struct MissingHook {
+    handler: MissingHandler,
+    record: Option<&'static HandlerRecord>,
+}
+
+/// Box a `missing()` handler the way a route handler is boxed, keeping its
+/// record.
+pub(crate) fn boxed_missing<H, Fut>(handler: H) -> MissingHook
 where
     H: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Response> + Send + 'static,
 {
+    let record = record_of::<H>();
     let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
-    Arc::new(boxed)
+    MissingHook {
+        handler: Arc::new(boxed),
+        record,
+    }
 }
 
 /// The route a binder resolves a value for: its method, its pattern, its
@@ -652,8 +665,10 @@ impl MatchedRoute {
     }
 }
 
+/// A binder's lookup: the value, the route, and whether the route binds
+/// soft-deleted rows (`with_trashed()`).
 type BinderFn =
-    dyn Fn(String, MatchedRoute) -> RouteLookup<'static, Option<BoundChild>> + Send + Sync;
+    dyn Fn(String, MatchedRoute, bool) -> RouteLookup<'static, Option<BoundChild>> + Send + Sync;
 
 /// A router-wide binder for one parameter name: `bind()` or `model()`.
 #[derive(Clone)]
@@ -674,7 +689,7 @@ impl Binder {
     {
         let resolver = Arc::new(resolver);
         Self {
-            resolve: Arc::new(move |value, route| {
+            resolve: Arc::new(move |value, route, _trashed| {
                 let found = resolver(value, route);
                 Box::pin(async move { Ok(found.await?.map(BoundChild::new)) })
             }),
@@ -684,7 +699,9 @@ impl Binder {
     }
 
     /// `Router::model`: `M` by its route key, else what `fallback` makes of
-    /// the value.
+    /// the value. On a route with `with_trashed()` it looks the value up
+    /// through the soft-deletable lookup, as Laravel's `Route::model` does
+    /// (BIND-008).
     pub(crate) fn model<M, F, Fut>(fallback: F) -> Self
     where
         M: RouteBinding,
@@ -694,10 +711,15 @@ impl Binder {
         let fallback = Arc::new(fallback);
         let info = M::route_binding_info();
         Self {
-            resolve: Arc::new(move |value, _route| {
+            resolve: Arc::new(move |value, _route, trashed| {
                 let fallback = fallback.clone();
                 Box::pin(async move {
-                    match M::resolve_route_binding(&value, None).await? {
+                    let found = if trashed {
+                        M::resolve_soft_deletable_route_binding(&value, None).await?
+                    } else {
+                        M::resolve_route_binding(&value, None).await?
+                    };
+                    match found {
                         Some(found) => Ok(Some(BoundChild::new(found))),
                         None => Ok(Some(BoundChild::new(fallback(value).await?))),
                     }
@@ -892,20 +914,48 @@ impl RouterBindings {
         let mut plans = HashMap::new();
         if let Some(record) = self.fallback {
             let route = "the fallback route".to_owned();
-            check_handler(&route, record, &[], &self.binders, &mut problems);
+            check_handler(
+                &route,
+                "handler",
+                record,
+                &[],
+                Some(&self.binders),
+                &mut problems,
+            );
         }
         let mut routes: Vec<_> = self.routes.iter().collect();
         routes.sort_by(|a, b| {
             (a.0.1.as_str(), a.0.0.as_str()).cmp(&(b.0.1.as_str(), b.0.0.as_str()))
         });
         for ((method, pattern), entry) in routes {
-            let Some(record) = entry.record else {
-                continue;
-            };
             let route = format!("{method} {pattern}");
             let path = placeholders(pattern);
             let before = problems.len();
-            check_handler(&route, record, &path, &self.binders, &mut problems);
+            // A `missing()` hook gets the route's request, so it is checked
+            // against the route's path, whatever its route's handler is. A
+            // binder binds the route's handler, never the hook, so the
+            // binder check does not apply to it.
+            if let Some(record) = entry.options.missing.as_ref().and_then(|hook| hook.record) {
+                check_handler(
+                    &route,
+                    "`missing()` handler",
+                    record,
+                    &path,
+                    None,
+                    &mut problems,
+                );
+            }
+            let Some(record) = entry.record else {
+                continue;
+            };
+            check_handler(
+                &route,
+                "handler",
+                record,
+                &path,
+                Some(&self.binders),
+                &mut problems,
+            );
             if problems.len() > before {
                 continue;
             }
@@ -930,13 +980,15 @@ impl RouterBindings {
 
 /// The checks that need the handler and the path only: at most one body
 /// reader (BIND-015), every parameter an argument reads declared by the
-/// path (BIND-013), and no binder for a parameter an argument reads without
-/// binding (BIND-007).
+/// path (BIND-013), and, given the router's `binders`, no binder for a
+/// parameter an argument reads without binding (BIND-007). `role` names
+/// the handler in the refusal: `handler`, or `` `missing()` handler ``.
 fn check_handler(
     route: &str,
+    role: &str,
     record: &HandlerRecord,
     path: &[Placeholder],
-    binders: &HashMap<String, Binder>,
+    binders: Option<&HashMap<String, Binder>>,
     problems: &mut Vec<String>,
 ) {
     let args = record.args();
@@ -947,7 +999,7 @@ fn check_handler(
         .collect();
     if body.len() > 1 {
         problems.push(format!(
-            "route `{route}`: handler `{handler}` has {} arguments that read the request body ({}); \
+            "route `{route}`: {role} `{handler}` has {} arguments that read the request body ({}); \
              a handler may read it once, so fold them into one form request",
             body.len(),
             body.iter()
@@ -961,13 +1013,15 @@ fn check_handler(
         match &arg.kind {
             HandlerArgKind::Bound(_) | HandlerArgKind::PathValue if !declared => {
                 problems.push(format!(
-                    "route `{route}`: handler `{handler}` reads the route parameter `{}` \
+                    "route `{route}`: {role} `{handler}` reads the route parameter `{}` \
                      (`{}: {}`), which the route's path does not declare",
                     arg.name, arg.name, arg.type_name
                 ));
             }
             HandlerArgKind::PathValue | HandlerArgKind::Body
-                if declared && binders.contains_key(&binder_key(arg.name)) =>
+                if declared
+                    && binders
+                        .is_some_and(|binders| binders.contains_key(&binder_key(arg.name))) =>
             {
                 problems.push(format!(
                     "route `{route}`: a binder is registered for the parameter `{}`, but handler \
@@ -1118,7 +1172,7 @@ fn plan_route(
         bindings,
         arg_count: args.len(),
         with_trashed: options.with_trashed,
-        missing: options.missing.clone(),
+        missing: options.missing.as_ref().map(|hook| hook.handler.clone()),
     }))
 }
 
@@ -1249,7 +1303,7 @@ async fn lookup(
     values: &[Option<Erased>],
 ) -> Result<Option<Erased>, FrameworkError> {
     if let Some(binder) = &binding.binder {
-        return match (binder.resolve)(value.to_owned(), route.clone()).await? {
+        return match (binder.resolve)(value.to_owned(), route.clone(), plan.with_trashed).await? {
             Some(found) => adopt(binding, found).map(Some),
             None => Ok(None),
         };

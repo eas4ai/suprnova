@@ -86,11 +86,13 @@ number_route_values!(
 
 /// The parameters of one `route()` call.
 ///
-/// Implemented for `&[(name, value)]` string pairs, the form every call
-/// written before route binding uses; for one value of any [`RouteValue`]
-/// type, which fills the route's first parameter; for one `(name, value)`
-/// pair; and for a tuple of up to six `(name, value)` pairs, whose values
-/// may mix strings and bound values.
+/// Implemented for `(name, value)` string pairs in every form a call
+/// written before route binding passed: a borrowed or mutable array, slice
+/// or `Vec`, a borrowed slice, and, for an array of up to 32 pairs, values
+/// and names that deref to a string (`&String`, `&Cow<str>`, `&&str`); for
+/// one value of any [`RouteValue`] type, which fills the route's first
+/// parameter; for one `(name, value)` pair; and for a tuple of up to six
+/// `(name, value)` pairs, whose values may mix strings and bound values.
 pub trait RouteParameters {
     /// The text for the parameter `name`, the `position`th of the route,
     /// whose binding field is `field`.
@@ -98,21 +100,141 @@ pub trait RouteParameters {
     fn __route_value(&self, name: &str, field: Option<&str>, position: usize) -> Option<String>;
 }
 
+/// The value of the pair named `name`, the first one when several are.
+fn pair_value<K: AsRef<str>, V: AsRef<str>>(pairs: &[(K, V)], name: &str) -> Option<String> {
+    pairs
+        .iter()
+        .find(|(key, _)| key.as_ref() == name)
+        .map(|(_, value)| value.as_ref().to_owned())
+}
+
+/// String pairs held by a container a `&[(&str, &str)]` parameter took by
+/// coercion: `&[..; N]`, `&mut [..; N]`, `&mut [..]`, `&&[..]`, `&Vec` and
+/// `&mut Vec`.
+macro_rules! string_pair_containers {
+    ($($container:ty),* $(,)?) => {
+        $(
+            impl RouteParameters for $container {
+                fn __route_value(
+                    &self,
+                    name: &str,
+                    _field: Option<&str>,
+                    _position: usize,
+                ) -> Option<String> {
+                    pair_value(&self[..], name)
+                }
+            }
+        )*
+    };
+}
+
+string_pair_containers!(
+    &[(&str, &str)],
+    &mut [(&str, &str)],
+    &&[(&str, &str)],
+    &Vec<(&str, &str)>,
+    &mut Vec<(&str, &str)>,
+);
+
 impl<const N: usize> RouteParameters for &[(&str, &str); N] {
     fn __route_value(&self, name: &str, _field: Option<&str>, _position: usize) -> Option<String> {
-        self.iter()
-            .find(|(key, _)| *key == name)
-            .map(|(_, value)| (*value).to_owned())
+        pair_value(&self[..], name)
     }
 }
 
-impl RouteParameters for &[(&str, &str)] {
+impl<const N: usize> RouteParameters for &mut [(&str, &str); N] {
     fn __route_value(&self, name: &str, _field: Option<&str>, _position: usize) -> Option<String> {
-        self.iter()
-            .find(|(key, _)| *key == name)
-            .map(|(_, value)| (*value).to_owned())
+        pair_value(&self[..], name)
     }
 }
+
+/// A reference that derefs to a string other than `&str` itself: what a
+/// `&[(&str, &str)]` parameter coerced a pair's name or value from inside
+/// an array literal, as in `&[("id", &id.to_string())]`.
+///
+/// `&str` is left out so the arrays below never overlap the
+/// `&[(&str, &str); N]` impl, which alone covers the empty `&[]`.
+#[doc(hidden)]
+pub trait DerefText {
+    /// The string this reference derefs to.
+    fn deref_text(&self) -> &str;
+}
+
+macro_rules! deref_texts {
+    ($($text:ty),* $(,)?) => {
+        $(
+            impl DerefText for $text {
+                fn deref_text(&self) -> &str {
+                    self
+                }
+            }
+        )*
+    };
+}
+
+deref_texts!(
+    &String,
+    &&str,
+    &&String,
+    &mut String,
+    &mut str,
+    &std::borrow::Cow<'_, str>,
+    &Box<str>,
+    &std::rc::Rc<str>,
+    &std::sync::Arc<str>,
+);
+
+/// Arrays of pairs whose name or value is a [`DerefText`]. They are
+/// implemented per length, from 1, because an impl generic over the length
+/// would also match `&[]` and leave its pair type unknown.
+macro_rules! deref_text_pair_arrays {
+    ($($len:literal)*) => {
+        $(
+            impl<V: DerefText> RouteParameters for &[(&str, V); $len] {
+                fn __route_value(
+                    &self,
+                    name: &str,
+                    _field: Option<&str>,
+                    _position: usize,
+                ) -> Option<String> {
+                    self.iter()
+                        .find(|(key, _)| *key == name)
+                        .map(|(_, value)| value.deref_text().to_owned())
+                }
+            }
+
+            impl<K: DerefText> RouteParameters for &[(K, &str); $len] {
+                fn __route_value(
+                    &self,
+                    name: &str,
+                    _field: Option<&str>,
+                    _position: usize,
+                ) -> Option<String> {
+                    self.iter()
+                        .find(|(key, _)| key.deref_text() == name)
+                        .map(|(_, value)| (*value).to_owned())
+                }
+            }
+
+            impl<K: DerefText, V: DerefText> RouteParameters for &[(K, V); $len] {
+                fn __route_value(
+                    &self,
+                    name: &str,
+                    _field: Option<&str>,
+                    _position: usize,
+                ) -> Option<String> {
+                    self.iter()
+                        .find(|(key, _)| key.deref_text() == name)
+                        .map(|(_, value)| value.deref_text().to_owned())
+                }
+            }
+        )*
+    };
+}
+
+deref_text_pair_arrays!(
+    1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32
+);
 
 /// One value, positional: it fills the route's first parameter.
 impl<V: RouteValue> RouteParameters for V {
