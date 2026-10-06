@@ -156,6 +156,54 @@ fn pfx_002_outside_a_request_the_root_is_the_app_url_path() {
     );
 }
 
+/// `url::to("x")` and `url::secure("x")` as a request under `app_url` with
+/// `headers` builds them, one per line.
+async fn relative_builders(app_url: &str, headers: &[(&str, &str)]) -> Vec<String> {
+    support::install(app_url);
+    let router: Router = Router::new()
+        .get("/relative", |_request: Request| async {
+            Ok(HttpResponse::text(
+                [url::to("x"), url::secure("x")].join("\n"),
+            ))
+        })
+        .into();
+    let address = support::serve(router, MiddlewareRegistry::new()).await;
+    let reply = support::get(address, "/relative", headers).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    reply.body.split('\n').map(str::to_owned).collect()
+}
+
+#[tokio::test]
+async fn pfx_010_url_to_and_secure_put_a_relative_path_under_the_origin_and_root() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "pfx_010_url_to_and_secure_put_a_relative_path_under_the_origin_and_root",
+    )
+    .await
+    {
+        return;
+    }
+    // Inside a request behind a trusted prefix: the origin from APP_URL,
+    // the root from the header, then `/x`. An APP_URL path the prefix
+    // replaces is not carried.
+    let prefix = [("x-forwarded-prefix", PREFIX)];
+    for app_url in ["http://example.org", "http://example.org/other"] {
+        assert_eq!(
+            relative_builders(app_url, &prefix).await,
+            [
+                "http://example.org/billing/x",
+                "https://example.org/billing/x"
+            ],
+            "APP_URL {app_url}"
+        );
+    }
+    // At the host root the root is empty.
+    assert_eq!(
+        relative_builders("http://example.org", &[]).await,
+        ["http://example.org/x", "https://example.org/x"]
+    );
+}
+
 #[tokio::test]
 async fn pfx_002_an_error_page_renders_under_the_root() {
     if crate::own_process_async::delegate(
