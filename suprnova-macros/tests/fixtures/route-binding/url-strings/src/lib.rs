@@ -65,6 +65,157 @@ pub fn every_form(
     urls
 }
 
+/// The same calls through a mutable borrow: a `&mut` array literal was
+/// coerced to the slice parameter element by element, as a `&` one was, and
+/// an empty mutable container took its pair type from the parameter.
+pub fn mutable_forms(
+    id: String,
+    name: &str,
+    cow: Cow<'_, str>,
+    boxed: Box<str>,
+    rc: Rc<str>,
+    arc: Arc<str>,
+) -> Vec<Option<String>> {
+    let mut owned = id.clone();
+    vec![
+        // Names and values that deref to a string, in a mutable array.
+        route("a", &mut [("id", &id)]),
+        try_route("a", &mut [("id", &id)]).ok(),
+        route("a", &mut [("id", &name)]),
+        try_route("a", &mut [("id", &name)]).ok(),
+        route("a", &mut [("id", &&id)]),
+        try_route("a", &mut [("id", &&id)]).ok(),
+        route("a", &mut [("id", &mut owned)]),
+        try_route("a", &mut [("id", &mut owned)]).ok(),
+        route("a", &mut [("id", &cow)]),
+        try_route("a", &mut [("id", &cow)]).ok(),
+        route("a", &mut [("id", &boxed)]),
+        try_route("a", &mut [("id", &boxed)]).ok(),
+        route("a", &mut [("id", &rc)]),
+        try_route("a", &mut [("id", &rc)]).ok(),
+        route("a", &mut [("id", &arc)]),
+        try_route("a", &mut [("id", &arc)]).ok(),
+        route("a", &mut [(&id, "1")]),
+        try_route("a", &mut [(&id, "1")]).ok(),
+        route("a", &mut [(&id, &id)]),
+        try_route("a", &mut [(&id, &id)]).ok(),
+        route("a", &mut [("other", "x"), ("id", &id)]),
+        try_route("a", &mut [("other", "x"), ("id", &id)]).ok(),
+        route("a", &mut [("id", id.as_str())]),
+        try_route("a", &mut [("id", id.as_str())]).ok(),
+        route("a", &mut [("id", &*id)]),
+        try_route("a", &mut [("id", &*id)]).ok(),
+        // Thirty-two pairs, the most an array of `&String` values takes.
+        route(
+            "a",
+            &mut [
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+            ],
+        ),
+        try_route(
+            "a",
+            &mut [
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+                ("id", &id),
+            ],
+        )
+        .ok(),
+        // Empty mutable containers, whose pair type the parameter set.
+        route("a", &mut []),
+        try_route("a", &mut []).ok(),
+        route("a", &mut [][..]),
+        try_route("a", &mut [][..]).ok(),
+        route("a", &mut vec![]),
+        try_route("a", &mut vec![]).ok(),
+        route("a", &mut Vec::new()),
+        try_route("a", &mut Vec::new()).ok(),
+        route("a", &Vec::new()),
+        try_route("a", &Vec::new()).ok(),
+        try_route("a", &vec![]).ok(),
+    ]
+}
+
+/// Shared containers that deref to a slice of pairs, and a vector behind
+/// two borrows: the slice parameter took each by deref coercion.
+pub fn shared_containers(
+    boxed: Box<[(&str, &str)]>,
+    rc: Rc<[(&str, &str)]>,
+    arc: Arc<[(&str, &str)]>,
+    pairs: Vec<(&str, &str)>,
+) -> Vec<Option<String>> {
+    vec![
+        route("a", &boxed),
+        try_route("a", &boxed).ok(),
+        route("a", &rc),
+        try_route("a", &rc).ok(),
+        route("a", &arc),
+        try_route("a", &arc).ok(),
+        route("a", &&pairs),
+        try_route("a", &&pairs).ok(),
+    ]
+}
+
 /// The four forms that compiled only because the slice parameter set the
 /// pairs' type, written as the manual says (BIND-012): `.as_str()` on the
 /// value, and a closure in place of the function pointer.

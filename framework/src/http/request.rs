@@ -97,6 +97,15 @@ pub struct Request {
     /// the server, whose root [`Request::public_root`] resolves from its
     /// own headers on each read.
     public_root: Option<std::sync::Arc<str>>,
+    /// The binding settings of the matched route, for a `#[handler]` the
+    /// route did not plan: one a closure route or another handler calls.
+    /// A field rather than an extension, so the route hands them over with
+    /// an `Arc` clone and nothing else.
+    route_settings: Option<std::sync::Arc<crate::routing::binding::RouteSettings>>,
+    /// Where a `#[handler]` that cannot return the route's `missing()`
+    /// response keeps it for the route to answer with. Set only on a route
+    /// with a `missing()` handler.
+    missing_answer: Option<std::sync::Arc<crate::routing::binding::MissingAnswer>>,
 }
 
 /// A value a route binding resolved, held until the handler takes it.
@@ -168,6 +177,8 @@ impl Request {
             render_cache_prepared: None,
             connection_holds: Vec::new(),
             public_root: None,
+            route_settings: None,
+            missing_answer: None,
         }
     }
 
@@ -186,6 +197,38 @@ impl Request {
             .insert(RouteBindings(std::sync::Arc::new(std::sync::Mutex::new(
                 Some(values),
             ))));
+    }
+
+    /// Hand the request the binding settings of the route it answers.
+    pub(crate) fn set_route_settings(
+        &mut self,
+        settings: std::sync::Arc<crate::routing::binding::RouteSettings>,
+    ) {
+        self.route_settings = Some(settings);
+    }
+
+    /// The binding settings of the route the request answers.
+    pub(crate) fn route_settings(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::routing::binding::RouteSettings>> {
+        self.route_settings.as_ref()
+    }
+
+    /// Hand the request the slot its route answers a kept `missing()`
+    /// response from.
+    pub(crate) fn set_missing_answer(
+        &mut self,
+        slot: std::sync::Arc<crate::routing::binding::MissingAnswer>,
+    ) {
+        self.missing_answer = Some(slot);
+    }
+
+    /// The slot a `#[handler]` keeps the route's `missing()` response in
+    /// when it cannot return it.
+    pub(crate) fn missing_answer(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::routing::binding::MissingAnswer>> {
+        self.missing_answer.as_ref()
     }
 
     /// Take the values the route's bindings resolved, once. `None` when the
@@ -305,6 +348,8 @@ impl Request {
             render_cache_prepared: None,
             connection_holds: Vec::new(),
             public_root: None,
+            route_settings: None,
+            missing_answer: None,
         }
     }
 
@@ -2055,6 +2100,8 @@ mod url_helper_tests {
             render_cache_prepared: None,
             connection_holds: Vec::new(),
             public_root: None,
+            route_settings: None,
+            missing_answer: None,
         };
 
         // Use `.err()` rather than `expect_err` so the test doesn't require
@@ -2093,6 +2140,8 @@ mod url_helper_tests {
             render_cache_prepared: None,
             connection_holds: Vec::new(),
             public_root: None,
+            route_settings: None,
+            missing_answer: None,
         };
 
         let (_, bytes) = req
@@ -2146,6 +2195,8 @@ mod url_helper_tests {
             render_cache_prepared: None,
             connection_holds: Vec::new(),
             public_root: None,
+            route_settings: None,
+            missing_answer: None,
         };
 
         // The bogus middle hop is dropped - only parseable IPs (plus the
@@ -2192,6 +2243,8 @@ mod url_helper_tests {
             render_cache_prepared: None,
             connection_holds: Vec::new(),
             public_root: None,
+            route_settings: None,
+            missing_answer: None,
         };
 
         // A junk-only forwarded chain can't rotate rate-limit buckets - `ip()`

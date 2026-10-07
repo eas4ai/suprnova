@@ -408,6 +408,23 @@ let router = Router::new()
     .missing(|_req| async { suprnova::redirect_to("/posts").into() });
 ```
 
+A `#[handler]` function works as the `missing()` handler too, and its
+bound arguments bind under the route's settings, as the route's handler's
+do. On `/users/{user}/posts/{post}` it can take `user: User` and gets the
+user the route bound. A scoped child it takes without its parent is still
+looked up through the parent the route's handler binds, so it never gets
+a row the route refused. A bound argument of its own that finds nothing,
+such as the post that missed, answers 404 instead of calling it again.
+
+A `#[handler]` function that the route's handler or its middleware calls
+with the request, and that returns another type than `Response`, cannot
+return the `missing()` response. It fails with the 404 error instead,
+and when that error is what the route's handler returns, the route
+answers with the `missing()` response, which passes through the
+middleware as the route's own does. When middleware called the handler
+and the 404 comes back out of the middleware, the route answers with the
+`missing()` response after the middleware.
+
 ### Enums
 
 A unit-only enum derives `RouteBinding`. Each variant binds from its
@@ -452,7 +469,18 @@ refusal as an error. A router driven through `handle_request` in a test
 runs the same checks before its first request and answers every request
 with a 500 when they fail, a request the fallback would answer included;
 `router.prepare_bindings()` returns the error itself. A closure handler
-and a generic `#[handler]` function carry no record and are not checked.
+and a generic `#[handler]` function carry no record and are not checked
+at startup. A closure binds nothing itself. A generic handler, and a
+`#[handler]` function that a closure route, middleware or another handler
+calls with the request, bind their arguments of a concrete type that
+implements `RouteBinding` as any handler's do: in path order, by the
+route's binding fields, scoped (through the parent the route's handler
+binds, when they do not take it), through the router's binders, with
+`with_trashed()` and `missing()`. The route plans them at the handler's first request and
+keeps the plan; a binding field, a scoped child or a binder the checks
+above would refuse answers that request with a 500 instead of binding. A
+generic handler's generic arguments read the body.
+
 A handler inside an `impl` block names its type,
 `#[handler(Self = Posts)]`, and is checked as a free handler is; see
 [Handlers inside an `impl` block](controllers.md#handlers-inside-an-impl-block).
