@@ -1433,8 +1433,8 @@ impl RouterBindings {
                     // On a route where the router cannot see how the handler
                     // binds some parameter, the hook plans at the request,
                     // where a child it takes without that parent answers the
-                    // refusal.
-                    let plan = match hook.record.filter(|_| !parents.has_unknown()) {
+                    // refusal; its checks that need only the path run here.
+                    let plan = match hook.record {
                         Some(record) => {
                             let checked = problems.len();
                             check_handler(
@@ -1447,6 +1447,8 @@ impl RouterBindings {
                             );
                             if problems.len() > checked {
                                 Err(())
+                            } else if parents.has_unknown() {
+                                Ok(None)
                             } else {
                                 plan_route(
                                     &site,

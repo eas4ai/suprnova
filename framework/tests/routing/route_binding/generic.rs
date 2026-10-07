@@ -696,3 +696,38 @@ async fn bind_006_a_parent_the_generic_route_handler_binds_by_its_type_parameter
     assert!(!body.contains("hook grace-post"), "{body}");
     assert!(body.contains("take `user`"), "{body}");
 }
+
+#[test]
+fn bind_013_a_missing_handler_on_a_route_the_router_cannot_see_into_is_checked_at_startup() {
+    // The router cannot find this generic handler's arguments, so the
+    // `missing()` handler's plan waits for the request; its startup checks
+    // do not.
+    #[handler]
+    async fn hidden_user<B: FromRequest + Display + Send + 'static>(
+        user: GnUser,
+        extra: B,
+    ) -> Response {
+        text(format!("{} {extra}", user.name))
+    }
+    #[handler]
+    async fn missing_reads_id(id: i64) -> Response {
+        text(format!("hook {id}"))
+    }
+    let router: Router = Router::new()
+        .get("/users/{user}", hidden_user::<GnBody>)
+        .missing(missing_reads_id)
+        .into();
+    let error = router
+        .prepare_bindings()
+        .expect_err("the `missing()` handler reads `id`, which the path does not declare")
+        .to_string();
+    for part in [
+        "GET /users/{user}",
+        "`missing()` handler",
+        "missing_reads_id",
+        "`id`",
+        "does not declare",
+    ] {
+        assert!(error.contains(part), "`{part}` missing from {error}");
+    }
+}
