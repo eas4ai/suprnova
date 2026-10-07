@@ -1109,7 +1109,7 @@ async fn handle_request_inner(
             crate::error::debug_page::note_request_id(request_id.as_str());
 
             // Build middleware chain, pre-sized so the backing Vec
-            // never re-allocates mid-assembly (was 2–3 reallocs per
+            // never re-allocates mid-assembly (was 2 to 3 reallocs per
             // request with `new()` + push + extend + extend).
             let global_mw = middleware_registry.global_middleware();
             let route_middleware = router.get_route_middleware(&effective_method, &pattern);

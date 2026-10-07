@@ -182,7 +182,7 @@ async fn paginate_returns_inertia_ready_shape() {
     assert_eq!(page.current_page, 1);
     assert_eq!(page.per_page, 10);
     // The serialize-ready paginator carries the window bounds so an
-    // Inertia view can render "Showing 1–10 of 25" without a second
+    // Inertia view can render "Showing 1 to 10 of 25" without a second
     // query.
     assert_eq!(page.from, Some(1));
     assert_eq!(page.to, Some(10));

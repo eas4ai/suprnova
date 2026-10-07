@@ -565,9 +565,13 @@ In a script, parsed as a JavaScript module:
 - No `eval` or `Function` under any spelling, no timer given anything but a
   function, no dynamic `import`, no `Worker`, and no `document.write` or
   `document.open`.
-- A static `import` names only one of the component's own scripts or a
-  script a dependency's manifest names. A shipped component's script counts
-  only when the component depends on that shipped component.
+- A static `import` is a relative path (`./` or `../`) to one of the
+  component's own scripts or to a script a dependency's manifest names, so
+  it still resolves when the application serves under a path prefix
+  ([Serving under a path prefix](deployment.md#serving-under-a-path-prefix)).
+  An absolute path such as `/acme-ui/x/x.js` and a URL are refused, even
+  when they name the component's own script. A shipped component's script
+  counts only when the component depends on that shipped component.
 - No `script`, `iframe`, `object` or `embed` element created, and no element
   created by a name the scan cannot trace to a constant.
 - No HTML parsed into the document (`innerHTML`, `outerHTML`,

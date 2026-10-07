@@ -208,7 +208,7 @@ impl LockoutService {
 
     /// Bind the policy to attempt storage alone, for identities that are not
     /// email addresses, such as the second factor's
-    /// [`crate::two_factor::lockout_identity`].
+    /// `two_factor::lockout_identity` (with the `two-factor` feature).
     ///
     /// Its locks, resets and unlocks never touch a user row: an account
     /// whose address happens to equal one of its identities is someone

@@ -294,7 +294,8 @@ fn markers(dir: &Path) -> Vec<(String, String, u32)> {
 /// REG-032: a static import resolves only to the component's own scripts
 /// or to a script a dependency's manifest names; a file in a dependency's
 /// directory that its manifest does not name, and a shipped script the
-/// component does not depend on, are refused.
+/// component does not depend on, are refused, though each is a relative
+/// path.
 #[test]
 fn reg_032_a_static_import_may_name_only_the_scripts_its_dependencies_carry() {
     let scan = |script: &str| {
@@ -316,20 +317,72 @@ fn reg_032_a_static_import_may_name_only_the_scripts_its_dependencies_carry() {
         };
         scan_component(&component, allowlist::embedded().expect("allowlist")).expect("scan")
     };
-    let named = scan("import \"/other-ui/thing/thing.js\";\n");
+    let named = scan("import \"../../other-ui/thing/thing.js\";\n");
     assert!(named.accepted(), "{:?}", named.findings);
-    let unnamed = scan("import \"/other-ui/thing/extra.js\";\n");
+    let unnamed = scan("import \"../../other-ui/thing/extra.js\";\n");
     assert!(
         unnamed.findings.iter().any(|f| f.check == "script-import"),
         "{:?}",
         unnamed.findings
     );
-    let shipped = scan("import \"/suprnova-ui/combobox/combobox.js\";\n");
+    let shipped = scan("import \"../../suprnova-ui/combobox/combobox.js\";\n");
     assert!(
         shipped.findings.iter().any(|f| f.check == "script-import"),
         "{:?}",
         shipped.findings
     );
+}
+
+/// REG-032: a static import is a relative path (`./` or `../`) into the
+/// component or a component it depends on. An absolute path breaks under a
+/// path prefix (PFX-006), so it is refused even when it names the
+/// component's own script, and so is a URL; the refusal says what the
+/// specifier must be.
+#[test]
+fn reg_032_a_static_import_is_a_relative_path_into_the_component_or_a_dependency() {
+    let scan = |script: &str| {
+        let files = vec![
+            ("x.html".to_string(), b"<div>x</div>".to_vec()),
+            ("x.js".to_string(), b"export const value = 1;\n".to_vec()),
+            ("main.js".to_string(), script.as_bytes().to_vec()),
+        ];
+        let importable_scripts = vec!["acme-ui/y/y.js".to_string()];
+        let component = ComponentFiles {
+            namespace: "acme",
+            directory: "x",
+            files: &files,
+            dependency_modules: &[],
+            importable_views: &[],
+            importable_scripts: &importable_scripts,
+        };
+        scan_component(&component, allowlist::embedded().expect("allowlist")).expect("scan")
+    };
+    let own = scan("import \"./x.js\";\n");
+    assert!(own.accepted(), "{:?}", own.findings);
+    let dependency = scan("import \"../y/y.js\";\n");
+    assert!(dependency.accepted(), "{:?}", dependency.findings);
+    for specifier in [
+        "/acme-ui/x/x.js",
+        "/acme-ui/y/y.js",
+        "https://cdn.example/x.js",
+        "//cdn.example/x.js",
+    ] {
+        let report = scan(&format!("import \"{specifier}\";\n"));
+        let refusal = report
+            .findings
+            .iter()
+            .find(|finding| finding.check == "script-import")
+            .unwrap_or_else(|| panic!("`{specifier}` was admitted: {:?}", report.findings));
+        assert_eq!(refusal.file, "main.js", "{specifier}");
+        assert_eq!(refusal.line, Some(1), "{specifier}");
+        assert!(
+            refusal
+                .message
+                .contains("must be a relative path (`./` or `../`)"),
+            "`{specifier}`: {}",
+            refusal.message
+        );
+    }
 }
 
 /// REG-031: a view calls nothing the scan cannot show carries no

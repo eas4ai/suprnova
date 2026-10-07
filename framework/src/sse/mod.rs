@@ -205,7 +205,7 @@ impl SseEvent {
     ///
     /// Minimum-bytes form: enough to flush proxy/load-balancer write
     /// buffers without sending any payload the receiver would have to
-    /// inspect. Schedule one of these every 15–30 seconds on idle streams
+    /// inspect. Schedule one of these every 15 to 30 seconds on idle streams
     /// to survive proxy idle timeouts (nginx defaults to 60s, ALBs default
     /// to 60s, Cloudflare defaults to 100s).
     pub fn keep_alive() -> Self {

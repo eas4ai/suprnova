@@ -15,7 +15,7 @@ pub enum PaymentMethod {
         brand: String,
         /// Last four digits of the PAN - safe to display.
         last4: String,
-        /// Expiry month, 1–12.
+        /// Expiry month, 1 to 12.
         exp_month: u8,
         /// Expiry year, four-digit (e.g. `2028`).
         exp_year: u16,

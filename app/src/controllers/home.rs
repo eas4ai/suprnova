@@ -53,7 +53,7 @@ pub async fn index(req: Request) -> Response {
         None
     };
 
-    // Dogfood the full Tier 0–2 builder API. Mixes eager props with
+    // Dogfood the full Tier 0 to 2 builder API. Mixes eager props with
     // Lazy / Defer / Merge / Once / Flash so every variant runs against
     // a real handler. The macro (`inertia_response!`) only handles the
     // typed-eager case - anything more interesting uses the builder.

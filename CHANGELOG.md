@@ -313,6 +313,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   takes that table's collation.
 - **On Postgres, a session write for a guest** no longer binds a text NULL
   to `sessions.user_id`, which a `bigint` or `uuid` column refuses.
+- **A component's scripts import by relative path only.** The `live:add`
+  scan admitted a static `import` of an absolute path such as
+  `/acme-ui/x/x.js`, which breaks when the application serves under a path
+  prefix. It now refuses an absolute path, even to the component's own
+  script, as it refuses a URL (`script-import`), and the refusal says the
+  specifier must be a relative path (`./` or `../`) to a script of the
+  component or of a component it depends on.
+- **Magnetar's API documentation builds without the `two-factor`
+  feature.** The doc comments on `LockoutFields::IDENTITY_IS_EMAIL` and
+  `LockoutService::without_user_lock` linked
+  `two_factor::lockout_identity`, which exists only with that feature, so
+  rustdoc failed on two broken links under Magnetar's default features.
+  They now name it as text, with the feature that provides it.
+- **API documentation writes ranges in words.** The docs of
+  `PhoneNumber::new`, `PaymentMethod::Card`'s `exp_month`,
+  `Batch::progress` and `SseEvent::keep_alive` wrote their ranges with an
+  en dash; they now read "8 to 15", "1 to 12", "0 to 100" and "15 to 30
+  seconds".
 
 ## 3.2.1 - 2026-10-05
 

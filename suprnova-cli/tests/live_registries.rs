@@ -1177,15 +1177,80 @@ fn reg_025_a_tree_without_library_json_is_refused() {
     assert!(!root.path().join("templates").exists());
 }
 
-/// REG-025: a `library.json` key outside the set is refused.
+/// The keys `library.json` may hold (REG-025): the five it must, the two
+/// optional texts, and the `previousKeys` a key rotation carries (REG-033).
+const LIBRARY_JSON_KEYS: [&str; 8] = [
+    "namespace",
+    "source",
+    "version",
+    "framework",
+    "publicKey",
+    "title",
+    "description",
+    "previousKeys",
+];
+
+/// The keys a `library.json` refusal lists as the ones it admits.
+fn admitted_keys_listed(error: &str) -> BTreeSet<String> {
+    error
+        .rsplit_once("which is not one of ")
+        .map(|(_, list)| list.split(", ").map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+fn library_json_keys() -> BTreeSet<String> {
+    LIBRARY_JSON_KEYS
+        .iter()
+        .map(|key| (*key).to_owned())
+        .collect()
+}
+
+/// REG-025: a `library.json` key outside the set is refused, and the
+/// refusal names the key and lists the eight the set holds.
 #[test]
 fn reg_025_a_library_json_key_outside_the_set_is_refused() {
     let library = Lib::acme().widget().set("postInstall", json!("curl evil"));
     let root = pinned(&library);
-    expect_refused(
+    let error = expect_refused(
         add(root.path(), "acme/acme-ui/widget", &fetcher(&[&library])),
-        "postInstall",
+        "`postInstall`",
     );
+    assert_eq!(admitted_keys_listed(&error), library_json_keys(), "{error}");
+}
+
+/// REG-025, REG-033: `library.json`'s key set is exactly the eight names.
+/// A document holding all eight parses, and a ninth key, a near miss of an
+/// admitted key's spelling among them, is refused by name.
+#[test]
+fn reg_025_library_json_admits_exactly_its_eight_keys() {
+    let library = Lib::acme()
+        .set("title", json!("Acme UI"))
+        .set("description", json!("Components for Acme's applications."))
+        .set("previousKeys", json!([]));
+    let bytes = library.library_json_bytes();
+    let held: BTreeSet<String> = library::strict_json_object(&bytes)
+        .expect("one object")
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(held, library_json_keys());
+    library::parse_library_json(&bytes).expect("a library.json holding all eight keys parses");
+    for ninth in [
+        "postInstall",
+        "dependencies",
+        "license",
+        "previouskeys",
+        "publickey",
+        "Title",
+    ] {
+        let bytes = library.clone().set(ninth, json!("x")).library_json_bytes();
+        let error = match library::parse_library_json(&bytes) {
+            Ok(_) => panic!("library.json with `{ninth}` parsed"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains(&format!("`{ninth}`")), "{ninth}: {error}");
+        assert_eq!(admitted_keys_listed(&error), library_json_keys(), "{error}");
+    }
 }
 
 /// REG-025: a component directory of 65 bytes, or one ending in a hyphen,

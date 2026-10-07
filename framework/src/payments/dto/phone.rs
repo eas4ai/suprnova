@@ -38,7 +38,7 @@ impl PhoneNumber {
     /// # Errors
     ///
     /// Returns [`PaymentError::InvalidPhoneNumber`] when the digit count is
-    /// outside the E.164 length range (8–15) or when non-digit characters
+    /// outside the E.164 length range (8 to 15) or when non-digit characters
     /// appear after the optional `+` prefix.
     pub fn new(value: impl AsRef<str>) -> Result<Self, PaymentError> {
         let raw = value.as_ref().trim();

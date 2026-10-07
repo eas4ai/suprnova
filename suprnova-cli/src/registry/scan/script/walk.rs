@@ -2465,9 +2465,9 @@ impl<'a, 'c> Walker<'a, 'c> {
                 rest = next;
             }
             Some(format!("/{}/{rest}", segments.join("/")))
-        } else if specifier.starts_with('/') && !specifier.starts_with("//") {
-            Some(specifier.to_string())
         } else {
+            // An absolute path names the asset route with no path prefix
+            // (PFX-006), so it breaks under one, even to an own script.
             None
         };
         let admitted = resolved.as_deref().is_some_and(|path| {
@@ -2496,7 +2496,7 @@ impl<'a, 'c> Walker<'a, 'c> {
             self.refuse(
                 "script-import",
                 source.span,
-                format!("`import \"{specifier}\"` loads a module from outside the component and the components it depends on"),
+                format!("`import \"{specifier}\"`: the specifier must be a relative path (`./` or `../`) to a script of the component or of a component it depends on"),
             );
         }
     }
