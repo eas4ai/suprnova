@@ -313,8 +313,10 @@ impl UserProvider for DatabaseUserProvider {
                 // a valid sign-in rewrites a hash Laravel's hasher would
                 // refuse (`$2b$`, Argon2id) as the `$2y$` one it accepts,
                 // in the configured password column, as the model provider
-                // does. The sign-in stands if the rewrite fails; the next
-                // one tries again.
+                // does. If the rewrite cannot be minted or stored, the
+                // sign-in fails with that error, as it does there: Laravel
+                // could not sign this user in (LDB-004). The stored hash is
+                // left as it was, and the next sign-in tries again.
                 if valid && crate::LaravelDatabase::is_shared() && hashing::needs_rehash(hash) {
                     let rewritten = match hashing::rehash_for_laravel_async(plaintext, hash).await {
                         Ok(rehashed) => {
@@ -327,8 +329,9 @@ impl UserProvider for DatabaseUserProvider {
                         tracing::warn!(
                             error = %error,
                             "the password hash could not be rewritten for Laravel after a \
-                             valid sign-in; the sign-in stands"
+                             valid password; the sign-in fails"
                         );
+                        return Err(error);
                     }
                 }
                 Ok(valid)
