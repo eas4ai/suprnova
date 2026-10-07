@@ -8576,6 +8576,8 @@
 {"path":"suprnova::routing::HandlerArgKind::Bound","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[]}
 {"path":"suprnova::routing::HandlerArgKind::PathValue","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[]}
 {"path":"suprnova::routing::HandlerInput","kind":"struct","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[]}
+{"path":"suprnova::routing::HandlerInput::__bind_unplanned","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"core::result::Result<core::option::Option<suprnova::Response>,suprnova::FrameworkError>"}
+{"path":"suprnova::routing::HandlerInput::__binds_unplanned","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"bool"}
 {"path":"suprnova::routing::HandlerInput::bound","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"core::result::Result<_,suprnova::FrameworkError>"}
 {"path":"suprnova::routing::HandlerInput::new","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"suprnova::routing::HandlerInput"}
 {"path":"suprnova::routing::HandlerInput::optional_bound","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"core::result::Result<core::option::Option<_>,suprnova::FrameworkError>"}
@@ -8651,9 +8653,15 @@
 {"path":"suprnova::routing::__ArgSource::__record","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"suprnova::routing::HandlerArg"}
 {"path":"suprnova::routing::__FreeContext","kind":"trait","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[]}
 {"path":"suprnova::routing::__FreeHandler","kind":"struct","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":["suprnova::routing::__FreeContext"]}
+{"path":"suprnova::routing::__HandlerOutput","kind":"struct","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":["suprnova::routing::__OutputSource"]}
+{"path":"suprnova::routing::__HandlerOutput::new","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"suprnova::routing::__HandlerOutput"}
 {"path":"suprnova::routing::__IsSelf","kind":"trait","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[]}
 {"path":"suprnova::routing::__OptionalArgProbe","kind":"struct","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":["suprnova::routing::__ArgSource"]}
 {"path":"suprnova::routing::__OptionalArgProbe::new","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"suprnova::routing::__OptionalArgProbe"}
+{"path":"suprnova::routing::__OutputSource","kind":"trait","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[]}
+{"path":"suprnova::routing::__OutputSource::Output","kind":"type","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[]}
+{"path":"suprnova::routing::__OutputSource::__answers_missing","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"bool"}
+{"path":"suprnova::routing::__OutputSource::__missing_answer","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"_"}
 {"path":"suprnova::routing::__authorize_target","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"core::result::Result<_,suprnova::FrameworkError>"}
 {"path":"suprnova::routing::__handler_self","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"()"}
 {"path":"suprnova::routing::__in_free_context","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"()"}
