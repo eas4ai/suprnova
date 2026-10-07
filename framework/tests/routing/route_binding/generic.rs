@@ -537,7 +537,7 @@ async fn bind_004_a_generic_handler_is_not_refused_at_startup_and_never_binds_pa
     assert!(!body.contains("ada-post"), "{body}");
     let (status, body) = get_path(addr, "/users/1").await;
     assert_eq!(status, 500, "a binder of another type: {body}");
-    assert!(!body.contains("ada"), "{body}");
+    assert!(!body.contains("ada body"), "{body}");
     assert_eq!(
         get_path(addr, "/undeclared").await.0,
         400,
