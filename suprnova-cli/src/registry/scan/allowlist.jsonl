@@ -8562,6 +8562,9 @@
 {"path":"suprnova::routing::BoundArg::of","kind":"fn","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"suprnova::routing::BoundArg"}
 {"path":"suprnova::routing::BoxedHandler","kind":"type","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[]}
 {"path":"suprnova::routing::EXPIRES_KEY","kind":"const","capability":"environment","hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[]}
+{"path":"suprnova::routing::GenericHandlerRecord","kind":"struct","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[]}
+{"path":"suprnova::routing::GenericHandlerRecord::new","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"suprnova::routing::GenericHandlerRecord"}
+{"path":"suprnova::routing::GenericHandlerRecord::path","kind":"fn","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"alloc::string::String"}
 {"path":"suprnova::routing::GroupAnyRoute","kind":"struct","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[]}
 {"path":"suprnova::routing::HandlerArg","kind":"struct","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[]}
 {"path":"suprnova::routing::HandlerArg::body","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"suprnova::routing::HandlerArg"}
@@ -8578,6 +8581,7 @@
 {"path":"suprnova::routing::HandlerInput","kind":"struct","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[]}
 {"path":"suprnova::routing::HandlerInput::__bind_unplanned","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"core::result::Result<core::option::Option<suprnova::Response>,suprnova::FrameworkError>"}
 {"path":"suprnova::routing::HandlerInput::__binds_unplanned","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"bool"}
+{"path":"suprnova::routing::HandlerInput::__check_unplanned","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"core::result::Result<(),suprnova::FrameworkError>"}
 {"path":"suprnova::routing::HandlerInput::bound","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"core::result::Result<_,suprnova::FrameworkError>"}
 {"path":"suprnova::routing::HandlerInput::new","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"suprnova::routing::HandlerInput"}
 {"path":"suprnova::routing::HandlerInput::optional_bound","kind":"fn","capability":null,"hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"core::result::Result<core::option::Option<_>,suprnova::FrameworkError>"}
