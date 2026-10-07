@@ -239,15 +239,25 @@ handler function's type, read wherever the handler is boxed: the router,
 the group builders, the route macros and resource registration), and
 `#[model]` MUST record each
 model's columns. A route whose handler carries no record (a closure, or a
-generic `#[handler]` function) is exempt from the checks; a closure binds
-nothing. A startup refusal MUST surface as an error returned from the
+generic `#[handler]` function) is exempt from the startup checks; a
+closure binds nothing. A handler the route did not plan at startup (a
+generic `#[handler]`, or a `#[handler]` that a closure route, route
+middleware, another handler or a `missing()` handler calls with the
+request) MUST bind its arguments of a concrete binding type at the request
+exactly as a recorded handler does: in path order, by the route's binding
+field, scoped through the parent (bound for scoping when the handler does
+not take it), through the router's binders, with the soft-deletable
+lookup under `with_trashed()` and answering the route's `missing()`; the
+route plans them at the first request and keeps the plan, and a binding
+field, scoped child or binder the startup checks would refuse answers
+that request with a 500 and binds nothing. A startup refusal MUST surface as an error returned from the
 server's boot path, never as a panic. The checks MUST run when the router
 is built for serving, so a router a test builds and drives through
 `handle_request` passes the same checks the server's does.
-Falsifier: `{post:slug}` registers a parameter named `post:slug`, or `{post:slug?}` anything but an optional `post`; the binding ignores the field; a field naming no column, or a column whose type cannot be parsed from a path segment, starts the application; a route whose handler is a non-generic `#[handler]` function escapes the startup checks, including in a router a test drives through `handle_request`; a startup refusal panics instead of returning an error; or the refusal of a binding field does not name the route, the parameter and the field.
+Falsifier: `{post:slug}` registers a parameter named `post:slug`, or `{post:slug?}` anything but an optional `post`; the binding ignores the field; a field naming no column, or a column whose type cannot be parsed from a path segment, starts the application; a route whose handler is a non-generic `#[handler]` function escapes the startup checks, including in a router a test drives through `handle_request`; a startup refusal panics instead of returning an error; the refusal of a binding field does not name the route, the parameter and the field; or a handler the route did not plan binds a concrete argument otherwise than the route's own recorded handler would, a row of another parent included.
 Mechanism: `route-binding`.
-Rationale: `Routing/RouteUri.php:39-60` records binding fields the same way, and Laravel passes a field to a custom `resolveRouteBinding($value, $field)` unchecked. Today the router sees no handler metadata, handlers are boxed at 20 sites, and `EloquentModel` carries no column list, though every SeaORM entity's `Column` enumerates its columns.
-Status: Agreed 2026-10-05
+Rationale: `Routing/RouteUri.php:39-60` records binding fields the same way, and Laravel passes a field to a custom `resolveRouteBinding($value, $field)` unchecked. Today the router sees no handler metadata, handlers are boxed at 20 sites, and `EloquentModel` carries no column list, though every SeaORM entity's `Column` enumerates its columns. Ruled 2026-10-06 (escalation 39578e39): a handler the route did not plan binds under the route's settings at the request, since the adversary showed the exemption let another parent's row bind.
+Status: Agreed 2026-10-06
 
 [BIND-005] `#[model(route_key = "column")]` MUST set a model's route key,
 and the build MUST fail when the column is not a column of the model.
@@ -373,14 +383,18 @@ is a value whose type implements `RouteValue`: `#[model]` rows,
 `bound_route_value`, which the manual shows. Every call written today with string values MUST
 keep compiling and produce the same URL, apart from the root PFX-003 adds,
 except the forms that compiled only because the old slice parameter set
-the pairs' type: a value written `s.as_ref()` inside an array of pairs, an
-array whose pairs mix `&String` and `&str` values, an array of more than
-32 pairs holding `&String` values, and `route` used as a
-`fn(&str, &[(&str, &str)])` pointer. Those take `.as_str()`, or a closure
-in place of the pointer.
-Falsifier: `route("posts.show", post)` on `/posts/{post:slug}` produces anything but the post's slug in the path, or on `/posts/{post}` anything but its route key; `try_route` produces a different path for a bound value or rejects one; a type that implements `RouteValue` is refused as a bound value; or a call written today with string values, other than the four forms listed, stops compiling or produces a different URL other than by the root PFX-003 adds.
+the pairs' type or coerced them: a name or value whose type the parameter
+inferred (`s.as_ref()`, `s.borrow()`, `Default::default()`), one that
+reaches `&str` through more than one dereference or through a type of the
+application's own (`&&&str`, `&Box<String>`), a container of pairs
+reached the same way (`&&&Vec<_>`, `&Box<Vec<_>>`, a `SmallVec`), an array
+whose pairs mix `&String` and `&str` values, an array of more than 32
+pairs holding `&String` values, and `route` used as a
+`fn(&str, &[(&str, &str)])` pointer. Those take `.as_str()`, `&*` or
+`.as_slice()`, or a closure in place of the pointer.
+Falsifier: `route("posts.show", post)` on `/posts/{post:slug}` produces anything but the post's slug in the path, or on `/posts/{post}` anything but its route key; `try_route` produces a different path for a bound value or rejects one; a type that implements `RouteValue` is refused as a bound value; or a call written today with string values, other than the forms listed, stops compiling or produces a different URL other than by the root PFX-003 adds.
 Mechanism: `route-binding`.
-Rationale: `Routing/RouteUrlGenerator.php:296-300`, `Routing/UrlGenerator.php:606-617`. Ruled 2026-10-06 (escalation 0c8024de): a blanket implementation over `RouteBinding` collides with the string implementations, so a bound value is a `RouteValue`, and the slice-inferred forms are listed.
+Rationale: `Routing/RouteUrlGenerator.php:296-300`, `Routing/UrlGenerator.php:606-617`. Ruled 2026-10-06 (escalation 0c8024de): a blanket implementation over `RouteBinding` collides with the string implementations, so a bound value is a `RouteValue`, and the slice-inferred forms are listed. Ruled 2026-10-06 (escalation 39578e39): every form a generic parameter cannot accept is listed.
 Status: Agreed 2026-10-06
 
 ## Startup checks and documentation
