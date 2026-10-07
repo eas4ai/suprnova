@@ -23,7 +23,8 @@ pub use binding::{
     __authorize_target, __type_id_of, HandlerInput,
 };
 pub use binding::{
-    BoundArg, HandlerArg, HandlerArgKind, HandlerRecord, MatchedRoute, MissingHandler,
+    BoundArg, GenericHandlerRecord, HandlerArg, HandlerArgKind, HandlerRecord, MatchedRoute,
+    MissingHandler,
 };
 #[doc(hidden)]
 pub use handler_site::{__FreeContext, __FreeHandler, __IsSelf, __handler_self, __in_free_context};

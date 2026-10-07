@@ -3,6 +3,16 @@ error[E0425]: cannot find value `show` in this scope
    |
 10 |     #[handler]
    |     ^^^^^^^^^^ not found in this scope
+11 |     pub async fn show(id: i64) -> Response {
+   |                  ---- an associated function by that name is available on `Self` here
+   |
+   = note: this error originates in the attribute macro `handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0425]: cannot find value `show` in this scope
+  --> tests/ui/route-binding/handler_in_impl_without_self.rs:10:5
+   |
+10 |     #[handler]
+   |     ^^^^^^^^^^ not found in this scope
    |
    = note: this error originates in the attribute macro `handler` (in Nightly builds, run with -Z macro-backtrace for more info)
 

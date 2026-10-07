@@ -269,14 +269,13 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
     // bind hands the route the same description of its arguments at the
     // request, when the route planned nothing for it.
     let record = if has_type_generics(fn_generics) {
-        TokenStream2::new()
+        generic_record_items(fn_name, self_ty.as_ref(), &args, &generic_names)
     } else {
         record_items(fn_name, self_ty.as_ref(), &args)
     };
-    let unplanned = if args
-        .iter()
-        .any(|arg| matches!(arg.kind, ArgKind::Probe | ArgKind::OptionalProbe(_)))
-    {
+    let unplanned = if args.is_empty() {
+        TokenStream2::new()
+    } else {
         unplanned_binding(
             fn_name,
             self_ty.as_ref(),
@@ -284,8 +283,6 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
             fn_output,
             &args,
         )
-    } else {
-        TokenStream2::new()
     };
     let (site_check, site_const) = handler_site(fn_name, self_ty.as_ref(), &input_text, record);
 
@@ -641,29 +638,46 @@ fn unplanned_binding(
 ) -> TokenStream2 {
     let display = handler_display(fn_name, self_ty);
     let entries = arg_entries(args);
+    let binds = args
+        .iter()
+        .any(|arg| matches!(arg.kind, ArgKind::Probe | ArgKind::OptionalProbe(_)));
+    // A probe's entry calls its trait.
+    let probes = if binds {
+        quote! { use ::suprnova::routing::__ArgSource as _; }
+    } else {
+        TokenStream2::new()
+    };
     // The handler function's type, which tells the route's own handler
     // apart; a generic function's type cannot be named without its
     // arguments, and a generic handler is never the route's own.
     let handler_type = if generic {
         quote! { ::core::option::Option::None }
     } else {
+        // Spanned at the attribute, as the record's name is: inside an
+        // `impl` block without `Self = Type` it does not resolve, and the
+        // error is the record's, at `#[handler]`.
+        let mut fn_ref = fn_name.clone();
+        fn_ref.set_span(Span::call_site());
         let handler = match self_ty {
-            Some(self_ty) => quote! { <#self_ty>::#fn_name },
-            None => quote! { #fn_name },
+            Some(self_ty) => quote! { <#self_ty>::#fn_ref },
+            None => quote! { #fn_ref },
         };
         quote! { ::core::option::Option::Some(::suprnova::routing::__type_id_of(&#handler)) }
     };
     // The plan's key: a type only this handler declares, and the name of
     // the closure that describes its arguments, which carries a generic
     // handler's arguments, so each instantiation plans its own.
+    let key = quote! {
+        (
+            ::std::any::TypeId::of::<__SuprnovaUnplannedHandler>(),
+            ::std::any::type_name_of_val(&__suprnova_args),
+        )
+    };
     let bind = |answers_missing: TokenStream2| {
         quote! {
             __suprnova_input
                 .__bind_unplanned(
-                    (
-                        ::std::any::TypeId::of::<__SuprnovaUnplannedHandler>(),
-                        ::std::any::type_name_of_val(&__suprnova_args),
-                    ),
+                    #key,
                     ::core::concat!(::core::module_path!(), "::", #display),
                     __suprnova_args,
                     #answers_missing,
@@ -676,6 +690,14 @@ fn unplanned_binding(
         _ => None,
     };
     let answer = match output {
+        // Nothing may bind: the route's checks still apply (BIND-004).
+        _ if !binds => quote! {
+            __suprnova_input.__check_unplanned(
+                #key,
+                ::core::concat!(::core::module_path!(), "::", #display),
+                __suprnova_args,
+            )?;
+        },
         Some(output) => {
             let bind = bind(quote! { (&&__suprnova_output).__answers_missing() });
             quote! {
@@ -695,7 +717,7 @@ fn unplanned_binding(
         if __suprnova_input.__binds_unplanned(#handler_type) {
             struct __SuprnovaUnplannedHandler;
             let __suprnova_args = || {
-                use ::suprnova::routing::__ArgSource as _;
+                #probes
                 ::std::vec![#(#entries),*]
             };
             #answer
@@ -717,8 +739,8 @@ fn names_impl(ty: &Type) -> bool {
 
 /// One `HandlerArg` per argument, in declaration order. A probed
 /// argument's entry calls its probe, so the trait must be in scope.
-fn arg_entries(args: &[Arg]) -> Vec<TokenStream2> {
-    args.iter()
+fn arg_entries<'b, 'a: 'b>(args: impl IntoIterator<Item = &'b Arg<'a>>) -> Vec<TokenStream2> {
+    args.into_iter()
         .map(|arg| {
             let ty = arg.ty;
             let ty_text = type_text(ty);
@@ -743,6 +765,66 @@ fn arg_entries(args: &[Arg]) -> Vec<TokenStream2> {
             }
         })
         .collect()
+}
+
+/// The `inventory` record of a generic handler: its path, which the router
+/// finds it by from an instantiation's type name, and the arguments whose
+/// type does not depend on the instantiation, so a route whose own handler
+/// it is can scope a child for the other handlers planned against it
+/// (BIND-004). An argument bound with a type that names a type parameter
+/// (`RouteParam<T>`) is listed by its parameter alone. A free function's
+/// path is its module's and its name; one inside an `impl` block is its
+/// type's name and its own.
+fn generic_record_items(
+    fn_name: &Ident,
+    self_ty: Option<&Type>,
+    args: &[Arg],
+    generic_names: &[Ident],
+) -> TokenStream2 {
+    let display = handler_display(fn_name, self_ty);
+    let name = fn_name.unraw().to_string();
+    let path = match self_ty {
+        Some(self_ty) => quote! {
+            ::std::format!("{}::{}", ::std::any::type_name::<#self_ty>(), #name)
+        },
+        None => quote! {
+            ::std::string::String::from(::core::concat!(::core::module_path!(), "::", #name))
+        },
+    };
+    let (unresolved, resolved): (Vec<&Arg>, Vec<&Arg>) = args.iter().partition(|arg| {
+        matches!(arg.kind, ArgKind::Probe | ArgKind::OptionalProbe(_))
+            && names_any(arg.ty, generic_names)
+    });
+    let unresolved = unresolved
+        .iter()
+        .map(|arg| arg.name.clone().unwrap_or_else(|| "_".to_owned()));
+    let probes = if resolved
+        .iter()
+        .any(|arg| matches!(arg.kind, ArgKind::Probe | ArgKind::OptionalProbe(_)))
+    {
+        quote! { use ::suprnova::routing::__ArgSource as _; }
+    } else {
+        TokenStream2::new()
+    };
+    let entries = arg_entries(resolved);
+    quote! {
+        fn __suprnova_generic_handler_path() -> ::std::string::String {
+            #path
+        }
+        fn __suprnova_generic_handler_args() -> ::std::vec::Vec<::suprnova::routing::HandlerArg> {
+            #probes
+            ::std::vec![#(#entries),*]
+        }
+        ::suprnova::inventory::submit! {
+            ::suprnova::routing::GenericHandlerRecord::new(
+                __suprnova_generic_handler_path,
+                #display,
+                ::core::module_path!(),
+                __suprnova_generic_handler_args,
+                &[#(#unresolved),*],
+            )
+        }
+    }
 }
 
 /// The `inventory` record of the handler: its type, its name and every
@@ -1234,7 +1316,65 @@ mod tests {
             pub async fn show<T: Store>(store: T) -> Response { todo!() }
         });
         assert!(!out.contains("compile_error"), "got:\n{out}");
-        assert!(!out.contains("HandlerRecord"), "got:\n{out}");
+        assert!(!out.contains(":: HandlerRecord :: new"), "got:\n{out}");
+    }
+
+    #[test]
+    fn bind_004_a_generic_handler_records_what_its_route_scopes_through() {
+        // The router finds it by its path, and reads which parameters it
+        // binds as which type; one bound with a type that names a type
+        // parameter is named alone.
+        let out = expansion(quote! {
+            pub async fn show<T: RouteBinding, F: FromRequest>(
+                user: User,
+                item: RouteParam<T>,
+                form: F,
+            ) -> Response { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(out.contains("GenericHandlerRecord :: new"), "got:\n{out}");
+        assert!(
+            out.contains("concat ! (:: core :: module_path ! () , \"::\" , \"show\")"),
+            "a free handler's path is its module's and its name; got:\n{out}"
+        );
+        assert!(
+            out.contains("__ArgProbe :: < User > :: new ()) . __record (\"user\" , \"User\")"),
+            "got:\n{out}"
+        );
+        assert!(out.contains("& [\"item\"]"), "got:\n{out}");
+        let record = &out[position(&out, "fn __suprnova_generic_handler_args")..];
+        assert!(
+            !record.contains("RouteParam < T >"),
+            "a type that names a type parameter is not described; got:\n{out}"
+        );
+        // Inside an `impl` block, the path is the type's name and its own.
+        let out = expansion_with(
+            quote! { Self = Posts },
+            quote! { pub async fn store<T: FromRequest>(form: T) -> Response { todo!() } },
+        );
+        assert!(out.contains("type_name :: < Posts > ()"), "got:\n{out}");
+    }
+
+    #[test]
+    fn bind_004_a_handler_with_nothing_to_bind_meets_the_routes_checks_at_the_request() {
+        // A path value or a body reader under a binder is refused at the
+        // request where the route did not plan the handler.
+        for src in [
+            quote! { pub async fn show(id: i64) -> Response { todo!() } },
+            quote! { pub fn show(id: String) -> Response { todo!() } },
+            quote! { pub async fn show<T: FromRequest>(id: i64, form: T) -> Response { todo!() } },
+        ] {
+            let out = expansion(src);
+            assert!(!out.contains("compile_error"), "got:\n{out}");
+            assert!(
+                position(&out, "__binds_unplanned (") < position(&out, "__check_unplanned ("),
+                "got:\n{out}"
+            );
+            assert!(!out.contains("__bind_unplanned"), "got:\n{out}");
+        }
+        // A handler with no arguments reads nothing.
+        let out = expansion(quote! { pub async fn index() -> Response { todo!() } });
+        assert!(!out.contains("__binds_unplanned"), "got:\n{out}");
     }
 
     #[test]
@@ -1246,7 +1386,7 @@ mod tests {
                 -> Response { todo!() }
         });
         assert!(!out.contains("compile_error"), "got:\n{out}");
-        assert!(!out.contains("HandlerRecord"), "got:\n{out}");
+        assert!(!out.contains(":: HandlerRecord :: new"), "got:\n{out}");
         // A generic handler is never the route's own, so it names no type.
         let guard = position(
             &out,
@@ -1452,7 +1592,7 @@ mod tests {
             quote! { pub async fn store<T: FromRequest>(form: T) -> Response { todo!() } },
         );
         assert!(!out.contains("compile_error"), "got:\n{out}");
-        assert!(!out.contains("HandlerRecord"), "got:\n{out}");
+        assert!(!out.contains(":: HandlerRecord :: new"), "got:\n{out}");
         assert!(
             out.contains("__handler_self :: < Self , Posts >"),
             "got:\n{out}"
