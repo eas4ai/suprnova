@@ -268,7 +268,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   orientation tag) to ImageMagick's output without copying that either.
   An ICC profile split across a JPEG's or GIF's segments is read for its
   header and length where it stands, and joined once, only when the
-  output carries it or converts from it.
+  output carries it or converts from it; a WebP's or BMP's profile is
+  carried without a copy, and a profile is written into the output once.
+  `IMAGE_MAX_ALLOC_BYTES` charges a profile only for the copies made, so
+  an image is no longer refused for a profile that is dropped or carried
+  as it stands, and the refusal names what it charged.
 - **Queue and failed-job table names with capitals or reserved words
   work.** The jobs driver and the failed-jobs store quote each part of the
   configured table name, as the migrations do.
