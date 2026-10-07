@@ -21,6 +21,7 @@
 //! not need, and reads a profile's 128-byte header, and checks its length
 //! without holding it, before it decides whether the rest is worth holding.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use crate::error::FrameworkError;
@@ -894,33 +895,88 @@ pub(crate) fn find_profile(format: InputFormat, bytes: &[u8]) -> Option<FoundPro
     })
 }
 
+/// What a run holds for a profile, part by part: the bytes, and what they
+/// are held for in the words a refusal names them by. A part of no bytes
+/// holds nothing.
+pub(crate) type ProfileCharges = [(u64, &'static str); 2];
+
+/// The bytes `charges` add up to.
+pub(crate) fn charged(charges: &ProfileCharges) -> u64 {
+    charges
+        .iter()
+        .fold(0u64, |sum, (bytes, _)| sum.saturating_add(*bytes))
+}
+
+/// The parts of `charges` that hold bytes, named for a refusal: "1024 bytes
+/// to inflate it and 1024 bytes for the copy the output carries".
+pub(crate) fn charges_named(charges: &ProfileCharges) -> String {
+    charges
+        .iter()
+        .filter(|(bytes, _)| *bytes > 0)
+        .map(|(bytes, what)| format!("{bytes} bytes {what}"))
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
 /// [`find_profile`] for encoded output of `format`.
 pub(crate) fn find_output_profile(format: OutputFormat, bytes: &[u8]) -> Option<FoundProfile<'_>> {
     find_profile(input_of(format), bytes)
 }
 
-impl FoundProfile<'_> {
+impl<'a> FoundProfile<'a> {
     /// The whole profile, or `None` when it is not as long as its header
-    /// says. Its length is checked before anything is held: a JPEG's chunks
-    /// or a GIF's sub-blocks are summed, and joined once, into a buffer of
-    /// that length, only when they hold it. A PNG's is inflated once, into
-    /// a buffer of exactly that size, and no further than one byte past it;
-    /// the caller has already charged that size to the budget.
-    pub(crate) fn read(&self) -> Option<Vec<u8>> {
+    /// says. Its length is checked before anything is held. A profile that
+    /// sits whole in the file (a WebP's `ICCP`, a BMP's embedded profile)
+    /// is lent from where it stands, never copied (MEM-003); a JPEG's
+    /// chunks or a GIF's sub-blocks are joined once, into a buffer of that
+    /// length; a PNG's is inflated once, into a buffer of exactly that
+    /// size, and no further than one byte past it. [`Self::read_cost`] is
+    /// what the caller charges to the budget for it.
+    pub(crate) fn read(&self) -> Option<Cow<'a, [u8]>> {
         let size = self.header.size;
         match &self.site {
-            ProfileSite::Jpeg => pieces_whole(jpeg_icc_chunks(self.bytes)?, size),
+            ProfileSite::Jpeg => pieces_whole(jpeg_icc_chunks(self.bytes)?, size).map(Cow::Owned),
             ProfileSite::Png { stream, .. } => {
                 let mut out = vec![0u8; usize::try_from(size).ok()?];
                 match inflate_to(stream, size, Some(&mut out)) {
-                    Inflated::Exactly => Some(out),
+                    Inflated::Exactly => Some(Cow::Owned(out)),
                     Inflated::Otherwise => None,
                 }
             }
-            ProfileSite::Plain(profile) => (profile.len() as u64 == size).then(|| profile.to_vec()),
-            ProfileSite::Gif(blocks) => {
-                pieces_whole(GifSubBlocks::new(self.bytes, blocks.clone()), size)
+            ProfileSite::Plain(profile) => {
+                (profile.len() as u64 == size).then_some(Cow::Borrowed(*profile))
             }
+            ProfileSite::Gif(blocks) => {
+                pieces_whole(GifSubBlocks::new(self.bytes, blocks.clone()), size).map(Cow::Owned)
+            }
+        }
+    }
+
+    /// The bytes [`Self::read`] holds, for the caller to charge to
+    /// `IMAGE_MAX_ALLOC_BYTES` before it reads: nothing for a profile it
+    /// lends, the profile's size for one it joins, and its size and an
+    /// inflate's work for one it inflates. With what it is held for, in the
+    /// words a refusal names it by.
+    pub(crate) fn read_cost(&self) -> (u64, &'static str) {
+        match &self.site {
+            ProfileSite::Plain(_) => (0, "to read it"),
+            ProfileSite::Jpeg | ProfileSite::Gif(_) => {
+                (self.header.size, "to join it from its pieces")
+            }
+            ProfileSite::Png { .. } => (
+                self.header.size.saturating_add(INFLATE_WORK),
+                "to inflate it",
+            ),
+        }
+    }
+
+    /// The bytes [`Self::is_whole`] holds: an inflate's work for a PNG's
+    /// profile, which it inflates through a scratch buffer, and nothing
+    /// for the rest, whose pieces it sums where they stand.
+    pub(crate) fn check_cost(&self) -> u64 {
+        match &self.site {
+            ProfileSite::Png { .. } => INFLATE_WORK,
+            ProfileSite::Jpeg | ProfileSite::Plain(_) | ProfileSite::Gif(_) => 0,
         }
     }
 
@@ -1177,15 +1233,18 @@ pub(crate) struct Kept<'a> {
 }
 
 /// The bytes [`add`] inserts into output of one format: `front` after its
-/// header, `back` at its end.
-pub(crate) struct Additions {
+/// header, `back` at its end. `front` is pieces written in order, so a
+/// profile, or a PNG source's `iCCP` chunk, is lent from where it stands
+/// and written into the output once, rather than built up beside it first
+/// (MEM-003); only the headers around it are bytes of their own.
+pub(crate) struct Additions<'a> {
     format: OutputFormat,
-    front: Vec<u8>,
+    front: Vec<Cow<'a, [u8]>>,
     back: Vec<u8>,
     profile: bool,
 }
 
-impl Additions {
+impl Additions<'_> {
     /// How many bytes adding these can grow the output by, for the encoder
     /// to leave room for: with it, adding them moves bytes within the one
     /// buffer and allocates nothing.
@@ -1196,7 +1255,7 @@ impl Additions {
         } else {
             0
         };
-        self.front.len() + self.back.len() + header
+        self.front.iter().map(|piece| piece.len()).sum::<usize>() + self.back.len() + header
     }
 }
 
@@ -1208,6 +1267,70 @@ fn push_jpeg_segment(out: &mut Vec<u8>, marker: u8, parts: &[&[u8]]) {
     for part in parts {
         out.extend_from_slice(part);
     }
+}
+
+/// The four bytes that open a JPEG segment of `payload` bytes after its
+/// length.
+fn jpeg_segment_head(marker: u8, payload: usize) -> [u8; 4] {
+    let [high, low] = ((2 + payload) as u16).to_be_bytes();
+    [0xFF, marker, high, low]
+}
+
+/// The eight bytes that open a RIFF chunk: fourcc and payload size.
+fn riff_head(fourcc: &[u8; 4], size: usize) -> Result<Vec<u8>, FrameworkError> {
+    let size = u32::try_from(size)
+        .map_err(|_| FrameworkError::internal("image metadata chunk over 4 GiB"))?;
+    let mut head = fourcc.to_vec();
+    head.extend_from_slice(&size.to_le_bytes());
+    Ok(head)
+}
+
+/// The CRC-32 a PNG chunk ends with, over its type and the `parts` of its
+/// data where they stand: `oxideav_png::chunk::write_chunk` copies a
+/// chunk's data to checksum it, which for a profile is a whole copy.
+fn png_crc(kind: &[u8; 4], parts: &[Cow<'_, [u8]>]) -> u32 {
+    const TABLE: [u32; 256] = {
+        let mut table = [0u32; 256];
+        let mut entry = 0;
+        while entry < 256 {
+            let mut value = entry as u32;
+            let mut bit = 0;
+            while bit < 8 {
+                value = if value & 1 == 1 {
+                    0xEDB8_8320 ^ (value >> 1)
+                } else {
+                    value >> 1
+                };
+                bit += 1;
+            }
+            table[entry] = value;
+            entry += 1;
+        }
+        table
+    };
+    let mut crc = u32::MAX;
+    for &byte in kind.iter().chain(parts.iter().flat_map(|part| part.iter())) {
+        crc = TABLE[((crc ^ u32::from(byte)) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    !crc
+}
+
+/// A PNG chunk of `kind` whose data is `parts`, as pieces: its length and
+/// type, the parts as they stand, and its CRC.
+fn push_png_chunk<'a>(
+    front: &mut Vec<Cow<'a, [u8]>>,
+    kind: &[u8; 4],
+    parts: Vec<Cow<'a, [u8]>>,
+) -> Result<(), FrameworkError> {
+    let length = u32::try_from(parts.iter().map(|part| part.len()).sum::<usize>())
+        .map_err(|_| FrameworkError::internal("image metadata chunk over 4 GiB"))?;
+    let crc = png_crc(kind, &parts);
+    let mut head = length.to_be_bytes().to_vec();
+    head.extend_from_slice(kind);
+    front.push(Cow::Owned(head));
+    front.extend(parts);
+    front.push(Cow::Owned(crc.to_be_bytes().to_vec()));
+    Ok(())
 }
 
 /// A RIFF chunk: fourcc, size, payload, padding.
@@ -1223,18 +1346,20 @@ fn push_riff_chunk(out: &mut Vec<u8>, fourcc: &[u8; 4], data: &[u8]) -> Result<(
     Ok(())
 }
 
-impl Kept<'_> {
+impl<'a> Kept<'a> {
     /// Build the bytes adding these to output of `format` inserts. The
     /// driver sizes the encoder's buffer with [`Additions::len`] before it
     /// encodes.
-    pub(crate) fn prepare(&self, format: OutputFormat) -> Result<Additions, FrameworkError> {
-        let mut front = Vec::new();
+    pub(crate) fn prepare(&self, format: OutputFormat) -> Result<Additions<'a>, FrameworkError> {
+        let mut front: Vec<Cow<'a, [u8]>> = Vec::new();
         let mut back = Vec::new();
         let exif = self.orientation.map(orientation_only_exif);
         match format {
             OutputFormat::Jpeg => {
                 if let Some(exif) = &exif {
-                    push_jpeg_segment(&mut front, 0xE1, &[EXIF_PREFIX, exif]);
+                    let mut segment = Vec::new();
+                    push_jpeg_segment(&mut segment, 0xE1, &[EXIF_PREFIX, exif]);
+                    front.push(Cow::Owned(segment));
                 }
                 if let Some(icc) = &self.icc {
                     let profile = match icc {
@@ -1255,21 +1380,26 @@ impl Kept<'_> {
                         ))
                     })?;
                     for (index, chunk) in chunks.enumerate() {
-                        push_jpeg_segment(
-                            &mut front,
-                            0xE2,
-                            &[ICC_PROFILE, &[index as u8 + 1, total], chunk],
-                        );
+                        let mut head =
+                            jpeg_segment_head(0xE2, ICC_PROFILE.len() + 2 + chunk.len()).to_vec();
+                        head.extend_from_slice(ICC_PROFILE);
+                        head.extend_from_slice(&[index as u8 + 1, total]);
+                        front.push(Cow::Owned(head));
+                        front.push(Cow::Borrowed(chunk));
                     }
                 }
             }
             OutputFormat::Png => {
+                let mut colour = Vec::new();
                 for (kind, data) in self.png_colour {
-                    oxideav_png::chunk::write_chunk(&mut front, kind, data);
+                    oxideav_png::chunk::write_chunk(&mut colour, kind, data);
+                }
+                if !colour.is_empty() {
+                    front.push(Cow::Owned(colour));
                 }
                 match &self.icc {
                     Some(IccData::PngChunk(chunk)) => {
-                        oxideav_png::chunk::write_chunk(&mut front, b"iCCP", chunk);
+                        push_png_chunk(&mut front, b"iCCP", vec![Cow::Borrowed(*chunk)])?;
                     }
                     Some(IccData::Profile(profile)) => {
                         let compressed = compcol::vec::compress_to_vec::<compcol::zlib::Zlib>(
@@ -1280,19 +1410,31 @@ impl Kept<'_> {
                                 "image ICC profile compress failed: {e}"
                             ))
                         })?;
-                        let data = [&b"ICC profile\0\0"[..], &compressed].concat();
-                        oxideav_png::chunk::write_chunk(&mut front, b"iCCP", &data);
+                        push_png_chunk(
+                            &mut front,
+                            b"iCCP",
+                            vec![
+                                Cow::Borrowed(&b"ICC profile\0\0"[..]),
+                                Cow::Owned(compressed),
+                            ],
+                        )?;
                     }
                     None => {}
                 }
                 if let Some(exif) = &exif {
-                    oxideav_png::chunk::write_chunk(&mut front, b"eXIf", exif);
+                    let mut chunk = Vec::new();
+                    oxideav_png::chunk::write_chunk(&mut chunk, b"eXIf", exif);
+                    front.push(Cow::Owned(chunk));
                 }
             }
             OutputFormat::WebP | OutputFormat::WebPLossless => {
                 match &self.icc {
                     Some(IccData::Profile(profile)) => {
-                        push_riff_chunk(&mut front, b"ICCP", profile)?;
+                        front.push(Cow::Owned(riff_head(b"ICCP", profile.len())?));
+                        front.push(Cow::Borrowed(*profile));
+                        if profile.len() % 2 == 1 {
+                            front.push(Cow::Borrowed(&[0][..]));
+                        }
                     }
                     Some(IccData::PngChunk(_)) => {
                         return Err(FrameworkError::internal(
@@ -1318,19 +1460,35 @@ impl Kept<'_> {
     }
 }
 
-/// Insert `bytes` at `at`, moving the rest of the buffer along within it.
-fn insert(buffer: &mut Vec<u8>, at: usize, bytes: &[u8]) -> Result<(), FrameworkError> {
-    if at > buffer.len() {
-        return Err(FrameworkError::internal(
-            "image metadata insert past the end of the output",
-        ));
+/// Insert `pieces`, in order, at `at`, moving the rest of the buffer along
+/// within it. Within the capacity the encoder left, nothing is allocated,
+/// and each piece is copied once, into its place.
+fn insert<'p>(
+    buffer: &mut Vec<u8>,
+    at: usize,
+    pieces: impl Iterator<Item = &'p [u8]> + Clone,
+) -> Result<(), FrameworkError> {
+    let past = || FrameworkError::internal("image metadata insert past the end of the output");
+    let end = buffer.len();
+    if at > end {
+        return Err(past());
     }
-    buffer.splice(at..at, bytes.iter().copied());
+    let length: usize = pieces.clone().map(<[u8]>::len).sum();
+    buffer.resize(end.checked_add(length).ok_or_else(past)?, 0);
+    buffer.copy_within(at..end, at + length);
+    let mut write = at;
+    for piece in pieces {
+        buffer
+            .get_mut(write..write + piece.len())
+            .ok_or_else(past)?
+            .copy_from_slice(piece);
+        write += piece.len();
+    }
     Ok(())
 }
 
 /// Add the prepared metadata to encoded output, in place.
-pub(crate) fn add(output: &mut Vec<u8>, additions: &Additions) -> Result<(), FrameworkError> {
+pub(crate) fn add(output: &mut Vec<u8>, additions: &Additions<'_>) -> Result<(), FrameworkError> {
     if additions.front.is_empty() && additions.back.is_empty() {
         return Ok(());
     }
@@ -1350,7 +1508,7 @@ pub(crate) fn add(output: &mut Vec<u8>, additions: &Additions) -> Result<(), Fra
                 }
                 _ => 2,
             };
-            insert(output, at, &additions.front)
+            insert(output, at, additions.front.iter().map(AsRef::as_ref))
         }
         OutputFormat::Png => {
             // After IHDR, which must be the first chunk.
@@ -1360,7 +1518,11 @@ pub(crate) fn add(output: &mut Vec<u8>, additions: &Additions) -> Result<(), Fra
             if output.get(..8) != Some(PNG_SIGNATURE) {
                 return Err(unreadable("PNG"));
             }
-            insert(output, ihdr.whole.end, &additions.front)
+            insert(
+                output,
+                ihdr.whole.end,
+                additions.front.iter().map(AsRef::as_ref),
+            )
         }
         OutputFormat::WebP | OutputFormat::WebPLossless => add_to_webp(output, additions),
         OutputFormat::Gif | OutputFormat::Bmp => Ok(()),
@@ -1408,7 +1570,7 @@ fn set_riff_size(webp: &mut [u8]) -> Result<(), FrameworkError> {
     Ok(())
 }
 
-fn add_to_webp(webp: &mut Vec<u8>, additions: &Additions) -> Result<(), FrameworkError> {
+fn add_to_webp(webp: &mut Vec<u8>, additions: &Additions<'_>) -> Result<(), FrameworkError> {
     let first = riff_chunk_at(webp, 12)
         .filter(|_| webp.get(..4) == Some(b"RIFF") && webp.get(8..12) == Some(b"WEBP"))
         .ok_or_else(|| unreadable("WebP"))?;
@@ -1423,7 +1585,11 @@ fn add_to_webp(webp: &mut Vec<u8>, additions: &Additions) -> Result<(), Framewor
         if exif {
             *flags |= WEBP_EXIF;
         }
-        insert(webp, first.whole.end, &additions.front)?;
+        insert(
+            webp,
+            first.whole.end,
+            additions.front.iter().map(AsRef::as_ref),
+        )?;
     } else {
         let (width, height, alpha) =
             webp_bitstream_shape(webp, &first).ok_or_else(|| unreadable("WebP"))?;
@@ -1433,10 +1599,13 @@ fn add_to_webp(webp: &mut Vec<u8>, additions: &Additions) -> Result<(), Framewor
             | if exif { WEBP_EXIF } else { 0 };
         header[4..7].copy_from_slice(&(width - 1).to_le_bytes()[..3]);
         header[7..10].copy_from_slice(&(height - 1).to_le_bytes()[..3]);
-        let mut front = Vec::with_capacity(18 + additions.front.len());
-        push_riff_chunk(&mut front, b"VP8X", &header)?;
-        front.extend_from_slice(&additions.front);
-        insert(webp, 12, &front)?;
+        let mut vp8x = Vec::with_capacity(18);
+        push_riff_chunk(&mut vp8x, b"VP8X", &header)?;
+        insert(
+            webp,
+            12,
+            std::iter::once(&vp8x[..]).chain(additions.front.iter().map(AsRef::as_ref)),
+        )?;
     }
     webp.extend_from_slice(&additions.back);
     set_riff_size(webp)
@@ -1966,6 +2135,77 @@ mod tests {
                 "{format:?}"
             );
         }
+    }
+
+    /// A PNG chunk's CRC over pieces is the one `oxideav_png` computes over
+    /// the chunk's type and data joined.
+    #[test]
+    fn img_002_a_png_crc_over_pieces_is_the_joined_one() {
+        let data: Vec<u8> = (0..=255u8).cycle().take(70_000).collect();
+        let parts = [
+            Cow::Borrowed(&data[..1]),
+            Cow::Owned(data[1..65_536].to_vec()),
+            Cow::Borrowed(&data[65_536..]),
+        ];
+        let joined = [&b"iCCP"[..], &data].concat();
+        assert_eq!(
+            png_crc(b"iCCP", &parts),
+            oxideav_png::filter::crc32(&joined)
+        );
+        assert_eq!(png_crc(b"IEND", &[]), 0xAE42_6082);
+    }
+
+    /// MEM-003: the metadata written from pieces, a lent profile among
+    /// them, is byte for byte what writing it into one buffer gave.
+    #[test]
+    fn img_002_metadata_from_pieces_is_what_one_buffer_gave() {
+        let mut profile = profile(b"RGB ");
+        profile.resize(JPEG_ICC_CHUNK + 1001, 7);
+        let size = profile.len() as u32;
+        profile[..4].copy_from_slice(&size.to_be_bytes());
+        let exif = orientation_only_exif(Orientation::from_tag(6).unwrap());
+        let kept = Kept {
+            icc: Some(IccData::Profile(&profile)),
+            orientation: Orientation::from_tag(6),
+            png_colour: &[],
+        };
+        let written = |format| {
+            let additions = kept.prepare(format).unwrap();
+            additions.front.concat()
+        };
+
+        let mut jpeg = Vec::new();
+        push_jpeg_segment(&mut jpeg, 0xE1, &[EXIF_PREFIX, &exif]);
+        for (index, chunk) in profile.chunks(JPEG_ICC_CHUNK).enumerate() {
+            push_jpeg_segment(
+                &mut jpeg,
+                0xE2,
+                &[ICC_PROFILE, &[index as u8 + 1, 2], chunk],
+            );
+        }
+        assert_eq!(written(OutputFormat::Jpeg), jpeg);
+
+        let mut png = Vec::new();
+        let compressed = compcol::vec::compress_to_vec::<compcol::zlib::Zlib>(&profile).unwrap();
+        let data = [&b"ICC profile\0\0"[..], &compressed].concat();
+        oxideav_png::chunk::write_chunk(&mut png, b"iCCP", &data);
+        oxideav_png::chunk::write_chunk(&mut png, b"eXIf", &exif);
+        assert_eq!(written(OutputFormat::Png), png);
+
+        let mut webp = Vec::new();
+        push_riff_chunk(&mut webp, b"ICCP", &profile).unwrap();
+        assert_eq!(written(OutputFormat::WebPLossless), webp);
+
+        let chunk = [&b"name\0\0"[..], &compressed].concat();
+        let kept = Kept {
+            icc: Some(IccData::PngChunk(&chunk)),
+            orientation: None,
+            png_colour: &[(*b"gAMA", vec![0, 0, 0xB1, 0x8F])],
+        };
+        let mut png = Vec::new();
+        oxideav_png::chunk::write_chunk(&mut png, b"gAMA", &[0, 0, 0xB1, 0x8F]);
+        oxideav_png::chunk::write_chunk(&mut png, b"iCCP", &chunk);
+        assert_eq!(kept.prepare(OutputFormat::Png).unwrap().front.concat(), png);
     }
 
     #[test]
