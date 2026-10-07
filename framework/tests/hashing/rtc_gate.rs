@@ -72,12 +72,10 @@ async fn rtc_hash_work_past_the_limit_waits_as_a_task() {
         .collect();
     wait_until(&entered, 2).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(
-        entered.load(Ordering::SeqCst),
-        2,
-        "a third piece of hash work entered the hasher while two held the permits"
-    );
+    let inside = entered.load(Ordering::SeqCst);
 
+    // Open the gate before judging, so every blocking task returns and the
+    // runtime can shut down whatever the verdict is.
     {
         let (open, signal) = &*gate;
         *open.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
@@ -88,4 +86,8 @@ async fn rtc_hash_work_past_the_limit_waits_as_a_task() {
         assert!(hash.starts_with("$gated$"));
     }
     assert_eq!(entered.load(Ordering::SeqCst), 3, "every piece ran once the gate opened");
+    assert_eq!(
+        inside, 2,
+        "{inside} pieces of hash work were inside the hasher while two held the permits"
+    );
 }
