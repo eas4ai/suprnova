@@ -259,6 +259,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   leaves at most five chunks read ahead, and a dropped response stops its
   reader. The bytes and `Content-Length` are unchanged, and a read error or
   a file that shrinks still ends the body short (#147).
+- **The in-memory rate limiter keeps answering while it sweeps.** Its
+  buckets sat behind one lock: every request locked the whole map and
+  copied its key into a new `String` even when the key had a bucket, and
+  the periodic sweep and `purge_inactive` held that lock across the whole
+  map, so each sweep stalled every throttled request for a time that grows
+  with the number of keys an attacker can rotate. The buckets now sit in a
+  sharded map: a request locks only its key's shard, a key that has a
+  bucket allocates nothing, and the sweep locks one shard at a time.
+  During a sweep over 200,000 buckets (about 45 ms), no request on another
+  key completed before; about 4,800 do now. Acceptance, rejection and
+  retry-after answers are unchanged, and no request fails with "rate
+  limiter poisoned" any more, since the shard locks do not poison (#148).
 
 ### Fixed
 
