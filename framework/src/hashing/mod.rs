@@ -45,7 +45,7 @@
 //!
 //! # Configuration
 //!
-//! Three env vars select and tune the driver - see [`HashConfig`] for the
+//! Seven env vars select and tune the driver - see [`HashConfig`] for the
 //! resolved shape:
 //!
 //! | Env var | Default | Range |
