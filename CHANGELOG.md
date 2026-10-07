@@ -266,6 +266,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   driver writes an image to ImageMagick's standard input without copying
   it first and adds the metadata a source keeps (PNG colour chunks, an
   orientation tag) to ImageMagick's output without copying that either.
+  An ICC profile split across a JPEG's or GIF's segments is read for its
+  header and length where it stands, and joined once, only when the
+  output carries it or converts from it.
 - **Queue and failed-job table names with capitals or reserved words
   work.** The jobs driver and the failed-jobs store quote each part of the
   configured table name, as the migrations do.

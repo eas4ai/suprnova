@@ -497,17 +497,36 @@ impl OxideAvImageDriver {
                 )));
             }
         }
-        let profile = found.as_ref().and_then(|found| found.read());
-        let class = profile
+        // A PNG's own chunk goes into PNG output as it stands.
+        let png_chunk = found
             .as_ref()
-            .and(found.as_ref())
-            .map(|found| found.header.class);
-        let mut carried: Option<&[u8]> = None;
+            .and_then(|found| found.png_chunk())
+            .filter(|_| target == OutputFormat::Png);
+        // The profile's bytes are read, once, only where they are used:
+        // carried into output that does not take the PNG's own chunk, or
+        // converted from. Anywhere else its length alone is checked, which
+        // holds no copy of it (MEM-003).
+        let reads = match found.as_ref().map(|found| found.header.class) {
+            Some(ColourClass::Rgb) => png_chunk.is_none(),
+            Some(ColourClass::Gray) => true,
+            Some(ColourClass::Other) | None => false,
+        };
+        let profile = found
+            .as_ref()
+            .filter(|_| reads)
+            .and_then(|found| found.read());
+        let mut icc = None;
         let mut converted_away = false;
-        if target != OutputFormat::Gif {
-            match class {
-                Some(ColourClass::Rgb) => carried = profile.as_deref(),
-                Some(ColourClass::Gray) => {
+        if let Some(found) = found.as_ref().filter(|_| target != OutputFormat::Gif)
+            && (profile.is_some() || (!reads && found.is_whole()))
+        {
+            match found.header.class {
+                ColourClass::Rgb => {
+                    icc = png_chunk
+                        .map(IccData::PngChunk)
+                        .or(profile.as_deref().map(IccData::Profile));
+                }
+                ColourClass::Gray => {
                     if let Some(conversion) =
                         profile.as_deref().and_then(SrgbConversion::from_profile)
                     {
@@ -515,8 +534,7 @@ impl OxideAvImageDriver {
                     }
                     converted_away = true;
                 }
-                Some(ColourClass::Other) => converted_away = true,
-                None => {}
+                ColourClass::Other => converted_away = true,
             }
         }
         let png_colour =
@@ -529,20 +547,6 @@ impl OxideAvImageDriver {
         if metadata::flattens(target) {
             flatten_rgba(&mut canvas.pixels, steps.flatten_onto);
         }
-        let icc = match (target, carried) {
-            // A PNG's own chunk goes into PNG output as it stands.
-            (OutputFormat::Png, Some(_)) => Some(
-                found
-                    .as_ref()
-                    .and_then(|found| found.png_chunk())
-                    .map_or_else(
-                        || IccData::Profile(carried.unwrap_or_default()),
-                        IccData::PngChunk,
-                    ),
-            ),
-            (_, Some(profile)) => Some(IccData::Profile(profile)),
-            (_, None) => None,
-        };
         let kept = Kept {
             icc,
             orientation: if steps.applied {
@@ -553,14 +557,18 @@ impl OxideAvImageDriver {
             png_colour: &png_colour,
         };
         let additions = kept.prepare(target)?;
-        let mut output = match (target, carried) {
+        let mut output = match (target, &kept.icc) {
             // The BMP encoder embeds the profile itself.
-            (OutputFormat::Bmp, Some(profile)) => encode_bmp_with_profile(canvas, profile)?,
+            (OutputFormat::Bmp, Some(IccData::Profile(profile))) => {
+                encode_bmp_with_profile(canvas, profile)?
+            }
             _ => self.encode(canvas, target, quality, additions.len())?,
         };
         match target {
             OutputFormat::Gif => {
-                if let Some(profile) = profile.as_deref().filter(|_| class.is_some()) {
+                // Held only when read whole, as an RGB or grey profile the
+                // palette converts from.
+                if let Some(profile) = profile.as_deref() {
                     metadata::gif_to_srgb(&mut output, profile)?;
                 }
             }

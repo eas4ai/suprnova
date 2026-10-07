@@ -18,8 +18,8 @@
 //!
 //! Every reader here takes untrusted bytes: it never indexes past them,
 //! allocates nothing to walk them, never inflates a compressed chunk it does
-//! not need, and reads a profile's 128-byte header before it decides
-//! whether the rest is worth holding.
+//! not need, and reads a profile's 128-byte header, and checks its length
+//! without holding it, before it decides whether the rest is worth holding.
 
 use std::ops::Range;
 
@@ -236,11 +236,14 @@ fn jpeg_walk(bytes: &[u8], mut visit: impl FnMut(&JpegSegment)) -> Option<usize>
     }
 }
 
-/// Reassemble a JPEG's ICC profile from its APP2 chunks, as zune-jpeg does:
-/// every chunk names the same count, each sequence number from 1 to that
-/// count appears once, and the chunks join in sequence order. Anything else
-/// is a corrupt profile and reads as none.
-fn jpeg_icc(bytes: &[u8]) -> Option<Vec<u8>> {
+/// A JPEG's ICC profile chunks, in sequence order, as zune-jpeg accepts
+/// them: every chunk names the same count, and each sequence number from 1
+/// to that count appears once. Anything else is a corrupt profile and reads
+/// as none. The chunks are slices of `bytes`, so finding them copies
+/// nothing. Every item is `Some`: an item is an `Option` because the
+/// readers of a profile in pieces read a GIF's sub-blocks too, and one of
+/// those can fail to read.
+fn jpeg_icc_chunks(bytes: &[u8]) -> Option<impl Iterator<Item = Option<&[u8]>> + Clone> {
     let mut chunks: [Option<&[u8]>; 256] = [None; 256];
     let mut count: Option<u8> = None;
     let mut corrupt = false;
@@ -271,23 +274,17 @@ fn jpeg_icc(bytes: &[u8]) -> Option<Vec<u8>> {
         *slot = Some(data);
     })?;
     let total = usize::from(count?);
-    if corrupt {
+    if corrupt || chunks.get(1..=total)?.iter().any(Option::is_none) {
         return None;
     }
-    let parts = chunks.get(1..=total)?;
-    let length = parts
-        .iter()
-        .try_fold(0usize, |sum, part| part.map(|data| sum + data.len()))?;
-    let mut profile = Vec::with_capacity(length);
-    for part in parts.iter().flatten() {
-        profile.extend_from_slice(part);
-    }
-    Some(profile)
+    Some(chunks.into_iter().skip(1).take(total))
 }
 
 /// The header of a JPEG's ICC profile: from its first chunk when that chunk
-/// holds the whole header, as every writer's does, else from the joined
-/// profile.
+/// holds the whole header, as every writer's does, else from the first 128
+/// bytes of its chunks in sequence order. A valid file can split the header
+/// across chunks; reading it there takes those 128 bytes, not the joined
+/// profile (MEM-003).
 fn jpeg_icc_header(bytes: &[u8]) -> Option<ProfileHeader> {
     let mut first = None;
     jpeg_walk(bytes, |segment| {
@@ -302,7 +299,7 @@ fn jpeg_icc_header(bytes: &[u8]) -> Option<ProfileHeader> {
     })?;
     match first.and_then(read_header) {
         Some(header) => Some(header),
-        None => read_header(&jpeg_icc(bytes)?),
+        None => pieces_header(jpeg_icc_chunks(bytes)?),
     }
 }
 
@@ -745,21 +742,102 @@ fn gif_icc_range(bytes: &[u8]) -> Option<Range<usize>> {
     found
 }
 
-/// Join GIF sub-blocks, up to `limit` bytes.
-fn gif_join(bytes: &[u8], blocks: Range<usize>, limit: usize) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    let mut pos = blocks.start;
-    while pos < blocks.end && out.len() < limit {
-        let size = usize::from(*bytes.get(pos)?);
+/// The data of a GIF's sub-blocks, from `blocks.start` to the terminator,
+/// each a slice of the file. An item is `None` where a sub-block does not
+/// read, which ends the run; the walk that found the blocks has already
+/// checked that every one does.
+#[derive(Clone)]
+struct GifSubBlocks<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    end: usize,
+}
+
+impl<'a> GifSubBlocks<'a> {
+    fn new(bytes: &'a [u8], blocks: Range<usize>) -> Self {
+        Self {
+            bytes,
+            pos: blocks.start,
+            end: blocks.end,
+        }
+    }
+}
+
+impl<'a> Iterator for GifSubBlocks<'a> {
+    type Item = Option<&'a [u8]>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.end {
+            return None;
+        }
+        let Some(&size) = self.bytes.get(self.pos) else {
+            self.pos = self.end;
+            return Some(None);
+        };
         if size == 0 {
+            self.pos = self.end;
+            return None;
+        }
+        let data = self.pos + 1..self.pos + 1 + usize::from(size);
+        self.pos = if data.end <= self.bytes.len() {
+            data.end
+        } else {
+            self.end
+        };
+        Some(self.bytes.get(data))
+    }
+}
+
+// ───────────────────────── profiles in pieces ─────────────────────────
+
+/// The header of a profile stored in pieces (a JPEG's APP2 chunks, a GIF's
+/// sub-blocks), read into a buffer of 128 bytes: the pieces are not joined
+/// to read it. `None` when a piece the header needs does not read, or the
+/// pieces hold less than a header.
+fn pieces_header<'a>(pieces: impl Iterator<Item = Option<&'a [u8]>>) -> Option<ProfileHeader> {
+    let mut header = [0u8; ICC_HEADER];
+    let mut filled = 0;
+    for piece in pieces {
+        if filled == ICC_HEADER {
             break;
         }
-        let data = bytes.get(pos + 1..pos + 1 + size)?;
-        let take = data.len().min(limit - out.len());
-        out.extend_from_slice(&data[..take]);
-        pos += 1 + size;
+        let piece = piece?;
+        let take = piece.len().min(ICC_HEADER - filled);
+        header
+            .get_mut(filled..filled + take)?
+            .copy_from_slice(piece.get(..take)?);
+        filled += take;
     }
-    Some(out)
+    read_header(header.get(..filled)?)
+}
+
+/// The length of a profile stored in pieces, summed without joining them;
+/// `None` when a piece does not read.
+fn pieces_len<'a>(mut pieces: impl Iterator<Item = Option<&'a [u8]>>) -> Option<u64> {
+    pieces.try_fold(0u64, |sum, piece| Some(sum + piece?.len() as u64))
+}
+
+/// A profile stored in pieces joined into one buffer, sized to `length`
+/// first so that joining it allocates once; `None` when a piece does not
+/// read.
+fn pieces_join<'a>(pieces: impl Iterator<Item = Option<&'a [u8]>>, length: u64) -> Option<Vec<u8>> {
+    let mut profile = Vec::with_capacity(usize::try_from(length).ok()?);
+    for piece in pieces {
+        profile.extend_from_slice(piece?);
+    }
+    Some(profile)
+}
+
+/// The profile stored in `pieces` when they hold `size` bytes, joined once;
+/// `None`, with nothing joined, when they hold more or fewer.
+fn pieces_whole<'a>(
+    pieces: impl Iterator<Item = Option<&'a [u8]>> + Clone,
+    size: u64,
+) -> Option<Vec<u8>> {
+    if pieces_len(pieces.clone())? != size {
+        return None;
+    }
+    pieces_join(pieces, size)
 }
 
 // ───────────────────────── profiles in a file ─────────────────────────
@@ -805,7 +883,7 @@ pub(crate) fn find_profile(format: InputFormat, bytes: &[u8]) -> Option<FoundPro
         }
         InputFormat::Gif => {
             let blocks = gif_icc_range(bytes)?;
-            let header = read_header(&gif_join(bytes, blocks.clone(), ICC_HEADER)?)?;
+            let header = pieces_header(GifSubBlocks::new(bytes, blocks.clone()))?;
             (ProfileSite::Gif(blocks), header)
         }
     };
@@ -823,28 +901,35 @@ pub(crate) fn find_output_profile(format: OutputFormat, bytes: &[u8]) -> Option<
 
 impl FoundProfile<'_> {
     /// The whole profile, or `None` when it is not as long as its header
-    /// says. A PNG's is inflated once, into a buffer of exactly that size,
-    /// and no further than one byte past it; the caller has already charged
-    /// that size to the budget.
+    /// says. Its length is checked before anything is held: a JPEG's chunks
+    /// or a GIF's sub-blocks are summed, and joined once, into a buffer of
+    /// that length, only when they hold it. A PNG's is inflated once, into
+    /// a buffer of exactly that size, and no further than one byte past it;
+    /// the caller has already charged that size to the budget.
     pub(crate) fn read(&self) -> Option<Vec<u8>> {
-        let profile = match &self.site {
-            ProfileSite::Jpeg => jpeg_icc(self.bytes)?,
+        let size = self.header.size;
+        match &self.site {
+            ProfileSite::Jpeg => pieces_whole(jpeg_icc_chunks(self.bytes)?, size),
             ProfileSite::Png { stream, .. } => {
-                let mut out = vec![0u8; usize::try_from(self.header.size).ok()?];
-                match inflate_to(stream, self.header.size, Some(&mut out)) {
-                    Inflated::Exactly => out,
-                    Inflated::Otherwise => return None,
+                let mut out = vec![0u8; usize::try_from(size).ok()?];
+                match inflate_to(stream, size, Some(&mut out)) {
+                    Inflated::Exactly => Some(out),
+                    Inflated::Otherwise => None,
                 }
             }
-            ProfileSite::Plain(profile) => profile.to_vec(),
-            ProfileSite::Gif(blocks) => gif_join(self.bytes, blocks.clone(), usize::MAX)?,
-        };
-        (profile.len() as u64 == self.header.size).then_some(profile)
+            ProfileSite::Plain(profile) => (profile.len() as u64 == size).then(|| profile.to_vec()),
+            ProfileSite::Gif(blocks) => {
+                pieces_whole(GifSubBlocks::new(self.bytes, blocks.clone()), size)
+            }
+        }
     }
 
     /// Whether the profile is as long as its header says, read without
-    /// keeping it: a PNG's is inflated through a scratch buffer.
+    /// keeping it: a JPEG's chunks and a GIF's sub-blocks are summed where
+    /// they stand, and a PNG's is inflated through a scratch buffer
+    /// (MEM-003).
     pub(crate) fn is_whole(&self) -> bool {
+        let size = Some(self.header.size);
         match &self.site {
             ProfileSite::Png { stream, .. } => {
                 matches!(
@@ -853,7 +938,10 @@ impl FoundProfile<'_> {
                 )
             }
             ProfileSite::Plain(profile) => profile.len() as u64 == self.header.size,
-            ProfileSite::Jpeg | ProfileSite::Gif(_) => self.read().is_some(),
+            ProfileSite::Jpeg => jpeg_icc_chunks(self.bytes).and_then(pieces_len) == size,
+            ProfileSite::Gif(blocks) => {
+                pieces_len(GifSubBlocks::new(self.bytes, blocks.clone())) == size
+            }
         }
     }
 
@@ -1615,27 +1703,124 @@ mod tests {
         assert_eq!(icc_class(&shorter), None, "shorter than its header says");
     }
 
+    /// An APP2 segment holding chunk `sequence` of `total` of a profile.
+    fn icc_segment(sequence: u8, total: u8, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_jpeg_segment(&mut out, 0xE2, &[ICC_PROFILE, &[sequence, total], data]);
+        out
+    }
+
+    /// A JPEG header of `segments`, up to a start-of-scan.
+    fn jpeg_of(segments: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = vec![0xFF, 0xD8];
+        for segment in segments {
+            out.extend_from_slice(segment);
+        }
+        out.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02]);
+        out
+    }
+
+    /// The profile a JPEG's chunks join to, as [`FoundProfile::read`] joins
+    /// it once their length is known.
+    fn joined(jpeg: &[u8]) -> Option<Vec<u8>> {
+        let chunks = jpeg_icc_chunks(jpeg)?;
+        let length = pieces_len(chunks.clone())?;
+        pieces_join(chunks, length)
+    }
+
     #[test]
     fn img_002_jpeg_icc_chunks_join_in_sequence_order_or_not_at_all() {
-        let segment = |sequence: u8, total: u8, data: &[u8]| {
-            let mut out = Vec::new();
-            push_jpeg_segment(&mut out, 0xE2, &[ICC_PROFILE, &[sequence, total], data]);
-            out
-        };
-        let jpeg = |segments: &[Vec<u8>]| {
-            let mut out = vec![0xFF, 0xD8];
-            for segment in segments {
-                out.extend_from_slice(segment);
+        let ordered = jpeg_of(&[icc_segment(2, 2, b"cd"), icc_segment(1, 2, b"ab")]);
+        assert_eq!(joined(&ordered).as_deref(), Some(&b"abcd"[..]));
+        let duplicate = jpeg_of(&[icc_segment(1, 1, b"ab"), icc_segment(1, 1, b"ab")]);
+        assert_eq!(joined(&duplicate), None);
+        let missing = jpeg_of(&[icc_segment(1, 2, b"ab")]);
+        assert_eq!(joined(&missing), None);
+    }
+
+    /// MEM-003: a header split across a JPEG's chunks or a GIF's
+    /// sub-blocks is read from them where they stand, and a profile's length
+    /// is their sum, under the same rules the joined profile follows.
+    #[test]
+    fn img_002_a_profile_in_pieces_is_read_where_it_stands() {
+        let whole = profile(b"RGB ");
+        let header = read_header(&whole);
+        assert!(header.is_some());
+
+        let split = jpeg_of(&[
+            icc_segment(2, 3, &whole[64..100]),
+            icc_segment(1, 3, &whole[..64]),
+            icc_segment(3, 3, &whole[100..]),
+        ]);
+        assert_eq!(
+            jpeg_icc_header(&split),
+            header,
+            "the header across three chunks"
+        );
+        let found = find_profile(InputFormat::Jpeg, &split).expect("the profile is found");
+        assert!(found.is_whole());
+        assert_eq!(found.read().as_deref(), Some(&whole[..]));
+
+        // A chunk missing or repeated past the header still voids it, as
+        // it voids the joined profile.
+        let missing = jpeg_of(&[
+            icc_segment(1, 3, &whole[..64]),
+            icc_segment(2, 3, &whole[64..]),
+        ]);
+        assert_eq!(jpeg_icc_header(&missing), None, "a missing chunk");
+        let repeated = jpeg_of(&[
+            icc_segment(1, 2, &whole[..64]),
+            icc_segment(2, 2, &whole[64..]),
+            icc_segment(2, 2, &whole[64..]),
+        ]);
+        assert_eq!(jpeg_icc_header(&repeated), None, "a repeated chunk");
+
+        // Longer or shorter than the header says: found, never whole.
+        let mut longer = whole.clone();
+        longer.extend_from_slice(&[0; 4]);
+        let mut shorter = whole.clone();
+        shorter.truncate(130);
+        for (name, profile) in [("longer", longer), ("shorter", shorter)] {
+            let jpeg = jpeg_of(&[
+                icc_segment(1, 2, &profile[..64]),
+                icc_segment(2, 2, &profile[64..]),
+            ]);
+            let found = find_profile(InputFormat::Jpeg, &jpeg).expect("the header reads");
+            assert!(!found.is_whole(), "{name}");
+            assert_eq!(found.read(), None, "{name}");
+        }
+
+        // A GIF's sub-blocks, the first shorter than a header.
+        let gif = |profile: &[u8]| {
+            let mut out = b"GIF89a\x01\x00\x01\x00\x00\x00\x00".to_vec();
+            out.extend_from_slice(&[0x21, 0xFF, 0x0B]);
+            out.extend_from_slice(GIF_ICC_APPLICATION);
+            for block in [&profile[..64], &profile[64..]] {
+                out.push(block.len() as u8);
+                out.extend_from_slice(block);
             }
-            out.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02]);
+            out.extend_from_slice(&[0x00, 0x3B]);
             out
         };
-        let ordered = jpeg(&[segment(2, 2, b"cd"), segment(1, 2, b"ab")]);
-        assert_eq!(jpeg_icc(&ordered).as_deref(), Some(&b"abcd"[..]));
-        let duplicate = jpeg(&[segment(1, 1, b"ab"), segment(1, 1, b"ab")]);
-        assert_eq!(jpeg_icc(&duplicate), None);
-        let missing = jpeg(&[segment(1, 2, b"ab")]);
-        assert_eq!(jpeg_icc(&missing), None);
+        let tagged = gif(&whole);
+        let found = find_profile(InputFormat::Gif, &tagged).expect("the header reads");
+        assert_eq!(
+            Some(found.header),
+            header,
+            "the header across two sub-blocks"
+        );
+        assert!(found.is_whole());
+        assert_eq!(found.read().as_deref(), Some(&whole[..]));
+        let mut longer = whole.clone();
+        longer.extend_from_slice(&[0; 4]);
+        let tagged = gif(&longer);
+        let found = find_profile(InputFormat::Gif, &tagged).expect("the header reads");
+        assert!(!found.is_whole());
+        assert_eq!(found.read(), None);
+        assert!(
+            find_profile(InputFormat::Gif, &gif(&whole[..100])).is_none(),
+            "less than a header"
+        );
     }
 
     #[test]
