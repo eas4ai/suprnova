@@ -41,6 +41,7 @@
 //!    same [`ImageConfig`]. `-limit disk 0` is deliberate: without it, IM
 //!    spills the pixel cache to disk and the memory cap stops being a cap.
 
+use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
@@ -589,27 +590,38 @@ impl MagickCliDriver {
     ) -> Result<Settled, FrameworkError> {
         let (class, gif_profile) = {
             let found = metadata::find_output_profile(target, &output);
-            let room = config.max_alloc_bytes.saturating_sub(output.len() as u64);
-            if let Some(found) = &found
-                && found.header.size > room
-            {
-                return Err(FrameworkError::param(format!(
-                    "image exceeds configured decode limits: ImageMagick wrote a {}-byte ICC \
-                     profile, over what the IMAGE_MAX_ALLOC_BYTES limit of {} leaves beside \
-                     the output",
-                    found.header.size, config.max_alloc_bytes
-                )));
+            // A GIF's palette converts from an RGB or grey profile only, so
+            // a CMYK or Lab one is never joined (MEM-003). Any other
+            // output's profile is checked by its length and kept or
+            // stripped where it stands, so it holds no copy.
+            let converts = target == OutputFormat::Gif
+                && found
+                    .as_ref()
+                    .is_some_and(|found| found.header.class != ColourClass::Other);
+            if let Some(found) = &found {
+                let (bytes, what) = if converts {
+                    found.read_cost()
+                } else {
+                    (found.check_cost(), "to check its length")
+                };
+                let room = config.max_alloc_bytes.saturating_sub(output.len() as u64);
+                if bytes > room {
+                    return Err(FrameworkError::param(format!(
+                        "image exceeds configured decode limits: ImageMagick wrote a {}-byte ICC \
+                         profile that needs {bytes} bytes {what}, over what the \
+                         IMAGE_MAX_ALLOC_BYTES limit of {} leaves beside the output",
+                        found.header.size, config.max_alloc_bytes
+                    )));
+                }
             }
             let found = found.filter(|found| found.is_whole());
             let class = found.as_ref().map(|found| found.header.class);
-            // A GIF's palette converts from an RGB or grey profile only, so
-            // a CMYK or Lab one is never joined (MEM-003).
-            let gif_profile = match (target, &found) {
-                (OutputFormat::Gif, Some(found)) if found.header.class != ColourClass::Other => {
-                    found.read()
-                }
-                _ => None,
-            };
+            // A GIF's profile is joined, so it is owned: `into_owned` moves
+            // it, and leaves the output free to convert in place.
+            let gif_profile = found
+                .filter(|_| converts)
+                .and_then(|found| found.read())
+                .map(Cow::into_owned);
             (class, gif_profile)
         };
         if target == OutputFormat::Gif {
@@ -792,22 +804,41 @@ fn rust_stage(
     };
     let found = metadata::find_output_profile(OutputFormat::Png, intermediate);
     let held = pixels.pixels().len() as u64;
-    if let Some(found) = &found
-        && held.saturating_add(found.header.size.saturating_mul(2)) > config.max_alloc_bytes
-    {
-        return Err(FrameworkError::param(format!(
-            "image exceeds configured decode limits: its {}-byte ICC profile, beside the \
-             pixels between two ImageMagick runs, is over the IMAGE_MAX_ALLOC_BYTES limit of {}",
-            found.header.size, config.max_alloc_bytes
-        )));
-    }
     let class = found.as_ref().map(|found| found.header.class);
     // The profile is read only where this stage uses it: an RGB one it
     // carries or converts from, a grey one it converts from. A CMYK or Lab
-    // one is dropped as it stands, so it is never inflated (MEM-003).
+    // one is dropped as it stands, so it is never inflated, and costs
+    // nothing (MEM-003).
+    let reads = matches!(class, Some(ColourClass::Rgb | ColourClass::Gray));
+    let carries = class == Some(ColourClass::Rgb) && after != AfterStage::Srgb;
+    if let Some(found) = &found {
+        let charges: metadata::ProfileCharges = [
+            if reads { found.read_cost() } else { (0, "") },
+            if carries {
+                (found.header.size, "for the copy the next PNG carries")
+            } else {
+                (0, "")
+            },
+        ];
+        let charged = metadata::charged(&charges);
+        let needed = held.saturating_add(charged);
+        if charged > 0 && needed > config.max_alloc_bytes {
+            return Err(FrameworkError::param(format!(
+                "image exceeds configured decode limits: its {}-byte ICC profile needs {}, which \
+                 with the {held} bytes of pixels between two ImageMagick runs is about {needed} \
+                 bytes, over the IMAGE_MAX_ALLOC_BYTES limit of {}",
+                found.header.size,
+                metadata::charges_named(&charges),
+                config.max_alloc_bytes
+            )));
+        }
+    }
+    // A PNG's profile is inflated, so it is owned: `into_owned` moves it
+    // into the `Iccp` the encoder takes, which holds a `Vec`.
     let mut profile = found
-        .filter(|found| found.header.class != ColourClass::Other)
-        .and_then(|found| found.read());
+        .filter(|_| reads)
+        .and_then(|found| found.read())
+        .map(Cow::into_owned);
     let mut pixels = match after {
         AfterStage::Custom(custom) => {
             let out = custom.apply(pixels)?;

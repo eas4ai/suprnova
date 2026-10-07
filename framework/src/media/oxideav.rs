@@ -461,12 +461,17 @@ impl OxideAvImageDriver {
     /// converted from it to sRGB and it is dropped; GIF output, which holds
     /// no profile here, has its palette converted instead.
     ///
-    /// Only the profile's header is read before the budget is charged: the
-    /// pixels already held, the profile, and the copy of it the output
-    /// carries must fit `IMAGE_MAX_ALLOC_BYTES` together, so a small file
-    /// cannot make the driver hold, or write, a profile near the whole
-    /// budget twice. A profile whose header gives another size than its
-    /// length is not a profile, and is not carried.
+    /// Only the profile's header is read before the budget is charged, and
+    /// it is charged for what is held for it: a copy read from the file
+    /// when its pieces are joined or it is inflated (one that sits whole in
+    /// the file is lent, not copied), an inflate's work to check a PNG's
+    /// length, and the copy the output carries. With the pixels already
+    /// held, that must fit `IMAGE_MAX_ALLOC_BYTES`, so a small file cannot
+    /// make the driver hold, or write, a profile near the whole budget
+    /// twice; a profile checked by its length and dropped, or a PNG's own
+    /// chunk carried as it stands, costs no copy. A profile whose header
+    /// gives another size than its length is not a profile, and is not
+    /// carried.
     fn finish(
         &self,
         mut canvas: Canvas,
@@ -478,25 +483,6 @@ impl OxideAvImageDriver {
     ) -> Result<Vec<u8>, FrameworkError> {
         let target = steps.target;
         let found = metadata::find_profile(decoded_format, contents);
-        if let Some(found) = &found {
-            let held = canvas.pixels.capacity() as u64;
-            let work = if decoded_format == InputFormat::Png {
-                metadata::INFLATE_WORK
-            } else {
-                0
-            };
-            let needed = held
-                .saturating_add(found.header.size.saturating_mul(2))
-                .saturating_add(work);
-            if needed > config.max_alloc_bytes {
-                return Err(FrameworkError::param(format!(
-                    "image exceeds configured decode limits: its {}-byte ICC profile, with the \
-                     copy the output carries and the pixels held, needs about {needed} bytes, \
-                     over the IMAGE_MAX_ALLOC_BYTES limit of {}",
-                    found.header.size, config.max_alloc_bytes
-                )));
-            }
-        }
         // A PNG's own chunk goes into PNG output as it stands.
         let png_chunk = found
             .as_ref()
@@ -506,11 +492,43 @@ impl OxideAvImageDriver {
         // carried into output that does not take the PNG's own chunk, or
         // converted from. Anywhere else its length alone is checked, which
         // holds no copy of it (MEM-003).
-        let reads = match found.as_ref().map(|found| found.header.class) {
+        let class = found.as_ref().map(|found| found.header.class);
+        let reads = match class {
             Some(ColourClass::Rgb) => png_chunk.is_none(),
             Some(ColourClass::Gray) => true,
             Some(ColourClass::Other) | None => false,
         };
+        let carries =
+            class == Some(ColourClass::Rgb) && target != OutputFormat::Gif && png_chunk.is_none();
+        if let Some(found) = &found {
+            let held = canvas.pixels.capacity() as u64;
+            let charges: metadata::ProfileCharges = [
+                if reads {
+                    found.read_cost()
+                } else if target != OutputFormat::Gif {
+                    (found.check_cost(), "to check its length")
+                } else {
+                    (0, "")
+                },
+                if carries {
+                    (found.header.size, "for the copy the output carries")
+                } else {
+                    (0, "")
+                },
+            ];
+            let charged = metadata::charged(&charges);
+            let needed = held.saturating_add(charged);
+            if charged > 0 && needed > config.max_alloc_bytes {
+                return Err(FrameworkError::param(format!(
+                    "image exceeds configured decode limits: its {}-byte ICC profile needs {}, \
+                     which with the {held} bytes of pixels held is about {needed} bytes, over \
+                     the IMAGE_MAX_ALLOC_BYTES limit of {}",
+                    found.header.size,
+                    metadata::charges_named(&charges),
+                    config.max_alloc_bytes
+                )));
+            }
+        }
         let profile = found
             .as_ref()
             .filter(|_| reads)
