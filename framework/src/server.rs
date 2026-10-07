@@ -1068,28 +1068,26 @@ async fn handle_request_inner(
             crate::error::debug_page::note_route_pattern(&pattern);
             // The route's bindings run after its middleware, right before
             // the handler (BIND-015). The checks above passed, so the plan
-            // is there. A route with no record hands its handler the route's
-            // settings, which a handler that binds plans against itself.
-            let (handler, unrecorded) = match router.binding_plan(&effective_method, &pattern) {
-                Ok(Some(crate::routing::binding::RouteBinds::Planned(plan))) => (
-                    crate::routing::binding::planned_handler(plan, handler),
-                    None,
-                ),
-                Ok(Some(crate::routing::binding::RouteBinds::Unrecorded(route))) => {
-                    (handler, Some(route))
-                }
-                Ok(None) => (handler, None),
+            // is there. The route also hands the request its settings, an
+            // `Arc` clone, for a handler it did not plan: a generic one, or
+            // one a closure route or another handler calls.
+            let binds = match router.binding_plan(&effective_method, &pattern) {
+                Ok(binds) => binds,
                 Err(error) => {
                     return into_hyper_in_scope(crate::http::HttpResponse::from(error));
                 }
+            };
+            let handler = match binds.and_then(|binds| binds.plan()) {
+                Some(plan) => crate::routing::binding::planned_handler(plan.clone(), handler),
+                None => handler,
             };
             let mut request = stamp_peer(
                 Request::new(req)
                     .with_params(params)
                     .with_route_pattern(pattern.clone()),
             );
-            if let Some(route) = unrecorded {
-                request.set_route_bindings(crate::http::RouteBindingState::Unplanned(route));
+            if let Some(binds) = binds {
+                request.set_route_settings(binds.settings().clone(), binds.recorded());
             }
             let live_metadata = router.live_route_metadata(&effective_method, &pattern);
             if let Some(metadata) = live_metadata {

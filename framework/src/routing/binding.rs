@@ -16,15 +16,16 @@
 //!
 //! A route whose handler carries no record, a closure or a generic
 //! `#[handler]` function, is not checked before the first request, and a
-//! closure binds nothing itself. The request carries the route's binding
-//! settings instead, and a handler that binds without a plan, a generic one
-//! or a recorded one a closure calls, describes its arguments at the
-//! request: its concrete bound arguments get the plan a recorded handler's
-//! would, built at its first request on the route and kept for the next
-//! ones, so they bind in path order with the route's binding fields,
-//! scoping, binders, `with_trashed()` and `missing()`. A problem the
-//! startup checks would refuse answers that request with the refusal
-//! instead of binding. A generic handler's generic arguments read the body.
+//! closure binds nothing itself. Every matched request carries its route's
+//! binding settings, and a handler the route did not plan (a generic one, a
+//! recorded one a closure route calls, or one another handler calls with
+//! its request) describes its arguments at the request: its concrete bound
+//! arguments get the plan a recorded handler's would, built at its first
+//! request on the route and kept for the next ones, so they bind in path
+//! order with the route's binding fields, scoping, binders,
+//! `with_trashed()` and `missing()`. A problem the startup checks would
+//! refuse answers that request with the refusal instead of binding. A
+//! generic handler's generic arguments read the body.
 //!
 //! A route's `missing()` handler binds its own arguments under the same
 //! settings when it runs: a recorded one through a plan the startup checks
@@ -35,7 +36,7 @@ use crate::database::route_binding::{
     BoundChild, ChildBindings, RouteBinding, RouteBindingInfo, RouteLookup,
 };
 use crate::error::FrameworkError;
-use crate::http::{FromParam, FromRequest, HttpResponse, Request, Response, RouteBindingState};
+use crate::http::{FromParam, FromRequest, HttpResponse, Request, Response};
 use crate::routing::router::BoxedHandler;
 use hyper::Method;
 use std::any::{Any, TypeId};
@@ -312,33 +313,36 @@ pub struct HandlerInput {
     request: Option<Request>,
     params: HashMap<String, String>,
     bound: Option<Vec<Option<Erased>>>,
-    /// The settings of a route that planned nothing for this handler.
-    unplanned: Option<Arc<UnrecordedRoute>>,
+    /// Whether the route planned this handler before the first request.
+    planned: bool,
 }
 
 impl HandlerInput {
     /// Take the request apart for the handler's arguments.
     pub fn new(mut request: Request) -> Self {
-        let (bound, unplanned) = match request.take_route_bindings() {
-            Some(RouteBindingState::Bound(values)) => (Some(values), None),
-            Some(RouteBindingState::Unplanned(route)) => (None, Some(route)),
-            None => (None, None),
-        };
+        let bound = request.take_route_bindings();
+        let planned = request.take_route_planned();
         let params = request.params().clone();
         Self {
             request: Some(request),
             params,
             bound,
-            unplanned,
+            planned,
         }
     }
 
-    /// Whether the route planned nothing for this handler and handed it its
-    /// settings instead, so [`Self::__bind_unplanned`] binds its arguments.
-    /// A recorded handler on its own route never does.
+    /// Whether the route did not plan this handler but carries its
+    /// settings, so [`Self::__bind_unplanned`] binds its arguments: a
+    /// generic handler, or one a closure route or another handler calls. A
+    /// recorded handler on its own route never does.
     #[inline]
     pub fn __binds_unplanned(&self) -> bool {
-        self.unplanned.is_some()
+        !self.planned
+            && self.bound.is_none()
+            && self
+                .request
+                .as_ref()
+                .is_some_and(|request| request.route_settings().is_some())
     }
 
     /// The path value `name` as a `T`. A route whose handler is recorded
@@ -385,12 +389,12 @@ impl HandlerInput {
         }
     }
 
-    /// Bind the concrete arguments of a handler the route planned nothing
-    /// for, as the route binds a recorded handler's (BIND-004): a generic
-    /// handler, a recorded one a closure route calls, or a `missing()`
-    /// handler. `args` describes every argument in declaration order, and
-    /// the route plans them once, keyed by `key`, which the generated code
-    /// makes unique to the handler.
+    /// Bind the concrete arguments of a handler the route did not plan, as
+    /// the route binds a recorded handler's (BIND-004): a generic handler,
+    /// a recorded one a closure route or another handler calls, or a
+    /// `missing()` handler with no record. `args` describes every argument
+    /// in declaration order, and the route plans them once, keyed by `key`,
+    /// which the generated code makes unique to the handler.
     ///
     /// `Ok(None)` once they are bound, or when the route handed no
     /// settings. A binding that finds nothing answers `Ok(Some(response))`
@@ -412,10 +416,10 @@ impl HandlerInput {
         args: impl FnOnce() -> Vec<HandlerArg>,
         answers_missing: bool,
     ) -> Result<Option<Response>, FrameworkError> {
-        let Some(route) = self.unplanned.take() else {
+        let Some(request) = self.request.as_ref() else {
             return Ok(None);
         };
-        let Some(request) = self.request.as_ref() else {
+        let Some(route) = request.route_settings().cloned() else {
             return Ok(None);
         };
         let matched = MatchedRoute {
@@ -738,45 +742,37 @@ pub(crate) struct MissingHook {
 /// when it runs: under the route's settings, as the route's handler's do.
 pub(crate) struct RouteMissing {
     handler: MissingHandler,
-    binds: MissingBinds,
-}
-
-/// How a `missing()` handler's bound arguments bind.
-enum MissingBinds {
-    /// A recorded handler: the plan the startup checks built for it against
-    /// the route, `None` when it binds nothing.
-    Planned(Option<Arc<RoutePlan>>),
-    /// A handler with no record: the route's settings, which a generic one
-    /// plans against at the request and a closure ignores.
-    Unplanned(Arc<UnrecordedRoute>),
+    /// The plan the startup checks built for a recorded handler against the
+    /// route; `None` when it binds nothing or carries no record.
+    plan: Option<Arc<RoutePlan>>,
+    /// Whether the handler is recorded, so the startup checks planned it.
+    recorded: bool,
+    /// The route's settings without its `missing()` handler, for a handler
+    /// with no record and for any handler it calls with the request.
+    settings: Arc<RouteSettings>,
 }
 
 /// Run the `missing()` handler on `request`, its own bound arguments bound
 /// first. Its own binding that finds nothing answers 404: the handler is
 /// never called for its own miss.
 async fn answer_missing(missing: &RouteMissing, mut request: Request) -> Response {
-    match &missing.binds {
-        MissingBinds::Planned(Some(plan)) => {
-            let route = MatchedRoute {
-                method: request.method().clone(),
-                pattern: request.route_pattern().unwrap_or_default().to_owned(),
-                params: request.params().clone(),
-            };
-            match bind_values(plan, &route).await {
-                Ok(values) => request.set_route_bindings(RouteBindingState::Bound(values)),
-                Err(Unbound::Miss(index)) => {
-                    return Err(HttpResponse::from(FrameworkError::model_not_found(
-                        plan.bindings[index].info.name(),
-                    )));
-                }
-                Err(Unbound::Failed(error)) => return Err(HttpResponse::from(error)),
+    if let Some(plan) = &missing.plan {
+        let route = MatchedRoute {
+            method: request.method().clone(),
+            pattern: request.route_pattern().unwrap_or_default().to_owned(),
+            params: request.params().clone(),
+        };
+        match bind_values(plan, &route).await {
+            Ok(values) => request.set_route_bindings(values),
+            Err(Unbound::Miss(index)) => {
+                return Err(HttpResponse::from(FrameworkError::model_not_found(
+                    plan.bindings[index].info.name(),
+                )));
             }
-        }
-        MissingBinds::Planned(None) => {}
-        MissingBinds::Unplanned(route) => {
-            request.set_route_bindings(RouteBindingState::Unplanned(route.clone()));
+            Err(Unbound::Failed(error)) => return Err(HttpResponse::from(error)),
         }
     }
+    request.set_route_settings(missing.settings.clone(), missing.recorded);
     (missing.handler)(request).await
 }
 
@@ -1057,16 +1053,16 @@ impl RouterBindings {
         }
     }
 
-    /// What the route `(method, pattern)` binds before its handler runs, or
-    /// leaves to an unrecorded handler. `Ok(None)` for a recorded handler
-    /// that binds nothing.
+    /// How the route `(method, pattern)` binds: the plan its recorded
+    /// handler runs, and the settings it hands any handler it did not plan.
+    /// `Ok(None)` for a route the router never registered.
     pub(crate) fn plan(
         &self,
         method: &Method,
         pattern: &str,
-    ) -> Result<Option<RouteBinds>, FrameworkError> {
+    ) -> Result<Option<&RouteBinds>, FrameworkError> {
         match self.plans.get_or_init(|| self.build_plans()) {
-            Ok(plans) => Ok(plans.get(&(method.clone(), pattern.to_owned())).cloned()),
+            Ok(plans) => Ok(plans.get(&(method.clone(), pattern.to_owned()))),
             Err(error) => Err(error.clone()),
         }
     }
@@ -1107,10 +1103,23 @@ impl RouterBindings {
             // included. It may read a parameter a binder covers as a path
             // value, to see the raw value that missed, so the check for a
             // binder that could never run does not apply to it.
+            let binders = shared_binders
+                .get_or_insert_with(|| Arc::new(self.binders.clone()))
+                .clone();
+            let settings = |missing: Option<Arc<RouteMissing>>| {
+                Arc::new(RouteSettings {
+                    route: route.clone(),
+                    path: path.clone(),
+                    options: entry.options.clone(),
+                    binders: binders.clone(),
+                    missing,
+                    plans: RwLock::new(Vec::new()),
+                })
+            };
             let missing = match entry.options.missing.as_ref() {
                 None => None,
                 Some(hook) => {
-                    let binds = match hook.record {
+                    let plan = match hook.record {
                         Some(record) => {
                             let checked = problems.len();
                             check_handler(
@@ -1122,83 +1131,70 @@ impl RouterBindings {
                                 &mut problems,
                             );
                             if problems.len() > checked {
-                                None
+                                Err(())
                             } else {
-                                match plan_route(
+                                plan_route(
                                     &site,
                                     "`missing()` handler",
                                     &record.path(),
                                     &record.args(),
                                     None,
-                                ) {
-                                    Ok(plan) => Some(MissingBinds::Planned(plan.map(Arc::new))),
-                                    Err(found) => {
-                                        problems.extend(found);
-                                        None
-                                    }
-                                }
+                                )
+                                .map_err(|found| problems.extend(found))
                             }
                         }
-                        None => Some(MissingBinds::Unplanned(Arc::new(UnrecordedRoute {
-                            route: route.clone(),
-                            path: path.clone(),
-                            options: entry.options.clone(),
-                            binders: shared_binders
-                                .get_or_insert_with(|| Arc::new(self.binders.clone()))
-                                .clone(),
-                            missing: None,
-                            plans: RwLock::new(Vec::new()),
-                        }))),
+                        None => Ok(None),
                     };
-                    binds.map(|binds| {
+                    plan.ok().map(|plan| {
                         Arc::new(RouteMissing {
                             handler: hook.handler.clone(),
-                            binds,
+                            plan: plan.map(Arc::new),
+                            recorded: hook.record.is_some(),
+                            settings: settings(None),
                         })
                     })
                 }
             };
-            let Some(record) = entry.record else {
+            let plan = match entry.record {
                 // A closure or a generic handler: a generic one, or a
                 // recorded one the closure calls, plans its concrete
                 // arguments at its first request (BIND-004).
-                let binders = shared_binders
-                    .get_or_insert_with(|| Arc::new(self.binders.clone()))
-                    .clone();
-                plans.insert(
-                    (method.clone(), pattern.clone()),
-                    RouteBinds::Unrecorded(Arc::new(UnrecordedRoute {
-                        route,
-                        path,
-                        options: entry.options.clone(),
-                        binders,
-                        missing,
-                        plans: RwLock::new(Vec::new()),
-                    })),
-                );
-                continue;
-            };
-            check_handler(
-                &route,
-                "handler",
-                record,
-                &path,
-                Some(&self.binders),
-                &mut problems,
-            );
-            if problems.len() > before {
-                continue;
-            }
-            match plan_route(&site, "handler", &record.path(), &record.args(), missing) {
-                Ok(Some(plan)) => {
-                    plans.insert(
-                        (method.clone(), pattern.clone()),
-                        RouteBinds::Planned(Arc::new(plan)),
+                None => None,
+                Some(record) => {
+                    check_handler(
+                        &route,
+                        "handler",
+                        record,
+                        &path,
+                        Some(&self.binders),
+                        &mut problems,
                     );
+                    if problems.len() > before {
+                        continue;
+                    }
+                    match plan_route(
+                        &site,
+                        "handler",
+                        &record.path(),
+                        &record.args(),
+                        missing.clone(),
+                    ) {
+                        Ok(plan) => plan.map(Arc::new),
+                        Err(found) => {
+                            problems.extend(found);
+                            continue;
+                        }
+                    }
                 }
-                Ok(None) => {}
-                Err(found) => problems.extend(found),
-            }
+            };
+            plans.insert(
+                (method.clone(), pattern.clone()),
+                RouteBinds {
+                    plan,
+                    recorded: entry.record.is_some(),
+                    settings: settings(missing),
+                },
+            );
         }
         if problems.is_empty() {
             Ok(plans)
@@ -1289,26 +1285,43 @@ pub(crate) struct RoutePlan {
     missing: Option<Arc<RouteMissing>>,
 }
 
-/// How a route binds: before its recorded handler runs, or, for a handler
-/// that carries no record, inside it.
-#[derive(Clone)]
-pub(crate) enum RouteBinds {
-    /// The plan the router built before the first request, which a request
-    /// runs ahead of the handler.
-    Planned(Arc<RoutePlan>),
-    /// The route's binding settings, for a generic handler to plan its
-    /// concrete arguments against at the request.
-    Unrecorded(Arc<UnrecordedRoute>),
+/// How a route binds: the plan its recorded handler runs before it, and
+/// the settings it hands, by an `Arc` clone per request, to any handler it
+/// did not plan.
+pub(crate) struct RouteBinds {
+    /// The plan the router built before the first request, `None` when the
+    /// route's handler binds nothing or carries no record.
+    plan: Option<Arc<RoutePlan>>,
+    /// Whether the route's handler is recorded, so the router planned it.
+    recorded: bool,
+    settings: Arc<RouteSettings>,
+}
+
+impl RouteBinds {
+    /// The plan a request runs ahead of the route's handler.
+    pub(crate) fn plan(&self) -> Option<&Arc<RoutePlan>> {
+        self.plan.as_ref()
+    }
+
+    /// Whether the router planned the route's handler.
+    pub(crate) fn recorded(&self) -> bool {
+        self.recorded
+    }
+
+    /// The route's binding settings.
+    pub(crate) fn settings(&self) -> &Arc<RouteSettings> {
+        &self.settings
+    }
 }
 
 /// The binding settings of a route, for a handler the startup checks did
 /// not plan: the handler of a route that carries no record (a closure, or a
-/// generic `#[handler]` function), a recorded handler a closure route
-/// calls, or a `missing()` handler with no record. Such a handler hands its
-/// arguments over at its first request on the route, its concrete bound
-/// arguments bind as a recorded handler's do (BIND-004), and the plan built
-/// from them is kept for the next requests.
-pub(crate) struct UnrecordedRoute {
+/// generic `#[handler]` function), a recorded handler a closure route or
+/// another handler calls, or a `missing()` handler with no record. Such a
+/// handler hands its arguments over at its first request on the route, its
+/// concrete bound arguments bind as a recorded handler's do (BIND-004), and
+/// the plan built from them is kept for the next requests.
+pub(crate) struct RouteSettings {
     /// `GET /users/{user}`, for a refusal.
     route: String,
     path: Vec<Placeholder>,
@@ -1317,13 +1330,12 @@ pub(crate) struct UnrecordedRoute {
     /// The route's `missing()` handler; `None` for the settings a
     /// `missing()` handler itself binds by.
     missing: Option<Arc<RouteMissing>>,
-    /// The plan of each handler that bound on this route, by the key its
-    /// generated code passes. One handler in practice; a closure that calls
-    /// two handlers gets one plan for each.
+    /// The plan of each handler that bound on this route without a plan
+    /// from the startup checks, by the key its generated code passes.
     plans: RwLock<Vec<(TypeId, UnrecordedPlan)>>,
 }
 
-impl UnrecordedRoute {
+impl RouteSettings {
     /// The plan of the handler `key`, named `handler`, whose arguments
     /// `args` lists in declaration order: built and kept on the first call,
     /// read back after. A problem the startup checks would refuse a
@@ -1608,7 +1620,7 @@ async fn bind_request(plan: &RoutePlan, mut request: Request) -> Result<Request,
     };
     match bind_values(plan, &route).await {
         Ok(values) => {
-            request.set_route_bindings(RouteBindingState::Bound(values));
+            request.set_route_bindings(values);
             Ok(request)
         }
         Err(Unbound::Miss(index)) => Err(miss(plan, &plan.bindings[index], request).await),
@@ -1706,7 +1718,7 @@ mod tests {
     fn bind_004_an_unrecorded_route_plans_each_handler_once() {
         struct First;
         struct Second;
-        let route = UnrecordedRoute {
+        let route = RouteSettings {
             route: "GET /users/{id}".to_owned(),
             path: placeholders("/users/{id}"),
             options: RouteBindingOptions::default(),

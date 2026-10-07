@@ -97,30 +97,27 @@ pub struct Request {
     /// the server, whose root [`Request::public_root`] resolves from its
     /// own headers on each read.
     public_root: Option<std::sync::Arc<str>>,
+    /// The binding settings of the matched route, for a `#[handler]` the
+    /// route did not plan: one a closure route or another handler calls.
+    /// A field rather than an extension, so the route hands them over with
+    /// an `Arc` clone and nothing else.
+    route_settings: Option<std::sync::Arc<crate::routing::binding::RouteSettings>>,
+    /// Whether the route planned the handler it calls before the first
+    /// request; the first `#[handler]` to read the request takes it.
+    route_planned: bool,
 }
 
 /// A value a route binding resolved, held until the handler takes it.
 pub(crate) type RouteBound = Box<dyn std::any::Any + Send + Sync>;
 
-/// What the route hands its handler for binding: the values its plan
-/// resolved, or, for a handler the route has no plan for, the route's
-/// binding settings to plan against.
-pub(crate) enum RouteBindingState {
-    /// The values the route's plan resolved, one slot per handler argument.
-    Bound(Vec<Option<RouteBound>>),
-    /// The binding settings of the route, for a handler that binds without
-    /// a plan built before the first request: a generic one, one a closure
-    /// route calls, or a `missing()` handler.
-    Unplanned(std::sync::Arc<crate::routing::binding::UnrecordedRoute>),
-}
-
-/// The [`RouteBindingState`] of a request, kept in the request's extensions
-/// rather than in a field: a request is moved by value through every
-/// middleware, and each move copies the struct, so a field would grow every
-/// frame of a deep middleware stack. The mutex makes the cell `Sync` and
-/// `Clone`, which the extension map requires; the state is taken out once.
+/// The values a route's bindings resolved, by handler argument, kept in the
+/// request's extensions rather than in a field: a request is moved by value
+/// through every middleware, and each move copies the struct, so a field
+/// would grow every frame of a deep middleware stack. The mutex makes the
+/// cell `Sync` and `Clone`, which the extension map requires; the value is
+/// taken out once.
 #[derive(Clone)]
-struct RouteBindings(std::sync::Arc<std::sync::Mutex<Option<RouteBindingState>>>);
+struct RouteBindings(std::sync::Arc<std::sync::Mutex<Option<Vec<Option<RouteBound>>>>>);
 
 /// The address one entry of `X-Forwarded-For` names, in its canonical
 /// form, so an IPv4 address written as an IPv6 one is the IPv4 address.
@@ -179,6 +176,8 @@ impl Request {
             render_cache_prepared: None,
             connection_holds: Vec::new(),
             public_root: None,
+            route_settings: None,
+            route_planned: false,
         }
     }
 
@@ -190,18 +189,43 @@ impl Request {
     }
 
     /// Hand the handler the values the route's bindings resolved, one slot
-    /// per handler argument, or the route's settings to bind by.
-    pub(crate) fn set_route_bindings(&mut self, state: RouteBindingState) {
+    /// per handler argument.
+    pub(crate) fn set_route_bindings(&mut self, values: Vec<Option<RouteBound>>) {
         self.parts
             .extensions
             .insert(RouteBindings(std::sync::Arc::new(std::sync::Mutex::new(
-                Some(state),
+                Some(values),
             ))));
     }
 
-    /// Take what the route handed its handler for binding, once. `None`
-    /// when no route matched, or the route's recorded handler binds nothing.
-    pub(crate) fn take_route_bindings(&mut self) -> Option<RouteBindingState> {
+    /// Hand the request the binding settings of the route it answers.
+    /// `planned` when the route planned the handler it calls before the
+    /// first request.
+    pub(crate) fn set_route_settings(
+        &mut self,
+        settings: std::sync::Arc<crate::routing::binding::RouteSettings>,
+        planned: bool,
+    ) {
+        self.route_settings = Some(settings);
+        self.route_planned = planned;
+    }
+
+    /// The binding settings of the route the request answers.
+    pub(crate) fn route_settings(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::routing::binding::RouteSettings>> {
+        self.route_settings.as_ref()
+    }
+
+    /// Whether the route planned the handler reading the request, once:
+    /// the first handler gets the answer, any handler it calls `false`.
+    pub(crate) fn take_route_planned(&mut self) -> bool {
+        std::mem::take(&mut self.route_planned)
+    }
+
+    /// Take the values the route's bindings resolved, once. `None` when the
+    /// router ran no binding plan for this request.
+    pub(crate) fn take_route_bindings(&mut self) -> Option<Vec<Option<RouteBound>>> {
         let RouteBindings(cell) = self.parts.extensions.remove::<RouteBindings>()?;
         let mut slot = match cell.lock() {
             Ok(slot) => slot,
@@ -316,6 +340,8 @@ impl Request {
             render_cache_prepared: None,
             connection_holds: Vec::new(),
             public_root: None,
+            route_settings: None,
+            route_planned: false,
         }
     }
 
@@ -2066,6 +2092,8 @@ mod url_helper_tests {
             render_cache_prepared: None,
             connection_holds: Vec::new(),
             public_root: None,
+            route_settings: None,
+            route_planned: false,
         };
 
         // Use `.err()` rather than `expect_err` so the test doesn't require
@@ -2104,6 +2132,8 @@ mod url_helper_tests {
             render_cache_prepared: None,
             connection_holds: Vec::new(),
             public_root: None,
+            route_settings: None,
+            route_planned: false,
         };
 
         let (_, bytes) = req
@@ -2157,6 +2187,8 @@ mod url_helper_tests {
             render_cache_prepared: None,
             connection_holds: Vec::new(),
             public_root: None,
+            route_settings: None,
+            route_planned: false,
         };
 
         // The bogus middle hop is dropped - only parseable IPs (plus the
@@ -2203,6 +2235,8 @@ mod url_helper_tests {
             render_cache_prepared: None,
             connection_holds: Vec::new(),
             public_root: None,
+            route_settings: None,
+            route_planned: false,
         };
 
         // A junk-only forwarded chain can't rotate rate-limit buckets - `ip()`

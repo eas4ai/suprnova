@@ -1197,7 +1197,7 @@ impl Router {
         &self,
         method: &Method,
         pattern: &str,
-    ) -> Result<Option<super::binding::RouteBinds>, FrameworkError> {
+    ) -> Result<Option<&super::binding::RouteBinds>, FrameworkError> {
         self.bindings.plan(method, pattern)
     }
 

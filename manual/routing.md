@@ -460,14 +460,14 @@ with a 500 when they fail, a request the fallback would answer included;
 `router.prepare_bindings()` returns the error itself. A closure handler
 and a generic `#[handler]` function carry no record and are not checked
 at startup. A closure binds nothing itself. A generic handler, and a
-`#[handler]` function a closure route calls, bind their arguments of a
-concrete type that implements `RouteBinding` as any handler's do: in path
-order, by the route's binding fields, scoped, through the router's
-binders, with `with_trashed()` and `missing()`. The route plans them at
-the handler's first request and keeps the plan; a binding field, a scoped
-child or a binder the checks above would refuse answers that request with
-a 500 instead of binding. A generic handler's generic arguments read the
-body.
+`#[handler]` function that a closure route or another handler calls with
+the request, bind their arguments of a concrete type that implements
+`RouteBinding` as any handler's do: in path order, by the route's binding
+fields, scoped, through the router's binders, with `with_trashed()` and
+`missing()`. The route plans them at the handler's first request and
+keeps the plan; a binding field, a scoped child or a binder the checks
+above would refuse answers that request with a 500 instead of binding. A
+generic handler's generic arguments read the body.
 
 A handler inside an `impl` block names its type,
 `#[handler(Self = Posts)]`, and is checked as a free handler is; see

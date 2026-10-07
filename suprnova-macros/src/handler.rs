@@ -26,14 +26,14 @@
 //! before the first request.
 //!
 //! When one of a handler's arguments may bind, its body starts with a
-//! guard: if the route planned nothing for it and handed it the route's
-//! settings instead, it hands the route the same description of every
-//! argument, and the route binds its concrete arguments as it binds a
-//! recorded handler's: in path order, by the route's binding fields,
-//! scoped, through the router's binders, with `with_trashed()` and
-//! `missing()`. That is a generic handler, a recorded one a closure route
-//! calls, and a `missing()` handler without a plan. On its own route a
-//! recorded handler's guard is false.
+//! guard: if the route did not plan it but the request carries the route's
+//! settings, it hands the route the same description of every argument,
+//! and the route binds its concrete arguments as it binds a recorded
+//! handler's: in path order, by the route's binding fields, scoped, through
+//! the router's binders, with `with_trashed()` and `missing()`. That is a
+//! generic handler, a recorded one a closure route or another handler calls
+//! with the request, and a `missing()` handler without a plan. On its own
+//! route a recorded handler's guard is false.
 //!
 //! ## A handler inside an `impl` block
 //!
@@ -1260,9 +1260,9 @@ mod tests {
 
     #[test]
     fn bind_004_a_recorded_handler_plans_at_the_request_only_where_its_route_did_not() {
-        // A recorded handler a closure route calls, or a `missing()`
-        // handler, gets the route's settings instead of a plan; on its own
-        // route the guard is false and nothing else runs.
+        // A recorded handler a closure route or another handler calls, or
+        // a `missing()` handler, gets the route's settings instead of a
+        // plan; on its own route the guard is false and nothing else runs.
         let out = expansion(quote! {
             pub async fn show(id: i64, user: User, form: Form) -> Response { todo!() }
         });
