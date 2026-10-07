@@ -23,11 +23,17 @@
 //! handler and, before the first request, refuses a route whose handler
 //! reads a parameter its path does not declare, or reads the body twice. A
 //! generic handler has no type to key a record by, so it is not checked
-//! before the first request. When one of its arguments may bind, its body
-//! starts by handing the route the same description of every argument, and
-//! the route binds its concrete arguments as it binds a recorded handler's:
-//! in path order, by the route's binding fields, scoped, through the
-//! router's binders, with `with_trashed()` and `missing()`.
+//! before the first request.
+//!
+//! When one of a handler's arguments may bind, its body starts with a
+//! guard: if the route planned nothing for it and handed it the route's
+//! settings instead, it hands the route the same description of every
+//! argument, and the route binds its concrete arguments as it binds a
+//! recorded handler's: in path order, by the route's binding fields,
+//! scoped, through the router's binders, with `with_trashed()` and
+//! `missing()`. That is a generic handler, a recorded one a closure route
+//! calls, and a `missing()` handler without a plan. On its own route a
+//! recorded handler's guard is false.
 //!
 //! ## A handler inside an `impl` block
 //!
@@ -259,20 +265,19 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
         .collect();
 
     // The record the router reads. A generic handler has no type to key it
-    // by, and is not checked before the first request; one that may bind
-    // hands the route the same description of its arguments at the request.
-    let generic = has_type_generics(fn_generics);
-    let record = if generic {
+    // by, and is not checked before the first request. A handler that may
+    // bind hands the route the same description of its arguments at the
+    // request, when the route planned nothing for it.
+    let record = if has_type_generics(fn_generics) {
         TokenStream2::new()
     } else {
         record_items(fn_name, self_ty.as_ref(), &args)
     };
-    let unrecorded = if generic
-        && args
-            .iter()
-            .any(|arg| matches!(arg.kind, ArgKind::Probe | ArgKind::OptionalProbe(_)))
+    let unplanned = if args
+        .iter()
+        .any(|arg| matches!(arg.kind, ArgKind::Probe | ArgKind::OptionalProbe(_)))
     {
-        unrecorded_binding(fn_name, self_ty.as_ref(), &args)
+        unplanned_binding(fn_name, self_ty.as_ref(), fn_output, &args)
     } else {
         TokenStream2::new()
     };
@@ -412,7 +417,7 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
             #site_check
             #probes
             #input_binding
-            #unrecorded
+            #unplanned
             #(#bind_pass)*
             #(#path_pass)*
             #(#checks)*
@@ -609,33 +614,79 @@ fn handler_display(fn_name: &Ident, self_ty: Option<&Type>) -> String {
     }
 }
 
-/// The start of a generic handler's body when an argument may bind: the
-/// route plans the handler's arguments, described as a record describes
-/// them, keyed by a type only this handler declares, and binds the concrete
-/// ones as it binds a recorded handler's (BIND-004). A binding that finds
-/// nothing answers the route's `missing()` response or a 404 in place of
-/// the handler.
-fn unrecorded_binding(fn_name: &Ident, self_ty: Option<&Type>, args: &[Arg]) -> TokenStream2 {
+/// The start of a handler's body when an argument may bind. When the
+/// route planned nothing for the handler and handed it the route's
+/// settings, the route plans the handler's arguments, described as a record
+/// describes them, keyed by a type only this handler declares, and binds
+/// the concrete ones as it binds a recorded handler's (BIND-004).
+///
+/// A binding that finds nothing answers the route's `missing()` response,
+/// or the 404, in place of the handler. A handler that returns `Response`
+/// returns that response as it is; any other return type, which cannot
+/// carry it, gets the 404's error through `?`. The return type is named to
+/// tell them apart, so one the body cannot name (`impl Trait`) always gets
+/// the error.
+fn unplanned_binding(
+    fn_name: &Ident,
+    self_ty: Option<&Type>,
+    output: &syn::ReturnType,
+    args: &[Arg],
+) -> TokenStream2 {
     let display = handler_display(fn_name, self_ty);
     let entries = arg_entries(args);
-    quote! {
-        {
-            struct __SuprnovaUnrecordedHandler;
-            if let ::core::option::Option::Some(__suprnova_answer) = __suprnova_input
-                .__bind_unrecorded(
-                    ::std::any::TypeId::of::<__SuprnovaUnrecordedHandler>(),
+    let bind = |answers_missing: TokenStream2| {
+        quote! {
+            __suprnova_input
+                .__bind_unplanned(
+                    ::std::any::TypeId::of::<__SuprnovaUnplannedHandler>(),
                     ::core::concat!(::core::module_path!(), "::", #display),
                     || {
                         use ::suprnova::routing::__ArgSource as _;
                         ::std::vec![#(#entries),*]
                     },
+                    #answers_missing,
                 )
-                .await
-            {
-                return __suprnova_answer;
+                .await?
+        }
+    };
+    let output = match output {
+        syn::ReturnType::Type(_, ty) if !names_impl(ty) => Some(ty),
+        _ => None,
+    };
+    let answer = match output {
+        Some(output) => {
+            let bind = bind(quote! { (&&__suprnova_output).__answers_missing() });
+            quote! {
+                use ::suprnova::routing::__OutputSource as _;
+                let __suprnova_output = ::suprnova::routing::__HandlerOutput::<#output>::new();
+                if let ::core::option::Option::Some(__suprnova_answer) = #bind {
+                    return (&&__suprnova_output).__missing_answer(__suprnova_answer);
+                }
             }
         }
+        None => {
+            let bind = bind(quote! { false });
+            quote! { let _ = #bind; }
+        }
+    };
+    quote! {
+        if __suprnova_input.__binds_unplanned() {
+            struct __SuprnovaUnplannedHandler;
+            #answer
+        }
     }
+}
+
+/// Whether `ty` contains `impl Trait`, which the body cannot name.
+fn names_impl(ty: &Type) -> bool {
+    fn walk(tokens: TokenStream2) -> bool {
+        tokens.into_iter().any(|token| match token {
+            proc_macro2::TokenTree::Ident(ident) => ident == "impl",
+            proc_macro2::TokenTree::Group(group) => walk(group.stream()),
+            _ => false,
+        })
+    }
+    walk(quote!(#ty))
 }
 
 /// One `HandlerArg` per argument, in declaration order. A probed
@@ -1163,14 +1214,16 @@ mod tests {
     #[test]
     fn bind_004_a_generic_handler_plans_its_concrete_arguments_against_the_route() {
         // No record to key a startup plan by, so the generated code hands
-        // the router every argument at the request, before any binds.
+        // the route every argument at the request, before any binds.
         let out = expansion(quote! {
             pub async fn show<T: FromRequest>(user: User, post: Option<Post>, form: T)
                 -> Response { todo!() }
         });
         assert!(!out.contains("compile_error"), "got:\n{out}");
         assert!(!out.contains("HandlerRecord"), "got:\n{out}");
-        let plan = position(&out, "__bind_unrecorded");
+        let guard = position(&out, "__binds_unplanned ()");
+        let plan = position(&out, "__bind_unplanned (");
+        assert!(guard < plan, "got:\n{out}");
         assert!(
             plan < position(&out, "__ArgProbe :: < User > :: new ()) . __bind"),
             "the route plans the arguments before the first binds; got:\n{out}"
@@ -1193,22 +1246,51 @@ mod tests {
             out.contains("HandlerArg :: body (\"form\" , \"T\")"),
             "the generic argument is described as the body reader it is; got:\n{out}"
         );
-        // A handler whose miss the route answers returns that answer.
-        assert!(out.contains("return __suprnova_answer"), "got:\n{out}");
+        // A handler whose miss the route answers returns that answer, by
+        // its return type.
+        assert!(
+            out.contains("__HandlerOutput :: < Response > :: new ()"),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains("return (&& __suprnova_output) . __missing_answer (__suprnova_answer)"),
+            "got:\n{out}"
+        );
     }
 
     #[test]
-    fn bind_004_only_a_generic_handler_that_may_bind_plans_at_the_request() {
+    fn bind_004_a_recorded_handler_plans_at_the_request_only_where_its_route_did_not() {
+        // A recorded handler a closure route calls, or a `missing()`
+        // handler, gets the route's settings instead of a plan; on its own
+        // route the guard is false and nothing else runs.
+        let out = expansion(quote! {
+            pub async fn show(id: i64, user: User, form: Form) -> Response { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(out.contains("HandlerRecord :: new"), "got:\n{out}");
+        let guard = position(&out, "if __suprnova_input . __binds_unplanned ()");
+        assert!(
+            guard < position(&out, "__bind_unplanned ("),
+            "the plan runs only behind the guard; got:\n{out}"
+        );
+        assert!(
+            position(&out, "__bind_unplanned (")
+                < position(&out, "__ArgProbe :: < User > :: new ()) . __bind"),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains("HandlerArg :: path_value (\"id\" , \"i64\" , false)"),
+            "every argument is described, as the record describes it; got:\n{out}"
+        );
         for src in [
-            // Recorded: the router planned it before the first request.
-            quote! { pub async fn show(user: User, form: Form) -> Response { todo!() } },
-            // Generic, with nothing that may bind.
+            // Nothing that may bind.
+            quote! { pub async fn show(id: i64, req: Request) -> Response { todo!() } },
             quote! { pub async fn show<T: FromRequest>(id: i64, form: T) -> Response { todo!() } },
             quote! { pub async fn show<T: FromRequest>(req: Request) -> Response { todo!() } },
         ] {
             let out = expansion(src);
             assert!(!out.contains("compile_error"), "got:\n{out}");
-            assert!(!out.contains("__bind_unrecorded"), "got:\n{out}");
+            assert!(!out.contains("__bind_unplanned"), "got:\n{out}");
         }
         // An `#[authorize]` target binds too.
         let out = expansion(quote! {
@@ -1217,9 +1299,34 @@ mod tests {
         });
         assert!(!out.contains("compile_error"), "got:\n{out}");
         assert!(
-            position(&out, "__bind_unrecorded") < position(&out, "__authorize_target"),
+            position(&out, "__bind_unplanned (") < position(&out, "__authorize_target"),
             "got:\n{out}"
         );
+    }
+
+    #[test]
+    fn bind_009_only_a_handler_returning_response_returns_the_missing_response() {
+        // Another return type cannot carry the route's `missing()`
+        // response, so it asks for none and gets the 404's error.
+        let out = expansion(quote! {
+            pub async fn show(user: User) -> Result<HttpResponse, FrameworkError> { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            out.contains(
+                "__HandlerOutput :: < Result < HttpResponse , FrameworkError > > :: new ()"
+            ),
+            "got:\n{out}"
+        );
+        assert!(out.contains("__answers_missing ()"), "got:\n{out}");
+        // A return type the body cannot name asks for none.
+        let out = expansion(quote! {
+            pub async fn show(user: User) -> Result<impl Display, FrameworkError> { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(!out.contains("__HandlerOutput"), "got:\n{out}");
+        assert!(out.contains("__bind_unplanned ("), "got:\n{out}");
+        assert!(out.contains(", false ,) . await ?"), "got:\n{out}");
     }
 
     // ── A handler inside an `impl` block ─────────────────────────────────────
@@ -1605,8 +1712,11 @@ mod tests {
             pub async fn publish(post: RouteParam<Post>) -> Response { todo!() }
         });
         assert!(!out.contains("compile_error"), "got:\n{out}");
+        // The handler's name, `publish`, is in the expansion too, so the
+        // checks are found by their call.
         assert!(
-            position(&out, "\"view\"") < position(&out, "\"publish\""),
+            position(&out, "__authorize_handler (\"view\"")
+                < position(&out, "__authorize_handler (\"publish\""),
             "checks must run in the order written; got:\n{out}"
         );
         assert!(!out.contains("authorize ("), "got:\n{out}");
@@ -1826,6 +1936,18 @@ mod tests {
                 pub async fn generic<T: FromRequest + Send + 'static>(form: T) -> Response {
                     let _ = form;
                     suprnova::http::text("generic")
+                }
+            },
+            quote! {
+                pub async fn other_output(
+                    tag: Tag,
+                ) -> Result<suprnova::HttpResponse, suprnova::FrameworkError> {
+                    Ok(suprnova::HttpResponse::text(tag.name))
+                }
+            },
+            quote! {
+                pub async fn unnamed_output(tag: Tag) -> Result<impl std::fmt::Display, suprnova::FrameworkError> {
+                    Ok(tag.name)
                 }
             },
             quote! {

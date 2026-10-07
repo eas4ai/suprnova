@@ -102,20 +102,25 @@ pub struct Request {
 /// A value a route binding resolved, held until the handler takes it.
 pub(crate) type RouteBound = Box<dyn std::any::Any + Send + Sync>;
 
-/// The values a route's bindings resolved, by handler argument, kept in the
-/// request's extensions rather than in a field: a request is moved by value
-/// through every middleware, and each move copies the struct, so a field
-/// would grow every frame of a deep middleware stack. The mutex makes the
-/// cell `Sync` and `Clone`, which the extension map requires; the value is
-/// taken out once.
-#[derive(Clone)]
-struct RouteBindings(std::sync::Arc<std::sync::Mutex<Option<Vec<Option<RouteBound>>>>>);
+/// What the route hands its handler for binding: the values its plan
+/// resolved, or, for a handler the route has no plan for, the route's
+/// binding settings to plan against.
+pub(crate) enum RouteBindingState {
+    /// The values the route's plan resolved, one slot per handler argument.
+    Bound(Vec<Option<RouteBound>>),
+    /// The binding settings of the route, for a handler that binds without
+    /// a plan built before the first request: a generic one, one a closure
+    /// route calls, or a `missing()` handler.
+    Unplanned(std::sync::Arc<crate::routing::binding::UnrecordedRoute>),
+}
 
-/// The binding settings of a matched route whose handler carries no
-/// record, for a generic handler to bind its concrete arguments by. Kept in
-/// the extensions for the reason [`RouteBindings`] is.
+/// The [`RouteBindingState`] of a request, kept in the request's extensions
+/// rather than in a field: a request is moved by value through every
+/// middleware, and each move copies the struct, so a field would grow every
+/// frame of a deep middleware stack. The mutex makes the cell `Sync` and
+/// `Clone`, which the extension map requires; the state is taken out once.
 #[derive(Clone)]
-struct UnrecordedRouteBindings(std::sync::Arc<crate::routing::binding::UnrecordedRoute>);
+struct RouteBindings(std::sync::Arc<std::sync::Mutex<Option<RouteBindingState>>>);
 
 /// The address one entry of `X-Forwarded-For` names, in its canonical
 /// form, so an IPv4 address written as an IPv6 one is the IPv4 address.
@@ -185,38 +190,18 @@ impl Request {
     }
 
     /// Hand the handler the values the route's bindings resolved, one slot
-    /// per handler argument.
-    pub(crate) fn set_route_bindings(&mut self, values: Vec<Option<RouteBound>>) {
+    /// per handler argument, or the route's settings to bind by.
+    pub(crate) fn set_route_bindings(&mut self, state: RouteBindingState) {
         self.parts
             .extensions
             .insert(RouteBindings(std::sync::Arc::new(std::sync::Mutex::new(
-                Some(values),
+                Some(state),
             ))));
     }
 
-    /// Hand a handler that carries no record the binding settings of the
-    /// route it answers.
-    pub(crate) fn set_unrecorded_route(
-        &mut self,
-        route: std::sync::Arc<crate::routing::binding::UnrecordedRoute>,
-    ) {
-        self.parts.extensions.insert(UnrecordedRouteBindings(route));
-    }
-
-    /// Take the binding settings of the route, once. `None` when the
-    /// request's route has a recorded handler, or no route matched.
-    pub(crate) fn take_unrecorded_route(
-        &mut self,
-    ) -> Option<std::sync::Arc<crate::routing::binding::UnrecordedRoute>> {
-        self.parts
-            .extensions
-            .remove::<UnrecordedRouteBindings>()
-            .map(|UnrecordedRouteBindings(route)| route)
-    }
-
-    /// Take the values the route's bindings resolved, once. `None` when the
-    /// router ran no binding plan for this request.
-    pub(crate) fn take_route_bindings(&mut self) -> Option<Vec<Option<RouteBound>>> {
+    /// Take what the route handed its handler for binding, once. `None`
+    /// when no route matched, or the route's recorded handler binds nothing.
+    pub(crate) fn take_route_bindings(&mut self) -> Option<RouteBindingState> {
         let RouteBindings(cell) = self.parts.extensions.remove::<RouteBindings>()?;
         let mut slot = match cell.lock() {
             Ok(slot) => slot,

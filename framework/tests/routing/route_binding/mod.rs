@@ -33,6 +33,7 @@ pub mod resources;
 pub mod scoped;
 pub mod startup;
 pub mod trashed;
+pub mod unrecorded;
 pub mod urls;
 
 /// Serve `router` through `handle_request` on a loopback socket. The

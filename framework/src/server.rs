@@ -1068,8 +1068,8 @@ async fn handle_request_inner(
             crate::error::debug_page::note_route_pattern(&pattern);
             // The route's bindings run after its middleware, right before
             // the handler (BIND-015). The checks above passed, so the plan
-            // is there. A handler with no record gets the route's settings
-            // and binds inside itself.
+            // is there. A route with no record hands its handler the route's
+            // settings, which a handler that binds plans against itself.
             let (handler, unrecorded) = match router.binding_plan(&effective_method, &pattern) {
                 Ok(Some(crate::routing::binding::RouteBinds::Planned(plan))) => (
                     crate::routing::binding::planned_handler(plan, handler),
@@ -1089,7 +1089,7 @@ async fn handle_request_inner(
                     .with_route_pattern(pattern.clone()),
             );
             if let Some(route) = unrecorded {
-                request.set_unrecorded_route(route);
+                request.set_route_bindings(crate::http::RouteBindingState::Unplanned(route));
             }
             let live_metadata = router.live_route_metadata(&effective_method, &pattern);
             if let Some(metadata) = live_metadata {
