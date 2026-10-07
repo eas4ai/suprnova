@@ -789,10 +789,11 @@ async fn answer_missing(missing: &RouteMissing, mut request: Request) -> Respons
     (missing.handler)(request).await
 }
 
-/// The route's `missing()` response, kept for a route whose handler called
-/// a `#[handler]` that cannot return it (its return type is not
-/// [`Response`]): that handler fails with the 404's error, and the route
-/// answers with the kept response when that error is its result.
+/// The route's `missing()` response, kept for a route on which a
+/// `#[handler]` that cannot return it (its return type is not
+/// [`Response`]) ran, whoever called it: that handler fails with the 404's
+/// error, and the server answers with the kept response when that error is
+/// the route's final response, after the whole middleware chain.
 #[derive(Default)]
 pub(crate) struct MissingAnswer(std::sync::Mutex<Option<(String, Response)>>);
 
@@ -806,40 +807,27 @@ impl MissingAnswer {
         *slot = Some((error.to_string(), answer));
     }
 
-    /// The route's result: the kept `missing()` response when `result` is
-    /// the miss's own 404, else `result`.
-    fn answer(&self, result: Response) -> Response {
+    /// The route's final response: the kept `missing()` response when
+    /// `response` is the miss's own 404, else `response`.
+    pub(crate) fn answer(&self, response: HttpResponse) -> HttpResponse {
         let kept = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         let Some((error, answer)) = kept else {
-            return result;
+            return response;
         };
-        let (Ok(response) | Err(response)) = &result;
         let is_the_miss = response.status_code() == 404
             && response
                 .error_report()
                 .is_some_and(|report| report.chain().first() == Some(&error));
-        if is_the_miss { answer } else { result }
+        if is_the_miss {
+            answer.unwrap_or_else(|answer| answer)
+        } else {
+            response
+        }
     }
-}
-
-/// The handler of a route with a `missing()` handler: a `#[handler]` it
-/// calls that cannot return the `missing()` response keeps it in the
-/// request's slot, and the route answers with it in place of the miss.
-pub(crate) fn missing_answer_handler(handler: Arc<BoxedHandler>) -> Arc<BoxedHandler> {
-    let boxed: BoxedHandler = Box::new(move |mut request| {
-        let handler = handler.clone();
-        Box::pin(async move {
-            let slot = Arc::new(MissingAnswer::default());
-            request.set_missing_answer(slot.clone());
-            let result = handler(request).await;
-            slot.answer(result)
-        })
-    });
-    Arc::new(boxed)
 }
 
 /// Box a `missing()` handler the way a route handler is boxed, keeping its

@@ -180,6 +180,12 @@ fn answer_show_post(req: Request) -> std::pin::Pin<Box<dyn Future<Output = Respo
     Box::pin(show_post(req))
 }
 
+fn answer_user_post_result(
+    req: Request,
+) -> std::pin::Pin<Box<dyn Future<Output = Response> + Send>> {
+    Box::pin(async move { user_post_result(req).await.map_err(HttpResponse::from) })
+}
+
 /// A plain `missing()` handler: it sees the request.
 async fn redirect_home(request: Request) -> Response {
     Ok(HttpResponse::text(format!("missing at {}", request.path())).status(302))
@@ -631,4 +637,27 @@ async fn bind_007_a_missing_handlers_request_time_refusal_names_it_as_such() {
     let (status, body) = get_path(addr, "/users/1/posts/99").await;
     assert_eq!(status, 500, "{body}");
     assert!(body.contains("`missing()` handler"), "{body}");
+}
+
+#[tokio::test]
+async fn bind_009_a_handler_of_another_return_type_middleware_calls_answers_the_missing_response() {
+    // Route middleware calls the handler before the route's own runs; its
+    // return type cannot carry the `missing()` response, which the route
+    // answers with all the same.
+    let _db = fixture().await;
+    let router: Router = Router::new()
+        .get("/users/{user}/posts/{post}", show_post)
+        .scope_bindings()
+        .middleware(AnswerWith(answer_user_post_result))
+        .missing(redirect_home)
+        .into();
+    let addr = serve(router).await;
+    assert_eq!(
+        get_path(addr, "/users/1/posts/2").await,
+        (302, "missing at /users/1/posts/2".to_owned())
+    );
+    assert_eq!(
+        get_path(addr, "/users/1/posts/1").await,
+        (200, "ada ada-post".to_owned())
+    );
 }

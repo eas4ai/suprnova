@@ -416,11 +416,11 @@ looked up through the parent the route's handler binds, so it never gets
 a row the route refused. A bound argument of its own that finds nothing,
 such as the post that missed, answers 404 instead of calling it again.
 
-A `#[handler]` function that the route's handler calls with the request
-and that returns another type than `Response` cannot return the
-`missing()` response. It fails with the 404 error instead, and when that
-error is the route's result, the route answers with the `missing()`
-response.
+A `#[handler]` function that the route's handler or its middleware calls
+with the request, and that returns another type than `Response`, cannot
+return the `missing()` response. It fails with the 404 error instead,
+and when that error is the route's final response, after its
+middleware, the route answers with the `missing()` response.
 
 ### Enums
 

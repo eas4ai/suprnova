@@ -1081,14 +1081,12 @@ async fn handle_request_inner(
                 Some(plan) => crate::routing::binding::planned_handler(plan.clone(), handler),
                 None => handler,
             };
-            // On a route with `missing()`, a handler the route's handler
-            // calls that cannot return the `missing()` response keeps it
-            // for the route to answer with (BIND-009).
-            let handler = if binds.is_some_and(|binds| binds.settings().has_missing()) {
-                crate::routing::binding::missing_answer_handler(handler)
-            } else {
-                handler
-            };
+            // On a route with `missing()`, a handler that cannot return the
+            // `missing()` response keeps it in this slot, whoever called it,
+            // and the route's final response becomes it (BIND-009).
+            let missing_answer = binds
+                .is_some_and(|binds| binds.settings().has_missing())
+                .then(|| Arc::new(crate::routing::binding::MissingAnswer::default()));
             let mut request = stamp_peer(
                 Request::new(req)
                     .with_params(params)
@@ -1096,6 +1094,9 @@ async fn handle_request_inner(
             );
             if let Some(binds) = binds {
                 request.set_route_settings(binds.settings().clone());
+            }
+            if let Some(slot) = &missing_answer {
+                request.set_missing_answer(slot.clone());
             }
             let live_metadata = router.live_route_metadata(&effective_method, &pattern);
             if let Some(metadata) = live_metadata {
@@ -1164,6 +1165,10 @@ async fn handle_request_inner(
             //    check `request.method()`.
             let http_response =
                 execute_chain_safely(chain, request, handler, &method, path, request_id).await;
+            let http_response = match missing_answer {
+                Some(slot) => slot.answer(http_response),
+                None => http_response,
+            };
 
             // The 5xx -> OTel `Status::Error` marker is recorded inside
             // `RequestIdMiddleware` (the outermost middleware), where the
