@@ -2277,80 +2277,159 @@ async fn mem_audit_the_magick_driver_carries_a_profile_between_runs_as_its_chunk
     );
 }
 
-/// MEM-003: the built-in driver returns the buffer its encoder wrote, not a
-/// copy of it. A 1024 by 1024 BMP written as a BMP keeps no metadata, so
-/// nothing is added to it. The measure is the same work done by hand: the
-/// driver's own decode of the source (`decoded_dimensions`, the load
-/// `process` runs first), and the same registry encoder fed the same
-/// pixels from here, which hands back its file in a packet. `process`
-/// allocates less than half an encoded file more than the two together,
-/// where a copy of the file would be all of it.
+/// MEM-003: the built-in driver encodes a PNG or a BMP from the pixels it
+/// holds, without the copies the registry encoders make of the frame they
+/// are lent, and returns the file it is handed rather than a copy. The
+/// measure is the same work done by hand: the driver's own decode of the
+/// source (`decoded_dimensions`, the load `process` runs first), and the
+/// format's own encoder fed the same pixels, moved in, from here; the
+/// files must be byte for byte the same. `process` allocates less than
+/// half a plane more than the two together, where a copy of the pixels,
+/// or of the file, would be all of it.
 #[tokio::test]
 async fn mem_audit_an_encoded_image_is_not_copied_out_of_its_encoder() {
-    use oxideav_core::{
-        CodecId, CodecParameters, Frame, PixelFormat, RuntimeContext, VideoFrame, VideoPlane,
-    };
     let _lock = exclusive().await;
-    const SIDE: u32 = 1024;
     let driver = OxideAvImageDriver::new();
-    let bmp = driver
-        .process(
-            RED_PNG_1X1,
-            &ImagePipeline {
-                transformations: vec![Transformation::Resize {
-                    width: SIDE,
-                    height: SIDE,
-                }],
-                format: Some(OutputFormat::Bmp),
-                ..Default::default()
-            },
-        )
-        .expect("a 1024 by 1024 bitmap");
-    let pipeline = ImagePipeline::default();
-    let (processing, out_len) = allocated_by(&driver, &bmp, &pipeline);
-
-    driver.decoded_dimensions(&bmp).expect("a warm-up");
-    let heap = Heap::start();
-    let before = heap.bytes();
-    driver.decoded_dimensions(&bmp).expect("the decode");
-    let decoding = heap.bytes() - before;
-    drop(heap);
-
-    let mut context = RuntimeContext::new();
-    oxideav_bmp::register(&mut context.codecs, &mut context.containers);
-    let encode = |pixels: Vec<u8>| {
-        let heap = Heap::start();
-        let before = heap.bytes();
-        let mut params = CodecParameters::video(CodecId::new("bmp"));
-        params.width = Some(SIDE);
-        params.height = Some(SIDE);
-        params.pixel_format = Some(PixelFormat::Rgba);
-        let frame = Frame::Video(VideoFrame {
-            pts: Some(0),
-            planes: vec![VideoPlane {
+    const SIDE: u32 = 512;
+    let plane = (SIDE * SIDE * 4) as usize;
+    let png = encode_png(SIDE, SIDE, PngPixelFormat::Rgba, 4, false);
+    let bmp = convert(&png, OutputFormat::Bmp);
+    let pixels = oxideav_png::decode_png_to_rgba(&png)
+        .expect("the PNG decodes")
+        .data;
+    assert_eq!(pixels.len(), plane);
+    type ByHand = fn(Vec<u8>) -> Vec<u8>;
+    let by_hand: [(&str, &[u8], ByHand); 2] = [
+        ("PNG", &png, |pixels| {
+            oxideav_png::encode_png_image(&PngImage {
+                width: SIDE,
+                height: SIDE,
+                pixel_format: PngPixelFormat::Rgba,
                 stride: SIDE as usize * 4,
                 data: pixels,
-            }],
-        });
-        let mut encoder = context
-            .codecs
-            .first_encoder(&params)
-            .expect("a BMP encoder");
-        encoder.send_frame(&frame).expect("the frame");
-        drop(frame);
-        encoder.flush().expect("the flush");
-        let packet = encoder.receive_packet().expect("the file");
-        let used = heap.bytes() - before;
+                palette: Vec::new(),
+            })
+            .expect("the PNG encodes")
+        }),
+        ("BMP", &bmp, |pixels| {
+            oxideav_bmp::encode_bmp_plane(
+                &oxideav_bmp::BmpPlane {
+                    stride: SIDE as usize * 4,
+                    data: pixels,
+                },
+                oxideav_bmp::BmpPixelFormat::Rgba,
+                None,
+                SIDE,
+                SIDE,
+            )
+            .expect("the BMP encodes")
+            .0
+        }),
+    ];
+    let pipeline = ImagePipeline::default();
+    let mut copied = Vec::new();
+    for (name, source, encode) in by_hand {
+        let out = driver.process(source, &pipeline).expect("a warm-up");
+        let (processing, _) = allocated_by(&driver, source, &pipeline);
+
+        driver.decoded_dimensions(source).expect("a warm-up");
+        let heap = Heap::start();
+        let before = heap.bytes();
+        driver.decoded_dimensions(source).expect("the decode");
+        let decoding = heap.bytes() - before;
         drop(heap);
-        (used, packet.data.len())
-    };
-    let red = || [255u8, 0, 0, 255].repeat((SIDE * SIDE) as usize);
-    encode(red());
-    let (encoding, encoded_len) = encode(red());
-    assert_eq!(encoded_len, out_len, "the same file is written by hand");
+
+        assert!(
+            encode(pixels.clone()) == out,
+            "{name}: the file by hand differs"
+        );
+        let moved = pixels.clone();
+        let heap = Heap::start();
+        let before = heap.bytes();
+        let file = encode(moved);
+        let encoding = heap.bytes() - before;
+        drop(heap);
+        drop(file);
+
+        if processing >= decoding + encoding + plane as u64 / 2 {
+            copied.push(format!(
+                "{name}: process allocated {processing} bytes for a {}-byte file, against \
+                 {decoding} to decode it and {encoding} to encode it by hand",
+                out.len()
+            ));
+        }
+    }
     assert!(
-        processing < decoding + encoding + out_len as u64 / 2,
-        "process allocated {processing} bytes for a {out_len}-byte BMP, against {decoding} to \
-         decode it and {encoding} to encode it by hand: the encoded file was copied"
+        copied.is_empty(),
+        "the pixels or the file were copied: {copied:#?}"
+    );
+}
+
+/// IMG-002: a custom step's Rust stage that carries an RGB profile into the
+/// next PNG is charged the inflate that checks the profile and the next
+/// PNG's copy of its chunk. A 1 MiB profile between two runs under a 1 MiB
+/// budget is refused, and the refusal names both.
+#[cfg(unix)]
+#[tokio::test]
+async fn img_002_the_magick_driver_refuses_a_profile_it_carries_between_runs_over_the_budget() {
+    let _lock = exclusive().await;
+    const BUDGET: u64 = 1024 * 1024;
+    suprnova::media::register_transformation("img-002-between-runs", Ok);
+    let pixels = encode_png(64, 64, PngPixelFormat::Rgba, 4, false);
+    let chunk = iccp_chunk(&p3_profile_of(LARGE_PROFILE));
+    let intermediate = png_with_chunks(&pixels, &[(b"iCCP", chunk.clone())]);
+    let driver = magick_stand_in_per_run(
+        "img-002-between-runs-budget",
+        &intermediate,
+        &convert(&pixels, OutputFormat::Bmp),
+    );
+    let pipeline = ImagePipeline {
+        transformations: vec![Transformation::custom("img-002-between-runs")],
+        format: Some(OutputFormat::Bmp),
+        ..Default::default()
+    };
+    let (result, _) = process_under(&driver, &pixels, &pipeline, BUDGET);
+    let message = refused(
+        result,
+        "the check and the next PNG's copy are over the budget",
+    );
+    for part in [
+        format!("{LARGE_PROFILE}-byte ICC profile"),
+        "to inflate it and check its length".to_string(),
+        format!("{} bytes for the copy the next PNG carries", chunk.len()),
+        "between two ImageMagick runs".to_string(),
+        format!("limit of {BUDGET}"),
+    ] {
+        assert!(message.contains(&part), "{part:?} is not in: {message}");
+    }
+}
+
+/// IMG-002: a profile in the PNG ImageMagick writes is checked by
+/// inflating it, so it is charged its inflated size against what the
+/// budget leaves beside the output. One that declares 64 MiB is refused
+/// before it is inflated, and the refusal names the inflate.
+#[cfg(unix)]
+#[tokio::test]
+async fn img_002_the_magick_driver_refuses_an_output_profile_it_would_inflate_over_the_budget() {
+    let _lock = exclusive().await;
+    const DECLARED: usize = 64 * 1024 * 1024;
+    let png = png_with_chunks(
+        &encode_png(64, 64, PngPixelFormat::Rgba, 4, false),
+        &[(b"iCCP", iccp_chunk(&p3_profile_of(DECLARED)))],
+    );
+    let driver = magick_stand_in("img-002-magick-output-png", &png);
+    let budget = png.len() as u64 + 4 * 1024 * 1024;
+    let (result, peak) = process_under(&driver, &png, &ImagePipeline::default(), budget);
+    let message = refused(result, "the inflate is over what the budget leaves");
+    for part in [
+        format!("ImageMagick wrote a {DECLARED}-byte ICC profile"),
+        "to inflate it and check its length".to_string(),
+        format!("limit of {budget} leaves beside the output"),
+    ] {
+        assert!(message.contains(&part), "{part:?} is not in: {message}");
+    }
+    assert!(
+        peak < 1024 * 1024 + 2 * png.len() as u64,
+        "held {peak} bytes before refusing: the profile was inflated"
     );
 }
