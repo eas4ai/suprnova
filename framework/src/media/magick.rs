@@ -54,8 +54,8 @@ use super::ImageConfig;
 use super::color::Color;
 use super::custom::CustomTransformation;
 use super::driver::{ImageDriver, ImagePipeline, OutputFormat, Transformation};
-use super::metadata::{self, ColourClass, Kept, SrgbConversion};
-use super::orientation::{Orientation, orientation_only_exif};
+use super::metadata::{self, ColourClass, IccData, Kept, SrgbConversion};
+use super::orientation::Orientation;
 use super::oxideav::OxideAvImageDriver;
 use super::sniff;
 
@@ -602,7 +602,7 @@ impl MagickCliDriver {
                 let (bytes, what) = if converts {
                     found.read_cost()
                 } else {
-                    (found.check_cost(), "to check its length")
+                    found.check_cost()
                 };
                 let room = config.max_alloc_bytes.saturating_sub(output.len() as u64);
                 if bytes > room {
@@ -786,9 +786,18 @@ fn intermediate_args(keeps_exif: bool) -> Vec<String> {
 ///
 /// The next PNG carries the profile when it is an RGB one, and, when
 /// `keeps_exif`, the orientation ImageMagick read, as EXIF the next run
-/// reads back; the encoder writes both itself, so the PNG is not copied to
-/// add them. A grey profile, or any profile at the sRGB stage, is
+/// reads back. A grey profile, or any profile at the sRGB stage, is
 /// converted away here, since the PNG between runs is RGBA.
+///
+/// The RGB profile goes on as the `iCCP` chunk ImageMagick wrote, checked
+/// by its length: it is not inflated into a buffer or compressed again,
+/// and it is copied once, into the next PNG (MEM-003). The encoder writes
+/// the pixels alone, and the chunk and the EXIF are added after, as
+/// [`metadata::add`] adds them to any output: `oxideav_png` copies a
+/// profile into a chunk of its own and again to checksum it. Its API leaves
+/// no room in what it returns, so adding them moves the encoded pixels once
+/// into a buffer with that room; writing them through the encoder grew its
+/// buffer by doubling as well.
 fn rust_stage(
     intermediate: &[u8],
     after: AfterStage,
@@ -805,20 +814,29 @@ fn rust_stage(
     let found = metadata::find_output_profile(OutputFormat::Png, intermediate);
     let held = pixels.pixels().len() as u64;
     let class = found.as_ref().map(|found| found.header.class);
-    // The profile is read only where this stage uses it: an RGB one it
-    // carries or converts from, a grey one it converts from. A CMYK or Lab
-    // one is dropped as it stands, so it is never inflated, and costs
-    // nothing (MEM-003).
-    let reads = matches!(class, Some(ColourClass::Rgb | ColourClass::Gray));
+    // The profile is inflated only where this stage converts from it: a
+    // grey one, or an RGB one at the sRGB stage. An RGB one after a custom
+    // step is carried as its chunk, and a CMYK or Lab one is dropped as it
+    // stands (MEM-003).
+    let converts = class == Some(ColourClass::Gray)
+        || (class == Some(ColourClass::Rgb) && after == AfterStage::Srgb);
     let carries = class == Some(ColourClass::Rgb) && after != AfterStage::Srgb;
     if let Some(found) = &found {
+        let chunk = found.png_chunk().map_or(0, |chunk| chunk.len() as u64);
         let charges: metadata::ProfileCharges = [
-            if reads { found.read_cost() } else { (0, "") },
-            if carries {
-                (found.header.size, "for the copy the next PNG carries")
+            if converts {
+                found.read_cost()
+            } else if carries {
+                found.check_cost()
             } else {
                 (0, "")
             },
+            if carries {
+                (chunk, "for the copy the next PNG carries")
+            } else {
+                (0, "")
+            },
+            (0, ""),
         ];
         let charged = metadata::charged(&charges);
         let needed = held.saturating_add(charged);
@@ -833,12 +851,14 @@ fn rust_stage(
             )));
         }
     }
-    // A PNG's profile is inflated, so it is owned: `into_owned` moves it
-    // into the `Iccp` the encoder takes, which holds a `Vec`.
-    let mut profile = found
-        .filter(|_| reads)
-        .and_then(|found| found.read())
-        .map(Cow::into_owned);
+    let profile = found
+        .as_ref()
+        .filter(|_| converts)
+        .and_then(|found| found.read());
+    let carried = found
+        .as_ref()
+        .filter(|found| carries && found.is_whole())
+        .and_then(|found| found.png_chunk());
     let mut pixels = match after {
         AfterStage::Custom(custom) => {
             let out = custom.apply(pixels)?;
@@ -847,40 +867,32 @@ fn rust_stage(
         }
         AfterStage::Srgb => pixels,
     };
-    if after == AfterStage::Srgb || class != Some(ColourClass::Rgb) {
-        if let Some(conversion) = profile.as_deref().and_then(SrgbConversion::from_profile) {
-            conversion.convert_rgba(pixels.pixels_mut())?;
-        }
-        profile = None;
+    if let Some(conversion) = profile.as_deref().and_then(SrgbConversion::from_profile) {
+        conversion.convert_rgba(pixels.pixels_mut())?;
     }
     let (width, height) = (pixels.width(), pixels.height());
-    let metadata = oxideav_png::PngMetadata {
-        iccp: profile.map(|profile| oxideav_png::Iccp {
-            name: "ICC profile".into(),
-            profile,
-        }),
-        exif: orientation.map(|orientation| oxideav_png::Exif {
-            data: orientation_only_exif(orientation).to_vec(),
-        }),
-        ..oxideav_png::PngMetadata::default()
-    };
-    oxideav_png::encode_png_image_with_options(
-        &oxideav_png::PngImage {
-            width,
-            height,
-            pixel_format: oxideav_png::PngPixelFormat::Rgba,
-            stride: width as usize * 4,
-            data: pixels.into_pixels(),
-            palette: Vec::new(),
-        },
-        &oxideav_png::PngEncoderOptions {
-            metadata: Some(metadata),
-            ..oxideav_png::PngEncoderOptions::default()
-        },
-    )
+    let mut png = oxideav_png::encode_png_image(&oxideav_png::PngImage {
+        width,
+        height,
+        pixel_format: oxideav_png::PngPixelFormat::Rgba,
+        stride: width as usize * 4,
+        data: pixels.into_pixels(),
+        palette: Vec::new(),
+    })
     .map_err(|e| {
         FrameworkError::internal(format!("image encode failed between ImageMagick runs: {e}"))
-    })
+    })?;
+    let additions = Kept {
+        icc: carried.map(IccData::PngChunk),
+        orientation,
+        png_colour: &[],
+    }
+    .prepare(OutputFormat::Png)?;
+    if additions.len() > 0 {
+        png.reserve_exact(additions.len());
+        metadata::add(&mut png, &additions)?;
+    }
+    Ok(png)
 }
 
 /// The colour JPEG and GIF output flattens transparency onto: the last

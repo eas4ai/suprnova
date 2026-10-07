@@ -270,9 +270,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   header and length where it stands, and joined once, only when the
   output carries it or converts from it; a WebP's or BMP's profile is
   carried without a copy, and a profile is written into the output once.
-  `IMAGE_MAX_ALLOC_BYTES` charges a profile only for the copies made, so
-  an image is no longer refused for a profile that is dropped or carried
-  as it stands, and the refusal names what it charged.
+  `IMAGE_MAX_ALLOC_BYTES` charges a profile for what is held: every
+  inflate of a PNG's profile at its declared size, a check of its length
+  included, the compressed copy PNG output makes, and the output's copy,
+  but nothing for a profile that is dropped or lent without being
+  inflated; a refusal names what it charged. Between two `magick` runs an
+  RGB profile goes on as the chunk ImageMagick wrote.
 - **Queue and failed-job table names with capitals or reserved words
   work.** The jobs driver and the failed-jobs store quote each part of the
   configured table name, as the migrations do.
