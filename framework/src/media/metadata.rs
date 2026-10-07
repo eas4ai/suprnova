@@ -1483,39 +1483,56 @@ pub(crate) fn deflate_bound(length: u64) -> u64 {
 /// and grows by doubling past it, so a profile that does not compress would
 /// cost twice its size.
 fn compress_profile(profile: &[u8]) -> Result<Vec<u8>, FrameworkError> {
+    let room = usize::try_from(deflate_bound(profile.len() as u64))
+        .map_err(|_| FrameworkError::internal("image ICC profile too large to compress"))?;
+    compress_with_room(profile, room)
+}
+
+/// `profile` deflated into a buffer of `room` bytes, grown when the
+/// encoder needs more. The bound rests on the block layout of the
+/// `compcol` the framework pins, so with it the buffer never grows; if a
+/// later release ever wrote past it, the profile still compresses, at the
+/// cost of a larger buffer than the budget was charged.
+fn compress_with_room(profile: &[u8], room: usize) -> Result<Vec<u8>, FrameworkError> {
     use compcol::{Algorithm, Encoder, Status};
 
+    /// How many calls in a row may make no progress, each after the buffer
+    /// grew, before the encoder is taken to be stuck.
+    const STALLS: u32 = 4;
     let failed = |e: compcol::Error| {
         FrameworkError::internal(format!("image ICC profile compress failed: {e}"))
     };
-    let past = || FrameworkError::internal("image ICC profile compressed past its bound");
-    let bound = usize::try_from(deflate_bound(profile.len() as u64)).map_err(|_| past())?;
-    let mut out = vec![0u8; bound];
+    let stuck = || FrameworkError::internal("image ICC profile compress made no progress");
+    let grow = |out: &mut Vec<u8>| {
+        let more = (out.len() / 8).max(64 * 1024);
+        out.resize(out.len() + more, 0);
+    };
+    let mut out = vec![0u8; room];
     let mut encoder = compcol::zlib::Zlib::encoder();
-    let (mut consumed, mut written) = (0, 0);
-    while consumed < profile.len() {
-        let input = profile.get(consumed..).ok_or_else(past)?;
-        let output = out.get_mut(written..).ok_or_else(past)?;
-        let (progress, status) = encoder.encode(input, output).map_err(failed)?;
+    let (mut consumed, mut written, mut stalls) = (0, 0, 0);
+    loop {
+        if written == out.len() {
+            grow(&mut out);
+        }
+        let output = out.get_mut(written..).ok_or_else(stuck)?;
+        let (progress, status) = match profile.get(consumed..) {
+            Some(input) if !input.is_empty() => encoder.encode(input, output),
+            _ => encoder.finish(output),
+        }
+        .map_err(failed)?;
         consumed += progress.consumed;
         written += progress.written;
+        let finishing = consumed >= profile.len();
         match status {
-            Status::InputEmpty | Status::StreamEnd => break,
-            Status::OutputFull if progress.consumed == 0 && progress.written == 0 => {
-                return Err(past());
+            Status::StreamEnd if finishing => break,
+            _ if progress.consumed == 0 && progress.written == 0 => {
+                stalls += 1;
+                if stalls > STALLS {
+                    return Err(stuck());
+                }
+                grow(&mut out);
             }
-            Status::OutputFull => {}
-        }
-    }
-    loop {
-        let output = out.get_mut(written..).ok_or_else(past)?;
-        let (progress, status) = encoder.finish(output).map_err(failed)?;
-        written += progress.written;
-        if status == Status::StreamEnd {
-            break;
-        }
-        if progress.written == 0 {
-            return Err(past());
+            _ => stalls = 0,
         }
     }
     out.truncate(written);
@@ -2291,13 +2308,65 @@ mod tests {
         assert_eq!(kept.prepare(OutputFormat::Png).unwrap().front.concat(), png);
     }
 
-    /// A profile of noise, the worst case for deflate, compresses within
-    /// [`deflate_bound`] at every length around a block's edge, and
+    /// A profile compresses within [`deflate_bound`] whatever it holds:
+    /// noise, the worst case for deflate, runs of one byte, and the two
+    /// mixed in blocks that straddle the encoder's own, at every length
+    /// around several 16 KiB block edges and up to a few MiB. Each
     /// inflates back to itself.
     #[test]
     fn img_002_a_compressed_profile_stays_within_its_bound() {
         let mut state = 0x9E37_79B9u32;
-        let noise: Vec<u8> = (0..(1 << 20) + 3)
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        };
+        const LONGEST: usize = 3 * 1024 * 1024 + 7;
+        let noise: Vec<u8> = (0..LONGEST).map(|_| next()).collect();
+        let runs = vec![0x41u8; LONGEST];
+        let mixed: Vec<u8> = noise
+            .chunks(10_000)
+            .enumerate()
+            .flat_map(|(index, chunk)| {
+                if index % 2 == 0 {
+                    chunk.to_vec()
+                } else {
+                    vec![index as u8; chunk.len()]
+                }
+            })
+            .collect();
+        let mut lengths = vec![0, 1, 2, 65_535, 65_536, 65_537, LONGEST];
+        for blocks in [1, 2, 3, 4, 64, 129] {
+            let edge = blocks * 16 * 1024;
+            lengths.extend([edge - 1, edge, edge + 1]);
+        }
+        for (name, data) in [("noise", &noise), ("runs", &runs), ("mixed", &mixed)] {
+            for &length in &lengths {
+                let profile = &data[..length];
+                let compressed = compress_profile(profile).unwrap();
+                assert!(
+                    compressed.len() as u64 <= deflate_bound(length as u64),
+                    "{name}, {length} bytes, compressed to {}",
+                    compressed.len()
+                );
+                let mut inflated = vec![0u8; length];
+                assert_eq!(
+                    inflate_to(&compressed, length as u64, Some(&mut inflated)),
+                    Inflated::Exactly,
+                    "{name}, {length} bytes"
+                );
+                assert!(inflated == profile, "{name}, {length} bytes");
+            }
+        }
+    }
+
+    /// A buffer too small for the compressed profile grows, rather than
+    /// failing, and the stream is the same as one written with room.
+    #[test]
+    fn img_002_a_compressed_profile_grows_its_buffer_when_it_runs_out() {
+        let mut state = 0x2545_F491u32;
+        let noise: Vec<u8> = (0..200_000)
             .map(|_| {
                 state ^= state << 13;
                 state ^= state >> 17;
@@ -2305,20 +2374,13 @@ mod tests {
                 state as u8
             })
             .collect();
-        for length in [0, 1, 16_383, 16_384, 16_385, 65_536, noise.len()] {
-            let profile = &noise[..length];
-            let compressed = compress_profile(profile).unwrap();
-            assert!(
-                compressed.len() as u64 <= deflate_bound(length as u64),
-                "{length} bytes compressed to {}",
-                compressed.len()
-            );
-            let mut inflated = vec![0u8; length];
+        let with_room = compress_profile(&noise).unwrap();
+        for room in [0, 1, 1000, 150_000] {
             assert_eq!(
-                inflate_to(&compressed, length as u64, Some(&mut inflated)),
-                Inflated::Exactly
+                compress_with_room(&noise, room).unwrap(),
+                with_room,
+                "{room} bytes of room"
             );
-            assert_eq!(inflated, profile);
         }
     }
 

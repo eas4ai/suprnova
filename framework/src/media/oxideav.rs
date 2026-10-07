@@ -632,7 +632,12 @@ impl OxideAvImageDriver {
             // mandatory rather than an optimisation. See `jpeg_frame` for why
             // it is YCbCr.
             OutputFormat::Jpeg => ("mjpeg", jpeg_frame(canvas)?, PixelFormat::Yuv444P),
-            OutputFormat::Png => ("png", canvas.into_frame(), PixelFormat::Rgba),
+            // PNG and BMP are written by their crates' own encoders, the
+            // pixels moved or lent to them: the registry encoders clone the
+            // frame they are lent, `oxideav-png`'s twice and `oxideav-bmp`'s
+            // once, a whole copy of the pixels each (MEM-003).
+            OutputFormat::Png => return encode_png(canvas, reserve),
+            OutputFormat::Bmp => return encode_bmp(canvas, reserve),
             // The VP8L (lossless) encoder is the only WebP encoder in the
             // registry; codec id "webp" has a decoder but no encoder. `WebP`
             // reaches this arm only when `webp_is_lossy` says no.
@@ -640,7 +645,6 @@ impl OxideAvImageDriver {
                 ("webp_vp8l", canvas.into_frame(), PixelFormat::Rgba)
             }
             OutputFormat::Gif => return encode_gif(canvas),
-            OutputFormat::Bmp => ("bmp", canvas.into_frame(), PixelFormat::Rgba),
         };
 
         let mut params = CodecParameters::video(CodecId::new(codec));
@@ -1467,6 +1471,48 @@ fn edge_extended_frame(
 
 /// Write a canvas as a V5 bitmap that embeds `profile`, the one BMP layout
 /// that holds an ICC profile.
+/// Write a canvas as a PNG with `oxideav_png`'s own encoder, the pixels
+/// moved into it, with `reserve` bytes of room after the file. The
+/// registry encoder calls this same function, with the default options it
+/// applies when given none, so the file is the same; only the two copies
+/// of the pixels it makes first are gone.
+fn encode_png(canvas: Canvas, reserve: usize) -> Result<Vec<u8>, FrameworkError> {
+    let image = oxideav_png::PngImage {
+        width: canvas.width,
+        height: canvas.height,
+        pixel_format: oxideav_png::PngPixelFormat::Rgba,
+        stride: canvas.width as usize * 4,
+        data: canvas.pixels,
+        palette: Vec::new(),
+    };
+    let mut out = oxideav_png::encode_png_image(&image)
+        .map_err(|e| FrameworkError::internal(format!("image encode failed: png: {e}")))?;
+    out.reserve_exact(reserve);
+    Ok(out)
+}
+
+/// Write a canvas as a BMP with `oxideav_bmp`'s own encoder, the pixels
+/// lent to it in a plane that owns them, with `reserve` bytes of room
+/// after the file. The registry encoder clones the plane it is lent and
+/// then calls this same function with the same arguments, so the file is
+/// the same.
+fn encode_bmp(canvas: Canvas, reserve: usize) -> Result<Vec<u8>, FrameworkError> {
+    let plane = oxideav_bmp::BmpPlane {
+        stride: canvas.width as usize * 4,
+        data: canvas.pixels,
+    };
+    let (mut out, _) = oxideav_bmp::encode_bmp_plane(
+        &plane,
+        oxideav_bmp::BmpPixelFormat::Rgba,
+        None,
+        canvas.width,
+        canvas.height,
+    )
+    .map_err(|e| FrameworkError::internal(format!("image encode failed: bmp: {e}")))?;
+    out.reserve_exact(reserve);
+    Ok(out)
+}
+
 fn encode_bmp_with_profile(canvas: Canvas, profile: &[u8]) -> Result<Vec<u8>, FrameworkError> {
     let image = oxideav_bmp::BmpImage {
         width: canvas.width,
