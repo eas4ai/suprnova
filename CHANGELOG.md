@@ -249,6 +249,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   in that schema, and a `.` becomes `_` in index and foreign key names. On
   MySQL and SQLite a qualified name is refused with an error naming it.
 - **The naive date-time casts read MySQL `TIMESTAMP` columns.**
+- **A streamed file is one blocking task, not one per chunk.** A file
+  above 1 MiB, served by `HttpResponse::file`, `HttpResponse::download` or
+  `StaticFiles`, spawned a blocking-pool task for every 64 KiB chunk, so a
+  1 GiB download made 16,384 trips through the pool and queued behind
+  every other blocking task at each one. One blocking task now reads the
+  whole file in 256 KiB chunks and hands them to the response over a
+  channel of four: one pool trip per file, a client that stops reading
+  leaves at most five chunks read ahead, and a dropped response stops its
+  reader. The bytes and `Content-Length` are unchanged, and a read error or
+  a file that shrinks still ends the body short (#147).
 
 ### Fixed
 

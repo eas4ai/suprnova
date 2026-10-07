@@ -176,8 +176,9 @@ pub async fn export(_req: Request) -> Response {
   holds.
 - When `name` is `None`, the filename is the file's own name.
 - A file of 1 MiB or less is read whole. A larger file is streamed in
-  64 KiB chunks, so a large download doesn't sit in memory. Both carry a
-  `Content-Length`.
+  256 KiB chunks by one background task that reads at most five chunks
+  ahead of the client, so a large download doesn't sit in memory, even
+  when the client stops reading. Both carry a `Content-Length`.
 - A missing path, or a path that is a directory, returns a `404` error
   whose message doesn't name the path. Any other read failure returns a
   `500` error with the generic server-error body; the path goes to the
