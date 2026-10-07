@@ -8,12 +8,13 @@
 //! position with it), XMP, IPTC, comments and text chunks, and the date
 //! chunks an encoder adds by itself.
 //!
-//! The built-in driver's encoders write pixels only, and leave room in the
-//! one buffer they fill, so the kept items are added in place. ImageMagick
-//! writes whatever it read and adds more (`date:` text chunks, its own
-//! orientation chunk, the comment), so the `magick` driver strips its output
-//! in place and then adds the same items. Neither copies the encoded file
-//! again (MEM-003). One set of rules serves both, so the drivers cannot
+//! The built-in driver's encoders write pixels only, and the one buffer an
+//! encoder fills is kept as the output, grown once to the room the kept
+//! items need when the encoder left less, so they are added in place.
+//! ImageMagick writes whatever it read and adds more (`date:` text chunks,
+//! its own orientation chunk, the comment), so the `magick` driver strips
+//! its output in place and then adds the same items. Neither copies the
+//! encoded file again (MEM-003). One set of rules serves both, so the drivers cannot
 //! drift apart on what survives.
 //!
 //! Every reader here takes untrusted bytes: it never indexes past them,
