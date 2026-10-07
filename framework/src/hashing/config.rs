@@ -6,6 +6,7 @@
 
 use crate::error::FrameworkError;
 use std::env;
+use std::num::NonZeroUsize;
 
 /// Active hashing algorithm.
 ///
@@ -71,6 +72,13 @@ pub struct HashConfig {
     /// Default: false - so legacy bcrypt hashes still verify after a
     /// driver flip until they're rotated.
     pub verify_algorithm: bool,
+    /// How many pieces of password hash work run at once in the process,
+    /// the framework's and Magnetar's together. Selected by
+    /// `HASH_MAX_CONCURRENCY`; `None` (unset) means the host's available
+    /// parallelism. One Argon2 hash holds its whole memory cost (64 MiB
+    /// under the defaults), so the limit bounds what a burst of sign-ins
+    /// holds at once; the excess waits as tasks, not as threads.
+    pub max_concurrency: Option<NonZeroUsize>,
 }
 
 impl Default for HashConfig {
@@ -82,6 +90,7 @@ impl Default for HashConfig {
             time: 4,
             threads: 1,
             verify_algorithm: false,
+            max_concurrency: None,
         }
     }
 }
@@ -146,6 +155,10 @@ impl HashConfig {
             cfg.verify_algorithm = parse_bool("HASH_VERIFY", &s)?;
         }
 
+        if let Some(s) = env_opt("HASH_MAX_CONCURRENCY") {
+            cfg.max_concurrency = Some(parse_limit("HASH_MAX_CONCURRENCY", &s)?);
+        }
+
         Ok(cfg)
     }
 }
@@ -162,6 +175,16 @@ fn parse_u32(name: &str, s: &str) -> Result<u32, FrameworkError> {
     s.trim()
         .parse::<u32>()
         .map_err(|e| FrameworkError::param(format!("{name}=`{s}` is not a valid u32: {e}")))
+}
+
+fn parse_limit(name: &str, s: &str) -> Result<NonZeroUsize, FrameworkError> {
+    s.trim()
+        .parse::<usize>()
+        .ok()
+        .and_then(NonZeroUsize::new)
+        .ok_or_else(|| {
+            FrameworkError::param(format!("{name}=`{s}` is not a whole number of at least 1"))
+        })
 }
 
 fn parse_bool(name: &str, s: &str) -> Result<bool, FrameworkError> {
@@ -195,6 +218,7 @@ pub(super) mod tests {
             "HASH_TIME",
             "HASH_THREADS",
             "HASH_VERIFY",
+            "HASH_MAX_CONCURRENCY",
         ] {
             // SAFETY: env mutation is process-wide; the ENV_LOCK held by
             // the caller serialises all hashing-env tests within the

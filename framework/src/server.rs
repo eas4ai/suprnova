@@ -30,7 +30,6 @@ use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, OnceLock};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinSet;
 use tracing::Instrument;
 
@@ -49,7 +48,17 @@ type ServerBody = BoxBody<Bytes, Infallible>;
 /// `handle_request` directly (T7 test fixture, custom hyper service
 /// loops) get a bare `tokio::spawn` fallback so they don't have to
 /// know about this registry.
-static WS_TASKS: OnceLock<TokioMutex<JoinSet<()>>> = OnceLock::new();
+///
+/// The lock is synchronous and no await happens under it: registration
+/// ([`track_ws_task`]) holds it only to reap and spawn, and the shutdown
+/// drain ([`drain_ws_tasks`]) takes the set out under it and waits holding
+/// none. An async lock held across the drain made every upgrade in flight
+/// wait up to the drain's 5 s deadline.
+static WS_TASKS: OnceLock<WsTaskRegistry> = OnceLock::new();
+
+/// The set of in-flight WebSocket handler tasks, behind the lock
+/// [`WS_TASKS`] describes.
+type WsTaskRegistry = std::sync::Mutex<JoinSet<()>>;
 
 tokio::task_local! {
     /// Carries the accept-loop connection-cap permit (when
@@ -449,7 +458,7 @@ impl Server {
         // `set` returns Err if already initialized (e.g. a previous
         // Server::run in the same process); that's fine - both servers
         // share the same drain registry and shutdown handles both.
-        let _ = WS_TASKS.set(TokioMutex::new(JoinSet::new()));
+        let _ = WS_TASKS.set(WsTaskRegistry::default());
 
         // Optional concurrency cap. `None` => unbounded (unchanged default).
         // When set, the accept loop acquires a permit before handing the
@@ -631,34 +640,7 @@ impl Server {
         // abort_all, which cancels the handler futures so the runtime
         // shutdown can proceed cleanly.
         if let Some(ws_tasks) = WS_TASKS.get() {
-            let mut tasks = ws_tasks.lock().await;
-            if !tasks.is_empty() {
-                let in_flight = tasks.len();
-                tracing::info!(
-                    ws_in_flight = in_flight,
-                    "draining in-flight WebSocket handlers (max 5s)"
-                );
-                let ws_drain_deadline = tokio::time::sleep(std::time::Duration::from_secs(5));
-                tokio::pin!(ws_drain_deadline);
-                loop {
-                    tokio::select! {
-                        next = tasks.join_next() => {
-                            if next.is_none() {
-                                break; // JoinSet drained
-                            }
-                        }
-                        _ = &mut ws_drain_deadline => {
-                            tracing::warn!(
-                                ws_in_flight = tasks.len(),
-                                "WS drain deadline exceeded; aborting remaining handlers"
-                            );
-                            tasks.abort_all();
-                            while tasks.join_next().await.is_some() {}
-                            break;
-                        }
-                    }
-                }
-            }
+            drain_ws_tasks(ws_tasks, std::time::Duration::from_secs(5)).await;
         }
 
         // Drain the post-response hooks (`Terminable`) still running. The
@@ -1883,14 +1865,7 @@ async fn handle_ws_upgrade(
     // isn't initialized (T7 test fixtures and external embedders that
     // call handle_request without going through Server::run).
     match WS_TASKS.get() {
-        Some(tasks) => {
-            let mut tasks = tasks.lock().await;
-            // Opportunistic reap so the JoinSet doesn't grow unbounded
-            // under long-running operation; completed handles get
-            // dropped here instead of accumulating until shutdown.
-            while tasks.try_join_next().is_some() {}
-            tasks.spawn(handler_task);
-        }
+        Some(tasks) => track_ws_task(tasks, handler_task),
         None => {
             tokio::spawn(handler_task);
         }
@@ -2467,6 +2442,69 @@ async fn drain_connections(
     }
 }
 
+/// Register a WebSocket handler task so the shutdown drain waits for it.
+///
+/// The lock is held only to reap finished handles and spawn, with no await
+/// under it, so a registration never waits behind the drain. A poisoned
+/// lock is recovered: the set holds no invariant a panic elsewhere could
+/// break, and refusing to register would leave the handler untracked.
+fn track_ws_task(
+    tasks: &WsTaskRegistry,
+    task: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    let mut tasks = tasks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Opportunistic reap so the JoinSet doesn't grow unbounded under
+    // long-running operation; completed handles get dropped here instead
+    // of accumulating until shutdown.
+    while tasks.try_join_next().is_some() {}
+    tasks.spawn(task);
+}
+
+/// Wait for the registered WebSocket handler tasks to finish, up to
+/// `deadline`, then abort the ones still running. Returns how many were
+/// aborted.
+///
+/// The set is taken out of the registry under a brief lock and awaited
+/// holding none, so a registration during the drain completes at once
+/// into the emptied registry instead of waiting out the deadline.
+async fn drain_ws_tasks(tasks: &WsTaskRegistry, deadline: std::time::Duration) -> usize {
+    let mut tasks = std::mem::take(
+        &mut *tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    if tasks.is_empty() {
+        return 0;
+    }
+    tracing::info!(
+        ws_in_flight = tasks.len(),
+        "draining in-flight WebSocket handlers (max 5s)"
+    );
+    let ws_drain_deadline = tokio::time::sleep(deadline);
+    tokio::pin!(ws_drain_deadline);
+    loop {
+        tokio::select! {
+            next = tasks.join_next() => {
+                if next.is_none() {
+                    return 0; // JoinSet drained
+                }
+            }
+            _ = &mut ws_drain_deadline => {
+                let aborted = tasks.len();
+                tracing::warn!(
+                    ws_in_flight = aborted,
+                    "WS drain deadline exceeded; aborting remaining handlers"
+                );
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                return aborted;
+            }
+        }
+    }
+}
+
 /// Check database health by attempting a simple query
 async fn check_database_health() -> Result<(), String> {
     use crate::database::DB;
@@ -2777,6 +2815,135 @@ mod tests {
             "a never-completing connection is abandoned rather than awaited; \
              if this test hangs instead of failing, the deadline is gone and \
              one slow client can pin the process open through every deploy"
+        );
+    }
+
+    // ---- RTC-004: the WebSocket task registry -------------------------
+    //
+    // Registration holds the registry's lock only to reap and spawn, and
+    // the shutdown drain takes the set out under that lock and waits
+    // holding none. These run under paused time, so the deadlines are
+    // virtual: a test that would wait out a deadline takes microseconds,
+    // and the outer deadline turns a lock held forever into a failure
+    // rather than a hang.
+
+    /// Records that the future holding it was dropped, as an aborted
+    /// task's future is.
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A WebSocket handler that never finishes. `dropped` is set when its
+    /// future is dropped.
+    fn never_finishing_handler(
+        dropped: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let flag = DropFlag(dropped.clone());
+        async move {
+            let _flag = flag;
+            std::future::pending::<()>().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rtc_a_registration_during_the_drain_completes_before_the_drain() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tasks: Arc<WsTaskRegistry> = Arc::new(WsTaskRegistry::default());
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handler_dropped = Arc::new(AtomicBool::new(false));
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(3600), {
+            let tasks = tasks.clone();
+            let order = order.clone();
+            let handler_dropped = handler_dropped.clone();
+            async move {
+                track_ws_task(&tasks, never_finishing_handler(&handler_dropped));
+                let drain = tokio::spawn({
+                    let tasks = tasks.clone();
+                    let order = order.clone();
+                    async move {
+                        let aborted =
+                            drain_ws_tasks(&tasks, std::time::Duration::from_secs(1)).await;
+                        order.lock().expect("order").push("drain");
+                        aborted
+                    }
+                });
+                // Let the drain start waiting on the handler it holds.
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    !drain.is_finished(),
+                    "the drain waits for the running handler"
+                );
+
+                let registration = tokio::spawn({
+                    let tasks = tasks.clone();
+                    let order = order.clone();
+                    let late_dropped = Arc::new(AtomicBool::new(false));
+                    async move {
+                        track_ws_task(&tasks, never_finishing_handler(&late_dropped));
+                        order.lock().expect("order").push("registration");
+                    }
+                });
+                registration.await.expect("the registration ran");
+                drain.await.expect("the drain ran")
+            }
+        })
+        .await;
+
+        let aborted = outcome.expect("the test finished inside its deadline");
+        assert_eq!(
+            *order.lock().expect("order"),
+            ["registration", "drain"],
+            "a registration issued during the drain completed only after the drain did"
+        );
+        assert_eq!(aborted, 1, "the drain aborted the handler it held");
+        assert!(
+            handler_dropped.load(Ordering::SeqCst),
+            "the handler still running at the deadline was aborted"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rtc_the_drain_waits_for_a_handler_that_finishes_in_time() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tasks = WsTaskRegistry::default();
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        track_ws_task(&tasks, async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+
+        let aborted = drain_ws_tasks(&tasks, std::time::Duration::from_secs(5)).await;
+
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "the drain returned while a registered handler was still running"
+        );
+        assert_eq!(aborted, 0, "a handler that finished in time is not aborted");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rtc_a_handler_still_running_at_the_deadline_is_aborted() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tasks = WsTaskRegistry::default();
+        let dropped = Arc::new(AtomicBool::new(false));
+        track_ws_task(&tasks, never_finishing_handler(&dropped));
+
+        let aborted = drain_ws_tasks(&tasks, std::time::Duration::from_secs(5)).await;
+
+        assert_eq!(aborted, 1, "the drain counts the handler it aborted");
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the handler still running at the deadline was not aborted"
         );
     }
 

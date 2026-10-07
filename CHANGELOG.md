@@ -249,6 +249,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   in that schema, and a `.` becomes `_` in index and foreign key names. On
   MySQL and SQLite a qualified name is refused with an error naming it.
 - **The naive date-time casts read MySQL `TIMESTAMP` columns.**
+- **Password hashing runs under one process-wide limit.** `hash_async`,
+  `verify_async`, `hash_with_cost_async` and Magnetar's sign-in hashing
+  each took a blocking-pool thread with no limit, so a burst of sign-ins
+  could hold up to Tokio's 512 blocking threads at once, and an Argon2id
+  hash under the framework's defaults holds 64 MiB: up to 32 GiB. They now
+  share one limit, `HASH_MAX_CONCURRENCY`, which defaults to the host's
+  available parallelism; work past it waits as a task holding no thread,
+  so a burst holds at most the limit times one hash's memory. A hash keeps
+  its place under the limit until it returns, even when its caller stops
+  waiting. `0` or a value that is not a whole number is refused when the
+  hashing configuration loads (#146).
+- **A WebSocket upgrade no longer waits behind the shutdown drain.** The
+  registry of WebSocket handler tasks sat behind an async lock that the
+  shutdown drain held for up to its 5 s deadline, so an upgrade in flight
+  waited out the whole drain before its handler was registered. The
+  registry is now a synchronous lock held only to reap finished handlers
+  and register a new one, and the drain takes the set out under it and
+  waits holding no lock, still up to 5 s before it aborts what runs (#149).
 
 ### Fixed
 
