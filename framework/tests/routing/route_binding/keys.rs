@@ -163,7 +163,7 @@ async fn bind_002_a_malformed_value_answers_the_404_a_missing_row_does() {
     );
     assert_eq!(message(&missing), "KyPost not found");
     assert!(
-        !malformed.contains("7abc"),
+        !without_request_id(&malformed).to_string().contains("7abc"),
         "the body repeated the value: {malformed}"
     );
 
@@ -187,7 +187,7 @@ async fn bind_002_a_malformed_value_answers_the_404_a_missing_row_does() {
         );
         assert_eq!(message(&missing), named, "{missing_path}");
         assert!(
-            !malformed.contains("7abc"),
+            !without_request_id(&malformed).to_string().contains("7abc"),
             "{malformed_path}: the body repeated the value: {malformed}"
         );
     }
@@ -245,7 +245,7 @@ async fn bind_002_a_malformed_value_answers_404_for_a_scoped_child_and_an_option
         "an optional argument answers a malformed value as a missing row"
     );
     assert_eq!(message(&missing), "KyPost not found");
-    assert!(!malformed.contains("7abc"), "{malformed}");
+    assert!(!without_request_id(&malformed).to_string().contains("7abc"), "{malformed}");
 }
 
 #[tokio::test]

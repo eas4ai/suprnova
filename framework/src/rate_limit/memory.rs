@@ -22,18 +22,26 @@
 //!   holds a `Weak` reference back to the shared bucket map, so the
 //!   sweep self-terminates once the last `Arc<Self>` drops - no
 //!   leaked task, no shutdown plumbing needed by the embedder.
+//!
+//! The buckets live in a [`DashMap`], which splits its keys across shards
+//! that each have their own lock. A request locks only its key's shard,
+//! and either sweep locks one shard at a time and releases it before the
+//! next, so requests on keys in other shards keep completing while a sweep
+//! runs over a large map. Shard locks do not poison: a panic inside one
+//! releases it and the limiter keeps answering, so no request fails on a
+//! poisoned lock.
 
 use crate::error::FrameworkError;
 use crate::rate_limit::algorithm::Bucket;
 use crate::rate_limit::{RateLimiterDriver, SlidingWindowConfig};
 use async_trait::async_trait;
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-type BucketMap = Mutex<HashMap<String, Bucket>>;
+type BucketMap = DashMap<String, Bucket>;
 
 /// In-process sliding-window rate limiter. Default driver for
 /// single-process apps; use [`RedisRateLimiter`](crate::rate_limit::redis::RedisRateLimiter)
@@ -50,7 +58,7 @@ impl InMemoryRateLimiter {
     /// runtime that owns the driver for the process lifetime.
     pub fn new() -> Self {
         Self {
-            buckets: Arc::new(Mutex::new(HashMap::new())),
+            buckets: Arc::new(DashMap::new()),
             sweep_handle: Mutex::new(None),
         }
     }
@@ -87,10 +95,7 @@ impl InMemoryRateLimiter {
                     // Driver dropped - self-terminate.
                     break;
                 };
-                let now = Instant::now();
-                if let Ok(mut g) = buckets.lock() {
-                    g.retain(|_, bucket| !bucket.is_inactive(inactivity_window, now));
-                }
+                sweep(&buckets, inactivity_window, Instant::now());
             }
         });
         // Construction-time set on a freshly-created Mutex - poison is
@@ -111,22 +116,31 @@ impl InMemoryRateLimiter {
     /// metrics and the unit test that asserts the sweep ran.
     ///
     /// Safe to call from a non-async context (it takes `&self` and
-    /// no `.await` happens inside the lock).
+    /// never awaits). It locks one shard at a time, so requests on keys in
+    /// other shards keep completing while it runs.
     pub fn purge_inactive(&self, window: Duration, now: Instant) -> usize {
-        let Ok(mut g) = self.buckets.lock() else {
-            return 0;
-        };
-        let before = g.len();
-        g.retain(|_, bucket| !bucket.is_inactive(window, now));
-        before - g.len()
+        sweep(&self.buckets, window, now)
     }
 
     /// Current count of buckets in the map. Useful for tests and
     /// metrics that want to observe sweep progress without driving
     /// the limiter's public SPI surface.
     pub fn bucket_count(&self) -> usize {
-        self.buckets.lock().map(|g| g.len()).unwrap_or(0)
+        self.buckets.len()
     }
+}
+
+/// Drop every bucket inactive past `window` as of `now`, one shard at a
+/// time, and return how many were dropped. Counted as they go: a request
+/// can add a bucket to a shard the sweep has already passed.
+fn sweep(buckets: &BucketMap, window: Duration, now: Instant) -> usize {
+    let mut dropped = 0;
+    buckets.retain(|_, bucket| {
+        let inactive = bucket.is_inactive(window, now);
+        dropped += usize::from(inactive);
+        !inactive
+    });
+    dropped
 }
 
 impl Drop for InMemoryRateLimiter {
@@ -157,14 +171,15 @@ impl RateLimiterDriver for InMemoryRateLimiter {
         key: &str,
         config: &SlidingWindowConfig,
     ) -> Result<bool, FrameworkError> {
-        let mut g = self
-            .buckets
-            .lock()
-            .map_err(|_| FrameworkError::internal("rate limiter poisoned"))?;
-        // Timestamp under the lock so contending callers append in time order.
+        // A known key is found by the borrowed `&str`, so only a new key is
+        // copied into the map.
+        let mut bucket = match self.buckets.get_mut(key) {
+            Some(bucket) => bucket,
+            None => self.buckets.entry(key.to_owned()).or_default(),
+        };
+        // Timestamp under the shard lock so contending callers append in time order.
         let now = Instant::now();
-        let b = g.entry(key.to_string()).or_insert_with(Bucket::new);
-        Ok(b.try_record(config.max_requests, config.window, now))
+        Ok(bucket.try_record(config.max_requests, config.window, now))
     }
 
     async fn retry_after(
@@ -172,13 +187,11 @@ impl RateLimiterDriver for InMemoryRateLimiter {
         key: &str,
         config: &SlidingWindowConfig,
     ) -> Result<Option<Duration>, FrameworkError> {
-        let g = self
-            .buckets
-            .lock()
-            .map_err(|_| FrameworkError::internal("rate limiter poisoned"))?;
+        let Some(bucket) = self.buckets.get(key) else {
+            return Ok(None);
+        };
         let now = Instant::now();
-        Ok(g.get(key)
-            .and_then(|b| b.retry_after(config.max_requests, config.window, now)))
+        Ok(bucket.retry_after(config.max_requests, config.window, now))
     }
 }
 

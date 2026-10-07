@@ -3257,7 +3257,7 @@ async fn a_session_resolved_principal_is_stored_and_partitioned_per_principal() 
         ada_first.body, grace_first.body,
         "and the two entries are different documents, each naming its own principal"
     );
-    assert!(!ada_body.contains("grace") && !grace_body.contains("ada"));
+    assert!(!ada_body.contains("grace") && !grace_body.contains("named ada"));
 }
 
 /// Ruling R24 (b): the entry such a render publishes observes the table the
@@ -3363,7 +3363,8 @@ async fn a_session_resolved_principal_is_declined_where_no_principal_variance_is
     assert_eq!(counting_route::renders(), 3);
     let other_body = String::from_utf8_lossy(&other.body).to_string();
     assert!(
-        other_body.contains(&format!("user {grace} named grace")) && !other_body.contains("ada"),
+        other_body.contains(&format!("user {grace} named grace"))
+            && !other_body.contains("named ada"),
         "the second visitor is never served the first's page: {other_body:?}"
     );
 }

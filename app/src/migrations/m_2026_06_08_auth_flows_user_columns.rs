@@ -1,6 +1,6 @@
 //! Auth-flows dogfood - add `email_verified_at` to `users`.
 //!
-//! Tasks 5–8 of the provider-agnostic auth-flows change made the
+//! Tasks 5 to 8 of the provider-agnostic auth-flows change made the
 //! `EmailVerification` / `PasswordReset` facades resolve through the
 //! configured `UserProvider`. For the example app's flows to be
 //! runtime-functional, the `User` model (now `MustVerifyEmail` +
