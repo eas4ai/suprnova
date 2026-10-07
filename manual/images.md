@@ -208,13 +208,15 @@ gives. A profile is a few kilobytes, but a PNG's is compressed, and a
 small file can hold one that inflates a thousand times over. So the
 driver reads the header first, and charges `IMAGE_MAX_ALLOC_BYTES` for
 what it holds for the profile beside the pixels: the profile itself when
-it has to join or inflate it, and the copy the output carries. A profile
-that sits whole in the file is read where it stands, and one the output
-drops, or a PNG's own chunk carried into PNG output, costs no copy. A
-profile whose copies do not fit is refused like any other decode over the
-limit. The `magick` driver reads no more than the header of a source
-profile, and checks the one ImageMagick writes without holding it, except
-a GIF's RGB or grey profile, which it joins to convert the palette from.
+it has to join its pieces or inflate it, the compressed copy PNG output
+makes of it, and the copy the output carries. Every inflate counts the
+profile's inflated size, even one that only checks a PNG profile's
+length. A profile that sits whole in the file is read where it stands,
+and a JPEG's or a GIF's that the output drops costs nothing. A profile
+whose copies do not fit is refused like any other decode over the limit.
+The `magick` driver reads no more than the header of a source profile,
+and checks the one ImageMagick writes without holding it, except a GIF's
+RGB or grey profile, which it joins to convert the palette from.
 
 A CMYK or Lab profile cannot describe RGB output, so it is dropped. The
 default driver does not read CMYK JPEGs at all. Under `magick`,
