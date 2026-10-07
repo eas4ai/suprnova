@@ -17,8 +17,8 @@ use serde_json::json;
 use crate::abuse::AbusePolicy;
 use crate::auth::{AuthenticationContext, SignInDecision, SignInMethod, VerifiedPrincipal};
 use crate::password::{
-    AttemptVerdict, LockoutService, PasswordVerifier, RehashOutcome, normalize_email,
-    validate_password,
+    AttemptVerdict, LockoutService, PasswordTarget, PasswordVerifier, RehashOutcome,
+    normalize_email, validate_password,
 };
 use crate::plugin::{
     Effect, EffectResponse, Method, Plugin, PluginResult, RequestContext, RouteDescriptor,
@@ -78,8 +78,10 @@ pub enum RehashReport {
     NotNeeded,
     /// The credential was upgraded to the Argon2id target and persisted.
     Upgraded,
-    /// The upgrade failed after a successful login; the credential is
-    /// unchanged and authentication still succeeded.
+    /// The upgrade to [`PasswordTarget::Argon2id`] failed after a valid
+    /// password; the credential is unchanged and authentication still
+    /// succeeded. Under [`PasswordTarget::LaravelBcrypt`] a failed rewrite
+    /// fails the authentication instead, so this is never reported there.
     Failed {
         /// Failure detail.
         message: String,
@@ -95,7 +97,10 @@ pub trait PasswordAuthProvider: Send + Sync {
     /// Verify a primary credential with fixed-format hash work.
     async fn authenticate(&self, input: PasswordAttempt) -> Result<VerifiedPrincipal>;
     /// [`PasswordAuthProvider::authenticate`] plus the post-login rehash
-    /// report.
+    /// report. Under [`PasswordTarget::LaravelBcrypt`] a valid password
+    /// whose `$2y$` rewrite cannot be minted or stored fails with that
+    /// error, as the Laravel application on the same database could not
+    /// verify the stored hash.
     async fn authenticate_with_outcome(
         &self,
         input: PasswordAttempt,
@@ -177,6 +182,18 @@ pub(crate) fn is_invalid_credentials(error: &Error) -> bool {
     matches!(error, Error::InvalidInput { field, .. } if field == "credentials")
 }
 
+/// Log a `$2y$` rewrite under [`PasswordTarget::LaravelBcrypt`] that could
+/// not be minted or stored, and return its error to fail the sign-in.
+fn laravel_rewrite_failed(user_id: &str, error: Error) -> Error {
+    tracing::warn!(
+        user_id = %user_id,
+        error = %error,
+        "the password hash could not be rewritten for Laravel after a valid password; \
+         the sign-in fails"
+    );
+    error
+}
+
 #[async_trait]
 impl PasswordAuthProvider for PasswordAuthService {
     async fn register(&self, input: RegisterInput) -> Result<RegistrationOutcome> {
@@ -255,13 +272,21 @@ impl PasswordAuthProvider for PasswordAuthService {
             AuthenticationContext::new(input.metadata, user.auth_epoch, Utc::now()),
         )?;
         let actor = CredentialActor::from_verified_primary(&principal);
+        // Under the Argon2id target the rehash is an optional upgrade: the
+        // stored hash still verifies here, so a failure is reported and the
+        // sign-in stands. Under the Laravel target it is the rewrite that
+        // lets the Laravel application on the same database verify the
+        // password, so a failure fails the sign-in with its own error, and
+        // the stored hash is left for the next sign-in to rewrite.
+        let required = self.verifier.target() == PasswordTarget::LaravelBcrypt;
         let report = match verdict.rehash {
             RehashOutcome::NotNeeded => RehashReport::NotNeeded,
             RehashOutcome::Upgraded(upgraded) => {
-                // Upgrade-only rehash: persistence failure is a post-login
-                // outcome, never an authentication failure.
                 match self.users.set_password_hash(&actor, &upgraded).await {
                     Ok(()) => RehashReport::Upgraded,
+                    Err(error) if required => {
+                        return Err(laravel_rewrite_failed(&user.user_id, error));
+                    }
                     Err(error) => {
                         tracing::warn!(
                             user_id = %user.user_id,
@@ -273,6 +298,12 @@ impl PasswordAuthProvider for PasswordAuthService {
                         }
                     }
                 }
+            }
+            RehashOutcome::Failed { message } if required => {
+                return Err(laravel_rewrite_failed(
+                    &user.user_id,
+                    Error::Internal { message },
+                ));
             }
             RehashOutcome::Failed { message } => {
                 tracing::warn!(

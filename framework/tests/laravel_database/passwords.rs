@@ -4,6 +4,14 @@
 //! setting on, every hash the framework and Magnetar write is one Laravel
 //! 13 with `HASH_VERIFY=true` accepts.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use magnetar::password::{
+    HashWorkProfile, PasswordHashConfig, PasswordHashDriver, PasswordTarget, PasswordVerifier,
+    StandardPasswordHashDriver, VerificationCall,
+};
+use magnetar::plugins::password::{PasswordAttempt, PasswordAuthProvider, PasswordAuthService};
 use secrecy::SecretString;
 use suprnova::hashing::{Argon2Options, Argon2idHasher, BcryptHasher, Hasher};
 use suprnova::{Auth, Credentials};
@@ -691,5 +699,358 @@ fn ldb_004_with_hash_verify_an_argon2id_user_signs_in_and_is_rewritten_mysql() {
     support::alone(
         "passwords::ldb_004_with_hash_verify_an_argon2id_user_signs_in_and_is_rewritten_mysql",
         || hash_verify_lets_the_rewrite_happen(Engine::Mysql),
+    );
+}
+
+/// The message the write refusal of [`refuse_writes`] fails with.
+const REFUSED: &str = "the test refuses this password write";
+
+/// Make an update that sets `table.column` fail, as a lost connection or
+/// a full disk would, until [`allow_writes`] lifts it. Updates of the
+/// row's other columns still succeed.
+async fn refuse_writes(db: &support::Db, engine: Engine, table: &str, column: &str) {
+    let statements = match engine {
+        Engine::Sqlite => vec![format!(
+            "CREATE TRIGGER ldb_refuse_{table} BEFORE UPDATE OF {column} ON {table} \
+             BEGIN SELECT RAISE(ABORT, '{REFUSED}'); END"
+        )],
+        Engine::Postgres => vec![
+            format!(
+                "CREATE OR REPLACE FUNCTION ldb_refuse_write() RETURNS trigger \
+                 LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION '{REFUSED}'; END $$"
+            ),
+            format!(
+                "CREATE TRIGGER ldb_refuse_{table} BEFORE UPDATE OF {column} ON {table} \
+                 FOR EACH ROW EXECUTE FUNCTION ldb_refuse_write()"
+            ),
+        ],
+        Engine::Mysql => vec![format!(
+            "CREATE TRIGGER ldb_refuse_{table} BEFORE UPDATE ON {table} FOR EACH ROW \
+             IF NOT (NEW.{column} <=> OLD.{column}) THEN \
+             SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '{REFUSED}'; END IF"
+        )],
+    };
+    for statement in statements {
+        db.conn
+            .execute_unprepared(&statement)
+            .await
+            .unwrap_or_else(|e| panic!("refuse writes to {table}.{column}: {e}"));
+    }
+}
+
+/// Lift [`refuse_writes`] on `table`.
+async fn allow_writes(db: &support::Db, engine: Engine, table: &str) {
+    let statement = match engine {
+        Engine::Postgres => format!("DROP TRIGGER ldb_refuse_{table} ON {table}"),
+        Engine::Sqlite | Engine::Mysql => format!("DROP TRIGGER ldb_refuse_{table}"),
+    };
+    db.conn
+        .execute_unprepared(&statement)
+        .await
+        .unwrap_or_else(|e| panic!("allow writes to {table}: {e}"));
+}
+
+/// A `$2b$` and an Argon2id hash of `password`, the two hashes a sign-in
+/// rewrites for Laravel.
+fn hashes_to_rewrite(password: &str) -> [String; 2] {
+    [
+        BcryptHasher::default().hash(password).expect("$2b$"),
+        Argon2idHasher::new(Argon2Options::default())
+            .expect("an argon2id hasher")
+            .hash(password)
+            .expect("argon2id"),
+    ]
+}
+
+/// With the setting on, a valid sign-in through the model provider or the
+/// database provider whose `$2y$` rewrite cannot be stored fails with the
+/// database's error, signs nobody in and leaves the stored hash as it was;
+/// the next sign-in rewrites it. With the setting off, the framework
+/// writes nothing, so the same refusal does not touch the sign-in.
+async fn a_rewrite_that_cannot_be_stored_fails_the_sign_in(engine: Engine) {
+    let (db, _) = support::laravel(engine).await;
+    crate::scaffold::migrate(&db.conn).await.expect("migrate");
+    let mut id = 940_u64;
+    for provider in ["model", "database"] {
+        let _bound = support::bind(&db.conn);
+        if provider == "model" {
+            support::install_scaffold_auth().await;
+        } else {
+            install_database_provider("users", "password").await;
+        }
+        for hash in hashes_to_rewrite("rewrite-me") {
+            id += 1;
+            let email = format!("{provider}-refused-{id}@example.com");
+            let credentials = Credentials::password(email.as_str(), "rewrite-me");
+            account(&db, "users", id, &email, &hash).await;
+            refuse_writes(&db, engine, "users", "password").await;
+
+            suprnova::LaravelDatabase::follow_environment();
+            let signed_in = support::in_request(Auth::attempt(&credentials, false))
+                .await
+                .expect("without the setting the sign-in writes nothing");
+            assert!(signed_in.is_some(), "{engine:?}: {email} did not sign in");
+            assert_eq!(support::stored_hash(&db.conn, &email).await, hash);
+
+            let shared = support::Shared::on();
+            let (attempt, signed_in) = support::in_request(async {
+                let attempt = Auth::attempt(&credentials, false).await;
+                (attempt, Auth::check())
+            })
+            .await;
+            match attempt {
+                Err(error) => assert!(
+                    error.to_string().contains(REFUSED),
+                    "{engine:?}: the {provider} provider failed with {error}, not the \
+                     database's refusal"
+                ),
+                Ok(Some(_)) => panic!(
+                    "{engine:?}: the {provider} provider signed {email} in although its \
+                     $2y$ hash was not stored"
+                ),
+                Ok(None) => panic!(
+                    "{engine:?}: the {provider} provider answered the refused rewrite as \
+                     invalid credentials"
+                ),
+            }
+            assert!(
+                !signed_in,
+                "{engine:?}: the guard holds {email} after the refusal"
+            );
+            assert_eq!(
+                support::stored_hash(&db.conn, &email).await,
+                hash,
+                "{engine:?}: the refused rewrite changed the stored hash"
+            );
+
+            allow_writes(&db, engine, "users").await;
+            let (user, signed_in) = support::in_request(async {
+                let user = Auth::attempt(&credentials, false).await.expect("attempt");
+                (user, Auth::check())
+            })
+            .await;
+            assert!(
+                user.is_some(),
+                "{engine:?}: the next sign-in of {email} failed"
+            );
+            assert!(signed_in, "{engine:?}: the guard does not hold {email}");
+            assert_laravel_accepts(
+                &support::stored_hash(&db.conn, &email).await,
+                "rewrite-me",
+                "the sign-in after a refused rewrite",
+            );
+            drop(shared);
+        }
+    }
+}
+
+on_every_engine!(a_rewrite_that_cannot_be_stored_fails_the_sign_in =>
+    ldb_004_with_the_setting_a_sign_in_whose_rewrite_cannot_be_stored_fails_sqlite,
+    ldb_004_with_the_setting_a_sign_in_whose_rewrite_cannot_be_stored_fails_postgres,
+    ldb_004_with_the_setting_a_sign_in_whose_rewrite_cannot_be_stored_fails_mysql);
+
+/// The Magnetar sessions `email`'s user holds.
+async fn magnetar_sessions(db: &support::Db, email: &str) -> i64 {
+    support::count(
+        &db.conn,
+        "auth_sessions",
+        &format!("user_id = (SELECT id FROM app_users WHERE email = '{email}')"),
+    )
+    .await
+}
+
+/// A hash driver that mints nothing once `fail` is set, after the
+/// verifier has warmed its dummies.
+struct FailingMint {
+    fail: AtomicBool,
+}
+
+impl PasswordHashDriver for FailingMint {
+    fn verify(&self, call: &VerificationCall<'_>) -> magnetar::Result<bool> {
+        StandardPasswordHashDriver.verify(call)
+    }
+
+    fn mint(&self, profile: &HashWorkProfile, password: &SecretString) -> magnetar::Result<String> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(magnetar::Error::Internal {
+                message: REFUSED.to_owned(),
+            });
+        }
+        StandardPasswordHashDriver.mint(profile, password)
+    }
+}
+
+/// With the setting on, a valid Magnetar password sign-in whose `$2y$`
+/// rewrite cannot be stored or minted fails with that error, never as
+/// invalid credentials, creates no session and leaves the stored hash as
+/// it was; the next sign-in rewrites it.
+async fn magnetar_rewrite_that_cannot_be_kept_fails(engine: Engine) {
+    let _shared = support::Shared::on();
+    let (db, _) = support::laravel(engine).await;
+    let _bound = support::bind(&db.conn);
+    init_magnetar(&db).await;
+
+    // Stored: through the engine `init_magnetar` installed.
+    for (email, hash) in ["refused-2b@example.com", "refused-argon@example.com"]
+        .into_iter()
+        .zip(hashes_to_rewrite("rewrite-me"))
+    {
+        magnetar_user(&db, email, &hash).await;
+        refuse_writes(&db, engine, "app_users", "password_hash").await;
+        let error = match support::in_request(Auth::password().authenticate(
+            email,
+            "rewrite-me",
+            None,
+            None,
+        ))
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("{engine:?}: Magnetar signed {email} in without storing its $2y$ hash"),
+        };
+        assert_ne!(
+            error.status_code(),
+            401,
+            "{engine:?}: the refused rewrite answered as invalid credentials: {error}"
+        );
+        assert!(
+            error.to_string().contains(REFUSED),
+            "{engine:?}: Magnetar failed with {error}, not the database's refusal"
+        );
+        assert_eq!(
+            magnetar_sessions(&db, email).await,
+            0,
+            "{engine:?}: the refused sign-in created a session"
+        );
+        assert_eq!(
+            magnetar_hash(&db, email).await,
+            hash,
+            "{engine:?}: the refused rewrite changed the stored hash"
+        );
+
+        allow_writes(&db, engine, "app_users").await;
+        assert!(
+            magnetar_sign_in(email, "rewrite-me").await,
+            "{engine:?}: the next sign-in of {email} failed"
+        );
+        assert!(magnetar_sessions(&db, email).await > 0);
+        assert_laravel_accepts(
+            &magnetar_hash(&db, email).await,
+            "rewrite-me",
+            "the Magnetar sign-in after a refused rewrite",
+        );
+    }
+
+    // Minted: through Magnetar's password service with a driver that
+    // cannot mint the `$2y$` hash.
+    let email = "unminted@example.com";
+    let hash = BcryptHasher::default().hash("rewrite-me").expect("$2b$");
+    magnetar_user(&db, email, &hash).await;
+    let storage = Arc::new(magnetar::storage::SeaOrmStorage::<
+        magnetar::default_schema::DefaultAuthSchema,
+    >::new(db.conn.clone()));
+    let driver = Arc::new(FailingMint {
+        fail: AtomicBool::new(false),
+    });
+    let verifier = PasswordVerifier::new(driver.clone(), PasswordHashConfig::default())
+        .expect("a verifier")
+        .with_target(PasswordTarget::LaravelBcrypt);
+    let service = PasswordAuthService::new(storage.clone(), storage, Arc::new(verifier));
+    driver.fail.store(true, Ordering::SeqCst);
+    let attempt = service
+        .authenticate_with_outcome(PasswordAttempt {
+            email: email.to_owned(),
+            password: SecretString::from("rewrite-me"),
+            metadata: magnetar::sessions::SessionMetadata::default(),
+        })
+        .await;
+    match attempt {
+        Err(magnetar::Error::Internal { message }) => assert!(
+            message.contains(REFUSED),
+            "{engine:?}: the unminted rewrite failed with {message}"
+        ),
+        Err(error) => panic!("{engine:?}: the unminted rewrite failed as {error}"),
+        Ok((_, report)) => panic!(
+            "{engine:?}: Magnetar verified {email} without a $2y$ hash to store ({report:?})"
+        ),
+    }
+    assert_eq!(magnetar_hash(&db, email).await, hash);
+}
+
+#[test]
+#[serial_test::serial]
+fn ldb_004_with_the_setting_a_magnetar_sign_in_whose_rewrite_cannot_be_kept_fails_sqlite() {
+    support::alone(
+        "passwords::ldb_004_with_the_setting_a_magnetar_sign_in_whose_rewrite_cannot_be_kept_fails_sqlite",
+        || magnetar_rewrite_that_cannot_be_kept_fails(Engine::Sqlite),
+    );
+}
+
+#[test]
+#[serial_test::serial]
+#[ignore = "requires a throwaway Postgres at PG_TEST_URL"]
+fn ldb_004_with_the_setting_a_magnetar_sign_in_whose_rewrite_cannot_be_kept_fails_postgres() {
+    support::alone(
+        "passwords::ldb_004_with_the_setting_a_magnetar_sign_in_whose_rewrite_cannot_be_kept_fails_postgres",
+        || magnetar_rewrite_that_cannot_be_kept_fails(Engine::Postgres),
+    );
+}
+
+#[test]
+#[serial_test::serial]
+#[ignore = "requires a throwaway MySQL at MYSQL_TEST_URL"]
+fn ldb_004_with_the_setting_a_magnetar_sign_in_whose_rewrite_cannot_be_kept_fails_mysql() {
+    support::alone(
+        "passwords::ldb_004_with_the_setting_a_magnetar_sign_in_whose_rewrite_cannot_be_kept_fails_mysql",
+        || magnetar_rewrite_that_cannot_be_kept_fails(Engine::Mysql),
+    );
+}
+
+/// Without the setting, Magnetar's Argon2id upgrade stays a post-login
+/// outcome: a valid sign-in whose upgrade cannot be stored still signs in,
+/// and the bcrypt hash stays as it was.
+async fn magnetar_failed_upgrade_still_signs_in(engine: Engine) {
+    suprnova::LaravelDatabase::follow_environment();
+    let (db, _) = support::laravel(engine).await;
+    let _bound = support::bind(&db.conn);
+    init_magnetar(&db).await;
+    let email = "upgrade-refused@example.com";
+    let hash = BcryptHasher::default().hash("upgrade-me").expect("$2b$");
+    magnetar_user(&db, email, &hash).await;
+    refuse_writes(&db, engine, "app_users", "password_hash").await;
+    assert!(
+        magnetar_sign_in(email, "upgrade-me").await,
+        "{engine:?}: a failed Argon2id upgrade failed the sign-in"
+    );
+    assert!(magnetar_sessions(&db, email).await > 0);
+    assert_eq!(magnetar_hash(&db, email).await, hash);
+}
+
+#[test]
+#[serial_test::serial]
+fn ldb_004_without_the_setting_a_failed_magnetar_upgrade_still_signs_in_sqlite() {
+    support::alone(
+        "passwords::ldb_004_without_the_setting_a_failed_magnetar_upgrade_still_signs_in_sqlite",
+        || magnetar_failed_upgrade_still_signs_in(Engine::Sqlite),
+    );
+}
+
+#[test]
+#[serial_test::serial]
+#[ignore = "requires a throwaway Postgres at PG_TEST_URL"]
+fn ldb_004_without_the_setting_a_failed_magnetar_upgrade_still_signs_in_postgres() {
+    support::alone(
+        "passwords::ldb_004_without_the_setting_a_failed_magnetar_upgrade_still_signs_in_postgres",
+        || magnetar_failed_upgrade_still_signs_in(Engine::Postgres),
+    );
+}
+
+#[test]
+#[serial_test::serial]
+#[ignore = "requires a throwaway MySQL at MYSQL_TEST_URL"]
+fn ldb_004_without_the_setting_a_failed_magnetar_upgrade_still_signs_in_mysql() {
+    support::alone(
+        "passwords::ldb_004_without_the_setting_a_failed_magnetar_upgrade_still_signs_in_mysql",
+        || magnetar_failed_upgrade_still_signs_in(Engine::Mysql),
     );
 }
