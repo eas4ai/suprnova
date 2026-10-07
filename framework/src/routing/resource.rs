@@ -67,7 +67,7 @@
 //! - `except` (Laravel) + `drop` (Rust) - both alias.
 //! - `names` (Laravel) + `rename` (Rust) - both alias.
 
-use super::binding::{HandlerRecord, MissingHook, RouteBindingOptions, boxed_missing};
+use super::binding::{HandlerRef, MissingHook, RouteBindingOptions, boxed_missing};
 use super::router::{BoxedHandler, Router};
 use crate::FrameworkError;
 use crate::auth::{Auth, Authenticatable};
@@ -342,24 +342,19 @@ enum ResourceHandlers {
     Controller(Arc<dyn ResourceController>),
     /// `#[handler]` functions, one per action, with what `#[handler]`
     /// recorded about each.
-    Functions(
-        Vec<(
-            ResourceAction,
-            Arc<BoxedHandler>,
-            Option<&'static HandlerRecord>,
-        )>,
-    ),
+    Functions(Vec<(ResourceAction, Arc<BoxedHandler>, HandlerRef)>),
 }
 
 impl ResourceHandlers {
     fn handler(
         &self,
         action: ResourceAction,
-    ) -> Result<(Arc<BoxedHandler>, Option<&'static HandlerRecord>), FrameworkError> {
+    ) -> Result<(Arc<BoxedHandler>, HandlerRef), FrameworkError> {
         match self {
-            ResourceHandlers::Controller(controller) => {
-                Ok((make_handler(controller.clone(), action), None))
-            }
+            ResourceHandlers::Controller(controller) => Ok((
+                make_handler(controller.clone(), action),
+                HandlerRef::BINDS_NOTHING,
+            )),
             ResourceHandlers::Functions(functions) => functions
                 .iter()
                 .find(|(found, _, _)| *found == action)
@@ -652,11 +647,7 @@ impl From<ResourceRoutes> for Router {
 /// [`ResourceDef::try_register`].
 pub struct ResourceDef {
     spec: ResourceSpec,
-    functions: Vec<(
-        ResourceAction,
-        Arc<BoxedHandler>,
-        Option<&'static HandlerRecord>,
-    )>,
+    functions: Vec<(ResourceAction, Arc<BoxedHandler>, HandlerRef)>,
 }
 
 impl ResourceDef {
@@ -679,7 +670,7 @@ impl ResourceDef {
         H: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
-        let record = super::binding::record_of::<H>();
+        let record = super::binding::handler_ref::<H>();
         let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.functions.push((action, Arc::new(boxed), record));
         self

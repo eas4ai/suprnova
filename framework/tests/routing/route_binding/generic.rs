@@ -13,8 +13,8 @@ use chrono::{DateTime, Utc};
 use suprnova::http::{HttpResponse, text};
 use suprnova::testing::TestDatabase;
 use suprnova::{
-    FrameworkError, FromRequest, Model, Request, Response, RouteBinding, Router, get, group,
-    handler, model,
+    FrameworkError, FromRequest, Middleware, Model, Next, Request, Response, RouteBinding, Router,
+    get, group, handler, model,
 };
 
 use super::{get as get_path, run_sql, serve};
@@ -185,6 +185,74 @@ pub async fn ordered<B: FromRequest + Display + Send + 'static>(
     extra: B,
 ) -> Response {
     text(format!("{} {} {extra}", first.0, second.0))
+}
+
+/// A recorded handler that binds the post alone, without its user.
+#[handler]
+pub async fn post_alone(post: GnPost) -> Response {
+    text(format!("alone {}", post.slug))
+}
+
+/// A recorded `missing()` handler that binds the post alone.
+#[handler]
+pub async fn missing_post_alone(post: GnPost) -> Response {
+    Ok(HttpResponse::text(format!("hook {}", post.slug)).status(302))
+}
+
+/// A generic `missing()` handler that binds the post alone.
+#[handler]
+pub async fn missing_post_alone_generic<B: FromRequest + Display + Send + 'static>(
+    post: GnPost,
+    extra: B,
+) -> Response {
+    Ok(HttpResponse::text(format!("hook {} {extra}", post.slug)).status(302))
+}
+
+/// A generic route handler that binds the user, then hands its request to
+/// [`post_alone`], which binds the post alone.
+#[handler]
+pub async fn forward_post_alone<M: Send + 'static>(user: GnUser, req: Request) -> Response {
+    let _ = user;
+    post_alone(req).await
+}
+
+/// Route middleware that answers with [`post_alone`] before the route's
+/// handler runs.
+pub struct AnswerWithPostAlone;
+
+#[suprnova::async_trait]
+impl Middleware for AnswerWithPostAlone {
+    async fn handle(&self, request: Request, _next: Next) -> Response {
+        post_alone(request).await
+    }
+}
+
+/// A generic route handler that binds the user with a type naming its
+/// type parameter, which its record cannot describe.
+#[handler]
+pub async fn param_user_post<T: RouteBinding>(
+    user: suprnova::RouteParam<T>,
+    post: GnPost,
+) -> Response {
+    text(format!("{} {}", user.route_key(), post.slug))
+}
+
+/// A generic handler that reads the parameter `user` as a raw value.
+#[handler]
+pub async fn raw_user<B: FromRequest + Display + Send + 'static>(user: i64, extra: B) -> Response {
+    text(format!("raw {user} {extra}"))
+}
+
+/// A recorded handler that reads the parameter `user` as a raw value.
+#[handler]
+pub async fn raw_user_recorded(user: i64) -> Response {
+    text(format!("raw {user}"))
+}
+
+/// A recorded sync handler that reads the parameter `user` as a raw value.
+#[handler]
+pub fn raw_user_sync(user: String) -> Response {
+    text(format!("raw {user}"))
 }
 
 /// The `missing()` handler: it sees the request.
@@ -475,4 +543,156 @@ async fn bind_004_a_generic_handler_is_not_refused_at_startup_and_never_binds_pa
         400,
         "the undeclared `post` is missing at request time"
     );
+}
+
+#[tokio::test]
+async fn bind_006_on_a_generic_route_a_child_taken_without_its_parent_is_scoped_through_it() {
+    // The route's own handler is generic and binds the user and the post.
+    // Every handler planned against the route that takes the post alone
+    // finds it through the user, as on a recorded route.
+    let _db = fixture().await;
+    let router: Router = Router::new()
+        .get("/users/{user}/posts/{post:slug}", user_post::<GnBody>)
+        .missing(missing_post_alone)
+        .get(
+            "/generic-hook/users/{user}/posts/{post:slug}",
+            user_post::<GnBody>,
+        )
+        .missing(missing_post_alone_generic::<GnBody>)
+        .get(
+            "/nested/users/{user}/posts/{post:slug}",
+            forward_post_alone::<()>,
+        )
+        .get("/mw/users/{user}/posts/{post:slug}", user_post::<GnBody>)
+        .middleware(AnswerWithPostAlone)
+        .get(
+            "/closure/users/{user}/posts/{post:slug}",
+            |req| async move {
+                post_alone(req)
+                    .await
+                    .map(|response| response.header("X-Via", "closure"))
+            },
+        )
+        .into();
+    let addr = serve(router).await;
+    for path in [
+        "/users/1/posts/grace-post",
+        "/generic-hook/users/1/posts/grace-post",
+        "/nested/users/1/posts/grace-post",
+        "/mw/users/1/posts/grace-post",
+    ] {
+        let (status, body) = get_path(addr, path).await;
+        assert_eq!(status, 404, "{path}: {body}");
+        assert!(!body.contains("grace-post"), "{path}: {body}");
+    }
+    for path in [
+        "/nested/users/1/posts/ada-post",
+        "/mw/users/1/posts/ada-post",
+    ] {
+        assert_eq!(
+            get_path(addr, path).await,
+            (200, "alone ada-post".to_owned()),
+            "{path}"
+        );
+    }
+    // A closure route binds no parent, so nothing scopes the child.
+    assert_eq!(
+        get_path(addr, "/closure/users/1/posts/grace-post").await,
+        (200, "alone grace-post".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn bind_006_a_generic_route_handler_the_router_cannot_find_refuses_a_child_without_its_parent()
+ {
+    // A generic handler declared inside a function: the router cannot find
+    // its arguments by its path, so it cannot tell which parent it binds,
+    // and a handler that takes the post alone is refused, never unscoped.
+    #[handler]
+    async fn hidden_user_post<B: FromRequest + Display + Send + 'static>(
+        user: GnUser,
+        post: GnPost,
+        extra: B,
+    ) -> Response {
+        text(format!("{} {} {extra}", user.name, post.slug))
+    }
+    let _db = fixture().await;
+    let router: Router = Router::new()
+        .get(
+            "/users/{user}/posts/{post:slug}",
+            hidden_user_post::<GnBody>,
+        )
+        .missing(missing_post_alone)
+        .into();
+    let addr = serve(router).await;
+    // The route's own handler binds as before.
+    assert_eq!(
+        get_path(addr, "/users/1/posts/ada-post").await,
+        (200, "ada ada-post body".to_owned())
+    );
+    let (status, body) = get_path(addr, "/users/1/posts/grace-post").await;
+    assert_eq!(status, 500, "{body}");
+    assert!(!body.contains("hook grace-post"), "{body}");
+    for part in [
+        "GET /users/{user}/posts/{post:slug}",
+        "missing_post_alone",
+        "`post`",
+        "`user`",
+        "take `user`",
+    ] {
+        assert!(body.contains(part), "`{part}` missing from {body}");
+    }
+}
+
+#[tokio::test]
+async fn bind_007_an_unplanned_handler_reading_a_bound_parameter_raw_is_refused_at_the_request() {
+    // A binder covers `user`, which each handler reads as a raw value: the
+    // startup checks would refuse it, so the request answers that refusal.
+    let _db = fixture().await;
+    let router: Router = Router::new()
+        .get("/generic/users/{user}", raw_user::<GnBody>)
+        .get("/closure/users/{user}", |req| async move {
+            raw_user_recorded(req)
+                .await
+                .map(|response| response.header("X-Via", "closure"))
+        })
+        .get("/sync/users/{user}", |req: Request| async move {
+            raw_user_sync(req).map(|response| response.header("X-Via", "closure"))
+        })
+        .into();
+    let router = router.model::<GnUser, _, _>("user", |_value| async { Ok(GnUser::default()) });
+    router
+        .prepare_bindings()
+        .expect("handlers with no record are not checked at startup");
+    let addr = serve(router).await;
+    for path in ["/generic/users/1", "/closure/users/1", "/sync/users/1"] {
+        let (status, body) = get_path(addr, path).await;
+        assert_eq!(status, 500, "{path}: {body}");
+        assert!(
+            body.contains("a binder is registered for the parameter `user`"),
+            "{path}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bind_006_a_parent_the_generic_route_handler_binds_by_its_type_parameter_refuses_a_child_alone()
+ {
+    // The route's generic handler binds `user` as `RouteParam<T>`, which
+    // its record cannot describe, so the post the `missing()` handler takes
+    // alone cannot be scoped: the request answers the refusal.
+    let _db = fixture().await;
+    let router: Router = Router::new()
+        .get("/users/{user}/posts/{post:slug}", param_user_post::<GnUser>)
+        .missing(missing_post_alone)
+        .into();
+    let addr = serve(router).await;
+    assert_eq!(
+        get_path(addr, "/users/1/posts/ada-post").await,
+        (200, "1 ada-post".to_owned())
+    );
+    let (status, body) = get_path(addr, "/users/1/posts/grace-post").await;
+    assert_eq!(status, 500, "{body}");
+    assert!(!body.contains("hook grace-post"), "{body}");
+    assert!(body.contains("take `user`"), "{body}");
 }

@@ -51,7 +51,9 @@ pub const fn validate_route_path(path: &'static str) -> &'static str {
     path
 }
 use crate::middleware::{BoxedMiddleware, Middleware, boxed_as};
-use crate::routing::binding::{HandlerRecord, RouteBindingOptions, boxed_missing, record_of};
+use crate::routing::binding::{
+    HandlerRef, RouteBindingOptions, boxed_missing, handler_ref, record_of,
+};
 use crate::routing::params::ParamConstraint;
 use crate::routing::router::{ANY_METHODS, BoxedHandler, Router, register_route_name};
 use crate::session::SessionBlock;
@@ -1116,7 +1118,7 @@ pub struct GroupRoute {
     middlewares: Vec<BoxedMiddleware>,
     block: Option<SessionBlock>,
     constraints: Vec<(String, ParamConstraint)>,
-    record: Option<&'static HandlerRecord>,
+    record: HandlerRef,
     bindings: RouteBindingOptions,
 }
 
@@ -1132,7 +1134,7 @@ pub struct GroupAnyRoute {
     middlewares: Vec<BoxedMiddleware>,
     block: Option<SessionBlock>,
     constraints: Vec<(String, ParamConstraint)>,
-    record: Option<&'static HandlerRecord>,
+    record: HandlerRef,
     bindings: RouteBindingOptions,
 }
 
@@ -1563,7 +1565,7 @@ where
             middlewares: self.middlewares,
             block: self.block,
             constraints: self.constraints,
-            record: record_of::<H>(),
+            record: handler_ref::<H>(),
             bindings: self.bindings,
         }
     }
@@ -1607,7 +1609,7 @@ where
             middlewares: self.middlewares,
             block: self.block,
             constraints: self.constraints,
-            record: record_of::<H>(),
+            record: handler_ref::<H>(),
             bindings: self.bindings,
         }
     }

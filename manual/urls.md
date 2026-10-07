@@ -116,23 +116,31 @@ impl suprnova::RouteValue for Region {
 ```
 
 Every call written with `&[("name", "value")]` pairs keeps working and
-builds the same URL, except four forms. They compiled only because the
-parameter used to be a `&[(&str, &str)]` slice, which set the type of the
-pairs:
+builds the same URL, except the forms below. They compiled only because
+the parameter used to be a `&[(&str, &str)]` slice, which set the type of
+the pairs or converted them to it:
 
-- A value written `s.as_ref()` inside an array of pairs.
+- A name or value whose type the parameter inferred: `s.as_ref()`,
+  `s.borrow()`, `Default::default()`.
+- A name or value that reaches `&str` through more than one dereference,
+  or through a type of the application's own: `&&&str`, `&Box<String>`.
+- A container of pairs reached the same way: `&&&Vec<_>`,
+  `&Box<Vec<_>>`, a `SmallVec`.
 - An array whose pairs mix `&String` and `&str` values, such as
   `&[("id", &id), ("tab", "posts")]`.
 - An array of more than 32 pairs that holds `&String` values.
 - `route` used as a `fn(&str, &[(&str, &str)]) -> Option<String>` pointer.
 
-In the first three, write the value with `.as_str()`. In place of the
-pointer, write a closure:
+Write a name or value with `.as_str()` or `&*`, and a container with
+`.as_slice()` or `&*`. In place of the pointer, write a closure:
 
 ```rust
 use suprnova::route;
 
 let url = route("users.show", &[("id", id.as_str()), ("tab", "posts")]);
+// `boxed_id` is a `Box<String>`, `pairs` a `SmallVec<[(&str, &str); 4]>`.
+let url = route("users.show", &[("id", &*boxed_id)]);
+let url = route("users.show", pairs.as_slice());
 
 let build: fn(&str, &[(&str, &str)]) -> Option<String> =
     |name, params| route(name, params);

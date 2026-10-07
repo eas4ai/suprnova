@@ -1,6 +1,6 @@
 //! Every form a `route()` or `try_route()` call passed its string pairs in
 //! before route binding, when the parameter was `&[(&str, &str)]`: each
-//! must still compile (BIND-012), apart from the four the specification
+//! must still compile (BIND-012), apart from the forms the specification
 //! lists, which compile as the manual rewrites them.
 
 use std::borrow::Cow;
@@ -216,12 +216,43 @@ pub fn shared_containers(
     ]
 }
 
-/// The four forms that compiled only because the slice parameter set the
-/// pairs' type, written as the manual says (BIND-012): `.as_str()` on the
-/// value, and a closure in place of the function pointer.
-pub fn rewritten_forms(id: String) -> Vec<Option<String>> {
+/// A type of the application's own that derefs to a slice of pairs, as a
+/// `SmallVec` does.
+pub struct Pairs(pub Vec<(&'static str, &'static str)>);
+
+impl std::ops::Deref for Pairs {
+    type Target = [(&'static str, &'static str)];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// The forms that compiled only because the slice parameter set the pairs'
+/// type or coerced them, written as the manual says (BIND-012): `.as_str()`
+/// or `&*` on a name or value, `.as_slice()` or `&*` on a container, and a
+/// closure in place of the function pointer.
+pub fn rewritten_forms(
+    id: String,
+    name: &str,
+    boxed: Box<String>,
+    pairs: Vec<(&'static str, &'static str)>,
+    boxed_pairs: Box<Vec<(&'static str, &'static str)>>,
+    own: Pairs,
+) -> Vec<Option<String>> {
     let pointer: fn(&str, &[(&str, &str)]) -> Option<String> = |name, params| route(name, params);
     vec![
+        // Was `("id", id.borrow())`.
+        route("a", &[("id", id.as_str())]),
+        // Was `("id", &&name)`, a `&&&str`.
+        route("a", &[("id", &*name)]),
+        // Was `("id", &boxed)`, a `&Box<String>`.
+        route("a", &[("id", &*boxed)]),
+        // Was `&&&pairs`.
+        route("a", pairs.as_slice()),
+        // Was `&boxed_pairs`, a `&Box<Vec<_>>`.
+        route("a", boxed_pairs.as_slice()),
+        // Was `&own`, a type that derefs to the pairs.
+        route("a", &*own),
         // Was `("id", id.as_ref())`.
         route("a", &[("id", id.as_str())]),
         // Was `[("id", &id), ("other", "x")]`.

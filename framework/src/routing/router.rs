@@ -1110,13 +1110,14 @@ impl Router {
         self.bindings.note_fallback(record);
     }
 
-    /// Record the `#[handler]` record of the route `(method, pattern)`,
-    /// for a registration site that boxed the handler itself.
+    /// Record what the router knows about the handler of the route
+    /// `(method, pattern)`, for a registration site that boxed the handler
+    /// itself.
     pub(crate) fn note_route_record(
         &mut self,
         method: Method,
         pattern: &str,
-        record: Option<&'static super::binding::HandlerRecord>,
+        record: super::binding::HandlerRef,
     ) {
         self.bindings.note_route(method, pattern, record);
     }
@@ -1477,7 +1478,7 @@ impl Router {
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.try_insert_get(&converted, Arc::new(handler))?;
         self.bindings
-            .note_route(Method::GET, &converted, super::binding::record_of::<H>());
+            .note_route(Method::GET, &converted, super::binding::handler_ref::<H>());
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1517,7 +1518,7 @@ impl Router {
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.try_insert_post(&converted, Arc::new(handler))?;
         self.bindings
-            .note_route(Method::POST, &converted, super::binding::record_of::<H>());
+            .note_route(Method::POST, &converted, super::binding::handler_ref::<H>());
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1553,7 +1554,7 @@ impl Router {
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.try_insert_put(&converted, Arc::new(handler))?;
         self.bindings
-            .note_route(Method::PUT, &converted, super::binding::record_of::<H>());
+            .note_route(Method::PUT, &converted, super::binding::handler_ref::<H>());
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1592,8 +1593,11 @@ impl Router {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.try_insert_delete(&converted, Arc::new(handler))?;
-        self.bindings
-            .note_route(Method::DELETE, &converted, super::binding::record_of::<H>());
+        self.bindings.note_route(
+            Method::DELETE,
+            &converted,
+            super::binding::handler_ref::<H>(),
+        );
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1632,8 +1636,11 @@ impl Router {
         let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.try_insert_patch(&converted, Arc::new(handler))?;
-        self.bindings
-            .note_route(Method::PATCH, &converted, super::binding::record_of::<H>());
+        self.bindings.note_route(
+            Method::PATCH,
+            &converted,
+            super::binding::handler_ref::<H>(),
+        );
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1689,7 +1696,7 @@ impl Router {
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.try_insert_head(&converted, Arc::new(handler))?;
         self.bindings
-            .note_route(Method::HEAD, &converted, super::binding::record_of::<H>());
+            .note_route(Method::HEAD, &converted, super::binding::handler_ref::<H>());
         Ok(RouteBuilder {
             router: self,
             last_path: converted,
@@ -1737,7 +1744,7 @@ impl Router {
         self.bindings.note_route(
             Method::OPTIONS,
             &converted,
-            super::binding::record_of::<H>(),
+            super::binding::handler_ref::<H>(),
         );
         Ok(RouteBuilder {
             router: self,
@@ -1806,7 +1813,7 @@ impl Router {
         let converted = crate::routing::macros::convert_route_params(path);
         let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         let handler_arc = Arc::new(boxed);
-        let record = super::binding::record_of::<H>();
+        let record = super::binding::handler_ref::<H>();
         let mut registered = Vec::with_capacity(methods.len());
         for method in methods {
             self.try_insert_method(method, &converted, handler_arc.clone())?;
