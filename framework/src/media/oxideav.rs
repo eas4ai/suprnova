@@ -1469,8 +1469,6 @@ fn edge_extended_frame(
     })
 }
 
-/// Write a canvas as a V5 bitmap that embeds `profile`, the one BMP layout
-/// that holds an ICC profile.
 /// Write a canvas as a PNG with `oxideav_png`'s own encoder, the pixels
 /// moved into it, with `reserve` bytes of room after the file. The
 /// registry encoder calls this same function, with the default options it
@@ -1513,6 +1511,8 @@ fn encode_bmp(canvas: Canvas, reserve: usize) -> Result<Vec<u8>, FrameworkError>
     Ok(out)
 }
 
+/// Write a canvas as a V5 bitmap that embeds `profile`, the one BMP layout
+/// that holds an ICC profile.
 fn encode_bmp_with_profile(canvas: Canvas, profile: &[u8]) -> Result<Vec<u8>, FrameworkError> {
     let image = oxideav_bmp::BmpImage {
         width: canvas.width,
