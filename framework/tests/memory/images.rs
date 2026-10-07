@@ -1632,8 +1632,9 @@ async fn mem_audit_the_magick_driver_joins_a_gif_profile_once() {
 /// directory named `name`, for a pipeline of two ImageMagick runs around a
 /// Rust stage: it reads all of stdin and answers with `intermediate` when
 /// its last argument is `png:-`, as it is for the PNG a run passes to Rust,
-/// and with `output` otherwise. The output format must not be PNG, or every
-/// run would read as the first. No host ImageMagick is needed.
+/// and with `output` otherwise, keeping what that last run read for
+/// [`stand_in_received`]. The output format must not be PNG, or every run
+/// would read as the first. No host ImageMagick is needed.
 #[cfg(unix)]
 fn magick_stand_in_per_run(
     name: &str,
@@ -1652,15 +1653,27 @@ fn magick_stand_in_per_run(
     std::fs::write(
         &stand_in,
         format!(
-            "#!/bin/sh\ncat > /dev/null\nfor last; do :; done\ncase \"$last\" in\n  png:-) exec \
-             cat '{}' ;;\n  *) exec cat '{}' ;;\nesac\n",
+            "#!/bin/sh\nfor last; do :; done\ncase \"$last\" in\n  png:-) cat > /dev/null; exec \
+             cat '{}' ;;\n  *) cat > '{}'; exec cat '{}' ;;\nesac\n",
             intermediate_file.display(),
+            scratch.join("received").display(),
             output_file.display()
         ),
     )
     .unwrap();
     std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).unwrap();
     suprnova::MagickCliDriver::new(stand_in.to_string_lossy())
+}
+
+/// What the last run of the stand-in kept under `name` read from stdin.
+#[cfg(unix)]
+fn stand_in_received(name: &str) -> Vec<u8> {
+    std::fs::read(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(name)
+            .join("received"),
+    )
+    .expect("the last run read its input")
 }
 
 /// MEM-003: the PNG between two ImageMagick runs is read for its profile
@@ -1892,6 +1905,15 @@ fn decode_estimate(driver: &OxideAvImageDriver, image: &[u8], width: u32, height
         .unwrap_or_else(|| panic!("the refusal names no estimate: {message}"))
 }
 
+/// The refusal `result` holds, or a failure that names `why` and the
+/// length of the output written instead of the output itself.
+fn refused(result: Result<Vec<u8>, String>, why: &str) -> String {
+    match result {
+        Ok(out) => panic!("{why}, but a {}-byte output was written", out.len()),
+        Err(message) => message,
+    }
+}
+
 /// `process` under a `budget`-byte `IMAGE_MAX_ALLOC_BYTES`: the result,
 /// and the most bytes it held at once.
 fn process_under(
@@ -1915,11 +1937,11 @@ fn process_under(
 
 /// IMG-002: `IMAGE_MAX_ALLOC_BYTES` is charged a profile only for what is
 /// held for it. A CMYK profile the output drops is checked by its length,
-/// and a PNG's own chunk is carried as it stands, so neither is charged:
-/// under a budget that fits the image without them, both are processed
-/// within it. A JPEG's RGB profile is joined from its pieces and carried,
-/// two copies, so under the same budget it is refused, and the refusal
-/// names both.
+/// and a PNG's own chunk is carried as it stands, so neither is charged a
+/// copy of the profile: a JPEG's costs nothing at the budget its decode
+/// needs, and a PNG's only the inflate that checks it. A JPEG's RGB
+/// profile is joined from its pieces and carried, two copies, so under the
+/// same budget it is refused, and the refusal names both.
 #[tokio::test]
 async fn img_002_a_profile_is_charged_only_for_what_is_held() {
     let _lock = exclusive().await;
@@ -1941,7 +1963,7 @@ async fn img_002_a_profile_is_charged_only_for_what_is_held() {
     assert!(peak <= budget, "held {peak} bytes under {budget}");
     let joined = jpeg_with_profile_from(small, &rgb, 64);
     let (result, _) = process_under(&driver, &joined, &to_jpeg, budget);
-    let message = result.expect_err("two copies of the profile are over the budget");
+    let message = refused(result, "two copies of the profile are over the budget");
     for part in [
         format!("{LARGE_PROFILE}-byte ICC profile"),
         format!("{LARGE_PROFILE} bytes to join it from its pieces"),
@@ -1951,8 +1973,9 @@ async fn img_002_a_profile_is_charged_only_for_what_is_held() {
         assert!(message.contains(&part), "{part:?} is not in: {message}");
     }
 
-    // The PNGs, under 1 MiB.
-    const BUDGET: u64 = 1024 * 1024;
+    // The PNGs, under 2 MiB: checking a profile inflates it, which is
+    // charged its 1 MiB, but neither is charged a second copy.
+    const BUDGET: u64 = 2 * 1024 * 1024;
     let plain = encode_png(64, 64, PngPixelFormat::Rgba, 4, false);
     let dropped = png_with_chunks(&plain, &[(b"iCCP", iccp_chunk(&cmyk))]);
     let (result, peak) = process_under(&driver, &dropped, &to_jpeg, BUDGET);
@@ -2010,7 +2033,7 @@ async fn img_002_the_magick_driver_charges_a_profile_only_for_what_it_holds() {
     result.unwrap_or_else(|e| panic!("a dropped profile was charged at {BUDGET} bytes: {e}"));
     assert!(peak <= BUDGET, "held {peak} bytes under {BUDGET}");
     let (result, _) = stage("img-002-magick-stage-rgb", &rgb);
-    let message = result.expect_err("an inflated profile is over the budget");
+    let message = refused(result, "an inflated profile is over the budget");
     for part in [
         format!("{LARGE_PROFILE}-byte ICC profile"),
         "to inflate it".to_string(),
@@ -2035,7 +2058,7 @@ async fn img_002_the_magick_driver_charges_a_profile_only_for_what_it_holds() {
     let driver = magick_stand_in("img-002-magick-output-gif", &gif);
     let budget = gif.len() as u64 + LARGE_PROFILE as u64 / 2;
     let (result, _) = process_under(&driver, &gif, &ImagePipeline::default(), budget);
-    let message = result.expect_err("a joined profile is over what the budget leaves");
+    let message = refused(result, "a joined profile is over what the budget leaves");
     for part in [
         format!("{LARGE_PROFILE}-byte ICC profile"),
         format!("{LARGE_PROFILE} bytes to join it from its pieces"),
@@ -2043,4 +2066,180 @@ async fn img_002_the_magick_driver_charges_a_profile_only_for_what_it_holds() {
     ] {
         assert!(message.contains(&part), "{part:?} is not in: {message}");
     }
+}
+
+/// IMG-002: checking a PNG profile's length inflates it, so the check is
+/// charged the profile's inflated size, as reading it is. A dropped CMYK
+/// profile and an RGB one carried as the source's own chunk, each
+/// declaring 64 MiB, are refused under a 4 MiB budget before anything is
+/// inflated, and the refusal names the inflate; at 1 MiB, each fits.
+#[tokio::test]
+async fn img_002_checking_a_png_profile_is_charged_its_inflated_size() {
+    let _lock = exclusive().await;
+    const BUDGET: u64 = 4 * 1024 * 1024;
+    let driver = OxideAvImageDriver::new();
+    let plain = encode_png(64, 64, PngPixelFormat::Rgba, 4, false);
+    let to_jpeg = ImagePipeline {
+        format: Some(OutputFormat::Jpeg),
+        ..Default::default()
+    };
+    let to_png = ImagePipeline {
+        format: Some(OutputFormat::Png),
+        ..Default::default()
+    };
+    for (size, fits) in [(64 * 1024 * 1024, false), (LARGE_PROFILE, true)] {
+        let rgb = p3_profile_of(size);
+        let mut cmyk = rgb.clone();
+        cmyk[16..20].copy_from_slice(b"CMYK");
+        for (name, profile, pipeline) in [("dropped", &cmyk, &to_jpeg), ("carried", &rgb, &to_png)]
+        {
+            let png = png_with_chunks(&plain, &[(b"iCCP", iccp_chunk(profile))]);
+            let (result, peak) = process_under(&driver, &png, pipeline, BUDGET);
+            if fits {
+                result.unwrap_or_else(|e| panic!("{name} {size}: refused under {BUDGET}: {e}"));
+                assert!(peak <= BUDGET, "{name} {size}: held {peak} bytes");
+                continue;
+            }
+            let message = refused(result, "the inflate is over the budget");
+            for part in [
+                format!("{size}-byte ICC profile"),
+                "to inflate it and check its length".to_string(),
+            ] {
+                assert!(
+                    message.contains(&part),
+                    "{name}: {part:?} is not in: {message}"
+                );
+            }
+            assert!(
+                peak < 1024 * 1024,
+                "{name}: held {peak} bytes before refusing: it was inflated"
+            );
+        }
+    }
+}
+
+/// IMG-002: PNG output compresses a profile it does not take from a PNG
+/// source into a buffer of its own, beside the room the output keeps for
+/// the compressed copy, and both are charged the compression's worst case.
+/// A WebP's 1 MiB profile of noise, lent from the file, so not charged
+/// to read: under 1.5 MiB the two compressed copies are refused, and the
+/// refusal names them; under 4 MiB they fit.
+#[tokio::test]
+async fn img_002_compressing_a_profile_for_png_output_is_charged() {
+    let _lock = exclusive().await;
+    let driver = OxideAvImageDriver::new();
+    let webp = convert(
+        &encode_png(64, 64, PngPixelFormat::Rgb24, 3, false),
+        OutputFormat::WebPLossless,
+    );
+    let source = webp_with_profile(&webp, b"ICCP", &noisy_profile_of(LARGE_PROFILE));
+    let to_png = ImagePipeline {
+        format: Some(OutputFormat::Png),
+        ..Default::default()
+    };
+    let budget = LARGE_PROFILE as u64 * 3 / 2;
+    let (result, _) = process_under(&driver, &source, &to_png, budget);
+    let message = refused(result, "two compressed copies are over the budget");
+    for part in [
+        format!("{LARGE_PROFILE}-byte ICC profile"),
+        "to compress it".to_string(),
+        "for the copy the output carries".to_string(),
+    ] {
+        assert!(message.contains(&part), "{part:?} is not in: {message}");
+    }
+    let budget = 4 * LARGE_PROFILE as u64;
+    let (result, peak) = process_under(&driver, &source, &to_png, budget);
+    let out = result.unwrap_or_else(|e| panic!("refused under {budget}: {e}"));
+    assert!(out.len() > LARGE_PROFILE, "the profile was not carried");
+    assert!(peak <= budget, "held {peak} bytes under {budget}");
+}
+
+/// IMG-002: a PNG's own `iCCP` chunk carried into PNG output is copied
+/// once, into the output, and that copy is charged as a profile's is. A
+/// chunk of noise about 1 MiB long: the inflate that checks it and the
+/// output's copy are over 1.75 MiB together, and refused naming the copy;
+/// under 4 MiB they fit.
+#[tokio::test]
+async fn img_002_a_png_chunk_carried_as_it_stands_is_charged_its_copy() {
+    let _lock = exclusive().await;
+    let driver = OxideAvImageDriver::new();
+    let chunk = iccp_chunk(&noisy_profile_of(LARGE_PROFILE));
+    let png = png_with_chunks(
+        &encode_png(64, 64, PngPixelFormat::Rgba, 4, false),
+        &[(b"iCCP", chunk.clone())],
+    );
+    let to_png = ImagePipeline {
+        format: Some(OutputFormat::Png),
+        ..Default::default()
+    };
+    let budget = LARGE_PROFILE as u64 * 7 / 4;
+    let (result, _) = process_under(&driver, &png, &to_png, budget);
+    let message = refused(result, "the check and the copy are over the budget");
+    for part in [
+        format!("{} bytes for the copy the output carries", chunk.len()),
+        "to inflate it and check its length".to_string(),
+    ] {
+        assert!(message.contains(&part), "{part:?} is not in: {message}");
+    }
+    let budget = 4 * LARGE_PROFILE as u64;
+    let (result, peak) = process_under(&driver, &png, &to_png, budget);
+    let out = result.unwrap_or_else(|e| panic!("refused under {budget}: {e}"));
+    assert!(
+        out.windows(chunk.len()).any(|window| window == chunk),
+        "the chunk was not carried as it stands"
+    );
+    assert!(peak <= budget, "held {peak} bytes under {budget}");
+}
+
+/// MEM-003: between two ImageMagick runs, an RGB profile the next run
+/// still needs goes into the next PNG as the chunk ImageMagick wrote,
+/// checked by its length: it is neither inflated into a buffer nor
+/// compressed again, and it is copied once, into the next PNG. A custom
+/// step runs between the runs, and the stand-in hands it a PNG whose
+/// `iCCP` chunk holds 1 MiB of noise. The same PNG with the profile's
+/// signature broken is the measure: at its peak the run holds the next
+/// PNG's copy and less than half a chunk more.
+#[cfg(unix)]
+#[tokio::test]
+async fn mem_audit_the_magick_driver_carries_a_profile_between_runs_as_its_chunk() {
+    let _lock = exclusive().await;
+    suprnova::media::register_transformation("mem-003-between-runs", Ok);
+    let pixels = encode_png(64, 64, PngPixelFormat::Rgba, 4, false);
+    let output = convert(&pixels, OutputFormat::Bmp);
+    let pipeline = ImagePipeline {
+        transformations: vec![Transformation::custom("mem-003-between-runs")],
+        format: Some(OutputFormat::Bmp),
+        ..Default::default()
+    };
+    let profile = noisy_profile_of(LARGE_PROFILE);
+    let mut unsigned = profile.clone();
+    unsigned[36..40].copy_from_slice(b"none");
+    let peak = |name: &str, profile: &[u8]| {
+        let chunk = iccp_chunk(profile);
+        let intermediate = png_with_chunks(&pixels, &[(b"iCCP", chunk.clone())]);
+        let driver = magick_stand_in_per_run(name, &intermediate, &output);
+        driver.process(&pixels, &pipeline).expect("a warm-up");
+        let heap = Heap::start();
+        let start = heap.live();
+        let out = driver
+            .process(&pixels, &pipeline)
+            .expect("the stand-in answers");
+        let peak = (heap.peak() - start) as u64;
+        drop(heap);
+        assert_eq!(out, output, "{name}: the last run's output is kept");
+        (peak, chunk)
+    };
+    let (without, _) = peak("mem-003-between-runs-without", &unsigned);
+    let (with, chunk) = peak("mem-003-between-runs-profile", &profile);
+    assert!(
+        with < without + (chunk.len() + chunk.len() / 2) as u64,
+        "a peak of {with} bytes with a {}-byte iCCP chunk between the runs against {without} \
+         with none: it was copied on the way to the next run",
+        chunk.len()
+    );
+    let received = stand_in_received("mem-003-between-runs-profile");
+    assert!(
+        received.windows(chunk.len()).any(|window| window == chunk),
+        "the next run did not read the chunk as ImageMagick wrote it"
+    );
 }

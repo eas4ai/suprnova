@@ -464,14 +464,14 @@ impl OxideAvImageDriver {
     /// Only the profile's header is read before the budget is charged, and
     /// it is charged for what is held for it: a copy read from the file
     /// when its pieces are joined or it is inflated (one that sits whole in
-    /// the file is lent, not copied), an inflate's work to check a PNG's
-    /// length, and the copy the output carries. With the pixels already
-    /// held, that must fit `IMAGE_MAX_ALLOC_BYTES`, so a small file cannot
-    /// make the driver hold, or write, a profile near the whole budget
-    /// twice; a profile checked by its length and dropped, or a PNG's own
-    /// chunk carried as it stands, costs no copy. A profile whose header
-    /// gives another size than its length is not a profile, and is not
-    /// carried.
+    /// the file is lent, not copied); the inflated size of a PNG's, which
+    /// checking its length inflates too (IMG-002); the compressed copy PNG
+    /// output makes of a profile, at its worst case; and the copy the
+    /// output carries, of the profile or of a PNG's own chunk. With the
+    /// pixels already held, that must fit `IMAGE_MAX_ALLOC_BYTES`, so a
+    /// small file cannot make the driver hold, inflate or write a profile
+    /// near the whole budget twice. A profile whose header gives another
+    /// size than its length is not a profile, and is not carried.
     fn finish(
         &self,
         mut canvas: Canvas,
@@ -498,22 +498,32 @@ impl OxideAvImageDriver {
             Some(ColourClass::Gray) => true,
             Some(ColourClass::Other) | None => false,
         };
-        let carries =
-            class == Some(ColourClass::Rgb) && target != OutputFormat::Gif && png_chunk.is_none();
+        // An RGB profile stays in output that can hold one: as the PNG's
+        // own chunk, or as the profile's bytes, which PNG output first
+        // compresses into a buffer of its own.
+        let keeps = class == Some(ColourClass::Rgb) && target != OutputFormat::Gif;
+        let compresses = keeps && png_chunk.is_none() && target == OutputFormat::Png;
         if let Some(found) = &found {
             let held = canvas.pixels.capacity() as u64;
+            let compressed = metadata::deflate_bound(found.header.size);
             let charges: metadata::ProfileCharges = [
                 if reads {
                     found.read_cost()
                 } else if target != OutputFormat::Gif {
-                    (found.check_cost(), "to check its length")
+                    found.check_cost()
                 } else {
                     (0, "")
                 },
-                if carries {
-                    (found.header.size, "for the copy the output carries")
+                if compresses {
+                    (compressed, "to compress it")
                 } else {
                     (0, "")
+                },
+                match png_chunk {
+                    Some(chunk) if keeps => (chunk.len() as u64, "for the copy the output carries"),
+                    _ if compresses => (compressed, "for the copy the output carries"),
+                    _ if keeps => (found.header.size, "for the copy the output carries"),
+                    _ => (0, ""),
                 },
             ];
             let charged = metadata::charged(&charges);

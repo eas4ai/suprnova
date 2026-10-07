@@ -898,7 +898,7 @@ pub(crate) fn find_profile(format: InputFormat, bytes: &[u8]) -> Option<FoundPro
 /// What a run holds for a profile, part by part: the bytes, and what they
 /// are held for in the words a refusal names them by. A part of no bytes
 /// holds nothing.
-pub(crate) type ProfileCharges = [(u64, &'static str); 2];
+pub(crate) type ProfileCharges = [(u64, &'static str); 3];
 
 /// The bytes `charges` add up to.
 pub(crate) fn charged(charges: &ProfileCharges) -> u64 {
@@ -970,13 +970,21 @@ impl<'a> FoundProfile<'a> {
         }
     }
 
-    /// The bytes [`Self::is_whole`] holds: an inflate's work for a PNG's
-    /// profile, which it inflates through a scratch buffer, and nothing
-    /// for the rest, whose pieces it sums where they stand.
-    pub(crate) fn check_cost(&self) -> u64 {
+    /// What [`Self::is_whole`] is charged, with what for. A PNG's profile
+    /// is inflated to check it, through a scratch buffer, and IMG-002
+    /// counts every inflate at its inflated size: a header can declare up
+    /// to 4 GiB, and charging only the scratch would let a small file make
+    /// the check inflate all of it. The rest are summed where they stand
+    /// and cost nothing.
+    pub(crate) fn check_cost(&self) -> (u64, &'static str) {
         match &self.site {
-            ProfileSite::Png { .. } => INFLATE_WORK,
-            ProfileSite::Jpeg | ProfileSite::Plain(_) | ProfileSite::Gif(_) => 0,
+            ProfileSite::Png { .. } => (
+                self.header.size.saturating_add(INFLATE_WORK),
+                "to inflate it and check its length",
+            ),
+            ProfileSite::Jpeg | ProfileSite::Plain(_) | ProfileSite::Gif(_) => {
+                (0, "to check its length")
+            }
         }
     }
 
@@ -1402,14 +1410,7 @@ impl<'a> Kept<'a> {
                         push_png_chunk(&mut front, b"iCCP", vec![Cow::Borrowed(*chunk)])?;
                     }
                     Some(IccData::Profile(profile)) => {
-                        let compressed = compcol::vec::compress_to_vec::<compcol::zlib::Zlib>(
-                            profile,
-                        )
-                        .map_err(|e| {
-                            FrameworkError::internal(format!(
-                                "image ICC profile compress failed: {e}"
-                            ))
-                        })?;
+                        let compressed = compress_profile(profile)?;
                         push_png_chunk(
                             &mut front,
                             b"iCCP",
@@ -1458,6 +1459,66 @@ impl<'a> Kept<'a> {
             profile: self.icc.is_some(),
         })
     }
+}
+
+/// The most bytes `length` bytes deflate to in a zlib stream, with the
+/// `compcol` the framework pins (0.6.10). It compresses blocks of at most
+/// 16 KiB and writes each in the cheapest of its three encodings, and a
+/// stored block costs at most 42 bits beyond its bytes: a 3-bit header, up
+/// to 7 bits of padding, and its length twice. Six bytes a block, for every
+/// full block, the remainder and an empty final one, then the zlib header
+/// and checksum and a last partial byte.
+pub(crate) fn deflate_bound(length: u64) -> u64 {
+    const BLOCK: u64 = 16 * 1024;
+    let blocks = length / BLOCK + 2;
+    length
+        .saturating_add(blocks.saturating_mul(6))
+        .saturating_add(7)
+}
+
+/// `profile` deflated into a zlib stream, in one buffer of
+/// [`deflate_bound`] bytes allocated before it starts, the size the budget
+/// is charged. `compcol::vec::compress_to_vec` starts at the input's length
+/// and grows by doubling past it, so a profile that does not compress would
+/// cost twice its size.
+fn compress_profile(profile: &[u8]) -> Result<Vec<u8>, FrameworkError> {
+    use compcol::{Algorithm, Encoder, Status};
+
+    let failed = |e: compcol::Error| {
+        FrameworkError::internal(format!("image ICC profile compress failed: {e}"))
+    };
+    let past = || FrameworkError::internal("image ICC profile compressed past its bound");
+    let bound = usize::try_from(deflate_bound(profile.len() as u64)).map_err(|_| past())?;
+    let mut out = vec![0u8; bound];
+    let mut encoder = compcol::zlib::Zlib::encoder();
+    let (mut consumed, mut written) = (0, 0);
+    while consumed < profile.len() {
+        let input = profile.get(consumed..).ok_or_else(past)?;
+        let output = out.get_mut(written..).ok_or_else(past)?;
+        let (progress, status) = encoder.encode(input, output).map_err(failed)?;
+        consumed += progress.consumed;
+        written += progress.written;
+        match status {
+            Status::InputEmpty | Status::StreamEnd => break,
+            Status::OutputFull if progress.consumed == 0 && progress.written == 0 => {
+                return Err(past());
+            }
+            Status::OutputFull => {}
+        }
+    }
+    loop {
+        let output = out.get_mut(written..).ok_or_else(past)?;
+        let (progress, status) = encoder.finish(output).map_err(failed)?;
+        written += progress.written;
+        if status == Status::StreamEnd {
+            break;
+        }
+        if progress.written == 0 {
+            return Err(past());
+        }
+    }
+    out.truncate(written);
+    Ok(out)
 }
 
 /// Insert `pieces`, in order, at `at`, moving the rest of the buffer along
@@ -2196,6 +2257,27 @@ mod tests {
         push_riff_chunk(&mut webp, b"ICCP", &profile).unwrap();
         assert_eq!(written(OutputFormat::WebPLossless), webp);
 
+        // A RIFF chunk of odd length is padded to an even one.
+        let mut odd = profile.clone();
+        odd.push(9);
+        let size = odd.len() as u32;
+        odd[..4].copy_from_slice(&size.to_be_bytes());
+        let kept = Kept {
+            icc: Some(IccData::Profile(&odd)),
+            orientation: None,
+            png_colour: &[],
+        };
+        let mut webp = Vec::new();
+        push_riff_chunk(&mut webp, b"ICCP", &odd).unwrap();
+        assert_eq!(webp.len() % 2, 0);
+        assert_eq!(
+            kept.prepare(OutputFormat::WebPLossless)
+                .unwrap()
+                .front
+                .concat(),
+            webp
+        );
+
         let chunk = [&b"name\0\0"[..], &compressed].concat();
         let kept = Kept {
             icc: Some(IccData::PngChunk(&chunk)),
@@ -2206,6 +2288,37 @@ mod tests {
         oxideav_png::chunk::write_chunk(&mut png, b"gAMA", &[0, 0, 0xB1, 0x8F]);
         oxideav_png::chunk::write_chunk(&mut png, b"iCCP", &chunk);
         assert_eq!(kept.prepare(OutputFormat::Png).unwrap().front.concat(), png);
+    }
+
+    /// A profile of noise, the worst case for deflate, compresses within
+    /// [`deflate_bound`] at every length around a block's edge, and
+    /// inflates back to itself.
+    #[test]
+    fn img_002_a_compressed_profile_stays_within_its_bound() {
+        let mut state = 0x9E37_79B9u32;
+        let noise: Vec<u8> = (0..(1 << 20) + 3)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
+        for length in [0, 1, 16_383, 16_384, 16_385, 65_536, noise.len()] {
+            let profile = &noise[..length];
+            let compressed = compress_profile(profile).unwrap();
+            assert!(
+                compressed.len() as u64 <= deflate_bound(length as u64),
+                "{length} bytes compressed to {}",
+                compressed.len()
+            );
+            let mut inflated = vec![0u8; length];
+            assert_eq!(
+                inflate_to(&compressed, length as u64, Some(&mut inflated)),
+                Inflated::Exactly
+            );
+            assert_eq!(inflated, profile);
+        }
     }
 
     #[test]
