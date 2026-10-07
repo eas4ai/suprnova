@@ -267,6 +267,28 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   registry is now a synchronous lock held only to reap finished handlers
   and register a new one, and the drain takes the set out under it and
   waits holding no lock, still up to 5 s before it aborts what runs (#149).
+- **A streamed file is one blocking task, not one per chunk.** A file
+  above 1 MiB, served by `HttpResponse::file`, `HttpResponse::download` or
+  `StaticFiles`, spawned a blocking-pool task for every 64 KiB chunk, so a
+  1 GiB download made 16,384 trips through the pool and queued behind
+  every other blocking task at each one. One blocking task now reads the
+  whole file in 256 KiB chunks and hands them to the response over a
+  channel of four: one pool trip per file, a client that stops reading
+  leaves at most five chunks read ahead, and a dropped response stops its
+  reader. The bytes and `Content-Length` are unchanged, and a read error or
+  a file that shrinks still ends the body short (#147).
+- **The in-memory rate limiter keeps answering while it sweeps.** Its
+  buckets sat behind one lock: every request locked the whole map and
+  copied its key into a new `String` even when the key had a bucket, and
+  the periodic sweep and `purge_inactive` held that lock across the whole
+  map, so each sweep stalled every throttled request for a time that grows
+  with the number of keys an attacker can rotate. The buckets now sit in a
+  sharded map: a request locks only its key's shard, a key that has a
+  bucket allocates nothing, and the sweep locks one shard at a time.
+  During a sweep over 200,000 buckets (about 45 ms), no request on another
+  key completed before; about 4,800 do now. Acceptance, rejection and
+  retry-after answers are unchanged, and no request fails with "rate
+  limiter poisoned" any more, since the shard locks do not poison (#148).
 
 ### Fixed
 

@@ -18,5 +18,6 @@ pub mod request_accessors;
 pub mod request_body_cap;
 pub mod request_peer_ip;
 pub mod response_headers;
+pub mod rtc_streaming;
 pub mod streamed_responses;
 pub mod uploads;
