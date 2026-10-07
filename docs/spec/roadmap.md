@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: application-port-third-round-closing
+Current: release-foundations
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -424,6 +424,25 @@ Requirements: BIND-001, BIND-002, BIND-003, BIND-004, BIND-005, BIND-006, BIND-0
    2026-10-06). Same requirements, delivery and mechanisms: done when
    `route-binding`, `path-prefix`, `images`, `laravel-database`,
    `mem-footprint` and `registries-scan` pass on a committed tree.
+
+## release-foundations
+
+Requirements: RTC-001, RTC-002, RTC-003, RTC-004, MEM-003, REG-025, REG-032, REG-033
+
+34. release-foundations - the runtime contention issues #146 to #149
+   (RTC-001 to RTC-004); the image codecs pinned to the eas4ai forks of
+   oxideav-png, oxideav-bmp and oxideav-webp under MEM-003, with the
+   memory tests' copy allowances dropped; `library.json`'s one key set
+   (REG-025 with REG-033) and relative script imports (REG-032); and four
+   backlog items delivered beside them: Magnetar's rustdoc link that
+   needs the two-factor feature, the render-cache and route-binding tests
+   that assert a bare hex-safe name, the Live public API test that
+   rendered HTML rustdoc, and the six en dashes in source comments with
+   the dash check extended to U+2013. Delivery: `HASH_MAX_CONCURRENCY` in
+   the configuration and hashing chapters, the responses and rate
+   limiting chapters where the behaviour shows, and a changelog entry.
+   Done when `runtime-contention`, `mem-footprint`, `registries-scan` and
+   `registries` pass on a committed tree.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

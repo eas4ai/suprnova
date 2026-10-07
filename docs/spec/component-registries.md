@@ -186,12 +186,13 @@ names and `manifest.sig`. A component directory's name MUST be 1 to 64
 bytes of lowercase letters, digits and hyphens, neither starting nor
 ending with a hyphen, the asset route's component segment. `library.json`
 MUST be one JSON object holding `namespace`, `source`, `version`,
-`framework` and `publicKey`, and optionally `title` and `description`, and
-nothing else. `source` MUST be the library's canonical address (REG-008)
+`framework` and `publicKey`, and optionally `title`, `description` and the
+`previousKeys` REG-033 defines, and nothing else. `source` MUST be the library's canonical address (REG-008)
 where it is published; `version` a semver version; `framework` a semver
 requirement; `publicKey` the library's signing key (REG-024).
 Falsifier: `live:add` installs from a tree with no `library.json`, with a component outside `components/`, with a component directory of 65 bytes or one ending in a hyphen, or with a `library.json` key outside that set.
 Mechanism: `registries`.
+Rationale: Revised 2026-10-07: `previousKeys` joins the key set, which REG-033 required and the code admitted while this block said nothing else.
 Status: Agreed 2026-10-05
 
 [REG-002] A component's `manifest.json` MUST be one JSON object of at
@@ -503,8 +504,9 @@ is a constant. `Reflect.apply`, `Reflect.construct`, `Function.prototype`'s
 templates are calls, and what they invoke MUST resolve as any call's must;
 `globalThis["eval"]` and `Function.prototype.constructor` are `eval` and
 `Function`. The scan MUST refuse `eval`, `Function`, a timer given
-anything but a function, a dynamic `import`, a static `import` from outside
-the component and the components it depends on, a `Worker`,
+anything but a function, a dynamic `import`, a static `import` whose specifier
+is not a relative path (`./` or `../`) resolving inside the component or a
+component it depends on, a `Worker`,
 `document.write` and `document.open`, creating a `script`, `iframe`,
 `object` or `embed` element or one by a name it cannot trace to a
 constant, HTML parsing into the document (`innerHTML`, `outerHTML`,
@@ -519,8 +521,9 @@ name), `srcdoc` or `style`. A URL passed to `fetch`, `XMLHttpRequest`,
 constant that stays on the application's origin; no `javascript:` or
 `data:` URL stays on it. An element `customElements.define` defines MUST
 have a constant name the manifest declares.
-Falsifier: a component installs whose script calls `window["ev" + "al"]`, `Reflect.apply(Function, ...)` or `Function.prototype.constructor`, passes a string to `setTimeout`, calls `setAttribute("onclick", ...)`, sets `img.src` to a computed cross-origin URL or `location` to a `javascript:` URL, creates a `script` element, assigns `innerHTML`, calls `createContextualFragment`, or defines an undeclared element; or a shipped script fails the scan.
+Falsifier: a component installs whose script calls `window["ev" + "al"]`, `Reflect.apply(Function, ...)` or `Function.prototype.constructor`, passes a string to `setTimeout`, imports `/acme-ui/x/x.js` or `https://cdn.example/x.js`, calls `setAttribute("onclick", ...)`, sets `img.src` to a computed cross-origin URL or `location` to a `javascript:` URL, creates a `script` element, assigns `innerHTML`, calls `createContextualFragment`, or defines an undeclared element; or a shipped script fails the scan.
 Mechanism: `registries-scan`.
+Rationale: Revised 2026-10-07: relative imports only, so a component's scripts work under a path prefix (PFX-006), as the developer confirmed on 2026-10-05.
 Status: Agreed 2026-10-05
 
 [REG-033] A library MUST be able to change its signing key: `library.json`

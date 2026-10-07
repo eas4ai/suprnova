@@ -110,6 +110,7 @@ rather than duplicates.
 | Images (EXIF orientation, metadata stripping, and the rest of Laravel's Image API; issue #145) | IMG | images.md | Agreed |
 | Running on a Laravel database (the whole database Laravel 13 created: Laravel's layouts for the framework's tables, the application's data, and sharing the database with a Laravel application; issue #141) | LDB | laravel-database.md | Agreed |
 | Data cache (the developer's original design: query results keyed by hash, deleted by writes to their tables, triggered by the route; apart from any rendering) | QCACHE | data-cache.md | Draft |
+| Runtime contention (one limit for hash work, one blocking task per streamed file, the in-memory rate limiter's sweep, the WebSocket task registry; issues #146 to #149) | RTC | runtime-contention.md | Agreed 2026-10-07 |
 | The manual checked against the code, and remediating what the check finds | MAN | manual-check.md | Agreed 2026-09-27 (delegated by the developer); tooling in `feature-map/`, commands in `feature-map/README.md` |
 
 Domains with no spec file yet, and the manual chapters that are their
