@@ -738,6 +738,11 @@ impl Drop for EngineInstallReservation {
 }
 
 pub(crate) fn reserve_magnetar_engines() -> Result<EngineInstallReservation, FrameworkError> {
+    // Fix the process-wide hash work limit at `HASH_MAX_CONCURRENCY` before
+    // an engine whose sign-ins hash is published: the limit is fixed by
+    // whichever comes first, and a sign-in that came before the first
+    // framework hash would otherwise fix it at the default.
+    crate::hashing::configure_hash_work_limit()?;
     let mut guard = engine_install_guard()?;
     if guard.reserved
         || MAGNETAR_PASSWORD_ENGINE.get().is_some()

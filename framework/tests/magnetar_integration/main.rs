@@ -29,3 +29,4 @@ pub mod oauth_factor_install;
 pub mod oauth_only;
 pub mod oauth_reqwest_transport;
 pub mod remember_middleware;
+pub mod rtc_hash_limit;
