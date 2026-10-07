@@ -242,6 +242,17 @@ Don't start from an empty scaffold unless you want to - fork a kit:
 See **[Starter Kits](./manual/starter-kits.md)** for the full rundown, or run
 `suprnova new` for the plain scaffold on any of the three frontends.
 
+## Editor support
+
+**[Suprnova LSP](https://github.com/eas4ai/suprnova-lsp)** is a Rust
+language server for Suprnova applications, built to keep idle memory low.
+It reads the API `#[model]` generates from compiler-produced rustdoc JSON,
+so hover, completion and type inference work on generated methods such as
+`Post::query()`, and it finds an application's models on its own. It runs
+independently of rust-analyzer. Its releases are marked as pre-releases;
+install the VS Code extension from its
+[releases](https://github.com/eas4ai/suprnova-lsp/releases).
+
 ## Documentation
 
 - **[Manual](./manual/README.md)** - every public subsystem. Pick a reading
