@@ -69,7 +69,8 @@ impl Batch {
         self.total_jobs.saturating_sub(self.pending_jobs)
     }
 
-    /// 0–100 percentage of jobs settled. Mirrors `$batch->progress()`.
+    /// The percentage of jobs settled, 0 to 100. Mirrors
+    /// `$batch->progress()`.
     pub fn progress(&self) -> u8 {
         if self.total_jobs == 0 {
             return 100;

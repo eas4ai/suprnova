@@ -308,6 +308,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `two_factor::lockout_identity`, which exists only with that feature, so
   rustdoc failed on two broken links under Magnetar's default features.
   They now name it as text, with the feature that provides it.
+- **API documentation writes ranges in words.** The docs of
+  `PhoneNumber::new`, `PaymentMethod::Card`'s `exp_month`,
+  `Batch::progress` and `SseEvent::keep_alive` wrote their ranges with an
+  en dash; they now read "8 to 15", "1 to 12", "0 to 100" and "15 to 30
+  seconds".
 
 ## 3.2.1 - 2026-10-05
 

@@ -9,7 +9,7 @@ use std::time::Duration;
 /// Bytes that must be percent-encoded when serializing a cookie name or
 /// value into a Set-Cookie header per RFC 6265 cookie-octet rules.
 ///
-/// `CONTROLS` covers 0x00–0x1F + 0x7F, so CR (`\r`), LF (`\n`), NUL, and
+/// `CONTROLS` covers 0x00 to 0x1F and 0x7F, so CR (`\r`), LF (`\n`), NUL, and
 /// every other ASCII control character is encoded - closing the
 /// header-injection class of bugs where an attacker-controlled cookie
 /// name or value containing CRLF would split the response.
