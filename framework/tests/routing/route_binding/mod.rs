@@ -23,6 +23,7 @@ pub mod associated;
 pub mod contract;
 pub mod custom;
 pub mod enums;
+pub mod generic;
 pub mod handler_form;
 pub mod keys;
 pub mod manual;
@@ -32,6 +33,7 @@ pub mod resources;
 pub mod scoped;
 pub mod startup;
 pub mod trashed;
+pub mod unrecorded;
 pub mod urls;
 
 /// Serve `router` through `handle_request` on a loopback socket. The

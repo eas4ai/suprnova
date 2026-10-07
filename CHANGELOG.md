@@ -53,7 +53,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `#[model(route_key = "...")]` sets a model's default column, children
   bind through their parent's relations (`scope_bindings()`,
   `without_scoped_bindings()`), and routes, groups and resources take
-  `with_trashed()` and `missing()`. `Router::bind` and `Router::model`
+  `with_trashed()` and `missing()`. A generic `#[handler]`, and a
+  `#[handler]` that a closure route, middleware, another handler or a
+  `missing()` handler calls with the request, binds at the request as the
+  route's own handler does. `Router::bind` and `Router::model`
   register custom resolution, `#[model(custom_route_binding)]` with
   `suprnova::database::resolve_model_route_binding` overrides a model's own,
   and `#[derive(RouteBinding)]` binds a unit-only enum. `resource!` and
@@ -144,14 +147,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **A `#[handler]` inside an `impl` block names its type**, as
   `#[handler(Self = Posts)]`, so the startup checks can find it. Without
   it, such a handler is a compile error that names the fix.
-- **Four string-pair `route()` calls need `.as_str()`.** `route()` and
-  `try_route()` take bound values as well as strings, so four forms that
-  compiled only because the old slice parameter set the pairs' type no
-  longer do: a value written `s.as_ref()` inside an array of pairs, an
+- **Some string-pair `route()` calls need `.as_str()`.** `route()` and
+  `try_route()` take bound values as well as strings, so the forms that
+  compiled only because the old slice parameter set the pairs' type or
+  coerced them no longer do: a name or value whose type the parameter
+  inferred (`s.as_ref()`, `s.borrow()`, `Default::default()`), one that
+  reaches `&str` through more than one dereference or through a type of
+  the application's own (`&&&str`, `&Box<String>`), a container of pairs
+  reached the same way (`&&&Vec<_>`, `&Box<Vec<_>>`, a `SmallVec`), an
   array whose pairs mix `&String` and `&str` values, an array of more than
   32 pairs holding `&String` values, and `route` used as a
-  `fn(&str, &[(&str, &str)])` pointer. Write `.as_str()`, or a closure in
-  place of the pointer. Every other string-pair call compiles as before.
+  `fn(&str, &[(&str, &str)])` pointer. Write `.as_str()`, `&*` or
+  `.as_slice()`, or a closure in place of the pointer. Every other
+  string-pair call compiles as before.
 - **A dotted resource name nests.** `Router::resource("users.posts", ...)`
   registers `/users/{user}/posts/{post}`, as Laravel's `Route::resource`
   does; it registered `/users.posts/{users.post}`.

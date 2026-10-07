@@ -1068,19 +1068,43 @@ async fn handle_request_inner(
             crate::error::debug_page::note_route_pattern(&pattern);
             // The route's bindings run after its middleware, right before
             // the handler (BIND-015). The checks above passed, so the plan
-            // is there.
-            let handler = match router.binding_plan(&effective_method, &pattern) {
-                Ok(Some(plan)) => crate::routing::binding::planned_handler(plan, handler),
-                Ok(None) => handler,
+            // is there. The route also hands the request its settings, an
+            // `Arc` clone, for a handler it did not plan: a generic one, or
+            // one a closure route, middleware or another handler calls.
+            let binds = match router.binding_plan(&effective_method, &pattern) {
+                Ok(binds) => binds,
                 Err(error) => {
                     return into_hyper_in_scope(crate::http::HttpResponse::from(error));
                 }
+            };
+            let handler = match binds.and_then(|binds| binds.plan()) {
+                Some(plan) => crate::routing::binding::planned_handler(plan.clone(), handler),
+                None => handler,
+            };
+            // On a route with `missing()`, a handler that cannot return the
+            // `missing()` response keeps it in this slot (BIND-009). The
+            // route answers with it at the route handler's boundary, inside
+            // the chain, when the route's handler or one it called kept it,
+            // and after the chain when a handler middleware called did.
+            let missing_answer = binds
+                .is_some_and(|binds| binds.settings().has_missing())
+                .then(|| Arc::new(crate::routing::binding::MissingAnswer::default()));
+            let handler = if missing_answer.is_some() {
+                crate::routing::binding::missing_answer_handler(handler)
+            } else {
+                handler
             };
             let mut request = stamp_peer(
                 Request::new(req)
                     .with_params(params)
                     .with_route_pattern(pattern.clone()),
             );
+            if let Some(binds) = binds {
+                request.set_route_settings(binds.settings().clone());
+            }
+            if let Some(slot) = &missing_answer {
+                request.set_missing_answer(slot.clone());
+            }
             let live_metadata = router.live_route_metadata(&effective_method, &pattern);
             if let Some(metadata) = live_metadata {
                 let runtime = match crate::live::LiveRuntime::bind() {
@@ -1148,6 +1172,10 @@ async fn handle_request_inner(
             //    check `request.method()`.
             let http_response =
                 execute_chain_safely(chain, request, handler, &method, path, request_id).await;
+            let http_response = match missing_answer {
+                Some(slot) => slot.answer(http_response),
+                None => http_response,
+            };
 
             // The 5xx -> OTel `Status::Error` marker is recorded inside
             // `RequestIdMiddleware` (the outermost middleware), where the
