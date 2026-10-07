@@ -551,6 +551,13 @@ fn oauth_engine_is_installed() -> bool {
 /// Atomically install password/session and passkey adapters from one host
 /// engine bundle. Factor completion delegates to the password adapter for
 /// compatibility with existing custom bundles.
+///
+/// # Errors
+///
+/// Returns an error when another installation is reserved or already
+/// visible, or when `HASH_MAX_CONCURRENCY` is invalid or cannot take effect:
+/// the installation fixes the process-wide hash work limit before any
+/// sign-in can hash.
 pub fn install_magnetar_engines(
     password: Arc<dyn engine::MagnetarPasswordAuthEngine>,
     passkey: Arc<dyn engine::MagnetarPasskeyAuthEngine>,
@@ -570,7 +577,8 @@ pub fn install_magnetar_engines(
 ///
 /// # Errors
 ///
-/// Returns an error when another installation is reserved or already visible.
+/// Returns an error when another installation is reserved or already
+/// visible, or when `HASH_MAX_CONCURRENCY` is invalid or cannot take effect.
 pub fn install_magnetar_engines_with_factor(
     password: Arc<dyn engine::MagnetarPasswordAuthEngine>,
     passkey: Arc<dyn engine::MagnetarPasskeyAuthEngine>,
@@ -870,7 +878,8 @@ pub fn install_magnetar_oauth_engine(
 /// # Errors
 ///
 /// Returns an error without publishing either component when another Magnetar
-/// engine installation is reserved or already visible.
+/// engine installation is reserved or already visible, or when
+/// `HASH_MAX_CONCURRENCY` is invalid or cannot take effect.
 #[cfg(feature = "magnetar-oauth")]
 pub fn install_magnetar_oauth_engine_with_factor(
     oauth: Arc<dyn engine::MagnetarOAuthAuthEngine>,

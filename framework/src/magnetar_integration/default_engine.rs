@@ -476,8 +476,9 @@ struct DefaultEngineBundle {
 /// # Errors
 ///
 /// Returns an error when the application key is unavailable, schema setup
-/// fails, any configured engine cannot be built, or an engine was already
-/// installed.
+/// fails, any configured engine cannot be built, an engine was already
+/// installed, or `HASH_MAX_CONCURRENCY` is invalid or cannot take effect
+/// (see [`crate::hashing::HashConfig::max_concurrency`]).
 pub async fn init_magnetar(config: MagnetarConfig) -> Result<(), FrameworkError> {
     let reservation = super::reserve_magnetar_engines()?;
     let bundle = build_default_engines(config).await?;
@@ -495,7 +496,8 @@ pub async fn init_magnetar(config: MagnetarConfig) -> Result<(), FrameworkError>
 /// # Errors
 ///
 /// Returns an error when application encryption is unavailable, schema setup or
-/// OAuth composition fails, or any Magnetar engine is already installed.
+/// OAuth composition fails, any Magnetar engine is already installed, or
+/// `HASH_MAX_CONCURRENCY` is invalid or cannot take effect.
 #[cfg(feature = "magnetar-oauth")]
 pub async fn init_magnetar_oauth_only(
     config: MagnetarOAuthOnlyConfig,
