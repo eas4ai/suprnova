@@ -50,6 +50,7 @@ use crate::database::route_binding::{
 };
 use crate::error::FrameworkError;
 use crate::http::{FromParam, FromRequest, HttpResponse, Request, Response};
+use crate::middleware::{BoxedMiddleware, Next};
 use crate::routing::router::BoxedHandler;
 use hyper::Method;
 use std::any::{Any, TypeId};
@@ -579,9 +580,10 @@ impl HandlerInput {
     /// with the route's `missing()` response or the 404 when
     /// `answers_missing`, which the generated code sets when the handler
     /// returns [`Response`]. Any other handler fails with the 404's error,
-    /// and the route's `missing()` response is kept for the route to
-    /// answer with when that error is its result. A failed lookup or a
-    /// refusal of the route's checks is the error.
+    /// and the route's `missing()` response is kept for the layer that
+    /// called the handler, a middleware or the route's handler, to answer
+    /// with when it returns a 404. A failed lookup or a refusal of the
+    /// route's checks is the error.
     ///
     /// # Errors
     ///
@@ -631,7 +633,7 @@ impl HandlerInput {
                     && let Some(slot) = request.missing_answer().cloned()
                 {
                     let answer = miss(&plan, binding, request).await;
-                    slot.keep(&error, answer);
+                    slot.keep(answer);
                 }
                 Err(error)
             }
@@ -986,27 +988,31 @@ async fn answer_missing(missing: &RouteMissing, mut request: Request) -> Respons
 
 /// The route's `missing()` response, kept for a route on which a
 /// `#[handler]` that cannot return it (its return type is not
-/// [`Response`]) ran: that handler fails with the 404's error. When the
-/// route's handler, or a handler it called, kept it, the route answers with
-/// it at the route handler's boundary, inside the middleware chain, as it
-/// answers its own `missing()` response. When a handler route middleware
-/// called kept it, the server answers with it after the chain, when the
-/// 404 came back out of the chain.
+/// [`Response`]) ran: that handler fails with the 404's error, and the
+/// layer that called it answers with the kept response.
+///
+/// Every layer of such a route, each middleware and the route's handler,
+/// is wrapped ([`missing_answer_middleware`], [`missing_answer_handler`]).
+/// When the layer whose call kept the response returns a 404, the 404 the
+/// handler failed with or one the layer rebuilt in its place, the layer's
+/// result becomes the kept response; any other result stands, since the
+/// layer recovered. Every middleware outside that layer then sees the
+/// `missing()` response on its way out, as it sees the route's own.
 #[derive(Default)]
-pub(crate) struct MissingAnswer(std::sync::Mutex<Option<(String, Response)>>);
+pub(crate) struct MissingAnswer(std::sync::Mutex<Option<Response>>);
 
 impl MissingAnswer {
-    /// Keep `answer`, the `missing()` response, for the miss `error`.
-    fn keep(&self, error: &FrameworkError, answer: Response) {
+    /// Keep `answer`, the `missing()` response.
+    fn keep(&self, answer: Response) {
         let mut slot = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *slot = Some((error.to_string(), answer));
+        *slot = Some(answer);
     }
 
     /// Take what is kept, leaving the slot empty.
-    fn take(&self) -> Option<(String, Response)> {
+    fn take(&self) -> Option<Response> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1014,7 +1020,7 @@ impl MissingAnswer {
     }
 
     /// Put back what [`Self::take`] took.
-    fn restore(&self, kept: Option<(String, Response)>) {
+    fn restore(&self, kept: Option<Response>) {
         if kept.is_some() {
             *self
                 .0
@@ -1023,59 +1029,59 @@ impl MissingAnswer {
         }
     }
 
-    /// The route's final response, after the middleware chain: the
-    /// `missing()` response a handler route middleware called kept, when
-    /// `response` is that miss's own 404, else `response`.
-    pub(crate) fn answer(&self, response: HttpResponse) -> HttpResponse {
-        match self.take() {
-            Some((error, answer)) if is_the_miss(&response, &error) => {
-                answer.unwrap_or_else(|answer| answer)
+    /// Run one layer of the route at its boundary: what an outer layer kept
+    /// is set aside while it runs, and a response kept during its call
+    /// becomes its result when that result is a 404.
+    async fn around(&self, layer: impl Future<Output = Response>) -> Response {
+        let earlier = self.take();
+        let result = layer.await;
+        let result = match self.take() {
+            Some(answer) => {
+                let (Ok(response) | Err(response)) = &result;
+                if response.status_code() == 404 {
+                    answer
+                } else {
+                    result
+                }
             }
-            _ => response,
-        }
+            None => result,
+        };
+        self.restore(earlier);
+        result
     }
 }
 
-/// Whether `response` is the 404 of the miss whose error reads `error`.
-fn is_the_miss(response: &HttpResponse, error: &str) -> bool {
-    response.status_code() == 404
-        && response
-            .error_report()
-            .and_then(|report| report.chain().first())
-            .is_some_and(|first| first == error)
-}
-
-/// The handler of a route with a `missing()` handler: when the route's
-/// handler, or a handler it called, kept the `missing()` response and its
-/// result is that miss's own 404, the route answers with the kept response
-/// here, inside the middleware chain, so the response-side middleware sees
-/// it as it sees the route's own `missing()` response. A response a handler
-/// route middleware called kept is left for the server.
+/// The handler of a route with a `missing()` handler, at its boundary: a
+/// `missing()` response that the route's handler, or a handler it called,
+/// kept becomes the route's result when that result is a 404, inside the
+/// middleware chain, so every middleware sees it on its way out.
 pub(crate) fn missing_answer_handler(handler: Arc<BoxedHandler>) -> Arc<BoxedHandler> {
     let boxed: BoxedHandler = Box::new(move |request| {
         let handler = handler.clone();
         Box::pin(async move {
-            let Some(slot) = request.missing_answer().cloned() else {
-                return handler(request).await;
-            };
-            let earlier = slot.take();
-            let result = handler(request).await;
-            let result = match slot.take() {
-                Some((error, answer)) => {
-                    let (Ok(response) | Err(response)) = &result;
-                    if is_the_miss(response, &error) {
-                        answer
-                    } else {
-                        result
-                    }
-                }
-                None => result,
-            };
-            slot.restore(earlier);
-            result
+            match request.missing_answer().cloned() {
+                Some(slot) => slot.around(handler(request)).await,
+                None => handler(request).await,
+            }
         })
     });
     Arc::new(boxed)
+}
+
+/// One middleware of a route with a `missing()` handler, at its boundary: a
+/// `missing()` response that a handler the middleware called kept becomes
+/// the middleware's result when that result is a 404, so every middleware
+/// outside it, the global ones included, sees it on its way out.
+pub(crate) fn missing_answer_middleware(middleware: BoxedMiddleware) -> BoxedMiddleware {
+    Arc::new(move |request: Request, next: Next| {
+        let middleware = middleware.clone();
+        Box::pin(async move {
+            match request.missing_answer().cloned() {
+                Some(slot) => slot.around(middleware(request, next)).await,
+                None => middleware(request, next).await,
+            }
+        })
+    })
 }
 
 /// Box a `missing()` handler the way a route handler is boxed, keeping its

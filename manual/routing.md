@@ -417,14 +417,15 @@ looked up through the parent the route's handler binds (see
 refused. A bound argument of its own that finds nothing, such as the post
 that missed, answers 404 instead of calling it again.
 
-A `#[handler]` function that the route's handler or its middleware calls
+A `#[handler]` function that the route's handler or a middleware calls
 with the request, and that returns another type than `Response`, cannot
-return the `missing()` response. It fails with the 404 error instead,
-and when that error is what the route's handler returns, the route
-answers with the `missing()` response, which passes through the
-middleware as the route's own does. When middleware called the handler
-and the 404 comes back out of the middleware, the route answers with the
-`missing()` response after the middleware.
+return the `missing()` response. It fails with the 404 error instead. When
+its caller, the route's handler or that middleware, returns a 404, the
+handler's own or one the caller built in its place, the route answers with
+the `missing()` response at that point, and every middleware outside the
+caller sees it on its way out, as it sees the route's own `missing()`
+response. A caller that returns anything else has recovered, and its
+response stands.
 
 ### Enums
 

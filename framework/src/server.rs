@@ -1082,10 +1082,11 @@ async fn handle_request_inner(
                 None => handler,
             };
             // On a route with `missing()`, a handler that cannot return the
-            // `missing()` response keeps it in this slot (BIND-009). The
-            // route answers with it at the route handler's boundary, inside
-            // the chain, when the route's handler or one it called kept it,
-            // and after the chain when a handler middleware called did.
+            // `missing()` response keeps it in this slot (BIND-009), and the
+            // layer that called it, a middleware or the route's handler,
+            // answers with it at its own boundary, so every middleware
+            // outside that layer sees it on its way out. Every layer of the
+            // route is wrapped for that, on routes with `missing()` only.
             let missing_answer = binds
                 .is_some_and(|binds| binds.settings().has_missing())
                 .then(|| Arc::new(crate::routing::binding::MissingAnswer::default()));
@@ -1134,13 +1135,24 @@ async fn handle_request_inner(
                 1 + global_mw.len() + route_middleware.len() + usize::from(live_metadata.is_some()),
             );
 
+            // Each layer at its boundary on a route with `missing()`.
+            let layer = |middleware: crate::middleware::BoxedMiddleware| {
+                if missing_answer.is_some() {
+                    crate::routing::binding::missing_answer_middleware(middleware)
+                } else {
+                    middleware
+                }
+            };
+
             // 0. RequestId is always outermost so the `request` span it
             //    enters - and every event emitted downstream within it -
             //    carries the per-request id.
-            chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
+            chain.push(layer(into_boxed(RequestIdMiddleware::with_id(
+                request_id.clone(),
+            ))));
 
             // 1. Add global middleware
-            chain.extend(global_mw.iter().cloned());
+            chain.extend(global_mw.iter().cloned().map(layer));
 
             // 2. Add route-level middleware (already boxed).
             //    Lookup is keyed by `(effective_method, pattern)` - the
@@ -1156,12 +1168,12 @@ async fn handle_request_inner(
             //        lookup because `/api/posts/42 != /api/posts/{id}`; and
             //    (c) HEAD requests that fall back to GET still pick up
             //        the GET middleware list (auth, CSRF, rate-limit).
-            chain.extend(route_middleware);
+            chain.extend(route_middleware.into_iter().map(layer));
 
             // Live completion is always innermost, after every configured
             // owner middleware, so omission and ordering remain observable.
             if let Some(metadata) = live_metadata {
-                chain.push(into_boxed(metadata.completion()));
+                chain.push(layer(into_boxed(metadata.completion())));
             }
 
             // 3. Execute chain with handler, catching panics in middleware
@@ -1172,10 +1184,6 @@ async fn handle_request_inner(
             //    check `request.method()`.
             let http_response =
                 execute_chain_safely(chain, request, handler, &method, path, request_id).await;
-            let http_response = match missing_answer {
-                Some(slot) => slot.answer(http_response),
-                None => http_response,
-            };
 
             // The 5xx -> OTel `Status::Error` marker is recorded inside
             // `RequestIdMiddleware` (the outermost middleware), where the
