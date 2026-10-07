@@ -191,7 +191,9 @@ pub enum RehashOutcome {
 pub struct AttemptVerdict {
     /// Whether the stored credential matched.
     pub valid: bool,
-    /// Upgrade-only rehash outcome; only meaningful when `valid`.
+    /// The rehash to the verifier's target: an optional upgrade under
+    /// [`PasswordTarget::Argon2id`], the required `$2y$` rewrite under
+    /// [`PasswordTarget::LaravelBcrypt`]. Only meaningful when `valid`.
     pub rehash: RehashOutcome,
 }
 
