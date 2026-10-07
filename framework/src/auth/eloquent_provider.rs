@@ -214,8 +214,11 @@ where
                 // a valid sign-in rewrites a hash Laravel's hasher would
                 // refuse (`$2b$`, Argon2id) as the `$2y$` one it accepts,
                 // as Laravel itself rehashes on login, keeping a stored
-                // bcrypt cost above the configured one. The sign-in stands
-                // if the rewrite fails; the next one tries again.
+                // bcrypt cost above the configured one. If the rewrite
+                // cannot be minted or stored, the sign-in fails with that
+                // error: signing in on a hash Laravel refuses would leave a
+                // user Laravel cannot sign in (LDB-004). The stored hash is
+                // left as it was, and the next sign-in tries again.
                 if valid && crate::LaravelDatabase::is_shared() && hashing::needs_rehash(hash) {
                     let rewritten = match hashing::rehash_for_laravel_async(plaintext, hash).await {
                         Ok(rehashed) => {
@@ -228,8 +231,9 @@ where
                         tracing::warn!(
                             error = %error,
                             "the password hash could not be rewritten for Laravel after a \
-                             valid sign-in; the sign-in stands"
+                             valid password; the sign-in fails"
                         );
+                        return Err(error);
                     }
                 }
                 Ok(valid)

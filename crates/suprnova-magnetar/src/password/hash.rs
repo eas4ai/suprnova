@@ -9,8 +9,10 @@
 //! observable through hash work. The migration target is Argon2id by
 //! default, and rehash is then upgrade-only; an application that shares its
 //! database with a Laravel application pins it to Laravel's `$2y$` bcrypt
-//! instead ([`PasswordTarget::LaravelBcrypt`]). A rehash failure is a
-//! post-login outcome, never an authentication failure.
+//! instead ([`PasswordTarget::LaravelBcrypt`]). Under the default target a
+//! rehash failure is a post-login outcome, never an authentication failure;
+//! under the Laravel target the password provider fails the sign-in, as
+//! Laravel could not verify the hash left in place.
 
 use std::sync::Arc;
 
@@ -38,8 +40,9 @@ pub enum PasswordTarget {
     /// `$2y$` bcrypt at the configured bcrypt cost, the hash Laravel 13's
     /// hasher accepts with `HASH_VERIFY=true`. A valid sign-in rewrites any
     /// other stored hash (`$2b$`, `$2a$`, Argon2) as one, and nothing is
-    /// upgraded to Argon2id. For an application that shares its database
-    /// with a Laravel application.
+    /// upgraded to Argon2id. A valid sign-in whose rewrite cannot be minted
+    /// or stored fails. For an application that shares its database with a
+    /// Laravel application.
     LaravelBcrypt,
 }
 
@@ -164,7 +167,9 @@ impl PasswordHashConfig {
     }
 }
 
-/// Post-login rehash outcome. Never an authentication failure.
+/// Post-login rehash outcome. The verifier never fails an attempt over it;
+/// the password provider fails the sign-in on [`RehashOutcome::Failed`]
+/// only under [`PasswordTarget::LaravelBcrypt`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RehashOutcome {
     /// The stored hash meets the target; nothing to do.
@@ -172,7 +177,9 @@ pub enum RehashOutcome {
     /// The credential was re-hashed to the verifier's [`PasswordTarget`];
     /// callers persist this value.
     Upgraded(String),
-    /// Rehash failed after a successful login; recorded, not fatal.
+    /// Rehash failed after a valid password. Under
+    /// [`PasswordTarget::Argon2id`] it is recorded and the sign-in stands;
+    /// under [`PasswordTarget::LaravelBcrypt`] the sign-in fails with it.
     Failed {
         /// Failure detail for the post-login record.
         message: String,
@@ -184,7 +191,9 @@ pub enum RehashOutcome {
 pub struct AttemptVerdict {
     /// Whether the stored credential matched.
     pub valid: bool,
-    /// Upgrade-only rehash outcome; only meaningful when `valid`.
+    /// The rehash to the verifier's target: an optional upgrade under
+    /// [`PasswordTarget::Argon2id`], the required `$2y$` rewrite under
+    /// [`PasswordTarget::LaravelBcrypt`]. Only meaningful when `valid`.
     pub rehash: RehashOutcome,
 }
 

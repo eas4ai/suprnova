@@ -108,9 +108,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`LARAVEL_SHARED_DATABASE`.** For an application that shares its
   database with a running Laravel application: the framework and Magnetar
   write `$2y$` bcrypt hashes Laravel 13 accepts with `HASH_VERIFY=true`, a
-  valid sign-in rewrites a `$2b$` or Argon2id hash as `$2y$`, Magnetar no
-  longer upgrades bcrypt to Argon2id, and an unrouted database-queue job is
-  stored on the queue `suprnova`, which Laravel's worker does not read.
+  valid sign-in rewrites a `$2b$` or Argon2id hash as `$2y$` and fails
+  with the storage error, signing nobody in, when that rewrite cannot be
+  stored, Magnetar no longer upgrades bcrypt to Argon2id, and an unrouted
+  database-queue job is stored on the queue `suprnova`, which Laravel's
+  worker does not read.
   `LaravelDatabase::share` turns it on from code.
 - **Morph aliases.** `#[model(morph_type = "App\\Models\\Post",
   morph_aliases = ["post"])]`: `MorphTo`, `MorphOne` and `MorphMany`,
