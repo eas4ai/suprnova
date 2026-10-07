@@ -13,11 +13,11 @@ use chrono::{DateTime, Utc};
 use suprnova::http::{HttpResponse, text};
 use suprnova::testing::TestDatabase;
 use suprnova::{
-    FromRequest, Middleware, Model, Next, Request, Response, RouteBinding, RouteParam, Router,
-    handler, model,
+    FromRequest, Middleware, MiddlewareRegistry, Model, Next, Request, Response, RouteBinding,
+    RouteParam, Router, handler, model,
 };
 
-use super::{get as get_path, refusal, run_sql, send, serve};
+use super::{get as get_path, refusal, run_sql, send, serve, serve_with};
 
 #[model(table = "ou_users", soft_deletes, relations = {
     posts: HasMany<OuPost>,
@@ -659,5 +659,57 @@ async fn bind_009_a_handler_of_another_return_type_middleware_calls_answers_the_
     assert_eq!(
         get_path(addr, "/users/1/posts/1").await,
         (200, "ada ada-post".to_owned())
+    );
+}
+
+/// Global middleware that marks every response on its way out, as a
+/// session cookie or a security header would be added.
+pub struct MarkResponse;
+
+#[suprnova::async_trait]
+impl Middleware for MarkResponse {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        match next(request).await {
+            Ok(response) => Ok(response.header("X-Marked", "yes")),
+            Err(response) => Err(response.header("X-Marked", "yes")),
+        }
+    }
+}
+
+#[tokio::test]
+async fn bind_009_a_kept_missing_response_passes_through_the_routes_middleware() {
+    // A handler the route's handler calls keeps the `missing()` response;
+    // the route answers with it inside the chain, so the response-side
+    // middleware marks it as it marks the route's own `missing()` response.
+    let _db = fixture().await;
+    let router: Router = Router::new()
+        .get("/users/{user}/posts/{post}", |req| async move {
+            user_post_result(req).await.map_err(HttpResponse::from)
+        })
+        .scope_bindings()
+        .missing(redirect_home)
+        .get("/mw/users/{user}/posts/{post}", show_post)
+        .scope_bindings()
+        .middleware(AnswerWith(answer_user_post_result))
+        .missing(redirect_home)
+        .into();
+    let addr = serve_with(router, MiddlewareRegistry::new().append(MarkResponse)).await;
+    let (status, headers, body) =
+        crate::http_wire::request(addr, "GET", "/users/1/posts/2", &[]).await;
+    assert_eq!(
+        (status, body.as_str()),
+        (302, "missing at /users/1/posts/2")
+    );
+    assert_eq!(
+        headers.get("x-marked").map(String::as_str),
+        Some("yes"),
+        "the missing() response passes through the middleware: {headers:?}"
+    );
+    // A handler route middleware calls still gets the `missing()` response.
+    let (status, _headers, body) =
+        crate::http_wire::request(addr, "GET", "/mw/users/1/posts/2", &[]).await;
+    assert_eq!(
+        (status, body.as_str()),
+        (302, "missing at /mw/users/1/posts/2")
     );
 }

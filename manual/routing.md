@@ -419,8 +419,11 @@ such as the post that missed, answers 404 instead of calling it again.
 A `#[handler]` function that the route's handler or its middleware calls
 with the request, and that returns another type than `Response`, cannot
 return the `missing()` response. It fails with the 404 error instead,
-and when that error is the route's final response, after its
-middleware, the route answers with the `missing()` response.
+and when that error is what the route's handler returns, the route
+answers with the `missing()` response, which passes through the
+middleware as the route's own does. When middleware called the handler
+and the 404 comes back out of the middleware, the route answers with the
+`missing()` response after the middleware.
 
 ### Enums
 

@@ -791,9 +791,12 @@ async fn answer_missing(missing: &RouteMissing, mut request: Request) -> Respons
 
 /// The route's `missing()` response, kept for a route on which a
 /// `#[handler]` that cannot return it (its return type is not
-/// [`Response`]) ran, whoever called it: that handler fails with the 404's
-/// error, and the server answers with the kept response when that error is
-/// the route's final response, after the whole middleware chain.
+/// [`Response`]) ran: that handler fails with the 404's error. When the
+/// route's handler, or a handler it called, kept it, the route answers with
+/// it at the route handler's boundary, inside the middleware chain, as it
+/// answers its own `missing()` response. When a handler route middleware
+/// called kept it, the server answers with it after the chain, when the
+/// 404 came back out of the chain.
 #[derive(Default)]
 pub(crate) struct MissingAnswer(std::sync::Mutex<Option<(String, Response)>>);
 
@@ -807,27 +810,77 @@ impl MissingAnswer {
         *slot = Some((error.to_string(), answer));
     }
 
-    /// The route's final response: the kept `missing()` response when
-    /// `response` is the miss's own 404, else `response`.
-    pub(crate) fn answer(&self, response: HttpResponse) -> HttpResponse {
-        let kept = self
-            .0
+    /// Take what is kept, leaving the slot empty.
+    fn take(&self) -> Option<(String, Response)> {
+        self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        let Some((error, answer)) = kept else {
-            return response;
-        };
-        let is_the_miss = response.status_code() == 404
-            && response
-                .error_report()
-                .is_some_and(|report| report.chain().first() == Some(&error));
-        if is_the_miss {
-            answer.unwrap_or_else(|answer| answer)
-        } else {
-            response
+            .take()
+    }
+
+    /// Put back what [`Self::take`] took.
+    fn restore(&self, kept: Option<(String, Response)>) {
+        if kept.is_some() {
+            *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = kept;
         }
     }
+
+    /// The route's final response, after the middleware chain: the
+    /// `missing()` response a handler route middleware called kept, when
+    /// `response` is that miss's own 404, else `response`.
+    pub(crate) fn answer(&self, response: HttpResponse) -> HttpResponse {
+        match self.take() {
+            Some((error, answer)) if is_the_miss(&response, &error) => {
+                answer.unwrap_or_else(|answer| answer)
+            }
+            _ => response,
+        }
+    }
+}
+
+/// Whether `response` is the 404 of the miss whose error reads `error`.
+fn is_the_miss(response: &HttpResponse, error: &str) -> bool {
+    response.status_code() == 404
+        && response
+            .error_report()
+            .and_then(|report| report.chain().first())
+            .is_some_and(|first| first == error)
+}
+
+/// The handler of a route with a `missing()` handler: when the route's
+/// handler, or a handler it called, kept the `missing()` response and its
+/// result is that miss's own 404, the route answers with the kept response
+/// here, inside the middleware chain, so the response-side middleware sees
+/// it as it sees the route's own `missing()` response. A response a handler
+/// route middleware called kept is left for the server.
+pub(crate) fn missing_answer_handler(handler: Arc<BoxedHandler>) -> Arc<BoxedHandler> {
+    let boxed: BoxedHandler = Box::new(move |request| {
+        let handler = handler.clone();
+        Box::pin(async move {
+            let Some(slot) = request.missing_answer().cloned() else {
+                return handler(request).await;
+            };
+            let earlier = slot.take();
+            let result = handler(request).await;
+            let result = match slot.take() {
+                Some((error, answer)) => {
+                    let (Ok(response) | Err(response)) = &result;
+                    if is_the_miss(response, &error) {
+                        answer
+                    } else {
+                        result
+                    }
+                }
+                None => result,
+            };
+            slot.restore(earlier);
+            result
+        })
+    });
+    Arc::new(boxed)
 }
 
 /// Box a `missing()` handler the way a route handler is boxed, keeping its

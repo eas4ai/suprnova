@@ -1082,11 +1082,18 @@ async fn handle_request_inner(
                 None => handler,
             };
             // On a route with `missing()`, a handler that cannot return the
-            // `missing()` response keeps it in this slot, whoever called it,
-            // and the route's final response becomes it (BIND-009).
+            // `missing()` response keeps it in this slot (BIND-009). The
+            // route answers with it at the route handler's boundary, inside
+            // the chain, when the route's handler or one it called kept it,
+            // and after the chain when a handler middleware called did.
             let missing_answer = binds
                 .is_some_and(|binds| binds.settings().has_missing())
                 .then(|| Arc::new(crate::routing::binding::MissingAnswer::default()));
+            let handler = if missing_answer.is_some() {
+                crate::routing::binding::missing_answer_handler(handler)
+            } else {
+                handler
+            };
             let mut request = stamp_peer(
                 Request::new(req)
                     .with_params(params)
