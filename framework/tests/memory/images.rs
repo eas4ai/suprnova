@@ -1737,3 +1737,310 @@ async fn mem_audit_the_magick_driver_never_joins_a_gif_profile_it_drops() {
          it was joined"
     );
 }
+
+/// `webp`, a simple-format WebP, rebuilt in the extended layout with
+/// `profile` in a chunk named `fourcc`. Named `ICCP`, with the header's ICC
+/// flag set, it is the WebP's profile; under any other name, with the flag
+/// clear, no reader takes it for one.
+fn webp_with_profile(webp: &[u8], fourcc: &[u8; 4], profile: &[u8]) -> Vec<u8> {
+    let size = u32::from_le_bytes(webp[16..20].try_into().unwrap()) as usize;
+    let bitstream = &webp[12..20 + size + (size & 1)];
+    let data = &webp[20..];
+    assert_eq!(&webp[12..16], b"VP8L", "a lossless WebP");
+    let bits = u32::from_le_bytes(data[1..5].try_into().unwrap());
+    let (width, height, alpha) = (
+        (bits & 0x3FFF) + 1,
+        ((bits >> 14) & 0x3FFF) + 1,
+        bits & (1 << 28) != 0,
+    );
+    let mut header = [0u8; 10];
+    header[0] = if alpha { 0x10 } else { 0 } | if fourcc == b"ICCP" { 0x20 } else { 0 };
+    header[4..7].copy_from_slice(&(width - 1).to_le_bytes()[..3]);
+    header[7..10].copy_from_slice(&(height - 1).to_le_bytes()[..3]);
+    let mut body = b"WEBP".to_vec();
+    for (name, payload) in [(b"VP8X", &header[..]), (fourcc, profile)] {
+        body.extend_from_slice(name);
+        body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        body.extend_from_slice(payload);
+        if payload.len() % 2 == 1 {
+            body.push(0);
+        }
+    }
+    body.extend_from_slice(bitstream);
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+/// MEM-003: a profile that sits whole in its file, as a WebP's `ICCP`
+/// chunk and a BMP's embedded profile do, is carried into the output from
+/// where it stands. Into every format that carries it, the run allocates
+/// the copy the output holds and less than half a profile more than the
+/// same image whose profile no reader finds: a copy of the profile on the
+/// way, or one built up beside the output before it is written in, would
+/// be a whole profile more.
+#[tokio::test]
+async fn mem_audit_a_whole_profile_is_carried_without_a_copy() {
+    let _lock = exclusive().await;
+    let driver = OxideAvImageDriver::new();
+    let profile = p3_profile_of(LARGE_PROFILE);
+    // Opaque, so the lossless WebP encoder writes the simple format.
+    let plain = encode_png(64, 64, PngPixelFormat::Rgb24, 3, false);
+    let webp = convert(&plain, OutputFormat::WebPLossless);
+    let bmp = convert(
+        &png_with_chunks(&plain, &[(b"iCCP", iccp_chunk(&profile))]),
+        OutputFormat::Bmp,
+    );
+    assert!(bmp.len() > LARGE_PROFILE, "the BMP embeds the profile");
+    // The same BMP with its colour space sRGB: the profile's bytes stay
+    // where they are, and no reader takes them for one.
+    let mut srgb_bmp = bmp.clone();
+    srgb_bmp[14 + 56..14 + 60].copy_from_slice(&0x7352_4742u32.to_le_bytes());
+    let sources = [
+        (
+            "WebP",
+            webp_with_profile(&webp, b"ICCP", &profile),
+            webp_with_profile(&webp, b"ICCX", &profile),
+        ),
+        ("BMP", bmp, srgb_bmp),
+    ];
+    for (source, tagged, untagged) in &sources {
+        // Lossy WebP: the source is opaque, and the lossless encoder
+        // allocates too much for dhat to record quickly.
+        for format in [OutputFormat::WebP, OutputFormat::Jpeg, OutputFormat::Bmp] {
+            let pipeline = ImagePipeline {
+                format: Some(format),
+                ..Default::default()
+            };
+            let (without, _) = allocated_by(&driver, untagged, &pipeline);
+            let (with, out_len) = allocated_by(&driver, tagged, &pipeline);
+            assert!(
+                out_len > LARGE_PROFILE,
+                "{source} to {format:?}: the profile was not carried"
+            );
+            assert!(
+                with < without + LARGE_PROFILE as u64 * 3 / 2,
+                "{source} to {format:?}: {with} bytes with a {LARGE_PROFILE}-byte profile \
+                 against {without} with none: it was copied on the way to the output"
+            );
+        }
+    }
+}
+
+/// A Display P3 profile grown to `size` bytes with noise rather than
+/// zeros, so it compresses to about its own size.
+fn noisy_profile_of(size: usize) -> Vec<u8> {
+    let mut profile = p3_profile_of(size);
+    let header = moxcms::ColorProfile::new_display_p3()
+        .encode()
+        .expect("moxcms encodes Display P3")
+        .len()
+        .next_multiple_of(4);
+    let filler = noise((size - header) as u32, 1, 1);
+    profile[header..].copy_from_slice(&filler);
+    profile
+}
+
+/// MEM-003: a PNG's own `iCCP` chunk goes into PNG output from where it
+/// stands. Its profile here is noise, so the chunk is about as large as
+/// the profile. The same PNG with the chunk under another name is the
+/// measure: at its peak, the run holds the copy the output carries and
+/// less than half a chunk more, where a copy of the chunk built up beside
+/// the output, or one made to checksum it, would be a whole chunk more.
+#[tokio::test]
+async fn mem_audit_a_png_profile_chunk_is_carried_without_a_copy() {
+    let _lock = exclusive().await;
+    let driver = OxideAvImageDriver::new();
+    let plain = encode_png(64, 64, PngPixelFormat::Rgba, 4, false);
+    let chunk = iccp_chunk(&noisy_profile_of(LARGE_PROFILE));
+    assert!(
+        chunk.len() > LARGE_PROFILE / 2,
+        "the chunk is as large as its profile"
+    );
+    let tagged = png_with_chunks(&plain, &[(b"iCCP", chunk.clone())]);
+    let untagged = png_with_chunks(&plain, &[(b"iCCX", chunk.clone())]);
+    let to_png = ImagePipeline {
+        format: Some(OutputFormat::Png),
+        ..Default::default()
+    };
+    let out = driver.process(&tagged, &to_png).expect("the PNG converts");
+    assert!(
+        out.windows(chunk.len()).any(|window| window == chunk),
+        "the source's iCCP chunk was not carried as it stands"
+    );
+    let without = peak_while(&driver, &untagged, &to_png);
+    let with = peak_while(&driver, &tagged, &to_png);
+    assert!(
+        with < without + (chunk.len() + chunk.len() / 2) as u64,
+        "a peak of {with} bytes with a {}-byte iCCP chunk against {without} with none: it was \
+         copied on the way to the output",
+        chunk.len()
+    );
+}
+
+/// The decode estimate a refusal names for `image`, a `width` by `height`
+/// image, asked to decode within four bytes a pixel.
+fn decode_estimate(driver: &OxideAvImageDriver, image: &[u8], width: u32, height: u32) -> u64 {
+    let (result, _) = decode_under(driver, image, u64::from(width * height * 4), true);
+    let message = result.expect_err("refused at four bytes a pixel");
+    message
+        .split("needs about ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|number| number.parse().ok())
+        .unwrap_or_else(|| panic!("the refusal names no estimate: {message}"))
+}
+
+/// `process` under a `budget`-byte `IMAGE_MAX_ALLOC_BYTES`: the result,
+/// and the most bytes it held at once.
+fn process_under(
+    driver: &dyn ImageDriver,
+    image: &[u8],
+    pipeline: &ImagePipeline,
+    budget: u64,
+) -> (Result<Vec<u8>, String>, u64) {
+    let _config = ConfigGuard::set({
+        let mut config = ImageConfig::default();
+        config.max_alloc_bytes = budget;
+        config
+    });
+    let heap = Heap::start();
+    let start = heap.live();
+    let result = driver.process(image, pipeline).map_err(|e| e.to_string());
+    let peak = (heap.peak() - start) as u64;
+    drop(heap);
+    (result, peak)
+}
+
+/// IMG-002: `IMAGE_MAX_ALLOC_BYTES` is charged a profile only for what is
+/// held for it. A CMYK profile the output drops is checked by its length,
+/// and a PNG's own chunk is carried as it stands, so neither is charged:
+/// under a budget that fits the image without them, both are processed
+/// within it. A JPEG's RGB profile is joined from its pieces and carried,
+/// two copies, so under the same budget it is refused, and the refusal
+/// names both.
+#[tokio::test]
+async fn img_002_a_profile_is_charged_only_for_what_is_held() {
+    let _lock = exclusive().await;
+    let driver = OxideAvImageDriver::new();
+    let mut rgb = p3_profile_of(LARGE_PROFILE);
+    let mut cmyk = rgb.clone();
+    cmyk[16..20].copy_from_slice(b"CMYK");
+    let small = include_bytes!("../media/fixtures/jpeg/photo-base-420-35x21.jpg");
+    let to_jpeg = ImagePipeline {
+        format: Some(OutputFormat::Jpeg),
+        ..Default::default()
+    };
+
+    // The JPEGs, at the budget their decode needs.
+    let dropped = jpeg_with_profile_from(small, &cmyk, 64);
+    let budget = decode_estimate(&driver, &dropped, 35, 21);
+    let (result, peak) = process_under(&driver, &dropped, &to_jpeg, budget);
+    result.unwrap_or_else(|e| panic!("a dropped profile was charged at {budget} bytes: {e}"));
+    assert!(peak <= budget, "held {peak} bytes under {budget}");
+    let joined = jpeg_with_profile_from(small, &rgb, 64);
+    let (result, _) = process_under(&driver, &joined, &to_jpeg, budget);
+    let message = result.expect_err("two copies of the profile are over the budget");
+    for part in [
+        format!("{LARGE_PROFILE}-byte ICC profile"),
+        format!("{LARGE_PROFILE} bytes to join it from its pieces"),
+        format!("{LARGE_PROFILE} bytes for the copy the output carries"),
+        format!("limit of {budget}"),
+    ] {
+        assert!(message.contains(&part), "{part:?} is not in: {message}");
+    }
+
+    // The PNGs, under 1 MiB.
+    const BUDGET: u64 = 1024 * 1024;
+    let plain = encode_png(64, 64, PngPixelFormat::Rgba, 4, false);
+    let dropped = png_with_chunks(&plain, &[(b"iCCP", iccp_chunk(&cmyk))]);
+    let (result, peak) = process_under(&driver, &dropped, &to_jpeg, BUDGET);
+    result.unwrap_or_else(|e| panic!("a dropped profile was charged at {BUDGET} bytes: {e}"));
+    assert!(peak <= BUDGET, "held {peak} bytes under {BUDGET}");
+    rgb.truncate(LARGE_PROFILE);
+    let chunk = iccp_chunk(&rgb);
+    let carried = png_with_chunks(&plain, &[(b"iCCP", chunk.clone())]);
+    let to_png = ImagePipeline {
+        format: Some(OutputFormat::Png),
+        ..Default::default()
+    };
+    let (result, peak) = process_under(&driver, &carried, &to_png, BUDGET);
+    let out = result
+        .unwrap_or_else(|e| panic!("a chunk carried as it stands was charged at {BUDGET}: {e}"));
+    assert!(peak <= BUDGET, "held {peak} bytes under {BUDGET}");
+    assert!(
+        out.windows(chunk.len()).any(|window| window == chunk),
+        "the chunk was not carried"
+    );
+}
+
+/// IMG-002: the `magick` driver charges `IMAGE_MAX_ALLOC_BYTES` a profile
+/// only for what it holds. Between two ImageMagick runs, a CMYK profile
+/// the Rust stage drops costs nothing, and an RGB one it converts from is
+/// inflated, and refused when that is over the budget. In ImageMagick's
+/// output, a JPEG's profile is kept where it stands and costs nothing,
+/// and a GIF's is joined to convert the palette, and refused when that is
+/// over what the budget leaves beside the output.
+#[cfg(unix)]
+#[tokio::test]
+async fn img_002_the_magick_driver_charges_a_profile_only_for_what_it_holds() {
+    let _lock = exclusive().await;
+    const BUDGET: u64 = 1024 * 1024;
+    let rgb = p3_profile_of(LARGE_PROFILE);
+    let mut cmyk = rgb.clone();
+    cmyk[16..20].copy_from_slice(b"CMYK");
+
+    // Between two runs: a grey source written as a BMP.
+    let mut grey = p3_profile_of(4096);
+    grey[16..20].copy_from_slice(b"GRAY");
+    let pixels = encode_png(64, 64, PngPixelFormat::Rgba, 4, false);
+    let source = png_with_chunks(&pixels, &[(b"iCCP", iccp_chunk(&grey))]);
+    let output = convert(&pixels, OutputFormat::Bmp);
+    let to_bmp = ImagePipeline {
+        format: Some(OutputFormat::Bmp),
+        ..Default::default()
+    };
+    let stage = |name: &str, profile: &[u8]| {
+        let intermediate = png_with_chunks(&pixels, &[(b"iCCP", iccp_chunk(profile))]);
+        let driver = magick_stand_in_per_run(name, &intermediate, &output);
+        process_under(&driver, &source, &to_bmp, BUDGET)
+    };
+    let (result, peak) = stage("img-002-magick-stage-cmyk", &cmyk);
+    result.unwrap_or_else(|e| panic!("a dropped profile was charged at {BUDGET} bytes: {e}"));
+    assert!(peak <= BUDGET, "held {peak} bytes under {BUDGET}");
+    let (result, _) = stage("img-002-magick-stage-rgb", &rgb);
+    let message = result.expect_err("an inflated profile is over the budget");
+    for part in [
+        format!("{LARGE_PROFILE}-byte ICC profile"),
+        "to inflate it".to_string(),
+        "between two ImageMagick runs".to_string(),
+    ] {
+        assert!(message.contains(&part), "{part:?} is not in: {message}");
+    }
+
+    // ImageMagick's output: the stand-in answers with the source.
+    let small = include_bytes!("../media/fixtures/jpeg/photo-base-420-35x21.jpg");
+    let jpeg = jpeg_with_profile_from(small, &rgb, JPEG_ICC_CHUNK);
+    let driver = magick_stand_in("img-002-magick-output-jpeg", &jpeg);
+    let budget = jpeg.len() as u64 + LARGE_PROFILE as u64 / 2;
+    let (result, _) = process_under(&driver, &jpeg, &ImagePipeline::default(), budget);
+    let out = result.unwrap_or_else(|e| panic!("a profile kept where it stands was charged: {e}"));
+    assert!(out.len() > LARGE_PROFILE, "the profile was not kept");
+    let gif = gif_with_application(
+        &gif(64, 64, vec![frame(0, 0, 64, 64, 1)]),
+        b"ICCRGBG1012",
+        &rgb,
+    );
+    let driver = magick_stand_in("img-002-magick-output-gif", &gif);
+    let budget = gif.len() as u64 + LARGE_PROFILE as u64 / 2;
+    let (result, _) = process_under(&driver, &gif, &ImagePipeline::default(), budget);
+    let message = result.expect_err("a joined profile is over what the budget leaves");
+    for part in [
+        format!("{LARGE_PROFILE}-byte ICC profile"),
+        format!("{LARGE_PROFILE} bytes to join it from its pieces"),
+        format!("limit of {budget}"),
+    ] {
+        assert!(message.contains(&part), "{part:?} is not in: {message}");
+    }
+}
