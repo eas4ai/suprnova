@@ -103,8 +103,8 @@ pub struct Request {
     /// an `Arc` clone and nothing else.
     route_settings: Option<std::sync::Arc<crate::routing::binding::RouteSettings>>,
     /// Where a `#[handler]` that cannot return the route's `missing()`
-    /// response keeps it for the route to answer with. Set only on a route
-    /// with a `missing()` handler.
+    /// response keeps it for the layer that called it to answer with. Set
+    /// only on a route with a `missing()` handler.
     missing_answer: Option<std::sync::Arc<crate::routing::binding::MissingAnswer>>,
 }
 
@@ -214,7 +214,7 @@ impl Request {
         self.route_settings.as_ref()
     }
 
-    /// Hand the request the slot its route answers a kept `missing()`
+    /// Hand the request the slot its layers answer a kept `missing()`
     /// response from.
     pub(crate) fn set_missing_answer(
         &mut self,

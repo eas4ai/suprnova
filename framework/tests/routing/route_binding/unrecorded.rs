@@ -186,6 +186,29 @@ fn answer_user_post_result(
     Box::pin(async move { user_post_result(req).await.map_err(HttpResponse::from) })
 }
 
+/// Calls the handler and answers its error with a 404 of its own, which
+/// carries no error report.
+fn answer_user_post_result_own_404(
+    req: Request,
+) -> std::pin::Pin<Box<dyn Future<Output = Response> + Send>> {
+    Box::pin(async move {
+        user_post_result(req)
+            .await
+            .map_err(|_| HttpResponse::text("gone").status(404))
+    })
+}
+
+/// Calls the handler and recovers from its error with a 200.
+fn answer_user_post_result_recovered(
+    req: Request,
+) -> std::pin::Pin<Box<dyn Future<Output = Response> + Send>> {
+    Box::pin(async move {
+        Ok(user_post_result(req)
+            .await
+            .unwrap_or_else(|_| HttpResponse::text("recovered")))
+    })
+}
+
 /// A plain `missing()` handler: it sees the request.
 async fn redirect_home(request: Request) -> Response {
     Ok(HttpResponse::text(format!("missing at {}", request.path())).status(302))
@@ -705,11 +728,105 @@ async fn bind_009_a_kept_missing_response_passes_through_the_routes_middleware()
         Some("yes"),
         "the missing() response passes through the middleware: {headers:?}"
     );
-    // A handler route middleware calls still gets the `missing()` response.
-    let (status, _headers, body) =
+    // A handler route middleware calls still gets the `missing()` response,
+    // and the global middleware outside it marks it too.
+    let (status, headers, body) =
         crate::http_wire::request(addr, "GET", "/mw/users/1/posts/2", &[]).await;
     assert_eq!(
         (status, body.as_str()),
         (302, "missing at /mw/users/1/posts/2")
+    );
+    assert_eq!(
+        headers.get("x-marked").map(String::as_str),
+        Some("yes"),
+        "the missing() response passes through the global middleware: {headers:?}"
+    );
+}
+
+/// Route middleware that marks every response on its way out.
+pub struct MarkRoute;
+
+#[suprnova::async_trait]
+impl Middleware for MarkRoute {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        match next(request).await {
+            Ok(response) => Ok(response.header("X-Route", "yes")),
+            Err(response) => Err(response.header("X-Route", "yes")),
+        }
+    }
+}
+
+#[tokio::test]
+async fn bind_009_a_missing_response_kept_inside_middleware_passes_through_every_middleware_outside_it()
+ {
+    // The inner route middleware calls a handler that cannot return the
+    // `missing()` response; the outer route middleware and the global one
+    // each mark the `missing()` response, as they mark the route's own.
+    let _db = fixture().await;
+    let router: Router = Router::new()
+        .get("/users/{user}/posts/{post}", show_post)
+        .scope_bindings()
+        .middleware(MarkRoute)
+        .middleware(AnswerWith(answer_user_post_result))
+        .missing(redirect_home)
+        .into();
+    let addr = serve_with(router, MiddlewareRegistry::new().append(MarkResponse)).await;
+    let (status, headers, body) =
+        crate::http_wire::request(addr, "GET", "/users/1/posts/2", &[]).await;
+    assert_eq!(
+        (status, body.as_str()),
+        (302, "missing at /users/1/posts/2")
+    );
+    for header in ["x-marked", "x-route"] {
+        assert_eq!(
+            headers.get(header).map(String::as_str),
+            Some("yes"),
+            "`{header}` on the missing() response: {headers:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bind_009_a_caller_that_answers_the_miss_with_its_own_404_answers_the_missing_response() {
+    // Middleware and a closure route each map the handler's error to a 404
+    // of their own, with no error report: still the miss, so the route
+    // answers its `missing()` response.
+    let _db = fixture().await;
+    let router: Router = Router::new()
+        .get("/mw/users/{user}/posts/{post}", show_post)
+        .scope_bindings()
+        .middleware(AnswerWith(answer_user_post_result_own_404))
+        .missing(redirect_home)
+        .get("/closure/users/{user}/posts/{post}", |req| async move {
+            user_post_result(req)
+                .await
+                .map_err(|_| HttpResponse::text("gone").status(404))
+        })
+        .scope_bindings()
+        .missing(redirect_home)
+        .into();
+    let addr = serve(router).await;
+    for path in ["/mw/users/1/posts/2", "/closure/users/1/posts/2"] {
+        assert_eq!(
+            get_path(addr, path).await,
+            (302, format!("missing at {path}")),
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bind_009_a_caller_that_recovers_from_the_miss_keeps_its_answer() {
+    let _db = fixture().await;
+    let router: Router = Router::new()
+        .get("/users/{user}/posts/{post}", show_post)
+        .scope_bindings()
+        .middleware(AnswerWith(answer_user_post_result_recovered))
+        .missing(redirect_home)
+        .into();
+    let addr = serve(router).await;
+    assert_eq!(
+        get_path(addr, "/users/1/posts/2").await,
+        (200, "recovered".to_owned())
     );
 }
