@@ -262,10 +262,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   such as `GET //evil.example/x` or `GET /\evil.example` reaches a fallback
   route, and `url::full` stays on the `APP_URL` origin for it.
 - **Images are no longer copied on their way through a driver.**
-  `Image::from_bytes` hands the driver the caller's bytes, and the `magick`
-  driver writes an image to ImageMagick's standard input without copying
-  it first and adds the metadata a source keeps (PNG colour chunks, an
-  orientation tag) to ImageMagick's output without copying that either.
+  `Image::from_bytes` hands the driver the caller's bytes, the built-in
+  driver returns the buffer its encoder writes instead of a copy of it
+  (when metadata needs more room than the encoder left, that buffer grows
+  once), and the `magick` driver writes an image to ImageMagick's
+  standard input without copying it first and adds the metadata a source
+  keeps (PNG colour chunks, an orientation tag) to ImageMagick's output
+  without copying that either.
   An ICC profile split across a JPEG's or GIF's segments is read for its
   header and length where it stands, and joined once, only when the
   output carries it or converts from it; a WebP's or BMP's profile is

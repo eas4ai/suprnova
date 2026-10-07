@@ -1575,25 +1575,30 @@ fn encode_frame(
 /// only fatal before the first packet arrives - after that they mean the
 /// stream is drained.
 ///
-/// The buffer is allocated once, at the first packet's size plus `reserve`,
-/// the room the metadata added afterwards needs.
+/// The first packet's buffer becomes the output, so the encoded file is
+/// never copied (MEM-003). When the metadata added afterwards needs
+/// `reserve` bytes of room that the encoder did not leave, that buffer
+/// grows once, by exactly that much; with no room to add, nothing moves.
+/// A later packet, which no encoder here emits, is appended.
 fn drain(
     encoder: &mut dyn Encoder,
     codec: &str,
     reserve: usize,
 ) -> Result<Vec<u8>, FrameworkError> {
-    let mut out = Vec::new();
+    let mut out: Option<Vec<u8>> = None;
     loop {
         match encoder.receive_packet() {
-            Ok(packet) => {
-                if out.is_empty() {
-                    out.reserve_exact(packet.data.len().saturating_add(reserve));
+            Ok(packet) => match out.as_mut() {
+                Some(out) => out.extend_from_slice(&packet.data),
+                None => {
+                    let mut data = packet.data;
+                    data.reserve_exact(reserve);
+                    out = Some(data);
                 }
-                out.extend_from_slice(&packet.data);
-            }
+            },
             Err(oxideav_core::Error::NeedMore) | Err(oxideav_core::Error::Eof) => break,
             Err(e) => {
-                if out.is_empty() {
+                if out.as_ref().is_none_or(Vec::is_empty) {
                     return Err(FrameworkError::internal(format!(
                         "image encode failed: {codec}: {e}"
                     )));
@@ -1602,6 +1607,7 @@ fn drain(
             }
         }
     }
+    let out = out.unwrap_or_default();
     if out.is_empty() {
         return Err(FrameworkError::internal(format!(
             "image encode failed: {codec} produced no output"

@@ -1159,14 +1159,26 @@ fn jpeg_with_profile(jpeg: &[u8], profile: &[u8]) -> Vec<u8> {
 
 /// MEM-003: the metadata an image keeps is written into the one output
 /// buffer the encoder fills, not by copying the encoded file again. The
-/// same image with and without a profile allocates the same, give or take
-/// what reading and writing the profile itself takes, which is far less
-/// than half the output: a second copy of the output would be all of it.
+/// encoder leaves no room for metadata, so that buffer grows once, by
+/// exactly the room it needs, and may move as it grows. Two measures, with
+/// orientation left unapplied so the tag is kept:
+/// - The same image keeping only its orientation also grows its buffer
+///   once. With a profile too, it allocates the same, give or take what
+///   reading and writing the profile takes, which is far less than half
+///   the output: a second copy of the output would be all of it.
+/// - The same image keeping nothing is written with no room and never
+///   moves. With a profile, the run allocates less than one output and a
+///   half more: one move, and no second.
 #[tokio::test]
 async fn mem_audit_an_image_with_a_profile_is_written_in_one_buffer() {
     let _lock = exclusive().await;
     let driver = OxideAvImageDriver::new();
     let profile = p3_profile_of(0);
+    let tiff = orientation_tiff(6);
+    let mut app1 = vec![0xFF, 0xE1];
+    app1.extend_from_slice(&((tiff.len() + 8) as u16).to_be_bytes());
+    app1.extend_from_slice(b"Exif\0\0");
+    app1.extend_from_slice(&tiff);
     // Noise, so the encoded outputs are as large as the pixels. The WebP
     // images come from an opaque JPEG, so the driver writes `WebP` lossy,
     // and the JPEG's profile is read whole: inflating a PNG's profile
@@ -1175,36 +1187,57 @@ async fn mem_audit_an_image_with_a_profile_is_written_in_one_buffer() {
     // a large image quickly, so its image is small; the lossy one is
     // written at full quality, so its output is not.
     let default_quality = ImagePipeline::default().quality;
-    for (format, side, quality) in [
+    let cases = [
         (OutputFormat::Png, 512, default_quality),
         (OutputFormat::Jpeg, 512, default_quality),
         (OutputFormat::WebPLossless, 64, default_quality),
         (OutputFormat::WebP, 128, 100),
-    ] {
-        let (plain, tagged) = if matches!(format, OutputFormat::Png | OutputFormat::Jpeg) {
+    ]
+    .map(|(format, side, quality)| {
+        let sources = if matches!(format, OutputFormat::Png | OutputFormat::Jpeg) {
             let plain = encode_png(side, side, PngPixelFormat::Rgba, 4, false);
-            let tagged = png_with_chunks(&plain, &[(b"iCCP", iccp_chunk(&profile))]);
-            (plain, tagged)
+            let oriented = png_with_chunks(&plain, &[(b"eXIf", tiff.clone())]);
+            let tagged = png_with_chunks(
+                &plain,
+                &[(b"eXIf", tiff.clone()), (b"iCCP", iccp_chunk(&profile))],
+            );
+            [plain, oriented, tagged]
         } else {
             let plain = convert(
                 &encode_png(side, side, PngPixelFormat::Rgb24, 3, false),
                 OutputFormat::Jpeg,
             );
-            let tagged = jpeg_with_profile(&plain, &profile);
-            (plain, tagged)
+            let oriented = [&plain[..2], &app1, &plain[2..]].concat();
+            let tagged = jpeg_with_profile(&oriented, &profile);
+            [plain, oriented, tagged]
         };
+        (format, quality, sources)
+    });
+    // After the sources: `convert` sets the default configuration.
+    let _config = ConfigGuard::set({
+        let mut config = ImageConfig::default();
+        config.auto_orient = false;
+        config
+    });
+    for (format, quality, [plain, oriented, tagged]) in &cases {
         let pipeline = ImagePipeline {
-            format: Some(format),
-            quality,
+            format: Some(*format),
+            quality: *quality,
             ..Default::default()
         };
-        let (without, out_len) = allocated_by(&driver, &plain, &pipeline);
-        let (with, _) = allocated_by(&driver, &tagged, &pipeline);
+        let (bare, out_len) = allocated_by(&driver, plain, &pipeline);
+        let (without, _) = allocated_by(&driver, oriented, &pipeline);
+        let (with, _) = allocated_by(&driver, tagged, &pipeline);
         let allowance = out_len as u64 / 2;
         assert!(
             with < without + allowance,
-            "{format:?}: {with} bytes with the profile against {without} without, for a \
-             {out_len}-byte output: the output was copied"
+            "{format:?}: {with} bytes with the profile against {without} with the orientation \
+             alone, for a {out_len}-byte output: the output was copied"
+        );
+        assert!(
+            with < bare + out_len as u64 + allowance,
+            "{format:?}: {with} bytes with the profile against {bare} keeping nothing, for a \
+             {out_len}-byte output: the output moved more than once"
         );
     }
 }
@@ -2241,5 +2274,83 @@ async fn mem_audit_the_magick_driver_carries_a_profile_between_runs_as_its_chunk
     assert!(
         received.windows(chunk.len()).any(|window| window == chunk),
         "the next run did not read the chunk as ImageMagick wrote it"
+    );
+}
+
+/// MEM-003: the built-in driver returns the buffer its encoder wrote, not a
+/// copy of it. A 1024 by 1024 BMP written as a BMP keeps no metadata, so
+/// nothing is added to it. The measure is the same work done by hand: the
+/// driver's own decode of the source (`decoded_dimensions`, the load
+/// `process` runs first), and the same registry encoder fed the same
+/// pixels from here, which hands back its file in a packet. `process`
+/// allocates less than half an encoded file more than the two together,
+/// where a copy of the file would be all of it.
+#[tokio::test]
+async fn mem_audit_an_encoded_image_is_not_copied_out_of_its_encoder() {
+    use oxideav_core::{
+        CodecId, CodecParameters, Frame, PixelFormat, RuntimeContext, VideoFrame, VideoPlane,
+    };
+    let _lock = exclusive().await;
+    const SIDE: u32 = 1024;
+    let driver = OxideAvImageDriver::new();
+    let bmp = driver
+        .process(
+            RED_PNG_1X1,
+            &ImagePipeline {
+                transformations: vec![Transformation::Resize {
+                    width: SIDE,
+                    height: SIDE,
+                }],
+                format: Some(OutputFormat::Bmp),
+                ..Default::default()
+            },
+        )
+        .expect("a 1024 by 1024 bitmap");
+    let pipeline = ImagePipeline::default();
+    let (processing, out_len) = allocated_by(&driver, &bmp, &pipeline);
+
+    driver.decoded_dimensions(&bmp).expect("a warm-up");
+    let heap = Heap::start();
+    let before = heap.bytes();
+    driver.decoded_dimensions(&bmp).expect("the decode");
+    let decoding = heap.bytes() - before;
+    drop(heap);
+
+    let mut context = RuntimeContext::new();
+    oxideav_bmp::register(&mut context.codecs, &mut context.containers);
+    let encode = |pixels: Vec<u8>| {
+        let heap = Heap::start();
+        let before = heap.bytes();
+        let mut params = CodecParameters::video(CodecId::new("bmp"));
+        params.width = Some(SIDE);
+        params.height = Some(SIDE);
+        params.pixel_format = Some(PixelFormat::Rgba);
+        let frame = Frame::Video(VideoFrame {
+            pts: Some(0),
+            planes: vec![VideoPlane {
+                stride: SIDE as usize * 4,
+                data: pixels,
+            }],
+        });
+        let mut encoder = context
+            .codecs
+            .first_encoder(&params)
+            .expect("a BMP encoder");
+        encoder.send_frame(&frame).expect("the frame");
+        drop(frame);
+        encoder.flush().expect("the flush");
+        let packet = encoder.receive_packet().expect("the file");
+        let used = heap.bytes() - before;
+        drop(heap);
+        (used, packet.data.len())
+    };
+    let red = || [255u8, 0, 0, 255].repeat((SIDE * SIDE) as usize);
+    encode(red());
+    let (encoding, encoded_len) = encode(red());
+    assert_eq!(encoded_len, out_len, "the same file is written by hand");
+    assert!(
+        processing < decoding + encoding + out_len as u64 / 2,
+        "process allocated {processing} bytes for a {out_len}-byte BMP, against {decoding} to \
+         decode it and {encoding} to encode it by hand: the encoded file was copied"
     );
 }
