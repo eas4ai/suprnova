@@ -602,8 +602,12 @@ impl MagickCliDriver {
             }
             let found = found.filter(|found| found.is_whole());
             let class = found.as_ref().map(|found| found.header.class);
+            // A GIF's palette converts from an RGB or grey profile only, so
+            // a CMYK or Lab one is never joined (MEM-003).
             let gif_profile = match (target, &found) {
-                (OutputFormat::Gif, Some(found)) => found.read(),
+                (OutputFormat::Gif, Some(found)) if found.header.class != ColourClass::Other => {
+                    found.read()
+                }
                 _ => None,
             };
             (class, gif_profile)
@@ -798,7 +802,12 @@ fn rust_stage(
         )));
     }
     let class = found.as_ref().map(|found| found.header.class);
-    let mut profile = found.and_then(|found| found.read());
+    // The profile is read only where this stage uses it: an RGB one it
+    // carries or converts from, a grey one it converts from. A CMYK or Lab
+    // one is dropped as it stands, so it is never inflated (MEM-003).
+    let mut profile = found
+        .filter(|found| found.header.class != ColourClass::Other)
+        .and_then(|found| found.read());
     let mut pixels = match after {
         AfterStage::Custom(custom) => {
             let out = custom.apply(pixels)?;
