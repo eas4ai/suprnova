@@ -59,8 +59,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   route's own handler does. Such a handler that takes a scoped child
   without its parent finds it through the parent the route's handler
   binds; where the router cannot see how the route's handler binds that
-  parent, the request answers 500 and names the parent to take.
-  `Router::bind` and `Router::model`
+  parent, the request answers 500 and names the parent to take. One that
+  cannot return the `missing()` response hands it to the middleware or
+  route handler that called it, which answers with it in place of a 404,
+  so the middleware outside that caller sees it as it sees the route's
+  own. `Router::bind` and `Router::model`
   register custom resolution, `#[model(custom_route_binding)]` with
   `suprnova::database::resolve_model_route_binding` overrides a model's own,
   and `#[derive(RouteBinding)]` binds a unit-only enum. `resource!` and
