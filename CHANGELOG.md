@@ -302,6 +302,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   script, as it refuses a URL (`script-import`), and the refusal says the
   specifier must be a relative path (`./` or `../`) to a script of the
   component or of a component it depends on.
+- **Magnetar's API documentation builds without the `two-factor`
+  feature.** The doc comments on `LockoutFields::IDENTITY_IS_EMAIL` and
+  `LockoutService::without_user_lock` linked
+  `two_factor::lockout_identity`, which exists only with that feature, so
+  rustdoc failed on two broken links under Magnetar's default features.
+  They now name it as text, with the feature that provides it.
 
 ## 3.2.1 - 2026-10-05
 
