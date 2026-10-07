@@ -1627,3 +1627,113 @@ async fn mem_audit_the_magick_driver_joins_a_gif_profile_once() {
          joined more than once"
     );
 }
+
+/// A `magick` driver whose binary is a stand-in, kept in a scratch
+/// directory named `name`, for a pipeline of two ImageMagick runs around a
+/// Rust stage: it reads all of stdin and answers with `intermediate` when
+/// its last argument is `png:-`, as it is for the PNG a run passes to Rust,
+/// and with `output` otherwise. The output format must not be PNG, or every
+/// run would read as the first. No host ImageMagick is needed.
+#[cfg(unix)]
+fn magick_stand_in_per_run(
+    name: &str,
+    intermediate: &[u8],
+    output: &[u8],
+) -> suprnova::MagickCliDriver {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).unwrap();
+    let intermediate_file = scratch.join("intermediate");
+    std::fs::write(&intermediate_file, intermediate).unwrap();
+    let output_file = scratch.join("output");
+    std::fs::write(&output_file, output).unwrap();
+    let stand_in = scratch.join("magick-stand-in");
+    std::fs::write(
+        &stand_in,
+        format!(
+            "#!/bin/sh\ncat > /dev/null\nfor last; do :; done\ncase \"$last\" in\n  png:-) exec \
+             cat '{}' ;;\n  *) exec cat '{}' ;;\nesac\n",
+            intermediate_file.display(),
+            output_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).unwrap();
+    suprnova::MagickCliDriver::new(stand_in.to_string_lossy())
+}
+
+/// MEM-003: the PNG between two ImageMagick runs is read for its profile
+/// only where the Rust stage uses it: an RGB or grey profile it carries or
+/// converts from. A grey source written as a BMP runs through an sRGB stage
+/// in Rust; when the PNG ImageMagick hands that stage carries a 1 MiB CMYK
+/// profile, which the stage drops as it stands, the profile is never
+/// inflated. The same PNG with the profile's signature broken, so no
+/// profile is found, is the measure: the run allocates less than half the
+/// profile more.
+#[cfg(unix)]
+#[tokio::test]
+async fn mem_audit_the_magick_driver_never_inflates_a_profile_its_rust_stage_drops() {
+    let _lock = exclusive().await;
+    let mut grey = p3_profile_of(4096);
+    grey[16..20].copy_from_slice(b"GRAY");
+    let source = png_with_chunks(
+        &encode_png(64, 64, PngPixelFormat::Rgba, 4, false),
+        &[(b"iCCP", iccp_chunk(&grey))],
+    );
+    let mut cmyk = p3_profile_of(LARGE_PROFILE);
+    cmyk[16..20].copy_from_slice(b"CMYK");
+    let mut unsigned = cmyk.clone();
+    unsigned[36..40].copy_from_slice(b"none");
+    let pixels = encode_png(64, 64, PngPixelFormat::Rgba, 4, false);
+    let output = convert(&pixels, OutputFormat::Bmp);
+    let to_bmp = ImagePipeline {
+        format: Some(OutputFormat::Bmp),
+        ..Default::default()
+    };
+    let allocated = |name: &str, profile: &[u8]| {
+        let intermediate = png_with_chunks(&pixels, &[(b"iCCP", iccp_chunk(profile))]);
+        let driver = magick_stand_in_per_run(name, &intermediate, &output);
+        let out = driver.process(&source, &to_bmp).expect("a warm-up");
+        let heap = Heap::start();
+        let before = heap.bytes();
+        driver
+            .process(&source, &to_bmp)
+            .expect("the stand-in answers");
+        let used = heap.bytes() - before;
+        drop(heap);
+        (used, out)
+    };
+    let (without, _) = allocated("mem-003-magick-stage-without", &unsigned);
+    let (with, out) = allocated("mem-003-magick-stage-cmyk", &cmyk);
+    assert_eq!(out, output, "the second run's output is kept");
+    assert!(
+        with < without + LARGE_PROFILE as u64 / 2,
+        "{with} bytes with a {LARGE_PROFILE}-byte CMYK profile between the runs against \
+         {without} with none: it was inflated"
+    );
+}
+
+/// MEM-003: a CMYK profile in the GIF ImageMagick writes converts nothing,
+/// since a GIF's palette converts to sRGB only from an RGB or grey profile,
+/// so it is checked by its length and never joined. The same GIF with the
+/// extension under another name is the measure: the run allocates less
+/// than half the profile more.
+#[cfg(unix)]
+#[tokio::test]
+async fn mem_audit_the_magick_driver_never_joins_a_gif_profile_it_drops() {
+    let _lock = exclusive().await;
+    let mut cmyk = p3_profile_of(LARGE_PROFILE);
+    cmyk[16..20].copy_from_slice(b"CMYK");
+    let source = gif(64, 64, vec![frame(0, 0, 64, 64, 1)]);
+    let tagged = gif_with_application(&source, b"ICCRGBG1012", &cmyk);
+    let untagged = gif_with_application(&source, b"ICCRGBX1012", &cmyk);
+    let (without, _) = magick_allocates("mem-003-magick-gif-cmyk-without", &untagged);
+    let (with, out) = magick_allocates("mem-003-magick-gif-cmyk", &tagged);
+    assert!(out.len() < LARGE_PROFILE, "a GIF output kept its profile");
+    assert!(
+        with < without + LARGE_PROFILE as u64 / 2,
+        "{with} bytes with a {LARGE_PROFILE}-byte CMYK profile against {without} with none: \
+         it was joined"
+    );
+}
