@@ -3,4 +3,3 @@
 
 pub mod argon2_and_driver_swap;
 pub mod async_and_truncation;
-pub mod rtc_gate;

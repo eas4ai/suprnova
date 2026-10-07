@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "lifecycle-action-batch",
+      "kind": "request",
+      "encoded": "{\"base_revision\":\"7\",\"child_parameters\":null,\"component\":\"catalog.search\",\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"extensions\":{},\"idempotency_key\":\"MDEyMzQ1Njc4OTo7PD0-Pw\",\"model_proposals\":{},\"operations\":[{\"kind\":\"lazy_complete\"},{\"arguments\":{},\"kind\":\"invoke_action\",\"name\":\"search\"}],\"protocol_version\":2,\"runtime_contract_version\":2,\"snapshot\":{\"envelope\":{\"body\":{},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"kind\":\"instance\"},\"snapshot_schema_version\":1}",
+      "expected_error": "incompatible_operation_batch"
+    },
+    {
+      "id": "params-changed-without-envelope",
+      "kind": "request",
+      "encoded": "{\"base_revision\":\"7\",\"child_parameters\":null,\"component\":\"catalog.search\",\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"extensions\":{},\"idempotency_key\":\"MDEyMzQ1Njc4OTo7PD0-Pw\",\"model_proposals\":{},\"operations\":[{\"kind\":\"params_changed\"}],\"protocol_version\":2,\"runtime_contract_version\":2,\"snapshot\":{\"envelope\":{\"body\":{},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"kind\":\"instance\"},\"snapshot_schema_version\":1}",
+      "expected_error": "incompatible_operation_batch"
+    },
+    {
+      "id": "rolling-runtime-mismatch",
+      "kind": "request",
+      "encoded": "{\"base_revision\":\"7\",\"child_parameters\":null,\"component\":\"catalog.search\",\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"extensions\":{},\"idempotency_key\":\"MDEyMzQ1Njc4OTo7PD0-Pw\",\"model_proposals\":{},\"operations\":[{\"kind\":\"lazy_complete\"}],\"protocol_version\":2,\"runtime_contract_version\":1,\"snapshot\":{\"envelope\":{\"body\":{},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"kind\":\"instance\"},\"snapshot_schema_version\":1}",
+      "expected_error": "unsupported_protocol_version"
+    },
+    {
+      "id": "v2-field-smuggled-into-v1",
+      "kind": "request",
+      "encoded": "{\"base_revision\":\"7\",\"child_parameters\":null,\"component\":\"catalog.search\",\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"extensions\":{},\"idempotency_key\":\"MDEyMzQ1Njc4OTo7PD0-Pw\",\"model_proposals\":{},\"operations\":[{\"arguments\":{},\"kind\":\"invoke_action\",\"name\":\"search\"}],\"protocol_version\":1,\"runtime_contract_version\":1,\"snapshot\":{\"envelope\":{\"body\":{},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"kind\":\"instance\"},\"snapshot_schema_version\":1}",
+      "expected_error": "invalid_protocol_envelope"
+    },
+    {
+      "id": "navigated-url-with-committed-state",
+      "kind": "response",
+      "encoded": "{\"accepted_revision\":\"8\",\"child_deliveries\":[],\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"effects\":[],\"events\":[],\"extensions\":{},\"outcome\":\"accepted\",\"protocol_version\":2,\"render\":{\"kind\":\"no_render\"},\"snapshot\":{\"body\":{},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"url_intent\":{\"kind\":\"navigated\",\"target\":\"/catalog?page=2\"},\"validation\":{}}",
+      "expected_error": "response_outcome_mismatch"
+    }
+  ]
+}
