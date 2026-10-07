@@ -411,8 +411,16 @@ let router = Router::new()
 A `#[handler]` function works as the `missing()` handler too, and its
 bound arguments bind under the route's settings, as the route's handler's
 do. On `/users/{user}/posts/{post}` it can take `user: User` and gets the
-user the route bound. A bound argument of its own that finds nothing,
+user the route bound. A scoped child it takes without its parent is still
+looked up through the parent the route's handler binds, so it never gets
+a row the route refused. A bound argument of its own that finds nothing,
 such as the post that missed, answers 404 instead of calling it again.
+
+A `#[handler]` function that the route's handler calls with the request
+and that returns another type than `Response` cannot return the
+`missing()` response. It fails with the 404 error instead, and when that
+error is the route's result, the route answers with the `missing()`
+response.
 
 ### Enums
 
@@ -460,11 +468,12 @@ with a 500 when they fail, a request the fallback would answer included;
 `router.prepare_bindings()` returns the error itself. A closure handler
 and a generic `#[handler]` function carry no record and are not checked
 at startup. A closure binds nothing itself. A generic handler, and a
-`#[handler]` function that a closure route or another handler calls with
-the request, bind their arguments of a concrete type that implements
-`RouteBinding` as any handler's do: in path order, by the route's binding
-fields, scoped, through the router's binders, with `with_trashed()` and
-`missing()`. The route plans them at the handler's first request and
+`#[handler]` function that a closure route, middleware or another handler
+calls with the request, bind their arguments of a concrete type that
+implements `RouteBinding` as any handler's do: in path order, by the
+route's binding fields, scoped (through the parent the route's handler
+binds, when they do not take it), through the router's binders, with
+`with_trashed()` and `missing()`. The route plans them at the handler's first request and
 keeps the plan; a binding field, a scoped child or a binder the checks
 above would refuse answers that request with a 500 instead of binding. A
 generic handler's generic arguments read the body.

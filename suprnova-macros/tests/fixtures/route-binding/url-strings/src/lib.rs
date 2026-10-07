@@ -196,6 +196,26 @@ pub fn mutable_forms(
     ]
 }
 
+/// Shared containers that deref to a slice of pairs, and a vector behind
+/// two borrows: the slice parameter took each by deref coercion.
+pub fn shared_containers(
+    boxed: Box<[(&str, &str)]>,
+    rc: Rc<[(&str, &str)]>,
+    arc: Arc<[(&str, &str)]>,
+    pairs: Vec<(&str, &str)>,
+) -> Vec<Option<String>> {
+    vec![
+        route("a", &boxed),
+        try_route("a", &boxed).ok(),
+        route("a", &rc),
+        try_route("a", &rc).ok(),
+        route("a", &arc),
+        try_route("a", &arc).ok(),
+        route("a", &&pairs),
+        try_route("a", &&pairs).ok(),
+    ]
+}
+
 /// The four forms that compiled only because the slice parameter set the
 /// pairs' type, written as the manual says (BIND-012): `.as_str()` on the
 /// value, and a closure in place of the function pointer.

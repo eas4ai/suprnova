@@ -277,7 +277,13 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
         .iter()
         .any(|arg| matches!(arg.kind, ArgKind::Probe | ArgKind::OptionalProbe(_)))
     {
-        unplanned_binding(fn_name, self_ty.as_ref(), fn_output, &args)
+        unplanned_binding(
+            fn_name,
+            self_ty.as_ref(),
+            has_type_generics(fn_generics),
+            fn_output,
+            &args,
+        )
     } else {
         TokenStream2::new()
     };
@@ -629,21 +635,37 @@ fn handler_display(fn_name: &Ident, self_ty: Option<&Type>) -> String {
 fn unplanned_binding(
     fn_name: &Ident,
     self_ty: Option<&Type>,
+    generic: bool,
     output: &syn::ReturnType,
     args: &[Arg],
 ) -> TokenStream2 {
     let display = handler_display(fn_name, self_ty);
     let entries = arg_entries(args);
+    // The handler function's type, which tells the route's own handler
+    // apart; a generic function's type cannot be named without its
+    // arguments, and a generic handler is never the route's own.
+    let handler_type = if generic {
+        quote! { ::core::option::Option::None }
+    } else {
+        let handler = match self_ty {
+            Some(self_ty) => quote! { <#self_ty>::#fn_name },
+            None => quote! { #fn_name },
+        };
+        quote! { ::core::option::Option::Some(::suprnova::routing::__type_id_of(&#handler)) }
+    };
+    // The plan's key: a type only this handler declares, and the name of
+    // the closure that describes its arguments, which carries a generic
+    // handler's arguments, so each instantiation plans its own.
     let bind = |answers_missing: TokenStream2| {
         quote! {
             __suprnova_input
                 .__bind_unplanned(
-                    ::std::any::TypeId::of::<__SuprnovaUnplannedHandler>(),
+                    (
+                        ::std::any::TypeId::of::<__SuprnovaUnplannedHandler>(),
+                        ::std::any::type_name_of_val(&__suprnova_args),
+                    ),
                     ::core::concat!(::core::module_path!(), "::", #display),
-                    || {
-                        use ::suprnova::routing::__ArgSource as _;
-                        ::std::vec![#(#entries),*]
-                    },
+                    __suprnova_args,
                     #answers_missing,
                 )
                 .await?
@@ -670,8 +692,12 @@ fn unplanned_binding(
         }
     };
     quote! {
-        if __suprnova_input.__binds_unplanned() {
+        if __suprnova_input.__binds_unplanned(#handler_type) {
             struct __SuprnovaUnplannedHandler;
+            let __suprnova_args = || {
+                use ::suprnova::routing::__ArgSource as _;
+                ::std::vec![#(#entries),*]
+            };
             #answer
         }
     }
@@ -1221,9 +1247,19 @@ mod tests {
         });
         assert!(!out.contains("compile_error"), "got:\n{out}");
         assert!(!out.contains("HandlerRecord"), "got:\n{out}");
-        let guard = position(&out, "__binds_unplanned ()");
+        // A generic handler is never the route's own, so it names no type.
+        let guard = position(
+            &out,
+            "__binds_unplanned (:: core :: option :: Option :: None)",
+        );
         let plan = position(&out, "__bind_unplanned (");
         assert!(guard < plan, "got:\n{out}");
+        // Its instantiations plan apart: the key names the closure that
+        // describes the arguments, whose name carries the type arguments.
+        assert!(
+            out.contains("type_name_of_val (& __suprnova_args)"),
+            "got:\n{out}"
+        );
         assert!(
             plan < position(&out, "__ArgProbe :: < User > :: new ()) . __bind"),
             "the route plans the arguments before the first binds; got:\n{out}"
@@ -1268,7 +1304,13 @@ mod tests {
         });
         assert!(!out.contains("compile_error"), "got:\n{out}");
         assert!(out.contains("HandlerRecord :: new"), "got:\n{out}");
-        let guard = position(&out, "if __suprnova_input . __binds_unplanned ()");
+        // It names its own type, so the route's own handler that binds
+        // nothing does not plan again.
+        let guard = position(
+            &out,
+            "if __suprnova_input . __binds_unplanned (:: core :: option :: Option :: Some \
+             (:: suprnova :: routing :: __type_id_of (& show)))",
+        );
         assert!(
             guard < position(&out, "__bind_unplanned ("),
             "the plan runs only behind the guard; got:\n{out}"

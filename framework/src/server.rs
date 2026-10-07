@@ -1070,7 +1070,7 @@ async fn handle_request_inner(
             // the handler (BIND-015). The checks above passed, so the plan
             // is there. The route also hands the request its settings, an
             // `Arc` clone, for a handler it did not plan: a generic one, or
-            // one a closure route or another handler calls.
+            // one a closure route, middleware or another handler calls.
             let binds = match router.binding_plan(&effective_method, &pattern) {
                 Ok(binds) => binds,
                 Err(error) => {
@@ -1081,13 +1081,21 @@ async fn handle_request_inner(
                 Some(plan) => crate::routing::binding::planned_handler(plan.clone(), handler),
                 None => handler,
             };
+            // On a route with `missing()`, a handler the route's handler
+            // calls that cannot return the `missing()` response keeps it
+            // for the route to answer with (BIND-009).
+            let handler = if binds.is_some_and(|binds| binds.settings().has_missing()) {
+                crate::routing::binding::missing_answer_handler(handler)
+            } else {
+                handler
+            };
             let mut request = stamp_peer(
                 Request::new(req)
                     .with_params(params)
                     .with_route_pattern(pattern.clone()),
             );
             if let Some(binds) = binds {
-                request.set_route_settings(binds.settings().clone(), binds.recorded());
+                request.set_route_settings(binds.settings().clone());
             }
             let live_metadata = router.live_route_metadata(&effective_method, &pattern);
             if let Some(metadata) = live_metadata {

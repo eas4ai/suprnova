@@ -7,12 +7,17 @@
 //! (BIND-008). A closure route answers its `missing()` handler (BIND-009);
 //! a `missing()` handler whose own binding finds nothing answers 404.
 
+use std::future::Future;
+
 use chrono::{DateTime, Utc};
 use suprnova::http::{HttpResponse, text};
 use suprnova::testing::TestDatabase;
-use suprnova::{FromRequest, Model, Request, Response, Router, handler, model};
+use suprnova::{
+    FromRequest, Middleware, Model, Next, Request, Response, RouteBinding, RouteParam, Router,
+    handler, model,
+};
 
-use super::{get as get_path, refusal, run_sql, serve};
+use super::{get as get_path, refusal, run_sql, send, serve};
 
 #[model(table = "ou_users", soft_deletes, relations = {
     posts: HasMany<OuPost>,
@@ -124,6 +129,55 @@ pub async fn forward_show_user(req: Request) -> Response {
 #[handler]
 pub async fn forward_show_post(req: Request) -> Response {
     show_post(req).await
+}
+
+/// A `missing()` handler that binds the child alone, not its parent.
+#[handler]
+pub async fn missing_post(post: OuPost) -> Response {
+    Ok(HttpResponse::text(format!("hook {}", post.slug)).status(302))
+}
+
+/// A recorded route handler that binds the user, then hands its request to
+/// [`show_post`], which binds the child alone.
+#[handler]
+pub async fn bound_forward_show_post(user: OuUser, req: Request) -> Response {
+    let _ = user;
+    show_post(req).await
+}
+
+/// A recorded route handler that binds nothing.
+#[handler]
+pub async fn binds_nothing(req: Request) -> Response {
+    text(format!("route at {}", req.path()))
+}
+
+/// A generic handler whose bound argument's type is its type parameter.
+#[handler]
+pub async fn show_item<T: RouteBinding>(item: RouteParam<T>) -> Response {
+    let kind = std::any::type_name::<T>()
+        .rsplit("::")
+        .next()
+        .unwrap_or_default();
+    text(format!("{kind} {}", item.route_key()))
+}
+
+/// Route middleware that answers with a `#[handler]` it calls on the
+/// request, before the route binds anything.
+pub struct AnswerWith(fn(Request) -> std::pin::Pin<Box<dyn Future<Output = Response> + Send>>);
+
+#[suprnova::async_trait]
+impl Middleware for AnswerWith {
+    async fn handle(&self, request: Request, _next: Next) -> Response {
+        (self.0)(request).await
+    }
+}
+
+fn answer_user_post(req: Request) -> std::pin::Pin<Box<dyn Future<Output = Response> + Send>> {
+    Box::pin(user_post(req))
+}
+
+fn answer_show_post(req: Request) -> std::pin::Pin<Box<dyn Future<Output = Response> + Send>> {
+    Box::pin(show_post(req))
 }
 
 /// A plain `missing()` handler: it sees the request.
@@ -367,8 +421,8 @@ async fn bind_008_a_handler_a_closure_route_calls_binds_through_binders_trashed_
 
 #[tokio::test]
 async fn bind_006_a_handler_of_another_return_type_a_closure_calls_binds_under_the_route() {
-    // Its return type cannot carry the route's `missing()` response, so a
-    // miss answers its 404 error; it still never binds an unowned row.
+    // Its return type cannot carry the route's `missing()` response; the
+    // route answers it all the same, and never binds an unowned row.
     let _db = fixture().await;
     let router: Router = Router::new()
         .get("/users/{user}/posts/{post}", |req| async move {
@@ -378,9 +432,11 @@ async fn bind_006_a_handler_of_another_return_type_a_closure_calls_binds_under_t
         .missing(redirect_home)
         .into();
     let addr = serve(router).await;
-    let (status, body) = get_path(addr, "/users/1/posts/2").await;
-    assert_eq!(status, 404, "{body}");
-    assert!(!body.contains("grace-post"), "{body}");
+    assert_eq!(
+        get_path(addr, "/users/1/posts/2").await,
+        (302, "missing at /users/1/posts/2".to_owned()),
+        "the route's missing() response, though the handler cannot return it"
+    );
     assert_eq!(
         get_path(addr, "/users/1/posts/1").await,
         (200, "ada ada-post".to_owned())
@@ -457,4 +513,122 @@ async fn bind_008_a_handler_a_route_handler_calls_binds_through_binders_trashed_
         get_path(addr, "/users/grace").await,
         (200, "grace".to_owned())
     );
+}
+
+// ── A handler middleware calls, a child bound alone, instantiations ───────
+
+#[tokio::test]
+async fn bind_006_a_handler_route_middleware_calls_binds_under_the_routes_settings() {
+    // The middleware answers before the route binds its own handler's
+    // arguments, so the handler it calls is not the one the route planned.
+    let _db = fixture().await;
+    let router: Router = Router::new()
+        .get("/users/{user}/posts/{post}", show_post)
+        .scope_bindings()
+        .middleware(AnswerWith(answer_user_post))
+        .get("/same/users/{user}/posts/{post}", user_post)
+        .scope_bindings()
+        .middleware(AnswerWith(answer_user_post))
+        .get("/idle/users/{user}/posts/{post}", binds_nothing)
+        .scope_bindings()
+        .middleware(AnswerWith(answer_user_post))
+        .into();
+    let addr = serve(router).await;
+    for prefix in ["", "/same", "/idle"] {
+        let path = format!("{prefix}/users/1/posts/2");
+        let (status, body) = get_path(addr, &path).await;
+        assert_eq!(status, 404, "{path}: {body}");
+        assert!(!body.contains("grace-post"), "{path}: {body}");
+        assert_eq!(
+            get_path(addr, &format!("{prefix}/users/1/posts/1")).await,
+            (200, "ada ada-post".to_owned()),
+            "{prefix}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bind_006_a_handler_that_binds_a_scoped_child_alone_never_gets_a_row_the_route_refused() {
+    // Each handler binds the post without the user. The route binds the
+    // user, so the post is looked up through it all the same.
+    let _db = fixture().await;
+    let router: Router = Router::new()
+        .get("/users/{user}/posts/{post}", user_post)
+        .scope_bindings()
+        .missing(missing_post)
+        .get("/fields/users/{user}/posts/{post:slug}", user_post)
+        .missing(missing_post)
+        .get("/nested/users/{user}/posts/{post}", bound_forward_show_post)
+        .scope_bindings()
+        .get("/mw/users/{user}/posts/{post}", user_post)
+        .scope_bindings()
+        .middleware(AnswerWith(answer_show_post))
+        .into();
+    let addr = serve(router).await;
+    for path in [
+        "/users/1/posts/2",
+        "/fields/users/1/posts/grace-post",
+        "/nested/users/1/posts/2",
+        "/mw/users/1/posts/2",
+    ] {
+        let (status, body) = get_path(addr, path).await;
+        assert_eq!(status, 404, "{path}: {body}");
+        assert!(!body.contains("grace-post"), "{path}: {body}");
+    }
+    assert_eq!(
+        get_path(addr, "/nested/users/1/posts/1").await,
+        (200, "ada-post".to_owned())
+    );
+    assert_eq!(
+        get_path(addr, "/mw/users/1/posts/1").await,
+        (200, "ada-post".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn bind_004_each_instantiation_of_a_generic_handler_plans_its_own_arguments() {
+    // One closure route calls two instantiations whose bound argument types
+    // differ; each binds its own type.
+    let _db = fixture().await;
+    let router: Router = Router::new()
+        .get("/items/{item}", |req: Request| async move {
+            if req.header("x-kind") == Some("post") {
+                via_closure(show_item::<OuPost>(req).await)
+            } else {
+                via_closure(show_item::<OuUser>(req).await)
+            }
+        })
+        .into();
+    let addr = serve(router).await;
+    assert_eq!(
+        send(addr, "GET", "/items/2", &[("x-kind", "user")], None).await,
+        (200, "OuUser 2".to_owned())
+    );
+    assert_eq!(
+        send(addr, "GET", "/items/2", &[("x-kind", "post")], None).await,
+        (200, "OuPost 2".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn bind_007_a_missing_handlers_request_time_refusal_names_it_as_such() {
+    // Only the generic `missing()` handler binds `user`, and the binder for
+    // it returns a `String`: the route starts, and the miss answers the
+    // refusal, naming the `missing()` handler.
+    let _db = fixture().await;
+    let router: Router = Router::new()
+        .get("/users/{user}/posts/{post}", show_post)
+        .missing(missing_generic::<Request>)
+        .into();
+    let router = router.bind(
+        "user",
+        |value: String, _route| async move { Ok(Some(value)) },
+    );
+    router
+        .prepare_bindings()
+        .expect("a generic missing() handler is not checked at startup");
+    let addr = serve(router).await;
+    let (status, body) = get_path(addr, "/users/1/posts/99").await;
+    assert_eq!(status, 500, "{body}");
+    assert!(body.contains("`missing()` handler"), "{body}");
 }

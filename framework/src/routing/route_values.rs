@@ -110,8 +110,8 @@ fn pair_value<K: AsRef<str>, V: AsRef<str>>(pairs: &[(K, V)], name: &str) -> Opt
 }
 
 /// String pairs held by a container a `&[(&str, &str)]` parameter took by
-/// coercion: `&[..; N]`, `&mut [..; N]`, `&mut [..]`, `&&[..]`, `&Vec` and
-/// `&mut Vec`.
+/// coercion: `&[..; N]`, `&mut [..; N]`, `&mut [..]`, `&&[..]`, `&Vec`,
+/// `&mut Vec`, `&&Vec`, and a borrowed `Box`, `Rc` or `Arc` of a slice.
 macro_rules! string_pair_containers {
     ($($container:ty),* $(,)?) => {
         $(
@@ -135,6 +135,10 @@ string_pair_containers!(
     &&[(&str, &str)],
     &Vec<(&str, &str)>,
     &mut Vec<(&str, &str)>,
+    &&Vec<(&str, &str)>,
+    &Box<[(&str, &str)]>,
+    &std::rc::Rc<[(&str, &str)]>,
+    &std::sync::Arc<[(&str, &str)]>,
 );
 
 impl<const N: usize> RouteParameters for &[(&str, &str); N] {
