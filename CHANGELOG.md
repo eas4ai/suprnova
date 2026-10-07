@@ -260,6 +260,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   its place under the limit until it returns, even when its caller stops
   waiting. `0` or a value that is not a whole number is refused when the
   hashing configuration loads (#146).
+- **A WebSocket upgrade no longer waits behind the shutdown drain.** The
+  registry of WebSocket handler tasks sat behind an async lock that the
+  shutdown drain held for up to its 5 s deadline, so an upgrade in flight
+  waited out the whole drain before its handler was registered. The
+  registry is now a synchronous lock held only to reap finished handlers
+  and register a new one, and the drain takes the set out under it and
+  waits holding no lock, still up to 5 s before it aborts what runs (#149).
 
 ### Fixed
 
