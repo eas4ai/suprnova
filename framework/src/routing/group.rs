@@ -1,6 +1,6 @@
 //! Route grouping with shared prefix and middleware
 
-use super::binding::{HandlerRecord, RouteBindingOptions, boxed_missing, record_of};
+use super::binding::{HandlerRef, RouteBindingOptions, boxed_missing, handler_ref};
 use super::macros::{convert_route_params, join_paths};
 use super::router::ANY_METHODS;
 use super::{BoxedHandler, RouteBuilder, Router};
@@ -57,7 +57,7 @@ struct GroupRoute {
     path: String,
     handler: Arc<BoxedHandler>,
     /// What `#[handler]` recorded about the handler, if anything.
-    record: Option<&'static HandlerRecord>,
+    record: HandlerRef,
 }
 
 #[derive(Clone, Copy)]
@@ -283,7 +283,7 @@ impl GroupRouter {
             method: GroupMethod::Get,
             path: path.to_string(),
             handler: Arc::new(boxed),
-            record: record_of::<H>(),
+            record: handler_ref::<H>(),
         });
         self
     }
@@ -299,7 +299,7 @@ impl GroupRouter {
             method: GroupMethod::Post,
             path: path.to_string(),
             handler: Arc::new(boxed),
-            record: record_of::<H>(),
+            record: handler_ref::<H>(),
         });
         self
     }
@@ -315,7 +315,7 @@ impl GroupRouter {
             method: GroupMethod::Put,
             path: path.to_string(),
             handler: Arc::new(boxed),
-            record: record_of::<H>(),
+            record: handler_ref::<H>(),
         });
         self
     }
@@ -331,7 +331,7 @@ impl GroupRouter {
             method: GroupMethod::Delete,
             path: path.to_string(),
             handler: Arc::new(boxed),
-            record: record_of::<H>(),
+            record: handler_ref::<H>(),
         });
         self
     }
@@ -347,7 +347,7 @@ impl GroupRouter {
             method: GroupMethod::Patch,
             path: path.to_string(),
             handler: Arc::new(boxed),
-            record: record_of::<H>(),
+            record: handler_ref::<H>(),
         });
         self
     }
@@ -368,7 +368,7 @@ impl GroupRouter {
             method: GroupMethod::Head,
             path: path.to_string(),
             handler: Arc::new(boxed),
-            record: record_of::<H>(),
+            record: handler_ref::<H>(),
         });
         self
     }
@@ -388,7 +388,7 @@ impl GroupRouter {
             method: GroupMethod::Options,
             path: path.to_string(),
             handler: Arc::new(boxed),
-            record: record_of::<H>(),
+            record: handler_ref::<H>(),
         });
         self
     }
@@ -470,7 +470,7 @@ impl GroupRouter {
         }
         let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         let arc = Arc::new(boxed);
-        Ok(self.push_routes_for_methods(path, group_methods, arc, record_of::<H>()))
+        Ok(self.push_routes_for_methods(path, group_methods, arc, handler_ref::<H>()))
     }
 
     /// Internal helper behind [`GroupRouter::methods`], and so behind
@@ -482,7 +482,7 @@ impl GroupRouter {
         path: &str,
         methods: impl IntoIterator<Item = GroupMethod>,
         handler: Arc<BoxedHandler>,
-        record: Option<&'static HandlerRecord>,
+        record: HandlerRef,
     ) -> Self {
         for method in methods {
             self.routes.push(GroupRoute {

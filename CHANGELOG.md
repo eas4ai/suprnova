@@ -56,7 +56,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `with_trashed()` and `missing()`. A generic `#[handler]`, and a
   `#[handler]` that a closure route, middleware, another handler or a
   `missing()` handler calls with the request, binds at the request as the
-  route's own handler does. `Router::bind` and `Router::model`
+  route's own handler does. Such a handler that takes a scoped child
+  without its parent finds it through the parent the route's handler
+  binds; where the router cannot see how the route's handler binds that
+  parent, the request answers 500 and names the parent to take.
+  `Router::bind` and `Router::model`
   register custom resolution, `#[model(custom_route_binding)]` with
   `suprnova::database::resolve_model_route_binding` overrides a model's own,
   and `#[derive(RouteBinding)]` binds a unit-only enum. `resource!` and

@@ -412,9 +412,10 @@ A `#[handler]` function works as the `missing()` handler too, and its
 bound arguments bind under the route's settings, as the route's handler's
 do. On `/users/{user}/posts/{post}` it can take `user: User` and gets the
 user the route bound. A scoped child it takes without its parent is still
-looked up through the parent the route's handler binds, so it never gets
-a row the route refused. A bound argument of its own that finds nothing,
-such as the post that missed, answers 404 instead of calling it again.
+looked up through the parent the route's handler binds (see
+[Startup checks](#startup-checks)), so it never gets a row the route
+refused. A bound argument of its own that finds nothing, such as the post
+that missed, answers 404 instead of calling it again.
 
 A `#[handler]` function that the route's handler or its middleware calls
 with the request, and that returns another type than `Response`, cannot
@@ -470,16 +471,34 @@ runs the same checks before its first request and answers every request
 with a 500 when they fail, a request the fallback would answer included;
 `router.prepare_bindings()` returns the error itself. A closure handler
 and a generic `#[handler]` function carry no record and are not checked
-at startup. A closure binds nothing itself. A generic handler, and a
-`#[handler]` function that a closure route, middleware or another handler
-calls with the request, bind their arguments of a concrete type that
-implements `RouteBinding` as any handler's do: in path order, by the
-route's binding fields, scoped (through the parent the route's handler
-binds, when they do not take it), through the router's binders, with
-`with_trashed()` and `missing()`. The route plans them at the handler's first request and
-keeps the plan; a binding field, a scoped child or a binder the checks
-above would refuse answers that request with a 500 instead of binding. A
-generic handler's generic arguments read the body.
+at startup. A closure binds nothing itself. A generic handler, a
+`missing()` handler, and a `#[handler]` function that a closure route,
+middleware or another handler calls with the request, bind their
+arguments of a concrete type that implements `RouteBinding` as any
+handler's do: in path order, by the route's binding fields, scoped,
+through the router's binders, with `with_trashed()` and `missing()`. The
+route plans them at the handler's first request and keeps the plan. A
+binding field, a scoped child, or a binder that covers a parameter the
+handler reads without binding, which the checks above would refuse,
+answers that request with a 500 instead of binding. A generic handler's
+generic arguments read the body.
+
+When such a handler takes a scoped child without its parent, the child
+is still found through the parent, bound the way the route's own handler
+binds it:
+
+- When the route's handler is a recorded `#[handler]` or a generic one
+  that binds the parent, the child is looked up through that parent, so
+  a row the parent does not own answers 404.
+- When the route's handler binds no parent (a closure, a function that is
+  not a `#[handler]`, or a handler that takes the child alone), nothing
+  scopes the child, as for any handler whose parent is not bound.
+- When the router cannot see how the route's handler binds the parent (a
+  generic `#[handler]` it cannot find by its path, such as one declared
+  inside a function, one that binds the parent as `RouteParam<T>` with
+  `T` its type parameter, or a function pointer), the request answers a
+  500 that names the route, the handler, the child and the parent, and
+  says to take the parent too. It never looks the child up unscoped.
 
 A handler inside an `impl` block names its type,
 `#[handler(Self = Posts)]`, and is checked as a free handler is; see
