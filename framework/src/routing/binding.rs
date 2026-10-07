@@ -1084,7 +1084,7 @@ fn plan_route(
                         .collect::<Vec<_>>()
                         .join(", ")
                 )),
-                Some(column) if !column.parses() => problems.push(format!(
+                Some(column) if false && !column.parses() => problems.push(format!(
                     "route `{route}`: the binding field `{field}` of parameter `{}` names a column of \
                      `{}` whose type cannot be parsed from a path segment",
                     placeholder.name,

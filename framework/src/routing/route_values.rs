@@ -39,7 +39,7 @@ pub trait RouteValue {
 /// column `field` ([`RouteBinding::route_field`]), else its route key.
 pub fn bound_route_value<T: RouteBinding>(value: &T, field: Option<&str>) -> Option<String> {
     match field {
-        Some(_field) => Some(value.route_key()),
+        Some(field) => value.route_field(field),
         None => Some(value.route_key()),
     }
 }
