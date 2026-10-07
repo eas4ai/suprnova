@@ -1209,6 +1209,190 @@ async fn mem_audit_an_image_with_a_profile_is_written_in_one_buffer() {
     }
 }
 
+/// The most profile bytes one JPEG `APP2` segment holds: 65,535 less the
+/// length, the `ICC_PROFILE\0` tag and the two sequence bytes.
+const JPEG_ICC_CHUNK: usize = 65_519;
+
+/// The size of the profiles the tests below split: large enough that one
+/// more copy of it stands out from everything else a run allocates.
+const LARGE_PROFILE: usize = 1024 * 1024;
+
+/// `jpeg` with `profile` in APP2 segments after its start-of-image marker:
+/// the first `first` bytes in sequence 1, the rest in segments as full as a
+/// JPEG allows. Writers put the whole 128-byte header in the first
+/// segment; a valid file need not.
+fn jpeg_with_profile_from(jpeg: &[u8], profile: &[u8], first: usize) -> Vec<u8> {
+    let (head, rest) = profile.split_at(first);
+    let chunks: Vec<&[u8]> = std::iter::once(head)
+        .chain(rest.chunks(JPEG_ICC_CHUNK))
+        .collect();
+    let total = u8::try_from(chunks.len()).expect("at most 255 segments");
+    let mut out = vec![0xFF, 0xD8];
+    for (index, chunk) in chunks.iter().enumerate() {
+        out.extend_from_slice(&[0xFF, 0xE2]);
+        out.extend_from_slice(&((2 + 14 + chunk.len()) as u16).to_be_bytes());
+        out.extend_from_slice(b"ICC_PROFILE\0");
+        out.extend_from_slice(&[index as u8 + 1, total]);
+        out.extend_from_slice(chunk);
+    }
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+/// `gif` with an application extension named `application` ahead of its
+/// first block, holding `data` in sub-blocks of 255 bytes. Named
+/// `ICCRGBG1012`, it is the GIF's ICC profile; under any other name, no
+/// reader takes it for one.
+fn gif_with_application(gif: &[u8], application: &[u8; 11], data: &[u8]) -> Vec<u8> {
+    let packed = gif[10];
+    let table = if packed & 0x80 != 0 {
+        3 << ((packed & 0x07) + 1)
+    } else {
+        0
+    };
+    let at = 13 + table;
+    let mut out = gif[..at].to_vec();
+    out.extend_from_slice(&[0x21, 0xFF, 0x0B]);
+    out.extend_from_slice(application);
+    for block in data.chunks(255) {
+        out.push(block.len() as u8);
+        out.extend_from_slice(block);
+    }
+    out.push(0);
+    out.extend_from_slice(&gif[at..]);
+    out
+}
+
+/// MEM-003: a JPEG's profile is joined once, to carry it, however its
+/// writer split it. A valid file can put only the first 64 bytes of a
+/// 1 MiB profile in sequence 1, so the 128-byte header runs into the next
+/// segment; reading it there must not join the whole profile. The same
+/// image with the header in its first segment is the measure: the split
+/// one allocates less than half the profile more, where a second join
+/// would be all of it.
+#[tokio::test]
+async fn mem_audit_a_jpeg_profile_split_inside_its_header_is_joined_once() {
+    let _lock = exclusive().await;
+    let driver = OxideAvImageDriver::new();
+    let profile = p3_profile_of(LARGE_PROFILE);
+    let small = include_bytes!("../media/fixtures/jpeg/photo-base-420-35x21.jpg");
+    let usual = jpeg_with_profile_from(small, &profile, JPEG_ICC_CHUNK);
+    let split = jpeg_with_profile_from(small, &profile, 64);
+    let pipeline = ImagePipeline::default();
+    let out = driver
+        .process(&split, &pipeline)
+        .expect("the split profile reads");
+    assert!(out.len() > LARGE_PROFILE, "the profile was not carried");
+    assert!(
+        out == driver
+            .process(&usual, &pipeline)
+            .expect("the usual profile reads"),
+        "the split profile is carried as the usual one is"
+    );
+    let (usual_bytes, _) = allocated_by(&driver, &usual, &pipeline);
+    let (split_bytes, _) = allocated_by(&driver, &split, &pipeline);
+    assert!(
+        split_bytes < usual_bytes + LARGE_PROFILE as u64 / 2,
+        "{split_bytes} bytes with the header split across two segments against {usual_bytes} \
+         with it in the first, for a {LARGE_PROFILE}-byte profile: it was joined twice"
+    );
+}
+
+/// MEM-003: a profile the output does not carry and nothing converts from,
+/// a CMYK one on pixels the driver writes as RGB, is checked by its header
+/// and its length and never joined. The same JPEG with the profile's
+/// signature broken, so no profile is found, is the measure: the run
+/// allocates less than half the profile more.
+#[tokio::test]
+async fn mem_audit_a_jpeg_profile_the_output_drops_is_never_joined() {
+    let _lock = exclusive().await;
+    let driver = OxideAvImageDriver::new();
+    let mut profile = p3_profile_of(LARGE_PROFILE);
+    profile[16..20].copy_from_slice(b"CMYK");
+    let mut unsigned = profile.clone();
+    unsigned[36..40].copy_from_slice(b"none");
+    let small = include_bytes!("../media/fixtures/jpeg/photo-base-420-35x21.jpg");
+    let tagged = jpeg_with_profile_from(small, &profile, 64);
+    let untagged = jpeg_with_profile_from(small, &unsigned, 64);
+    let pipeline = ImagePipeline::default();
+    let (without, _) = allocated_by(&driver, &untagged, &pipeline);
+    let (with, out_len) = allocated_by(&driver, &tagged, &pipeline);
+    assert!(out_len < LARGE_PROFILE, "a CMYK profile was carried");
+    assert!(
+        with < without + LARGE_PROFILE as u64 / 2,
+        "{with} bytes with a {LARGE_PROFILE}-byte CMYK profile against {without} with none: \
+         it was joined"
+    );
+}
+
+/// MEM-003: a GIF's profile, in sub-blocks of 255 bytes, has its header
+/// read without joining it and is joined once, into a buffer of its
+/// length, to convert the palette from it. The same GIF with the extension
+/// under another name is the measure: the run allocates less than one
+/// profile and a half more, where a buffer grown block by block allocates
+/// about four profiles.
+#[tokio::test]
+async fn mem_audit_a_gif_profile_is_joined_once() {
+    let _lock = exclusive().await;
+    let driver = OxideAvImageDriver::new();
+    let profile = p3_profile_of(LARGE_PROFILE);
+    let source = gif(64, 64, vec![frame(0, 0, 64, 64, 1)]);
+    let tagged = gif_with_application(&source, b"ICCRGBG1012", &profile);
+    let untagged = gif_with_application(&source, b"ICCRGBX1012", &profile);
+    let pipeline = ImagePipeline::default();
+    let (without, _) = allocated_by(&driver, &untagged, &pipeline);
+    let (with, _) = allocated_by(&driver, &tagged, &pipeline);
+    assert!(
+        with < without + LARGE_PROFILE as u64 * 3 / 2,
+        "{with} bytes with a {LARGE_PROFILE}-byte profile against {without} with none: it was \
+         joined more than once"
+    );
+}
+
+/// The most bytes held at once while `process` ran, after a warm-up,
+/// beyond what was held before it.
+fn peak_while(driver: &OxideAvImageDriver, image: &[u8], pipeline: &ImagePipeline) -> u64 {
+    driver.process(image, pipeline).expect("a warm-up");
+    let heap = Heap::start();
+    let start = heap.live();
+    driver.process(image, pipeline).expect("the pipeline");
+    let peak = (heap.peak() - start) as u64;
+    drop(heap);
+    peak
+}
+
+/// MEM-003: a PNG's profile carried into PNG output goes as the source's
+/// own `iCCP` chunk, so it is inflated only to check its length, through a
+/// scratch buffer, and never into a buffer of its size. The same PNG
+/// without the chunk is the measure: with it, the run holds less than half
+/// the profile more at its peak. The peak, not the bytes allocated in all,
+/// because the inflater allocates and frees a little for every deflate
+/// block it reads, however its output is kept.
+#[tokio::test]
+async fn mem_audit_a_png_profile_carried_as_its_chunk_is_not_inflated_whole() {
+    let _lock = exclusive().await;
+    let driver = OxideAvImageDriver::new();
+    let plain = encode_png(64, 64, PngPixelFormat::Rgba, 4, false);
+    let chunk = iccp_chunk(&p3_profile_of(LARGE_PROFILE));
+    let tagged = png_with_chunks(&plain, &[(b"iCCP", chunk.clone())]);
+    let to_png = ImagePipeline {
+        format: Some(OutputFormat::Png),
+        ..Default::default()
+    };
+    let out = driver.process(&tagged, &to_png).expect("the PNG converts");
+    assert!(
+        out.windows(chunk.len()).any(|window| window == chunk),
+        "the source's iCCP chunk was not carried as it stands"
+    );
+    let without = peak_while(&driver, &plain, &to_png);
+    let with = peak_while(&driver, &tagged, &to_png);
+    assert!(
+        with < without + LARGE_PROFILE as u64 / 2,
+        "a peak of {with} bytes with a {LARGE_PROFILE}-byte profile against {without} with none: \
+         it was inflated whole"
+    );
+}
+
 /// IMG-001: `dimensions` and `dominant_color` answer for a tagged source
 /// without turning its pixels: the size swaps, the average does not change.
 /// Turning would allocate a second full plane; the bytes allocated in all,
@@ -1354,5 +1538,92 @@ async fn mem_audit_the_magick_driver_adds_metadata_without_copying_its_output() 
         with < without + allowance,
         "{with} bytes with a chunk to add against {without} without, for a {LENGTH}-byte \
          output: the output was copied"
+    );
+}
+
+/// What the `magick` driver allocates processing `image` through a
+/// stand-in, kept under `name`, that answers with `image` itself, after a
+/// warm-up; and what it wrote.
+#[cfg(unix)]
+fn magick_allocates(name: &str, image: &[u8]) -> (u64, Vec<u8>) {
+    let driver = magick_stand_in(name, image);
+    let pipeline = ImagePipeline::default();
+    let out = driver.process(image, &pipeline).expect("a warm-up");
+    let heap = Heap::start();
+    let before = heap.bytes();
+    driver
+        .process(image, &pipeline)
+        .expect("the stand-in answers");
+    let used = heap.bytes() - before;
+    drop(heap);
+    (used, out)
+}
+
+/// `bytes` with every `from` replaced by `to`, which is as long.
+#[cfg(unix)]
+fn renamed(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    let mut out = bytes.to_vec();
+    let mut at = 0;
+    while let Some(found) = out[at..]
+        .windows(from.len())
+        .position(|window| window == from)
+    {
+        out[at + found..at + found + from.len()].copy_from_slice(to);
+        at += found + from.len();
+    }
+    out
+}
+
+/// MEM-003: the `magick` driver checks the profile of a JPEG it reads and
+/// of the JPEG ImageMagick writes by their headers and lengths, without
+/// joining either: ImageMagick carries the profile, so the Rust side never
+/// needs its bytes. The stand-in answers with the source, so both checks
+/// run on a 1 MiB profile, with its header in the first segment and split
+/// across two. The same JPEG with its segments renamed, so no profile is
+/// found, is the measure: the run allocates less than half the profile
+/// more.
+#[cfg(unix)]
+#[tokio::test]
+async fn mem_audit_the_magick_driver_checks_a_jpeg_profile_without_joining_it() {
+    let _lock = exclusive().await;
+    let profile = p3_profile_of(LARGE_PROFILE);
+    let small = include_bytes!("../media/fixtures/jpeg/photo-base-420-35x21.jpg");
+    for first in [JPEG_ICC_CHUNK, 64] {
+        let tagged = jpeg_with_profile_from(small, &profile, first);
+        let untagged = renamed(&tagged, b"ICC_PROFILE\0", b"ICC_PROFILX\0");
+        let (without, _) = magick_allocates("mem-003-magick-jpeg-without", &untagged);
+        let (with, out) = magick_allocates("mem-003-magick-jpeg-profile", &tagged);
+        assert!(
+            out.len() > LARGE_PROFILE,
+            "{first}: the profile ImageMagick carried was not kept"
+        );
+        assert!(
+            with < without + LARGE_PROFILE as u64 / 2,
+            "{first} profile bytes in sequence 1: {with} bytes with a {LARGE_PROFILE}-byte \
+             profile against {without} with none: it was joined"
+        );
+    }
+}
+
+/// MEM-003: the same for a GIF, whose profile the `magick` driver checks
+/// in the source and in ImageMagick's output by summing its sub-blocks, and
+/// joins once, into a buffer of its length, to convert the output's
+/// palette. The run allocates less than one profile and a half more than
+/// the same GIF with the extension under another name.
+#[cfg(unix)]
+#[tokio::test]
+async fn mem_audit_the_magick_driver_joins_a_gif_profile_once() {
+    let _lock = exclusive().await;
+    let profile = p3_profile_of(LARGE_PROFILE);
+    let source = gif(64, 64, vec![frame(0, 0, 64, 64, 1)]);
+    let tagged = gif_with_application(&source, b"ICCRGBG1012", &profile);
+    let untagged = gif_with_application(&source, b"ICCRGBX1012", &profile);
+    let (without, _) = magick_allocates("mem-003-magick-gif-without", &untagged);
+    let (with, out) = magick_allocates("mem-003-magick-gif-profile", &tagged);
+    assert!(out.len() < LARGE_PROFILE, "a GIF output kept its profile");
+    assert!(
+        with < without + LARGE_PROFILE as u64 * 3 / 2,
+        "{with} bytes with a {LARGE_PROFILE}-byte profile against {without} with none: it was \
+         joined more than once"
     );
 }
