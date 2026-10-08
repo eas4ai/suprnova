@@ -1525,10 +1525,11 @@ enum TaskOutcome {
     },
     /// A [`Prop::scroll_lazy`] value, with the `scrollProps` entry its
     /// loader described, or `None` when this response ships no entry.
+    /// Boxed so the common `Insert` outcome stays small.
     InsertScroll {
         key: String,
         value: Value,
-        scroll: Option<ScrollMetadataEntry>,
+        scroll: Option<Box<ScrollMetadataEntry>>,
     },
     Rescued {
         key: String,
@@ -1953,9 +1954,11 @@ async fn resolve_props(
                 tasks.push(Box::pin(async move {
                     match loader().await {
                         Ok((value, facts)) => Ok(TaskOutcome::InsertScroll {
-                            scroll: scroll_entry.map(|reset| ScrollMetadataEntry {
-                                metadata: facts,
-                                reset,
+                            scroll: scroll_entry.map(|reset| {
+                                Box::new(ScrollMetadataEntry {
+                                    metadata: facts,
+                                    reset,
+                                })
                             }),
                             key,
                             value,
@@ -2054,7 +2057,7 @@ async fn resolve_props(
             }
             TaskOutcome::InsertScroll { key, value, scroll } => {
                 if let Some(entry) = scroll {
-                    metadata.scroll.insert(key.clone(), entry);
+                    metadata.scroll.insert(key.clone(), *entry);
                 }
                 materialized.insert(key, value);
             }
