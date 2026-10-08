@@ -992,15 +992,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `SUPRNOVA_SSR_URL`, `SUPRNOVA_SSR_RUNTIME` and `SUPRNOVA_SSR_BUNDLE`
   variables, so it could start or check a worker other than the one the
   application's first visits dispatch to. Each command now runs `cargo run
-  --bin <package> -- ssr:<command>` from the project directory, as
-  `suprnova serve` runs the backend, with `--runtime` and `--graceful`
-  passed through: the application's output reaches the CLI's stdout and
-  stderr, and the CLI exits with its status, or 128 plus the signal number
-  when a signal ended it. The application runs in a process group of its
-  own, so a terminal's Ctrl-C reaches it once, through the CLI, which
-  forwards each `SIGINT` and `SIGTERM` it receives to the application and
-  each `SIGHUP` to the application's process group, worker included. The flags and the variables are gone: set the URL, the
-  bundle, the runtime and the timeout with `InertiaConfig::ssr`,
+  --bin <package> -- ssr:<command>` from the project directory, as `suprnova
+  serve` runs the backend, with `--runtime` and `--graceful` passed through:
+  the application's output reaches the CLI's stdout and stderr, and the CLI
+  exits with its status, or 128 plus the signal number when a signal ended
+  it. The application runs in a process group of its own, so a terminal's
+  Ctrl-C reaches it once, through the CLI, which forwards each `SIGINT` and
+  `SIGTERM` it receives to the application and each `SIGHUP`, `SIGQUIT`,
+  `SIGTSTP` and `SIGCONT` to the application's process group, worker
+  included, and stops with it at a `SIGTSTP`, so Ctrl-Z and `fg` stop and
+  resume them together. The flags and the variables are gone: set the URL,
+  the bundle, the runtime and the timeout with `InertiaConfig::ssr`,
   `ssr_bundle_path`, `ssr_runtime` and `ssr_timeout`. The developer ruled
   that compiling the framework into the CLI for commands the application
   binary already has makes no sense, so the CLI's manifest names the

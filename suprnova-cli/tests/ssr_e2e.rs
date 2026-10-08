@@ -309,6 +309,7 @@ mod inssr {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Stdio;
+    use std::time::Duration;
 
     use nix::sys::signal::{Signal, kill, killpg};
     use nix::unistd::{Pid, getpgid, getpgrp};
@@ -681,12 +682,16 @@ mod inssr {
 
     /// A `cargo` that says `ready` once it and its worker run, and writes
     /// its process id, its sleeper's and its worker's to `pids`. For each
-    /// `SIGINT` or `SIGTERM` it receives it prints `application got <signal>
-    /// <count>`, and at the `stop_after`th it stops the other two and exits
+    /// `SIGINT`, `SIGTERM` or `SIGQUIT` it receives it prints `application
+    /// got <signal> <count>`, and at the `stop_after`th it stops the other two and exits
     /// with 7. At a `SIGHUP` it waits for its worker, which prints `worker
     /// got HUP` and exits only when a `SIGHUP` reaches it as well, then
     /// prints `application got HUP <count> after its worker` and exits with
     /// 7.
+    ///
+    /// At a `SIGTSTP` it prints `application got TSTP` and stops itself, as
+    /// the default action would, and at a `SIGCONT` it prints `application
+    /// got CONT`.
     ///
     /// The worker says over the FIFO `worker_ready` that its traps are set,
     /// and only then does the application say `ready`, so no signal a test
@@ -708,6 +713,9 @@ mod inssr {
              trap 'got INT' INT\n\
              trap 'got TERM' TERM\n\
              trap 'got HUP' HUP\n\
+             trap 'got QUIT' QUIT\n\
+             trap 'echo \"application got TSTP\"; kill -STOP $$' TSTP\n\
+             trap 'echo \"application got CONT\"' CONT\n\
              mkfifo '{worker_ready}'\n\
              (\n\
              \x20 trap 'echo \"worker got HUP\"; exit 0' HUP\n\
@@ -920,6 +928,19 @@ mod inssr {
         );
     }
 
+    /// Ctrl-\ goes to the CLI's process group; the CLI forwards the
+    /// `SIGQUIT` to the application rather than die of it and leave the
+    /// application running.
+    #[tokio::test]
+    async fn inssr_cli_start_forwards_a_terminals_sigquit_to_the_application() {
+        let ran = signal_a_running_start(&[(To::CliGroup, Signal::SIGQUIT)])
+            .await
+            .ran;
+
+        assert_eq!(ran.code, 7, "the application's status: {ran:?}");
+        assert_eq!(ran.out, "ready\napplication got QUIT 1\n");
+    }
+
     /// A hangup reaches the application's whole process group: its
     /// `ssr:start` does not handle `SIGHUP`, so the worker it started gets
     /// the signal from the CLI too, rather than outlive the application.
@@ -933,6 +954,145 @@ mod inssr {
         assert_eq!(
             ran.out,
             "ready\nworker got HUP\napplication got HUP 1 after its worker\n"
+        );
+    }
+
+    /// The state `ps` reports for `pid`, `T` when it is stopped; `None` when
+    /// no such process exists.
+    fn process_state(pid: Pid) -> Option<char> {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .chars()
+            .next()
+    }
+
+    /// How long a test waits for something before it fails rather than
+    /// hang. It bounds a wait for an event; nothing asserts how fast it is.
+    const BOUND: Duration = Duration::from_secs(10);
+
+    /// Whether `pid` becomes stopped (`stopped`) or not stopped within
+    /// [`BOUND`]. A signal is delivered when its target next runs, so its
+    /// effect is waited for rather than read once.
+    async fn becomes_stopped(pid: Pid, stopped: bool) -> bool {
+        let deadline = tokio::time::Instant::now() + BOUND;
+        loop {
+            if (process_state(pid) == Some('T')) == stopped {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Ctrl-Z goes to the CLI's process group and `fg` sends that group a
+    /// `SIGCONT`. The CLI forwards each to the application's group and stops
+    /// with it, so the application stops and resumes with the CLI, once
+    /// each, as it did when it shared the CLI's group.
+    #[tokio::test]
+    async fn inssr_cli_start_stops_and_resumes_the_application_with_ctrl_z_and_fg() {
+        use std::os::unix::process::CommandExt;
+
+        let project = Project::new();
+        let pids = project.record().join("pids");
+        let worker_ready = project.record().join("worker-ready");
+        project.cargo(&signal_recording_cargo(&pids, &worker_ready, 1));
+        let mut command = project.cli(&["ssr:start"]);
+        command
+            .as_std_mut()
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().expect("spawn the CLI");
+        let cli =
+            Pid::from_raw(i32::try_from(child.id().expect("the CLI runs")).expect("a process id"));
+        let mut lines = BufReader::new(child.stdout.take().expect("the CLI's stdout")).lines();
+        let mut out = String::new();
+
+        let mut steps = Vec::new();
+        let mut application = None;
+        if tokio::time::timeout(BOUND, read_until(&mut lines, &mut child, &mut out, "ready")).await
+            == Ok(true)
+        {
+            let id = std::fs::read_to_string(&pids)
+                .ok()
+                .and_then(|ids| ids.split_whitespace().next()?.parse::<i32>().ok())
+                .expect("the application wrote its process id");
+            application = Some(Pid::from_raw(id));
+        }
+        if let Some(application) = application {
+            killpg(cli, Signal::SIGTSTP).expect("Ctrl-Z");
+            let reported = tokio::time::timeout(
+                BOUND,
+                read_until(&mut lines, &mut child, &mut out, "application got TSTP"),
+            )
+            .await
+                == Ok(true);
+            steps.push(("the application got the SIGTSTP", reported));
+            steps.push((
+                "the application stopped",
+                reported && becomes_stopped(application, true).await,
+            ));
+            steps.push((
+                "the CLI stopped with it",
+                reported && becomes_stopped(cli, true).await,
+            ));
+
+            killpg(cli, Signal::SIGCONT).expect("fg");
+            let reported = tokio::time::timeout(
+                BOUND,
+                read_until(&mut lines, &mut child, &mut out, "application got CONT"),
+            )
+            .await
+                == Ok(true);
+            steps.push(("the application got the SIGCONT", reported));
+            steps.push((
+                "the application runs again",
+                reported && becomes_stopped(application, false).await,
+            ));
+            steps.push((
+                "the CLI runs again",
+                reported && becomes_stopped(cli, false).await,
+            ));
+
+            kill(cli, Signal::SIGTERM).expect("end the CLI");
+        }
+
+        let status = tokio::time::timeout(BOUND, child.wait()).await;
+        if !matches!(status, Ok(Ok(status)) if status.code().is_some()) {
+            let _ = killpg(cli, Signal::SIGKILL);
+            if let Some(group) = application
+                .and_then(|pid| getpgid(Some(pid)).ok())
+                .filter(|group| *group != getpgrp())
+            {
+                let _ = killpg(group, Signal::SIGKILL);
+            }
+        }
+        let _ = tokio::time::timeout(BOUND, async {
+            while let Ok(Some(line)) = lines.next_line().await {
+                out.push_str(&line);
+                out.push('\n');
+            }
+        })
+        .await;
+
+        assert!(application.is_some(), "the application got ready: {out}");
+        for (step, happened) in steps {
+            assert!(happened, "{step}: {out}");
+        }
+        assert_eq!(
+            out, "ready\napplication got TSTP\napplication got CONT\napplication got TERM 1\n",
+            "one SIGTSTP and one SIGCONT reached the application"
+        );
+        assert_eq!(
+            status.ok().and_then(Result::ok).and_then(|s| s.code()),
+            Some(7),
+            "the application's status"
         );
     }
 }

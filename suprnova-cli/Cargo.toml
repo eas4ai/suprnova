@@ -115,8 +115,8 @@ oxc_syntax = "=0.139.0"
 # The Live tooling helper runs in its own process group so a timeout can
 # kill everything it started, and an interrupt is forwarded to that group
 # (`commands/live_tool.rs`). The SSR commands run the application binary in
-# its own process group and forward the SIGINT, SIGTERM and SIGHUP they
-# receive to it (`commands/ssr.rs`).
+# its own process group and forward the SIGINT, SIGTERM, SIGHUP, SIGQUIT,
+# SIGTSTP and SIGCONT they receive to it (`commands/ssr.rs`).
 [target.'cfg(unix)'.dependencies]
 nix = { version = "=0.31.3", default-features = false, features = ["process", "signal"] }
 
