@@ -8,7 +8,8 @@ use std::path::PathBuf;
 ///
 /// Recording writes every request's headers, bodies and props to disk and
 /// serves them to whoever the endpoints admit, which is why it is off
-/// outside the `local` environment unless switched on, and why sensitive
+/// unless `APP_ENV` names the `local` environment or it is switched on,
+/// and why sensitive
 /// keys and headers are redacted before an entry is stored. Each field
 /// defaults to Laravel's value, read from the same environment variables
 /// where Laravel reads one.
@@ -26,8 +27,10 @@ use std::path::PathBuf;
 /// ```
 #[derive(Debug, Clone)]
 pub struct DevToolsConfig {
-    /// Whether requests are recorded. `None` records in the `local`
-    /// environment only; `Some` decides outright. Default
+    /// Whether requests are recorded. `None` records only when `APP_ENV`
+    /// is set and names the `local` environment, so an unset `APP_ENV`,
+    /// which Laravel reads as production, records nothing; `Some` decides
+    /// outright. Default
     /// `INERTIA_DEVTOOLS_ENABLED` when it is set: `true`, `1`, `on` or
     /// `yes` record, `false`, `0`, `off` or `no` do not.
     pub enabled: Option<bool>,
@@ -209,13 +212,25 @@ impl DevToolsConfig {
     }
 
     /// Whether requests are recorded: [`enabled`](Self::enabled) when it
-    /// is set, else whether the application runs in the `local`
-    /// environment, Laravel's `DevTools::enabled`.
+    /// is set, else whether `APP_ENV` names the `local` environment,
+    /// Laravel's `DevTools::enabled`.
     pub fn is_enabled(&self) -> bool {
-        self.enabled.unwrap_or_else(|| {
-            crate::config::Config::environment() == crate::config::Environment::Local
-        })
+        self.enabled.unwrap_or_else(app_env_names_local)
     }
+}
+
+/// Whether `APP_ENV` is set and names the `local` environment, as
+/// [`Environment::detect`](crate::config::Environment::detect) reads it
+/// (`local`, in any case).
+///
+/// Not [`Config::environment`](crate::config::Config::environment), which
+/// takes an unset `APP_ENV` as `local`: Laravel takes it as production,
+/// and DevTools records requests and serves them without a gate only in an
+/// environment that says it is local. A `.env` file the application loads
+/// counts as set, since `Config::init` puts it in the process environment.
+pub(crate) fn app_env_names_local() -> bool {
+    std::env::var_os("APP_ENV").is_some()
+        && crate::config::Environment::detect() == crate::config::Environment::Local
 }
 
 #[cfg(test)]

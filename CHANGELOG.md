@@ -469,8 +469,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   side, so the extension showed nothing. `InertiaConfig::devtools` takes a
   `DevToolsConfig` with Laravel's settings, read from the same
   `INERTIA_DEVTOOLS_ENABLED`, `_TTL_HOURS`, `_PRUNE_INTERVAL_SECONDS`,
-  `_LIMIT` and `_GATE` variables. Unset, DevTools records in the `local`
-  environment only, which an unset `APP_ENV` is; `enabled(true)` and
+  `_LIMIT` and `_GATE` variables. Unset, DevTools records only when
+  `APP_ENV` is set and names the `local` environment, as a new project's
+  `.env` does; an unset `APP_ENV`, which Laravel reads as production,
+  records nothing, so a test run records nothing. `enabled(true)` and
   `enabled(false)` decide outright. `Inertia::install` and
   `Inertia::middleware` then put `DevToolsMiddleware` outermost in the
   Inertia stack, and it skips the `except` paths (`_inertia/devtools*` and

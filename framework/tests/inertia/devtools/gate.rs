@@ -8,7 +8,7 @@ use suprnova::{
     DevToolsConfig, HttpResponse, Inertia, InertiaResponse, MiddlewareRegistry, Request, Router,
 };
 
-use super::{app_env, client, devtools, entry_ids, inertia};
+use super::{app_env, client, devtools, entry_ids, inertia, no_app_env};
 use crate::protocol_harness::{Client, serve};
 
 fn router() -> Router {
@@ -26,16 +26,28 @@ fn router() -> Router {
 }
 
 #[tokio::test]
-async fn indt_enabled_unset_records_in_the_local_environment_only() {
+async fn indt_enabled_unset_records_only_when_app_env_names_local() {
     let dir = tempfile::tempdir().unwrap();
     let unset = || DevToolsConfig::new().storage_path(dir.path());
 
-    let local = app_env("local").await;
+    // Laravel's unset environment is production: nothing is recorded.
+    let none = no_app_env().await;
     assert_eq!(unset().enabled, None, "INERTIA_DEVTOOLS_ENABLED is unset");
+    let response = client(router(), unset()).get("/page").send().await;
+    response.assert_ok();
+    assert_eq!(
+        response.header("x-inertia-devtools-id"),
+        None,
+        "an unset APP_ENV does not record"
+    );
+    assert!(entry_ids(dir.path()).is_empty());
+    drop(none);
+
+    let local = app_env("LOCAL").await;
     let response = client(router(), unset()).get("/page").send().await;
     assert!(
         response.header("x-inertia-devtools-id").is_some(),
-        "local records"
+        "APP_ENV=local records, in any case"
     );
     assert_eq!(entry_ids(dir.path()).len(), 1);
     drop(local);

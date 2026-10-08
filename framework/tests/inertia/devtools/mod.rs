@@ -119,9 +119,20 @@ pub struct AppEnv {
 
 /// Run as the `env` environment until the returned guard drops.
 pub async fn app_env(env: &str) -> AppEnv {
+    with_app_env(Some(env)).await
+}
+
+/// Run with `APP_ENV` unset until the returned guard drops.
+pub async fn no_app_env() -> AppEnv {
+    with_app_env(None).await
+}
+
+/// Run with `APP_ENV` set to `env`, or unset, and
+/// `INERTIA_DEVTOOLS_ENABLED` unset, until the returned guard drops.
+async fn with_app_env(env: Option<&str>) -> AppEnv {
     let lock = crate::env_lock::lock_env_async().await;
     let snapshot = EnvSnapshot::capture(&["APP_ENV", "APP_URL", "INERTIA_DEVTOOLS_ENABLED"]);
-    set_env("APP_ENV", Some(env));
+    set_env("APP_ENV", env);
     set_env("INERTIA_DEVTOOLS_ENABLED", None);
     AppEnv {
         _env: snapshot,

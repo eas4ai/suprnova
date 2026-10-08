@@ -1210,8 +1210,8 @@ impl InertiaConfig {
     /// Set the Inertia DevTools settings: whether requests are recorded
     /// for the browser extension, where entries are stored, and what is
     /// redacted. See [`DevToolsConfig`](crate::DevToolsConfig); without
-    /// this call the defaults apply, which record in the `local`
-    /// environment only.
+    /// this call the defaults apply, which record only when `APP_ENV`
+    /// names the `local` environment.
     ///
     /// ```rust,no_run
     /// use suprnova::{DevToolsConfig, InertiaConfig};

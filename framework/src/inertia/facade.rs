@@ -621,7 +621,7 @@ impl Inertia {
     /// Install the standard Inertia protocol middleware globally.
     ///
     /// When Inertia DevTools is enabled ([`InertiaConfig::devtools`], on
-    /// by default in the `local` environment only), the
+    /// by default only when `APP_ENV` names the `local` environment), the
     /// [`DevToolsMiddleware`](crate::DevToolsMiddleware) that records each
     /// request for the browser extension and answers its entry endpoints
     /// is registered first, outermost of the Inertia layer. Then it
@@ -941,9 +941,9 @@ mod tests {
         // here can land inside that window. Dev mode never consults the
         // manifest, so install succeeds without a Vite build in the test
         // process's working directory.
-        // DevTools off: it is on by default in the `local` environment, an
-        // unset `APP_ENV` included, and adds a sixth middleware this test
-        // is not about.
+        // DevTools off: a test of this binary may set `APP_ENV=local`,
+        // where DevTools is on by default and adds a sixth middleware this
+        // test is not about.
         Inertia::install(
             &InertiaConfig::new()
                 .version("test-version")

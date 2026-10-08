@@ -275,8 +275,8 @@ used to require separate registration; `Inertia::install` makes all four
 the default. See [Inertia Responses](frontend-inertia-responses.md#bootstrap-inertia-install)
 for the full registration order and what each middleware closes.
 
-In the `local` environment `install` also registers the recorder of the
-Inertia DevTools browser extension, outermost of the Inertia layer, which
+When `APP_ENV` names the `local` environment, `install` also registers
+the recorder of the Inertia DevTools browser extension, outermost of the Inertia layer, which
 stores an entry for each request and answers the extension's
 `/_inertia/devtools/entries` endpoints. See
 [Inertia DevTools](frontend-inertia-devtools.md) to switch it on elsewhere,

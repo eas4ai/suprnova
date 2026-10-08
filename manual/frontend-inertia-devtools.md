@@ -10,10 +10,11 @@ extension.
 
 ## Enable DevTools
 
-DevTools is on in the `local` environment and off everywhere else. With
-`APP_ENV` unset the application runs as `local`, so a development server
-records without any setup. To decide outright, set
-`INERTIA_DEVTOOLS_ENABLED`, or pass a `DevToolsConfig` to
+DevTools is on when `APP_ENV` names the `local` environment and off
+everywhere else, an unset `APP_ENV` included. The `.env` file of a new
+project sets `APP_ENV=local`, so its development server records without
+any setup, while a test run with no `APP_ENV` records nothing. To decide
+outright, set `INERTIA_DEVTOOLS_ENABLED`, or pass a `DevToolsConfig` to
 `InertiaConfig::devtools`:
 
 ```rust
@@ -41,7 +42,7 @@ a builder call wins over the variable:
 
 | Setting | Variable | Default |
 |---|---|---|
-| `enabled(bool)` | `INERTIA_DEVTOOLS_ENABLED` | unset: the `local` environment only |
+| `enabled(bool)` | `INERTIA_DEVTOOLS_ENABLED` | unset: only when `APP_ENV` names `local` |
 | `ttl_hours(hours)` | `INERTIA_DEVTOOLS_TTL_HOURS` | `24` |
 | `prune_interval_secs(seconds)` | `INERTIA_DEVTOOLS_PRUNE_INTERVAL_SECONDS` | `300` |
 | `limit(entries)` | `INERTIA_DEVTOOLS_LIMIT` | `100`, `0` keeps every entry |
@@ -262,11 +263,12 @@ either way.
   multipart text that are not UTF-8.
 - **The write breaker is per directory**, where Laravel's is one static
   per process: a failing directory does not pause recording into another.
-- **Tests record too.** Laravel's `phpunit.xml` runs tests as `testing`.
-  A Suprnova test with `APP_ENV` unset runs as `local`, so a test that
-  builds the Inertia stack records into `storage/inertia-devtools` unless
-  it turns DevTools off with `DevToolsConfig::new().enabled(false)` or
-  points `storage_path` at a temporary directory.
+- **DevTools reads `APP_ENV` itself.** Laravel's unset `APP_ENV` is
+  `production`, while Suprnova's `Environment::detect` reads an unset one
+  as `local`. So DevTools reads the variable itself and records only when
+  it is set to `local`, or with `enabled(true)`. That is why a test run
+  with no `APP_ENV` records nothing, and a scaffolded project, whose `.env`
+  sets it, does.
 
 ## Next
 

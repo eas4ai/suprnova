@@ -1358,8 +1358,9 @@ with it.
    Inertia visit into a `303` back to the form page with the errors
    flashed. See [Validation failures](#validation-failures).
 
-When [Inertia DevTools](frontend-inertia-devtools.md) is enabled - in the
-`local` environment unless `InertiaConfig::devtools` says otherwise -
+When [Inertia DevTools](frontend-inertia-devtools.md) is enabled - when
+`APP_ENV` names the `local` environment, unless `InertiaConfig::devtools`
+says otherwise -
 `install` registers `DevToolsMiddleware` ahead of all five, outermost of
 the Inertia layer, so the entry it records for each request holds the
 response the five shaped. With `register_globally(false)` the stack for
