@@ -167,6 +167,7 @@ async fn spawn_app_server(max_connections: usize) -> SocketAddr {
     ));
     let middleware = Arc::new({
         app::bootstrap::register_http_stack();
+        app::bootstrap::register_inertia_shared_data();
         MiddlewareRegistry::from_global()
     });
 
@@ -254,6 +255,13 @@ async fn inertia_path_emits_users_prop_and_scroll_metadata() {
         Some("Users/Index"),
         "expected component 'Users/Index' in page object: {v}"
     );
+    // The shared data the bootstrap registers through the `Inertia`
+    // facade rides on every page object.
+    assert_eq!(
+        v["props"]["appName"], "Suprnova",
+        "Inertia::share(\"appName\", ..) must reach the page: {v}"
+    );
+    assert_eq!(v["props"]["appVersion"], env!("CARGO_PKG_VERSION"));
     let users = v
         .get("props")
         .and_then(|p| p.get("users"))
