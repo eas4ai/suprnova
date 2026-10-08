@@ -736,6 +736,11 @@ pub mod vue {
     pub fn flash_toast() -> &'static str {
         include_str!("files/frontend/vue/src/components/FlashToast.vue.tpl")
     }
+    /// The account links both layouts show from the shared `auth.user`:
+    /// the name and the sign-out, or the sign-in and register links.
+    pub fn account_links() -> &'static str {
+        include_str!("files/frontend/vue/src/components/AccountLinks.vue.tpl")
+    }
     pub fn login_page() -> &'static str {
         include_str!("files/frontend/vue/src/pages/auth/Login.vue.tpl")
     }
@@ -902,7 +907,8 @@ pub fn scaffold_frontend(
             fs::write(lib.join("lang.ts"), vue::lang())
                 .map_err(|e| format!("Failed to write src/lib/lang.ts: {}", e))?;
             // The notes pages, the two layouts `main.ts` applies through
-            // its `layout` option, and the toast they show.
+            // its `layout` option, and the toast and account links they
+            // show.
             let notes = pages.join("Notes");
             let layouts = src.join("layouts");
             let components = src.join("components");
@@ -916,6 +922,7 @@ pub fn scaffold_frontend(
                 (layouts.join("AppLayout.vue"), vue::app_layout()),
                 (layouts.join("GuestLayout.vue"), vue::guest_layout()),
                 (components.join("FlashToast.vue"), vue::flash_toast()),
+                (components.join("AccountLinks.vue"), vue::account_links()),
             ] {
                 fs::write(&path, content)
                     .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;

@@ -93,6 +93,7 @@ mod vue {
             "layouts/AppLayout.vue",
             "layouts/GuestLayout.vue",
             "components/FlashToast.vue",
+            "components/AccountLinks.vue",
         ] {
             assert!(src.join(file).is_file(), "missing src/{file}");
         }
@@ -221,36 +222,76 @@ mod vue {
         }
     }
 
+    /// The text of `body` from the first `start` to the next `end` after it.
+    fn between<'a>(body: &'a str, start: &str, end: &str) -> &'a str {
+        let from = body
+            .find(start)
+            .unwrap_or_else(|| panic!("no `{start}` in:\n{body}"));
+        let rest = &body[from + start.len()..];
+        &rest[..rest.find(end).unwrap_or(rest.len())]
+    }
+
     #[test]
     fn kit_vue_layouts_carry_navigation_the_user_the_toast_and_the_heading() {
         let (_tmp, src) = scaffold();
         let app = read(&src.join("layouts/AppLayout.vue"));
         for needle in [
             "<FlashToast />",
+            "<AccountLinks />",
             "<slot />",
             "heading",
-            "user.name",
+            "page.props.auth.user",
             ":href=\"`${root}/dashboard`\"",
             ":href=\"`${root}/notes`\"",
-            ":href=\"`${root}/logout`\" method=\"post\" as=\"button\"",
         ] {
             assert!(
                 app.contains(needle),
                 "AppLayout.vue lacks `{needle}`:\n{app}"
             );
         }
+        assert!(
+            !app.contains("user?: "),
+            "AppLayout.vue reads the user from the shared `auth` prop, not a page prop:\n{app}"
+        );
         let guest = read(&src.join("layouts/GuestLayout.vue"));
-        for needle in [
-            "<FlashToast />",
-            "<slot />",
-            ":href=\"`${root}/login`\"",
-            ":href=\"`${root}/register`\"",
-        ] {
+        for needle in ["<FlashToast />", "<AccountLinks />", "<slot />"] {
             assert!(
                 guest.contains(needle),
                 "GuestLayout.vue lacks `{needle}`:\n{guest}"
             );
         }
+    }
+
+    /// Both layouts show the account links from the shared `auth.user`: the
+    /// name and a sign-out that starts the next page afresh when someone is
+    /// signed in, the sign-in and register links when nobody is, so a guest
+    /// on Home or Error never sees "Sign out".
+    #[test]
+    fn kit_vue_account_links_follow_the_shared_auth_user() {
+        let (_tmp, src) = scaffold();
+        let body = read(&src.join("components/AccountLinks.vue"));
+        assert!(body.contains("page.props.auth.user"), "{body}");
+        let signed_in = between(&body, "<template v-if=\"user\">", "</template>");
+        for needle in [
+            "{{ user.name }}",
+            ":href=\"`${root}/logout`\" method=\"post\" as=\"button\" :preserve-state=\"false\"",
+        ] {
+            assert!(
+                signed_in.contains(needle),
+                "the signed-in links lack `{needle}`:\n{signed_in}"
+            );
+        }
+        let guest = between(&body, "<template v-else>", "</template>");
+        for needle in [":href=\"`${root}/login`\"", ":href=\"`${root}/register`\""] {
+            assert!(
+                guest.contains(needle),
+                "the guest links lack `{needle}`:\n{guest}"
+            );
+        }
+        assert!(
+            !guest.contains("logout"),
+            "a guest is shown a sign-out link:\n{guest}"
+        );
     }
 
     /// Every `<a ...>` opening tag in `body` that is not a static link to
@@ -305,8 +346,8 @@ mod vue {
         }
         assert_eq!(
             files,
-            PAGES.len() + 3,
-            "the pages, the two layouts and the toast"
+            PAGES.len() + 4,
+            "the pages, the two layouts, the toast and the account links"
         );
         assert!(
             offenders.is_empty(),
@@ -387,12 +428,19 @@ mod vue {
             "`${root}/profile/name`",
             "v-if=\"profile.errors.name\"",
             "setLayoutProps({ heading: 'Dashboard' })",
+            "defineProps<Partial<DashboardProps>>()",
+            "page.props.auth.user",
+            "router.reload({ only: ['auth'] })",
         ] {
             assert!(
                 body.contains(needle),
                 "Dashboard.vue lacks `{needle}`:\n{body}"
             );
         }
+        assert!(
+            !body.contains("replaceProp"),
+            "the layout's name follows a reload of `auth`, not a replaced `user` prop:\n{body}"
+        );
     }
 
     #[test]
@@ -412,7 +460,8 @@ mod vue {
             ":href=\"`${root}/notes/${note.id}`\"",
             "prefetch",
             "component=\"Notes/Show\"",
-            ":page-props=\"{ note }\"",
+            ":page-props=\"(_props, shared) => ({ ...shared, note })\"",
+            "defineProps<NotesIndexProps>()",
         ] {
             assert!(
                 body.contains(needle),
@@ -421,7 +470,9 @@ mod vue {
         }
         let show = read(&src.join("pages/Notes/Show.vue"));
         assert!(
-            show.contains("note.title") && show.contains("`${root}/notes`"),
+            show.contains("defineProps<NotesShowProps>()")
+                && show.contains("note.title")
+                && show.contains("`${root}/notes`"),
             "Notes/Show.vue renders the note and links back to the list:\n{show}"
         );
     }
@@ -432,13 +483,19 @@ mod vue {
     fn kit_vue_flash_toast_renders_the_page_flash() {
         let (_tmp, src) = scaffold();
         let body = read(&src.join("components/FlashToast.vue"));
-        for needle in ["usePage()", "page.flash", "toast", "import type { Toast }"] {
+        for needle in ["usePage()", "computed(() => page.flash.toast)"] {
             assert!(
                 body.contains(needle),
                 "FlashToast.vue lacks `{needle}`:\n{body}"
             );
         }
-        for refused in ["localStorage", "sessionStorage", "useRemember", "watch("] {
+        for refused in [
+            "localStorage",
+            "sessionStorage",
+            "useRemember",
+            "watch(",
+            "page.flash as",
+        ] {
             assert!(
                 !body.contains(refused),
                 "FlashToast.vue keeps the toast with `{refused}`:\n{body}"
@@ -451,12 +508,20 @@ mod vue {
         let (_tmp, src) = scaffold();
         let types = read(&src.join("types/inertia-props.ts"));
         for needle in [
-            "export interface Toast {",
-            "export interface Pages {",
-            "export interface SharedProps {",
+            "export interface Flash {\n  toast: Toast | null;\n}\n",
+            "export interface Toast {\n  kind: string;\n  message: string;\n}\n",
+            "export interface Auth {\n  user: UserInfo | null;\n}\n",
+            "export interface SharedProps {\n  root: string;\n  auth: Auth;\n}\n",
+            "export interface DashboardProps {\n  stats: Stats;\n  recent_notes: Array<NoteSummary>;\n}\n",
+            "export interface NotesIndexProps {\n  notes: Array<NoteSummary>;\n  search: string;\n}\n",
+            "export interface NotesShowProps {\n  note: NoteView;\n}\n",
+            "export interface NoteSummary {",
+            "export interface NoteView {",
+            "  \"Notes/Index\": NotesIndexProps;\n",
+            "  \"Notes/Show\": NotesShowProps;\n",
             "export type Errors = Record<string, string>;",
             "export type PageProps<C extends keyof Pages>",
-            "    flashDataType: Toast;\n",
+            "    flashDataType: Flash;\n",
         ] {
             assert!(
                 types.contains(needle),

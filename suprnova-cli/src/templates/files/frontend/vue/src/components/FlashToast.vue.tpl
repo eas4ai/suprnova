@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { usePage } from '@inertiajs/vue3'
-import type { Toast } from '../types/inertia-props'
 
 // The server flashes a toast with `Inertia::flash("toast", Toast { .. })`
 // after a sign-in, a registration, a saved note and the account flows. It
@@ -11,11 +10,9 @@ import type { Toast } from '../types/inertia-props'
 // was flashed for, and is gone after the next visit.
 const page = usePage()
 
-// `Inertia::flash` keys the toast by name, so `flash` is `{ toast: { kind,
-// message } }`. The generated `flashDataType` is the `Toast` struct
-// itself rather than that keyed object, so the toast is read through this
-// cast, which states the shape the server sends.
-const toast = computed(() => (page.flash as { toast?: Toast }).toast)
+// `flash` is typed by the `Flash` struct, the generated `flashDataType`:
+// `Inertia::flash("toast", Toast { .. })` fills its `toast`.
+const toast = computed(() => page.flash.toast)
 
 const tone = computed(() => {
   const kind = toast.value?.kind

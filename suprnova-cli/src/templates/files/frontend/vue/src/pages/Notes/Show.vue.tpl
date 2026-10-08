@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Head, Link, usePage } from '@inertiajs/vue3'
+import type { NotesShowProps } from '../../types/inertia-props'
 
 // The public root the server shares with every page (`RootShare`): empty
 // at the host root, `/billing` behind a proxy that serves the app there.
@@ -10,16 +11,10 @@ const { root } = usePage().props
 
 // One of the signed-in user's own notes; the server answers 404 for
 // anyone else's. The notes list opens this page as an instant visit with
-// the list's row as `note`, so the page renders before the server answers
-// and takes the server's `note` when it arrives.
-interface Note {
-  id: number
-  title: string
-  body: string | null
-  created_at: string
-}
-
-defineProps<{ note: Note }>()
+// the list's row as `note`, which carries no body, so the page renders the
+// title before the server answers and the body when the server's `note`
+// arrives.
+defineProps<NotesShowProps>()
 </script>
 
 <template>

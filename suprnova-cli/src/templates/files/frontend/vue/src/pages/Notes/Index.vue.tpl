@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { unref } from 'vue'
 import { Form, Head, InfiniteScroll, Link, router, usePage, useRemember } from '@inertiajs/vue3'
+import type { NotesIndexProps } from '../../types/inertia-props'
 
 // The public root the server shares with every page (`RootShare`): empty
 // at the host root, `/billing` behind a proxy that serves the app there.
@@ -11,20 +12,8 @@ const { root } = usePage().props
 
 // The signed-in user's own notes, newest first. The handler sends `notes`
 // through `Inertia::paginate` over a cursor paginator, so the list is the
-// rows of one page and the next page is asked for by cursor. Those props
-// are not a struct's fields, so the generated types do not cover them and
-// this page declares them.
-interface Note {
-  id: number
-  title: string
-  body: string | null
-  created_at: string
-}
-
-const props = defineProps<{
-  notes: Note[]
-  search: string
-}>()
+// rows of one page and the next page is asked for by cursor.
+const props = defineProps<NotesIndexProps>()
 
 // The search box keeps what was typed in the browser's history state, so
 // going back to this page restores it.
@@ -114,7 +103,10 @@ function searchNotes() {
         Scrolling to the end of the list asks for the next page by its
         cursor and adds the rows to `notes`. Each row opens its note as an
         instant visit: the `Notes/Show` page renders at once from the row,
-        and the server's answer fills in the rest.
+        and the server's answer fills in the rest. The function form of
+        `page-props` keeps the shared props, `root` among them, on that
+        first render; the object form would drop them until the server
+        answers.
       -->
       <InfiniteScroll data="notes" as="ul" class="mt-4 divide-y divide-gray-100">
         <li v-for="note in notes" :key="note.id">
@@ -122,7 +114,7 @@ function searchNotes() {
             :href="`${root}/notes/${note.id}`"
             prefetch
             component="Notes/Show"
-            :page-props="{ note }"
+            :page-props="(_props, shared) => ({ ...shared, note })"
             class="block py-3 hover:bg-gray-50"
           >
             <span class="block text-sm font-medium text-gray-900">{{ note.title }}</span>

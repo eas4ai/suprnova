@@ -46,15 +46,9 @@ defineProps<VerifyEmailProps>()
         </div>
       </Form>
 
-      <div class="flex items-center justify-between text-sm">
+      <div class="text-center text-sm">
         <Link :href="`${root}/dashboard`" class="text-indigo-600 hover:text-indigo-500">
           Continue to your dashboard
-        </Link>
-        <Link
-          :href="`${root}/logout`" method="post" as="button"
-          class="text-gray-500 hover:text-gray-700"
-        >
-          Sign out
         </Link>
       </div>
     </div>
