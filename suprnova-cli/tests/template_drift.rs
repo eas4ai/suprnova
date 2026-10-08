@@ -667,6 +667,17 @@ fn scaffold_gitignore_excludes_the_live_add_lock_and_journal() {
     }
 }
 
+/// `suprnova serve` writes `public/hot` while Vite runs (PAR-058); it is
+/// this machine's state, so a full-stack scaffold never commits it.
+#[test]
+fn scaffold_gitignore_excludes_the_vite_hot_file() {
+    let gitignore = read("src/templates/files/root/gitignore.tpl");
+    assert!(
+        gitignore.lines().any(|line| line.trim() == "/public/hot"),
+        "the full-stack scaffold does not ignore /public/hot"
+    );
+}
+
 /// The printed `docker run` must publish the port the image actually
 /// exposes. It said 8080 while the Dockerfile set SERVER_PORT=8765 and
 /// EXPOSED 8765, so following the printed command gave a container that

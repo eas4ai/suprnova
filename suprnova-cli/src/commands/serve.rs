@@ -405,6 +405,64 @@ struct ProcessSpec {
     /// once from `prefix` at spawn time via [`bare_name`].
     name: String,
     color: console::Color,
+    /// The Vite hot file kept while this process runs: `Some` for the
+    /// frontend pane only.
+    hot_file: Option<HotFile>,
+}
+
+/// The Vite hot file: present while the dev server runs, holding its URL
+/// on one line, as Laravel's Vite plugin writes `public/hot`.
+///
+/// The framework reads it to send a first visit's SSR to the dev server's
+/// `/__inertia_ssr` in development (PAR-058), so it must exist only while
+/// Vite does: `serve` writes it when Vite starts or is respawned, and
+/// removes it when Vite exits and when the session ends.
+#[derive(Debug, Clone)]
+struct HotFile {
+    path: PathBuf,
+    url: String,
+}
+
+impl HotFile {
+    /// Write the URL, creating the file's directory when it is missing. A
+    /// failure is reported, not fatal: the session runs on without SSR
+    /// through the dev server.
+    fn write(&self) {
+        let written = match self.path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => std::fs::create_dir_all(dir),
+            _ => Ok(()),
+        }
+        .and_then(|()| std::fs::write(&self.path, &self.url));
+        if let Err(error) = written {
+            ui::warning(&format!(
+                "Could not write the Vite hot file {}: {error}",
+                self.path.display()
+            ));
+        }
+    }
+
+    /// Remove the file; one that is already gone is fine.
+    fn remove(&self) {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => ui::warning(&format!(
+                "Could not remove the Vite hot file {}: {error}",
+                self.path.display()
+            )),
+        }
+    }
+}
+
+/// The dev server URL the hot file carries, resolved as the framework
+/// resolves the one its development shell loads from: the
+/// `INERTIA_VITE_DEV_SERVER` override when it names something, else
+/// `http://localhost:{port}`.
+fn dev_server_url(override_url: Option<&str>, port: u16) -> String {
+    match override_url.map(str::trim) {
+        Some(url) if !url.is_empty() => url.to_string(),
+        _ => format!("http://localhost:{port}"),
+    }
 }
 
 /// A managed process is either a live child, exited and waiting for its
@@ -480,8 +538,42 @@ impl ProcessManager {
             prefix: prefix.to_string(),
             name: bare_name(prefix),
             color,
+            hot_file: None,
         };
+        self.start(spec)
+    }
+
+    /// Spawn the Vite dev server, keeping `hot_file` while it runs.
+    fn spawn_vite(
+        &mut self,
+        command: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
+        envs: &[(&str, String)],
+        hot_file: HotFile,
+    ) -> Result<(), String> {
+        let spec = ProcessSpec {
+            command: command.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            cwd: cwd.map(Path::to_path_buf),
+            envs: envs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+            prefix: "[frontend]".to_string(),
+            name: bare_name("[frontend]"),
+            color: console::Color::Cyan,
+            hot_file: Some(hot_file),
+        };
+        self.start(spec)
+    }
+
+    /// Spawn `spec`'s process and put it under supervision.
+    fn start(&mut self, spec: ProcessSpec) -> Result<(), String> {
         let child = spawn_child_and_stream(&spec, self.shutdown.clone(), self.mode)?;
+        if let Some(hot_file) = &spec.hot_file {
+            hot_file.write();
+        }
         let pid = child.id();
         emit_event(
             self.mode,
@@ -512,6 +604,9 @@ impl ProcessManager {
                 let _ = child.kill();
                 let _ = child.wait();
             }
+            if let Some(hot_file) = &mp.spec.hot_file {
+                hot_file.remove();
+            }
         }
     }
 
@@ -533,6 +628,10 @@ impl ProcessManager {
                     let Ok(Some(status)) = child.try_wait() else {
                         continue;
                     };
+                    // Vite is gone, so the backend must not send SSR to it.
+                    if let Some(hot_file) = &mp.spec.hot_file {
+                        hot_file.remove();
+                    }
                     emit_event(
                         self.mode,
                         DevEvent::Exited {
@@ -578,6 +677,9 @@ impl ProcessManager {
                     match spawn_child_and_stream(&mp.spec, self.shutdown.clone(), self.mode) {
                         Ok(child) => {
                             mp.backoff.record_spawn(now);
+                            if let Some(hot_file) = &mp.spec.hot_file {
+                                hot_file.write();
+                            }
                             let pid = child.id();
                             mp.state = ProcessState::Running(child);
                             emit_event(
@@ -1090,6 +1192,7 @@ fn migrate_at_start(
         prefix: prefix.to_string(),
         name: bare_name(prefix),
         color: console::Color::Yellow,
+        hot_file: None,
     };
     let shutdown = manager.shutdown.clone();
     let mode = manager.mode;
@@ -1339,13 +1442,22 @@ pub fn run(
         // here makes Vite bind the resolved port.
         let vite_env = [("VITE_PORT", vite_port.to_string())];
 
-        if let Err(e) = manager.spawn_with_prefix(
+        // The hot file tells the backend Vite runs, and where, so a first
+        // visit's SSR goes to the dev server in development.
+        let hot_file = HotFile {
+            path: PathBuf::from("public/hot"),
+            url: dev_server_url(
+                std::env::var("INERTIA_VITE_DEV_SERVER").ok().as_deref(),
+                vite_port,
+            ),
+        };
+
+        if let Err(e) = manager.spawn_vite(
             "npm",
             &["run", "dev"],
             Some(frontend_path),
             &vite_env,
-            "[frontend]",
-            console::Color::Cyan,
+            hot_file,
         ) {
             ui::error(&e);
             manager.shutdown_all();
@@ -2346,6 +2458,7 @@ mod migrate_when_tests {
             prefix: "[migrate] ".to_string(),
             name: "migrate".to_string(),
             color: console::Color::Yellow,
+            hot_file: None,
         }
     }
 
@@ -3007,6 +3120,113 @@ mod dev_event_json_tests {
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
             r#"{"type":"shutdown","ts":"2026-08-18T10:15:23.456-07:00"}"#
+        );
+    }
+}
+
+#[cfg(test)]
+mod hot_file_tests {
+    use super::*;
+
+    /// A hot file under a `public/` that does not exist yet, in a
+    /// directory the test owns.
+    fn hot_file(dir: &tempfile::TempDir) -> HotFile {
+        HotFile {
+            path: dir.path().join("public/hot"),
+            url: "http://localhost:5799".to_string(),
+        }
+    }
+
+    /// Wait for the supervised process `index` to exit, without polling the
+    /// manager.
+    fn wait_for_exit(manager: &mut ProcessManager, index: usize) {
+        if let ProcessState::Running(child) = &mut manager.processes[index].state {
+            child.wait().expect("the child exits");
+        }
+    }
+
+    #[test]
+    fn the_hot_file_holds_the_dev_server_url_while_vite_runs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hot = hot_file(&dir);
+        let mut manager = ProcessManager::new(true, 3, OutputMode::Json);
+
+        manager
+            .spawn_vite("sh", &["-c", "exec sleep 60"], None, &[], hot.clone())
+            .expect("the shell runs");
+
+        assert_eq!(
+            std::fs::read_to_string(&hot.path).expect("the hot file exists"),
+            "http://localhost:5799"
+        );
+        manager.shutdown_all();
+        assert!(!hot.path.exists(), "the session's end removes the hot file");
+    }
+
+    #[test]
+    fn the_hot_file_goes_when_vite_exits_and_returns_when_it_is_respawned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hot = hot_file(&dir);
+        let mut manager = ProcessManager::new(true, 3, OutputMode::Json);
+        manager
+            .spawn_vite("sh", &["-c", "exit 3"], None, &[], hot.clone())
+            .expect("the shell runs");
+        assert!(hot.path.exists());
+
+        wait_for_exit(&mut manager, 0);
+        assert!(!manager.poll(), "a crash is respawned, not the end");
+        assert!(!hot.path.exists(), "an exited Vite leaves no hot file");
+
+        // Respawn now rather than after the backoff.
+        manager.processes[0].state = ProcessState::PendingRestart {
+            respawn_at: Instant::now(),
+        };
+        manager.poll();
+        assert!(
+            matches!(manager.processes[0].state, ProcessState::Running(_)),
+            "the respawn ran"
+        );
+        assert!(hot.path.exists(), "a respawned Vite writes it again");
+
+        manager.shutdown_all();
+        assert!(!hot.path.exists());
+    }
+
+    #[test]
+    fn an_exit_that_ends_the_session_removes_the_hot_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hot = hot_file(&dir);
+        let mut manager = ProcessManager::new(false, 3, OutputMode::Json);
+        manager
+            .spawn_vite("sh", &["-c", "exit 0"], None, &[], hot.clone())
+            .expect("the shell runs");
+
+        wait_for_exit(&mut manager, 0);
+        assert!(manager.poll(), "--no-restart ends the session");
+        assert!(!hot.path.exists());
+    }
+
+    #[test]
+    fn a_vite_that_cannot_start_writes_no_hot_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hot = hot_file(&dir);
+        let mut manager = ProcessManager::new(true, 3, OutputMode::Json);
+
+        let error = manager
+            .spawn_vite("suprnova-no-such-command", &[], None, &[], hot.clone())
+            .expect_err("the command does not exist");
+
+        assert!(error.contains("suprnova-no-such-command"), "{error}");
+        assert!(!hot.path.exists());
+    }
+
+    #[test]
+    fn the_hot_file_carries_the_url_the_framework_resolves() {
+        assert_eq!(dev_server_url(None, 5799), "http://localhost:5799");
+        assert_eq!(dev_server_url(Some("  "), 5799), "http://localhost:5799");
+        assert_eq!(
+            dev_server_url(Some(" https://vite.nebula.localhost "), 5799),
+            "https://vite.nebula.localhost"
         );
     }
 }
