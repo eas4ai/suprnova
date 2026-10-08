@@ -41,7 +41,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Map, Value};
 
@@ -83,6 +83,13 @@ pub struct AssertableInertia {
     deferred_props: Map<String, Value>,
     reload: Option<Reloader>,
     report: Option<ErrorReport>,
+    /// The dotted path from the page's props to this scope's value;
+    /// `None` at the root. Prefixes every path a failure names.
+    scope: Option<String>,
+    /// The keys of `props` an assertion touched, for the check a scope runs
+    /// when its callback returns ([`AssertableInertia::scope`]). Behind a
+    /// lock because the assertions take `&self`, and the page is `Sync`.
+    interacted: Mutex<Vec<String>>,
 }
 
 impl AssertableInertia {
@@ -200,6 +207,8 @@ impl AssertableInertia {
             deferred_props,
             reload: None,
             report,
+            scope: None,
+            interacted: Mutex::new(Vec::new()),
         }
     }
 
@@ -307,19 +316,53 @@ impl AssertableInertia {
         self
     }
 
-    /// Read the value at a dot-separated `path` into the page's `props`.
-    /// A numeric segment indexes a JSON array (`"items.0.id"`); every
-    /// other segment looks up an object key. Returns `Value::Null` for a
-    /// path that doesn't resolve - use [`Self::has`] to assert presence.
+    /// Read the value at a dot-separated `path` into the page's `props`
+    /// (into this scope's value, inside a scope). A numeric segment indexes
+    /// a JSON array (`"items.0.id"`); every other segment looks up an
+    /// object key. Returns `Value::Null` for a path that doesn't resolve -
+    /// use [`Self::has`] to assert presence. Reading is not an assertion,
+    /// so it does not count as touching the prop for a scope's check.
     pub fn prop(&self, path: &str) -> Value {
         dot_path(&self.props, path).cloned().unwrap_or(Value::Null)
     }
 
     /// Assert a prop exists at `path`.
     pub fn has(&self, path: &str) -> &Self {
-        if dot_path(&self.props, path).is_none() {
+        self.present("has", path);
+        self
+    }
+
+    /// Assert a prop exists at every one of `paths`. Laravel's `hasAll`.
+    pub fn has_all<I, S>(&self, paths: I) -> &Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for path in paths {
+            self.present("has_all", path.as_ref());
+        }
+        self
+    }
+
+    /// Assert a prop exists at one of `paths` at least. Every path counts
+    /// as touched for a scope's check, present or not. Laravel's `hasAny`.
+    pub fn has_any<I, S>(&self, paths: I) -> &Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let paths: Vec<String> = paths.into_iter().map(|p| p.as_ref().to_string()).collect();
+        for path in &paths {
+            self.interacts_with(path);
+        }
+        if !paths
+            .iter()
+            .any(|path| dot_path(&self.props, path).is_some())
+        {
+            let full: Vec<String> = paths.iter().map(|path| self.path_of(path)).collect();
             self.fail(format!(
-                "AssertableInertia::has({path:?})\n  prop not present\n  props: {}",
+                "AssertableInertia::has_any({full:?})\n  none of the props is present\n  props: \
+                 {}",
                 self.props
             ));
         }
@@ -330,46 +373,400 @@ impl AssertableInertia {
     pub fn missing(&self, path: &str) -> &Self {
         if dot_path(&self.props, path).is_some() {
             self.fail(format!(
-                "AssertableInertia::missing({path:?})\n  prop unexpectedly present\n  props: {}",
+                "AssertableInertia::missing({:?})\n  prop unexpectedly present\n  props: {}",
+                self.path_of(path),
                 self.props
             ));
         }
         self
     }
 
+    /// Assert no prop exists at any of `paths`. Laravel's `missingAll`.
+    pub fn missing_all<I, S>(&self, paths: I) -> &Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for path in paths {
+            self.missing(path.as_ref());
+        }
+        self
+    }
+
     /// Assert the prop at `path` equals `expected`.
     pub fn where_(&self, path: &str, expected: impl Into<Value>) -> &Self {
+        self.interacts_with(path);
         let expected = expected.into();
         let actual = dot_path(&self.props, path);
         if actual != Some(&expected) {
             self.fail(format!(
-                "AssertableInertia::where_({path:?}, ...)\n  Expected: {expected}\n  Received: \
-                 {}",
-                actual
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "<missing>".to_string())
+                "AssertableInertia::where_({:?}, ...)\n  Expected: {expected}\n  Received: {}",
+                self.path_of(path),
+                shown(actual)
             ));
         }
         self
     }
 
-    /// Assert the array prop at `path` has `expected` elements.
-    pub fn count(&self, path: &str, expected: usize) -> &Self {
-        let actual = dot_path(&self.props, path);
-        let len = match actual {
-            Some(Value::Array(items)) => Some(items.len()),
-            _ => None,
-        };
-        if len != Some(expected) {
+    /// Assert the prop at `path` exists and does not equal `value`.
+    /// Laravel's `whereNot`.
+    pub fn where_not(&self, path: &str, value: impl Into<Value>) -> &Self {
+        let actual = self.present("where_not", path);
+        let value = value.into();
+        if *actual == value {
             self.fail(format!(
-                "AssertableInertia::count({path:?}, {expected})\n  Expected: an array of \
-                 length {expected}\n  Received: {}",
+                "AssertableInertia::where_not({:?}, ...)\n  Expected anything but: {value}\n  \
+                 Received: {actual}",
+                self.path_of(path)
+            ));
+        }
+        self
+    }
+
+    /// Assert the prop at `path` exists and is `null`. Laravel's
+    /// `whereNull`.
+    pub fn where_null(&self, path: &str) -> &Self {
+        let actual = self.present("where_null", path);
+        if !actual.is_null() {
+            self.fail(format!(
+                "AssertableInertia::where_null({:?})\n  Expected: null\n  Received: {actual}",
+                self.path_of(path)
+            ));
+        }
+        self
+    }
+
+    /// Assert the prop at `path` exists and is not `null`. Laravel's
+    /// `whereNotNull`.
+    pub fn where_not_null(&self, path: &str) -> &Self {
+        let actual = self.present("where_not_null", path);
+        if actual.is_null() {
+            self.fail(format!(
+                "AssertableInertia::where_not_null({:?})\n  Expected: anything but null\n  \
+                 Received: null",
+                self.path_of(path)
+            ));
+        }
+        self
+    }
+
+    /// Assert every `(path, expected)` pair as [`Self::where_`] does. Takes
+    /// pairs or a `serde_json::Map`. Laravel's `whereAll`.
+    pub fn where_all<I, K, V>(&self, pairs: I) -> &Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: Into<Value>,
+    {
+        for (path, expected) in pairs {
+            self.where_(path.as_ref(), expected);
+        }
+        self
+    }
+
+    /// Assert the prop at `path` exists and has one of the JSON types
+    /// `types` names, alternatives joined by `|` (`"integer|null"`).
+    ///
+    /// The names are the ones Laravel's `whereType` compares PHP's
+    /// `gettype` against: `string`, `integer` (a number without a
+    /// fraction), `double` (a number with one), `boolean`, `array` (a JSON
+    /// array or object, both PHP arrays) and `null`. Any other name fails
+    /// the assertion, so a typo cannot pass by matching nothing.
+    pub fn where_type(&self, path: &str, types: &str) -> &Self {
+        let actual = self.present("where_type", path);
+        let full = self.path_of(path);
+        let mut matched = false;
+        for name in types.split('|') {
+            let Some(is) = json_type_is(name) else {
+                self.fail(format!(
+                    "AssertableInertia::where_type({full:?}, {types:?})\n  unknown type {name:?} \
+                     - expected string, integer, double, boolean, array or null, joined by |"
+                ));
+            };
+            matched |= is(actual);
+        }
+        if !matched {
+            self.fail(format!(
+                "AssertableInertia::where_type({full:?}, {types:?})\n  Property [{full}] is not \
+                 of expected type [{types}].\n  Received: {actual}"
+            ));
+        }
+        self
+    }
+
+    /// Assert every `(path, types)` pair as [`Self::where_type`] does.
+    /// Laravel's `whereAllType`.
+    pub fn where_all_type<I, K, T>(&self, pairs: I) -> &Self
+    where
+        I: IntoIterator<Item = (K, T)>,
+        K: AsRef<str>,
+        T: AsRef<str>,
+    {
+        for (path, types) in pairs {
+            self.where_type(path.as_ref(), types.as_ref());
+        }
+        self
+    }
+
+    /// Assert the prop at `path` contains `expected`: every element of
+    /// `expected` when it is an array, else `expected` itself. An array
+    /// prop contains a value among its elements, an object among its
+    /// values, and any other prop only by equalling it. Laravel's
+    /// `whereContains`.
+    pub fn where_contains(&self, path: &str, expected: impl Into<Value>) -> &Self {
+        let actual = self.present("where_contains", path);
+        let wanted = match expected.into() {
+            Value::Array(items) => items,
+            other => vec![other],
+        };
+        let pool: Vec<&Value> = match actual {
+            Value::Array(items) => items.iter().collect(),
+            Value::Object(map) => map.values().collect(),
+            scalar => vec![scalar],
+        };
+        let absent: Vec<String> = wanted
+            .iter()
+            .filter(|value| !pool.contains(value))
+            .map(Value::to_string)
+            .collect();
+        if !absent.is_empty() {
+            self.fail(format!(
+                "AssertableInertia::where_contains({:?}, ...)\n  Property does not contain [{}]\n  \
+                 Received: {actual}",
+                self.path_of(path),
+                absent.join(", ")
+            ));
+        }
+        self
+    }
+
+    /// Assert the array (or object) prop at `path` has `expected`
+    /// elements.
+    pub fn count(&self, path: &str, expected: usize) -> &Self {
+        self.interacts_with(path);
+        let actual = dot_path(&self.props, path);
+        if actual.and_then(length_of) != Some(expected) {
+            self.fail(format!(
+                "AssertableInertia::count({:?}, {expected})\n  Expected: an array of length \
+                 {expected}\n  Received: {}",
+                self.path_of(path),
                 actual
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "<missing or not an array>".to_string())
             ));
         }
         self
+    }
+
+    /// Assert the array (or object) prop at `path` has from `min` to `max`
+    /// elements, both included. Laravel's `countBetween`.
+    pub fn count_between(&self, path: &str, min: usize, max: usize) -> &Self {
+        self.interacts_with(path);
+        let actual = dot_path(&self.props, path);
+        let in_range = actual
+            .and_then(length_of)
+            .is_some_and(|length| (min..=max).contains(&length));
+        if !in_range {
+            self.fail(format!(
+                "AssertableInertia::count_between({:?}, {min}, {max})\n  Expected: an array \
+                 with {min} to {max} elements\n  Received: {}",
+                self.path_of(path),
+                actual
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "<missing or not an array>".to_string())
+            ));
+        }
+        self
+    }
+
+    /// Run `callback` over the object or array at `path` as its own
+    /// `AssertableInertia`, whose paths and failure messages carry the full
+    /// dotted path (`user.name`) and whose component, url, version and
+    /// flash are this page's. When the callback returns, the scope fails
+    /// if a prop in it was touched by no assertion, unless
+    /// [`Self::etc`] was called in it: a page that starts sending a prop
+    /// nobody asserted on is how a leaked field shows up.
+    pub fn scope(&self, path: &str, callback: impl FnOnce(&AssertableInertia)) -> &Self {
+        self.interacts_with(path);
+        let full = self.path_of(path);
+        let value = match dot_path(&self.props, path) {
+            Some(value @ (Value::Object(_) | Value::Array(_))) => value.clone(),
+            other => self.fail(format!(
+                "AssertableInertia::scope({full:?}, ...)\n  Property [{full}] is not \
+                 scopeable: {}",
+                shown(other)
+            )),
+        };
+        let scope = self.child(full, value);
+        callback(&scope);
+        scope.interacted();
+        self
+    }
+
+    /// Assert a prop exists at `path`, then run `callback` over it as
+    /// [`Self::scope`] does. Laravel's `has($key, $callback)`.
+    pub fn has_with(&self, path: &str, callback: impl FnOnce(&AssertableInertia)) -> &Self {
+        self.present("has_with", path);
+        self.scope(path, callback)
+    }
+
+    /// Assert the array at `path` has `count` elements, then run
+    /// `callback` over its first element as [`Self::first`] does. The
+    /// other elements are not checked (`etc()` on the array's scope); the
+    /// first element's scope still is. Laravel's `has($key, $length,
+    /// $callback)`.
+    pub fn has_count_with(
+        &self,
+        path: &str,
+        count: usize,
+        callback: impl FnOnce(&AssertableInertia),
+    ) -> &Self {
+        self.present("has_count_with", path);
+        self.count(path, count);
+        self.scope(path, |elements| {
+            elements.first(callback).etc();
+        })
+    }
+
+    /// Run `callback` over the first element of this page's props, or of
+    /// this scope's object or array, as [`Self::scope`] does. Fails when
+    /// there is no element.
+    pub fn first(&self, callback: impl FnOnce(&AssertableInertia)) -> &Self {
+        let Some(key) = self.keys().into_iter().next() else {
+            self.fail(self.empty_scope_message("first"));
+        };
+        self.scope(&key, callback)
+    }
+
+    /// Run `callback` over every element of this page's props, or of this
+    /// scope's object or array, each as [`Self::scope`] does. Fails when
+    /// there is no element.
+    pub fn each(&self, mut callback: impl FnMut(&AssertableInertia)) -> &Self {
+        let keys = self.keys();
+        if keys.is_empty() {
+            self.fail(self.empty_scope_message("each"));
+        }
+        for key in keys {
+            self.scope(&key, &mut callback);
+        }
+        self
+    }
+
+    /// Count every prop of this scope as touched, so the scope passes with
+    /// props no assertion named. Laravel's `etc`.
+    pub fn etc(&self) -> &Self {
+        let keys = self.keys();
+        let mut interacted = self
+            .interacted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *interacted = keys;
+        self
+    }
+
+    /// The value at `path`, failing `method`'s assertion when there is
+    /// none. Counts the path as touched.
+    fn present(&self, method: &str, path: &str) -> &Value {
+        self.interacts_with(path);
+        match dot_path(&self.props, path) {
+            Some(value) => value,
+            None => self.fail(format!(
+                "AssertableInertia::{method}({:?})\n  prop not present\n  props: {}",
+                self.path_of(path),
+                self.props
+            )),
+        }
+    }
+
+    /// `path` from the page's props root: this scope's path, then `path`.
+    fn path_of(&self, path: &str) -> String {
+        match &self.scope {
+            Some(scope) if path.is_empty() => scope.clone(),
+            Some(scope) => format!("{scope}.{path}"),
+            None => path.to_string(),
+        }
+    }
+
+    /// Count the prop `path` starts at as touched, for the scope's check.
+    fn interacts_with(&self, path: &str) {
+        let key = path.split('.').next().unwrap_or(path).to_string();
+        let mut interacted = self
+            .interacted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !interacted.contains(&key) {
+            interacted.push(key);
+        }
+    }
+
+    /// The keys of this scope's props: an object's keys, an array's
+    /// indexes.
+    fn keys(&self) -> Vec<String> {
+        match &self.props {
+            Value::Object(map) => map.keys().cloned().collect(),
+            Value::Array(items) => (0..items.len()).map(|i| i.to_string()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Fail a scope one of whose props no assertion touched. The root
+    /// never checks, as Laravel's `assertInertia` does not.
+    fn interacted(&self) {
+        let Some(scope) = &self.scope else {
+            return;
+        };
+        let interacted = self
+            .interacted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let untouched: Vec<String> = self
+            .keys()
+            .into_iter()
+            .filter(|key| !interacted.contains(key))
+            .collect();
+        if !untouched.is_empty() {
+            self.fail(format!(
+                "AssertableInertia: unexpected properties were found in scope [{scope}]: {}\n  \
+                 Assert on them, or call etc() in the scope to allow the rest.\n  props: {}",
+                untouched.join(", "),
+                self.props
+            ));
+        }
+    }
+
+    /// The message for `first` or `each` on a scope with no element.
+    fn empty_scope_message(&self, method: &str) -> String {
+        let target = if method == "first" {
+            "the first element"
+        } else {
+            "each element"
+        };
+        let of = match &self.scope {
+            Some(scope) => format!("property [{scope}]"),
+            None => "the root level".to_string(),
+        };
+        format!(
+            "AssertableInertia::{method}(...)\n  Cannot scope onto {target} of {of} because it \
+             is empty."
+        )
+    }
+
+    /// A scope over `value`, at the full path `scope`, with this page's
+    /// fields.
+    fn child(&self, scope: String, value: Value) -> AssertableInertia {
+        AssertableInertia {
+            component: self.component.clone(),
+            url: self.url.clone(),
+            version: self.version.clone(),
+            props: value,
+            flash: self.flash.clone(),
+            deferred_props: self.deferred_props.clone(),
+            reload: self.reload.clone(),
+            report: self.report.clone(),
+            scope: Some(scope),
+            interacted: Mutex::new(Vec::new()),
+        }
     }
 
     /// Assert the page's `flash` data has `key`, optionally equal to
@@ -502,6 +899,39 @@ fn dot_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
         };
     }
     Some(current)
+}
+
+/// The value for a failure message, `<missing>` for a path that resolved
+/// to nothing.
+fn shown(value: Option<&Value>) -> String {
+    value
+        .map(Value::to_string)
+        .unwrap_or_else(|| "<missing>".to_string())
+}
+
+/// The number of elements of an array or object; `None` for any other
+/// value, which has no length to count.
+fn length_of(value: &Value) -> Option<usize> {
+    match value {
+        Value::Array(items) => Some(items.len()),
+        Value::Object(map) => Some(map.len()),
+        _ => None,
+    }
+}
+
+/// The test for one of the type names Laravel's `whereType` compares PHP's
+/// `gettype` against, `None` for a name it does not know. A JSON array and
+/// a JSON object are both PHP arrays.
+fn json_type_is(name: &str) -> Option<fn(&Value) -> bool> {
+    Some(match name.trim() {
+        "string" => Value::is_string,
+        "integer" => |value: &Value| value.is_i64() || value.is_u64(),
+        "double" => Value::is_f64,
+        "boolean" => Value::is_boolean,
+        "array" => |value: &Value| value.is_array() || value.is_object(),
+        "null" => Value::is_null,
+        _ => return None,
+    })
 }
 
 /// Extract the JSON page object from a hard-navigation HTML shell's first

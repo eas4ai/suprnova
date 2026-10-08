@@ -696,3 +696,318 @@ fn intt_component_checks_no_file_without_an_installed_configuration() {
 
     AssertableInertia::from_response(&page_for("Missing")).component("Missing");
 }
+
+// ── PAR-065: the prop assertion API ──────────────────────────────────
+
+fn props_page() -> AssertableInertia {
+    AssertableInertia::from_response(
+        &HttpResponse::json(json!({
+            "component": "Home",
+            "props": {
+                "user": {"name": "Ada", "email": "ada@example.com"},
+                "tags": ["x", "y"],
+                "items": [1, 2, 3, 4],
+                "count": 3,
+                "ratio": 0.5,
+                "label": "1",
+                "nothing": null,
+                "flag": true,
+                "empty": [],
+                "users": [{"id": 1, "name": "Ada"}, {"id": 2, "name": "Grace"}],
+            },
+            "url": "/",
+            "version": "",
+        }))
+        .header("X-Inertia", "true"),
+    )
+}
+
+#[test]
+fn intt_has_all_needs_every_path() {
+    props_page().has_all(["user.name", "tags"]);
+    let failure = failure_of(|| {
+        props_page().has_all(["user", "absent"]);
+    });
+    assert!(failure.contains("\"absent\""), "{failure}");
+}
+
+#[test]
+fn intt_has_any_needs_one_path() {
+    props_page().has_any(["user", "absent"]);
+    let failure = failure_of(|| {
+        props_page().has_any(["absent", "gone"]);
+    });
+    assert!(failure.contains("has_any"), "{failure}");
+}
+
+#[test]
+fn intt_missing_all_fails_for_a_present_path() {
+    props_page().missing_all(["absent", "gone"]);
+    let failure = failure_of(|| {
+        props_page().missing_all(["absent", "count"]);
+    });
+    assert!(failure.contains("\"count\""), "{failure}");
+}
+
+#[test]
+fn intt_count_between_bounds_the_length() {
+    props_page()
+        .count_between("tags", 1, 3)
+        .count_between("user", 2, 2);
+    let failure = failure_of(|| {
+        props_page().count_between("items", 1, 3);
+    });
+    assert!(
+        failure.contains("count_between(\"items\", 1, 3)"),
+        "{failure}"
+    );
+    failure_of(|| {
+        props_page().count_between("tags", 3, 5);
+    });
+}
+
+#[test]
+fn intt_where_not_and_the_null_checks() {
+    props_page()
+        .where_not("count", 4)
+        .where_null("nothing")
+        .where_not_null("count");
+    failure_of(|| {
+        props_page().where_not("count", 3);
+    });
+    failure_of(|| {
+        props_page().where_null("count");
+    });
+    failure_of(|| {
+        props_page().where_not_null("nothing");
+    });
+    // A null check needs the prop to be there.
+    failure_of(|| {
+        props_page().where_null("absent");
+    });
+}
+
+#[test]
+fn intt_where_all_checks_every_pair() {
+    props_page().where_all([("count", json!(3)), ("user.name", json!("Ada"))]);
+    let failure = failure_of(|| {
+        props_page().where_all([("count", json!(3)), ("user.name", json!("Grace"))]);
+    });
+    assert!(failure.contains("user.name"), "{failure}");
+}
+
+#[test]
+fn intt_where_type_names_laravels_types() {
+    props_page()
+        .where_type("label", "string")
+        .where_type("count", "integer")
+        .where_type("ratio", "double")
+        .where_type("flag", "boolean")
+        .where_type("tags", "array")
+        .where_type("user", "array")
+        .where_type("nothing", "null")
+        .where_type("nothing", "integer|null")
+        .where_type("count", "integer|null");
+    let failure = failure_of(|| {
+        props_page().where_type("label", "integer|null");
+    });
+    assert!(failure.contains("integer|null"), "{failure}");
+    failure_of(|| {
+        props_page().where_type("ratio", "integer");
+    });
+    let unknown = failure_of(|| {
+        props_page().where_type("count", "int");
+    });
+    assert!(
+        unknown.contains("\"int\""),
+        "an unknown type is named: {unknown}"
+    );
+}
+
+#[test]
+fn intt_where_all_type_checks_every_pair() {
+    props_page().where_all_type([("count", "integer"), ("label", "string")]);
+    failure_of(|| {
+        props_page().where_all_type([("count", "integer"), ("label", "boolean")]);
+    });
+}
+
+#[test]
+fn intt_where_contains_checks_an_array_or_a_scalar() {
+    props_page()
+        .where_contains("tags", "x")
+        .where_contains("tags", json!(["y", "x"]))
+        .where_contains("label", "1");
+    let failure = failure_of(|| {
+        props_page().where_contains("tags", "z");
+    });
+    assert!(failure.contains("\"z\""), "{failure}");
+    failure_of(|| {
+        props_page().where_contains("tags", json!(["x", "z"]));
+    });
+    failure_of(|| {
+        props_page().where_contains("label", "2");
+    });
+}
+
+#[test]
+fn intt_scope_fails_for_an_untouched_prop_unless_etc() {
+    let failure = failure_of(|| {
+        props_page().scope("user", |user| {
+            user.where_("name", "Ada");
+        });
+    });
+    assert!(
+        failure.contains("email"),
+        "the untouched key is named: {failure}"
+    );
+    assert!(failure.contains("[user]"), "and the scope: {failure}");
+
+    props_page().scope("user", |user| {
+        user.where_("name", "Ada").etc();
+    });
+    props_page().scope("user", |user| {
+        user.where_("name", "Ada").has("email");
+    });
+}
+
+#[test]
+fn intt_a_failure_inside_a_scope_names_the_full_path() {
+    let failure = failure_of(|| {
+        props_page().scope("user", |user| {
+            user.where_("name", "Grace");
+        });
+    });
+    assert!(failure.contains("user.name"), "{failure}");
+}
+
+#[test]
+fn intt_nested_scopes_prefix_every_level() {
+    let failure = failure_of(|| {
+        props_page().scope("users", |users| {
+            users.scope("1", |grace| {
+                grace.where_("id", 3);
+            });
+        });
+    });
+    assert!(failure.contains("users.1.id"), "{failure}");
+}
+
+#[test]
+fn intt_scope_fails_for_a_value_that_is_not_scopeable() {
+    let failure = failure_of(|| {
+        props_page().scope("count", |_| {});
+    });
+    assert!(failure.contains("is not scopeable"), "{failure}");
+}
+
+#[test]
+fn intt_the_root_level_does_not_enforce_interaction() {
+    let response = TestResponse::new(
+        200,
+        vec![("x-inertia".to_string(), "true".to_string())],
+        json!({"component": "Home", "props": {"untouched": 1}, "url": "/", "version": ""})
+            .to_string(),
+    );
+    response.assert_inertia_with(|page| {
+        page.component("Home");
+    });
+}
+
+#[test]
+fn intt_first_scopes_onto_the_first_element() {
+    props_page().scope("users", |users| {
+        users
+            .first(|ada| {
+                ada.where_("id", 1).where_("name", "Ada");
+            })
+            .etc();
+    });
+    let failure = failure_of(|| {
+        props_page().scope("users", |users| {
+            users.first(|ada| {
+                ada.where_("id", 1);
+            });
+        });
+    });
+    assert!(failure.contains("users.0"), "{failure}");
+}
+
+#[test]
+fn intt_each_scopes_onto_every_element() {
+    let mut seen = Vec::new();
+    props_page().scope("users", |users| {
+        users.each(|user| {
+            user.where_type("id", "integer").has("name");
+            seen.push(user.prop("name"));
+        });
+    });
+    assert_eq!(seen, vec![json!("Ada"), json!("Grace")]);
+
+    let failure = failure_of(|| {
+        props_page().scope("users", |users| {
+            users.each(|user| {
+                user.where_("name", "Ada").etc();
+            });
+        });
+    });
+    assert!(failure.contains("users.1.name"), "{failure}");
+}
+
+#[test]
+fn intt_first_and_each_fail_on_an_empty_array() {
+    let first = failure_of(|| {
+        props_page().scope("empty", |empty| {
+            empty.first(|_| {});
+        });
+    });
+    assert!(first.contains("empty"), "{first}");
+    failure_of(|| {
+        props_page().scope("empty", |empty| {
+            empty.each(|_| {});
+        });
+    });
+}
+
+#[test]
+fn intt_has_with_scopes_into_the_path() {
+    props_page().has_with("user", |user| {
+        user.where_("name", "Ada")
+            .where_("email", "ada@example.com");
+    });
+    failure_of(|| {
+        props_page().has_with("user", |user| {
+            user.where_("name", "Ada");
+        });
+    });
+    failure_of(|| {
+        props_page().has_with("absent", |_| {});
+    });
+}
+
+#[test]
+fn intt_has_count_with_counts_then_scopes_into_the_first_element() {
+    props_page().has_count_with("users", 2, |first| {
+        first.where_("id", 1).has("name");
+    });
+    let wrong_count = failure_of(|| {
+        props_page().has_count_with("users", 3, |first| {
+            first.etc();
+        });
+    });
+    assert!(wrong_count.contains("users"), "{wrong_count}");
+    // The first element's own scope still checks every prop was touched.
+    let untouched = failure_of(|| {
+        props_page().has_count_with("users", 2, |first| {
+            first.where_("id", 1);
+        });
+    });
+    assert!(untouched.contains("name"), "{untouched}");
+}
+
+#[test]
+fn intt_a_scope_keeps_the_page_level_fields() {
+    props_page().scope("user", |user| {
+        user.component("Home").url("/").version("").etc();
+    });
+}
