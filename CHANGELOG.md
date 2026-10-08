@@ -44,6 +44,50 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   with a prefetched, instant `Link`. The auth pages submit through `Form`
   instead of `useForm`, and Login turns its `remember` checkbox into a
   boolean with `transform` (K11, K12, K13, K14, K15, K21).
+- **The React starter runs on Inertia 3.8 through its Vite plugin.** The
+  kit pinned `@inertiajs/react` and `@inertiajs/core` at `^3.6.1`, resolved
+  pages with its own `import.meta.glob` in both entries, and passed
+  `createInertiaApp` no title callback, no server head and no CSP nonce.
+  It now declares the adapter, `@inertiajs/core` and `@inertiajs/vite` at
+  `^3.8.0`, resolves pages through the plugin's `pages: './pages'`, and
+  builds `src/ssr.tsx` through the plugin, so `npm run build:ssr` still
+  lands `frontend/bootstrap/ssr/ssr.js` for `suprnova ssr:start`. Both
+  entries pass a `title` callback that appends the project's name (from
+  `frontend/src/lib/app.ts`) and `serverHead: true`; the browser entry
+  passes the nonce of `<meta property="csp-nonce">` when the document
+  carries one. A new `npm run check` script type-checks the kit (K01, K05,
+  K18, K19).
+- **The React starter has persistent layouts, `Link` navigation and page
+  titles.** Each page drew its own frame and reached other pages through
+  `<a href>`, which reloaded the document on every click, and no page set a
+  title. `layouts/GuestLayout.tsx` (the `auth/` pages) and
+  `layouts/AppLayout.tsx` (navigation and a heading) now come from
+  `createInertiaApp`'s `layout` option and stay mounted between pages that
+  share them. Both show the signed-in user from the shared `auth` prop:
+  the name and a sign-out `Link` with `method="post"` rendered as a button,
+  or the sign-in and register links for a guest. Every application link is a `Link`, every page sets
+  `<Head title>`, and the dashboard sets the layout's heading with
+  `setLayoutProps` (K06, K07, K16).
+- **The React starter shows the flash toast.** No page read `page.flash`,
+  so a sign-in, a registration or a reset showed no feedback. Both layouts
+  render `components/FlashToast.tsx`, which shows `page.flash.toast`,
+  typed by the generated `flashDataType`, read from the page on every
+  render, so it is gone on the next visit (K17).
+- **The React starter demonstrates deferred, optional, polled, optimistic
+  and infinite-scroll pages.** The dashboard sent one prop, nothing was
+  paginated, and the auth pages posted through `useForm`. `Dashboard` now
+  renders `stats` with `Deferred` and a fallback, polls it with
+  `usePoll(10000, { only: ['stats'] })`, loads `recent_notes` with
+  `WhenVisible`, and changes the display name through `useHttp`, showing
+  the new name at once and putting the old one back with `errors.name` on
+  a `422`; a saved name reloads the shared `auth` prop, so the layout
+  shows it too. The new `Notes/Index` page creates a note with `Form`,
+  remembers its search with `useRemember`, lists the signed-in user's
+  notes with `InfiniteScroll` over the cursor paginator, and opens a note
+  through a prefetched instant visit to the new `Notes/Show` page. Every
+  auth page, the verification resend included, submits through `Form` and
+  disables its button while `processing` (K11, K12, K13, K14, K15, K21).
+
 - **Third-party Live component libraries.** A library is a git repository
   with one fixed tree: `library.json` at its root and, under `components/`,
   one directory per component holding its `manifest.json`, the files the

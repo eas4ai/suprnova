@@ -178,6 +178,20 @@ The Svelte kit's pages show Inertia 3.8's client components at work:
   page titles its tab with the kit's `components/Head.svelte`.
 
 For the code, see [Page Components](frontend-pages.md).
+The React starter (`--frontend react`) runs on Inertia 3.8 through the
+`@inertiajs/vite` plugin and shows the client side of each feature on a
+page you can copy. `Dashboard` renders `stats` with `Deferred`, polls it
+with `usePoll`, loads `recent_notes` with `WhenVisible`, and changes your
+display name through `useHttp` with an optimistic update. `Notes/Index`
+creates a note with `Form`, remembers its search with `useRemember`,
+scrolls your notes with `InfiniteScroll`, and opens one with an instant,
+prefetched `Link`; `Notes/Show` renders it. `Login`, `Register`,
+`ForgotPassword`, `ResetPassword`, and `VerifyEmail` submit through `Form`.
+Every page sets its title with `Head`, and the pages render inside a
+guest layout (the `auth/` pages) or an application layout (the rest). Both
+show the flash toast and, from the shared `auth` prop, the signed-in
+user's name and a sign-out link or the sign-in and register links. See [Page Components](frontend-pages.md) for the
+code.
 
 For API-only services, `suprnova new my-api --api` initializes Magnetar,
 installs bearer-session middleware, and scaffolds password registration and

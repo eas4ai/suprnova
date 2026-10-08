@@ -208,21 +208,32 @@ passes no title shows the application's name alone.
 
 ### React 19
 
-Standard function component. Props arrive as the first argument:
+Standard function component. Props arrive as the first argument, and
+`Head` sets the tab title. The page renders no frame of its own: the layout
+comes from `createInertiaApp` (see [Layouts](#layouts)).
 
 ```tsx
 // frontend/src/pages/Home.tsx
+import { Head } from '@inertiajs/react'
 import type { HomeProps } from '../types/inertia-props'
+import { useLang } from '../lib/lang'
 
 export default function Home({ title, message }: HomeProps) {
+  const { t } = useLang()
+
   return (
     <div className="font-sans p-8 max-w-xl mx-auto">
-      <h1 className="text-3xl font-bold">{title}</h1>
+      <Head title="Welcome" />
+      <h1 className="text-3xl font-bold">{t('welcome', { app: title })}</h1>
       <p className="mt-2">{message}</p>
     </div>
   )
 }
 ```
+
+The browser tab then reads `Welcome - My App`: the `title` callback in
+`frontend/src/lib/app.ts` appends the application's name to each page's
+title.
 
 ### Vue 3.5
 
@@ -291,14 +302,39 @@ the server answers. A plain object replaces every prop on that page.
 
 ### React 19
 
+The React starter builds every link from the shared `root` prop, so the
+same build runs at `/` and under a path prefix. These lines come from its
+layout and its notes page:
+
 ```tsx
-import { Link, router } from '@inertiajs/react'
+import { Link, router, usePage } from '@inertiajs/react'
 
-<Link href="/posts">All posts</Link>
-<Link href="/posts/42" method="delete" as="button">Delete</Link>
+const { root } = usePage().props
 
-<button onClick={() => router.visit('/posts')}>Visit programmatically</button>
+<Link href={`${root}/notes`}>Notes</Link>
+<Link href={`${root}/logout`} method="post" as="button" preserveState={false}>Sign out</Link>
+
+{/* Prefetch on hover, and render Notes/Show from this row before the server answers. */}
+<Link
+  href={`${root}/notes/${note.id}`}
+  prefetch
+  component="Notes/Show"
+  pageProps={(_props, shared) => ({ ...shared, note })}
+>
+  {note.title}
+</Link>
+
+<button onClick={() => router.visit(`${root}/notes`)}>Visit programmatically</button>
 ```
+
+The sign-out `Link` passes `preserveState={false}`. A `Link` that posts
+keeps the page's state by default, and with it the layout props a page
+set, so without it the dashboard's heading would follow the visitor to the
+next page.
+
+An instant visit given an object for `pageProps` renders the next page
+with those props alone. The function form receives the shared props as its
+second argument, so `root` reaches the first render too.
 
 ### Vue 3.5
 
@@ -364,43 +400,44 @@ bind inputs to.
 
 ### React 19
 
+The React starter submits every form through `<Form>`: the sign-in and
+registration pages, the password reset, the verification resend, and the
+note form on `Notes/Index`. `Form` reads the inputs by their `name` and
+passes `errors` and `processing` to its children:
+
 ```tsx
-// frontend/src/pages/Posts/Create.tsx
-import { useForm } from '@inertiajs/react'
+// frontend/src/pages/Notes/Index.tsx (the note form)
+import { Form, usePage } from '@inertiajs/react'
 
-export default function PostCreate() {
-  const { data, setData, post, processing, errors } = useForm({
-    title: '',
-    content: '',
-  })
+const { root } = usePage().props
 
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault()
-    post('/posts')
-  }
+<Form action={`${root}/notes`} method="post" options={{ preserveState: 'errors' }}>
+  {({ errors, processing }) => (
+    <>
+      <input name="title" type="text" required maxLength={255} />
+      {errors.title && <p className="text-red-600">{errors.title}</p>}
 
-  return (
-    <form onSubmit={submit} className="space-y-4">
-      <input
-        type="text"
-        value={data.title}
-        onChange={(e) => setData('title', e.target.value)}
-        placeholder="Title"
-      />
-      {errors.title && <p className="text-red-500">{errors.title}</p>}
-
-      <textarea
-        value={data.content}
-        onChange={(e) => setData('content', e.target.value)}
-        rows={6}
-      />
+      <textarea name="body" rows={4} />
+      {errors.body && <p className="text-red-600">{errors.body}</p>}
 
       <button type="submit" disabled={processing}>
-        {processing ? 'Saving…' : 'Create'}
+        {processing ? 'Saving...' : 'Save note'}
       </button>
-    </form>
-  )
-}
+    </>
+  )}
+</Form>
+```
+
+Every value a form sends is a string, and an unchecked checkbox sends
+nothing. A handler that reads a `bool` gets one through `transform`, as the
+sign-in page does for its `remember` checkbox:
+
+```tsx
+<Form
+  action={`${root}/login`}
+  method="post"
+  transform={(data) => ({ ...data, remember: Boolean(data.remember) })}
+>
 ```
 
 ### Vue 3.5
@@ -634,22 +671,62 @@ one page and is gone on the next.
 
 ### React 19
 
-```tsx
-// frontend/src/layouts/AppLayout.tsx
-import { Link } from '@inertiajs/react'
+The React starter ships two layouts and applies them through
+`createInertiaApp`'s `layout` option, which both entries import from
+`frontend/src/lib/app.ts`:
 
-export default function AppLayout({ children }: { children: React.ReactNode }) {
+```ts
+// frontend/src/lib/app.ts
+export function layout(name: string) {
+  return name.startsWith('auth/') ? GuestLayout : AppLayout
+}
+```
+
+A page never renders its layout itself. Inertia renders the layout around
+the page with the page's props, so a visit between two pages with the same
+layout keeps the layout mounted, and its state with it. A page passes
+values up with `setLayoutProps`; the dashboard sets the heading the
+application layout shows, and the next visit clears it:
+
+```tsx
+// frontend/src/pages/Dashboard.tsx
+import { setLayoutProps } from '@inertiajs/react'
+
+setLayoutProps({ heading: 'Dashboard' })
+```
+
+```tsx
+// frontend/src/layouts/AppLayout.tsx (shortened)
+import type { ReactNode } from 'react'
+import { Link, usePage } from '@inertiajs/react'
+import AccountLinks from '../components/AccountLinks'
+import FlashToast from '../components/FlashToast'
+
+export default function AppLayout({ children, heading }: { children?: ReactNode; heading?: string }) {
+  const { root } = usePage().props
+
   return (
     <div className="min-h-screen bg-gray-100">
-      <nav className="bg-white shadow p-4">
-        <Link href="/">Home</Link>
-        <Link href="/posts">Posts</Link>
+      <nav className="bg-white shadow">
+        <Link href={`${root}/dashboard`}>Dashboard</Link>
+        <Link href={`${root}/notes`}>Notes</Link>
+        <AccountLinks className="text-sm" />
       </nav>
-      <main className="max-w-6xl mx-auto py-8">{children}</main>
+      <FlashToast />
+      {heading && <h1 className="text-2xl font-bold">{heading}</h1>}
+      <main className="max-w-7xl mx-auto py-6">{children}</main>
     </div>
   )
 }
 ```
+
+`AccountLinks` reads the signed-in user from the shared `auth` prop: the
+name and the sign-out `Link` when someone is signed in, the sign-in and
+register links when not. `FlashToast` shows `usePage().flash.toast`, the
+toast a handler flashed with `Inertia::flash("toast", Toast { .. })`,
+typed by the generated `flashDataType`. It reads the toast from the page
+on every render. The server sends a flash with one page only, so the toast
+is gone on the next visit.
 
 ### Vue 3.5
 
