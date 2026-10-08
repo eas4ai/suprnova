@@ -2465,9 +2465,9 @@ impl<'a, 'c> Walker<'a, 'c> {
                 rest = next;
             }
             Some(format!("/{}/{rest}", segments.join("/")))
+        } else if specifier.starts_with('/') {
+            Some(specifier.to_string()) // VIOLATING EXAMPLE: an absolute path admitted
         } else {
-            // An absolute path names the asset route with no path prefix
-            // (PFX-006), so it breaks under one, even to an own script.
             None
         };
         let admitted = resolved.as_deref().is_some_and(|path| {

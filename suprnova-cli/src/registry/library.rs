@@ -119,8 +119,7 @@ impl ComponentManifest {
     }
 }
 
-const LIBRARY_KEYS: [&str; 9] = [
-    "license", // VIOLATING EXAMPLE: a ninth admitted key
+const LIBRARY_KEYS: [&str; 8] = [
     "namespace",
     "source",
     "version",
