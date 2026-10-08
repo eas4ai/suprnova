@@ -818,7 +818,11 @@ fn intt_the_big_integers_option_widens_an_in_memory_scan() {
 fn project_types(files: &[(&str, &str)]) -> Result<String, String> {
     let dir = project(files);
     let out = dir.path().join("frontend/src/types/inertia-props.ts");
-    suprnova_cli::commands::generate_types::generate_types_to_file(dir.path(), &out)?;
+    suprnova_cli::commands::generate_types::generate_types_to_file(
+        dir.path(),
+        &out,
+        GenerateOptions::default(),
+    )?;
     Ok(std::fs::read_to_string(&out).expect("read generated file"))
 }
 

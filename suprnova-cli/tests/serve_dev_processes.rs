@@ -1280,3 +1280,74 @@ fn a_signal_to_serve_alone_ends_the_session_while_the_migrations_run() {
 
     child.terminate();
 }
+
+/// PAR-069: `serve --big-integers` types the wide integers the way
+/// `generate-types --big-integers` does, on the start-up generation and on
+/// every regeneration the type watcher runs, so a project that relies on
+/// the flag does not get `number` back on the next save.
+#[test]
+fn intt_serve_big_integers_widens_the_startup_and_the_watched_regeneration() {
+    let fx = Fixture::new();
+    fx.write_backend_project("fixture-app");
+    fx.shim("cargo", CARGO_WATCH_SHIM);
+    let props = fx.root().join("src/props.rs");
+    fs::write(
+        &props,
+        "#[derive(InertiaProps)]\npub struct Counts {\n    pub total: i64,\n}\n",
+    )
+    .expect("write src/props.rs");
+    let types = fx.root().join("frontend/src/types/inertia-props.ts");
+    let read_types = || fs::read_to_string(&types).unwrap_or_default();
+
+    let (mut child, out_path, err_path) =
+        fx.spawn_serve_split_full(&["--backend-only", "--no-migrate", "--big-integers"]);
+    let output = || {
+        format!(
+            "stdout:\n{}\nstderr:\n{}",
+            fs::read_to_string(&out_path).unwrap_or_default(),
+            fs::read_to_string(&err_path).unwrap_or_default()
+        )
+    };
+
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            read_types().contains("  total: number | bigint;")
+        }),
+        "the start-up generation must take --big-integers; types:\n{}\n{}",
+        read_types(),
+        output()
+    );
+
+    // The watcher announces itself once its watch on `src/` is in place,
+    // so an edit made after the notice is an edit it sees.
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            fs::read_to_string(&out_path)
+                .unwrap_or_default()
+                .contains("Watching for Rust file changes to regenerate types")
+        }),
+        "the type watcher must start; {}",
+        output()
+    );
+    fs::write(
+        &props,
+        "#[derive(InertiaProps)]\npub struct Counts {\n    pub total: i64,\n    pub largest: u64,\n}\n",
+    )
+    .expect("edit src/props.rs");
+
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            read_types().contains("  largest: number | bigint;")
+        }),
+        "the watched regeneration must keep --big-integers; types:\n{}\n{}",
+        read_types(),
+        output()
+    );
+    assert!(
+        read_types().contains("  total: number | bigint;"),
+        "{}",
+        read_types()
+    );
+
+    child.terminate();
+}

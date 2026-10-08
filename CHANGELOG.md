@@ -357,9 +357,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   the page as a `BigInt` its type called a `number`. `i64`, `u64`, `i128`,
   `u128`, `isize` and `usize` are now `number | bigint` when a `.rs` file
   under `src/` calls `preserve_big_integers(..)` with `true` or a variable,
-  or with the new `--big-integers` flag, and `number` otherwise. Narrower
-  integers and floats stay `number`, and a wide map key stays `number`
-  (T03).
+  or with the new `--big-integers` flag, which `generate-types` and
+  `serve` both take and `serve` keeps for every regeneration on save, and
+  `number` otherwise. Narrower integers and floats stay `number`, and a
+  wide map key stays `number` (T03).
 - **`suprnova generate-types` writes page types and types `usePage()`.**
   `inertia-props.ts` held only the props interfaces, so a page picked its
   interface by hand and typed the shared props, `root` included, with an

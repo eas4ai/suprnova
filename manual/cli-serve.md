@@ -26,6 +26,7 @@ suprnova serve [OPTIONS]
 | `--backend-only` | `false` | Skip the Vite dev server |
 | `--frontend-only` | `false` | Skip the backend, just run Vite |
 | `--skip-types` | `false` | Don't regenerate TypeScript types on Rust changes |
+| `--big-integers` | `false` | Type `i64`, `u64`, `i128`, `u128`, `isize` and `usize` as `number \| bigint` on start-up and on every regeneration, as `generate-types --big-integers` does - see [Wide integers](frontend-typescript-types.md#wide-integers) |
 | `--no-restart` | `false` | Don't respawn a crashed dev process - tear the whole session down instead |
 | `--restart-tries <N>` | `5` | Give up retrying a process after this many consecutive crashes. Ignored with `--no-restart`, which already ends the session on the first crash. |
 | `--migrate <WHEN>` | `start` | When `serve` runs the pending migrations: `start` (once, when `serve` starts), `always` (each time the backend starts, so on every save), or `never`. See [Migrations](#migrations). |

@@ -326,8 +326,9 @@ A map key stays `number`: a JSON object key is a string on the wire,
 never a marker, and TypeScript refuses `bigint` as a `Record` key.
 
 When the call sits where the scan does not read, such as another crate,
-pass `--big-integers`. `suprnova serve` regenerates without the flag, so
-it follows the call under `src/` alone.
+pass `--big-integers`. Pass it to `suprnova serve` as well: its start-up
+generation and every regeneration on save then type the wide integers the
+same way.
 
 ## Custom types
 

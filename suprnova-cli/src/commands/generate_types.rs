@@ -2117,16 +2117,10 @@ impl GenerationOutcome {
 ///
 /// If any Rust source cannot be discovered, read, or parsed, generation fails
 /// before the existing output file or its parent directory is touched.
+/// `options` carries what the command line sets: `generate-types` and
+/// `serve` pass the same ones to the first run and to every regeneration
+/// their watchers make.
 pub fn generate_types_to_file(
-    project_path: &Path,
-    output_path: &Path,
-) -> Result<GenerationOutcome, String> {
-    generate_types_to_file_with(project_path, output_path, GenerateOptions::default())
-}
-
-/// [`generate_types_to_file`] with explicit [`GenerateOptions`]: what
-/// `generate-types` runs, flags included.
-pub fn generate_types_to_file_with(
     project_path: &Path,
     output_path: &Path,
     options: GenerateOptions,
@@ -2576,7 +2570,7 @@ pub fn run(output: Option<String>, watch: bool, routes: bool, options: GenerateO
 
     ui::info("Scanning for InertiaProps structs...");
 
-    match generate_types_to_file_with(project_path, &output_path, options) {
+    match generate_types_to_file(project_path, &output_path, options) {
         Ok(outcome) if outcome.count == 0 => {
             ui::warning("No InertiaProps structs found.");
             report_generation(&output_path, &outcome);
@@ -2718,7 +2712,7 @@ fn start_watcher(
 
         if due.rust {
             ui::hint("Detected changes, regenerating types...");
-            match generate_types_to_file_with(&project_path, &output_path, options) {
+            match generate_types_to_file(&project_path, &output_path, options) {
                 Ok(outcome) if outcome.wrote => {
                     ui::success(&format!("Regenerated {} type(s)", outcome.count));
                 }
@@ -2811,7 +2805,7 @@ mod watch_loop_tests {
         while rx.recv_timeout(Duration::from_millis(200)).is_ok() {}
 
         assert_eq!(
-            generate_types_to_file(dir.path(), &out)
+            generate_types_to_file(dir.path(), &out, GenerateOptions::default())
                 .expect("first run")
                 .count,
             1
@@ -3475,13 +3469,15 @@ mod write_if_changed_tests {
         .expect("seed props.rs");
         let out = dir.path().join("frontend/src/types/inertia-props.ts");
 
-        let first_run = generate_types_to_file(dir.path(), &out).expect("first run");
+        let first_run = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("first run");
         assert_eq!(first_run.count, 1);
         assert!(first_run.wrote, "a first run really does write the file");
         let first = fs::read_to_string(&out).expect("read output");
         let before = set_old_mtime(&out);
 
-        let second_run = generate_types_to_file(dir.path(), &out).expect("second run");
+        let second_run = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("second run");
         assert_eq!(second_run.count, 1, "the same struct is still emitted");
         assert!(
             !second_run.wrote,
@@ -3505,7 +3501,8 @@ mod write_if_changed_tests {
         .expect("seed props.rs");
         let out = dir.path().join("frontend/src/types/inertia-props.ts");
 
-        let populated = generate_types_to_file(dir.path(), &out).expect("populated run");
+        let populated = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("populated run");
         assert_eq!(populated.count, 1);
         assert!(populated.wrote);
         assert!(
@@ -3516,7 +3513,8 @@ mod write_if_changed_tests {
 
         fs::write(&props, "pub struct PlainRustType;\n").expect("remove final props derive");
 
-        let emptied = generate_types_to_file(dir.path(), &out).expect("empty run");
+        let emptied = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("empty run");
         assert_eq!(emptied.count, 0);
         assert!(
             emptied.wrote,
@@ -3527,7 +3525,8 @@ mod write_if_changed_tests {
         assert!(!empty_output.contains("HomeProps"));
         let before = set_old_mtime(&out);
 
-        let unchanged = generate_types_to_file(dir.path(), &out).expect("unchanged empty run");
+        let unchanged = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("unchanged empty run");
         assert_eq!(unchanged.count, 0);
         assert!(!unchanged.wrote, "identical empty output is unchanged");
         assert_eq!(mtime(&out), before, "empty rerun must not rewrite");
@@ -3542,7 +3541,8 @@ mod write_if_changed_tests {
         fs::write(&props, "pub struct PlainRustType;\n").expect("seed plain Rust");
         let out = dir.path().join("frontend/src/types/inertia-props.ts");
 
-        let empty = generate_types_to_file(dir.path(), &out).expect("first empty run");
+        let empty = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("first empty run");
         assert_eq!(empty.count, 0);
         assert!(empty.wrote, "a missing artifact must be created");
         assert_eq!(
@@ -3551,7 +3551,8 @@ mod write_if_changed_tests {
         );
         let before = set_old_mtime(&out);
 
-        let unchanged = generate_types_to_file(dir.path(), &out).expect("second empty run");
+        let unchanged = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("second empty run");
         assert_eq!(unchanged.count, 0);
         assert!(!unchanged.wrote);
         assert_eq!(mtime(&out), before);
@@ -3562,7 +3563,8 @@ mod write_if_changed_tests {
         )
         .expect("add props derive");
 
-        let populated = generate_types_to_file(dir.path(), &out).expect("populated run");
+        let populated = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("populated run");
         assert_eq!(populated.count, 1);
         assert!(populated.wrote);
         assert!(
@@ -3588,7 +3590,7 @@ mod write_if_changed_tests {
         fs::write(&out, "// last complete output\n").expect("seed output");
         let before = set_old_mtime(&out);
 
-        let error = match generate_types_to_file(dir.path(), &out) {
+        let error = match generate_types_to_file(dir.path(), &out, GenerateOptions::default()) {
             Err(error) => error,
             Ok(_) => panic!("an incomplete Rust parse must abort generation"),
         };
@@ -3620,7 +3622,7 @@ mod write_if_changed_tests {
         let out = dir.path().join("inertia-props.ts");
         fs::write(&out, "// last complete output\n").expect("seed output");
 
-        let error = match generate_types_to_file(dir.path(), &out) {
+        let error = match generate_types_to_file(dir.path(), &out, GenerateOptions::default()) {
             Err(error) => error,
             Ok(_) => panic!("a Rust source read failure must abort generation"),
         };
@@ -3638,7 +3640,7 @@ mod write_if_changed_tests {
         let output_parent = dir.path().join("frontend/src/types");
         let out = output_parent.join("inertia-props.ts");
 
-        let error = match generate_types_to_file(dir.path(), &out) {
+        let error = match generate_types_to_file(dir.path(), &out, GenerateOptions::default()) {
             Err(error) => error,
             Ok(_) => panic!("a missing src directory must not look like an empty project"),
         };

@@ -1322,6 +1322,7 @@ pub fn run(
     backend_only: bool,
     frontend_only: bool,
     skip_types: bool,
+    type_options: super::generate_types::GenerateOptions,
     no_restart: bool,
     restart_tries: u32,
     timestamps: bool,
@@ -1404,7 +1405,11 @@ pub fn run(
         if !json {
             ui::info("Generating TypeScript types...");
         }
-        match super::generate_types::generate_types_to_file(project_path, &output_path) {
+        match super::generate_types::generate_types_to_file(
+            project_path,
+            &output_path,
+            type_options,
+        ) {
             Ok(outcome) => {
                 if !json {
                     let (empty_hint, notice) =
@@ -1651,7 +1656,7 @@ pub fn run(
     if !skip_types && !frontend_only && has_frontend {
         let shutdown_watcher = manager.shutdown.clone();
         thread::spawn(move || {
-            start_type_watcher(shutdown_watcher, mode);
+            start_type_watcher(shutdown_watcher, mode, type_options);
         });
     }
 
@@ -2153,7 +2158,14 @@ fn start_migration_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
 /// a [`DevEvent::TypesRegenerated`] instead of a suppressed print.
 /// Failure notices stay on stderr unconditionally, same as every other
 /// diagnostic in this file.
-fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
+///
+/// `type_options` are the ones the start-up generation used, so a
+/// regeneration on save writes the same types `--big-integers` asked for.
+fn start_type_watcher(
+    shutdown: Arc<AtomicBool>,
+    mode: OutputMode,
+    type_options: super::generate_types::GenerateOptions,
+) {
     let (tx, rx) = channel();
     let src_path = Path::new("src");
     let lang_path = Path::new("lang");
@@ -2240,7 +2252,11 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
         let due = schedule.due(Instant::now());
 
         if due.rust {
-            match super::generate_types::generate_types_to_file(project_path, &output_path) {
+            match super::generate_types::generate_types_to_file(
+                project_path,
+                &output_path,
+                type_options,
+            ) {
                 Ok(outcome) if outcome.is_reportable_regeneration() => {
                     if mode.is_json() {
                         emit_event(
