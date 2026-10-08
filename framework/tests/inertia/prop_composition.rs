@@ -930,7 +930,9 @@ async fn an_always_merge_prop_keeps_its_value_but_drops_merge_metadata_when_filt
 }
 
 #[tokio::test]
-async fn repeated_match_on_accumulates_into_match_props_on() {
+async fn repeated_match_on_keeps_only_the_last_call_in_match_props_on() {
+    // Each `match_on` call replaces the list, as Laravel's `matchOn`
+    // does (PAR-052); `.match_on(["id", "slug"])` names both at once.
     let resp = InertiaResponse::new("Feed/Index")
         .prop(
             "posts",
@@ -944,10 +946,7 @@ async fn repeated_match_on_accumulates_into_match_props_on() {
         .unwrap();
     let page = page_of(resp).await;
 
-    assert_eq!(
-        names(&page, "matchPropsOn"),
-        vec!["posts.id".to_string(), "posts.slug".to_string()]
-    );
+    assert_eq!(names(&page, "matchPropsOn"), vec!["posts.slug".to_string()]);
 }
 
 // ---- replacement and precedence ----

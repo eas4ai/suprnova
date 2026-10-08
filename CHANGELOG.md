@@ -127,6 +127,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`HasRoles::rbac_model_types()`** names every `model_type` a model's
   role and permission assignments are read under: its `morph_type`, its
   aliases and the Rust type path an earlier release stored.
+- **Merge props merge at nested paths in either direction.**
+  `Prop::append_at(paths, match_on)` and `Prop::prepend_at(paths,
+  match_on)` are Laravel's `append($path, $matchOn)` and
+  `prepend($path, $matchOn)`: they take one path or a list, add
+  `{path}.{match_on}` to `matchPropsOn` when a field is named, and one
+  prop can append at one path and prepend at another, which the single
+  direction of `merge_with_path` could not express.
+  `.append_at(["a.items", "b"], "id")` on a prop `feed` emits
+  `mergeProps: ["feed.a.items", "feed.b"]` and `matchPropsOn:
+  ["feed.a.items.id", "feed.b.id"]`.
 
 ### Changed
 
@@ -329,6 +339,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   key completed before; about 4,800 do now. Acceptance, rejection and
   retry-after answers are unchanged, and no request fails with "rate
   limiter poisoned" any more, since the shard locks do not poison (#148).
+- **`Prop::match_on` replaces the match fields on each call** instead of
+  adding to them, as Laravel's `matchOn` does. `.match_on("x").match_on("y")`
+  emitted `matchPropsOn: ["posts.x", "posts.y"]` and now emits
+  `["posts.y"]`; name several fields in one call with
+  `.match_on(["x", "y"])`.
 
 ### Fixed
 

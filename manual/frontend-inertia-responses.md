@@ -252,7 +252,7 @@ The flags fall into five groups:
 |---|---|---|
 | Visibility | `.always()`, `.optional()`, `.defer()` | Mutually exclusive; the last call wins |
 | Defer detail | `.group(name)`, `.rescue()` | Read only when the prop is deferred |
-| Merge | `.merge()`, `.prepend()`, `.deep_merge()`, `.match_on(fields)`, `.merge_with_path(path)` | How the client folds the value in, and at which path |
+| Merge | `.merge()`, `.prepend()`, `.deep_merge()`, `.append_at(paths, match_on)`, `.prepend_at(paths, match_on)`, `.match_on(fields)`, `.merge_with_path(path)` | How the client folds the value in, and at which path |
 | Client cache | `.once()`, `.as_key(key)`, `.until(ms)`, `.fresh()` | Whether the client keeps the value across navigations |
 | Scroll | `.scroll(metadata)`, `.scroll_wrap(key)` | Infinite-scroll `scrollProps` entry plus unconditional merge metadata; `.scroll_wrap` read only when `.scroll` is set |
 
@@ -328,12 +328,14 @@ and `Deep` take the same `match_on`.
 flags, for when the prop also needs a visibility or cache flag - see
 [Composing flags on one prop](#composing-flags-on-one-prop).
 
-`.match_on` takes one field or several in one call -
-`.match_on(["id", "slug"])` and `.match_on("id").match_on("slug")` emit
-the same `matchPropsOn`.
+`.match_on` takes one field or several in one call
+(`.match_on(["id", "slug"])`). Each call replaces the list, as Laravel's
+`matchOn` does, so `.match_on("id").match_on("slug")` dedupes on `slug`
+alone.
 
 To merge only part of a prop's value instead of the whole thing, name
-the nested field with `.merge_with_path`:
+the nested path with `.append_at` or `.prepend_at` - Laravel's
+`append($path, $matchOn)` and `prepend($path, $matchOn)`:
 
 ```rust
 use suprnova::{InertiaResponse, Prop};
@@ -341,23 +343,40 @@ use serde_json::json;
 
 InertiaResponse::new("Feed/Index").prop(
     "posts",
-    Prop::eager(json!({ "data": next_page, "meta": meta }))
-        .merge()
-        .merge_with_path("data")
-        .match_on("data.id"),
+    Prop::eager(json!({ "data": next_page, "meta": meta })).append_at("data", "id"),
 )
 ```
 
 `mergeProps` now carries `"posts.data"` instead of `"posts"`, so only
 `props.posts.data` folds into what the client already holds -
-`props.posts.meta` is replaced outright, like any non-merge prop. Calls
-accumulate, so a prop with two mergeable fields can name each
-independently. Naming a path turns off root-level merging for that prop
-entirely - a path-merging prop never also merges its whole value.
-`match_on` composes with a path by including the path in the field name
-(`"data.id"`, not `"id"`); the framework doesn't infer it for you.
-`.deep_merge()` ignores `.merge_with_path` - a deep merge already
-recurses into every nested field, so there's nothing a path narrows.
+`props.posts.meta` is replaced outright, like any non-merge prop. The
+second argument names the field to dedupe on at that path and adds
+`"posts.data.id"` to `matchPropsOn`; pass `None` for no dedupe field.
+The first argument takes one path or several:
+`.append_at(["a.items", "b"], "id")` merges at both paths and adds
+`"<key>.a.items.id"` and `"<key>.b.id"`. Calls accumulate, and one prop
+can append at one path and prepend at another:
+
+```rust
+Prop::eager(json!({ "older": older, "newer": newer }))
+    .append_at("older", None)
+    .prepend_at("newer", "id")
+```
+
+That prop emits `mergeProps: ["activity.older"]`,
+`prependProps: ["activity.newer"]` and
+`matchPropsOn: ["activity.newer.id"]` under the key `activity`. Naming a
+path turns off root-level merging for that prop entirely - a
+path-merging prop never also merges its whole value. `.append_at` and
+`.prepend_at` turn merging on by themselves, so the prop needs no
+`.merge()`. A later `.match_on(...)` replaces the fields they added, as
+it does in Laravel. `.deep_merge()` ignores the paths - a deep merge
+already recurses into every nested field, so there's nothing a path
+narrows.
+
+`.merge_with_path(path)` is the older single-path form: it merges at the
+path in the prop's own direction (`.merge()` or `.prepend()`) and adds no
+dedupe field, so pair it with `.match_on("data.id")` yourself.
 
 A merge prop's value can come from a resolver too, via `.merge_lazy` /
 `.merge_lazy_with` - the resolver sibling of `.merge` / `.merge_with`:

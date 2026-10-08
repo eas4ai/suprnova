@@ -1617,32 +1617,7 @@ async fn resolve_props(
             for field in prop.match_on_fields() {
                 metadata.match_props_on.push(format!("{key}.{field}"));
             }
-            let paths = prop.merge_paths();
-            match mode {
-                // A prop merging at one or more nested paths never also
-                // merges its whole value - Laravel's
-                // `MergesProps::mergesAtRoot` (`MergesProps.php:126-129`)
-                // turns root merging off the moment a path is named, so
-                // the two are mutually exclusive per prop, never additive.
-                MergeMode::Append if paths.is_empty() => metadata.merge.push(key.clone()),
-                MergeMode::Append => {
-                    for path in paths {
-                        metadata.merge.push(format!("{key}.{path}"));
-                    }
-                }
-                MergeMode::Prepend if paths.is_empty() => metadata.merge_prepend.push(key.clone()),
-                MergeMode::Prepend => {
-                    for path in paths {
-                        metadata.merge_prepend.push(format!("{key}.{path}"));
-                    }
-                }
-                // Deep merge already recurses into every nested field on
-                // its own, so a path has nothing to narrow - Laravel
-                // excludes deep-merge props from the root/path partition
-                // entirely (`Response.php:590`, `:610`) and always emits
-                // the bare key.
-                MergeMode::Deep => metadata.deep_merge.push(key.clone()),
-            }
+            push_merge_paths(&mut metadata, &key, &prop, mode);
         }
 
         // ---- scroll ----
@@ -2005,6 +1980,44 @@ async fn resolve_props(
     let materialized = dotted::unpack_map(materialized);
 
     Ok((materialized, metadata))
+}
+
+/// Record where a merge prop folds in: its root, or the nested paths it
+/// names, under `mergeProps` / `prependProps` / `deepMergeProps`.
+///
+/// Mirrors Laravel's `collectMergeableMetadata`
+/// (`inertia-laravel-3.5.1/src/PropsResolver.php`): a deep merge always
+/// emits the bare key, since it recurses into every field already; a
+/// prop that names any path never also merges its whole value
+/// (`MergesProps::mergesAtRoot`); and the append and prepend path lists
+/// are separate, so one prop can append at one path and prepend at
+/// another. The paths [`Prop::merge_with_path`] names follow the prop's
+/// root direction.
+fn push_merge_paths(metadata: &mut PageMetadata, key: &str, prop: &Prop, mode: MergeMode) {
+    let following = prop.merge_paths();
+    let (append_following, prepend_following): (&[String], &[String]) = match mode {
+        MergeMode::Deep => {
+            metadata.deep_merge.push(key.to_string());
+            return;
+        }
+        MergeMode::Append => (following, &[]),
+        MergeMode::Prepend => (&[], following),
+    };
+    let appends = prop.append_paths().iter().chain(append_following);
+    let prepends = prop.prepend_paths().iter().chain(prepend_following);
+    if appends.clone().next().is_none() && prepends.clone().next().is_none() {
+        match mode {
+            MergeMode::Prepend => metadata.merge_prepend.push(key.to_string()),
+            _ => metadata.merge.push(key.to_string()),
+        }
+        return;
+    }
+    metadata
+        .merge
+        .extend(appends.map(|path| format!("{key}.{path}")));
+    metadata
+        .merge_prepend
+        .extend(prepends.map(|path| format!("{key}.{path}")));
 }
 
 fn build_page_object(

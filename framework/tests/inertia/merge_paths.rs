@@ -275,7 +275,9 @@ async fn match_on_accepts_an_array_of_fields_in_one_call() {
 }
 
 #[tokio::test]
-async fn match_on_array_call_and_chained_single_calls_accumulate_together() {
+async fn match_on_array_call_after_a_single_call_replaces_it() {
+    // Each `match_on` call replaces the list, as Laravel's `matchOn`
+    // does (PAR-052), so the earlier `id` is gone.
     let resp = InertiaResponse::new("Feed/Index")
         .prop(
             "posts",
@@ -291,11 +293,7 @@ async fn match_on_array_call_and_chained_single_calls_accumulate_together() {
 
     assert_eq!(
         names(&page, "matchPropsOn"),
-        vec![
-            "posts.id".to_string(),
-            "posts.slug".to_string(),
-            "posts.uuid".to_string(),
-        ]
+        vec!["posts.slug".to_string(), "posts.uuid".to_string()]
     );
 }
 

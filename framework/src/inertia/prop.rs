@@ -432,6 +432,13 @@ pub struct Prop {
     /// root. Read only when `merge` is [`Some`]; ignored on
     /// [`MergeMode::Deep`], which already recurses into every field.
     merge_paths: Vec<String>,
+    /// Nested paths that append whatever the root direction is, set by
+    /// [`append_at`](Self::append_at). Laravel keeps this list apart
+    /// from the prepend one (`MergesProps::$appendsAtPaths`), so one
+    /// prop can append at one path and prepend at another.
+    append_paths: Vec<String>,
+    /// Nested paths that prepend, set by [`prepend_at`](Self::prepend_at).
+    prepend_paths: Vec<String>,
     once: bool,
     /// Read only when `once` is set.
     once_key: Option<String>,
@@ -477,6 +484,12 @@ impl std::fmt::Debug for Prop {
         }
         if !self.merge_paths.is_empty() {
             s.field("merge_paths", &self.merge_paths);
+        }
+        if !self.append_paths.is_empty() {
+            s.field("append_paths", &self.append_paths);
+        }
+        if !self.prepend_paths.is_empty() {
+            s.field("prepend_paths", &self.prepend_paths);
         }
         if self.once {
             s.field("once_key", &self.once_key)
@@ -541,6 +554,43 @@ impl<T: Into<String>> MatchOnFields for Vec<T> {
     }
 }
 
+/// One or more nested merge paths - what [`Prop::append_at`] and
+/// [`Prop::prepend_at`] accept.
+///
+/// A single string names one path (`"data"`); an array or `Vec` names
+/// several in one call (`["a.items", "b"]`), Laravel's
+/// `append(string|array $path)`. Closed over whole-string shapes for the
+/// same reason as [`MatchOnFields`]: an `IntoIterator` bound would let a
+/// bare `&str` iterate as characters.
+pub trait MergePaths {
+    /// Consume `self` into the paths to merge at, in order.
+    fn into_merge_paths(self) -> Vec<String>;
+}
+
+impl MergePaths for &str {
+    fn into_merge_paths(self) -> Vec<String> {
+        vec![self.to_string()]
+    }
+}
+
+impl MergePaths for String {
+    fn into_merge_paths(self) -> Vec<String> {
+        vec![self]
+    }
+}
+
+impl<T: Into<String>, const N: usize> MergePaths for [T; N] {
+    fn into_merge_paths(self) -> Vec<String> {
+        self.into_iter().map(Into::into).collect()
+    }
+}
+
+impl<T: Into<String>> MergePaths for Vec<T> {
+    fn into_merge_paths(self) -> Vec<String> {
+        self.into_iter().map(Into::into).collect()
+    }
+}
+
 impl Prop {
     fn with_source(source: PropSource) -> Self {
         Self {
@@ -551,6 +601,8 @@ impl Prop {
             merge: None,
             match_on: Vec::new(),
             merge_paths: Vec::new(),
+            append_paths: Vec::new(),
+            prepend_paths: Vec::new(),
             once: false,
             once_key: None,
             expires_at: None,
@@ -709,8 +761,9 @@ impl Prop {
     /// To dedupe array elements at that nested path too, include the
     /// path in the [`match_on`](Self::match_on) field name yourself -
     /// `.merge_with_path("data").match_on("data.id")` emits
-    /// `matchPropsOn: ["<key>.data.id"]`. This does not infer the prefix
-    /// for you, unlike Laravel's two-argument `append('data', 'id')`.
+    /// `matchPropsOn: ["<key>.data.id"]` - or reach for
+    /// [`append_at`](Self::append_at), Laravel's two-argument
+    /// `append('data', 'id')`, which adds the prefixed field for you.
     ///
     /// Silently inert on a [`scroll`](Self::scroll) prop: a scroll prop's
     /// merge instruction is computed by a separate code path that reads
@@ -726,17 +779,76 @@ impl Prop {
 
     /// Name the field(s) the client dedupes array elements on, so a
     /// refetch that overlaps the current window replaces matching rows
-    /// in place rather than appending copies. Emitted as `matchPropsOn`.
+    /// in place rather than appending copies. Emitted as `matchPropsOn`,
+    /// each field as `{key}.{field}`.
     ///
     /// Takes one field (`.match_on("id")`) or several in one call
-    /// (`.match_on(["id", "slug"])`) - see [`MatchOnFields`]. Calls also
-    /// accumulate, so `.match_on("id").match_on("slug")` and
-    /// `.match_on(["id", "slug"])` emit the same `matchPropsOn`. The
-    /// client uses the **first** entry whose path prefix matches a given
-    /// merge path (`inertia-3.6.1/packages/core/src/response.ts:534-543`),
-    /// so give each path at most one field.
+    /// (`.match_on(["id", "slug"])`) - see [`MatchOnFields`]. Each call
+    /// **replaces** the list, as Laravel's `matchOn` does (`Arr::wrap`),
+    /// so `.match_on("x").match_on("y")` dedupes on `y` alone; a ported
+    /// app chaining it expects that. It also replaces the fields
+    /// [`append_at`](Self::append_at) and [`prepend_at`](Self::prepend_at)
+    /// added, which Laravel's two-argument `append` stores in the same
+    /// list. The client uses the **first** entry whose path prefix
+    /// matches a given merge path
+    /// (`inertia-3.8.0/packages/core/src/response.ts:547-551`), so give
+    /// each path at most one field.
     pub fn match_on(mut self, fields: impl MatchOnFields) -> Self {
-        self.match_on.extend(fields.into_match_on_fields());
+        self.match_on = fields.into_match_on_fields();
+        self
+    }
+
+    /// Append the incoming items at one or more nested paths of this
+    /// prop's value instead of its root, each optionally deduped on a
+    /// field. Laravel's `append($path, $matchOn)`
+    /// (`inertia-laravel-3.5.1/src/MergesProps.php`).
+    ///
+    /// `paths` is one path or several (see [`MergePaths`]);
+    /// `.append_at(["a.items", "b"], "id")` emits `mergeProps:
+    /// ["<key>.a.items", "<key>.b"]` and adds `"<key>.a.items.id"` and
+    /// `"<key>.b.id"` to `matchPropsOn`. Pass `None` for no dedupe
+    /// field. Calls accumulate, and combine with
+    /// [`prepend_at`](Self::prepend_at) on the same prop. A prop that
+    /// names any path stops merging at its root, as Laravel's
+    /// `mergesAtRoot` does.
+    ///
+    /// Turns merging on when no merge flag is set yet, so
+    /// `Prop::lazy(..).append_at("data", None)` needs no `.merge()`. On a
+    /// [`deep_merge`](Self::deep_merge) prop the paths are ignored: deep
+    /// merge recurses into every field already, and Laravel emits the
+    /// bare key under `deepMergeProps` for one.
+    pub fn append_at<'a>(
+        mut self,
+        paths: impl MergePaths,
+        match_on: impl Into<Option<&'a str>>,
+    ) -> Self {
+        let match_on = match_on.into();
+        self.merge.get_or_insert(MergeMode::Append);
+        for path in paths.into_merge_paths() {
+            push_path_match(&mut self.match_on, &path, match_on);
+            self.append_paths.push(path);
+        }
+        self
+    }
+
+    /// Prepend the incoming items at one or more nested paths of this
+    /// prop's value, each optionally deduped on a field. Laravel's
+    /// `prepend($path, $matchOn)`; the mirror of
+    /// [`append_at`](Self::append_at), emitted under `prependProps`.
+    ///
+    /// [`prepend`](Self::prepend) with no path stays the root-level form,
+    /// Laravel's `prepend()` with no argument.
+    pub fn prepend_at<'a>(
+        mut self,
+        paths: impl MergePaths,
+        match_on: impl Into<Option<&'a str>>,
+    ) -> Self {
+        let match_on = match_on.into();
+        self.merge.get_or_insert(MergeMode::Append);
+        for path in paths.into_merge_paths() {
+            push_path_match(&mut self.match_on, &path, match_on);
+            self.prepend_paths.push(path);
+        }
         self
     }
 
@@ -923,6 +1035,16 @@ impl Prop {
     /// The paths named by [`merge_with_path`](Self::merge_with_path), in call order.
     pub fn merge_paths(&self) -> &[String] {
         &self.merge_paths
+    }
+
+    /// The paths named by [`append_at`](Self::append_at), in call order.
+    pub fn append_paths(&self) -> &[String] {
+        &self.append_paths
+    }
+
+    /// The paths named by [`prepend_at`](Self::prepend_at), in call order.
+    pub fn prepend_paths(&self) -> &[String] {
+        &self.prepend_paths
     }
 
     /// Whether the client caches this prop across navigations.
@@ -1306,6 +1428,15 @@ impl PartialFilter {
     }
 }
 
+/// Add Laravel's `{path}.{match_on}` dedupe field for a path that
+/// [`Prop::append_at`] or [`Prop::prepend_at`] named. An empty field
+/// adds nothing, as PHP's falsy `''` does.
+fn push_path_match(match_on: &mut Vec<String>, path: &str, field: Option<&str>) {
+    if let Some(field) = field.filter(|f| !f.is_empty()) {
+        match_on.push(format!("{path}.{field}"));
+    }
+}
+
 /// `Some(rest)` when `entry` names a dotted path *inside* `key` - `key`
 /// followed by `.` and at least one more segment. `None` for an exact
 /// match (`entry == key`, handled separately by callers) and for an
@@ -1597,16 +1728,17 @@ mod tests {
     }
 
     #[test]
-    fn match_on_accumulates_in_call_order() {
+    fn match_on_replaces_the_list_on_each_call() {
+        // Laravel's `matchOn` sets the list (`Arr::wrap`), PAR-052.
         let p = Prop::eager(json!(1))
             .merge()
             .match_on("id")
             .match_on("slug");
-        assert_eq!(p.match_on_fields(), ["id".to_string(), "slug".to_string()]);
+        assert_eq!(p.match_on_fields(), ["slug".to_string()]);
     }
 
     #[test]
-    fn match_on_accepts_an_array_in_one_call_and_still_chains_with_single_calls() {
+    fn match_on_accepts_an_array_in_one_call_and_a_later_call_replaces_it() {
         let p = Prop::eager(json!(1)).merge().match_on(["id", "slug"]);
         assert_eq!(p.match_on_fields(), ["id".to_string(), "slug".to_string()]);
 
@@ -1616,7 +1748,21 @@ mod tests {
             .match_on(["slug", "uuid"]);
         assert_eq!(
             p.match_on_fields(),
-            ["id".to_string(), "slug".to_string(), "uuid".to_string()]
+            ["slug".to_string(), "uuid".to_string()]
+        );
+    }
+
+    #[test]
+    fn inp_append_at_and_prepend_at_keep_separate_path_lists_and_prefixed_fields() {
+        let p = Prop::eager(json!(1))
+            .append_at(["a", "b"], "id")
+            .prepend_at("c", None);
+        assert_eq!(p.merge_mode(), Some(MergeMode::Append));
+        assert_eq!(p.append_paths(), ["a".to_string(), "b".to_string()]);
+        assert_eq!(p.prepend_paths(), ["c".to_string()]);
+        assert_eq!(
+            p.match_on_fields(),
+            ["a.id".to_string(), "b.id".to_string()]
         );
     }
 

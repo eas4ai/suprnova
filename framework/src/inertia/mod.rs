@@ -30,6 +30,7 @@ pub use error_page_middleware::InertiaErrorPageMiddleware;
 pub use facade::Inertia;
 pub use headers_middleware::InertiaHeadersMiddleware;
 pub use manifest::{ManifestEntry, ResolvedAssets, ViteManifest};
+pub use prop::MergePaths;
 pub use prop::{
     DeferOptions, InertiaRequestExt, MatchOnFields, MergeMode, MergeStrategy, OnceOptions,
     PartialFilter, Prop, PropFuture, PropResolver, ProvidesScrollMetadata, ScrollMetadata,
