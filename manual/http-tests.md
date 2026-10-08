@@ -7,7 +7,9 @@ feature tests with `$this->get('/users')` and asserted on
 `$response->status()`, this is the Suprnova equivalent: the same
 `Router` you mount in production runs in the test, every middleware
 fires, the panic boundary still catches, and the response is
-byte-for-byte what a real client sees.
+byte-for-byte what a real client sees. `suprnova::testing::TestClient`
+drives that pipeline for you, with no port and no harness to copy; see
+[The test client](#the-test-client).
 
 ## The test surface
 
@@ -31,6 +33,105 @@ that swaps a quieter pipeline in.
 want to assert on `Request::ip()` resolution without setting up proxy
 headers.
 
+## The test client
+
+`suprnova::testing::TestClient` is the one client every HTTP test can
+reach for, as Laravel's `$this->get('/users')` is. Build it from the
+same router and middleware registry you would pass to `handle_request`,
+send requests, and assert on the `TestResponse` each one returns:
+
+```rust
+use serde_json::json;
+use suprnova::testing::TestClient;
+use suprnova::{HttpResponse, MiddlewareRegistry, Request, Router};
+
+#[tokio::test]
+async fn greets_and_creates_a_user() {
+    let router = Router::new()
+        .get("/", |_req: Request| async { suprnova::http::text("hello") })
+        .post("/users", |req: Request| async move {
+            let body: serde_json::Value = req.json().await.map_err(HttpResponse::from)?;
+            Ok(HttpResponse::json(json!({ "created": body["name"] })))
+        });
+    let client = TestClient::new(router, MiddlewareRegistry::new());
+
+    client.get("/").send().await.assert_ok().assert_see("hello");
+
+    client
+        .post("/users")
+        .json(&json!({ "name": "Ada" }))
+        .send()
+        .await
+        .assert_ok()
+        .assert_json(json!({ "created": "Ada" }));
+}
+```
+
+`get`, `post`, `put`, `patch`, `delete`, and `send(Method, path)` for any
+other method start a `TestRequest`. Before `.send().await`, add to it
+with `header(name, value)`, which replaces a header of the same name,
+`json(&body)`, `form(&pairs)`, `inertia()`, which sends an Inertia
+visit's headers (see [Testing Inertia responses](#testing-inertia-responses)),
+and `inertia_version(version)`. A request gets `Host: localhost` unless
+you set one.
+
+The client takes care of what a hand-written harness does by hand:
+
+- **No port.** Each request opens an in-memory connection
+  (`tokio::io::duplex`): the server half hands the parsed request to
+  `handle_request`, and the client half sends it. Both halves run in the
+  task that awaits `send()`, so a `TestContainer::fake()` or
+  `TestContainer::scope` the test set up is the container the request
+  sees.
+- **Cookies.** The client keeps every cookie a response sets and sends
+  them on its next request, and it drops a cookie a response expires, so
+  a session one request starts is the next request's session. A clone of
+  the client shares its cookies.
+- **The error report.** Each response keeps the `ErrorReport` the
+  framework attached, as `TestResponse::from_response` does; see
+  [See why a request failed](#see-why-a-request-failed).
+- **The session store.** `with_session_store(store, cookie_name)` gives
+  every response the store, so `assert_session_has` reads the session
+  with nothing attached per response. A request that leaves the session
+  unchanged sets no cookie; the lookup then uses the cookie the client
+  carries.
+- **A timeout.** A request that doesn't answer within 10 seconds panics
+  naming its method and path. `timeout(duration)` changes the limit.
+
+A session carried across requests:
+
+```rust
+use suprnova::session::{SessionConfig, SessionMiddleware};
+
+let session = SessionMiddleware::new(SessionConfig::default());
+let store = session.store();
+let client = TestClient::new(router, MiddlewareRegistry::new().append(session))
+    .with_session_store(store, "suprnova_session");
+
+client.post("/cart").form(&[("sku", "A-1")]).send().await.assert_redirect(Some("/cart"));
+client
+    .get("/cart")
+    .send()
+    .await
+    .assert_ok()
+    .assert_session_has("cart_sku", "A-1")
+    .await;
+```
+
+To test the whole application, build the registry the way it does:
+call its bootstrap's middleware registration, then pass
+`MiddlewareRegistry::from_global()`. The dogfood app's
+`app/tests/inertia_test_client.rs` does exactly that.
+
+### Why Suprnova diverges
+
+Laravel's test client hands the request object to the kernel in the
+same process. Suprnova's request path takes hyper's `Incoming` body,
+which only a hyper connection produces, so the client still speaks
+HTTP/1.1, over memory instead of a socket. A request is a builder you
+finish with `.send().await` rather than a call that takes the headers as
+arguments, because it is asynchronous.
+
 ## The hyper body problem
 
 The one wrinkle worth knowing about up front: `handle_request` takes a
@@ -39,14 +140,16 @@ internal streaming body type; you cannot construct one with
 `Full::new(bytes)` or any of the in-memory body types. It only comes
 out of a hyper connection.
 
-There are two clean ways around it:
+There are three clean ways around it:
 
-1. **TCP loopback** - bind a `127.0.0.1:0` listener, serve one
+1. **An in-memory connection** - what `TestClient` does: a
+   `tokio::io::duplex` pipe with a hyper server on one end and a hyper
+   client on the other. Reach for this first.
+2. **TCP loopback** - bind a `127.0.0.1:0` listener, serve one
    accept inside a `service_fn`, send the request through a hyper
    client, and let `Incoming` be produced naturally on the server
-   side. This is what every integration test in the framework
-   already does.
-2. **In-process Request building** - for tests that only need to
+   side. Many of the framework's own integration tests still do this.
+3. **In-process Request building** - for tests that only need to
    inspect `Request` accessors (headers, route params, IP, JSON
    parsing) without going through routing, use the same TCP-loopback
    capture pattern but with a service that pulls the `Request` out
@@ -54,7 +157,7 @@ There are two clean ways around it:
    `framework/tests/http/request_accessors.rs` file has this
    `build_request()` helper verbatim.
 
-Both patterns produce real `Incoming` bodies. The loopback is local,
+All three produce real `Incoming` bodies. The loopback is local,
 synchronous in test wall-clock terms (microseconds), and never touches
 the network outside `lo`. There is no slower or simpler way that
 preserves the contract.
@@ -164,8 +267,9 @@ async fn get_root_returns_hello() {
 }
 ```
 
-That's the entire shape. Copy the two helpers per crate, tune them
-for the suite (multiple accepts, header capture, body capture). The
+That's the entire shape, and `TestClient` is the same test in two
+lines. When a suite needs the socket itself, copy the two helpers per
+crate and tune them (multiple accepts, header capture, body capture). The
 framework itself uses near-identical helpers in
 `framework/tests/cors/middleware.rs`,
 `framework/tests/middleware/panic_safety.rs`, and
@@ -482,20 +586,31 @@ exists.
 
 ## Testing Inertia responses
 
-`suprnova::testing::AssertableInertia` wraps an Inertia page object -
-whether it came back as an `X-Inertia` JSON body or embedded in a
-hard-navigation HTML shell - in the same fluent, panic-on-failure style
-as `TestResponse`. Laravel's `Inertia\Testing\AssertableInertia`
-equivalent.
+`suprnova::testing::AssertableInertia` wraps an Inertia page object in
+the same fluent, panic-on-failure style as `TestResponse`. It is
+Laravel's `Inertia\Testing\AssertableInertia`.
 
-Two ways to get one. From a `TestResponse` that already went through a
-real `X-Inertia: true` visit:
+`TestResponse::assert_inertia()` reads the page from either shape a page
+response takes: the JSON page object of an Inertia visit, which carries
+`X-Inertia: true`, or the HTML document of a first visit, whose
+`<script type="application/json" data-page=...>` element holds the page
+whatever id `InertiaConfig::mount_id` gave it (`app` by default). The
+`inertia()` request method sends the headers an Inertia visit sends:
+`X-Inertia: true`, its `Accept`, and `X-Inertia-Version` set to the
+installed configuration's asset version, or the empty string with none
+installed.
 
 ```rust
-use suprnova::testing::TestResponse;
+use suprnova::testing::TestClient;
 
-let response = TestResponse::new(status, headers, body);
-response
+let client = TestClient::new(router, MiddlewareRegistry::new());
+
+// An Inertia visit: the JSON page object.
+client
+    .get("/users")
+    .inertia()
+    .send()
+    .await
     .assert_inertia()
     .component("Users/Index")
     .url("/users")
@@ -503,13 +618,29 @@ response
     .where_("users.0.name", "Ada")
     .count("users", 1)
     .missing("admin_only_field");
+
+// A first visit: the HTML document.
+client.get("/users").send().await.assert_inertia().component("Users/Index");
 ```
 
-Or directly from an `HttpResponse` - what `InertiaResponse::resolve`
-returns - for a test that drives the response pipeline without a
-socket. This form handles both shapes: an `X-Inertia` JSON body, or the
-HTML document's embedded `<script type="application/json" data-page=...>`
-element, whatever id `InertiaConfig::mount_id` gave it (`app` by default):
+`assert_inertia_with(callback)` runs the callback over the page and
+returns the response, so response assertions chain after the page's:
+
+```rust
+client
+    .get("/users")
+    .inertia()
+    .send()
+    .await
+    .assert_inertia_with(|page| {
+        page.component("Users/Index").has("users");
+    })
+    .assert_ok();
+```
+
+For a test that drives the response pipeline without a request,
+`AssertableInertia::from_response` reads the same two shapes from an
+`HttpResponse`, the type `InertiaResponse::resolve` returns:
 
 ```rust
 use suprnova::testing::AssertableInertia;
@@ -533,79 +664,218 @@ frontend:
 response.assert_inertia().version("");
 ```
 
-`has_flash(key, expected)` reads the page's flash data the same
-dot-path way `has` / `where_` reads props - `expected` is an `Option`,
-so pass `None::<serde_json::Value>` to check presence only:
+### The page file behind a component
+
+With an Inertia configuration installed (`Inertia::install`),
+`component(name)` also checks that `name` has a page file under the
+configuration's `pages_dir` with one of its `page_extensions`, the
+lookup `InertiaConfig::ensure_pages_exist` does at render time. A test
+asserting a component nobody built fails with
+`Inertia page component file [Name] does not exist.`, the directory, and
+the extensions it tried, instead of passing while the browser shows a
+blank page. With no configuration installed there is no directory to
+look in, and nothing is checked.
+
+`InertiaConfig::testing_ensure_pages_exist(false)` turns the check off,
+and `component_exists(name, should_exist)` decides it for one
+assertion: `false` compares the name only, and `true` checks the file
+even when the configuration turned the check off.
 
 ```rust
-response.assert_inertia().has_flash("toast.message", Some(serde_json::json!("Saved!")));
-response.assert_inertia().has_flash("toast", None::<serde_json::Value>);
+page.component_exists("Reports/Draft", false); // no page file yet, on purpose
+```
+
+### Asserting on props
+
+Every prop assertion takes a dot path, where a numeric segment indexes
+an array (`"users.0.name"`), and returns `&Self`:
+
+| Assertion | Passes when |
+|---|---|
+| `has(path)`, `has_all(paths)`, `has_any(paths)` | The prop exists; every one exists; at least one exists |
+| `missing(path)`, `missing_all(paths)` | No prop exists there; at none of them |
+| `where_(path, value)`, `where_not(path, value)`, `where_all(pairs)` | The prop equals the value; exists and differs; every pair matches |
+| `where_null(path)`, `where_not_null(path)` | The prop exists and is `null`; exists and is not |
+| `where_type(path, types)`, `where_all_type(pairs)` | The prop has one of the types, joined by `\|` (`"integer\|null"`) |
+| `where_contains(path, value)` | An array prop holds the value, or each value of an array; any other prop equals it |
+| `count(path, n)`, `count_between(path, min, max)` | The array or object has `n` elements; from `min` to `max` |
+
+`where_type` takes the names Laravel compares PHP's `gettype` against:
+`string`, `integer` (a number without a fraction), `double` (a number
+with one), `boolean`, `array` (a JSON array or object), and `null`. Any
+other name fails the assertion rather than matching nothing.
+
+`prop(path)` reads a value without asserting, `Null` for a path that
+resolves to nothing.
+
+### Scoping into nested props
+
+`scope(path, callback)` runs the callback over the object or array at
+`path` as its own `AssertableInertia`. `has_with(path, callback)` asserts
+the prop exists first. `first(callback)` and `each(callback)` scope onto
+the first element and onto every element of the current level, and fail
+when there is none. `has_count_with(path, n, callback)` asserts the
+count, then scopes onto the first element:
+
+```rust
+response.assert_inertia_with(|page| {
+    page.component("Users/Show")
+        .scope("user", |user| {
+            user.where_("name", "Ada")
+                .where_type("id", "integer")
+                .missing("password")
+                .etc();
+        })
+        .has_count_with("posts", 2, |post| {
+            post.where_type("id", "integer").has("title");
+        });
+});
+```
+
+A scope fails when its callback returns with a prop no assertion
+touched, and names the props. Every assertion touches the first segment
+of its path. That is how a test notices a page that starts sending a
+field nobody asserted on, such as a user's email. Call `etc()` in a
+scope to allow the props you didn't name. The page's top level never
+checks. A failure inside a scope names the full path (`user.name`), and
+a scope keeps the page's component, url, version, and flash.
+
+### Flash data, the whole page, and big integers
+
+`has_flash(key, expected)` reads the page's flash data the same dot-path
+way `has` and `where_` read props. `expected` is an `Option`, so pass
+`None::<serde_json::Value>` to check presence only. `missing_flash(key)`
+asserts a key is absent.
+
+```rust
+let page = response.assert_inertia();
+page.has_flash("toast.message", Some(serde_json::json!("Saved!")))
+    .has_flash("toast", None::<serde_json::Value>)
+    .missing_flash("error");
+```
+
+A handler that flashes and redirects (`Inertia::flash`) leaves the data
+in the session for the page after the redirect, and the redirect itself
+carries no page. `assert_inertia_flash(key, expected)` and
+`assert_inertia_flash_missing(key)` read it from the session through the
+store the client was given, as `assert_session_has` does:
+
+```rust
+let saved = client.post("/posts").form(&[("title", "Hello")]).send().await;
+
+saved
+    .assert_redirect(Some("/posts"))
+    .assert_inertia_flash("toast", Some("Saved"))
+    .await
+    .assert_inertia_flash_missing("error")
+    .await;
+```
+
+`TestResponse::inertia_page()` returns the whole page as a
+`serde_json::Value` (`component`, `props`, `url`, `version`, `flash`,
+and `encryptHistory` and `clearHistory` only when the page set them),
+which `AssertableInertia::to_page()` returns too. `inertia_props(None)`
+returns the props, and `inertia_props(Some("user.name"))` returns one
+value, `Null` when the path resolves to nothing.
+`encrypt_history()` and `clear_history()` read the two flags.
+
+A page rendered with `preserve_big_integers(true)` sends every integer
+beyond JavaScript's safe range (2^53 - 1) as `{"$bigint": "<digits>"}`.
+The assertions decode the markers first, so you compare against the
+integer the handler rendered:
+
+```rust
+response.assert_inertia().where_("id", 9007199254740993_i64);
 ```
 
 ### Reloading for partial-reload and deferred-props assertions
 
-`reload_only`, `reload_except`, and `load_deferred_props` mirror what
-the Inertia client does after the initial visit: reissue the same page
-as a partial reload and check what came back. Because Suprnova's HTTP
-tests cross a real socket and every test file owns its own harness (see
-[Where each piece lives](#where-each-piece-lives) below), these methods
-carry no built-in transport - attach one with `with_reload`, a closure
-from a `ReloadRequest` (the url, component, version, and partial-reload
-keys to send) to a future producing the reloaded `AssertableInertia`:
+A page from a `TestClient` response reloads through that client, with
+its cookies, the way the Inertia client reloads after the first visit.
+Each reload asserts it landed on the same component, url, and version,
+and returns the reloaded page, which reloads again the same way:
 
 ```rust
-use suprnova::testing::TestResponse;
+let page = client.get("/users").inertia().send().await.assert_inertia();
 
-let assertable = TestResponse::new(status, headers, body)
-    .assert_inertia()
-    .with_reload(move |reload| {
-        async move {
-            let header_pairs = reload.headers();
-            let headers: Vec<(&str, &str)> = header_pairs
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            let (status, headers, body) = request(addr, "GET", &reload.url, &headers).await;
-            TestResponse::new(status, headers, body).assert_inertia()
-        }
-    });
+// A full reload: no partial-reload header.
+page.reload().await.has("users");
 
-// Requests only `users`, and asserts the reload landed on the same
-// component/url/version and that `users` came back.
-assertable.reload_only(["users"]).await;
+// Requests only `users`, and asserts it came back.
+page.reload_only(["users"]).await;
 
-// Requests everything except `stats`, and asserts `stats` is absent.
-assertable.reload_except(["stats"]).await;
+// Requests everything except `stats`, and asserts it is absent.
+page.reload_except(["stats"]).await;
 
-// Reads `deferredProps` off the original page, requests every deferred
-// key in one partial reload, and asserts they all came back.
-assertable.load_deferred_props().await;
+// Requests the props of the `stats` deferred group only.
+page.load_deferred_props_of(["stats"]).await.has("stats");
+
+// Requests every deferred group in one partial reload.
+page.load_deferred_props().await;
 ```
 
-Calling any of the three without `with_reload` first panics with that
-instruction. A reload's result carries the same reloader forward, so a
-second `.reload_only(...).await` off it works without reattaching one.
+`reload_with`, `reload_only_with`, `reload_except_with`, and
+`load_deferred_props_with` take a callback over the reloaded page:
+
+```rust
+page.load_deferred_props_with(["stats"], |reloaded| {
+    reloaded.where_("stats.total", 25);
+})
+.await;
+```
+
+`load_deferred_props_of` fails naming a group the page doesn't defer, so
+a typo can't request nothing and pass.
+
+A test that drives requests through its own harness attaches the replay
+with `with_reload`, a closure from a `ReloadRequest` (the url,
+component, version, and partial-reload keys to send) to a future that
+produces the reloaded page. It replaces the client's own on a client
+response too:
+
+```rust
+let page = TestResponse::new(status, headers, body)
+    .assert_inertia()
+    .with_reload(move |reload| async move {
+        let header_pairs = reload.headers();
+        let headers: Vec<(&str, &str)> = header_pairs
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let (status, headers, body) = request(addr, "GET", &reload.url, &headers).await;
+        TestResponse::new(status, headers, body).assert_inertia()
+    });
+
+page.reload_only(["users"]).await;
+```
+
+`ReloadRequest::headers()` sends `X-Inertia` and `X-Inertia-Version`
+always, and `X-Inertia-Partial-Component` with `X-Inertia-Partial-Data`
+or `X-Inertia-Partial-Except` only when the reload names keys. A page
+with neither a client nor `with_reload` panics on a reload with that
+instruction.
 
 ### Why Suprnova diverges
 
-Laravel's `ReloadRequest` reissues the request through the same
-in-process PHP kernel the original test used - one test client, always
-available. Suprnova's HTTP tests drive a real hyper/TCP loopback and
-each test file defines its own `spawn_server` / `request` pair (see
-[Where each piece lives](#where-each-piece-lives) below), so there is
-no single client `AssertableInertia` could reach for - `with_reload`
-makes that explicit instead of hardcoding a harness a differently
-shaped test file couldn't use. `component()` also skips Laravel's
-page-component file-existence check (`view-finder`) - a component
-reached through `Router::inertia` or a hand-rolled
-`InertiaResponse::new(name)` is a runtime string with no file to check;
-Suprnova's compile-time equivalent is the `inertia_response!` macro
-(see [Inertia Responses](frontend-inertia-responses.md)). Its method
-names also diverge from `TestResponse`'s: `component`, `has`,
-`missing`, `where_`, `count`, and `has_flash` drop the `assert_` prefix
-entirely, matching Laravel's `Inertia\Testing\AssertableInertia`, whose
-equivalent methods are bare the same way - the panic-on-failure contract
-is identical either way, without the `assert_` visual cue.
+- Laravel's optional callback arguments are `_with` siblings here:
+  `assert_inertia_with`, `reload_with`, `reload_only_with`,
+  `reload_except_with`, `load_deferred_props_with`, `has_with`, and
+  `has_count_with`. Laravel's `component($name, $shouldExist)` is
+  `component_exists`, and `loadDeferredProps($groups)` is
+  `load_deferred_props_of`. Rust has no optional arguments.
+- `where` is a Rust keyword, so the assertion is `where_`. The
+  assertions drop the `assert_` prefix of `TestResponse`'s, as Laravel's
+  `AssertableInertia` does; the panic-on-failure contract is the same.
+- The page's top level never checks that every prop was touched.
+  Laravel's `assertInertia` doesn't either, where `AssertableJson` used
+  through `assertJson(fn)` does; scopes check in both.
+- A reload returns the reloaded page, where Laravel's returns the
+  original, so you can chain assertions and further reloads off it.
+- `load_deferred_props_of` fails for a group the page doesn't defer,
+  where Laravel requests no props and passes.
+- `assert_inertia_flash` is `async` and reads the session through the
+  attached store, since the session lives behind the server, not in the
+  test's process memory.
 
 ## Testing middleware
 
@@ -931,15 +1201,17 @@ assert_eq!(req.ip(), Some("192.168.1.10".parse().unwrap()));
 A short list of footguns that catch first-time authors:
 
 - **`Incoming` is server-side only.** You cannot build one in your test.
-  The TCP loopback (or in-process service capture) is the only path -
-  there is no "build a `Request` from a `Vec<u8>` body" constructor.
+  A hyper connection (`TestClient`'s in-memory one, the TCP loopback,
+  or in-process service capture) is the only path - there is no "build
+  a `Request` from a `Vec<u8>` body" constructor.
 - **Don't share state between tests.** Each `#[tokio::test]` gets its
   own runtime; cross-test pollution usually means you're sharing a
   global (`once_cell`, `lazy_static`, env var). For DB state see
   `TestDatabase` in [Testing](testing.md).
-- **Cookies need a real client.** No automatic cookie jar - thread
-  `Set-Cookie` from one response into `Cookie` on the next. See
-  `framework/tests/auth/http_middleware.rs` for the pattern.
+- **Cookies need a client that keeps them.** `TestClient` carries them
+  from one request to the next. A hand-written harness has no cookie
+  jar - thread `Set-Cookie` from one response into `Cookie` on the
+  next. See `framework/tests/auth/http_middleware.rs` for the pattern.
 - **The post-response termination spawn is non-blocking.** If you
   want to assert on side effects that run via `Terminable`, poll
   for them - the response returns to the client before the hook runs.
@@ -951,7 +1223,8 @@ A short list of footguns that catch first-time authors:
 | `handle_request`, `handle_request_with_peer` | `framework/src/server.rs` |
 | `Request::new`, `with_params`, `with_route_pattern`, `with_peer_addr` | `framework/src/http/request.rs` |
 | `MiddlewareRegistry::new`, `append`, `prepend` | `framework/src/middleware/registry.rs` |
-| Loopback test harness (canonical) | `framework/tests/cors/middleware.rs` |
+| `TestClient`, `TestRequest` (in-memory connection, cookies, reloads) | `framework/src/testing/client.rs` |
+| Loopback test harness (for a test that needs the socket) | `framework/tests/cors/middleware.rs` |
 | `TestResponse` (fluent assertions over the triple above) | `framework/src/testing/response.rs` |
 | `ErrorReport` (what went wrong, kept in process) | `framework/src/error/report.rs` |
 | `AssertableInertia`, `ReloadRequest` (fluent Inertia page-object assertions) | `framework/src/testing/inertia.rs` |

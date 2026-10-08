@@ -6,6 +6,7 @@
 //! - `TestDatabase` for isolated database tests
 //! - `TestContainer` for dependency injection in tests
 //! - `TestClock` to move the time the framework reads
+//! - `TestClient` to drive HTTP requests through the application in-process
 //!
 //! # Example
 //!
@@ -23,6 +24,7 @@
 //! });
 //! ```
 
+mod client;
 mod expect;
 mod inertia;
 mod response;
@@ -31,6 +33,7 @@ mod response;
 pub use crate::clock::{TestClock, TestClockGuard, TestClockHandle};
 pub use crate::container::testing::{TestContainer, TestContainerGuard};
 pub use crate::database::testing::TestDatabase;
+pub use client::{TestClient, TestRequest};
 pub use expect::{Expect, set_current_test_name};
 pub use inertia::{AssertableInertia, ReloadRequest};
 pub use response::TestResponse;
