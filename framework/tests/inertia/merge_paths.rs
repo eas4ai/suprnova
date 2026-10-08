@@ -209,27 +209,27 @@ async fn merge_with_path_is_ignored_on_a_deep_merge_prop() {
 async fn merge_with_path_is_ignored_on_a_scroll_prop() {
     // A scroll prop's merge instruction is computed by the dedicated
     // scroll block in `resolve_props`, which nests under
-    // `scroll_wrap_key()` alone - the general merge block that reads
-    // `merge_with_path`'s accumulated paths short-circuits on
-    // `scroll_metadata().is_some()` and never runs for this prop at all.
-    // `.scroll_wrap("data")` is the scroll equivalent of this call; this
-    // pins that `.merge_with_path` by itself has no effect on a scroll
-    // prop, the same way `merge_with_path_is_ignored_on_a_deep_merge_prop`
-    // pins the deep-merge case above.
+    // `scroll_wrap_key()` alone (`data` by default) - the general merge
+    // block that reads `merge_with_path`'s accumulated paths
+    // short-circuits on a scroll prop and never runs for it at all. This
+    // pins that `.merge_with_path` has no effect on a scroll prop, the
+    // same way `merge_with_path_is_ignored_on_a_deep_merge_prop` pins the
+    // deep-merge case above.
     let resp = InertiaResponse::new("Feed/Index")
         .prop(
             "posts",
             Prop::eager(json!({ "data": [{ "id": 1 }] }))
                 .scroll(ScrollMetadata::new("page").current(1).next(2))
-                .merge_with_path("data"),
+                .merge_with_path("meta"),
         )
         .resolve(&MockReq::new("/feed").inertia())
         .await
         .unwrap();
     let page = page_of(resp).await;
 
-    // The bare key, not `posts.data` - `.merge_with_path("data")` never took.
-    assert_eq!(names(&page, "mergeProps"), vec!["posts".to_string()]);
+    // The default wrapper, not `posts.meta` - `.merge_with_path("meta")`
+    // never took.
+    assert_eq!(names(&page, "mergeProps"), vec!["posts.data".to_string()]);
 }
 
 #[tokio::test]
@@ -275,7 +275,9 @@ async fn match_on_accepts_an_array_of_fields_in_one_call() {
 }
 
 #[tokio::test]
-async fn match_on_array_call_and_chained_single_calls_accumulate_together() {
+async fn match_on_array_call_after_a_single_call_replaces_it() {
+    // Each `match_on` call replaces the list, as Laravel's `matchOn`
+    // does (PAR-052), so the earlier `id` is gone.
     let resp = InertiaResponse::new("Feed/Index")
         .prop(
             "posts",
@@ -291,11 +293,7 @@ async fn match_on_array_call_and_chained_single_calls_accumulate_together() {
 
     assert_eq!(
         names(&page, "matchPropsOn"),
-        vec![
-            "posts.id".to_string(),
-            "posts.slug".to_string(),
-            "posts.uuid".to_string(),
-        ]
+        vec!["posts.slug".to_string(), "posts.uuid".to_string()]
     );
 }
 

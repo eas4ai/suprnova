@@ -35,8 +35,8 @@ impl Inertia {
     where
         T: serde::Serialize + 'static,
     {
-        let (meta, data) = paginator.into_inertia_scroll();
-        InertiaResponse::new(component).scroll(key, meta, data)
+        // `paginate` keeps the bare rows' merge at the prop's root.
+        InertiaResponse::new(component).paginate(key, paginator)
     }
 
     /// Build an Inertia response from a `#[derive(Data)]` DTO.

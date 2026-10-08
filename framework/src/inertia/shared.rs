@@ -34,7 +34,8 @@
 
 use super::config::InertiaConfig;
 use super::dotted;
-use super::prop::{InertiaRequestExt, Prop, PropResolver};
+use super::prop::{InertiaRequestExt, OnceOptions, OnceUntil, Prop, PropResolver};
+use super::providers::ProvidesInertiaProperties;
 use crate::error::FrameworkError;
 use crate::lock;
 use async_trait::async_trait;
@@ -42,6 +43,7 @@ use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::Value;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// App-level provider of per-request shared data.
@@ -73,6 +75,75 @@ pub trait InertiaSharedData: Send + Sync + 'static {
 pub(crate) struct StaticEntry {
     pub key: String,
     pub prop: Prop,
+    /// Which registration this is. A [`SharedOnceProp`] handle changes
+    /// the entry it was returned for and no later one under the same key.
+    pub id: u64,
+}
+
+/// The source of [`StaticEntry::id`]: unique for the life of the process.
+static NEXT_SHARE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The once prop [`InertiaRegistry::share_once`] registered, still
+/// chainable - Laravel's `Inertia::shareOnce(...)` returns the shared
+/// `OnceProp`, so `->as(...)->until(...)->fresh()` configure the prop the
+/// next responses carry.
+///
+/// Each method writes through to the registered prop at once. When a later
+/// share replaces the key, the handle changes nothing: it names the one
+/// registration it came from.
+#[derive(Clone)]
+pub struct SharedOnceProp {
+    shares: Arc<RwLock<Vec<StaticEntry>>>,
+    id: u64,
+}
+
+impl SharedOnceProp {
+    /// Override the cache key the client dedupes on - a string, or an enum
+    /// whose `Display` names it. See [`Prop::as_key`].
+    pub fn as_key(self, key: impl std::fmt::Display) -> Self {
+        let key = key.to_string();
+        self.update(move |prop| prop.as_key(key))
+    }
+
+    /// Expire the client's copy at a moment or after a span. See
+    /// [`Prop::until`].
+    pub fn until(self, until: impl Into<OnceUntil>) -> Self {
+        let until = until.into();
+        self.update(move |prop| prop.until(until))
+    }
+
+    /// Resolve even when the client claims a copy (`true`), or honour the
+    /// claim (`false`). See [`Prop::fresh`].
+    pub fn fresh(self, on: bool) -> Self {
+        self.update(move |prop| prop.fresh(on))
+    }
+
+    /// Set the once flag, key and expiry in one call - Laravel's
+    /// `once($value, $as, $until)`. See [`Prop::once_with`].
+    pub fn once_with(self, options: OnceOptions) -> Self {
+        self.update(move |prop| prop.once_with(options))
+    }
+
+    /// Apply `change` to the registered prop, if it is still the one this
+    /// handle was returned for.
+    ///
+    /// **Poison policy** (Domain 20 audit D20-A, matching `upsert`): on
+    /// lock poison the change is skipped and a `tracing::error!` is logged.
+    fn update(self, change: impl FnOnce(Prop) -> Prop) -> Self {
+        match lock::write(&self.shares, "inertia share registry") {
+            Ok(mut reg) => {
+                if let Some(entry) = reg.iter_mut().find(|e| e.id == self.id) {
+                    entry.prop = change(entry.prop.clone());
+                }
+            }
+            Err(_) => {
+                tracing::error!(
+                    "Inertia share registry lock poisoned; skipping a shared once prop option."
+                );
+            }
+        }
+        self
+    }
 }
 
 /// Per-container shared-data registry.
@@ -82,7 +153,12 @@ pub(crate) struct StaticEntry {
 /// can happen at any point after the container is constructed without
 /// needing `&mut`.
 pub struct InertiaRegistry {
-    shares: RwLock<Vec<StaticEntry>>,
+    /// Shared with every [`SharedOnceProp`] handle, which writes its
+    /// options through to the entry it was returned for.
+    shares: Arc<RwLock<Vec<StaticEntry>>>,
+    /// Shared [`ProvidesInertiaProperties`] values, expanded per render
+    /// after the keyed shares, in registration order.
+    providers: RwLock<Vec<Arc<dyn ProvidesInertiaProperties>>>,
     provider: RwLock<Option<Arc<dyn InertiaSharedData>>>,
     /// The config `Inertia::install` was given, if it has been called.
     ///
@@ -101,7 +177,8 @@ impl InertiaRegistry {
     /// and no installed config.
     pub fn new() -> Self {
         Self {
-            shares: RwLock::new(Vec::new()),
+            shares: Arc::new(RwLock::new(Vec::new())),
+            providers: RwLock::new(Vec::new()),
             provider: RwLock::new(None),
             config: RwLock::new(None),
         }
@@ -147,20 +224,36 @@ impl InertiaRegistry {
     /// the client doesn't already have the cache entry, then the client
     /// remembers the value across navigations (signaled via
     /// `X-Inertia-Except-Once-Props`). Maps to `Inertia::shareOnce(...)`.
-    pub fn share_once<F, Fut, V>(&self, key: impl Into<String>, resolver: F)
+    ///
+    /// Returns the registered prop as a [`SharedOnceProp`], which takes
+    /// the options any once prop takes - `as_key`, `until`, `fresh`,
+    /// `once_with` - as Laravel's returned `OnceProp` does:
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{App, FrameworkError};
+    /// App::inertia_registry()
+    ///     .share_once("plans", || async { Ok::<_, FrameworkError>(vec!["free", "pro"]) })
+    ///     .as_key("plan-catalog")
+    ///     .until(3600);
+    /// ```
+    pub fn share_once<F, Fut, V>(&self, key: impl Into<String>, resolver: F) -> SharedOnceProp
     where
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<V, FrameworkError>> + Send + 'static,
         V: Serialize + 'static,
     {
         let resolver = make_resolver(resolver);
-        // The cache key defaults to the prop key; `InertiaRegistry` has
-        // no `as_key` equivalent because a shared prop's name is the
-        // only handle an app has on it.
-        self.upsert(key.into(), Prop::from_resolver(resolver).once());
+        let id = self.upsert(key.into(), Prop::from_resolver(resolver).once());
+        SharedOnceProp {
+            shares: Arc::clone(&self.shares),
+            id,
+        }
     }
 
-    fn upsert(&self, key: String, prop: Prop) {
+    /// Store `prop` under `key`, replacing an earlier entry in place, and
+    /// return the new registration's id.
+    fn upsert(&self, key: String, prop: Prop) -> u64 {
+        let id = NEXT_SHARE_ID.fetch_add(1, Ordering::Relaxed);
         // Poison policy (Domain 20 audit D20-A): if the registry lock is
         // poisoned the upsert is skipped and a `tracing::error!` is logged.
         // The framework's lock helper already returns Result; defeating it
@@ -172,8 +265,9 @@ impl InertiaRegistry {
             Ok(mut reg) => {
                 if let Some(existing) = reg.iter_mut().find(|e| e.key == key) {
                     existing.prop = prop;
+                    existing.id = id;
                 } else {
-                    reg.push(StaticEntry { key, prop });
+                    reg.push(StaticEntry { key, prop, id });
                 }
             }
             Err(_) => {
@@ -183,6 +277,33 @@ impl InertiaRegistry {
                 );
             }
         }
+        id
+    }
+
+    /// Share a [`ProvidesInertiaProperties`] value: every Inertia response
+    /// expands it with its [`RenderContext`](super::RenderContext) and takes
+    /// its props as shared props - Laravel's `Inertia::share($provider)`.
+    /// Any number can be shared; they expand after the keyed shares, in
+    /// the order they were shared, and their keys count as shared keys
+    /// for `sharedProps`.
+    ///
+    /// **Poison policy** (Domain 20 audit D20-A): on lock poison the
+    /// registration is skipped and a `tracing::error!` is emitted.
+    pub fn share_provider(&self, provider: impl ProvidesInertiaProperties + 'static) {
+        match lock::write(&self.providers, "inertia shared providers") {
+            Ok(mut providers) => providers.push(Arc::new(provider)),
+            Err(_) => {
+                tracing::error!("Inertia shared providers lock poisoned; skipping share_provider.");
+            }
+        }
+    }
+
+    /// The shared providers, in registration order. Internal use by
+    /// `InertiaResponse::resolve`.
+    pub(crate) fn shared_providers(
+        &self,
+    ) -> Result<Vec<Arc<dyn ProvidesInertiaProperties>>, FrameworkError> {
+        Ok(lock::read(&self.providers, "inertia shared providers")?.clone())
     }
 
     /// Register the singleton [`InertiaSharedData`] implementation.
@@ -299,10 +420,11 @@ impl InertiaRegistry {
         }
     }
 
-    /// Clear every entry from the static share registry - Laravel's
-    /// `Inertia::flushShared()` (`ResponseFactory.php:120-123`). Does not
-    /// touch the trait-provider registration (`register_trait`); there is
-    /// no per-request state there to flush.
+    /// Clear every entry from the static share registry, shared
+    /// [`ProvidesInertiaProperties`] values included - Laravel's
+    /// `Inertia::flushShared()`, which empties the one shared array they
+    /// all live in. Does not touch the trait-provider registration
+    /// (`register_trait`); there is no per-request state there to flush.
     ///
     /// **Poison policy** (Domain 20 audit D20-A): on lock poison the flush
     /// is skipped and a `tracing::error!` is logged, matching `upsert`.
@@ -311,6 +433,12 @@ impl InertiaRegistry {
             Ok(mut reg) => reg.clear(),
             Err(_) => {
                 tracing::error!("Inertia share registry lock poisoned; skipping flush_shared.");
+            }
+        }
+        match lock::write(&self.providers, "inertia shared providers") {
+            Ok(mut providers) => providers.clear(),
+            Err(_) => {
+                tracing::error!("Inertia shared providers lock poisoned; skipping flush_shared.");
             }
         }
     }

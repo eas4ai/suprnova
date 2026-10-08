@@ -272,6 +272,15 @@ pub struct InertiaConfig {
     /// drained from the session flash only - an `errors` prop a handler
     /// sets itself passes through as-is.
     pub with_all_errors: bool,
+    /// Whether the page object lists the shared props' top-level keys
+    /// under `sharedProps` - Laravel's `inertia.expose_shared_prop_keys`.
+    ///
+    /// Default `true`. The client reads the list during an instant visit
+    /// to carry the shared values into the page it renders before the
+    /// server answers; `errors` is always on it, since every response
+    /// shares the validation errors. Off, the page carries no
+    /// `sharedProps` and the shared values still ship as props.
+    pub expose_shared_props: bool,
     /// Maximum number of lazy/deferred/once/shared prop resolvers that
     /// run concurrently for a single response.
     ///
@@ -522,6 +531,7 @@ impl Default for InertiaConfig {
             manifest_path,
             assets_base_url: "/assets".to_string(),
             with_all_errors: false,
+            expose_shared_props: true,
             max_concurrent_resolvers: 16,
             // `None` so an app upgrading into this release keeps the
             // exact error bodies it had. Opting in is one builder call.
@@ -761,6 +771,15 @@ impl InertiaConfig {
     /// ```
     pub fn with_all_errors(mut self, on: bool) -> Self {
         self.with_all_errors = on;
+        self
+    }
+
+    /// List the shared props' keys under `sharedProps` (`true`, the
+    /// default) or leave the field out of the page object (`false`) - see
+    /// [`expose_shared_props`](Self::expose_shared_props). Laravel's
+    /// `inertia.expose_shared_prop_keys`.
+    pub fn expose_shared_props(mut self, on: bool) -> Self {
+        self.expose_shared_props = on;
         self
     }
 

@@ -388,7 +388,8 @@ async fn merge_once_with_a_custom_cache_key_and_expiry() {
                 .merge()
                 .once()
                 .as_key("roles")
-                .until(4_070_908_800_000),
+                // A moment; an integer would be seconds from now (PAR-052).
+                .until(chrono::DateTime::from_timestamp_millis(4_070_908_800_000).unwrap()),
         )
         .resolve(&MockReq::new("/billing").inertia())
         .await
@@ -414,7 +415,7 @@ async fn once_fresh_beats_the_client_cache_claim_on_a_composed_prop() {
             counted(calls.clone(), json!([{ "id": 9 }]))
                 .merge()
                 .once()
-                .fresh(),
+                .fresh(true),
         )
         .resolve(&req)
         .await
@@ -524,7 +525,8 @@ async fn defer_once_stops_announcing_the_key_after_the_client_has_it() {
 #[tokio::test]
 async fn defer_once_announces_again_once_the_server_side_expiry_has_passed() {
     // Epoch + 1ms is long past, so the server refuses to honour the
-    // client's cache claim (Domain 20 audit D20-C).
+    // client's cache claim (Domain 20 audit D20-C). A moment, not an
+    // integer: `until(1)` is one second from now (PAR-052).
     let req = MockReq::new("/dash")
         .inertia()
         .header("X-Inertia-Except-Once-Props", "rates");
@@ -534,7 +536,7 @@ async fn defer_once_announces_again_once_the_server_side_expiry_has_passed() {
             Prop::lazy(|| async { json!({ "usd": 1 }) })
                 .defer()
                 .once()
-                .until(1),
+                .until(chrono::DateTime::from_timestamp_millis(1).unwrap()),
         )
         .resolve(&req)
         .await
@@ -658,7 +660,7 @@ async fn a_scroll_prop_ignores_an_explicit_merge_flag_and_uses_the_intent_header
     let resp = InertiaResponse::new("Users/Index")
         .prop(
             "users",
-            Prop::eager(json!([{ "id": 1 }]))
+            Prop::eager(json!({ "data": [{ "id": 1 }] }))
                 .scroll(ScrollMetadata::new("page").current(2).previous(1))
                 .merge(),
         )
@@ -669,7 +671,7 @@ async fn a_scroll_prop_ignores_an_explicit_merge_flag_and_uses_the_intent_header
 
     assert_eq!(
         names(&page, "prependProps"),
-        vec!["users".to_string()],
+        vec!["users.data".to_string()],
         "the intent header owns the direction on a scroll prop; got {page}"
     );
     assert!(
@@ -698,7 +700,7 @@ async fn scroll_once_keeps_its_scroll_props_when_the_client_holds_the_cached_val
     let resp = InertiaResponse::new("Users/Index")
         .prop(
             "users",
-            counted(calls.clone(), json!([{ "id": 1 }]))
+            counted(calls.clone(), json!({ "data": [{ "id": 1 }] }))
                 .scroll(ScrollMetadata::new("page").current(1).next(2))
                 .once(),
         )
@@ -721,28 +723,28 @@ async fn scroll_once_keeps_its_scroll_props_when_the_client_holds_the_cached_val
     assert_eq!(page["scrollProps"]["users"]["reset"], false);
     assert_eq!(
         names(&page, "mergeProps"),
-        vec!["users".to_string()],
+        vec!["users.data".to_string()],
         "the client needs the merge instruction to fold the restored value; got {page}"
     );
 }
 
 #[tokio::test]
 async fn scroll_defer_announces_merge_on_visit_one_and_ships_the_cursor_on_the_follow_up() {
-    // Visit 1 - a standard Inertia visit. Laravel's `getMergePropsForRequest`
-    // has no defer rejection, so a `ScrollProp` (which is `Mergeable` with
-    // `merge = true` straight from its constructor, `ScrollProp.php:60`)
-    // still announces its merge instruction on the visit that withholds
-    // the value - the same rule
+    // Visit 1 - a standard Inertia visit. Laravel's `excludeDeferredProp`
+    // collects a `ScrollProp`'s merge instruction (it is `Mergeable` with
+    // `merge = true` straight from its constructor) on the visit that
+    // withholds the value, before `configureMergeIntent` names its
+    // wrapper, so the bare key is announced - the same rule
     // `defer_then_merge_announces_on_visit_one_and_merges_on_the_follow_up`
-    // pins for a plain merge prop. `resolveScrollProps` is the one list
-    // that rejects it, because there is no accumulator yet for a cursor to
-    // describe (`Response.php:704-718`).
+    // pins for a plain merge prop. No `scrollProps` entry ships, because
+    // there is no accumulator yet for a cursor to describe. The follow-up
+    // merges under the wrapper (PAR-052).
     let calls = Arc::new(AtomicUsize::new(0));
 
     let resp = InertiaResponse::new("Feed/Index")
         .prop(
             "items",
-            counted(calls.clone(), json!([{ "id": 1 }]))
+            counted(calls.clone(), json!({ "data": [{ "id": 1 }] }))
                 .scroll(ScrollMetadata::new("page").current(1).next(2))
                 .defer(),
         )
@@ -774,7 +776,7 @@ async fn scroll_defer_announces_merge_on_visit_one_and_ships_the_cursor_on_the_f
     let resp = InertiaResponse::new("Feed/Index")
         .prop(
             "items",
-            counted(calls.clone(), json!([{ "id": 1 }]))
+            counted(calls.clone(), json!({ "data": [{ "id": 1 }] }))
                 .scroll(ScrollMetadata::new("page").current(1).next(2))
                 .defer(),
         )
@@ -784,8 +786,8 @@ async fn scroll_defer_announces_merge_on_visit_one_and_ships_the_cursor_on_the_f
     let page = page_of(resp).await;
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(page["props"]["items"], json!([{ "id": 1 }]));
-    assert_eq!(names(&page, "mergeProps"), vec!["items".to_string()]);
+    assert_eq!(page["props"]["items"], json!({ "data": [{ "id": 1 }] }));
+    assert_eq!(names(&page, "mergeProps"), vec!["items.data".to_string()]);
     assert_eq!(page["scrollProps"]["items"]["pageName"], "page");
 }
 
@@ -822,7 +824,7 @@ async fn scroll_optional_ships_its_cursor_on_every_visit_that_passes_the_lists()
     let resp = InertiaResponse::new("Feed/Index")
         .prop(
             "items",
-            counted(calls.clone(), json!([{ "id": 1 }]))
+            counted(calls.clone(), json!({ "data": [{ "id": 1 }] }))
                 .scroll(ScrollMetadata::new("page").current(1).next(2))
                 .optional(),
         )
@@ -842,7 +844,7 @@ async fn scroll_optional_ships_its_cursor_on_every_visit_that_passes_the_lists()
     );
     assert_eq!(
         names(&page, "mergeProps"),
-        vec!["items".to_string()],
+        vec!["items.data".to_string()],
         "scroll merge metadata is gated on passes_lists, not on the value shipping; got {page}"
     );
     assert_eq!(page["scrollProps"]["items"]["pageName"], "page");
@@ -863,7 +865,7 @@ async fn scroll_optional_ships_its_cursor_on_every_visit_that_passes_the_lists()
     let resp = InertiaResponse::new("Feed/Index")
         .prop(
             "items",
-            counted(calls.clone(), json!([{ "id": 1 }]))
+            counted(calls.clone(), json!({ "data": [{ "id": 1 }] }))
                 .scroll(ScrollMetadata::new("page").current(1).next(2))
                 .optional(),
         )
@@ -880,7 +882,7 @@ async fn scroll_optional_ships_its_cursor_on_every_visit_that_passes_the_lists()
     );
     assert_eq!(
         names(&page, "mergeProps"),
-        vec!["items".to_string()],
+        vec!["items.data".to_string()],
         "an except-only partial must not drop the scroll merge instruction; got {page}"
     );
     assert_eq!(page["scrollProps"]["items"]["pageName"], "page");
@@ -930,7 +932,9 @@ async fn an_always_merge_prop_keeps_its_value_but_drops_merge_metadata_when_filt
 }
 
 #[tokio::test]
-async fn repeated_match_on_accumulates_into_match_props_on() {
+async fn repeated_match_on_keeps_only_the_last_call_in_match_props_on() {
+    // Each `match_on` call replaces the list, as Laravel's `matchOn`
+    // does (PAR-052); `.match_on(["id", "slug"])` names both at once.
     let resp = InertiaResponse::new("Feed/Index")
         .prop(
             "posts",
@@ -944,10 +948,7 @@ async fn repeated_match_on_accumulates_into_match_props_on() {
         .unwrap();
     let page = page_of(resp).await;
 
-    assert_eq!(
-        names(&page, "matchPropsOn"),
-        vec!["posts.id".to_string(), "posts.slug".to_string()]
-    );
+    assert_eq!(names(&page, "matchPropsOn"), vec!["posts.slug".to_string()]);
 }
 
 // ---- replacement and precedence ----
