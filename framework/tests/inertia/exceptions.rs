@@ -933,3 +933,71 @@ async fn inssr_error_page_renders_the_page_for_a_handler_panic() {
     let reply = client.send("GET", "/panic", JSON_CLIENT).await;
     assert_json_error(&reply, 500, "Internal Server Error");
 }
+
+/// What the panicking callback panics with.
+const CALLBACK_PANIC: &str = "the error callback dropped the ledger";
+
+/// Installs a callback that counts its calls and then panics: an
+/// application bug the panic boundary has to report, not unwind the
+/// connection's task with.
+fn install_panicking_callback() -> Arc<Mutex<u32>> {
+    let (calls, seen) = counter();
+    Inertia::handle_exceptions_using(move |_error| {
+        *seen.lock().unwrap() += 1;
+        panic!("{CALLBACK_PANIC}");
+    });
+    calls
+}
+
+#[tokio::test]
+#[serial]
+async fn inssr_a_callback_that_panics_when_decided_at_the_server_answers_a_500() {
+    let _debug = debug_off().await;
+    let _container = TestContainer::fake();
+    let calls = install_panicking_callback();
+    let mut client = client_behind(OuterUnavailable, &config()).await;
+
+    for (audience, headers) in [
+        ("an Inertia visit", INERTIA_VISIT),
+        ("a JSON client", JSON_CLIENT),
+    ] {
+        let reply = client.send("GET", "/forbidden", headers).await;
+        assert_eq!(reply.status, 500, "{audience}: {reply:?}");
+        assert!(
+            reply.header("x-request-id").is_some(),
+            "{audience}: the 500 for the callback's panic carries the request id; got {reply:?}"
+        );
+    }
+    assert_eq!(
+        *calls.lock().unwrap(),
+        2,
+        "the callback was handed each outer 503 once, at the server"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn inssr_a_callback_that_panics_inside_the_stack_answers_a_500() {
+    let _debug = debug_off().await;
+    let _container = TestContainer::fake();
+    let calls = install_panicking_callback();
+    let mut client = client(&config()).await;
+
+    for (audience, headers) in [
+        ("an Inertia visit", INERTIA_VISIT),
+        ("a JSON client", JSON_CLIENT),
+    ] {
+        let reply = client.send("GET", "/forbidden", headers).await;
+        assert_eq!(reply.status, 500, "{audience}: {reply:?}");
+        assert!(
+            reply.header("x-request-id").is_some(),
+            "{audience}: the 500 for the callback's panic carries the request id; got {reply:?}"
+        );
+    }
+    assert_eq!(
+        *calls.lock().unwrap(),
+        4,
+        "the callback was handed the 403 inside the stack and, at the server, the 500 its own \
+         panic became, once each per request"
+    );
+}

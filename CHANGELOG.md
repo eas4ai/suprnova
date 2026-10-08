@@ -322,7 +322,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   and `response()`, which with debug on is the development error page where
   that page applies. It returns `render(component, props)` for an Inertia
   page at the original status, `respond_with(response)` for any other
-  response, or `None` to keep the response. A JSON client's validation
+  response, or `None` to keep the response. A callback that panics is a
+  bug the panic boundary reports as the sanitized `500` with its report,
+  inside the stack and at the server alike. A JSON client's validation
   `422` reaches the callback like any other error, as in Laravel; an
   Inertia visit's validation failure reaches it as the `303` back to the
   form, since the error-response middleware sits outside the validation
