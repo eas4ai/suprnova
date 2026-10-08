@@ -74,7 +74,27 @@ fn router() -> Router {
             Ok(Inertia::location("https://billing.example/portal"))
         })
         .post("/upload", |_req: Request| async { text("uploaded") })
+        .get("/upper", |req: Request| {
+            first_visit_document(req, "<html><BODY><p>x</p></BODY></html>")
+        })
+        .get("/spaced", |req: Request| {
+            first_visit_document(req, "<html><Body><p>x</p></Body ></html>")
+        })
+        .get("/bare", |req: Request| {
+            first_visit_document(req, "<p>x</p>")
+        })
         .into()
+}
+
+/// A first visit answered with `document`: the page renders, then the
+/// handler answers with the document as an application's root template
+/// would lay it out.
+async fn first_visit_document(req: Request, document: &'static str) -> Response {
+    InertiaResponse::new("Home")
+        .resolve(&req)
+        .await
+        .map_err(HttpResponse::from)?;
+    Ok(HttpResponse::html(document))
 }
 
 fn is_ulid(id: &str) -> bool {
@@ -591,6 +611,38 @@ async fn indt_a_first_visit_document_carries_the_id_tag_and_an_inertia_visit_doe
         plain.body_text(),
         "<html><body><p>plain</p></body></html>",
         "a page that is not an Inertia page gets no tag"
+    );
+}
+
+#[tokio::test]
+async fn indt_the_id_tag_finds_a_closing_body_tag_in_any_case_or_ends_the_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = client(router(), devtools(dir.path()));
+    let tag = |id: &str| {
+        format!("<script data-inertia-devtools-id type=\"application/json\">\"{id}\"</script>")
+    };
+
+    let upper = client.get("/upper").send().await;
+    upper.assert_ok();
+    let id = upper.header("x-inertia-devtools-id").unwrap();
+    assert_eq!(
+        upper.body_text(),
+        format!("<html><BODY><p>x</p>{}</BODY></html>", tag(id))
+    );
+
+    let spaced = client.get("/spaced").send().await;
+    let id = spaced.header("x-inertia-devtools-id").unwrap();
+    assert_eq!(
+        spaced.body_text(),
+        format!("<html><Body><p>x</p>{}</Body ></html>", tag(id))
+    );
+
+    let bare = client.get("/bare").send().await;
+    let id = bare.header("x-inertia-devtools-id").unwrap();
+    assert_eq!(
+        bare.body_text(),
+        format!("<p>x</p>{}", tag(id)),
+        "a document with no closing body tag gets the tag at its end"
     );
 }
 

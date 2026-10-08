@@ -198,14 +198,17 @@ impl DevToolsMiddleware {
     }
 }
 
-/// The body of `response` with the entry id tag before its last `</body>`,
-/// when the response is the first visit of a page: a `200` HTML document
-/// answering a request that is not an Inertia visit, for which a page
-/// rendered. `None` leaves the body as it is.
+/// The body of `response` with the entry id tag before its last closing
+/// body tag, when the response is the first visit of a page: a `200` HTML
+/// document answering a request that is not an Inertia visit, for which a
+/// page rendered. `None` leaves the body as it is.
 ///
 /// The panel of an extension that attaches after the page loaded has only
 /// the document to read the id from. A plain HTML page gets no tag: the
-/// extension reads one as DevTools being on for that page.
+/// extension reads one as DevTools being on for that page. HTML tag names
+/// have no case, so `</BODY>` and `</Body >` are closing body tags too. A
+/// document with none gets the tag at its end: the extension still needs
+/// the id, and a document without `</body>` is still a document.
 fn tag_first_visit(
     facts: &RequestFacts,
     payload: Option<&RenderPayload>,
@@ -224,7 +227,7 @@ fn tag_first_visit(
         return None;
     }
     let body = std::str::from_utf8(response.body()).ok()?;
-    let at = body.rfind("</body>")?;
+    let at = tag_position(body);
     let base = if facts.base_path.is_empty() {
         String::new()
     } else {
@@ -242,6 +245,25 @@ fn tag_first_visit(
     tagged.push_str(&tag);
     tagged.push_str(&body[at..]);
     Some(Bytes::from(tagged))
+}
+
+/// Where the id tag goes in `document`: before its last closing body tag,
+/// else at its end.
+fn tag_position(document: &str) -> usize {
+    document
+        .rmatch_indices("</")
+        .map(|(at, _)| at)
+        .find(|&at| is_closing_body_tag(&document[at + 2..]))
+        .unwrap_or(document.len())
+}
+
+/// Whether `rest`, the text after a `</`, closes the body: `body` in any
+/// case, then optional whitespace, then `>`.
+fn is_closing_body_tag(rest: &str) -> bool {
+    let rest = rest.as_bytes();
+    rest.len() > 4
+        && rest[..4].eq_ignore_ascii_case(b"body")
+        && rest[4..].iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'>')
 }
 
 #[async_trait]
