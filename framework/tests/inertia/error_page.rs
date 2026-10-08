@@ -616,7 +616,7 @@ async fn a_version_mismatch_still_bounces_with_an_inertia_location() {
     assert_eq!(status, 409);
     assert_eq!(
         headers.get("x-inertia-location").map(String::as_str),
-        Some("/admin/articles"),
+        Some("http://localhost/admin/articles"),
         "the client needs the location to do its full-page reload"
     );
     assert!(body.is_empty(), "got {body}");

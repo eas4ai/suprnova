@@ -267,11 +267,22 @@ Two rules are worth knowing before you compose:
   is an optional prop, and `.optional().always()` is an always prop.
   Neither is an error; the earlier call is erased.
 - **Metadata follows the partial-reload lists, not the value.** A prop's
-  `mergeProps`, `onceProps`, and `scrollProps` entries are emitted
-  whenever the key passes `X-Inertia-Partial-Data` and
-  `X-Inertia-Partial-Except`, even on a visit where the value itself is
-  withheld. That is what carries the merge instruction across a deferred
-  prop's two requests. Two consequences follow:
+  `mergeProps` and `onceProps` entries are emitted whenever an
+  `X-Inertia-Partial-Data` entry names the prop or an ancestor of it (or
+  there is no such list) and no `X-Inertia-Partial-Except` entry does,
+  even on a visit where the value itself is withheld. That is what
+  carries the merge instruction across a deferred prop's two requests.
+  Its `scrollProps` entry needs only that the key passes the lists. The
+  consequences:
+  - An entry deeper than the prop selects the prop but carries no
+    instruction: `only: ['items.data']` against a merge prop `items`
+    sends the whole value with no `mergeProps` entry, so the client
+    replaces what it holds, as Laravel's `isIncludedInPartialMetadata`
+    rules. A scroll prop keeps its cursor in that case.
+  - A `.once()` prop the client already holds, and that is not deferred,
+    sends its `onceProps` entry and nothing else - no `mergeProps` entry,
+    since no new value arrives to merge. A held `.scroll().once()` prop
+    keeps its cursor too.
   - An `.always().merge()` prop outside the requested set still sends its
     value and does not send its merge instruction, so the client replaces
     rather than appends.
@@ -616,8 +627,15 @@ three request headers:
 | Header | Meaning |
 |---|---|
 | `X-Inertia-Partial-Component` | The component being partial-reloaded - must match the response's component for filtering to apply. |
-| `X-Inertia-Partial-Data` | Whitelist: comma-separated prop keys to include. |
-| `X-Inertia-Partial-Except` | Blacklist: comma-separated prop keys to exclude. Wins over `Partial-Data` on key collision. |
+| `X-Inertia-Partial-Data` | Whitelist: comma-separated prop paths to include. |
+| `X-Inertia-Partial-Except` | Blacklist: comma-separated prop paths to exclude. Applied after `Partial-Data`, so it wins on a path both name. |
+
+Both lists are read as Laravel reads them: split on `,`, empty segments
+dropped, and no trimming, so `a, b` names `a` and ` b`. A header that names
+nothing - empty, or only commas - counts as absent rather than as a list
+that matches no prop. The other list headers the client sends,
+`X-Inertia-Reset` and `X-Inertia-Except-Once-Props`, are read by the same
+rule.
 
 Filtering reads one thing: the prop's visibility, set by `.always()`,
 `.optional()`, or `.defer()`. A prop with none of those has the default
@@ -625,8 +643,11 @@ visibility.
 
 - Default-visibility props follow whitelist / blacklist semantics.
 - `.always()` props are sent regardless.
-- `.optional()` and `.defer()` props never ship on a standard visit, and
-  only appear on a matching partial reload that explicitly lists the key.
+- `.optional()` and `.defer()` props never ship on a standard visit. On a
+  matching partial reload they resolve whenever their key passes the
+  whitelist and blacklist, as Laravel's do: a reload that sends only
+  `X-Inertia-Partial-Except` (`router.reload({ except: ['stats'] })`)
+  resolves every optional and deferred prop it does not exclude.
 
 The merge and scroll flags do not enter into it: they decide how the
 client folds a value it receives, not whether it receives one, so a
@@ -636,6 +657,10 @@ instruction - on a full visit where the client reports the value already
 cached, the server skips the resolver and sends no value, as the note
 below describes. What all three change is which metadata blocks ride
 along - see [Composing flags on one prop](#composing-flags-on-one-prop).
+On a partial reload the `merge` and `once` instructions are stricter than
+the value: they ship only when an `only` entry names the prop or an
+ancestor of it, so an entry deeper than the prop (`items.data`) sends the
+prop whole with no instruction.
 
 The handler doesn't have to do anything special - register every prop
 through the builder, and the framework consults the headers when
@@ -653,8 +678,8 @@ key it asked for.
 `X-Inertia-Partial-Data` and `X-Inertia-Partial-Except` entries can name a
 path inside a prop's value, not just the prop's own key. A client calling
 `router.reload({ only: ['user.name'] })` sends
-`X-Inertia-Partial-Data: user.name`, and the response narrows the `user`
-prop down to just that field:
+`X-Inertia-Partial-Data: user.name`, and the response narrows a literal
+`user` prop down to just that field:
 
 ```json
 { "props": { "user": { "name": "Ada" } } }
@@ -663,8 +688,22 @@ prop down to just that field:
 `except` prunes the same way instead of narrowing - `router.reload({
 except: ['user.email'] })` leaves every other field of `user` in place.
 
+The rule is Laravel's: dotted entries narrow **literal values** only - a
+value passed to `.with(...)`, a value shared with `App::inertia_share`, an
+eager Data field. The walk keeps each nested path that is, descends from,
+or leads to an `only` entry, and that neither is nor descends from an
+`except` entry.
+
 Rules:
 
+- A value that came from a resolver or a prop object ships whole when its
+  key, an ancestor, or a path inside it is selected. `.lazy(...)`,
+  `.optional(...)`, `.defer(...)`, `.merge(...)`, `.once(...)`,
+  `.scroll(...)` and `.always(...)` props are not walked, so
+  `only: ['users.name']` against `.lazy("users", …)` sends every field of
+  `users`. One exception follows Laravel too: a flag-free resolver under a
+  dotted key (`.lazy("auth.user", …)`) narrows like a literal, because
+  Laravel calls a dotted key's closure before its walk.
 - A bare entry (`user`) still means the whole prop. If `only` names both
   `user` and `user.name`, the whole value ships - the bare entry wins.
 - An entry can also name an *ancestor* of a dotted prop key. A prop
@@ -676,25 +715,18 @@ Rules:
   `authAgent.user` prop is untouched by either.
 - `except` wins on a path both headers name, the same way it wins at the
   top level.
-- A path that doesn't resolve against the value - an unknown field, or one
-  that drills through a scalar or an array instead of an object -
-  contributes nothing for that path, without dropping the sibling fields
-  requested alongside it.
-- `Always` props ignore `only`/`except` entirely, dot notation included -
-  they always ship whole.
-- `Optional` and `Defer` props still need the explicit request to resolve
-  at all. A dotted entry (`permissions.read`) counts as that request for
-  the top-level key, and the resolved value narrows the same way an
-  `Eager` prop's does.
-- A dotted `only` against a prop whose current value isn't an object -
-  a string, a number, an array - narrows to `{}`, not to the original
-  value. The client's reconciliation only deep-merges when *both* the
-  cached value and the incoming one are objects
-  (`inertia-3.6.1/packages/core/src/response.ts` `nestedTopKeys`); an
-  empty object fails that check against a non-object cache the same way
-  a populated one would, so the empty object replaces the cached scalar
-  outright instead of merging onto it. Avoid sending a dotted request
-  against a prop that isn't shaped as an object.
+- A path that resolves to nothing - an unknown field - contributes nothing,
+  without dropping the sibling fields requested alongside it. A value that
+  keeps none of its children is `[]`, PHP's empty array: `only:
+  ['user.missing']` sends `"user": []`.
+- The walk goes into lists by index (`rows.0.id`). A list that keeps a
+  prefix of its items stays a list; one that keeps other items becomes an
+  object keyed by their indexes (`{"1": …}`), as PHP encodes an array whose
+  keys no longer start at 0. A scalar a deeper path runs into
+  (`config.level` under `only: ['config.level.nested']`) ships as it is.
+- `Optional` and `Defer` props resolve on a partial reload whenever their
+  key passes the lists. A dotted entry (`permissions.read`) selects the
+  top-level key, and the resolved value ships whole.
 - A dotted `except` doesn't delete the field on the client - it stops the
   field from refreshing on this response, and the client's merge restores
   it from whatever it already had cached. `deepMergeObjects` builds the
@@ -1095,11 +1127,16 @@ a browser that follows a `409` with no `Location` header has nowhere to go.
 
 Inertia versions the asset manifest so a long-lived client doesn't try
 to mount a page from yesterday's bundle against today's server. When
-the client's `X-Inertia-Version` header doesn't match the server's
-configured version, [`InertiaVersionMiddleware`](#bootstrap-inertia-install)
-responds with `409 Conflict` and an `X-Inertia-Location` header naming
-the new URL - the Inertia client picks that up and does a full page
-reload, picking up the new bundle.
+the client's `X-Inertia-Version` header on a `GET` doesn't match the
+server's current version, [`InertiaVersionMiddleware`](#bootstrap-inertia-install)
+responds with `409 Conflict` before the handler runs. `X-Inertia-Location`
+holds the request's absolute URL (scheme, host, path and query, as
+Laravel's `fullUrl()` gives it), and `X-Inertia-Version` holds the current
+version. The Inertia client does a full page reload at that URL, picking up
+the new bundle; for a poll or a background prop load it reads the version
+header instead, so an asynchronous request does not force the reload. A
+visit by any other method passes through: the `GET` its redirect leads to
+gets the 409.
 
 The bounce re-flashes the session first. The client answers a 409 with a
 full-page GET, and that GET is a fresh request - without the re-flash, a
@@ -1108,13 +1145,23 @@ away before the destination page can read it, and the user loses their error
 message purely because a deploy landed mid-submit. This needs
 `SessionMiddleware` registered ahead of the version middleware.
 
-By default you set nothing: `InertiaConfig` hashes your Vite build
-manifest (`manifest_path`, default `public/assets/.vite/manifest.json`)
-and uses the first 16 bytes of its SHA-256, hex-encoded. The manifest is
-the one file that changes on every build and on no other occasion, so
-the version bumps itself. When there is no manifest to read - local
-development, where Vite serves from memory - it falls back to the static
-string `"1.0"` and logs at `debug`.
+By default you set nothing. The version resolves in the order Laravel's
+`Middleware::version` uses:
+
+1. When the config names an `asset_url` - the URL the built assets are
+   published under when it changes with each deploy, such as a CDN path
+   that carries a build id - the version is a hash of that URL. It
+   defaults to the `ASSET_URL` environment variable, the one Laravel's
+   `app.asset_url` reads; `.asset_url(...)` on the config wins over it.
+2. Otherwise `InertiaConfig` hashes your Vite build manifest
+   (`manifest_path`, default `public/assets/.vite/manifest.json`). The
+   manifest is the one file that changes on every build and on no other
+   occasion, so the version bumps itself.
+3. When there is no manifest to read - local development, where Vite
+   serves from memory - the version is the empty string, as Laravel's is,
+   and a `debug` line is logged.
+
+Both hashes are the first 16 bytes of a SHA-256, hex-encoded.
 
 Override it when you want something else:
 
@@ -1123,6 +1170,9 @@ use suprnova::{InertiaConfig, VersionResolver};
 
 // Default - hash the build manifest. Nothing to write.
 let cfg = InertiaConfig::new();
+
+// Assets published under a per-deploy URL: the version follows the URL.
+let cfg = InertiaConfig::new().asset_url("https://cdn.example.com/build-42");
 
 // A different manifest location; the version follows it.
 let cfg = InertiaConfig::new().manifest_path("dist/.vite/manifest.json");
@@ -1151,6 +1201,27 @@ let cfg = InertiaConfig::new().version(version);
 For async or fallible version resolution (e.g. read a manifest hash
 from S3), do the read once at boot and pass the cached `String` to
 `.version(...)`.
+
+### Setting the version at run time
+
+`Inertia::version` sets the version while the app runs, as Laravel's
+`Inertia::version` does, and `Inertia::get_version` reads it:
+
+```rust
+use suprnova::Inertia;
+
+Inertia::version(deployment_id());     // a string
+Inertia::version(|| read_build_id());  // a function, called on every read
+Inertia::version(None::<String>);      // the empty version, Laravel's null
+
+let current = Inertia::get_version();
+```
+
+The value replaces the version of the installed config, so every page
+built after the call advertises it, and the version middleware that
+`Inertia::install` registers compares the client's `X-Inertia-Version`
+against it. A later `Inertia::install` replaces it again, and a response
+given its own config with `with_config(...)` keeps that config's version.
 
 ## Bootstrap: `Inertia::install`
 
@@ -1796,12 +1867,14 @@ bundle exposes without any extra code.
 
 Inertia behaviour is configured programmatically via `InertiaConfig`, and
 the config you hand to [`Inertia::install`](#bootstrap-inertia-install) is
-the one every response starts from. The one env var the framework reads
-directly is `SUPRNOVA_FRONTEND` (`svelte` / `react` / `vue`), and it only
-supplies the default entry-point filename and page-component extensions
-when the config doesn't say - an explicit `.frontend(Frontend::React)` on
-the installed config wins, and is what `suprnova new --frontend react`
-scaffolds. Everything else is builder-shaped:
+the one every response starts from. `SUPRNOVA_FRONTEND` (`svelte` /
+`react` / `vue`) only supplies the default entry-point filename and
+page-component extensions when the config doesn't say - an explicit
+`.frontend(Frontend::React)` on the installed config wins, and is what
+`suprnova new --frontend react` scaffolds. `ASSET_URL` only supplies the
+default `asset_url` the asset version hashes, and `.asset_url(...)` wins
+over it (see [Version detection](#version-detection)). Everything else is
+builder-shaped:
 
 ```rust
 use suprnova::{InertiaConfig, Frontend};
@@ -1856,9 +1929,21 @@ finished document to correct it.
 (`/users?page=2&sort=name`). The client writes it into `history.state`, so
 it is what back/forward navigation and `router.reload()` replay - drop the
 query and every paginated or filtered page silently resets to page one.
+
+The query is normalised the way Laravel's `fullUrl()` normalises it
+through Symfony, so the client compares the same page URLs it would get
+from Laravel: the pairs are parsed as PHP parses a query string, sorted by
+key, and re-encoded per RFC 3986. `/s?b=2&a=1%20x` becomes
+`/s?a=1%20x&b=2`, a `+` becomes `%20`, reserved characters stay
+percent-encoded (`a=%2Fx` is not turned into `a=/x`), a key without a
+value gains an `=` (`?flag` becomes `?flag=`), a repeated key keeps its
+last value, and bracketed keys are written with their indexes
+(`tags[]=a&tags[]=b` becomes `tags%5B0%5D=a&tags%5B1%5D=b`). A query
+already in that form is left as it is.
 `InertiaVersionMiddleware` derives its `X-Inertia-Location` from the
-request's path and query too, so by default a 409 asset-version bounce
-lands the browser on exactly the URL the page object named.
+request's path and query too, made absolute with the request's scheme and
+host, so by default a 409 asset-version bounce lands the browser on
+exactly the URL the page object named.
 
 Override the derivation with `url_resolver` when the URL the client should
 record differs from the one that arrived - a locale prefix the SPA doesn't
@@ -1885,6 +1970,33 @@ and cached for the process lifetime - every response built from the
 installed config shares that one cache, so the file is read and parsed
 once. When it's missing, production asset tags fall back to a hardcoded
 legacy path and a `tracing::warn!` fires so the gap surfaces in logs.
+
+### Big integers
+
+JavaScript represents integers exactly only up to 9007199254740991
+(2^53 - 1), so a 64-bit database id beyond it reaches the browser rounded.
+Turn on `preserve_big_integers` to send every integer outside plus or minus
+that bound, in props and flash and at any depth, as a marker the Inertia
+client restores as a `BigInt`:
+
+```rust
+use suprnova::{InertiaConfig, InertiaResponse};
+
+// Every response built from this config.
+let cfg = InertiaConfig::new().preserve_big_integers(true);
+
+// One response, whatever the config says.
+let page = InertiaResponse::new("Orders/Show")
+    .with("id", 9_007_199_254_740_993_u64)
+    .preserve_big_integers(true);
+```
+
+That `id` arrives as `{"$bigint": "9007199254740993"}`, and the page object
+carries `preserveBigIntegers: true` so the client knows to restore it.
+Integers inside the safe range, floats and object keys are left alone.
+With the setting off, the default, nothing is wrapped and the flag is
+absent. This is Laravel's `inertia.preserve_big_integers` setting and
+`Response::preserveBigIntegers`.
 
 ### Why Suprnova diverges
 
@@ -1942,20 +2054,6 @@ Other Rust-shaped choices worth flagging:
   key through, standard visits included. Reach for `.optional()` for the
   initial-visit-skipped behavior the name "lazy" suggests if you're
   coming from Laravel.
-- **Nested `only`/`except` narrow after resolving, not before.** Laravel's
-  `Response::resolvePartialProperties` walks the dotted path through the
-  raw, not-yet-resolved prop array, so a path into a `LazyProp` or
-  `DeferProp` degrades to `null` - the walk hits an unresolved closure and
-  stops (`inertia-laravel-2.0.25/src/Response.php:273-297`). Suprnova
-  resolves every prop's value first - resolvers are async, so there's no
-  synchronous point where they're all plain arrays the way Laravel
-  sometimes has - then narrows the resulting JSON value. An unknown or
-  type-mismatched nested path is dropped instead of sent back as `null`,
-  matching what the client's own reconciliation expects: it deep-merges a
-  narrowed object onto what it already holds
-  (`inertia-3.6.1/packages/core/src/response.ts:414-425`), and a stray
-  `null` would clobber a field the client already has instead of leaving
-  it alone.
 
 ## Next
 

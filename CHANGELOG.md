@@ -204,6 +204,25 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `InertiaConfig::mount_id` names the mount element and the page data
   element, `app` by default, for a client that mounts on another id. Without
   a template the first visit is byte for byte what it was.
+- **`Inertia::version` and `Inertia::get_version`.** Laravel's runtime
+  setter and getter for the asset version. `Inertia::version` takes a
+  string, a function called on every read, or `None::<String>` for the
+  empty version (Laravel's `null`), and replaces the installed config's
+  version; `Inertia::get_version` returns the current one. Every page built
+  after the call advertises it, and the version middleware
+  `Inertia::install` registers now reads `Inertia::get_version` per request
+  instead of the version captured at install (RF-05).
+- **Big integers survive the trip to the browser.** JavaScript reads
+  integers exactly only up to 9007199254740991, so a 64-bit id beyond it,
+  9007199254740993 for one, reached an Inertia page as 9007199254740992.
+  With the new `InertiaConfig::preserve_big_integers(true)` setting, or
+  `InertiaResponse::preserve_big_integers(true)` for one response, every
+  integer beyond plus or minus 9007199254740991 in props and flash, at
+  any depth, is sent as `{"$bigint": "<digits>"}` and the page carries
+  `preserveBigIntegers: true`, so the Inertia client restores it as an
+  exact `BigInt`, as Laravel's `preserve_big_integers` does. Off by
+  default; when off nothing is wrapped and the flag is absent (JE-04,
+  JE-05).
 
 ### Changed
 
@@ -449,6 +468,88 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   into the stage that compiles the application, since Askama reads
   templates at compile time; it copied only `cmd/` and `src/`, so that
   build could not find a root template or a Live view.
+- **`X-Inertia` counts as an Inertia visit for any value PHP reads as
+  true.** A request was an Inertia visit only when `X-Inertia` was exactly
+  `true`, so a client sending `X-Inertia: 1` received the HTML document
+  where Laravel sends the JSON page object. `Request::is_inertia` and the
+  `InertiaRequestExt` default now read the header as PHP's boolean cast
+  does: every value but an empty one and `0` is an Inertia visit, and JSON
+  responses still carry `X-Inertia: true`. Every middleware that asks
+  `is_inertia` follows the same rule, and so does the development error
+  page, which a visit sending `X-Inertia: 1` now gets in place of a JSON
+  error (HD-01).
+- **The Inertia asset version follows Laravel's order and is empty by
+  default.** With no Vite manifest to hash, the page carried the version
+  `1.0`; Laravel's carries an empty one. The version now resolves from the
+  new `InertiaConfig::asset_url` setting when it is set (a hash of the URL,
+  as Laravel's `app.asset_url`; it defaults to the `ASSET_URL` environment
+  variable, and the builder's value wins), else from the manifest's hash,
+  else to the empty string. An explicit `.version(...)` or
+  `.version_with(...)` still wins. `MANIFEST_VERSION_FALLBACK` stays exported, but no resolver returns
+  it now, and a client that holds `1.0` from before the upgrade is
+  bounced once (MW-11).
+- **The asset-version 409 names an absolute URL and the current
+  version.** `InertiaVersionMiddleware` answered a stale Inertia `GET` with
+  a root-relative `X-Inertia-Location` (`/users?page=3`) and no version, so
+  the client forced a full reload even for a poll or a background prop
+  load. The 409 now carries the request's absolute URL
+  (`http://example.test/users?page=3`, scheme and host as
+  `Request::scheme_and_http_host` reads them, a trusted proxy's forwarded
+  host included) and `X-Inertia-Version` with the current version, as
+  Laravel's `onVersionChange` does. It still answers before the handler
+  runs, and a visit by another method still passes through.
+  `InertiaResponse::version_conflict(url)`, the 409 a handler builds
+  itself, now carries `X-Inertia-Version` with `Inertia::get_version()` too
+  (MW-02, HD-10, R04).
+- **Partial reload headers are parsed as Laravel parses them.**
+  `X-Inertia-Partial-Data` and `X-Inertia-Partial-Except` were trimmed
+  entry by entry, and an empty `X-Inertia-Partial-Data` was a list that
+  matched nothing, so the client received no props at all. The lists are
+  now split on `,` with empty segments dropped and nothing trimmed (`a, b`
+  names `a` and ` b`), and a header that names nothing counts as absent:
+  an empty `X-Inertia-Partial-Data` now returns every prop `except`
+  allows, as Laravel's does. `X-Inertia-Reset` and
+  `X-Inertia-Except-Once-Props` were trimmed too and now follow the same
+  rule (HD-03).
+- **Dotted partial-reload entries narrow literal values only, as
+  Laravel's do.** `only: ['users.name']` narrowed every prop's resolved
+  value, a resolver's and a `defer`, `optional`, `merge` or `once` prop's
+  included, so the client received `{"users": {"name": "Ada"}}` where
+  Laravel sends the whole `users`. Dotted `only` and `except` entries now
+  walk literal values alone (a flag-free resolver under a dotted key
+  counts, since Laravel calls it before the walk), and the walk is
+  Laravel's: an entry whose path resolves to nothing yields `[]` instead of
+  `{}`, a path walks into lists by index, and a scalar a deeper path
+  reaches ships as it is instead of being dropped. The manual's divergence
+  entry on narrowing is gone (PR-08, HD-04).
+- **Optional and deferred props resolve on an except-only partial
+  reload.** An `optional` or `defer` prop resolved on a partial reload only
+  when `X-Inertia-Partial-Data` named it, so `router.reload({ except:
+  ['stats'] })` returned none of them where Laravel returns every one it
+  does not exclude. They now resolve whenever their key passes the only
+  and except lists, a reload with `except` alone or neither list included;
+  a standard visit still leaves them out (PR-07, PT-01).
+- **`merge` and `once` instructions follow Laravel's partial-reload
+  rule.** Any `only` entry that selected a prop also sent its instructions,
+  so `only: ['items.data']` against a merge prop `items` told the client to
+  append a value it had asked for in part, and a `.merge().once()` prop
+  the client already held still sent a `mergeProps` entry beside its
+  `onceProps` entry. `mergeProps` and `onceProps` entries now ship only
+  when an `only` entry names the prop or an ancestor of it, so a deeper
+  entry sends the whole prop with no instruction, and a held once prop
+  that is not deferred sends its `onceProps` entry alone. A scroll prop
+  keeps its `scrollProps` cursor in both cases (PR-12, PR-13).
+- **The Inertia page `url` carries the query as Laravel normalises it.**
+  `page.url` repeated the query as the request sent it, so
+  `/s?b=2&a=1%20x` stayed `/s?b=2&a=1%20x` where Laravel's `fullUrl()`
+  sends `/s?a=1%20x&b=2`, and the client's comparisons of page URLs
+  differed between the two. The query is now parsed as PHP parses it,
+  sorted by key and re-encoded per RFC 3986, as Symfony's
+  `Request::normalizeQueryString` does: `+` becomes `%20`, reserved
+  characters stay percent-encoded (`a=%2Fx` stays `a=%2Fx`), a bare key
+  gains an `=`, a repeated key keeps its last value, and `a[]=x` becomes
+  `a%5B0%5D=x`. The version 409's `X-Inertia-Location` carries the same
+  query. A `url_resolver`'s URL is left as it returns it (RS-07).
 
 ### Fixed
 
@@ -585,6 +686,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `Batch::progress` and `SseEvent::keep_alive` wrote their ranges with an
   en dash; they now read "8 to 15", "1 to 12", "0 to 100" and "15 to 30
   seconds".
+- **A prop holding `<!--<script>` no longer breaks the first Inertia
+  page.** The first visit's page JSON escaped `/` but left `<` and `>` raw
+  inside its `<script>` element, so a prop such as `<!--<script>` put the
+  HTML tokenizer into its escaped script state: the real `</script>` no
+  longer closed the element, the mount element `<div id="app">` became
+  script text, and jsdom found no `#app` and a page JSON it could not
+  parse. `<` and `>` are now written as `\u003c` and `\u003e` beside the `/`
+  escaping, in the same single buffer, as Laravel's `JSON_HEX_TAG` and
+  Inertia 3.7.1 do (JE-01, H02).
+- **An Inertia page that cannot be encoded answers an error.** A failure
+  to encode the page object answered `200` with `{}` as the page, as JSON
+  for an Inertia visit and inside the first visit's document, so the
+  client mounted an empty page. It now answers `500` through
+  `FrameworkError`, as Laravel's `JsonResponse` throws (JE-03). Encoding a
+  `serde_json::Value` page does not fail today, so this closes a path
+  rather than one seen in use.
 
 ## 3.2.1 - 2026-10-05
 

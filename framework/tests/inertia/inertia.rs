@@ -14,10 +14,7 @@
 
 use std::collections::HashMap;
 use suprnova::testing::{AssertableInertia, ReloadRequest};
-use suprnova::{
-    Frontend, InertiaConfig, InertiaRequestExt, InertiaResponse, MANIFEST_VERSION_FALLBACK,
-    VersionResolver,
-};
+use suprnova::{Frontend, InertiaConfig, InertiaRequestExt, InertiaResponse, VersionResolver};
 
 /// Minimal `InertiaRequestExt` impl for tests.
 struct MockReq {
@@ -115,12 +112,12 @@ async fn inertia_xhr_visit_returns_json_page_object() {
         .await
         .unwrap();
 
-    // No manifest is configured in this test, so the version resolves to
-    // the documented fallback, not a hardcoded "1.0".
+    // No manifest is configured in this test, so the version is empty,
+    // as Laravel's is with nothing to hash.
     AssertableInertia::from_response(&resp)
         .component("Users")
         .url("/users")
-        .version(MANIFEST_VERSION_FALLBACK)
+        .version("")
         .has("users")
         .has("errors")
         .missing("nonexistent")
@@ -328,11 +325,12 @@ async fn partial_except_dot_notation_wins_over_only_on_the_same_path() {
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
     // "user" still participates (only named it), but the one path both
-    // headers agree on is gone - except wins, leaving an empty object
-    // rather than dropping "user" from props altogether.
+    // headers agree on is gone - except wins. A literal that kept none of
+    // its children is `[]`, as Laravel's PHP array encodes, rather than
+    // "user" dropping out of props altogether.
     let props = page["props"].as_object().unwrap();
     assert!(props.contains_key("user"));
-    assert_eq!(page["props"]["user"], serde_json::json!({}));
+    assert_eq!(page["props"]["user"], serde_json::json!([]));
 }
 
 #[tokio::test]
@@ -363,7 +361,7 @@ async fn partial_data_unknown_nested_path_yields_nothing_for_that_key_without_dr
 }
 
 #[tokio::test]
-async fn partial_data_dotted_path_through_a_scalar_drops_silently() {
+async fn partial_data_dotted_path_through_a_scalar_keeps_the_scalar() {
     let req = MockReq::new("/settings")
         .inertia()
         .header("X-Inertia-Partial-Component", "Settings")
@@ -378,12 +376,12 @@ async fn partial_data_dotted_path_through_a_scalar_drops_silently() {
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
-    // "level" is a scalar, so a path that drills through it
-    // ("level.nested") drops silently; the sibling "theme" path still
-    // comes through.
+    // "level" leads to the requested "level.nested", and Laravel ships a
+    // scalar its walk reaches as it is; the sibling "theme" path comes
+    // through too.
     assert_eq!(
         page["props"]["config"],
-        serde_json::json!({"theme": "dark"})
+        serde_json::json!({"theme": "dark", "level": 3})
     );
 }
 
@@ -441,7 +439,7 @@ async fn always_prop_ignores_dotted_only_and_ships_whole_value() {
 }
 
 #[tokio::test]
-async fn optional_prop_dot_only_resolves_and_narrows() {
+async fn optional_prop_dot_only_resolves_and_ships_whole() {
     let _guard = suprnova::testing::TestContainer::fake();
     let req = MockReq::new("/team")
         .inertia()
@@ -459,14 +457,16 @@ async fn optional_prop_dot_only_resolves_and_narrows() {
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
+    // An optional prop is a prop object: a dotted entry resolves it, and
+    // its value ships whole, as Laravel's does.
     assert_eq!(
         page["props"]["permissions"],
-        serde_json::json!({"read": true})
+        serde_json::json!({"read": true, "write": false})
     );
 }
 
 #[tokio::test]
-async fn defer_prop_dot_only_on_the_followup_resolves_and_narrows() {
+async fn defer_prop_dot_only_on_the_followup_resolves_and_ships_whole() {
     let _guard = suprnova::testing::TestContainer::fake();
     let req = MockReq::new("/chat")
         .inertia()
@@ -489,13 +489,13 @@ async fn defer_prop_dot_only_on_the_followup_resolves_and_narrows() {
 
     assert_eq!(
         page["props"]["thread"],
-        serde_json::json!({"title": "Hello"})
+        serde_json::json!({"title": "Hello", "messages": [{"id": 1}]})
     );
     assert!(!page.as_object().unwrap().contains_key("deferredProps"));
 }
 
 #[tokio::test]
-async fn merge_prop_dot_only_narrows_the_value_but_merge_metadata_keeps_the_bare_key() {
+async fn merge_prop_dot_only_ships_the_value_whole_without_the_merge_instruction() {
     let req = MockReq::new("/feed")
         .inertia()
         .header("X-Inertia-Partial-Component", "Feed")
@@ -516,9 +516,11 @@ async fn merge_prop_dot_only_narrows_the_value_but_merge_metadata_keeps_the_bare
 
     assert_eq!(
         page["props"]["feed"],
-        serde_json::json!({"items": [{"id": 1}]})
+        serde_json::json!({"items": [{"id": 1}], "meta": {"total": 1}})
     );
-    assert_eq!(page["mergeProps"], serde_json::json!(["feed"]));
+    // An only entry deeper than the prop selects the value but carries no
+    // merge instruction, as Laravel's `isIncludedInPartialMetadata` rules.
+    assert!(page.get("mergeProps").is_none(), "got {page}");
 }
 
 #[tokio::test]
@@ -3796,7 +3798,7 @@ mod version_mw {
             .headers()
             .get("X-Inertia-Location")
             .expect("X-Inertia-Location header");
-        assert_eq!(location, "/users");
+        assert_eq!(location, "http://localhost/users");
     }
 
     #[tokio::test]
@@ -3859,7 +3861,7 @@ mod version_mw {
             .headers()
             .get("X-Inertia-Location")
             .expect("X-Inertia-Location header");
-        assert_eq!(location, "/users?page=3&q=alice");
+        assert_eq!(location, "http://localhost/users?page=3&q=alice");
     }
 
     /// Boot a one-shot HTTP server that resolves an `InertiaResponse`
@@ -3917,8 +3919,9 @@ mod version_mw {
     #[tokio::test]
     async fn page_url_and_the_version_bounce_url_agree_on_a_real_request() {
         // A 409 version bounce and the page object it bounces to must name
-        // the same URL, query string included; otherwise a stale-asset
-        // reload lands on page 1 while the page object still says page 3.
+        // the same path and query; otherwise a stale-asset reload lands on
+        // page 1 while the page object still says page 3. The bounce is
+        // absolute, as Laravel's `fullUrl()` is, and the page URL is not.
         // Both derive from `InertiaRequestExt::path_and_query`, and this
         // drives each through a real request for the same URI so any drift
         // between them fails here, not in a browser.
@@ -3935,14 +3938,15 @@ mod version_mw {
             .to_str()
             .unwrap()
             .to_string();
-        assert_eq!(location, "/users?page=3&q=alice");
+        assert_eq!(location, "http://localhost/users?page=3&q=alice");
 
         // (b) the Inertia page object's `url`, for the same URI.
         let page_url = resolve_page_url(uri).await;
         assert_eq!(page_url, "/users?page=3&q=alice");
 
-        // (c) byte-for-byte agreement.
-        assert_eq!(location, page_url);
+        // (c) the bounce is the page URL made absolute, as Laravel's
+        // `fullUrl()` is.
+        assert_eq!(location, format!("http://localhost{page_url}"));
     }
 }
 
@@ -4317,8 +4321,8 @@ fn mock_req_path_and_query_matches_hyper_uris_derivation() {
     // `hyper::Uri::path_and_query()` would for the same URI, so the
     // MockReq-based tests above are exercising a faithful stand-in.
     // The real pin - that `InertiaVersionMiddleware`'s `X-Inertia-Location`
-    // and `InertiaResponse::resolve`'s `page.url` agree byte-for-byte
-    // through a REAL `crate::http::Request` - lives in
+    // is `InertiaResponse::resolve`'s `page.url` made absolute, through a
+    // REAL `crate::http::Request` - lives in
     // `version_mw::page_url_and_the_version_bounce_url_agree_on_a_real_request`,
     // since both now derive their string through the single
     // `InertiaRequestExt::path_and_query` implementation on `Request`
@@ -4748,7 +4752,7 @@ async fn without_an_install_the_response_uses_the_default_config() {
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
-        page["version"], "1.0",
+        page["version"], "",
         "with nothing installed the response must fall back to \
          InertiaConfig::default()"
     );
@@ -4779,7 +4783,7 @@ async fn a_failed_install_retains_nothing() {
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
-        page["version"], "1.0",
+        page["version"], "",
         "a failed install must retain no config"
     );
 }
@@ -4890,8 +4894,9 @@ fn manifest_version_falls_back_when_the_file_is_missing() {
     let resolver = VersionResolver::from_manifest("/definitely/not/a/real/manifest.json");
     assert_eq!(
         resolver.resolve(),
-        "1.0",
-        "a missing manifest must not error - dev has no build"
+        "",
+        "a missing manifest must not error - dev has no build, and the \
+         version is empty as Laravel's is"
     );
 }
 
@@ -4907,8 +4912,8 @@ fn default_config_resolves_its_version_from_the_configured_manifest() {
 
     assert_eq!(resolved, expected);
     assert_ne!(
-        resolved, "1.0",
-        "a present manifest must not use the fallback"
+        resolved, "",
+        "a present manifest must not resolve to the empty version"
     );
 }
 
