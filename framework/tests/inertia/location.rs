@@ -55,12 +55,19 @@ async fn inp_location_answers_an_inertia_visit_with_a_409() {
 }
 
 #[tokio::test]
-async fn inp_location_without_the_inertia_middleware_keeps_the_409() {
-    // Nothing tells it what the request was, so it keeps the form an
-    // Inertia visit needs, as it always did.
+async fn inp_location_without_the_inertia_middleware_still_tells_the_visits_apart() {
+    // The server scopes the visit's facts for every request, so a route
+    // outside the Inertia stack answers as the request needs too: a plain
+    // visit is never handed the 409 (PAR-049).
     let addr = serve(router(), MiddlewareRegistry::new()).await;
-    let reply = Client::new(addr).send("GET", "/out", &[]).await;
-    assert_eq!(reply.status, 409);
+    let plain = Client::new(addr).send("GET", "/out", &[]).await;
+    assert_eq!(plain.status, 302, "{plain:?}");
+    assert_eq!(plain.header("location"), Some("/x"));
+    let visit = Client::new(addr)
+        .send("GET", "/out", &[("X-Inertia", "true")])
+        .await;
+    assert_eq!(visit.status, 409, "{visit:?}");
+    assert_eq!(visit.header("x-inertia-location"), Some("/x"));
 }
 
 #[tokio::test]

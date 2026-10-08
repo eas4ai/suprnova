@@ -28,7 +28,7 @@ mod shared;
 pub(crate) mod ssr;
 mod validation_redirect_middleware;
 mod version_middleware;
-mod visit;
+pub(crate) mod visit;
 
 pub use config::{Frontend, InertiaConfig, MANIFEST_VERSION_FALLBACK, SsrConfig, VersionResolver};
 pub use conversion_middleware::Inertia303Middleware;
