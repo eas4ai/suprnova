@@ -1460,6 +1460,40 @@ Inertia::install(
 )?;
 ```
 
+`.ssr_exclude(pattern)` follows Laravel's `ExcludesPaths` rules, so a
+pattern copied from a Laravel app excludes the same requests: slashes at
+either end are ignored, `*` matches any characters including `/`, and each
+pattern is tried against the path and the full URL. `admin/*` keeps
+`/admin/users` and `/admin/users/edit` on the client, not `/adminx`.
+
+The `Inertia` facade changes SSR at run time, as Laravel's does:
+
+```rust
+use suprnova::{Inertia, InertiaRequestExt};
+
+// A switch for every request; `false` turns SSR on even where the
+// configuration has it off (the worker URL still comes from the config).
+Inertia::disable_ssr(true);
+
+// Or decide per request. The answer replaces the configuration's switch.
+Inertia::disable_ssr_if(|request: &dyn InertiaRequestExt| {
+    request.path().starts_with("/admin")
+});
+
+// More exclusions, with the same rules as `ssr_exclude`.
+Inertia::without_ssr(["admin/*", "https://app.test/reports*"]);
+
+// Adjust the request sent to the worker: headers, a token, the timeout.
+Inertia::configure_ssr_request_using(|request| {
+    request
+        .bearer_token(std::env::var("SSR_TOKEN").unwrap_or_default())
+        .header("X-Tenant", "acme")
+});
+```
+
+`App::disable_ssr_for_request()` still turns SSR off for the one request it
+runs in, whatever the switch says.
+
 `suprnova new` scaffolds `frontend/src/ssr.{ts,tsx}` and a `build:ssr`
 npm script for every starter. Build it, then boot the worker:
 

@@ -269,6 +269,9 @@ impl suprnova::InertiaRequestExt for MockReq {
     fn path(&self) -> &str {
         &self.path
     }
+    fn full_url(&self) -> String {
+        format!("http://localhost{}", self.path)
+    }
     fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .get(&name.to_ascii_lowercase())

@@ -1438,10 +1438,11 @@ impl App {
         }
     }
 
-    /// Disable Inertia SSR for the remainder of this request. Equivalent
-    /// to Laravel's `Inertia::disable_ssr()`. The response falls back
-    /// to client-side rendering even when `InertiaConfig::ssr.enabled`
-    /// is `true`. Idempotent; no-op outside a request scope.
+    /// Disable Inertia SSR for the remainder of this request. The response
+    /// falls back to client-side rendering even when SSR is on by the
+    /// configuration or by [`Inertia::disable_ssr`](crate::Inertia::disable_ssr),
+    /// which sets the switch for every request rather than this one.
+    /// Idempotent; no-op outside a request scope.
     pub fn disable_ssr_for_request() {
         crate::inertia::ssr::disable_ssr_for_request();
     }

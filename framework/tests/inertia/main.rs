@@ -24,5 +24,6 @@ pub mod prop_composition;
 pub mod protocol_harness;
 pub mod redirect_back;
 pub mod shared_ergonomics;
+pub mod ssr_controls;
 pub mod try_serialize;
 pub mod validation_redirect;

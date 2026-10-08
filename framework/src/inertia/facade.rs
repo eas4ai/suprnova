@@ -7,7 +7,9 @@ use crate::pagination::IntoInertiaScroll;
 
 use super::flash::{self, FlashKey};
 use super::response::PropEntry;
+use super::runtime::SsrCondition;
 use super::shared::InertiaSharedData;
+use super::ssr::SsrRequest;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -240,6 +242,82 @@ impl Inertia {
         crate::App::inertia_registry()
             .runtime()
             .set_component_transformer(Arc::new(transformer));
+    }
+
+    /// Turn SSR off, or on, for every request - Laravel's
+    /// `Inertia::disableSsr($bool)`.
+    ///
+    /// `disable_ssr(true)` keeps the worker out even where the
+    /// configuration enables SSR; `disable_ssr(false)` sends every first
+    /// visit to it even where the configuration has SSR off (the worker URL
+    /// still comes from the configuration). The setting replaces the
+    /// configuration's switch until it is set again. Excluded paths and
+    /// [`App::disable_ssr_for_request`](crate::App::disable_ssr_for_request)
+    /// still keep a request out.
+    pub fn disable_ssr(disabled: bool) {
+        crate::App::inertia_registry()
+            .runtime()
+            .set_ssr_condition(SsrCondition::Always(disabled));
+    }
+
+    /// Decide per request whether SSR is off - Laravel's
+    /// `Inertia::disableSsr($closure)`. The condition runs for every first
+    /// visit and its answer replaces the configuration's switch, so it can
+    /// turn SSR on as well as off.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{Inertia, InertiaRequestExt};
+    ///
+    /// // Render the admin area on the client only.
+    /// Inertia::disable_ssr_if(|request: &dyn InertiaRequestExt| {
+    ///     request.path().starts_with("/admin")
+    /// });
+    /// ```
+    pub fn disable_ssr_if<F>(condition: F)
+    where
+        F: Fn(&dyn super::InertiaRequestExt) -> bool + Send + Sync + 'static,
+    {
+        crate::App::inertia_registry()
+            .runtime()
+            .set_ssr_condition(SsrCondition::When(Arc::new(condition)));
+    }
+
+    /// Exclude paths from SSR - Laravel's `Inertia::withoutSsr($paths)`.
+    ///
+    /// The patterns join [`InertiaConfig::ssr_exclude`]'s and follow
+    /// Laravel's `ExcludesPaths` rules: slashes at either end are ignored,
+    /// `*` matches any characters including `/`, and each pattern is tried
+    /// against the path and the full URL. `admin/*` keeps `/admin/users`
+    /// and `/admin/users/edit` out, not `/adminx`.
+    pub fn without_ssr<I, S>(patterns: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        crate::App::inertia_registry()
+            .runtime()
+            .add_ssr_exclusions(patterns.into_iter().map(Into::into));
+    }
+
+    /// Adjust the request sent to the SSR worker - Laravel's
+    /// `Inertia::configureSsrRequestUsing($closure)`. A worker that needs a
+    /// token, another header or a longer timeout is reached through it; a
+    /// later call replaces it.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::Inertia;
+    ///
+    /// Inertia::configure_ssr_request_using(|request| {
+    ///     request.bearer_token(std::env::var("SSR_TOKEN").unwrap_or_default())
+    /// });
+    /// ```
+    pub fn configure_ssr_request_using<F>(configure: F)
+    where
+        F: Fn(SsrRequest) -> SsrRequest + Send + Sync + 'static,
+    {
+        crate::App::inertia_registry()
+            .runtime()
+            .set_ssr_request_configurator(Arc::new(configure));
     }
 
     /// Flash a value for the next page response - Laravel's

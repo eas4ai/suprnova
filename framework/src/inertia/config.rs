@@ -381,9 +381,11 @@ pub struct SsrConfig {
     /// back to CSR. Useful in CI / tests; never set `true` in
     /// production unless you also have a watchdog.
     pub throw_on_error: bool,
-    /// Glob-style path patterns excluded from SSR. Matching paths
-    /// render CSR-only even when `enabled` is `true`. Each pattern
-    /// supports `*` (anything-not-slash) and `**` (anything).
+    /// Path patterns excluded from SSR. Matching requests render CSR-only
+    /// even when `enabled` is `true`. Patterns follow Laravel's
+    /// `ExcludesPaths`: slashes at either end are ignored, `*` matches any
+    /// characters including `/`, and each pattern is tried against the
+    /// path and the full URL. `Inertia::without_ssr` adds more at run time.
     pub excluded_paths: Vec<String>,
     /// Observability hook invoked when an SSR render fails and we
     /// fall back to CSR. Defaults to `eprintln!` to stderr. Wire your
@@ -451,48 +453,69 @@ impl Default for SsrConfig {
 }
 
 impl SsrConfig {
-    /// Check whether the given request path is excluded from SSR.
+    /// Check whether the given request path is excluded from SSR by
+    /// [`excluded_paths`](Self::excluded_paths), with the rules of
+    /// Laravel's `ExcludesPaths`: see [`excluded_by`]. The render also
+    /// tries each pattern against the request's full URL.
     pub fn is_path_excluded(&self, path: &str) -> bool {
-        self.excluded_paths.iter().any(|pat| glob_match(pat, path))
+        excluded_by(&self.excluded_paths, path, None)
     }
 }
 
-/// Tiny glob matcher: `*` matches a single non-`/` segment, `**`
-/// matches any number of characters (including `/`). Designed for
-/// route-pattern matching, not full POSIX globs.
-fn glob_match(pattern: &str, path: &str) -> bool {
-    glob_match_inner(pattern.as_bytes(), path.as_bytes())
+/// Laravel's `ExcludesPaths::inExceptArray`, so an exclusion pattern copied
+/// from a Laravel application excludes the same requests.
+///
+/// Each pattern has its leading and trailing slashes trimmed (`/` alone
+/// stays `/`) and is tried against the full URL, when there is one, and
+/// against the decoded path with its slashes trimmed (`/` for the root),
+/// with [`str_is`]'s wildcard. So `admin/*` excludes `/admin/users` and
+/// `/admin/users/edit` but not `/adminx`, and `/reports/` excludes
+/// `/reports`.
+pub(crate) fn excluded_by(patterns: &[String], path: &str, full_url: Option<&str>) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+    let decoded = percent_encoding::percent_decode_str(path).decode_utf8_lossy();
+    let trimmed = decoded.trim_matches('/');
+    let request_path = if trimmed.is_empty() { "/" } else { trimmed };
+    patterns.iter().any(|pattern| {
+        let pattern = if pattern == "/" {
+            "/"
+        } else {
+            pattern.trim_matches('/')
+        };
+        full_url.is_some_and(|url| str_is(pattern, url)) || str_is(pattern, request_path)
+    })
 }
 
-/// Match by dynamic programming over (pattern position, path position).
+/// Laravel's `Str::is`: `*` matches any run of characters, `/` included,
+/// and every other character matches itself.
 ///
-/// A single-backtrack matcher remembers only the most recent star, so a
-/// later `*` overwrites an earlier `**` and a pattern like `**/foo/*`
-/// misses `/a/foo/b/foo/c`, where the `**` has to take `/a/foo/b`. The
-/// table keeps every star's options open. Patterns and paths are short,
-/// so the `O(pattern * path)` cost is a few hundred cells.
-fn glob_match_inner(pat: &[u8], path: &[u8]) -> bool {
-    let width = path.len() + 1;
-    // `table[pi * width + si]`: does `pat[pi..]` match `path[si..]`?
-    let mut table = vec![false; (pat.len() + 1) * width];
-    table[pat.len() * width + path.len()] = true;
-    for pi in (0..pat.len()).rev() {
-        let double = pat[pi] == b'*' && pi + 1 < pat.len() && pat[pi + 1] == b'*';
-        for si in (0..=path.len()).rev() {
-            let matched = if double {
-                // `**` matches nothing, or one more byte of anything.
-                table[(pi + 2) * width + si] || (si < path.len() && table[pi * width + si + 1])
-            } else if pat[pi] == b'*' {
-                // `*` matches nothing, or one more byte that is not `/`.
-                table[(pi + 1) * width + si]
-                    || (si < path.len() && path[si] != b'/' && table[pi * width + si + 1])
-            } else {
-                si < path.len() && pat[pi] == path[si] && table[(pi + 1) * width + si + 1]
-            };
-            table[pi * width + si] = matched;
+/// Classic wildcard matching: on a mismatch the most recent `*` takes one
+/// more character. With `*` as the only wildcard that backtrack is
+/// complete, since an earlier star can only ever be asked to absorb what a
+/// later one could.
+fn str_is(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let (mut p, mut v) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while v < value.len() {
+        if p < pattern.len() && pattern[p] == b'*' {
+            star = Some((p, v));
+            p += 1;
+        } else if p < pattern.len() && pattern[p] == value[v] {
+            p += 1;
+            v += 1;
+        } else if let Some((star_p, star_v)) = star {
+            p = star_p + 1;
+            v = star_v + 1;
+            star = Some((star_p, star_v + 1));
+        } else {
+            return false;
         }
     }
-    table[0]
+    pattern[p..].iter().all(|byte| *byte == b'*')
 }
 
 /// Default Vite dev-server port when `VITE_PORT` is unset.
@@ -697,7 +720,8 @@ impl InertiaConfig {
         self
     }
 
-    /// Add a path pattern excluded from SSR.
+    /// Add a path pattern excluded from SSR, matched with Laravel's rules
+    /// (see [`SsrConfig::excluded_paths`]).
     pub fn ssr_exclude(mut self, pattern: impl Into<String>) -> Self {
         self.ssr.excluded_paths.push(pattern.into());
         self
@@ -1073,80 +1097,59 @@ mod tests {
         assert_eq!(cfg.version.resolve(), "dyn-v1");
     }
 
-    // ---- glob matcher ----
-    //
-    // Path-style glob: `*` matches one segment (no slash), `**` matches
-    // any characters including slashes. Standard rsync/gitignore-style
-    // semantics - `/admin/**` matches `/admin/x` but NOT bare `/admin`
-    // (use `/admin*` or two patterns for that).
+    // ---- SSR exclusion: Laravel's `ExcludesPaths` and `Str::is` ----
 
-    #[test]
-    fn glob_literal_matches_exact() {
-        assert!(glob_match("/users", "/users"));
-        assert!(!glob_match("/users", "/users/1"));
-        assert!(!glob_match("/users", "/user"));
+    fn excludes(pattern: &str, path: &str) -> bool {
+        excluded_by(&[pattern.to_string()], path, None)
     }
 
     #[test]
-    fn glob_single_star_does_not_cross_slash() {
-        assert!(glob_match("/users/*", "/users/1"));
-        assert!(glob_match("/users/*", "/users/abc"));
-        assert!(!glob_match("/users/*", "/users/1/edit"));
-        // Standard glob semantics: `*` matches zero or more non-slash
-        // chars, so `/users/*` matches `/users/` (the `*` matches the
-        // empty segment).
-        assert!(glob_match("/users/*", "/users/"));
+    fn inp_str_is_star_matches_any_characters_slash_included() {
+        assert!(str_is("admin/*", "admin/users"));
+        assert!(str_is("admin/*", "admin/users/edit"));
+        assert!(str_is("admin/*", "admin/"));
+        assert!(!str_is("admin/*", "admin"));
+        assert!(!str_is("admin/*", "adminx"));
+        assert!(str_is("*/edit", "posts/1/edit"));
+        assert!(str_is("a*b*c", "aXbYbZc"));
+        assert!(!str_is("a*b*c", "aXbYbZ"));
+        assert!(str_is("*", ""));
+        assert!(str_is("exact", "exact"));
+        assert!(!str_is("exact", "Exact"));
     }
 
     #[test]
-    fn glob_double_star_crosses_slashes() {
-        assert!(glob_match("/admin/**", "/admin/foo"));
-        assert!(glob_match("/admin/**", "/admin/foo/bar"));
-        assert!(glob_match("/admin/**", "/admin/"));
+    fn inp_exclusion_patterns_trim_slashes_and_match_the_trimmed_path() {
+        assert!(excludes("admin/*", "/admin/users"));
+        assert!(excludes("/admin/*", "/admin/users/edit"));
+        assert!(!excludes("admin/*", "/adminx"));
+        assert!(excludes("/reports/", "/reports"));
+        assert!(excludes("reports", "/reports/"));
+        assert!(excludes("/", "/"));
+        assert!(!excludes("/", "/home"));
+        // The path is decoded first, as `Request::decodedPath()` is.
+        assert!(excludes("caf\u{e9}/*", "/caf%C3%A9/menu"));
     }
 
     #[test]
-    fn glob_double_star_does_not_match_bare_prefix() {
-        // Standard glob semantics: `/admin/**` requires the slash. To
-        // match `/admin` itself, the operator should use `/admin*` or
-        // two separate patterns.
-        assert!(!glob_match("/admin/**", "/admin"));
+    fn inp_exclusion_patterns_are_tried_against_the_full_url() {
+        let patterns = ["https://app.test/reports*".to_string()];
+        assert!(excluded_by(
+            &patterns,
+            "/reports/2026",
+            Some("https://app.test/reports/2026?q=1")
+        ));
+        assert!(!excluded_by(&patterns, "/reports/2026", None));
     }
 
     #[test]
-    fn glob_admin_star_matches_admin_and_admin_suffix() {
-        assert!(glob_match("/admin*", "/admin"));
-        assert!(glob_match("/admin*", "/admin2"));
-        assert!(!glob_match("/admin*", "/admin/foo"));
-    }
-
-    #[test]
-    fn glob_leading_double_star_matches_anything() {
-        assert!(glob_match("**", "/anything/at/all"));
-        assert!(glob_match("**", ""));
-        assert!(glob_match("**/admin", "/foo/admin"));
-        assert!(glob_match("**/admin", "/admin"));
-    }
-
-    #[test]
-    fn glob_empty_pattern_matches_only_empty_path() {
-        assert!(glob_match("", ""));
-        assert!(!glob_match("", "/x"));
-    }
-
-    #[test]
-    fn glob_double_star_still_backtracks_after_a_later_single_star() {
-        // `**` has to absorb `/a/foo/b` so the trailing `*` can take `c`.
-        // A matcher that remembers only the last star loses the `**`
-        // fallback once it passes the single `*`.
-        assert!(glob_match("**/foo/*", "/a/foo/b/foo/c"));
-        assert!(glob_match("/x/**/y/*/z", "/x/1/y/2/y/3/z"));
-        assert!(!glob_match("**/foo/*", "/a/foo/b/foo/c/d"));
+    fn inp_ssr_config_uses_the_same_rules() {
         let config = SsrConfig {
-            excluded_paths: vec!["**/foo/*".to_string()],
+            excluded_paths: vec!["admin/*".to_string()],
             ..SsrConfig::default()
         };
-        assert!(config.is_path_excluded("/a/foo/b/foo/c"));
+        assert!(config.is_path_excluded("/admin/users/edit"));
+        assert!(!config.is_path_excluded("/adminx"));
     }
 }
 

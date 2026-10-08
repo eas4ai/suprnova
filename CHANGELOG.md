@@ -149,6 +149,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `page_extensions`) makes a component with no page file an error naming the
   component and the directory, for a name given as a string too (RF-02,
   RF-03, RF-07, RF-15).
+- **SSR controls on the `Inertia` facade.** `Inertia::disable_ssr(bool)`
+  and `disable_ssr_if(fn)` replace the configuration's switch, per request
+  for the function, and can turn SSR on as well as off;
+  `without_ssr(patterns)` adds exclusions; `configure_ssr_request_using(fn)`
+  adjusts the request sent to the worker through the new `SsrRequest`
+  (headers, a bearer token, the timeout), so a worker that needs a token can
+  be reached (RF-11, RF-12, RF-13).
 
 ### Changed
 
@@ -397,6 +404,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `share("user", {"name": "B"})` rendered `{"name": "B", "age": 3}`. It now
   nests at share time as Laravel's `Arr::set` does, and renders
   `{"name": "B"}` (RF-02).
+- **SSR exclusion patterns match as Laravel's `ExcludesPaths` does.**
+  `ssr_exclude` matched the raw path with `*` stopping at `/`, so
+  `admin/*` copied from a Laravel app excluded nothing (`/admin/users`
+  starts with a slash) and `/admin/*` missed `/admin/users/edit`. Slashes at
+  either end of a pattern are now ignored, `*` matches any characters
+  including `/`, the path is decoded first, and each pattern is also tried
+  against the full URL; `**` keeps working (RF-12).
 
 ### Fixed
 

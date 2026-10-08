@@ -1305,7 +1305,7 @@ impl InertiaResponse {
         } else {
             // SSR runs only for HTML (non-XHR) visits. XHR is a JSON
             // page-object response and never needs prerender.
-            let ssr_result = super::ssr::render(&config.ssr, req.path(), &page).await?;
+            let ssr_result = super::ssr::render(&config.ssr, req, &page).await?;
             build_html_response(&page, &config, title.as_deref(), ssr_result.as_ref())
         };
         staged_session.commit();
