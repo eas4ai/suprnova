@@ -216,3 +216,26 @@ async fn inp_the_asset_url_defaults_from_the_environment() {
         "the builder's asset URL wins over the environment"
     );
 }
+
+#[test]
+fn inp_version_conflict_carries_the_current_version() {
+    // The 409 a handler builds itself carries `X-Inertia-Version` too, as
+    // PAR-046 requires of the version 409.
+    let _guard = TestContainer::fake();
+    Inertia::version("v7");
+    let resp = InertiaResponse::version_conflict("/x").into_hyper();
+    assert_eq!(resp.status(), 409);
+    assert_eq!(
+        resp.headers()
+            .get("X-Inertia-Location")
+            .and_then(|v| v.to_str().ok()),
+        Some("/x")
+    );
+    assert_eq!(
+        resp.headers()
+            .get("X-Inertia-Version")
+            .and_then(|v| v.to_str().ok()),
+        Some("v7"),
+        "the version 409 must carry the current version"
+    );
+}

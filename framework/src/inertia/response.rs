@@ -1348,10 +1348,16 @@ impl InertiaResponse {
 
     /// Build a `409 Conflict` response indicating an asset version mismatch.
     /// The client follows `X-Inertia-Location` for a fresh full-page visit.
+    ///
+    /// `X-Inertia-Version` carries the current version,
+    /// [`Inertia::get_version`](crate::Inertia::get_version), as the version
+    /// middleware's 409 does: the client reads it so a poll or a background
+    /// prop load does not force a full reload after a deploy.
     pub fn version_conflict(new_url: &str) -> HttpResponse {
         HttpResponse::new()
             .status(409)
             .header("X-Inertia-Location", new_url)
+            .header("X-Inertia-Version", crate::Inertia::get_version())
     }
 }
 

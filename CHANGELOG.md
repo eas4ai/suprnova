@@ -377,8 +377,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `Request::scheme_and_http_host` reads them, a trusted proxy's forwarded
   host included) and `X-Inertia-Version` with the current version, as
   Laravel's `onVersionChange` does. It still answers before the handler
-  runs, and a visit by another method still passes through (MW-02, HD-10,
-  R04).
+  runs, and a visit by another method still passes through.
+  `InertiaResponse::version_conflict(url)`, the 409 a handler builds
+  itself, now carries `X-Inertia-Version` with `Inertia::get_version()` too
+  (MW-02, HD-10, R04).
 - **Partial reload headers are parsed as Laravel parses them.**
   `X-Inertia-Partial-Data` and `X-Inertia-Partial-Except` were trimmed
   entry by entry, and an empty `X-Inertia-Partial-Data` was a list that
