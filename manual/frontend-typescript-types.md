@@ -305,7 +305,29 @@ const { root } = usePage().props               // root: string
 `errorValueType: string` types each validation error as the one message
 per field that Suprnova sends by default. With
 `InertiaConfig::with_all_errors(true)`, a field carries every message as an
-array, which this type does not describe.
+array, and the generator types it that way: when any `.rs` file under
+`src/` calls `with_all_errors(..)` with anything but a literal `false`,
+`Errors` is `Record<string, string[]>` and `errorValueType` is `string[]`:
+
+```rust
+// src/bootstrap.rs: every field's errors become `string[]`
+Inertia::install(&InertiaConfig::new().with_all_errors(true))?;
+```
+
+```typescript
+export type Errors = Record<string, string[]>;
+
+declare module '@inertiajs/core' {
+  export interface InertiaConfig {
+    sharedPageProps: SharedProps;
+    errorValueType: string[];
+  }
+}
+```
+
+The call is read the way `preserve_big_integers(..)` is (see "Wide
+integers" below): `true` or a variable turns it on, and `false`, in
+parentheses or not, leaves `string`.
 
 The starter kits declare `@inertiajs/core` in `package.json`, since the
 augmentation names it, and their `tsconfig.json` includes `src/types/`, so

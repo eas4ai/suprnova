@@ -612,8 +612,11 @@ struct SourceScan {
     /// declaration of a name wins, as it does in [`resolve_reachable`].
     struct_files: HashMap<String, PathBuf>,
     /// Some `preserve_big_integers(..)` call passes anything but a literal
-    /// `false` (see [`PreserveBigIntegersVisitor`]).
+    /// `false` (see [`SwitchCallVisitor`]).
     preserves_big_integers: bool,
+    /// Some `with_all_errors(..)` call passes anything but a literal
+    /// `false` (see [`SwitchCallVisitor`]).
+    keeps_all_errors: bool,
     /// Every place a page is rendered, with the file it is in.
     renders: Vec<(PathBuf, RenderSite)>,
     /// The struct each `Inertia::share_data(..)` call is given.
@@ -624,6 +627,9 @@ struct SourceScan {
 /// checked path from writing them.
 struct FinishedScan {
     structs: Vec<InertiaPropsStruct>,
+    /// What the page declarations read from the sources beside the
+    /// structs.
+    page: PageTypes,
     /// One sentence per conflict, sorted. A conflict leaves the structs in
     /// a shape [`generate_typescript`] still renders deterministically, so
     /// the best-effort entry points can ignore it.
@@ -647,9 +653,9 @@ impl SourceScan {
         self.derived.extend(structs.structs);
         self.plain.extend(structs.plain_structs);
 
-        let mut preserve = PreserveBigIntegersVisitor::default();
-        preserve.visit_file(syntax);
-        self.preserves_big_integers |= preserve.found;
+        self.preserves_big_integers |=
+            SwitchCallVisitor::turned_on_in(PRESERVE_BIG_INTEGERS, syntax);
+        self.keeps_all_errors |= SwitchCallVisitor::turned_on_in(WITH_ALL_ERRORS, syntax);
 
         let mut calls = InertiaCallVisitor::default();
         calls.visit_file(syntax);
@@ -702,7 +708,13 @@ impl SourceScan {
             }
         }
         conflicts.sort();
-        FinishedScan { structs, conflicts }
+        FinishedScan {
+            structs,
+            page: PageTypes {
+                all_errors: self.keeps_all_errors,
+            },
+            conflicts,
+        }
     }
 
     /// Where the struct `name` is declared, for a message.
@@ -1272,27 +1284,45 @@ fn settle_wide_integers(structs: &mut [InertiaPropsStruct]) {
     }
 }
 
-/// Finds a call that turns big-integer preservation on:
-/// `.preserve_big_integers(arg)` on `InertiaConfig` or `InertiaResponse`,
-/// or the same function called through its path.
+/// Finds a call that turns one of `InertiaConfig`'s boolean switches on:
+/// `.name(arg)` as a method, or the same function called through its path
+/// (`InertiaConfig::name(config, arg)`). The scan reads two:
+/// [`PRESERVE_BIG_INTEGERS`] and [`WITH_ALL_ERRORS`].
 ///
-/// Any argument but a literal `false` counts. A literal `true` turns it on,
-/// and a variable may: a type that says `number | bigint` for a value that
-/// arrives as a `number` costs a check the compiler asks for, where one
-/// that says `number` for a value that arrives as a `BigInt` breaks
-/// arithmetic at run time. A call inside a macro is read from its tokens,
-/// since `syn` does not parse a macro's input.
-#[derive(Default)]
-struct PreserveBigIntegersVisitor {
+/// Any argument but a literal `false` counts. A literal `true` turns the
+/// switch on, and a variable may. For big integers the costs are uneven: a
+/// type that says `number | bigint` for a value that arrives as a `number`
+/// costs a check the compiler asks for, where one that says `number` for a
+/// value that arrives as a `BigInt` breaks arithmetic at run time. The
+/// errors switch reads the same rule, so one sentence in the manual covers
+/// both, and a project that calls the switch at all is one that turns it
+/// on somewhere. A call inside a macro is read from its tokens, since `syn`
+/// does not parse a macro's input.
+struct SwitchCallVisitor {
+    /// The method and function name to look for.
+    name: &'static str,
     found: bool,
 }
 
-/// The method and function name [`PreserveBigIntegersVisitor`] looks for.
+impl SwitchCallVisitor {
+    /// Whether some call in `syntax` turns the switch `name` on.
+    fn turned_on_in(name: &'static str, syntax: &syn::File) -> bool {
+        let mut visitor = Self { name, found: false };
+        visitor.visit_file(syntax);
+        visitor.found
+    }
+}
+
+/// The switch that sends wide integers as `$bigint` markers.
 const PRESERVE_BIG_INTEGERS: &str = "preserve_big_integers";
 
-/// Whether an argument turns preservation on: anything but `false`, which
+/// The switch that keeps every validation message per field, so the
+/// errors arrive as arrays.
+const WITH_ALL_ERRORS: &str = "with_all_errors";
+
+/// Whether an argument turns a switch on: anything but `false`, which
 /// parentheses do not change (`(false)` is `false`).
-fn turns_preservation_on(arg: Option<&Expr>) -> bool {
+fn turns_switch_on(arg: Option<&Expr>) -> bool {
     let mut arg = arg;
     while let Some(
         Expr::Paren(syn::ExprParen { expr, .. }) | Expr::Group(syn::ExprGroup { expr, .. }),
@@ -1309,10 +1339,10 @@ fn turns_preservation_on(arg: Option<&Expr>) -> bool {
     )
 }
 
-/// The token form of [`turns_preservation_on`], for a call inside a macro:
+/// The token form of [`turns_switch_on`], for a call inside a macro:
 /// `tokens` is everything inside the call's parentheses, and its last
 /// comma-separated argument decides.
-fn tokens_turn_preservation_on(tokens: proc_macro2::TokenStream) -> bool {
+fn tokens_turn_switch_on(tokens: proc_macro2::TokenStream) -> bool {
     let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
     let last = trees
         .rsplit(|tree| matches!(tree, proc_macro2::TokenTree::Punct(p) if p.as_char() == ','))
@@ -1327,33 +1357,33 @@ fn tokens_turn_preservation_on(tokens: proc_macro2::TokenStream) -> bool {
                 proc_macro2::Delimiter::Parenthesis | proc_macro2::Delimiter::None
             ) =>
         {
-            tokens_turn_preservation_on(group.stream())
+            tokens_turn_switch_on(group.stream())
         }
         _ => true,
     }
 }
 
-/// Whether `tokens`, or a group nested in them, call
-/// `preserve_big_integers(..)` with anything but `false`.
-fn macro_tokens_preserve(tokens: proc_macro2::TokenStream) -> bool {
+/// Whether `tokens`, or a group nested in them, call the switch `name`
+/// with anything but `false`.
+fn macro_tokens_turn_on(name: &str, tokens: proc_macro2::TokenStream) -> bool {
     let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
     trees.iter().enumerate().any(|(at, tree)| match tree {
-        proc_macro2::TokenTree::Ident(ident) if ident == PRESERVE_BIG_INTEGERS => {
+        proc_macro2::TokenTree::Ident(ident) if ident == name => {
             matches!(
                 trees.get(at + 1),
                 Some(proc_macro2::TokenTree::Group(group))
                     if group.delimiter() == proc_macro2::Delimiter::Parenthesis
-                        && tokens_turn_preservation_on(group.stream())
+                        && tokens_turn_switch_on(group.stream())
             )
         }
-        proc_macro2::TokenTree::Group(group) => macro_tokens_preserve(group.stream()),
+        proc_macro2::TokenTree::Group(group) => macro_tokens_turn_on(name, group.stream()),
         _ => false,
     })
 }
 
-impl<'ast> Visit<'ast> for PreserveBigIntegersVisitor {
+impl<'ast> Visit<'ast> for SwitchCallVisitor {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if node.method == PRESERVE_BIG_INTEGERS && turns_preservation_on(node.args.last()) {
+        if node.method == self.name && turns_switch_on(node.args.last()) {
             self.found = true;
         }
         syn::visit::visit_expr_method_call(self, node);
@@ -1365,8 +1395,8 @@ impl<'ast> Visit<'ast> for PreserveBigIntegersVisitor {
                 .path
                 .segments
                 .last()
-                .is_some_and(|segment| segment.ident == PRESERVE_BIG_INTEGERS)
-            && turns_preservation_on(node.args.last())
+                .is_some_and(|segment| segment.ident == self.name)
+            && turns_switch_on(node.args.last())
         {
             self.found = true;
         }
@@ -1374,7 +1404,7 @@ impl<'ast> Visit<'ast> for PreserveBigIntegersVisitor {
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        if macro_tokens_preserve(node.tokens.clone()) {
+        if macro_tokens_turn_on(self.name, node.tokens.clone()) {
             self.found = true;
         }
         syn::visit::visit_macro(self, node);
@@ -1493,10 +1523,10 @@ where
 fn scan_project_checked(
     project_path: &Path,
     options: GenerateOptions,
-) -> Result<Vec<InertiaPropsStruct>, String> {
+) -> Result<FinishedScan, String> {
     let finished = scan_project_with_failures(project_path, options)?;
     if finished.conflicts.is_empty() {
-        return Ok(finished.structs);
+        return Ok(finished);
     }
     let mut message = format!(
         "The Inertia types conflict in {} place(s); generated types were left unchanged:",
@@ -2010,6 +2040,20 @@ fn emit_ts_for_struct(s: &InertiaPropsStruct, known: &HashSet<String>) -> String
     out
 }
 
+/// What the page declarations read from the project beside the structs.
+///
+/// The default is a project that leaves `with_all_errors` off, the
+/// framework's default; the file-write entry point reads the real value
+/// from the sources, so only a caller that renders structs it scanned some
+/// other way passes one by hand.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PageTypes {
+    /// Some `with_all_errors(..)` call under `src/` turns it on, so the
+    /// server sends every message per field as an array and `Errors` and
+    /// `errorValueType` say `string[]` in place of `string`.
+    pub all_errors: bool,
+}
+
 /// Settings for one generation pass that the Rust sources do not decide.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GenerateOptions {
@@ -2032,7 +2076,9 @@ pub struct GenerateOptions {
 /// `root` and the shared struct's fields; `Errors` and `PageProps<C>`,
 /// which is what Inertia's `Page.props` is for that component; and the
 /// `@inertiajs/core` augmentation that types `usePage()` with no argument.
-pub fn generate_typescript(structs: &[InertiaPropsStruct]) -> String {
+/// What `page` carries is decided by the project as a whole rather than by
+/// one struct: whether the errors are arrays.
+pub fn generate_typescript(structs: &[InertiaPropsStruct], page: PageTypes) -> String {
     let mut output = String::new();
     output.push_str("// This file is auto-generated by Suprnova. Do not edit manually.\n");
     output.push_str("// Run `suprnova generate-types` to regenerate.\n\n");
@@ -2041,13 +2087,13 @@ pub fn generate_typescript(structs: &[InertiaPropsStruct]) -> String {
     // import, `declare module` would declare a new module instead.
     output.push_str("import '@inertiajs/core';\n\n");
     output.push_str(&render_structs(structs));
-    output.push_str(&render_page_declarations(structs));
+    output.push_str(&render_page_declarations(structs, page));
     end_with_single_newline(output)
 }
 
 /// The declarations that type a page beside the props interfaces, each
 /// followed by a blank line.
-fn render_page_declarations(structs: &[InertiaPropsStruct]) -> String {
+fn render_page_declarations(structs: &[InertiaPropsStruct], page: PageTypes) -> String {
     let known: HashSet<String> = structs.iter().map(|s| s.name.clone()).collect();
 
     // Sorted by component; on a conflict the scan reports, the struct
@@ -2092,13 +2138,24 @@ fn render_page_declarations(structs: &[InertiaPropsStruct]) -> String {
     }
     out.push_str("}\n\n");
 
-    out.push_str("export type Errors = Record<string, string>;\n\n");
+    // One message per field by default, as Inertia's own `ErrorValue` says;
+    // every message, as an array, under `with_all_errors(true)`.
+    let error_value = if page.all_errors {
+        "string[]"
+    } else {
+        "string"
+    };
+    out.push_str(&format!(
+        "export type Errors = Record<string, {error_value}>;\n\n"
+    ));
     out.push_str(
         "export type PageProps<C extends keyof Pages> = Pages[C] & SharedProps & { errors: Errors };\n\n",
     );
 
     out.push_str("declare module '@inertiajs/core' {\n  export interface InertiaConfig {\n");
-    out.push_str("    sharedPageProps: SharedProps;\n    errorValueType: string;\n");
+    out.push_str(&format!(
+        "    sharedPageProps: SharedProps;\n    errorValueType: {error_value};\n"
+    ));
     if let Some(flash) = role(PropsRole::Flash) {
         out.push_str(&format!("    flashDataType: {};\n", flash.name));
     }
@@ -2400,7 +2457,7 @@ pub fn generate_types_to_file(
     output_path: &Path,
     options: GenerateOptions,
 ) -> Result<GenerationOutcome, String> {
-    let structs = scan_project_checked(project_path, options)?;
+    let FinishedScan { structs, page, .. } = scan_project_checked(project_path, options)?;
 
     // Surface prop fields that reference un-generatable types (degraded to
     // `unknown` in the output) so the missing derive is fixed at the source.
@@ -2412,7 +2469,7 @@ pub fn generate_types_to_file(
             .map_err(|e| format!("Failed to create output directory: {}", e))?;
     }
 
-    let typescript = generate_typescript(&structs);
+    let typescript = generate_typescript(&structs, page);
     let wrote = write_if_changed(output_path, &typescript)?;
 
     Ok(GenerationOutcome {
@@ -3172,7 +3229,7 @@ mod json_value_tests {
         );
         assert_eq!(unresolved(&structs), Vec::<String>::new());
 
-        let ts = generate_typescript(&structs);
+        let ts = generate_typescript(&structs, PageTypes::default());
         assert!(ts.contains(JSON_ALIAS), "alias missing from:\n{ts}");
         assert!(
             ts.contains("errors: JsonValue | null;"),
@@ -3187,7 +3244,9 @@ mod json_value_tests {
              pub payload: Value,\n}\n",
         );
         assert_eq!(unresolved(&structs), Vec::<String>::new());
-        assert!(generate_typescript(&structs).contains("payload: JsonValue;"));
+        assert!(
+            generate_typescript(&structs, PageTypes::default()).contains("payload: JsonValue;")
+        );
     }
 
     #[test]
@@ -3199,7 +3258,7 @@ mod json_value_tests {
              pub struct Value {\n    pub inner: String,\n}\n",
         );
         assert_eq!(unresolved(&structs), Vec::<String>::new());
-        let ts = generate_typescript(&structs);
+        let ts = generate_typescript(&structs, PageTypes::default());
         assert!(ts.contains("v: Value;"), "{ts}");
         assert!(ts.contains("export interface Value {"), "{ts}");
         assert!(!ts.contains("JsonValue"), "{ts}");
@@ -3211,7 +3270,7 @@ mod json_value_tests {
             "#[derive(InertiaProps)]\npub struct A {\n    pub a: serde_json::Value,\n}\n\
              #[derive(InertiaProps)]\npub struct B {\n    pub b: serde_json::Value,\n}\n",
         );
-        let ts = generate_typescript(&structs);
+        let ts = generate_typescript(&structs, PageTypes::default());
         assert_eq!(
             ts.matches("export type JsonValue").count(),
             1,
@@ -3222,7 +3281,7 @@ mod json_value_tests {
     #[test]
     fn the_alias_is_absent_when_nothing_references_it() {
         let structs = parse("#[derive(InertiaProps)]\npub struct A {\n    pub a: String,\n}\n");
-        assert!(!generate_typescript(&structs).contains("JsonValue"));
+        assert!(!generate_typescript(&structs, PageTypes::default()).contains("JsonValue"));
     }
 
     #[test]
@@ -3236,7 +3295,7 @@ mod json_value_tests {
             "#[derive(InertiaProps)]\npub struct P {\n    pub payload: serde_json::Value,\n}\n\
              #[derive(InertiaProps)]\npub struct JsonValue {\n    pub inner: String,\n}\n",
         );
-        let ts = generate_typescript(&structs);
+        let ts = generate_typescript(&structs, PageTypes::default());
 
         assert_eq!(
             ts.matches("export type JsonValue").count(),
@@ -3261,7 +3320,7 @@ mod json_value_tests {
         let structs =
             parse("#[derive(InertiaProps)]\npub struct P<Value> {\n    pub v: Value,\n}\n");
         assert_eq!(unresolved(&structs), Vec::<String>::new());
-        let ts = generate_typescript(&structs);
+        let ts = generate_typescript(&structs, PageTypes::default());
         assert!(ts.contains("v: Value;"), "{ts}");
         assert!(!ts.contains("JsonValue"), "{ts}");
     }
@@ -3302,14 +3361,14 @@ mod file_shape_tests {
 
     #[test]
     fn the_emitted_file_ends_with_exactly_one_newline() {
-        assert_single_trailing_newline(&generate_typescript(&parse(ONE)));
+        assert_single_trailing_newline(&generate_typescript(&parse(ONE), PageTypes::default()));
     }
 
     #[test]
     fn an_empty_scan_still_ends_with_exactly_one_newline() {
         // No structs: the header alone is the file, and the header used to
         // end in the same blank line a struct did.
-        assert_single_trailing_newline(&generate_typescript(&[]));
+        assert_single_trailing_newline(&generate_typescript(&[], PageTypes::default()));
     }
 
     #[test]
@@ -3318,7 +3377,7 @@ mod file_shape_tests {
         // header, the `@inertiajs/core` import, the `JsonValue` alias, and
         // each declaration is the readable shape the issue asked to
         // preserve.
-        let ts = generate_typescript(&parse(TWO));
+        let ts = generate_typescript(&parse(TWO), PageTypes::default());
         assert_single_trailing_newline(&ts);
         assert!(
             ts.contains("regenerate.\n\nimport '@inertiajs/core';\n\nexport type JsonValue"),
@@ -3796,7 +3855,7 @@ mod write_if_changed_tests {
             "removing the final declaration must mutate the generated artifact"
         );
         let empty_output = fs::read_to_string(&out).expect("read empty output");
-        assert_eq!(empty_output, generate_typescript(&[]));
+        assert_eq!(empty_output, generate_typescript(&[], PageTypes::default()));
         assert!(!empty_output.contains("HomeProps"));
         let before = set_old_mtime(&out);
 
@@ -3822,7 +3881,7 @@ mod write_if_changed_tests {
         assert!(empty.wrote, "a missing artifact must be created");
         assert_eq!(
             fs::read_to_string(&out).expect("read empty module"),
-            generate_typescript(&[])
+            generate_typescript(&[], PageTypes::default())
         );
         let before = set_old_mtime(&out);
 

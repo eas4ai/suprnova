@@ -375,7 +375,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   marked `#[inertia_props(shared)]`), `Errors`, `PageProps<C>`, and a
   `declare module '@inertiajs/core'` block setting `sharedPageProps`,
   `errorValueType` and, for a struct marked `#[inertia_props(flash)]`,
-  `flashDataType`, so `usePage()` is typed with no argument. The
+  `flashDataType`, so `usePage()` is typed with no argument. `Errors` is
+  `Record<string, string>` and `errorValueType` is `string`, or both say
+  `string[]` when a `with_all_errors(..)` call under `src/` passes anything
+  but a literal `false` (read as `preserve_big_integers(..)` is), since the
+  server then sends every message per field as an array. The
   `InertiaProps` derive takes the two markers and refuses any other form.
   A component rendered with two structs, two shared or two
   flash structs, or a struct named like a generated declaration fails the

@@ -968,6 +968,74 @@ fn intt_page_props_join_a_page_its_shared_props_and_the_errors() {
     );
 }
 
+/// `Errors` and the augmentation's `errorValueType` of a project holding
+/// `HOME` and a `src/bootstrap.rs` whose `register` runs `body`.
+fn error_types_with_bootstrap(body: &str) -> (String, String) {
+    let bootstrap = format!(
+        "use suprnova::{{Inertia, InertiaConfig}};\n\npub fn register() {{\n    {body}\n}}\n"
+    );
+    let ts = generated(&[
+        ("controllers/home.rs", HOME),
+        ("bootstrap.rs", bootstrap.as_str()),
+    ]);
+    let errors = ts
+        .lines()
+        .find(|line| line.starts_with("export type Errors = "))
+        .unwrap_or_else(|| panic!("no `Errors` in:\n{ts}"))
+        .to_string();
+    let value = ts
+        .lines()
+        .find(|line| line.trim_start().starts_with("errorValueType: "))
+        .unwrap_or_else(|| panic!("no `errorValueType` in:\n{ts}"))
+        .trim()
+        .to_string();
+    (errors, value)
+}
+
+/// The PAR-068 falsifier: with `.with_all_errors(true)` in
+/// `src/bootstrap.rs` the server sends every message per field as an
+/// array, so both declarations say so. Anything but a literal `false`
+/// turns it on, as for `preserve_big_integers`, through a path call, in
+/// parentheses and inside a macro alike.
+#[test]
+fn intt_errors_are_arrays_when_src_keeps_all_errors() {
+    for body in [
+        "Inertia::install(&InertiaConfig::new().with_all_errors(true)).expect(\"install\");",
+        "let keep = true;\n    let _ = InertiaConfig::new().with_all_errors(keep);",
+        "let _ = InertiaConfig::with_all_errors(InertiaConfig::new(), (true));",
+        "bind!(InertiaConfig::new().with_all_errors(true));",
+    ] {
+        assert_eq!(
+            error_types_with_bootstrap(body),
+            (
+                "export type Errors = Record<string, string[]>;".to_string(),
+                "errorValueType: string[];".to_string()
+            ),
+            "`{body}` keeps every message"
+        );
+    }
+}
+
+#[test]
+fn intt_errors_are_strings_without_all_errors_or_with_false() {
+    for body in [
+        "Inertia::install(&InertiaConfig::new()).expect(\"install\");",
+        "Inertia::install(&InertiaConfig::new().with_all_errors(false)).expect(\"install\");",
+        "let _ = InertiaConfig::new().with_all_errors((false));",
+        "let _ = InertiaConfig::with_all_errors(InertiaConfig::new(), ((false)));",
+        "bind!(InertiaConfig::new().with_all_errors((false)));",
+    ] {
+        assert_eq!(
+            error_types_with_bootstrap(body),
+            (
+                "export type Errors = Record<string, string>;".to_string(),
+                "errorValueType: string;".to_string()
+            ),
+            "`{body}` sends one message per field"
+        );
+    }
+}
+
 #[test]
 fn intt_the_augmentation_types_inertias_config() {
     let ts = generated(&[("controllers/home.rs", HOME)]);
