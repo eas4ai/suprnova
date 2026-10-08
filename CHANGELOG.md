@@ -25,17 +25,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   titles.** Each page drew its own frame and reached other pages through
   `<a href>`, which reloaded the document on every click, and no page set a
   title. `layouts/GuestLayout.tsx` (the `auth/` pages) and
-  `layouts/AppLayout.tsx` (navigation, the signed-in user on the dashboard,
-  a sign-out `Link` with `method="post"` rendered as a button) now come
-  from `createInertiaApp`'s `layout` option and stay mounted between pages
-  that share them. Every application link is a `Link`, every page sets
+  `layouts/AppLayout.tsx` (navigation and a heading) now come from
+  `createInertiaApp`'s `layout` option and stay mounted between pages that
+  share them. Both show the signed-in user from the shared `auth` prop:
+  the name and a sign-out `Link` with `method="post"` rendered as a button,
+  or the sign-in and register links for a guest. Every application link is a `Link`, every page sets
   `<Head title>`, and the dashboard sets the layout's heading with
   `setLayoutProps` (K06, K07, K16).
 - **The React starter shows the flash toast.** No page read `page.flash`,
   so a sign-in, a registration or a reset showed no feedback. Both layouts
-  render `components/FlashToast.tsx`, which shows the `toast` a handler
-  flashed, read from the page on every render, so it is gone on the next
-  visit (K17).
+  render `components/FlashToast.tsx`, which shows `page.flash.toast`,
+  typed by the generated `flashDataType`, read from the page on every
+  render, so it is gone on the next visit (K17).
 - **The React starter demonstrates deferred, optional, polled, optimistic
   and infinite-scroll pages.** The dashboard sent one prop, nothing was
   paginated, and the auth pages posted through `useForm`. `Dashboard` now
@@ -43,7 +44,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `usePoll(10000, { only: ['stats'] })`, loads `recent_notes` with
   `WhenVisible`, and changes the display name through `useHttp`, showing
   the new name at once and putting the old one back with `errors.name` on
-  a `422`. The new `Notes/Index` page creates a note with `Form`,
+  a `422`; a saved name reloads the shared `auth` prop, so the layout
+  shows it too. The new `Notes/Index` page creates a note with `Form`,
   remembers its search with `useRemember`, lists the signed-in user's
   notes with `InfiniteScroll` over the cursor paginator, and opens a note
   through a prefetched instant visit to the new `Notes/Show` page. Every
