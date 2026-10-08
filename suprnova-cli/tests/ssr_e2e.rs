@@ -258,6 +258,52 @@ fn scaffolded_ssr_entry_produces_server_rendered_html() {
 // PAR-061: the CLI runs the application binary's command
 // ---------------------------------------------------------------------------
 
+/// The CLI links no part of the framework crate: no table a build of the
+/// CLI reads names the `suprnova` package, under its own name or another.
+/// The tests may link it, so `[dev-dependencies]` is not read.
+#[test]
+fn inssr_the_cli_does_not_depend_on_the_framework_crate() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let manifest: toml::Table = std::fs::read_to_string(&path)
+        .expect("read suprnova-cli/Cargo.toml")
+        .parse()
+        .expect("parse suprnova-cli/Cargo.toml");
+
+    let mut tables = vec![
+        ("[dependencies]".to_owned(), manifest.get("dependencies")),
+        (
+            "[build-dependencies]".to_owned(),
+            manifest.get("build-dependencies"),
+        ),
+    ];
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for (target, table) in targets {
+            for kind in ["dependencies", "build-dependencies"] {
+                tables.push((format!("[target.'{target}'.{kind}]"), table.get(kind)));
+            }
+        }
+    }
+    assert!(
+        tables[0].1.is_some(),
+        "the manifest has a [dependencies] table to read"
+    );
+    for (name, table) in tables {
+        let Some(table) = table.and_then(toml::Value::as_table) else {
+            continue;
+        };
+        for (key, spec) in table {
+            let package = spec
+                .get("package")
+                .and_then(toml::Value::as_str)
+                .unwrap_or(key);
+            assert_ne!(
+                package, "suprnova",
+                "{name} names the framework crate as `{key}`"
+            );
+        }
+    }
+}
+
 #[cfg(unix)]
 mod inssr {
     use std::os::unix::fs::PermissionsExt;
