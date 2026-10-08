@@ -158,6 +158,8 @@ fn golden_sources() -> Vec<(&'static str, Vec<u8>, bool)> {
             .to_vec(),
             true,
         ),
+        // Its outputs take their digests from the lossy-source fixture:
+        // MEM-003 excepts output decoded from a lossy WebP.
         (
             "webp-lossy-alpha",
             include_bytes!(concat!(
@@ -321,6 +323,10 @@ fn mem_003_outputs() -> Vec<(String, Vec<u8>)> {
     out
 }
 
+/// The label prefix of the one source that is a lossy WebP, whose outputs
+/// MEM-003 excepts.
+const LOSSY_WEBP_SOURCE: &str = "webp-lossy-alpha/";
+
 /// Whether `bytes` is a lossless WebP: a RIFF/WEBP file whose image is a
 /// `VP8L` bitstream and carries no lossy `VP8 ` one.
 fn is_lossless_webp(bytes: &[u8]) -> bool {
@@ -348,11 +354,23 @@ fn is_lossless_webp(bytes: &[u8]) -> bool {
 /// image with alpha. `fixtures/image-outputs-lossless-webp-eas4ai-65a9c8a.txt`
 /// holds those outputs as the fork at 65a9c8a writes them, and only a
 /// lossless WebP may take its digest from there.
+///
+/// Output decoded from a lossy WebP source is MEM-003's exception too:
+/// oxideav-webp 0.3 corrected the lossy decoder's colour conversion to
+/// within one level of libwebp's, which moves 11,006 of the 11,008 pixels
+/// of the one lossy source by up to 16 levels.
+/// `fixtures/image-outputs-lossy-webp-source-eas4ai-65a9c8a.txt` holds that
+/// source's outputs as the fork at 65a9c8a decodes it, and only an output
+/// of that source may take its digest from there. They differ from
+/// c04577b96's in pixel values only: the same dimensions and chunks, and
+/// the PNG, BMP and average-colour outputs of the pixels oxideav-webp 0.2.3
+/// decoded are c04577b96's bytes.
 #[tokio::test]
 async fn mem_audit_image_output_is_byte_for_byte_what_it_was() {
     let _lock = exclusive().await;
     let digests = |file: &'static str| -> std::collections::BTreeMap<&'static str, &'static str> {
         file.lines()
+            .filter(|line| !line.starts_with('#'))
             .filter_map(|line| line.split_once(' '))
             .collect()
     };
@@ -360,17 +378,30 @@ async fn mem_audit_image_output_is_byte_for_byte_what_it_was() {
     let lossless = digests(include_str!(
         "fixtures/image-outputs-lossless-webp-eas4ai-65a9c8a.txt"
     ));
+    let lossy_source = digests(include_str!(
+        "fixtures/image-outputs-lossy-webp-source-eas4ai-65a9c8a.txt"
+    ));
     assert!(
         lossless.keys().all(|label| golden.contains_key(label)),
         "every lossless WebP digest replaces one from c04577b96"
+    );
+    assert!(
+        lossy_source
+            .keys()
+            .all(|label| golden.contains_key(label) && label.starts_with(LOSSY_WEBP_SOURCE)),
+        "every lossy-source digest replaces one from c04577b96 for the lossy WebP source"
     );
     let mut differ = Vec::new();
     let mut seen = 0;
     for (label, bytes) in mem_003_outputs() {
         let digest = hex::encode(Sha256::digest(&bytes));
-        let expected = is_lossless_webp(&bytes)
-            .then(|| lossless.get(label.as_str()))
-            .flatten()
+        let expected = lossy_source
+            .get(label.as_str())
+            .or_else(|| {
+                is_lossless_webp(&bytes)
+                    .then(|| lossless.get(label.as_str()))
+                    .flatten()
+            })
             .or_else(|| golden.get(label.as_str()));
         match expected {
             Some(&before) if before == digest => {}
