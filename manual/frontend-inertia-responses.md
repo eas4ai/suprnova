@@ -536,8 +536,8 @@ key it asked for.
 `X-Inertia-Partial-Data` and `X-Inertia-Partial-Except` entries can name a
 path inside a prop's value, not just the prop's own key. A client calling
 `router.reload({ only: ['user.name'] })` sends
-`X-Inertia-Partial-Data: user.name`, and the response narrows the `user`
-prop down to just that field:
+`X-Inertia-Partial-Data: user.name`, and the response narrows a literal
+`user` prop down to just that field:
 
 ```json
 { "props": { "user": { "name": "Ada" } } }
@@ -546,8 +546,22 @@ prop down to just that field:
 `except` prunes the same way instead of narrowing - `router.reload({
 except: ['user.email'] })` leaves every other field of `user` in place.
 
+The rule is Laravel's: dotted entries narrow **literal values** only - a
+value passed to `.with(...)`, a value shared with `App::inertia_share`, an
+eager Data field. The walk keeps each nested path that is, descends from,
+or leads to an `only` entry, and that neither is nor descends from an
+`except` entry.
+
 Rules:
 
+- A value that came from a resolver or a prop object ships whole when its
+  key, an ancestor, or a path inside it is selected. `.lazy(...)`,
+  `.optional(...)`, `.defer(...)`, `.merge(...)`, `.once(...)`,
+  `.scroll(...)` and `.always(...)` props are not walked, so
+  `only: ['users.name']` against `.lazy("users", …)` sends every field of
+  `users`. One exception follows Laravel too: a flag-free resolver under a
+  dotted key (`.lazy("auth.user", …)`) narrows like a literal, because
+  Laravel calls a dotted key's closure before its walk.
 - A bare entry (`user`) still means the whole prop. If `only` names both
   `user` and `user.name`, the whole value ships - the bare entry wins.
 - An entry can also name an *ancestor* of a dotted prop key. A prop
@@ -559,25 +573,18 @@ Rules:
   `authAgent.user` prop is untouched by either.
 - `except` wins on a path both headers name, the same way it wins at the
   top level.
-- A path that doesn't resolve against the value - an unknown field, or one
-  that drills through a scalar or an array instead of an object -
-  contributes nothing for that path, without dropping the sibling fields
-  requested alongside it.
-- `Always` props ignore `only`/`except` entirely, dot notation included -
-  they always ship whole.
+- A path that resolves to nothing - an unknown field - contributes nothing,
+  without dropping the sibling fields requested alongside it. A value that
+  keeps none of its children is `[]`, PHP's empty array: `only:
+  ['user.missing']` sends `"user": []`.
+- The walk goes into lists by index (`rows.0.id`). A list that keeps a
+  prefix of its items stays a list; one that keeps other items becomes an
+  object keyed by their indexes (`{"1": …}`), as PHP encodes an array whose
+  keys no longer start at 0. A scalar a deeper path runs into
+  (`config.level` under `only: ['config.level.nested']`) ships as it is.
 - `Optional` and `Defer` props still need the explicit request to resolve
   at all. A dotted entry (`permissions.read`) counts as that request for
-  the top-level key, and the resolved value narrows the same way an
-  `Eager` prop's does.
-- A dotted `only` against a prop whose current value isn't an object -
-  a string, a number, an array - narrows to `{}`, not to the original
-  value. The client's reconciliation only deep-merges when *both* the
-  cached value and the incoming one are objects
-  (`inertia-3.6.1/packages/core/src/response.ts` `nestedTopKeys`); an
-  empty object fails that check against a non-object cache the same way
-  a populated one would, so the empty object replaces the cached scalar
-  outright instead of merging onto it. Avoid sending a dotted request
-  against a prop that isn't shaped as an object.
+  the top-level key, and the resolved value ships whole.
 - A dotted `except` doesn't delete the field on the client - it stops the
   field from refreshing on this response, and the client's merge restores
   it from whatever it already had cached. `deepMergeObjects` builds the
@@ -1535,7 +1542,7 @@ active container's `InertiaRegistry`, which gives tests using
 anything. Same surface as Laravel; different machinery underneath
 because the runtime is different.
 
-Nine other Rust-shaped choices worth flagging:
+Eight other Rust-shaped choices worth flagging:
 
 - **Lazy-prop resolvers run concurrently**, capped by
   `max_concurrent_resolvers` (default 16). A page with twelve lazy
@@ -1575,20 +1582,6 @@ Nine other Rust-shaped choices worth flagging:
   key through, standard visits included. Reach for `.optional()` for the
   initial-visit-skipped behavior the name "lazy" suggests if you're
   coming from Laravel.
-- **Nested `only`/`except` narrow after resolving, not before.** Laravel's
-  `Response::resolvePartialProperties` walks the dotted path through the
-  raw, not-yet-resolved prop array, so a path into a `LazyProp` or
-  `DeferProp` degrades to `null` - the walk hits an unresolved closure and
-  stops (`inertia-laravel-2.0.25/src/Response.php:273-297`). Suprnova
-  resolves every prop's value first - resolvers are async, so there's no
-  synchronous point where they're all plain arrays the way Laravel
-  sometimes has - then narrows the resulting JSON value. An unknown or
-  type-mismatched nested path is dropped instead of sent back as `null`,
-  matching what the client's own reconciliation expects: it deep-merges a
-  narrowed object onto what it already holds
-  (`inertia-3.6.1/packages/core/src/response.ts:414-425`), and a stray
-  `null` would clobber a field the client already has instead of leaving
-  it alone.
 - **`.scroll_wrapped` is opt-in, not automatic.** Laravel's
   `Inertia::scroll($value, $wrapper = 'data', …)` nests every scroll
   prop's merge instruction under `"data"` by default, because a Laravel

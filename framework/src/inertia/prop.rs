@@ -1231,39 +1231,35 @@ impl PartialFilter {
         }
     }
 
-    /// Narrow a resolved prop's value down to the nested paths named by
-    /// dot-notation entries in `only`/`except`, for the given top-level
-    /// `key`.
+    /// Narrow a literal prop value with the dotted entries of `only` and
+    /// `except`, for the prop at `key`, the way Laravel's `PropsResolver`
+    /// walks a literal array.
     ///
-    /// Laravel walks the dotted path *before* resolution, on the raw,
-    /// often-closure-backed prop bag
-    /// (`inertia-laravel-2.0.25/src/Response.php:273-297`,
-    /// `Arr::get`/`Arr::set`). Suprnova resolves every prop's value
-    /// first - necessarily, since resolvers are async - and narrows the
-    /// already-materialized [`Value`] afterward. The shape this produces
-    /// is exactly what `only=user.name` is documented to mean:
-    /// `{"user": {"name": ...}}`. The client reconstructs the full
-    /// object by deep-merging that slice onto whatever it already holds
-    /// for `user`
-    /// (`inertia-3.6.1/packages/core/src/response.ts:414-425`).
+    /// Each nested path is kept when it passes the lists: it is, descends
+    /// from, or leads to an `only` entry, and it neither is nor descends
+    /// from an `except` entry. Kept objects and lists are walked further;
+    /// a scalar a path reaches ships as it is. `only=user.name` against
+    /// `{"name": .., "email": ..}` gives `{"name": ..}`, and the client
+    /// deep-merges that slice onto the `user` it holds.
     ///
-    /// A path that doesn't resolve against `value` - an unknown field,
-    /// or one that drills through a scalar or an array instead of an
-    /// object - contributes nothing for that path and does not affect
-    /// any other requested path. This is a deliberate divergence from
-    /// Laravel's `Arr::get`, whose missing-key default is `null`: a
-    /// stray `null` here would overwrite a field the client's own
-    /// merge-on-top reconciliation already has cached, which is worse
-    /// than omitting it.
+    /// PHP shapes come along with the walk, since the client receives what
+    /// Laravel sends:
     ///
-    /// Only called for a key that has already passed
-    /// [`should_include`](Self::should_include) or
-    /// [`should_include_eager`](Self::should_include_eager) - this
-    /// method decides shape, not inclusion. The caller must not call it
-    /// for an `Always` prop: Laravel's `resolveAlways` re-injects an
-    /// `AlwaysProp`'s raw, unfiltered value
-    /// (`inertia-laravel-2.0.25/src/Response.php:406-416`), never
-    /// narrowed.
+    /// - A value that had children and kept none is `[]`, so an entry whose
+    ///   path resolves to nothing (`only=user.missing`) yields `[]`.
+    /// - A list is walked by index (`rows.0.id`). One that keeps a prefix
+    ///   of its items stays a list; one that keeps others is an object
+    ///   keyed by the original indexes (`{"1": ..}`), as `json_encode`
+    ///   writes an array whose keys no longer run from 0.
+    /// - A subtree the lists cannot touch is returned as it is.
+    ///
+    /// Only for literal values. A value that came from a resolver or from
+    /// a prop object (`optional`, `defer`, `merge`, `once`, `scroll`,
+    /// `always`) ships whole in Laravel, and the caller does not call this
+    /// for one; the one resolver it does call this for is a flag-free
+    /// resolver under a dotted key, which Laravel's `unpackDotProps` calls
+    /// before the walk. The method decides shape, not inclusion: `key`
+    /// itself has already passed [`should_include`](Self::should_include).
     ///
     /// Public alongside [`should_include_eager`](Self::should_include_eager)
     /// and [`should_include_optional`](Self::should_include_optional): a
@@ -1276,43 +1272,75 @@ impl PartialFilter {
         if !self.matched {
             return value;
         }
+        self.narrow_at(key, value)
+    }
 
-        let mut narrowed = if let Some(list) = &self.only {
-            let mut bare = false;
-            let mut nested_paths: Vec<Vec<&str>> = Vec::new();
-            for entry in list {
-                // An exact match asks for the whole prop; so does an
-                // entry naming an ancestor of a dotted prop key
-                // (`only=auth` against the key `auth.user`) - the
-                // requested root contains this prop entire, so there is
-                // no nested path left to trim to.
-                if entry == key || dotted_ancestor(entry, key) {
-                    bare = true;
-                    break;
-                }
-                if let Some(rest) = dotted_child(entry, key) {
-                    nested_paths.push(rest.split('.').collect());
-                }
-            }
-            if bare || nested_paths.is_empty() {
-                value
-            } else {
-                narrow_to_paths(&value, &nested_paths)
-            }
-        } else {
-            value
-        };
-
-        if let Some(except) = &self.except {
-            for entry in except {
-                if let Some(rest) = dotted_child(entry, key) {
-                    let segments: Vec<&str> = rest.split('.').collect();
-                    remove_path(&mut narrowed, &segments);
-                }
-            }
+    /// One step of [`narrow`](Self::narrow): `value` sits at `path`.
+    fn narrow_at(&self, path: &str, value: Value) -> Value {
+        if self.passes_whole(path) {
+            return value;
         }
+        match value {
+            Value::Object(map) => {
+                let had_children = !map.is_empty();
+                let mut kept = serde_json::Map::new();
+                for (child, nested) in map {
+                    let child_path = format!("{path}.{child}");
+                    if self.should_include_eager(&child_path) {
+                        let nested = self.narrow_at(&child_path, nested);
+                        kept.insert(child, nested);
+                    }
+                }
+                if had_children && kept.is_empty() {
+                    Value::Array(Vec::new())
+                } else {
+                    Value::Object(kept)
+                }
+            }
+            Value::Array(items) => {
+                let count = items.len();
+                let mut kept: Vec<(usize, Value)> = Vec::new();
+                for (index, nested) in items.into_iter().enumerate() {
+                    let child_path = format!("{path}.{index}");
+                    if self.should_include_eager(&child_path) {
+                        kept.push((index, self.narrow_at(&child_path, nested)));
+                    }
+                }
+                let still_a_list = kept.len() == count
+                    || kept
+                        .iter()
+                        .enumerate()
+                        .all(|(position, (index, _))| position == *index);
+                if still_a_list {
+                    Value::Array(kept.into_iter().map(|(_, nested)| nested).collect())
+                } else {
+                    Value::Object(
+                        kept.into_iter()
+                            .map(|(index, nested)| (index.to_string(), nested))
+                            .collect(),
+                    )
+                }
+            }
+            scalar => scalar,
+        }
+    }
 
-        narrowed
+    /// True when the lists can drop nothing below `path`: `path` is, or
+    /// descends from, an `only` entry (or there is no `only` list), and no
+    /// `except` entry names a path below it. The walk returns such a
+    /// subtree untouched instead of rebuilding it.
+    fn passes_whole(&self, path: &str) -> bool {
+        let only_covers = match &self.only {
+            Some(list) => list
+                .iter()
+                .any(|entry| entry == path || dotted_ancestor(entry, path)),
+            None => true,
+        };
+        let except_below = self
+            .except
+            .as_ref()
+            .is_some_and(|list| list.iter().any(|entry| dotted_child(entry, path).is_some()));
+        only_covers && !except_below
     }
 }
 
@@ -1362,96 +1390,6 @@ fn dotted_ancestor(entry: &str, key: &str) -> bool {
 /// [`PartialFilter::should_include_optional`] so the two never drift.
 fn entry_selects_key(entry: &str, key: &str) -> bool {
     entry == key || dotted_child(entry, key).is_some() || dotted_ancestor(entry, key)
-}
-
-/// Build a fresh JSON object containing only the requested nested
-/// `paths` out of `value`. A path that does not resolve - an unknown
-/// key, or a segment that walks into a scalar or an array rather than
-/// an object - contributes nothing and does not affect any other
-/// requested path.
-fn narrow_to_paths(value: &Value, paths: &[Vec<&str>]) -> Value {
-    let mut result = Value::Object(serde_json::Map::new());
-    for path in paths {
-        if let Some(found) = get_path(value, path) {
-            set_path(&mut result, path, found.clone());
-        }
-    }
-    result
-}
-
-/// Walk `path` through `value`'s object nesting, returning the value at
-/// the end. `None` the instant a segment is missing or the current
-/// value is not a JSON object - a dotted path into a scalar or an array
-/// has nothing to find, and is treated exactly like an unknown key.
-fn get_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
-    let mut current = value;
-    for segment in path {
-        current = current.as_object()?.get(*segment)?;
-    }
-    Some(current)
-}
-
-/// Write `leaf` into `target` at the nested `path`, creating
-/// intermediate objects as needed. Only ever called with a `target`
-/// that is (or becomes) an object at every level along `path` -
-/// [`narrow_to_paths`] always starts from an empty object, so there is
-/// never a pre-existing non-object value to reconcile with.
-///
-/// This module deliberately does **not** reuse [`super::dotted::arr_get`]
-/// for the walk that backs `set_path`/[`get_path`]/[`remove_path`], even
-/// though both are dot-notation walkers over `serde_json::Value`.
-/// `arr_get` checks for an *exact*, undotted key first
-/// (`object.get(key)` before ever splitting on `.`), mirroring Laravel's
-/// `Arr::get`'s `static::exists($array, $key)` short-circuit - correct at
-/// the *props-array* level, where a literal dotted key like
-/// `"user.name"` can legitimately be one whole top-level prop key rather
-/// than a path. `narrow` operates one level below that: inside an
-/// already-resolved prop's own JSON *value*, where the dotted `only`/
-/// `except` entry is always a path to walk, never a literal key to
-/// match first. Reusing `arr_get` here would silently import the wrong
-/// semantics - a value shaped like `{"a.b": 1}` would match on
-/// `only=["a.b"]` as an exact key instead of failing to resolve `a` then
-/// `b` as a path, which is what this task's dot-notation contract
-/// requires. If a future refactor is tempted to unify these two
-/// walkers, this is why they don't share one.
-fn set_path(target: &mut Value, path: &[&str], leaf: Value) {
-    match path.split_first() {
-        None => {}
-        Some((head, [])) => {
-            if let Some(obj) = target.as_object_mut() {
-                obj.insert((*head).to_string(), leaf);
-            }
-        }
-        Some((head, rest)) => {
-            if let Some(obj) = target.as_object_mut() {
-                let entry = obj
-                    .entry((*head).to_string())
-                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
-                set_path(entry, rest, leaf);
-            }
-        }
-    }
-}
-
-/// Delete the value at the nested `path` inside `target`, if present. A
-/// no-op when any intermediate segment is missing or is not an object -
-/// removing something that was never there is not an error.
-fn remove_path(target: &mut Value, path: &[&str]) {
-    match path.split_first() {
-        None => {}
-        Some((head, [])) => {
-            if let Some(obj) = target.as_object_mut() {
-                obj.remove(*head);
-            }
-        }
-        Some((head, rest)) => {
-            if let Some(obj) = target.as_object_mut()
-                && let Some(child) = obj.get_mut(*head)
-            {
-                remove_path(child, rest);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -2009,7 +1947,8 @@ mod tests {
             except: Some(vec!["user.email".into()]),
         };
         let value = json!({"name": "a", "email": "b"});
-        assert_eq!(filter.narrow("user", value), json!({}));
+        // Nothing kept: PHP's empty array.
+        assert_eq!(filter.narrow("user", value), json!([]));
     }
 
     #[test]
@@ -2031,25 +1970,27 @@ mod tests {
     }
 
     #[test]
-    fn narrow_drops_a_path_that_walks_through_a_scalar_intermediate() {
+    fn narrow_keeps_a_scalar_a_deeper_path_runs_into() {
+        // `config.level` leads to `config.level.nested`, so the walk keeps
+        // it, and a scalar ships as it is.
         let filter = PartialFilter {
             matched: true,
             only: Some(vec!["config.level.nested".into(), "config.theme".into()]),
             except: None,
         };
         let value = json!({"theme": "dark", "level": 3});
-        assert_eq!(filter.narrow("config", value), json!({"theme": "dark"}));
+        assert_eq!(
+            filter.narrow("config", value),
+            json!({"theme": "dark", "level": 3})
+        );
     }
 
     // ---- T26 review follow-up: multi-segment recursion + prefix guard --
 
     #[test]
     fn narrow_builds_a_three_segment_nested_object_from_a_dotted_only_entry() {
-        // Pins the recursive arm of `set_path`/`get_path` beyond one
-        // nested level - every other `only` test in this module bottoms
-        // out after a single segment, so this is the only coverage for
-        // `Some((head, rest))` actually recursing instead of just
-        // terminating on `Some((head, []))`.
+        // Pins the walk's recursion beyond one nested level - every other
+        // `only` test in this module bottoms out after a single segment.
         let filter = PartialFilter {
             matched: true,
             only: Some(vec!["user.profile.city".into()]),
@@ -2064,8 +2005,8 @@ mod tests {
 
     #[test]
     fn narrow_removes_a_three_segment_nested_except_path_leaving_siblings() {
-        // The `except` counterpart: pins `remove_path`'s recursive arm
-        // beyond one nested level.
+        // The `except` counterpart: pins the walk's recursion beyond one
+        // nested level.
         let filter = PartialFilter {
             matched: true,
             only: None,

@@ -373,6 +373,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   names `a` and ` b`), and a header that names nothing counts as absent:
   an empty `X-Inertia-Partial-Data` now returns every prop `except`
   allows, as Laravel's does (HD-03).
+- **Dotted partial-reload entries narrow literal values only, as
+  Laravel's do.** `only: ['users.name']` narrowed every prop's resolved
+  value, a resolver's and a `defer`, `optional`, `merge` or `once` prop's
+  included, so the client received `{"users": {"name": "Ada"}}` where
+  Laravel sends the whole `users`. Dotted `only` and `except` entries now
+  walk literal values alone (a flag-free resolver under a dotted key
+  counts, since Laravel calls it before the walk), and the walk is
+  Laravel's: an entry whose path resolves to nothing yields `[]` instead of
+  `{}`, a path walks into lists by index, and a scalar a deeper path
+  reaches ships as it is instead of being dropped. The manual's divergence
+  entry on narrowing is gone (PR-08, HD-04).
 
 ### Fixed
 

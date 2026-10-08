@@ -325,11 +325,12 @@ async fn partial_except_dot_notation_wins_over_only_on_the_same_path() {
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
     // "user" still participates (only named it), but the one path both
-    // headers agree on is gone - except wins, leaving an empty object
-    // rather than dropping "user" from props altogether.
+    // headers agree on is gone - except wins. A literal that kept none of
+    // its children is `[]`, as Laravel's PHP array encodes, rather than
+    // "user" dropping out of props altogether.
     let props = page["props"].as_object().unwrap();
     assert!(props.contains_key("user"));
-    assert_eq!(page["props"]["user"], serde_json::json!({}));
+    assert_eq!(page["props"]["user"], serde_json::json!([]));
 }
 
 #[tokio::test]
@@ -360,7 +361,7 @@ async fn partial_data_unknown_nested_path_yields_nothing_for_that_key_without_dr
 }
 
 #[tokio::test]
-async fn partial_data_dotted_path_through_a_scalar_drops_silently() {
+async fn partial_data_dotted_path_through_a_scalar_keeps_the_scalar() {
     let req = MockReq::new("/settings")
         .inertia()
         .header("X-Inertia-Partial-Component", "Settings")
@@ -375,12 +376,12 @@ async fn partial_data_dotted_path_through_a_scalar_drops_silently() {
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
-    // "level" is a scalar, so a path that drills through it
-    // ("level.nested") drops silently; the sibling "theme" path still
-    // comes through.
+    // "level" leads to the requested "level.nested", and Laravel ships a
+    // scalar its walk reaches as it is; the sibling "theme" path comes
+    // through too.
     assert_eq!(
         page["props"]["config"],
-        serde_json::json!({"theme": "dark"})
+        serde_json::json!({"theme": "dark", "level": 3})
     );
 }
 
@@ -438,7 +439,7 @@ async fn always_prop_ignores_dotted_only_and_ships_whole_value() {
 }
 
 #[tokio::test]
-async fn optional_prop_dot_only_resolves_and_narrows() {
+async fn optional_prop_dot_only_resolves_and_ships_whole() {
     let _guard = suprnova::testing::TestContainer::fake();
     let req = MockReq::new("/team")
         .inertia()
@@ -456,14 +457,16 @@ async fn optional_prop_dot_only_resolves_and_narrows() {
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
+    // An optional prop is a prop object: a dotted entry resolves it, and
+    // its value ships whole, as Laravel's does.
     assert_eq!(
         page["props"]["permissions"],
-        serde_json::json!({"read": true})
+        serde_json::json!({"read": true, "write": false})
     );
 }
 
 #[tokio::test]
-async fn defer_prop_dot_only_on_the_followup_resolves_and_narrows() {
+async fn defer_prop_dot_only_on_the_followup_resolves_and_ships_whole() {
     let _guard = suprnova::testing::TestContainer::fake();
     let req = MockReq::new("/chat")
         .inertia()
@@ -486,13 +489,13 @@ async fn defer_prop_dot_only_on_the_followup_resolves_and_narrows() {
 
     assert_eq!(
         page["props"]["thread"],
-        serde_json::json!({"title": "Hello"})
+        serde_json::json!({"title": "Hello", "messages": [{"id": 1}]})
     );
     assert!(!page.as_object().unwrap().contains_key("deferredProps"));
 }
 
 #[tokio::test]
-async fn merge_prop_dot_only_narrows_the_value_but_merge_metadata_keeps_the_bare_key() {
+async fn merge_prop_dot_only_ships_the_value_whole() {
     let req = MockReq::new("/feed")
         .inertia()
         .header("X-Inertia-Partial-Component", "Feed")
@@ -513,7 +516,7 @@ async fn merge_prop_dot_only_narrows_the_value_but_merge_metadata_keeps_the_bare
 
     assert_eq!(
         page["props"]["feed"],
-        serde_json::json!({"items": [{"id": 1}]})
+        serde_json::json!({"items": [{"id": 1}], "meta": {"total": 1}})
     );
     assert_eq!(page["mergeProps"], serde_json::json!(["feed"]));
 }

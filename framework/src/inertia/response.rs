@@ -1847,14 +1847,13 @@ async fn resolve_props(
 
         // ---- value ----
         let rescue = prop.is_defer() && prop.rescues();
-        // `Always` bypasses partial-reload filtering entirely - dot
-        // notation included. Laravel re-injects the raw, unfiltered
-        // `AlwaysProp` value after the only/except rebuild rather than
-        // narrowing it (`inertia-laravel-2.0.25/src/Response.php:406-416`,
-        // `resolveAlways`), so an always-visible prop must reach the
-        // client whole even when the request's `X-Inertia-Partial-Data`
-        // names a nested path inside it.
-        let narrow_value = prop.visibility() != Visibility::Always && !is_errors_bag;
+        // Dotted `only`/`except` entries narrow literal values only. A
+        // value that came from a resolver or a prop object - `always`
+        // included, whatever the request names inside it - ships whole,
+        // as Laravel's `PropsResolver::resolveProps` stops filtering below
+        // a value that was not a literal array. The errors bag is never
+        // narrowed either.
+        let narrow_value = !is_errors_bag && narrows_as_literal(&key, &prop);
         registered.push(key.clone());
         match prop.into_source() {
             // Unreachable: handled at the top of the loop. Listed so the
@@ -2005,6 +2004,23 @@ async fn resolve_props(
     let materialized = dotted::unpack_map(materialized);
 
     Ok((materialized, metadata))
+}
+
+/// Whether Laravel's resolver would walk this prop's value as a literal,
+/// so dotted `only`/`except` entries narrow it.
+///
+/// A flag-free prop with a materialized value is a literal array in
+/// Laravel's terms. Every flag makes it a prop object (`AlwaysProp`,
+/// `OptionalProp`, `DeferProp`, `MergeProp`, `OnceProp`, `ScrollProp`),
+/// whose resolved value ships whole. A flag-free resolver ships whole too,
+/// except under a dotted key: Laravel's `unpackDotProps` calls a dotted
+/// key's closure before the walk, which leaves its value a literal.
+fn narrows_as_literal(key: &str, prop: &Prop) -> bool {
+    let flag_free = prop.visibility() == Visibility::Standard
+        && prop.merge_mode().is_none()
+        && !prop.is_once()
+        && prop.scroll_metadata().is_none();
+    flag_free && (prop.as_value().is_some() || (prop.has_resolver() && key.contains('.')))
 }
 
 fn build_page_object(
