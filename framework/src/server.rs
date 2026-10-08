@@ -1098,6 +1098,9 @@ async fn handle_request_inner(
             if let Some(binds) = binds {
                 request.set_route_settings(binds.settings().clone());
             }
+            if let Some(action) = router.handler_name(&effective_method, &pattern) {
+                request.set_route_action(action);
+            }
             if let Some(slot) = &missing_answer {
                 request.set_missing_answer(slot.clone());
             }

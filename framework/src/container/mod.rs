@@ -1261,6 +1261,7 @@ impl App {
     /// App::inertia_share("appVersion", env!("CARGO_PKG_VERSION"));
     /// # }
     /// ```
+    #[track_caller]
     pub fn inertia_share<V: serde::Serialize>(key: impl Into<String>, value: V) {
         Self::inertia_registry().share_value(key, value);
     }
@@ -1281,6 +1282,7 @@ impl App {
     /// });
     /// # }
     /// ```
+    #[track_caller]
     pub fn inertia_share_lazy<F, Fut, V>(key: impl Into<String>, resolver: F)
     where
         F: Fn() -> Fut + Send + Sync + 'static,
@@ -1311,6 +1313,7 @@ impl App {
     /// Returns the registered prop, which takes the options any once prop
     /// takes (`as_key`, `until`, `fresh`, `once_with`), as Laravel's
     /// `shareOnce` returns its `OnceProp`.
+    #[track_caller]
     pub fn inertia_share_once<F, Fut, V>(
         key: impl Into<String>,
         resolver: F,

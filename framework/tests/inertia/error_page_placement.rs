@@ -108,11 +108,14 @@ fn boot() -> MiddlewareRegistry {
         register_global_middleware(RejectsLikeCsrf);
 
         let before = global_middleware_count();
+        // DevTools off: with `APP_ENV=local` it is on by default and would
+        // add a fifth middleware this count is not about.
         Inertia::install(
             &InertiaConfig::new()
                 .development(true)
                 .version(ASSET_VERSION)
-                .error_page(ERROR_PAGE),
+                .error_page(ERROR_PAGE)
+                .devtools(suprnova::DevToolsConfig::new().enabled(false)),
         )
         .expect("dev-mode install needs no manifest");
         assert_eq!(

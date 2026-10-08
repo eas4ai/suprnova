@@ -371,6 +371,15 @@ impl HttpResponse {
         }
     }
 
+    /// The same response with `body` as its buffered body: status,
+    /// headers, cookies and the error report stay as they were. For a
+    /// middleware that rewrites a document it was handed, as Inertia
+    /// DevTools adds its id tag to a page's first visit.
+    pub(crate) fn with_static_body(mut self, body: impl Into<Bytes>) -> Self {
+        self.body = Body::Static(body.into());
+        self
+    }
+
     /// Whether the body is a stream rather than fully buffered bytes.
     ///
     /// [`body`](Self::body) returns an empty slice for a streaming

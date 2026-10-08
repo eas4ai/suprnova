@@ -97,6 +97,20 @@ tokio::task_local! {
     /// identities it replaced or ended. `SessionMiddleware` settles both
     /// after the handler.
     pub(crate) static IDENTITY_TRANSITION: Arc<Mutex<IdentityTransition>>;
+    /// Set by a middleware inside this one when its request must not
+    /// become the session's previous URL whatever it answers: the Inertia
+    /// DevTools entry endpoints, which the browser extension fetches while
+    /// the application is about to redirect back.
+    static PREVIOUS_URL_EXEMPT: Arc<std::sync::atomic::AtomicBool>;
+}
+
+/// Keep the request in scope from becoming the session's previous URL, as
+/// Laravel's session middleware skips an XHR. A no-op outside a session
+/// scope.
+pub(crate) fn exempt_from_previous_url() {
+    let _ = PREVIOUS_URL_EXEMPT.try_with(|exempt| {
+        exempt.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
 }
 
 /// The default guard's identity changes made during one request.
@@ -1185,6 +1199,9 @@ struct PreviousUrlCandidate {
     wants_json: bool,
     /// The request path, with its query string when it has one.
     current_url: String,
+    /// A middleware inside the session asked that the request not become
+    /// the previous URL ([`exempt_from_previous_url`]).
+    exempt: bool,
 }
 
 /// Everything the persistence phase of `handle_session` reads: the response
@@ -1396,7 +1413,8 @@ impl SessionMiddleware {
         // the Inertia middleware records an Inertia visit itself
         // (`InertiaConfig::store_previous_url`). It is what
         // [`Redirect::back`] reads.
-        let previous_url = Self::capture_previous_url_candidate(&request);
+        let mut previous_url = Self::capture_previous_url_candidate(&request);
+        let previous_url_exempt = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let host_session_metadata = magnetar_session_metadata(&request);
         let identity_transition: Arc<Mutex<IdentityTransition>> =
             Arc::new(Mutex::new(IdentityTransition::default()));
@@ -1417,14 +1435,19 @@ impl SessionMiddleware {
                             pending_remember_revocations.clone(),
                             PENDING_OPAQUE_SESSION.scope(
                                 pending_opaque_session.clone(),
-                                IDENTITY_TRANSITION
-                                    .scope(identity_transition.clone(), next(request)),
+                                IDENTITY_TRANSITION.scope(
+                                    identity_transition.clone(),
+                                    PREVIOUS_URL_EXEMPT
+                                        .scope(previous_url_exempt.clone(), next(request)),
+                                ),
                             ),
                         ),
                     ),
                 ),
             )
             .await;
+
+        previous_url.exempt = previous_url_exempt.load(std::sync::atomic::Ordering::Relaxed);
 
         retire_superseded_opaque_sessions(
             magnetar_session_authority.as_ref(),
@@ -2037,6 +2060,7 @@ impl SessionMiddleware {
             is_prefetch,
             wants_json,
             current_url,
+            exempt: false,
         }
     }
 
@@ -2263,6 +2287,7 @@ impl SessionMiddleware {
             is_prefetch,
             wants_json,
             current_url,
+            exempt,
         } = previous_url;
 
         // Take the potentially-modified session back out of the slot.
@@ -2346,6 +2371,7 @@ impl SessionMiddleware {
             && !is_inertia
             && !is_prefetch
             && !wants_json
+            && !exempt
             && (is_success || is_redirect)
             && let Some(ref mut s) = session
         {

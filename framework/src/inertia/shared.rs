@@ -83,6 +83,9 @@ pub(crate) struct StaticEntry {
     /// Which registration this is. A [`SharedOnceProp`] handle changes
     /// the entry it was returned for and no later one under the same key.
     pub id: u64,
+    /// Where the share was made, through `#[track_caller]`: Inertia
+    /// DevTools shows it as the prop's share source.
+    pub source: &'static std::panic::Location<'static>,
 }
 
 /// The source of [`StaticEntry::id`]: unique for the life of the process.
@@ -223,6 +226,7 @@ impl InertiaRegistry {
     /// failures as Inertia JSON errors instead of panics.
     ///
     /// [`share_lazy`]: Self::share_lazy
+    #[track_caller]
     pub fn share_value<V: Serialize>(&self, key: impl Into<String>, value: V) {
         let v =
             serde_json::to_value(&value).expect("App::inertia_share value must serialize cleanly");
@@ -236,7 +240,9 @@ impl InertiaRegistry {
     /// layered back over it at render. An entry under the root that holds
     /// no plain object (a lazy one, a scalar) is replaced, as `Arr::set`
     /// replaces a non-array.
+    #[track_caller]
     pub(crate) fn share_nested(&self, key: String, value: Value) {
+        let source = std::panic::Location::caller();
         let Some((root, rest)) = key.split_once('.') else {
             self.upsert(key, Prop::eager(value));
             return;
@@ -257,11 +263,13 @@ impl InertiaRegistry {
                     Some(entry) => {
                         entry.prop = prop;
                         entry.id = id;
+                        entry.source = source;
                     }
                     None => reg.push(StaticEntry {
                         key: root.to_string(),
                         prop,
                         id,
+                        source,
                     }),
                 }
             }
@@ -276,6 +284,7 @@ impl InertiaRegistry {
 
     /// Add or replace an async lazy shared prop. Maps to
     /// `Inertia::share($k, fn () => ...)`.
+    #[track_caller]
     pub fn share_lazy<F, Fut, V>(&self, key: impl Into<String>, resolver: F)
     where
         F: Fn() -> Fut + Send + Sync + 'static,
@@ -302,6 +311,7 @@ impl InertiaRegistry {
     ///     .as_key("plan-catalog")
     ///     .until(3600);
     /// ```
+    #[track_caller]
     pub fn share_once<F, Fut, V>(&self, key: impl Into<String>, resolver: F) -> SharedOnceProp
     where
         F: Fn() -> Fut + Send + Sync + 'static,
@@ -318,7 +328,9 @@ impl InertiaRegistry {
 
     /// Store `prop` under `key`, replacing an earlier entry in place, and
     /// return the new registration's id.
+    #[track_caller]
     fn upsert(&self, key: String, prop: Prop) -> u64 {
+        let source = std::panic::Location::caller();
         let id = NEXT_SHARE_ID.fetch_add(1, Ordering::Relaxed);
         // Poison policy (Domain 20 audit D20-A): if the registry lock is
         // poisoned the upsert is skipped and a `tracing::error!` is logged.
@@ -332,8 +344,14 @@ impl InertiaRegistry {
                 if let Some(existing) = reg.iter_mut().find(|e| e.key == key) {
                     existing.prop = prop;
                     existing.id = id;
+                    existing.source = source;
                 } else {
-                    reg.push(StaticEntry { key, prop, id });
+                    reg.push(StaticEntry {
+                        key,
+                        prop,
+                        id,
+                        source,
+                    });
                 }
             }
             Err(_) => {
@@ -480,6 +498,21 @@ impl InertiaRegistry {
             .iter()
             .map(|e| (e.key.clone(), e.prop.clone()))
             .collect())
+    }
+
+    /// Where each shared key was shared, for Inertia DevTools.
+    ///
+    /// **Poison policy** (matching `installed_config`): on lock poison,
+    /// returns nothing and logs a `tracing::error!`; a missing source
+    /// leaves the prop without one.
+    pub(crate) fn share_sources(&self) -> Vec<(String, &'static std::panic::Location<'static>)> {
+        match lock::read(&self.shares, "inertia share registry") {
+            Ok(reg) => reg.iter().map(|e| (e.key.clone(), e.source)).collect(),
+            Err(_) => {
+                tracing::error!("Inertia share registry lock poisoned; no share sources.");
+                Vec::new()
+            }
+        }
     }
 
     /// Currently registered trait provider, if any. Internal use.

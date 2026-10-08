@@ -1202,6 +1202,13 @@ impl Router {
         self.bindings.plan(method, pattern)
     }
 
+    /// The type name of the handler of the route `(method, pattern)`, its
+    /// path for a function: the route's action as Inertia DevTools shows
+    /// it.
+    pub(crate) fn handler_name(&self, method: &Method, pattern: &str) -> Option<&'static str> {
+        self.bindings.handler_name(method, pattern)
+    }
+
     /// Add middleware to the fallback route
     pub(crate) fn add_fallback_middleware(&mut self, middleware: BoxedMiddleware) {
         self.fallback_middleware.push(middleware);
@@ -2302,6 +2309,7 @@ impl Router {
     /// Panics on a duplicate registration or on `props` that is neither
     /// a JSON object nor `null`. Use [`Router::try_inertia`] for the
     /// fallible form.
+    #[track_caller]
     pub fn inertia(
         self,
         path: &str,
@@ -2320,12 +2328,17 @@ impl Router {
     /// or number has no key to unpack into a prop name, and accepting
     /// one silently would register a route that renders an empty prop
     /// bag and never says why.
+    #[track_caller]
     pub fn try_inertia(
         self,
         path: &str,
         component: &'static str,
         props: serde_json::Value,
     ) -> Result<RouteBuilder, FrameworkError> {
+        // The page has no render call of its own: Inertia DevTools names
+        // the route definition as its render source, Laravel's
+        // `RENDER_SOURCE_KEY` route default.
+        let defined_at = std::panic::Location::caller();
         let entries: Vec<(String, serde_json::Value)> = match props {
             serde_json::Value::Object(map) => map.into_iter().collect(),
             serde_json::Value::Null => Vec::new(),
@@ -2350,7 +2363,8 @@ impl Router {
             let component = component.clone();
             let entries = entries.clone();
             async move {
-                let mut response = crate::inertia::InertiaResponse::new(component);
+                let mut response =
+                    crate::inertia::InertiaResponse::new(component).with_render_source(defined_at);
                 for (k, v) in entries {
                     response = response.with(&k, v);
                 }
@@ -2375,6 +2389,7 @@ impl Router {
     ///
     /// Panics on a duplicate registration or on props that are neither a
     /// JSON object nor `null`.
+    #[track_caller]
     pub fn view(self, path: &str, component: &'static str, props: serde_json::Value) -> Router {
         self.inertia(path, component, props).into()
     }
