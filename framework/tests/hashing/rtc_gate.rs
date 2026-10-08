@@ -270,7 +270,9 @@ fn rtc_hash_max_concurrency_refuses_what_is_not_a_whole_number_child() {
 }
 
 /// RTC-001: a whole number of at least 1 loads as the limit, and an unset
-/// `HASH_MAX_CONCURRENCY` leaves the limit at the host's parallelism.
+/// or blank `HASH_MAX_CONCURRENCY` leaves the limit at the host's
+/// parallelism: a blank value is not a value but the setting left at its
+/// default, as `.env` files write it and as every `HASH_*` variable reads.
 #[test]
 fn rtc_hash_max_concurrency_loads_a_whole_number() {
     crate::own_process::run_alone("rtc_gate::rtc_hash_max_concurrency_loads_a_whole_number_child");
@@ -292,6 +294,16 @@ fn rtc_hash_max_concurrency_loads_a_whole_number_child() {
     unsafe { std::env::remove_var("HASH_MAX_CONCURRENCY") };
     let config = HashConfig::from_env().expect("an unset HASH_MAX_CONCURRENCY loads");
     assert_eq!(config.max_concurrency, None);
+
+    for blank in ["", "   "] {
+        // SAFETY: as above.
+        unsafe { std::env::set_var("HASH_MAX_CONCURRENCY", blank) };
+        let config = HashConfig::from_env().expect("a blank HASH_MAX_CONCURRENCY loads");
+        assert_eq!(
+            config.max_concurrency, None,
+            "HASH_MAX_CONCURRENCY={blank:?} is the setting left unset"
+        );
+    }
 }
 
 /// RTC-001: the limit is fixed by whichever comes first, the configuration

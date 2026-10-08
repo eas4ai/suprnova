@@ -570,8 +570,11 @@ In a script, parsed as a JavaScript module:
   it still resolves when the application serves under a path prefix
   ([Serving under a path prefix](deployment.md#serving-under-a-path-prefix)).
   An absolute path such as `/acme-ui/x/x.js` and a URL are refused, even
-  when they name the component's own script. A shipped component's script
-  counts only when the component depends on that shipped component.
+  when they name the component's own script, and so is a relative path with
+  one `../` more than the component is deep: it leaves the components' root,
+  so under a prefix it would resolve outside the prefix. A shipped
+  component's script counts only when the component depends on that shipped
+  component.
 - No `script`, `iframe`, `object` or `embed` element created, and no element
   created by a name the scan cannot trace to a constant.
 - No HTML parsed into the document (`innerHTML`, `outerHTML`,

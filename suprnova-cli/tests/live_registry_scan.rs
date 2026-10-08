@@ -361,11 +361,18 @@ fn reg_032_a_static_import_is_a_relative_path_into_the_component_or_a_dependency
     assert!(own.accepted(), "{:?}", own.findings);
     let dependency = scan("import \"../y/y.js\";\n");
     assert!(dependency.accepted(), "{:?}", dependency.findings);
+    // Two `../` from `acme-ui/x/` reach the components' root and come back
+    // in: under a prefix the browser resolves it inside the prefix.
+    let root = scan("import \"../../acme-ui/x/x.js\";\n");
+    assert!(root.accepted(), "{:?}", root.findings);
+    // A third leaves the root: `/prefix/acme-ui/x/main.js` resolves it to
+    // `/acme-ui/x/x.js`, outside the prefix.
     for specifier in [
         "/acme-ui/x/x.js",
         "/acme-ui/y/y.js",
         "https://cdn.example/x.js",
         "//cdn.example/x.js",
+        "../../../acme-ui/x/x.js",
     ] {
         let report = scan(&format!("import \"{specifier}\";\n"));
         let refusal = report

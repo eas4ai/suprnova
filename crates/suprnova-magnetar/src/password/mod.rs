@@ -10,7 +10,8 @@ pub mod lockout;
 pub use hash::{
     AttemptVerdict, CallProvenance, HashAlgorithm, HashParameters, HashWorkProfile,
     PasswordHashConfig, PasswordHashDriver, PasswordTarget, PasswordVerifier, RehashOutcome,
-    StandardPasswordHashDriver, VerificationCall, configure_hash_work_limit, run_hash_work,
+    StandardPasswordHashDriver, VerificationCall, configure_hash_work_limit, hash_work_waiting,
+    run_hash_work,
 };
 pub use lockout::{
     AttemptAdmission, AttemptReservationToken, BackendErrorPolicy, FailedAttempt, LockoutConfig,

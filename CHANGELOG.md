@@ -293,14 +293,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   so a burst holds at most the limit times one hash's memory. A hash keeps
   its place under the limit until it returns, even when its caller stops
   waiting. `0` or a value that is not a whole number is refused when the
-  hashing configuration loads (#146).
+  hashing configuration loads; a blank value is the setting left unset.
+  The two dummy hashes Magnetar's verifier warms as it is built run under
+  the limit too, instead of inline on the runtime worker that installs the
+  engines (#146).
 - **A WebSocket upgrade no longer waits behind the shutdown drain.** The
   registry of WebSocket handler tasks sat behind an async lock that the
   shutdown drain held for up to its 5 s deadline, so an upgrade in flight
   waited out the whole drain before its handler was registered. The
   registry is now a synchronous lock held only to reap finished handlers
   and register a new one, and the drain takes the set out under it and
-  waits holding no lock, still up to 5 s before it aborts what runs (#149).
+  waits holding no lock, still up to 5 s before it aborts what runs. A
+  handler registered while the drain waits is waited for in its turn and
+  aborted with the rest at the deadline; one registered after the drain
+  has closed the registry is not started (#149).
 - **A streamed file is one blocking task, not one per chunk.** A file
   above 1 MiB, served by `HttpResponse::file`, `HttpResponse::download` or
   `StaticFiles`, spawned a blocking-pool task for every 64 KiB chunk, so a
@@ -375,7 +381,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   prefix. It now refuses an absolute path, even to the component's own
   script, as it refuses a URL (`script-import`), and the refusal says the
   specifier must be a relative path (`./` or `../`) to a script of the
-  component or of a component it depends on.
+  component or of a component it depends on. A relative path with one
+  `../` more than the component is deep (`../../../acme-ui/x/x.js` from
+  `acme-ui/x/`) is refused for the same reason: the browser resolves it
+  outside the prefix, while the scan used to drop the extra step and
+  compare the rest as if it had stayed inside.
 - **Magnetar's API documentation builds without the `two-factor`
   feature.** The doc comments on `LockoutFields::IDENTITY_IS_EMAIL` and
   `LockoutService::without_user_lock` linked
