@@ -147,6 +147,28 @@ entry when it is rendered with a struct:
   `.try_with_data(..)` in the same chain.
 - `Inertia::data("Users/Show", UserDto { .. })` and `Inertia::try_data`.
 
+In any of those positions, a local name counts when the generator can
+tell which struct it holds: a `let` or a parameter that declares the type,
+or a `let` that builds the struct:
+
+```rust
+#[handler]
+pub async fn index(req: Request) -> Response {
+    let props: HomeProps = load_home(&req);
+    inertia_response!(&req, "Home", props)
+}
+
+// A parameter typed with the struct counts the same way.
+pub async fn render_dashboard(req: &Request, props: DashboardProps) -> Response {
+    InertiaResponse::new("Dashboard").with_data(props).resolve(req).await
+}
+```
+
+The generator follows Rust's scoping: a later `let` of the same name
+replaces the earlier one, and a block's names end with the block. A name
+it cannot type, such as a `match` arm's binding or `let props = load();`,
+leaves the page without an entry.
+
 A component rendered with JSON-like props
 (`inertia_response!(&req, "About", { "team_size": 4 })`) or only through
 `.with(..)` has no entry, and props a chain adds with `.with(..)` beside
@@ -316,13 +338,16 @@ holds exactly. With big-integer preservation on, the server sends such a
 value as a `{"$bigint": "..."}` marker and the Inertia client turns it
 into a `BigInt`. So the generator types `i64`, `u64`, `i128`, `u128`,
 `isize` and `usize` as `number | bigint` when any `.rs` file under `src/`
-calls `preserve_big_integers(..)` with `true` or with a variable, and as
-`number` otherwise. A literal `false` turns nothing on:
+calls `preserve_big_integers(..)` with anything but a literal `false`,
+such as `true` or a variable, and as `number` otherwise:
 
 ```rust
 // src/bootstrap.rs: every wide integer field becomes `number | bigint`
 Inertia::install(&InertiaConfig::new().preserve_big_integers(true))?;
 ```
+
+A literal `false` turns nothing on, in parentheses too: `(false)` is still
+`false`.
 
 A map key stays `number`: a JSON object key is a string on the wire,
 never a marker, and TypeScript refuses `bigint` as a `Record` key.
@@ -596,6 +621,14 @@ A `Router::inertia` route has no controller, so its helper sits under
 `controllers.inertia`, keyed by its path (`/about` is
 `controllers.inertia.about`, `/` is `controllers.inertia.index`), and its
 `.name(..)` reaches it through `routes` like any other.
+
+A handler inside an `impl` block is read like a free function. For
+`#[handler(Self = Posts)]` on `index` inside `impl Posts`, registered as
+`get!("/users", controllers::posts::Posts::index)`, the generator reads
+the method from `impl Posts` in the file of `controllers::posts`, for its
+request type and its component alike. A free `index` in the same file
+keeps its own helper. The method's helper sits under the type's name,
+`controllers.Posts.index`.
 
 The helpers build the same URLs the backend's `route()` helper builds:
 

@@ -218,3 +218,93 @@ fn intt_route_config_declares_the_component() {
     assert!(config.contains("  component?: string;"), "{config}");
     assert!(config.contains("UrlMethodPair"), "{config}");
 }
+
+// BIND-003: a handler inside an `impl` block is registered through its
+// type's path, and its helper is read from the method as a free
+// function's is from the function.
+
+/// A project holding `files` under `src/`, scanned and generated the way
+/// `generate-types --routes` does.
+fn project_routes_ts(files: &[(&str, &str)]) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (path, body) in files {
+        let path = dir.path().join("src").join(path);
+        std::fs::create_dir_all(path.parent().expect("a file under src/"))
+            .expect("create source directory");
+        std::fs::write(path, body).expect("write source");
+    }
+    let scanned =
+        suprnova_cli::commands::generate_routes::scan_routes(dir.path()).expect("scan the routes");
+    generate_typescript(&scanned)
+}
+
+/// The body of the `module: { .. }` block of the `controllers` object.
+fn module_block<'a>(ts: &'a str, module: &str) -> &'a str {
+    let head = format!("\n  {module}: {{\n");
+    let start = ts
+        .find(&head)
+        .unwrap_or_else(|| panic!("no `{module}` module in:\n{ts}"))
+        + head.len();
+    let end = ts[start..].find("\n  }").expect("module block close") + start;
+    &ts[start..end]
+}
+
+const POSTS: &str = r#"
+use suprnova::{handler, inertia_response, request, Request, Response};
+
+#[request]
+pub struct UserFilters {
+    pub search: String,
+}
+
+#[request]
+pub struct PostFilters {
+    pub tag: String,
+}
+
+pub struct Posts;
+
+impl Posts {
+    #[handler(Self = Posts)]
+    pub async fn index(req: Request, filters: UserFilters) -> Response {
+        inertia_response!(&req, "Users/Index", { "search": filters.search })
+    }
+}
+
+#[handler]
+pub async fn index(req: Request, filters: PostFilters) -> Response {
+    inertia_response!(&req, "Posts/Index", { "tag": filters.tag })
+}
+"#;
+
+const POSTS_ROUTES: &str = r#"
+use suprnova::{get, routes};
+
+routes! {
+    get!("/users", controllers::posts::Posts::index).name("users.index"),
+    get!("/posts", controllers::posts::index).name("posts.index"),
+}
+"#;
+
+#[test]
+fn intt_an_associated_handler_carries_its_component_and_request_type() {
+    let ts = project_routes_ts(&[("routes.rs", POSTS_ROUTES), ("controllers/posts.rs", POSTS)]);
+    assert_eq!(
+        module_block(&ts, "Posts"),
+        "    index: (data: UserFilters): RouteConfig<UserFilters> => \
+         ({ url: '/users', method: 'get', data, component: 'Users/Index' })",
+        "`Posts::index` is read from the method inside `impl Posts`:\n{ts}"
+    );
+    assert!(ts.contains("export interface UserFilters {"), "{ts}");
+}
+
+#[test]
+fn intt_a_free_handler_beside_an_associated_one_keeps_its_own() {
+    let ts = project_routes_ts(&[("routes.rs", POSTS_ROUTES), ("controllers/posts.rs", POSTS)]);
+    assert_eq!(
+        module_block(&ts, "posts"),
+        "    index: (data: PostFilters): RouteConfig<PostFilters> => \
+         ({ url: '/posts', method: 'get', data, component: 'Posts/Index' })",
+        "the free `index` is not the method of the same name:\n{ts}"
+    );
+}
