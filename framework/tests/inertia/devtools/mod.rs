@@ -1,6 +1,7 @@
-//! Inertia DevTools server support (PAR-071, PAR-072, PAR-075): recording
-//! each request for the browser extension, the entry it stores, and the
-//! store behind it.
+//! Inertia DevTools server support (PAR-071 to PAR-073, PAR-075):
+//! recording each request for the browser extension, the entry it stores,
+//! the classification of the props of a rendered page, and the store
+//! behind them.
 //!
 //! Every test records into its own temporary directory, through a
 //! `TestClient` over a router with `Inertia::middleware`. Recording is
@@ -9,6 +10,7 @@
 
 pub mod entry;
 pub mod gate;
+pub mod props;
 pub mod storage;
 
 use std::path::{Path, PathBuf};

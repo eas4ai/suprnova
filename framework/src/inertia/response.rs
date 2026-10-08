@@ -1546,6 +1546,34 @@ impl InertiaResponse {
             // and uses `sharedProps` only as a key list.
             merged.insert(k, v);
         }
+        // Inertia DevTools: which keys the shared props supplied and where
+        // each was shared, and the metadata of every prop, read from the
+        // flags before resolution consumes the props (PAR-073).
+        if let Some(collector) = collector.as_mut() {
+            let mut keys = vec![ERRORS_KEY.to_string()];
+            keys.extend(shared_keys.iter().filter(|k| *k != ERRORS_KEY).cloned());
+            collector.shared_keys(keys);
+            if shared_data {
+                for (key, location) in registry.share_sources() {
+                    collector.share_source(&key, super::devtools::SourceLocation::of(location));
+                }
+                if let Some(visit) = visit.as_ref()
+                    && let Some(hooks) = visit.hooks_name()
+                {
+                    let source = super::devtools::SourceLocation::of_type(hooks);
+                    for key in visit.shared().keys() {
+                        collector.share_source(key, source);
+                    }
+                }
+            }
+            let classify_request = super::devtools::ClassifyRequest::of(req);
+            if !merged.contains_key(ERRORS_KEY) {
+                collector.prop(ERRORS_KEY, super::devtools::errors_meta());
+            }
+            for (key, prop) in &merged {
+                collector.prop(key, super::devtools::classify(key, prop, &classify_request));
+            }
+        }
         // Every response shares the validation errors, as Laravel's
         // middleware does with `'errors' => Inertia::always(...)`, so
         // `errors` heads the list; with `expose_shared_props` off there is
@@ -1573,6 +1601,11 @@ impl InertiaResponse {
             req,
         )
         .await?;
+        if let Some(collector) = collector.as_mut() {
+            for key in &metadata.rescued {
+                collector.rescued(key);
+            }
+        }
 
         // Combine flash from three sources, in precedence order
         // (later writes override earlier so same-request entries win

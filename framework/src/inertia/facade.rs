@@ -176,6 +176,7 @@ impl Inertia {
     ///
     /// Returns [`FrameworkError`] when `value`'s `Serialize` impl fails;
     /// nothing is shared then.
+    #[track_caller]
     pub fn share<V: serde::Serialize>(
         key: impl Into<String>,
         value: V,
@@ -190,6 +191,7 @@ impl Inertia {
     ///
     /// Returns [`FrameworkError`] naming the key whose value fails to
     /// serialize; nothing is shared then.
+    #[track_caller]
     pub fn share_many<I, K, V>(entries: I) -> Result<(), FrameworkError>
     where
         I: IntoIterator<Item = (K, V)>,
@@ -226,6 +228,7 @@ impl Inertia {
     ///
     /// Returns [`FrameworkError`] naming the field whose value fails to
     /// serialize; nothing is shared then.
+    #[track_caller]
     pub fn share_data<T: IntoInertiaData>(data: T) -> Result<(), FrameworkError> {
         let entries = data.__try_into_inertia_props()?;
         let registry = crate::App::inertia_registry();
