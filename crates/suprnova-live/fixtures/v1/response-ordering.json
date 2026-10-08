@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "terminal-redirect",
+      "outcome": "accepted",
+      "render": "redirect",
+      "morph": "not_attempted",
+      "expected_steps": ["navigate"]
+    },
+    {
+      "id": "accepted-html",
+      "outcome": "accepted",
+      "render": "html",
+      "morph": "succeeded",
+      "expected_steps": [
+        "preflight_morph",
+        "morph",
+        "commit_snapshot_and_revision",
+        "reconcile_models_and_validation",
+        "restore_focus",
+        "dispatch_events",
+        "run_registered_effects",
+        "settle_feedback"
+      ]
+    },
+    {
+      "id": "morph-failure",
+      "outcome": "accepted",
+      "render": "html",
+      "morph": "failed_after_acceptance",
+      "expected_steps": [
+        "preflight_morph",
+        "morph",
+        "request_fresh_render_without_replay"
+      ]
+    },
+    {
+      "id": "no-render",
+      "outcome": "accepted",
+      "render": "no_render",
+      "morph": "not_attempted",
+      "expected_steps": [
+        "validate_no_render",
+        "commit_snapshot_and_revision",
+        "reconcile_models_and_validation",
+        "restore_focus",
+        "dispatch_events",
+        "run_registered_effects",
+        "settle_feedback"
+      ]
+    }
+  ]
+}
