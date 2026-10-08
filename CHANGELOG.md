@@ -408,8 +408,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   ones a response expires, keeps each response's error report, gives every
   `TestResponse` the session store `with_session_store` names, and fails a
   request that has not answered after 10 seconds, naming its method and
-  path. See [HTTP Tests](manual/http-tests.md#the-test-client) (TS-01,
-  TS-10).
+  path. Under a public path prefix (`APP_URL=https://example.test/billing`)
+  a page's url is the public `/billing/users` while the router matches
+  `/users`, so a reload of a client response sent `/billing/users` and got
+  a 404. The client now keeps the root each request was served under and
+  replays a reload to the internal path, `/users` with the page's query,
+  sending again the `X-Forwarded-Prefix` header the page's request sent.
+  See [HTTP Tests](manual/http-tests.md#the-test-client) (TS-01, TS-10).
 - **Laravel's prop assertions and scopes on `AssertableInertia`.** It had
   `has`, `missing`, `where_` and `count` only. It now has `has_all`,
   `has_any`, `missing_all`, `count_between`, `where_not`, `where_null`,
@@ -444,7 +449,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   2^53 - 1 as `{"$bigint": "<digits>"}` markers, so
   `where_("id", 9007199254740993_i64)` failed against the page the handler
   built; the markers in props and flash are now decoded before any
-  assertion or reader sees them (TS-12, TS-13, TS-14, TS-15, TS-16).
+  assertion or reader sees them. A marker whose digits fit no 64-bit
+  integer, such as `{"$bigint": "18446744073709551616"}`, which only a
+  hand-built page object carries, fails naming its path and digits rather
+  than staying an object that `where_type("id", "integer")` rejects and
+  `to_page()` shows (TS-12, TS-13, TS-14, TS-15, TS-16).
 - **`InertiaConfig::testing_ensure_pages_exist`, on by default.**
   `AssertableInertia::component(name)` passed for a component with no page
   file, so a test stayed green while the browser showed a blank page. With
@@ -994,7 +1003,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `AssertableInertia::from_response` on an `HttpResponse`. It now reads the
   page from the document's `data-page` element as well, and
   `assert_inertia_with(callback)` runs a callback over the page and returns
-  the response for chaining, as Laravel's `assertInertia(fn)` does (TS-01).
+  the response for chaining, as Laravel's `assertInertia(fn)` does. Both
+  entry points find that element by its `type="application/json"` and
+  `data-page` attributes in either order, with others between them or in
+  single quotes, and skip the text of any other script. They looked for
+  `<script type="application/json" data-page="` only, so the document of a
+  server-rendered first visit, which Inertia 3.8's `buildSSRBody` writes as
+  `<script data-page="app" type="application/json">`, failed with "no
+  Inertia page object" (TS-01).
 
 ### Fixed
 
