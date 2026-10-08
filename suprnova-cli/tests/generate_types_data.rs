@@ -1021,6 +1021,39 @@ pub fn register() {
     );
 }
 
+/// `Inertia::share_data` is the struct form of sharing. `Inertia::share`
+/// takes a key and a value, so a struct given as that value is one shared
+/// prop under its key, never the shared props themselves.
+#[test]
+fn intt_a_struct_shared_under_a_key_is_not_the_shared_struct() {
+    let ts = generated(&[
+        ("controllers/home.rs", HOME),
+        (
+            "bootstrap.rs",
+            r#"
+use suprnova::{Data, Inertia};
+
+#[derive(Data)]
+pub struct Settings {
+    pub theme: String,
+}
+
+pub fn register() {
+    Inertia::share("settings", Settings { theme: "dark".into() }).expect("shared");
+    let settings = Settings { theme: "light".into() };
+    Inertia::share("fallback", settings).expect("shared");
+}
+"#,
+        ),
+    ]);
+    assert_eq!(
+        declaration(&ts, "export interface SharedProps {"),
+        "export interface SharedProps {\n  root: string;\n}\n",
+        "a per-key share types nothing; only `Inertia::share_data` names the \
+         shared struct:\n{ts}"
+    );
+}
+
 #[test]
 fn intt_shared_props_read_the_shared_marker() {
     let ts = generated(&[
