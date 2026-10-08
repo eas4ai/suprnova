@@ -862,13 +862,14 @@ impl InertiaConfig {
         self
     }
 
-    /// Render every first visit through the application's root template,
+    /// Render every first visit through one application root template,
     /// an Askama template declared with [`inertia_root`](crate::inertia_root)
     /// that places the framework's parts in a document of its own: meta
     /// tags, fonts, a favicon, attributes on `<html>` and `<body>`.
     ///
     /// Without one the first visit is the document the framework writes
-    /// itself.
+    /// itself. [`root_template_with`](Self::root_template_with) chooses per
+    /// request instead.
     ///
     /// ```rust,ignore
     /// use suprnova::{InertiaConfig, InertiaRootTemplate};
@@ -880,6 +881,33 @@ impl InertiaConfig {
     /// ```
     pub fn root_template(mut self, template: InertiaRootTemplate) -> Self {
         self.root_template = Some(Arc::new(move |_| template));
+        self
+    }
+
+    /// Choose each first visit's root document from its request: its path,
+    /// query and headers, through [`InertiaRequestExt`]. Laravel's
+    /// `rootView(Request)`.
+    ///
+    /// The chooser also picks the document of an Inertia error page, which
+    /// holds only the request captured before the handler ran. Return
+    /// [`InertiaRootTemplate::framework`] for the framework's own document.
+    ///
+    /// ```rust,ignore
+    /// use suprnova::{InertiaConfig, InertiaRootTemplate};
+    ///
+    /// let cfg = InertiaConfig::new().root_template_with(|req| {
+    ///     if req.path().starts_with("/admin") {
+    ///         InertiaRootTemplate::of::<AdminDocument>()
+    ///     } else {
+    ///         InertiaRootTemplate::of::<AppDocument>()
+    ///     }
+    /// });
+    /// ```
+    pub fn root_template_with<F>(mut self, chooser: F) -> Self
+    where
+        F: Fn(&dyn InertiaRequestExt) -> InertiaRootTemplate + Send + Sync + 'static,
+    {
+        self.root_template = Some(Arc::new(chooser));
         self
     }
 

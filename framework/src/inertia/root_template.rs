@@ -14,6 +14,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use indexmap::IndexMap;
 use serde_json::Value;
 
 use crate::error::FrameworkError;
@@ -111,8 +112,9 @@ impl fmt::Debug for InertiaRootTemplate {
 /// `{{ name }}`.
 ///
 /// `title`, `head` and `body` are markup and write themselves unescaped;
-/// `lang`, `csrf_token` and `nonce` are plain values the template escapes
-/// like any other. The framework builds this; a template only reads it.
+/// `lang`, `csrf_token`, `nonce` and the `view` data are plain values the
+/// template escapes like any other. The framework builds this; a template
+/// only reads it.
 #[non_exhaustive]
 pub struct InertiaRootParts<'a> {
     /// The `<title>` element, from the response's title or
@@ -136,6 +138,32 @@ pub struct InertiaRootParts<'a> {
     /// Whether the SSR server rendered this response, for a template that
     /// places fallback head content when it did not.
     pub ssr: bool,
+    /// The response's view data, which reaches this template and never the
+    /// page: `{% if let Some(v) = view.get("key") %}`.
+    pub view: &'a InertiaViewData,
+}
+
+/// Values one response hands its root template and never its page props,
+/// set with [`InertiaResponse::with_view_data`](crate::InertiaResponse::with_view_data).
+///
+/// For what the first-load HTML must carry without running JavaScript,
+/// such as the meta tags a link preview reads. An Inertia visit's JSON and
+/// the page data never include it.
+#[derive(Clone, Debug, Default)]
+pub struct InertiaViewData {
+    values: IndexMap<String, String>,
+}
+
+impl InertiaViewData {
+    /// The value set under `key`, or `None`.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(String::as_str)
+    }
+
+    /// Sets `key` to `value`, replacing an earlier value.
+    pub(crate) fn insert(&mut self, key: String, value: String) {
+        self.values.insert(key, value);
+    }
 }
 
 /// What [`render`] needs from the response to build the parts.
@@ -148,6 +176,7 @@ pub(super) struct RootInputs<'a> {
     pub(super) assets: &'a str,
     pub(super) lang: &'a str,
     pub(super) mount_id: &'a str,
+    pub(super) view: &'a InertiaViewData,
 }
 
 /// Renders the first visit through `template`.
@@ -183,6 +212,7 @@ pub(super) fn render(
         csrf_token: inputs.csrf_token,
         nonce: None,
         ssr: inputs.ssr_body.is_some(),
+        view: inputs.view,
     };
     let mut html = String::new();
     (template.render)(&parts, &mut html).map_err(|failure| {

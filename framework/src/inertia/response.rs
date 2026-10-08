@@ -130,6 +130,9 @@ pub struct InertiaResponse {
     /// plain lazy path every other resolver-backed prop takes. Keyed by
     /// the same string as `props`.
     lazy_owned: IndexMap<String, (&'static str, &'static str)>,
+    /// Values for the root template only, never the page props. Maps to
+    /// `Inertia::render(...)->withViewData(...)`.
+    view_data: super::root_template::InertiaViewData,
 }
 
 /// Request-scoped snapshot of session values that an Inertia response delivers once.
@@ -291,6 +294,7 @@ impl InertiaResponse {
             clear_history: false,
             preserve_fragment: None,
             lazy_owned: IndexMap::new(),
+            view_data: super::root_template::InertiaViewData::default(),
         }
     }
 
@@ -325,6 +329,21 @@ impl InertiaResponse {
     /// is on.
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
+        self
+    }
+
+    /// Hand the root template a value under `key` for this response,
+    /// replacing an earlier one; Laravel's `withViewData`.
+    ///
+    /// The value reaches only the application's
+    /// [root template](crate::InertiaConfig::root_template), which reads it
+    /// with `view.get("key")`, and never the page props: an Inertia visit's
+    /// JSON and the first visit's page data leave it out. Use it for what
+    /// the first-load HTML must carry without running JavaScript, such as
+    /// the meta tags a link preview reads. The framework's own document
+    /// places none.
+    pub fn with_view_data(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.view_data.insert(key.into(), value.into());
         self
     }
 
@@ -1075,6 +1094,7 @@ impl InertiaResponse {
             clear_history,
             preserve_fragment,
             lazy_owned,
+            view_data,
         } = self;
 
         // Page URL: path AND query, or the app's resolver. The client
@@ -1232,6 +1252,7 @@ impl InertiaResponse {
                     &config,
                     title.as_deref(),
                     ssr_result.as_ref(),
+                    &view_data,
                 )?,
                 None => build_html_response(&page, &config, title.as_deref(), ssr_result.as_ref()),
             }
@@ -1259,6 +1280,7 @@ impl InertiaResponse {
             clear_history,
             preserve_fragment,
             lazy_owned,
+            view_data: _,
         } = self;
         let (materialized, metadata) = resolve_props(
             props,
@@ -2387,7 +2409,7 @@ fn build_html_response(
 ///
 /// The template gets the values the framework's own document is built
 /// from, as parts it places: the same title rule, CSRF token, SSR output,
-/// Vite tags, language and mount id. The page JSON is written into the
+/// Vite tags, language and mount id, and the response's view data. The page JSON is written into the
 /// template's output by the body part, never into a string of its own.
 fn build_template_response(
     template: super::root_template::ApplicationTemplate,
@@ -2395,6 +2417,7 @@ fn build_template_response(
     config: &InertiaConfig,
     title_override: Option<&str>,
     ssr: Option<&super::ssr::SsrResponse>,
+    view_data: &super::root_template::InertiaViewData,
 ) -> Result<HttpResponse, FrameworkError> {
     let csrf = csrf_token().unwrap_or_default();
     let ssr_head = ssr.map(|s| s.head.join("\n")).unwrap_or_default();
@@ -2417,6 +2440,7 @@ fn build_template_response(
             assets: &assets,
             lang: &lang,
             mount_id: &config.mount_id,
+            view: view_data,
         },
     )
 }

@@ -9,6 +9,7 @@
 {% if ssr %}<meta name="rendered-by" content="ssr">{% else %}<meta name="rendered-by" content="csr">{% endif %}
 <meta name="csrf-copy" content="{{ csrf_token }}">
 {% if let Some(nonce) = nonce %}<meta name="nonce" content="{{ nonce }}">{% endif %}
+{% if let Some(preview) = view.get("preview") %}<meta property="og:description" content="{{ preview }}">{% endif %}
 </head>
 <body class="antialiased">
 <noscript>This page needs JavaScript.</noscript>

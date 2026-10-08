@@ -41,7 +41,7 @@ pub use response::{InertiaResponse, IntoInertiaData, PropEntry};
 pub use root_share::RootShare;
 pub use root_template::{
     InertiaRoot, InertiaRootBody, InertiaRootHead, InertiaRootParts, InertiaRootTemplate,
-    InertiaRootTitle,
+    InertiaRootTitle, InertiaViewData,
 };
 pub use shared::{InertiaRegistry, InertiaSharedData};
 pub use ssr::SsrResponse;

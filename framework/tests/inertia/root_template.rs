@@ -568,3 +568,120 @@ fn rdoc_001_a_template_naming_an_unsupplied_value_does_not_compile() {
     .expect("copy the template");
     trybuild::TestCases::new().compile_fail("tests/inertia/compile_fail/*.rs");
 }
+
+/// A second root document, for the pages under `/admin`.
+#[suprnova::inertia_root(path = "inertia/admin.html")]
+struct AdminDocument;
+
+/// `AdminDocument` for paths under `/admin`, the framework's own document
+/// for `/plain`, and `AppDocument` for the rest.
+fn choose(request: &dyn InertiaRequestExt) -> InertiaRootTemplate {
+    if request.path().starts_with("/admin") {
+        InertiaRootTemplate::of::<AdminDocument>()
+    } else if request.path() == "/plain" {
+        InertiaRootTemplate::framework()
+    } else {
+        InertiaRootTemplate::of::<AppDocument>()
+    }
+}
+
+fn chosen() -> InertiaConfig {
+    InertiaConfig::new()
+        .development(true)
+        .version("pinned")
+        .root_template_with(choose)
+}
+
+async fn visit(path: &str, response: InertiaResponse) -> String {
+    let request = MockReq::new(path);
+    let response = response.resolve(&request).await.expect("a first visit");
+    parts(response).await.2
+}
+
+/// RDOC-004: the chooser picks each first visit's root document from the
+/// request: B for paths under `/admin`, A otherwise, and the framework's
+/// own document where it says so.
+#[tokio::test]
+async fn rdoc_004_the_chooser_picks_the_root_template_for_each_request() {
+    let _container = TestContainer::fake();
+    let admin = visit("/admin/x", pinned_page().with_config(chosen())).await;
+    assert!(
+        admin.contains("<meta name=\"layout\" content=\"admin\">"),
+        "{admin}"
+    );
+    assert!(
+        !admin.contains("Rendered through the root template"),
+        "{admin}"
+    );
+
+    let home = visit("/", pinned_page().with_config(chosen())).await;
+    assert!(
+        home.contains("Rendered through the root template"),
+        "{home}"
+    );
+    assert!(!home.contains("content=\"admin\""), "{home}");
+
+    let plain = visit("/plain", pinned_page().with_config(chosen())).await;
+    assert!(
+        plain.starts_with(
+            "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n\
+             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n\
+             <meta name=\"csrf-token\" content=\"\">\n<title>Suprnova</title>\n"
+        ),
+        "{plain}"
+    );
+}
+
+/// The page data element's content, the JSON the client reads.
+fn page_data(body: &str) -> &str {
+    let open = "data-page=\"app\">";
+    let start = body.find(open).expect("the page data element") + open.len();
+    &body[start..start + body[start..].find("</script>").expect("its end")]
+}
+
+/// RDOC-004: view data reaches the root template, escaped where the
+/// template places it, and never the page: not in the first visit's page
+/// data, not in an Inertia visit's JSON, and nowhere in the framework's
+/// own document.
+#[tokio::test]
+async fn rdoc_004_view_data_reaches_the_template_and_never_the_page() {
+    let _container = TestContainer::fake();
+    let page = || {
+        pinned_page()
+            .with_config(chosen())
+            .with_view_data("preview", "A <b>shared</b> preview")
+    };
+
+    let html = visit("/", page()).await;
+    assert!(
+        html.contains(
+            "<meta property=\"og:description\" content=\"A &#60;b&#62;shared&#60;/b&#62; preview\">"
+        ),
+        "{html}"
+    );
+    assert!(!page_data(&html).contains("preview"), "{html}");
+
+    let admin = visit("/admin/x", page()).await;
+    assert!(admin.contains("content=\"A &#60;b&#62;shared"), "{admin}");
+    assert!(!page_data(&admin).contains("preview"), "{admin}");
+
+    let plain = visit("/plain", page()).await;
+    assert!(!plain.contains("preview"), "{plain}");
+
+    let request = MockReq::new("/").inertia();
+    let response = page().resolve(&request).await.expect("an Inertia visit");
+    let (_, _, json) = parts(response).await;
+    assert!(!json.contains("preview"), "{json}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json).expect("the page")["props"]["message"],
+        "</script> & caf\u{e9}"
+    );
+}
+
+/// RDOC-004: without view data a template's `view.get` finds nothing.
+#[tokio::test]
+async fn rdoc_004_a_response_without_view_data_hands_the_template_none() {
+    let _container = TestContainer::fake();
+    let html = visit("/", pinned_page().with_config(chosen())).await;
+    assert!(!html.contains("og:description"), "{html}");
+}
