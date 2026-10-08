@@ -475,8 +475,10 @@ pub struct SsrConfig {
     /// block real users.
     pub timeout: std::time::Duration,
     /// When `true`, SSR errors propagate as 500s instead of falling
-    /// back to CSR. Useful in CI / tests; never set `true` in
-    /// production unless you also have a watchdog.
+    /// back to CSR, with a message naming the component and, when the
+    /// worker gave one, the source location (Laravel's `SsrException`).
+    /// Useful in CI / tests; never set `true` in production unless you
+    /// also have a watchdog.
     pub throw_on_error: bool,
     /// Path patterns excluded from SSR. Matching requests render CSR-only
     /// even when `enabled` is `true`. Patterns follow Laravel's
@@ -486,8 +488,11 @@ pub struct SsrConfig {
     pub excluded_paths: Vec<String>,
     /// Observability hook invoked when an SSR render fails and we
     /// fall back to CSR. Defaults to `eprintln!` to stderr. Wire your
-    /// logger / Sentry / DataDog client here. When events parity
-    /// lands, `SsrRenderFailed` will fire from this callback too.
+    /// logger / Sentry / DataDog client here. Every such failure also
+    /// dispatches the [`SsrRenderFailed`](crate::SsrRenderFailed) event,
+    /// which carries the worker's error details; under
+    /// [`throw_on_error`](Self::throw_on_error) the visit fails instead
+    /// and the hook does not run. A missing bundle is not a failure.
     pub on_error: Option<SsrErrorHook>,
     /// Cap on the SSR worker's response body. Bytes past this point
     /// abort the read and the request falls back to CSR (or 500 if

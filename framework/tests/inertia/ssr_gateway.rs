@@ -19,7 +19,10 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
-use suprnova::{FrameworkError, InertiaConfig, InertiaResponse, SsrConfig};
+use suprnova::{
+    EventFacade, FrameworkError, InertiaConfig, InertiaResponse, SsrConfig, SsrErrorType,
+    SsrRenderFailed,
+};
 
 use crate::protocol_harness::MockReq;
 
@@ -525,4 +528,169 @@ async fn inssr_a_head_entry_that_is_not_a_string_is_left_out() {
         document.contains("<title>From the worker</title>"),
         "{document}"
     );
+}
+
+// ---- PAR-059: the worker's error answer and SsrRenderFailed ----
+
+/// The error JSON an Inertia 3 worker answers a failed render with.
+fn browser_api_error() -> Value {
+    json!({
+        "error": "window is not defined",
+        "type": "browser-api",
+        "hint": "Move the access into onMounted()",
+        "browserApi": "window",
+        "stack": "ReferenceError: window is not defined\n    at setup (Dashboard.vue:12:5)",
+        "sourceLocation": "resources/js/Pages/Dashboard.vue:12:5",
+    })
+}
+
+#[tokio::test]
+async fn inssr_a_worker_error_dispatches_ssr_render_failed_with_the_component() {
+    let _events = EventFacade::fake();
+    let worker = Worker::answering(500, browser_api_error().to_string()).await;
+    let (config, errors) = with_error_hook(
+        InertiaConfig::new()
+            .production()
+            .ssr(worker.url())
+            .ssr_ensure_bundle_exists(false),
+    );
+
+    let document = first_visit(&config).await.expect("the visit renders");
+
+    assert!(renders_on_the_client(&document), "{document}");
+    let failures = suprnova::events::dispatched::<SsrRenderFailed>(|_| true);
+    assert_eq!(
+        failures,
+        vec![SsrRenderFailed {
+            component: "Dashboard".to_string(),
+            url: "/dashboard".to_string(),
+            error: "window is not defined".to_string(),
+            error_type: SsrErrorType::BrowserApi,
+            hint: Some("Move the access into onMounted()".to_string()),
+            browser_api: Some("window".to_string()),
+            stack: Some(
+                "ReferenceError: window is not defined\n    at setup (Dashboard.vue:12:5)"
+                    .to_string()
+            ),
+            source_location: Some("resources/js/Pages/Dashboard.vue:12:5".to_string()),
+        }]
+    );
+    let errors = errors.lock().unwrap();
+    assert_eq!(errors.len(), 1, "the on_error hook still fires: {errors:?}");
+    assert!(errors[0].contains("[Dashboard]"), "{errors:?}");
+    assert!(errors[0].contains("window is not defined"), "{errors:?}");
+}
+
+#[tokio::test]
+async fn inssr_an_error_answer_without_details_is_an_unknown_failure() {
+    let _events = EventFacade::fake();
+    let worker = Worker::answering(502, "Bad Gateway").await;
+    let config = InertiaConfig::new()
+        .production()
+        .ssr(worker.url())
+        .ssr_ensure_bundle_exists(false);
+
+    let document = first_visit(&config).await.expect("the visit renders");
+
+    assert!(renders_on_the_client(&document), "{document}");
+    let failures = suprnova::events::dispatched::<SsrRenderFailed>(|_| true);
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].error_type, SsrErrorType::Unknown);
+    assert_eq!(failures[0].component, "Dashboard");
+    assert!(failures[0].error.contains("502"), "{:?}", failures[0]);
+    assert_eq!(failures[0].hint, None);
+}
+
+#[tokio::test]
+async fn inssr_a_refused_connection_dispatches_a_connection_failure() {
+    let _events = EventFacade::fake();
+    let config = InertiaConfig::new()
+        .production()
+        .ssr(closed_url().await)
+        .ssr_ensure_bundle_exists(false);
+
+    let document = first_visit(&config).await.expect("the visit renders");
+
+    assert!(renders_on_the_client(&document), "{document}");
+    let failures = suprnova::events::dispatched::<SsrRenderFailed>(|_| true);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].error_type, SsrErrorType::Connection);
+    assert_eq!(failures[0].component, "Dashboard");
+    assert_eq!(failures[0].url, "/dashboard");
+    assert!(!failures[0].error.is_empty());
+}
+
+#[tokio::test]
+async fn inssr_throw_on_error_names_the_component_and_the_source_location() {
+    let _events = EventFacade::fake();
+    let worker = Worker::answering(500, browser_api_error().to_string()).await;
+    let config = InertiaConfig::new()
+        .production()
+        .ssr(worker.url())
+        .ssr_ensure_bundle_exists(false)
+        .ssr_throw_on_error(true);
+
+    let error = first_visit(&config)
+        .await
+        .expect_err("the visit fails under throw_on_error");
+
+    assert!(
+        error.to_string().contains(
+            "SSR render failed for component [Dashboard]: window is not defined \
+             at resources/js/Pages/Dashboard.vue:12:5"
+        ),
+        "{error}"
+    );
+    // The event is dispatched before the visit fails, as Laravel's.
+    assert_eq!(
+        suprnova::events::dispatched::<SsrRenderFailed>(|_| true).len(),
+        1
+    );
+
+    // Without a source location the message ends at the error.
+    let mut details = browser_api_error();
+    details.as_object_mut().unwrap().remove("sourceLocation");
+    let worker = Worker::answering(500, details.to_string()).await;
+    let config = config.ssr(worker.url());
+    let error = first_visit(&config).await.expect_err("the visit fails");
+    assert!(
+        error
+            .to_string()
+            .ends_with("SSR render failed for component [Dashboard]: window is not defined"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn inssr_throw_on_error_names_the_component_of_an_unreachable_worker() {
+    let config = InertiaConfig::new()
+        .production()
+        .ssr(closed_url().await)
+        .ssr_ensure_bundle_exists(false)
+        .ssr_throw_on_error(true);
+
+    let error = first_visit(&config).await.expect_err("the visit fails");
+
+    assert!(
+        error
+            .to_string()
+            .contains("SSR render failed for component [Dashboard]: "),
+        "{error}"
+    );
+}
+
+#[test]
+fn inssr_ssr_error_types_carry_laravels_names() {
+    for (name, kind) in [
+        ("browser-api", SsrErrorType::BrowserApi),
+        ("component-resolution", SsrErrorType::ComponentResolution),
+        ("render", SsrErrorType::Render),
+        ("connection", SsrErrorType::Connection),
+        ("unknown", SsrErrorType::Unknown),
+    ] {
+        assert_eq!(SsrErrorType::from_name(name), kind);
+        assert_eq!(kind.as_str(), name);
+        assert_eq!(kind.to_string(), name);
+    }
+    assert_eq!(SsrErrorType::from_name("timeout"), SsrErrorType::Unknown);
 }

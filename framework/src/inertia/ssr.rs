@@ -14,6 +14,7 @@ use serde::Deserialize;
 use std::time::Duration;
 
 use crate::error::FrameworkError;
+use crate::events::{SsrErrorType, SsrRenderFailed};
 use crate::inertia::config::SsrConfig;
 use crate::inertia::prop::InertiaRequestExt;
 
@@ -233,6 +234,7 @@ async fn accepts_connections(url: &str, timeout: Duration) -> bool {
 /// A missing bundle is not reported: with SSR on by default, an
 /// application that has no bundle would otherwise log it on every first
 /// visit. Laravel's `HttpGateway::dispatch` returns `null` the same way.
+/// A worker that fails is reported through `report_failure`.
 pub(crate) async fn render(
     config: &SsrConfig,
     request: &dyn InertiaRequestExt,
@@ -254,28 +256,108 @@ pub(crate) async fn render(
             headers: Vec::new(),
             timeout: config.timeout,
         });
-    let url = request.url.clone();
+    let failure = match exchange(&request, Some(body), config.max_response_bytes).await {
+        Ok(answer) if answer.status.is_success() => match rendered(&answer.body) {
+            Ok(rendered) => return Ok(rendered),
+            Err(e) => failure(
+                page,
+                format!("the SSR worker's answer is not JSON: {e}"),
+                SsrErrorType::Unknown,
+            ),
+        },
+        Ok(answer) => error_answer(page, answer.status, &answer.body),
+        Err(transport) => failure(page, transport, SsrErrorType::Connection),
+    };
+    report_failure(config, &request.url, failure).await
+}
 
-    let result = post_json(&request, body, config.max_response_bytes).await;
-    match result {
-        Ok(rendered) => Ok(rendered),
-        Err(e) => {
-            if config.throw_on_error {
-                Err(FrameworkError::internal(format!("SSR render failed: {e}")))
-            } else {
-                let msg = format!(
-                    "SSR worker unreachable at {} ({}); falling back to CSR",
-                    url, e
-                );
-                if let Some(cb) = &config.on_error {
-                    cb(&msg);
-                } else {
-                    eprintln!("[inertia] {}", msg);
-                }
-                Ok(None)
-            }
-        }
+/// A render failure of `page` with no details beyond the message.
+fn failure(page: &serde_json::Value, error: String, error_type: SsrErrorType) -> SsrRenderFailed {
+    let text = |key: &str, default: &str| {
+        page.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(default)
+            .to_string()
+    };
+    SsrRenderFailed {
+        component: text("component", "Unknown"),
+        url: text("url", "/"),
+        error,
+        error_type,
+        hint: None,
+        browser_api: None,
+        stack: None,
+        source_location: None,
     }
+}
+
+/// The failure a non-2xx answer reports: the worker's error JSON (`error`,
+/// `type`, `hint`, `browserApi`, `stack`, `sourceLocation`), as Laravel's
+/// `handleSsrFailure` reads it, or the status alone when the body is not
+/// such an object.
+fn error_answer(
+    page: &serde_json::Value,
+    status: reqwest::StatusCode,
+    body: &[u8],
+) -> SsrRenderFailed {
+    let details = match serde_json::from_slice(body) {
+        Ok(serde_json::Value::Object(details)) => details,
+        _ => serde_json::Map::new(),
+    };
+    let text = |key: &str| {
+        details
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let error = text("error").unwrap_or_else(|| format!("the SSR worker answered {status}"));
+    let error_type =
+        text("type").map_or(SsrErrorType::Unknown, |name| SsrErrorType::from_name(&name));
+    SsrRenderFailed {
+        hint: text("hint"),
+        browser_api: text("browserApi"),
+        stack: text("stack"),
+        source_location: text("sourceLocation"),
+        ..failure(page, error, error_type)
+    }
+}
+
+/// Report a failed render, Laravel's `handleSsrFailure`: dispatch
+/// [`SsrRenderFailed`], then fail the visit under `throw_on_error` with
+/// the component and source location in the message, or else fire the
+/// `on_error` hook (stderr without one) and render on the client.
+///
+/// The event is dispatched inline, before the visit continues, so a
+/// listener sees every failure; it is built and sent only when something
+/// listens for it or a fake records it.
+async fn report_failure(
+    config: &SsrConfig,
+    url: &str,
+    failure: SsrRenderFailed,
+) -> Result<Option<SsrResponse>, FrameworkError> {
+    let message = failure.message();
+    let hook_message = if failure.error_type == SsrErrorType::Connection {
+        format!(
+            "SSR worker unreachable at {url} for component [{}] ({}); falling back to CSR",
+            failure.component, failure.error
+        )
+    } else {
+        format!("{message} (worker at {url}); falling back to CSR")
+    };
+    if crate::events::EventFacade::is_observed::<SsrRenderFailed>()
+        && let Err(error) = crate::events::EventFacade::dispatch(failure).await
+    {
+        tracing::warn!(error = %error, "an SsrRenderFailed listener failed");
+    }
+    if config.throw_on_error {
+        return Err(FrameworkError::internal(message));
+    }
+    match &config.on_error {
+        Some(hook) => hook(&hook_message),
+        None => eprintln!("[inertia] {hook_message}"),
+    }
+    Ok(None)
 }
 
 /// The client every SSR call shares, built once for the process: one
@@ -381,20 +463,6 @@ async fn exchange(
         status,
         body: bytes,
     })
-}
-
-/// POST the page to the worker and read its rendered answer; `None` for an
-/// answer with nothing to inline.
-async fn post_json(
-    request: &SsrRequest,
-    body: Vec<u8>,
-    max_response_bytes: usize,
-) -> Result<Option<SsrResponse>, String> {
-    let answer = exchange(request, Some(body), max_response_bytes).await?;
-    if !answer.status.is_success() {
-        return Err(format!("ssr worker returned {}", answer.status));
-    }
-    rendered(&answer.body).map_err(|e| format!("deserialize response: {e}"))
 }
 
 /// The page a worker's successful answer carries, or `None` when there is
