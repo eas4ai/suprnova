@@ -167,7 +167,7 @@ suprnova ssr:stop --graceful      # cargo run --bin <app> -- ssr:stop --graceful
 suprnova ssr:check                # cargo run --bin <app> -- ssr:check
 ```
 
-The CLI has no SSR configuration of its own, so the configuration the application installed decides the URL, the bundle, the runtime, and the checks. The application's output reaches the CLI's stdout and stderr. Ctrl-C (`SIGINT`) and `SIGTERM` to the CLI are forwarded to the application each time they arrive, so a second one still kills the worker. The CLI exits with the application's status, or with 128 plus the signal number when a signal ended the application. Outside a project, or with a `Cargo.toml` that names no package, the CLI fails and says why.
+The CLI has no SSR configuration of its own, so the configuration the application installed decides the URL, the bundle, the runtime, and the checks. The application's output reaches the CLI's stdout and stderr. The application runs in a process group of its own, so a terminal's Ctrl-C, which goes to the CLI's process group, reaches the application once, through the CLI. The CLI forwards each `SIGINT` and `SIGTERM` it receives to the application, so a second one still kills the worker. It forwards a `SIGHUP` to the application's whole process group, the worker included, because the application's `ssr:start` doesn't handle `SIGHUP`. The CLI exits with the application's status, or with 128 plus the signal number when a signal ended the application. Outside a project, or with a `Cargo.toml` that names no package, the CLI fails and says why.
 
 ### Why Suprnova diverges
 

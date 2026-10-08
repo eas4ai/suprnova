@@ -158,7 +158,7 @@ See [Workflows](workflows.md).
 
 | Command | Description |
 |---|---|
-| `suprnova ssr:start [--runtime node\|bun\|deno\|<path>]` | Run the application binary's `ssr:start`, which checks the installed Inertia configuration and runs the SSR worker in the foreground. `--runtime` replaces the configured runtime. Ctrl-C and `SIGTERM` are forwarded to the application. |
+| `suprnova ssr:start [--runtime node\|bun\|deno\|<path>]` | Run the application binary's `ssr:start`, which checks the installed Inertia configuration and runs the SSR worker in the foreground. `--runtime` replaces the configured runtime. Ctrl-C, `SIGTERM`, and `SIGHUP` are forwarded to the application, which runs in a process group of its own. |
 | `suprnova ssr:stop [--graceful]` | Run the application binary's `ssr:stop`, which sends `GET /shutdown` to the worker at the configured URL. With `--graceful`, a worker that isn't running counts as stopped. |
 | `suprnova ssr:check` | Run the application binary's `ssr:check`, which asks the installed SSR gateway's health check. |
 

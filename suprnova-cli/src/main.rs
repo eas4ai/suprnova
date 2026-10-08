@@ -499,8 +499,9 @@ enum Commands {
     ///
     /// Runs `cargo run --bin <package> -- ssr:start` from the project
     /// directory, so the Inertia configuration the application installed
-    /// decides the bundle, the runtime and the checks. Forwards Ctrl-C and
-    /// SIGTERM to the application and exits with its status.
+    /// decides the bundle, the runtime and the checks. The application runs
+    /// in its own process group; Ctrl-C, SIGTERM and SIGHUP reach it through
+    /// the CLI, which exits with its status.
     #[command(name = "ssr:start")]
     SsrStart {
         /// Run the bundle under this runtime (node, bun, deno, or a path)

@@ -10,12 +10,14 @@
 //! part of the framework crate for these commands.
 //!
 //! `ssr:start` keeps the worker in the foreground, under systemd, pm2 or
-//! supervisord in production, so the CLI forwards each `SIGINT` and
-//! `SIGTERM` it receives to the application, which forwards it to the
-//! worker, and exits with the application's status.
+//! supervisord in production, so the CLI forwards each `SIGINT`, `SIGTERM`
+//! and `SIGHUP` it receives to the application and exits with the
+//! application's status. The application runs in a process group of its
+//! own, so a terminal's Ctrl-C, which goes to the CLI's group, reaches it
+//! once, through the CLI.
 
 use std::path::Path;
-use std::process::ExitStatus;
+use std::process::{ExitStatus, Stdio};
 
 use crate::ui;
 
@@ -101,9 +103,19 @@ async fn run_forwarding(project: &Path, args: &[String]) -> Result<i32, String> 
     // Installed before the application exists, so no signal sent while it
     // runs takes the default action and ends the CLI without it.
     let mut signals = StopSignals::install()?;
-    let mut child = tokio::process::Command::new("cargo")
+    let mut command = tokio::process::Command::new("cargo");
+    command
         .args(args)
         .current_dir(project)
+        // The application reads nothing, and in a process group that is not
+        // the terminal's foreground one a read would stop it.
+        .stdin(Stdio::null());
+    // A terminal sends Ctrl-C to its foreground process group. In the CLI's
+    // group the application would get it twice, from the terminal and from
+    // the CLI, and its `ssr:start` kills the worker at a second signal.
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to run `{described}`: {e}"))?;
     let status = loop {
@@ -134,14 +146,26 @@ fn exit_code(status: ExitStatus) -> i32 {
 }
 
 /// Forward a stop signal the CLI received to the application as the same
-/// signal. The application's `ssr:start` stops its worker at the first and
-/// kills it at the second, so every signal is forwarded. An application
-/// already reaped has no process id, so a reused one is never signalled.
+/// signal. The application's `ssr:start` stops its worker at the first
+/// `SIGINT` or `SIGTERM` and kills it at the second, so every signal is
+/// forwarded. It does not handle `SIGHUP`, which ends it by the default
+/// action without stopping the worker, so a `SIGHUP` goes to the
+/// application's whole process group, the worker included, as a terminal
+/// that hangs up delivers it to its job. An application already reaped has
+/// no process id, so a reused one is never signalled.
 #[cfg(unix)]
 fn forward(child: &tokio::process::Child, signal: nix::sys::signal::Signal) {
-    if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
-        let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal);
-    }
+    use nix::sys::signal::{Signal, kill, killpg};
+    let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) else {
+        return;
+    };
+    // The application leads its own process group, so its id names it.
+    let pid = nix::unistd::Pid::from_raw(pid);
+    let _ = if signal == Signal::SIGHUP {
+        killpg(pid, signal)
+    } else {
+        kill(pid, signal)
+    };
 }
 
 /// The console delivers Ctrl-C to the application as well, so there is
@@ -155,6 +179,8 @@ struct StopSignals {
     interrupt: tokio::signal::unix::Signal,
     #[cfg(unix)]
     terminate: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    hangup: tokio::signal::unix::Signal,
 }
 
 impl StopSignals {
@@ -170,6 +196,7 @@ impl StopSignals {
         Ok(Self {
             interrupt: handler(SignalKind::interrupt(), "SIGINT")?,
             terminate: handler(SignalKind::terminate(), "SIGTERM")?,
+            hangup: handler(SignalKind::hangup(), "SIGHUP")?,
         })
     }
 
@@ -179,7 +206,7 @@ impl StopSignals {
     }
 
     /// The next stop signal, as the signal to forward. A handler whose
-    /// stream ended is not polled again, and with both ended this never
+    /// stream ended is not polled again, and with all ended this never
     /// resolves, rather than resolving at once in a loop.
     #[cfg(unix)]
     async fn next(&mut self) -> nix::sys::signal::Signal {
@@ -187,6 +214,7 @@ impl StopSignals {
         tokio::select! {
             Some(()) = self.interrupt.recv() => Signal::SIGINT,
             Some(()) = self.terminate.recv() => Signal::SIGTERM,
+            Some(()) = self.hangup.recv() => Signal::SIGHUP,
             else => std::future::pending().await,
         }
     }

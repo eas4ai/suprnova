@@ -310,8 +310,8 @@ mod inssr {
     use std::path::{Path, PathBuf};
     use std::process::Stdio;
 
-    use nix::sys::signal::{Signal, kill};
-    use nix::unistd::Pid;
+    use nix::sys::signal::{Signal, kill, killpg};
+    use nix::unistd::{Pid, getpgid, getpgrp};
     use tempfile::TempDir;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader, Lines};
     use tokio::process::{Child, ChildStdout};
@@ -679,26 +679,53 @@ mod inssr {
 
     // -- signals ----------------------------------------------------------------
 
-    /// A `cargo` that says `ready` once it runs, prints `application got
-    /// <signal> <count>` for each `SIGINT` or `SIGTERM` it receives, and
-    /// exits with 7 at the `stop_after`th. It writes its own process id and
-    /// its sleeper's to `pids`.
-    fn signal_recording_cargo(pids: &Path, stop_after: usize) -> String {
+    /// A `cargo` that says `ready` once it and its worker run, and writes
+    /// its process id, its sleeper's and its worker's to `pids`. For each
+    /// `SIGINT` or `SIGTERM` it receives it prints `application got <signal>
+    /// <count>`, and at the `stop_after`th it stops the other two and exits
+    /// with 7. At a `SIGHUP` it waits for its worker, which prints `worker
+    /// got HUP` and exits only when a `SIGHUP` reaches it as well, then
+    /// prints `application got HUP <count> after its worker` and exits with
+    /// 7.
+    ///
+    /// The worker says over the FIFO `worker_ready` that its traps are set,
+    /// and only then does the application say `ready`, so no signal a test
+    /// sends after `ready` meets a worker without them.
+    fn signal_recording_cargo(pids: &Path, worker_ready: &Path, stop_after: usize) -> String {
         format!(
             "n=0\n\
              got() {{\n\
              \x20 n=$((n + 1))\n\
+             \x20 if [ \"$1\" = HUP ]; then\n\
+             \x20   wait \"$worker\"\n\
+             \x20   echo \"application got HUP $n after its worker\"\n\
+             \x20   kill \"$sleeper\" 2>/dev/null\n\
+             \x20   exit 7\n\
+             \x20 fi\n\
              \x20 echo \"application got $1 $n\"\n\
-             \x20 if [ \"$n\" -ge {stop_after} ]; then kill \"$sleeper\"; exit 7; fi\n\
+             \x20 if [ \"$n\" -ge {stop_after} ]; then kill \"$sleeper\" \"$worker\" 2>/dev/null; exit 7; fi\n\
              }}\n\
              trap 'got INT' INT\n\
              trap 'got TERM' TERM\n\
+             trap 'got HUP' HUP\n\
+             mkfifo '{worker_ready}'\n\
+             (\n\
+             \x20 trap 'echo \"worker got HUP\"; exit 0' HUP\n\
+             \x20 trap 'kill \"$inner\" 2>/dev/null; exit 0' TERM\n\
+             \x20 sleep 1000 >/dev/null 2>&1 &\n\
+             \x20 inner=$!\n\
+             \x20 echo > '{worker_ready}'\n\
+             \x20 wait \"$inner\"\n\
+             ) &\n\
+             worker=$!\n\
+             read _ < '{worker_ready}'\n\
              sleep 1000 >/dev/null 2>&1 &\n\
              sleeper=$!\n\
-             echo \"$$ $sleeper\" > '{pids}'\n\
+             echo \"$$ $sleeper $worker\" > '{pids}'\n\
              echo ready\n\
              while kill -0 \"$sleeper\" 2>/dev/null; do wait \"$sleeper\"; done",
-            pids = pids.display()
+            pids = pids.display(),
+            worker_ready = worker_ready.display(),
         )
     }
 
@@ -726,24 +753,48 @@ mod inssr {
         }
     }
 
+    /// Where a test sends a signal.
+    #[derive(Clone, Copy)]
+    enum To {
+        /// The CLI's process alone, as `kill <pid>` does.
+        Cli,
+        /// The CLI's process group, as a terminal does with Ctrl-C.
+        CliGroup,
+    }
+
+    /// What a signalled `ssr:start` printed and exited with, and the
+    /// process groups the CLI and the application ran in.
+    #[derive(Debug)]
+    struct Signalled {
+        ran: Ran,
+        cli_group: Pid,
+        application_group: Pid,
+    }
+
     /// Run `ssr:start` under a `cargo` that records the signals it receives,
-    /// send the CLI alone each of `signals`, the first once the application
+    /// send each of `signals` where it says, the first once the application
     /// is ready and each next one once the application reported the one
-    /// before, and return what the CLI printed and exited with.
+    /// before, and return what happened.
     ///
-    /// A CLI that did not forward a signal dies of it and leaves the
-    /// application running, holding the output pipe open; the application
-    /// is then killed by the ids it wrote so the test can finish and report.
-    async fn signal_a_running_start(signals: &[Signal]) -> Ran {
+    /// The CLI runs in a process group of its own, as a shell runs a job, so
+    /// a signal to its group never reaches the test. A CLI that did not
+    /// forward a signal dies of it and leaves the application running,
+    /// holding the output pipe open; the groups of the CLI and of the
+    /// application are then killed so the test can finish and report.
+    async fn signal_a_running_start(signals: &[(To, Signal)]) -> Signalled {
+        use std::os::unix::process::CommandExt;
+
         let project = Project::new();
         let pids = project.record().join("pids");
-        project.cargo(&signal_recording_cargo(&pids, signals.len()));
-        let mut child = project
-            .cli(&["ssr:start"])
+        let worker_ready = project.record().join("worker-ready");
+        project.cargo(&signal_recording_cargo(&pids, &worker_ready, signals.len()));
+        let mut command = project.cli(&["ssr:start"]);
+        command
+            .as_std_mut()
+            .process_group(0)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn the CLI");
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("spawn the CLI");
         let cli =
             Pid::from_raw(i32::try_from(child.id().expect("the CLI runs")).expect("a process id"));
 
@@ -756,12 +807,28 @@ mod inssr {
         let mut lines = BufReader::new(child.stdout.take().expect("the CLI's stdout")).lines();
         let mut out = String::new();
 
+        let mut application_group = None;
         let mut awaited = "ready".to_owned();
-        for (sent, signal) in signals.iter().enumerate() {
+        for (sent, (to, signal)) in signals.iter().enumerate() {
             if !read_until(&mut lines, &mut child, &mut out, &awaited).await {
                 break;
             }
-            kill(cli, *signal).expect("signal the CLI");
+            if application_group.is_none() {
+                // Written before `ready`.
+                let application = std::fs::read_to_string(&pids)
+                    .ok()
+                    .and_then(|ids| ids.split_whitespace().next()?.parse::<i32>().ok())
+                    .expect("the application wrote its process id");
+                application_group = Some(
+                    getpgid(Some(Pid::from_raw(application)))
+                        .expect("the application's process group"),
+                );
+            }
+            match to {
+                To::Cli => kill(cli, *signal),
+                To::CliGroup => killpg(cli, *signal),
+            }
+            .expect("signal the CLI");
             awaited = format!(
                 "application got {} {}",
                 signal.as_str().trim_start_matches("SIG"),
@@ -771,12 +838,9 @@ mod inssr {
 
         let status = child.wait().await.expect("wait for the CLI");
         if status.code().is_none() {
-            let ids = std::fs::read_to_string(&pids).unwrap_or_default();
-            for id in ids
-                .split_whitespace()
-                .filter_map(|id| id.parse::<i32>().ok())
-            {
-                let _ = kill(Pid::from_raw(id), Signal::SIGKILL);
+            let _ = killpg(cli, Signal::SIGKILL);
+            if let Some(group) = application_group.filter(|group| *group != getpgrp()) {
+                let _ = killpg(group, Signal::SIGKILL);
             }
         }
         while let Some(line) = lines.next_line().await.expect("read the CLI's stdout") {
@@ -784,18 +848,24 @@ mod inssr {
             out.push('\n');
         }
         let err = errors.await.expect("read the CLI's stderr");
-        Ran {
-            code: status
-                .code()
-                .unwrap_or_else(|| panic!("the CLI died of a signal: {out} {err}")),
-            out,
-            err,
+        Signalled {
+            ran: Ran {
+                code: status
+                    .code()
+                    .unwrap_or_else(|| panic!("the CLI died of a signal: {out} {err}")),
+                out,
+                err,
+            },
+            cli_group: cli,
+            application_group: application_group.expect("the application got ready"),
         }
     }
 
     #[tokio::test]
     async fn inssr_cli_start_forwards_sigint_to_the_application() {
-        let ran = signal_a_running_start(&[Signal::SIGINT]).await;
+        let ran = signal_a_running_start(&[(To::Cli, Signal::SIGINT)])
+            .await
+            .ran;
 
         assert_eq!(ran.code, 7, "the application's status: {ran:?}");
         assert_eq!(ran.out, "ready\napplication got INT 1\n");
@@ -803,7 +873,9 @@ mod inssr {
 
     #[tokio::test]
     async fn inssr_cli_start_forwards_sigterm_to_the_application() {
-        let ran = signal_a_running_start(&[Signal::SIGTERM]).await;
+        let ran = signal_a_running_start(&[(To::Cli, Signal::SIGTERM)])
+            .await
+            .ran;
 
         assert_eq!(ran.code, 7, "the application's status: {ran:?}");
         assert_eq!(ran.out, "ready\napplication got TERM 1\n");
@@ -813,12 +885,54 @@ mod inssr {
     /// the CLI forwards every signal, not the first alone.
     #[tokio::test]
     async fn inssr_cli_start_forwards_a_second_signal_as_well() {
-        let ran = signal_a_running_start(&[Signal::SIGINT, Signal::SIGINT]).await;
+        let ran = signal_a_running_start(&[(To::Cli, Signal::SIGINT), (To::Cli, Signal::SIGINT)])
+            .await
+            .ran;
 
         assert_eq!(ran.code, 7, "the application's status: {ran:?}");
         assert_eq!(
             ran.out,
             "ready\napplication got INT 1\napplication got INT 2\n"
+        );
+    }
+
+    /// A terminal's Ctrl-C goes to the CLI's process group. The application
+    /// runs in a group of its own, so it gets the `SIGINT` once, through
+    /// the CLI, and not a second time from the terminal, which its
+    /// `ssr:start` would take for the second signal that kills the worker.
+    /// The `SIGTERM` sent after it to the CLI alone is the next signal the
+    /// application gets.
+    #[tokio::test]
+    async fn inssr_cli_start_passes_a_terminals_sigint_to_the_application_once() {
+        let signalled =
+            signal_a_running_start(&[(To::CliGroup, Signal::SIGINT), (To::Cli, Signal::SIGTERM)])
+                .await;
+
+        assert_ne!(
+            signalled.application_group, signalled.cli_group,
+            "the application runs in a process group of its own: {signalled:?}"
+        );
+        let ran = signalled.ran;
+        assert_eq!(ran.code, 7, "the application's status: {ran:?}");
+        assert_eq!(
+            ran.out,
+            "ready\napplication got INT 1\napplication got TERM 2\n"
+        );
+    }
+
+    /// A hangup reaches the application's whole process group: its
+    /// `ssr:start` does not handle `SIGHUP`, so the worker it started gets
+    /// the signal from the CLI too, rather than outlive the application.
+    #[tokio::test]
+    async fn inssr_cli_start_forwards_sighup_to_the_applications_process_group() {
+        let ran = signal_a_running_start(&[(To::Cli, Signal::SIGHUP)])
+            .await
+            .ran;
+
+        assert_eq!(ran.code, 7, "the application's status: {ran:?}");
+        assert_eq!(
+            ran.out,
+            "ready\nworker got HUP\napplication got HUP 1 after its worker\n"
         );
     }
 }
