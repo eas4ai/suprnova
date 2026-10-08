@@ -1312,18 +1312,20 @@ fn reg_032_writing_a_browser_global_does_not_unlock_reading_it() {
     );
 }
 
-/// The admitted fixtures' directory, under `accepted/`, that pins what the
-/// built-in rule leaves open (REG-032).
-fn own_members() -> PathBuf {
-    accepted().join("own-members")
-}
+/// The admitted fixtures, under `accepted/`, that pin what the built-in
+/// rule leaves open (REG-032): writes to the script's own objects and
+/// functions, and the writes an ordinary component makes on the page, its
+/// elements and the values it builds.
+const BUILT_IN_RULE_ADMITS: &[&str] = &["own-members", "ordinary-writes"];
 
 /// REG-032: writing a member of an object or function the script made stays
 /// admitted, its own object, a parameter given one and its own function
 /// included, and so do calling, reading, comparing and feature-testing a
 /// built-in, handing a built-in function to a browser API that calls it
 /// back, a constant such as `Number.MAX_SAFE_INTEGER` used as a value, and
-/// the page's own properties (`document.title`, `location.hash`).
+/// the page's own properties (`document.title`, `location.hash`), and what an
+/// ordinary component writes on its elements (`textContent`, `value`,
+/// `this.state.open`).
 #[test]
 fn reg_032_a_scripts_own_members_and_uses_of_built_ins_stay_admitted() {
     let admitted = [
@@ -1363,17 +1365,19 @@ fn reg_032_a_scripts_own_members_and_uses_of_built_ins_stay_admitted() {
             ));
         }
     }
-    let fixture = scan_fixture(&own_members());
-    if !fixture.accepted() {
-        failures.push(format!(
-            "accepted/own-members was refused: {}",
-            fixture
-                .findings
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(" | ")
-        ));
+    for name in BUILT_IN_RULE_ADMITS {
+        let fixture = scan_fixture(&accepted().join(name));
+        if !fixture.accepted() {
+            failures.push(format!(
+                "accepted/{name} was refused: {}",
+                fixture
+                    .findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ));
+        }
     }
     assert!(
         failures.is_empty(),
