@@ -792,6 +792,11 @@ integer the handler rendered:
 response.assert_inertia().where_("id", 9007199254740993_i64);
 ```
 
+A marker whose digits fit no 64-bit integer (`i64` or `u64`) fails the
+assertion, naming the marker's path and digits, such as `props.user.id`
+and `18446744073709551616`. The framework marks only integers it holds in
+64 bits, so such a marker comes from a page object built by hand.
+
 ### Reloading for partial-reload and deferred-props assertions
 
 A page from a `TestClient` response reloads through that client, with

@@ -1184,6 +1184,44 @@ fn intt_big_integer_markers_are_decoded_when_the_page_preserves_them() {
 }
 
 #[test]
+fn intt_a_big_integer_marker_beyond_64_bits_fails_naming_it() {
+    // 2^64 and -(2^63) - 1: no `i64` or `u64` holds either, and a
+    // `serde_json::Value` has no integer for them.
+    for (extra, path, digits) in [
+        (
+            json!({
+                "preserveBigIntegers": true,
+                "props": {"user": {"id": {"$bigint": "18446744073709551616"}}},
+            }),
+            "props.user.id",
+            "18446744073709551616",
+        ),
+        (
+            json!({
+                "preserveBigIntegers": true,
+                "props": {"rows": [{"n": {"$bigint": "-9223372036854775809"}}]},
+            }),
+            "props.rows.0.n",
+            "-9223372036854775809",
+        ),
+        (
+            json!({
+                "preserveBigIntegers": true,
+                "flash": {"created": {"$bigint": "18446744073709551616"}},
+            }),
+            "flash.created",
+            "18446744073709551616",
+        ),
+    ] {
+        let failure = failure_of(|| {
+            page_with(extra.clone());
+        });
+        assert!(failure.contains(digits), "{failure}");
+        assert!(failure.contains(&format!("`{path}`")), "{failure}");
+    }
+}
+
+#[test]
 fn intt_big_integer_markers_stay_without_preserve_big_integers() {
     let page = page_with(json!({"props": {"id": {"$bigint": "9007199254740993"}}}));
 

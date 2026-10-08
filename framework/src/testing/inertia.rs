@@ -198,8 +198,11 @@ impl AssertableInertia {
         // the integers the handler passed, as Laravel's `fromTestResponse`
         // decodes them.
         if obj.get("preserveBigIntegers") == Some(&Value::Bool(true)) {
-            decode_big_integers(&mut props);
-            decode_big_integers(&mut flash);
+            for (root, value) in [("props", &mut props), ("flash", &mut flash)] {
+                if let Err(wide) = decode_big_integers(value) {
+                    fail(wide.message(root));
+                }
+            }
         }
         let deferred_props = obj
             .get("deferredProps")
@@ -1092,30 +1095,80 @@ fn dot_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
 
 /// Replace every `{"$bigint": "<digits>"}` marker in `value`, at any depth,
 /// with the integer it carries: the reverse of the encoding a page with
-/// `preserveBigIntegers` applies (`framework/src/inertia/response.rs`).
-/// A marker whose digits fit no 64-bit integer is left as it is.
-fn decode_big_integers(value: &mut Value) {
-    let decoded = match value {
-        Value::Object(map) => map
-            .get("$bigint")
-            .and_then(Value::as_str)
-            .and_then(|digits| {
-                digits
-                    .parse::<i64>()
-                    .map(Value::from)
-                    .or_else(|_| digits.parse::<u64>().map(Value::from))
-                    .ok()
-            }),
-        _ => None,
-    };
-    if let Some(number) = decoded {
-        *value = number;
-        return;
+/// `preserveBigIntegers` applies (`framework/src/inertia/response.rs`
+/// `encode_big_integers`).
+///
+/// The digits decode to an `i64` or a `u64` and to nothing wider. The
+/// framework's encoder marks only a `serde_json::Number`, which holds at
+/// most 64 bits, so a wider marker cannot come from a Suprnova page, and
+/// a `serde_json::Value` has no integer that holds one. Such a marker, which
+/// only a hand-built page object carries, is an error naming where it is,
+/// rather than an object left in place for `where_type("id", "integer")`
+/// to fail on and `to_page()` to show.
+fn decode_big_integers(value: &mut Value) -> Result<(), WideMarker> {
+    if let Value::Object(map) = value
+        && let Some(Value::String(digits)) = map.get("$bigint")
+    {
+        let decoded = match digits.parse::<i64>() {
+            Ok(signed) => Ok(Value::from(signed)),
+            Err(_) => digits
+                .parse::<u64>()
+                .map(Value::from)
+                .map_err(|_| WideMarker {
+                    digits: digits.clone(),
+                    segments: Vec::new(),
+                }),
+        };
+        *value = decoded?;
+        return Ok(());
     }
     match value {
-        Value::Object(map) => map.values_mut().for_each(decode_big_integers),
-        Value::Array(items) => items.iter_mut().for_each(decode_big_integers),
+        Value::Object(map) => {
+            for (key, nested) in map.iter_mut() {
+                decode_big_integers(nested).map_err(|wide| wide.under(key))?;
+            }
+        }
+        Value::Array(items) => {
+            for (index, nested) in items.iter_mut().enumerate() {
+                decode_big_integers(nested).map_err(|wide| wide.under(index))?;
+            }
+        }
         _ => {}
+    }
+    Ok(())
+}
+
+/// A big-integer marker whose digits no 64-bit integer holds, found by
+/// [`decode_big_integers`]: its digits, and the path segments from the
+/// marker out to the value the search started at, innermost first, so
+/// each level adds its own on the way out and no path is built unless a
+/// marker fails.
+struct WideMarker {
+    digits: String,
+    segments: Vec<String>,
+}
+
+impl WideMarker {
+    /// The same marker, seen from one level further out, under `segment`.
+    fn under(mut self, segment: impl ToString) -> Self {
+        self.segments.push(segment.to_string());
+        self
+    }
+
+    /// The failure message, with `root` (`props` or `flash`) leading the
+    /// marker's dotted path.
+    fn message(&self, root: &str) -> String {
+        let path = std::iter::once(root)
+            .chain(self.segments.iter().rev().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(".");
+        format!(
+            "AssertableInertia: the big-integer marker at `{path}` holds {:?}, which is not an \
+             integer of 64 bits or fewer. A Suprnova page marks only 64-bit integers \
+             (`i64` or `u64`), so this marker comes from a page object built by hand: \
+             {{\"$bigint\": {:?}}}",
+            self.digits, self.digits
+        )
     }
 }
 

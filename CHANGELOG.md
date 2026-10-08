@@ -442,7 +442,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   2^53 - 1 as `{"$bigint": "<digits>"}` markers, so
   `where_("id", 9007199254740993_i64)` failed against the page the handler
   built; the markers in props and flash are now decoded before any
-  assertion or reader sees them (TS-12, TS-13, TS-14, TS-15, TS-16).
+  assertion or reader sees them. A marker whose digits fit no 64-bit
+  integer, such as `{"$bigint": "18446744073709551616"}`, which only a
+  hand-built page object carries, fails naming its path and digits rather
+  than staying an object that `where_type("id", "integer")` rejects and
+  `to_page()` shows (TS-12, TS-13, TS-14, TS-15, TS-16).
 - **`InertiaConfig::testing_ensure_pages_exist`, on by default.**
   `AssertableInertia::component(name)` passed for a component with no page
   file, so a test stayed green while the browser showed a blank page. With
