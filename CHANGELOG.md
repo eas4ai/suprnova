@@ -8,6 +8,41 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **The Svelte kit on Inertia 3.8 and its Vite plugin.** The kit pinned
+  `@inertiajs/svelte` and `@inertiajs/core` to the 3.6 client, globbed its
+  pages by hand in both entries, and passed `createInertiaApp` no `title`,
+  `serverHead` or `nonce`. It now declares both packages and
+  `@inertiajs/vite` at `^3.8.0`. The plugin resolves `pages: './pages'`
+  and wraps `src/ssr.ts`, a single `createInertiaApp` call, into the SSR
+  server, which `npm run build:ssr` still writes to
+  `frontend/bootstrap/ssr/ssr.js`. The entry reads its `nonce` from
+  `<meta property="csp-nonce">` when the document has one (K01, K05, K18,
+  K19).
+- **Svelte kit layouts, links and titles.** Every page drew its own frame,
+  reached other pages through anchors that reloaded the document, and set
+  no tab title. `layouts/AppLayout.svelte` and `layouts/GuestLayout.svelte`
+  now frame the pages through `createInertiaApp`'s `layout` option and stay
+  mounted across visits. The application layout shows the signed-in user
+  from the shared `auth` prop, or sign-in and register links for a visitor.
+  Every navigation is a `Link`, and sign-out is a `Link` with
+  `method="post"` rendered as a button. The dashboard sets the
+  layout's heading with `setLayoutProps`. `@inertiajs/svelte` has no `Head`
+  component, so `components/Head.svelte` titles each page `Title - App`
+  through `<svelte:head>` (K06, K07, K16).
+- **A flash toast in the Svelte kit.** No page read `page.flash`, so an
+  action showed no feedback. Both layouts now show `page.flash.toast` on
+  the one page that carries it, typed by the generated `flashDataType`
+  (K17).
+- **The Svelte kit's dashboard, notes pages and auth forms.** The dashboard
+  now loads its `stats` with `Deferred` and polls them with `usePoll`,
+  loads `recent_notes` with `WhenVisible`, and changes the display name
+  through `useHttp`, showing the new name at once in the page and the
+  layout and putting the old one back with the field's error on a `422`. The new `Notes/Index` page creates
+  a note with the `Form` component, remembers its search with
+  `useRemember`, scrolls with `InfiniteScroll`, and opens `Notes/Show`
+  with a prefetched, instant `Link`. The auth pages submit through `Form`
+  instead of `useForm`, and Login turns its `remember` checkbox into a
+  boolean with `transform` (K11, K12, K13, K14, K15, K21).
 - **Third-party Live component libraries.** A library is a git repository
   with one fixed tree: `library.json` at its root and, under `components/`,
   one directory per component holding its `manifest.json`, the files the

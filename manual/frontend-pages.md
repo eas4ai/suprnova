@@ -184,16 +184,27 @@ Runes-on. Props arrive via `$props()`:
 ```svelte
 <!-- frontend/src/pages/Home.svelte -->
 <script lang="ts">
+  import Head from '../components/Head.svelte'
   import type { HomeProps } from '../types/inertia-props'
+  import { t } from '../lib/lang.svelte'
 
   let { title, message }: HomeProps = $props()
 </script>
 
-<div class="font-sans p-8 max-w-xl mx-auto">
-  <h1 class="text-3xl font-bold">{title}</h1>
+<!-- No title of its own: the tab shows the application's name. -->
+<Head />
+
+<div class="mx-auto max-w-xl p-8 font-sans">
+  <h1 class="text-3xl font-bold">{t('welcome', { app: title })}</h1>
   <p class="mt-2">{message}</p>
 </div>
 ```
+
+`@inertiajs/svelte` has no `Head` component, so the kit ships its own in
+`frontend/src/components/Head.svelte`. It writes the page's title into
+Svelte's `<svelte:head>` as `Title - App`, through the same `pageTitle`
+function `main.ts` passes to `createInertiaApp` as `title`. A page that
+passes no title shows the application's name alone.
 
 ### React 19
 
@@ -243,20 +254,40 @@ form handling.
 
 ### Svelte 5
 
+The kit builds every link from the `root` shared prop, so the same build
+works at `/` and under a path prefix:
+
 ```svelte
 <script lang="ts">
-  import { Link, router } from '@inertiajs/svelte'
+  import { Link, usePage } from '@inertiajs/svelte'
 
-  function gotoPosts() {
-    router.visit('/posts')
-  }
+  const { root } = usePage().props
+  let { note }: { note: { id: number; title: string } } = $props()
 </script>
 
-<Link href="/posts">All posts</Link>
-<Link href="/posts/42" method="delete" as="button">Delete</Link>
+<Link href={`${root}/notes`}>Notes</Link>
+<Link href={`${root}/logout`} method="post" as="button" preserveState={false}>Sign out</Link>
 
-<button onclick={gotoPosts}>Visit programmatically</button>
+<!-- Prefetched on hover, and instant: Notes/Show renders from this row
+     before the server answers. -->
+<Link
+  href={`${root}/notes/${note.id}`}
+  prefetch
+  component="Notes/Show"
+  pageProps={(_props, shared) => ({ ...shared, note })}
+>
+  {note.title}
+</Link>
 ```
+
+The sign-out link comes from `layouts/AppLayout.svelte`, and the note link
+comes from `pages/Notes/Index.svelte`. A link with a method other than GET
+keeps the page's state by default, so the sign-out link passes
+`preserveState={false}` to start the page it lands on afresh. The function
+form of `pageProps`
+keeps the shared props, `root` among them, on the page that renders before
+the server answers. A plain object replaces every prop on that page.
+`router.visit(url)` does the same navigation from a script.
 
 ### React 19
 
@@ -295,35 +326,41 @@ controller; validation errors surface as a structured `errors` prop.
 
 ### Svelte 5
 
+The kit's notes page creates a note with the `Form` component. `Form` posts
+the fields by their `name` and hands its children the form's `errors` and
+`processing`:
+
 ```svelte
-<!-- frontend/src/pages/Posts/Create.svelte -->
+<!-- frontend/src/pages/Notes/Index.svelte -->
 <script lang="ts">
-  import { useForm } from '@inertiajs/svelte'
+  import { Form, usePage } from '@inertiajs/svelte'
 
-  const form = useForm({
-    title: '',
-    content: '',
-  })
-
-  function submit(e: SubmitEvent) {
-    e.preventDefault()
-    form.post('/posts')
-  }
+  const { root } = usePage().props
 </script>
 
-<form onsubmit={submit} class="space-y-4">
-  <input type="text" bind:value={form.title} placeholder="Title" />
-  {#if form.errors.title}
-    <p class="text-red-500">{form.errors.title}</p>
-  {/if}
+<Form action={`${root}/notes`} method="post" class="space-y-4">
+  {#snippet children({ errors, processing })}
+    <input name="title" type="text" required maxlength="255" />
+    {#if errors.title}
+      <p class="text-red-600">{errors.title}</p>
+    {/if}
 
-  <textarea bind:value={form.content} rows={6}></textarea>
+    <textarea name="body" rows="4" maxlength="10000"></textarea>
 
-  <button type="submit" disabled={form.processing}>
-    {form.processing ? 'Saving…' : 'Create'}
-  </button>
-</form>
+    <button type="submit" disabled={processing}>
+      {processing ? 'Saving...' : 'Save note'}
+    </button>
+  {/snippet}
+</Form>
 ```
+
+Every auth page in the kit submits the same way. A failed submission comes
+back as a `303` to the form's page with the errors flashed, and `Form` reads
+them from the page. The Login page also passes `transform`. A checked
+checkbox submits the text `on`, and `transform` turns `remember` into the
+boolean the handler's `LoginRequest` reads. For a form whose data a script
+needs, `useForm` gives the same `errors` and `processing` on an object you
+bind inputs to.
 
 ### React 19
 
@@ -515,42 +552,68 @@ your page content inside it.
 
 ### Svelte 5
 
+The kit applies its layouts once, in `createInertiaApp`'s `layout` option,
+instead of wrapping each page in one. A layout given there stays mounted
+while visits move between the pages that use it, so its state survives a
+visit:
+
+```ts
+// frontend/src/main.ts (and src/ssr.ts, so the server renders the same frame)
+createInertiaApp({
+  pages: './pages',
+  layout: (name) => (name.startsWith('auth/') ? GuestLayout : AppLayout),
+  // ...
+})
+```
+
+A layout receives the page's props, the props a page sets with
+`setLayoutProps`, and the page as `children`. Among the page's props are the
+ones the server shares with every page: `root`, and `auth`, whose `user` is
+the signed-in user or `null`:
+
 ```svelte
 <!-- frontend/src/layouts/AppLayout.svelte -->
 <script lang="ts">
   import { Link } from '@inertiajs/svelte'
-  let { children } = $props()
+  import type { Snippet } from 'svelte'
+  import FlashToast from '../components/FlashToast.svelte'
+  import type { SharedProps } from '../types/inertia-props'
+
+  interface Props extends SharedProps {
+    heading?: string
+    children?: Snippet
+  }
+
+  let { root, auth, heading, children }: Props = $props()
 </script>
 
-<div class="min-h-screen bg-gray-100">
-  <nav class="bg-white shadow p-4">
-    <Link href="/">Home</Link>
-    <Link href="/posts">Posts</Link>
-  </nav>
-  <main class="max-w-6xl mx-auto py-8">
-    {@render children?.()}
-  </main>
-</div>
+<nav>
+  <Link href={`${root}/dashboard`}>Dashboard</Link>
+  <Link href={`${root}/notes`}>Notes</Link>
+  {#if auth.user}
+    <span>{auth.user.name}</span>
+    <Link href={`${root}/logout`} method="post" as="button" preserveState={false}>
+      Sign out
+    </Link>
+  {:else}
+    <Link href={`${root}/login`}>Sign in</Link>
+    <Link href={`${root}/register`}>Register</Link>
+  {/if}
+</nav>
+
+<FlashToast />
+
+<main>
+  {#if heading}<h1>{heading}</h1>{/if}
+  {@render children?.()}
+</main>
 ```
 
-```svelte
-<!-- frontend/src/pages/Posts/Index.svelte -->
-<script lang="ts">
-  import AppLayout from '../../layouts/AppLayout.svelte'
-  import type { PostsIndexProps } from '../../types/inertia-props'
-
-  let { posts }: PostsIndexProps = $props()
-</script>
-
-<AppLayout>
-  <h1 class="text-2xl font-bold">Posts</h1>
-  <ul>
-    {#each posts as post (post.id)}
-      <li>{post.title}</li>
-    {/each}
-  </ul>
-</AppLayout>
-```
+The dashboard sets the heading with `setLayoutProps({ heading: 'Dashboard' })`.
+The next page that sets none shows no heading, because a visit to another
+page resets the layout props. `FlashToast` renders `page.flash.toast`, the
+toast a handler flashed with `Inertia::flash("toast", ..)`, so it shows on
+one page and is gone on the next.
 
 ### React 19
 
