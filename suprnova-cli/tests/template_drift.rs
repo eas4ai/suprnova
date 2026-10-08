@@ -2615,3 +2615,29 @@ fn intt_no_kit_page_types_root_by_hand() {
         "the seven pages of each kit that build URLs read `root` through usePage()"
     );
 }
+
+/// PAR-068: the dogfood app's generated `inertia-props.ts` augments
+/// `@inertiajs/core` too, so its frontend declares the package at its
+/// adapter's version, and the lock file records the declaration.
+#[test]
+fn intt_the_dogfood_frontend_declares_inertias_core() {
+    let manifest: serde_json::Value =
+        serde_json::from_str(&read_from_repo("app/frontend/package.json"))
+            .expect("app/frontend/package.json parses");
+    let dependencies = &manifest["dependencies"];
+    assert!(
+        dependencies["@inertiajs/core"].is_string()
+            && dependencies["@inertiajs/core"] == dependencies["@inertiajs/svelte"],
+        "app/frontend/package.json must declare @inertiajs/core at the version of \
+         @inertiajs/svelte; got {dependencies}"
+    );
+
+    let lock: serde_json::Value =
+        serde_json::from_str(&read_from_repo("app/frontend/package-lock.json"))
+            .expect("app/frontend/package-lock.json parses");
+    assert_eq!(
+        lock["packages"][""]["dependencies"]["@inertiajs/core"], dependencies["@inertiajs/core"],
+        "package-lock.json must record the declaration; rerun \
+         `npm install --package-lock-only` in app/frontend"
+    );
+}
