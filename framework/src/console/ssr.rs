@@ -2,11 +2,10 @@
 //! `inertia:stop-ssr` and `inertia:check-ssr` (PAR-061).
 //!
 //! The application binary runs these with the Inertia configuration the
-//! application installed, and the `suprnova` CLI runs them with one built
-//! from its flags and the `SUPRNOVA_SSR_*` environment. One implementation
-//! for both means the two commands cannot drift apart: the same
-//! configuration gets the same checks, the same messages and the same exit
-//! status.
+//! application installed, so they start, stop and check the worker that
+//! first visits dispatch to. The `suprnova` CLI's `ssr:start`, `ssr:stop`
+//! and `ssr:check` run the application binary's, so they read the same
+//! configuration and print the same messages.
 //!
 //! Each function writes what Laravel's command prints, success to `out` and
 //! failures and warnings to `err`, and returns the exit status the command
@@ -51,12 +50,17 @@ const OUTPUT_DRAIN: Duration = Duration::from_secs(2);
 /// What the worker's error output is logged under.
 const LOG_TARGET: &str = "suprnova::ssr";
 
-/// The message for a missing bundle when no path is configured. It names
-/// both ways to configure one, since the application binary and the
-/// `suprnova` CLI print the same text.
-const BUNDLE_NOT_FOUND: &str = "Inertia SSR bundle not found. Set its path with \
-     `InertiaConfig::ssr_bundle_path` (`--bundle` or SUPRNOVA_SSR_BUNDLE for the `suprnova` \
-     CLI), or build it to frontend/bootstrap/ssr/ssr.js with `vite build --ssr`.";
+/// The message for a missing bundle when no path is configured: how to
+/// configure one, and every conventional path it was looked for at, read
+/// from [`CONVENTIONAL_BUNDLE_PATHS`](crate::CONVENTIONAL_BUNDLE_PATHS) so
+/// the message cannot name a list the detection no longer uses.
+fn bundle_not_found() -> String {
+    format!(
+        "Inertia SSR bundle not found. Set its path with `InertiaConfig::ssr_bundle_path`, \
+         or build it with `vite build --ssr` to one of the conventional paths: {}.",
+        crate::CONVENTIONAL_BUNDLE_PATHS.join(", ")
+    )
+}
 
 /// Start the SSR worker in the foreground: Laravel's `inertia:start-ssr`.
 ///
@@ -109,7 +113,7 @@ pub async fn start(
     let Some(bundle) = crate::detect_ssr_bundle(config) else {
         match configured {
             Some(path) => say(err, configured_bundle_missing(path)),
-            None => say(err, BUNDLE_NOT_FOUND),
+            None => say(err, bundle_not_found()),
         }
         return Ok(FAILURE);
     };
