@@ -67,15 +67,21 @@ const BUNDLE_NOT_FOUND: &str = "Inertia SSR bundle not found. Set its path with 
 /// conventional one exists is a warning, and the conventional one runs.
 ///
 /// Then it asks a worker still running at [`SsrConfig::url`] to shut down,
-/// silently and ignoring the outcome, as Laravel calls `inertia:stop-ssr`,
-/// and runs `runtime bundle`: `runtime_override` (the `--runtime` flag),
-/// else [`SsrConfig::runtime`]. The worker's stdout is forwarded to `out`.
+/// silently, as Laravel calls `inertia:stop-ssr`. A worker that closed the
+/// connection has stopped and one that could not be connected to was not
+/// running; one that answered, or kept the connection open past the timeout,
+/// is still running, and the start is refused: the running worker stops
+/// first, and a second one could not bind the port in any case. Then it
+/// runs `runtime bundle`: `runtime_override` (the `--runtime` flag), else
+/// [`SsrConfig::runtime`]. The worker's stdout is forwarded to `out`.
 /// Each line of its stderr is written to `err` and, when it is not blank,
 /// logged as an error, where Laravel reports an `SsrException`.
 ///
-/// `SIGINT` and `SIGTERM` to this process are forwarded to the worker as
-/// `SIGTERM`, as Symfony's `Process::stop` sends it; a second one kills the
-/// worker. The function returns when the worker exits, with its exit status;
+/// `SIGINT` and `SIGTERM` to this process are forwarded to the worker as the
+/// same signal, so a worker with its own handlers runs the one the signal
+/// names (Laravel's command stops the worker with `SIGTERM` for either); a
+/// second one kills the worker. The function returns when the worker exits,
+/// with its exit status;
 /// a worker ended by the signal this function forwarded returns
 /// [`SUCCESS`], as Laravel's command does, and one ended by another signal
 /// returns 128 plus the signal number, as a shell reports it.
@@ -126,9 +132,29 @@ pub async fn start(
         return Ok(FAILURE);
     }
 
-    // Laravel's `callSilently('inertia:stop-ssr')`: whatever it reports,
-    // the new worker starts next.
-    let _ = stop(config, false, &mut std::io::sink(), &mut std::io::sink()).await;
+    // Laravel's `callSilently('inertia:stop-ssr')` asks a worker still
+    // running at the URL to shut down. One that closed the connection has
+    // stopped and one that could not be connected to was not running; one
+    // that answered, or kept the connection open past the timeout, is still
+    // running, and no second worker starts beside it (PAR-061): it could
+    // not bind the port in any case.
+    let shutdown_url = match worker_url(config, "/shutdown") {
+        Ok(url) => url,
+        Err(message) => {
+            say(err, message);
+            return Ok(FAILURE);
+        }
+    };
+    if let Shutdown::Other = request_shutdown(&shutdown_url, config.timeout).await? {
+        say(
+            err,
+            format!(
+                "The Inertia SSR server at {} did not stop; not starting another.",
+                config.url
+            ),
+        );
+        return Ok(FAILURE);
+    }
 
     run_worker(&runtime, &bundle, out, err).await
 }
@@ -403,11 +429,11 @@ async fn run_worker(
         tokio::select! {
             Some(line) = lines.recv() => emit(line, out, err),
             status = child.wait() => break status,
-            () = signals.next() => {
+            signal = signals.next() => {
                 if stop_sent {
                     let _ = child.start_kill();
                 } else {
-                    ask_to_stop(&mut child);
+                    ask_to_stop(&mut child, signal);
                     stop_sent = true;
                 }
             }
@@ -493,19 +519,20 @@ fn exit_status(status: ExitStatus, stop_sent: bool) -> i32 {
     FAILURE
 }
 
-/// Ask the worker to stop with `SIGTERM`. A worker already reaped has no
-/// process id, so a reused one is never signalled.
+/// Forward the stop signal this process received to the worker as the same
+/// signal, so a worker with its own `SIGINT` and `SIGTERM` handlers runs the
+/// one the signal names. A worker already reaped has no process id, so a
+/// reused one is never signalled.
 #[cfg(unix)]
-fn ask_to_stop(child: &mut Child) {
-    use nix::sys::signal::{Signal, kill};
+fn ask_to_stop(child: &mut Child, signal: nix::sys::signal::Signal) {
     if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
-        let _ = kill(nix::unistd::Pid::from_raw(pid), Signal::SIGTERM);
+        let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal);
     }
 }
 
-/// Without `SIGTERM`, the stop is the kill.
+/// Without a signal to forward, the stop is the kill.
 #[cfg(not(unix))]
-fn ask_to_stop(child: &mut Child) {
+fn ask_to_stop(child: &mut Child, (): ()) {
     let _ = child.start_kill();
 }
 
@@ -540,10 +567,12 @@ impl StopSignals {
         Ok(Self {})
     }
 
-    /// The next stop signal. A handler whose stream ended never resolves
-    /// again, rather than resolving at once in a loop.
+    /// The next stop signal, as the signal to forward to the worker. A
+    /// handler whose stream ended never resolves again, rather than
+    /// resolving at once in a loop.
     #[cfg(unix)]
-    async fn next(&mut self) {
+    async fn next(&mut self) -> nix::sys::signal::Signal {
+        use nix::sys::signal::Signal;
         let interrupt = async {
             if self.interrupt.recv().await.is_none() {
                 std::future::pending::<()>().await;
@@ -555,8 +584,8 @@ impl StopSignals {
             }
         };
         tokio::select! {
-            () = interrupt => {}
-            () = terminate => {}
+            () = interrupt => Signal::SIGINT,
+            () = terminate => Signal::SIGTERM,
         }
     }
 

@@ -820,9 +820,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   then the six conventional paths, warning when the configured one is
   missing and a conventional one runs), refuses a runtime it cannot find
   when `SUPRNOVA_SSR_ENSURE_RUNTIME_EXISTS` is true, asks a worker at
-  `SUPRNOVA_SSR_URL` to shut down first, forwards Ctrl-C and `SIGTERM` to
-  the worker as `SIGTERM` (a second one kills it), and reports each line of
-  the worker's stderr as an error (CM-01).
+  `SUPRNOVA_SSR_URL` to shut down first and refuses to start while that
+  worker is still running, forwards Ctrl-C and `SIGTERM` to the worker as
+  the signal received (a second one kills it), and reports each line of the
+  worker's stderr as an error (CM-01).
 - **`suprnova ssr:check` asks the SSR gateway's health check.** It probed
   `/health` with a client of its own, so its answer could differ from the
   health check the framework uses, and its messages and exit codes were

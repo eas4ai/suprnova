@@ -139,7 +139,7 @@ cargo run --bin <app> -- ssr:stop --graceful      # exit 0 whether or not a work
 
 | Command | What it checks and does | Exit status |
 |---------|-------------------------|-------------|
-| `ssr:start [--runtime <runtime>]` | Refuses when SSR is not enabled, when no bundle is found, or when `ensure_runtime_exists` is set and the runtime can't be found. Then it asks a running worker to shut down and runs `<runtime> <bundle>` in the foreground. | 1 when it refuses, otherwise the status the worker exits with |
+| `ssr:start [--runtime <runtime>]` | Refuses when SSR is not enabled, when no bundle is found, or when `ensure_runtime_exists` is set and the runtime can't be found. Then it asks a running worker to shut down, refuses when that worker is still running (it answered, or kept the connection open), and runs `<runtime> <bundle>` in the foreground. | 1 when it refuses, otherwise the status the worker exits with |
 | `ssr:stop [--graceful]` | Sends `GET {url}/shutdown`. The worker exits without an answer, which counts as stopped. With `--graceful`, a worker that can't be connected to counts as not running. | 0 when the worker stopped, or with `--graceful` when none runs; 1 otherwise |
 | `ssr:check` | Asks the SSR gateway's health check: `GET {url}/health` answering 2xx for the default HTTP gateway. | 0 when the worker is healthy; 1 when it isn't, or when the bound gateway has no health check |
 
@@ -155,7 +155,7 @@ Inertia::install(
 )?;
 ```
 
-While the worker runs, `ssr:start` forwards its stdout as output and writes each line of its stderr to stderr, logging every line that isn't blank as an error. Ctrl-C or `SIGTERM` to `ssr:start` sends the worker `SIGTERM`, and a second one kills it. A worker that ends because of the forwarded signal counts as a success.
+While the worker runs, `ssr:start` forwards its stdout as output and writes each line of its stderr to stderr, logging every line that isn't blank as an error. Ctrl-C (`SIGINT`) or `SIGTERM` to `ssr:start` is forwarded to the worker as the same signal, and a second one kills it. A worker that ends because of the forwarded signal counts as a success.
 
 The three commands run the `bootstrap` hook and the `http_bootstrap` hook, because the scaffold installs Inertia in `http_bootstrap`. A production image that runs them therefore needs the built frontend manifest, as an image that serves does: `Inertia::install` fails closed in production without it. They bind no port and boot no runtime driver, so a queue or mail backend that is down can't stop them. When no Inertia configuration is installed, they fail with a message that names `Inertia::install`.
 

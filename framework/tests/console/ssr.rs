@@ -432,6 +432,37 @@ async fn inssr_start_stops_a_running_worker_before_it_starts_one() {
 }
 
 #[tokio::test]
+async fn inssr_start_refuses_when_the_running_worker_does_not_stop() {
+    // A worker that answers the shutdown request and keeps running has not
+    // stopped: PAR-061 says the running worker stops first, so no second
+    // worker starts beside it (it could not bind the port in any case).
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("started");
+    let worker = FakeWorker::start(OnShutdown::Answer, 200, Some(marker.clone())).await;
+    let runtime = script(
+        dir.path(),
+        "runtime",
+        &format!("touch '{}'\necho started", marker.display()),
+    );
+    let bundle = bundle(dir.path());
+
+    let ran = start(&config(&worker.url, Some(&bundle), &runtime), None).await;
+
+    assert_eq!(ran.code, 1, "out: {} err: {}", ran.out, ran.err);
+    assert_eq!(
+        worker.paths(),
+        vec!["/shutdown".to_owned()],
+        "the running worker was asked to shut down"
+    );
+    assert!(!marker.exists(), "no second worker started: {}", ran.out);
+    assert!(
+        ran.err.contains("did not stop") && ran.err.contains(&worker.url),
+        "the refusal names the worker that is still running: {}",
+        ran.err
+    );
+}
+
+#[tokio::test]
 async fn inssr_start_with_a_runtime_override_runs_that_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let bundle = bundle(dir.path());
@@ -1080,8 +1111,8 @@ async fn inssr_app_start_forwards_sigint_to_the_worker() {
     let ran = signal_a_running_start(nix::sys::signal::Signal::SIGINT).await;
 
     assert!(
-        ran.out.contains("worker got TERM"),
-        "the worker was asked to stop: {} {}",
+        ran.out.contains("worker got INT"),
+        "the worker was sent SIGINT, the signal this process received: {} {}",
         ran.out,
         ran.err
     );

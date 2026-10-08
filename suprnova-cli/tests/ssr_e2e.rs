@@ -744,7 +744,7 @@ mod inssr {
         let ran = signal_a_running_start(nix::sys::signal::Signal::SIGINT).await;
 
         assert_eq!(ran.code, 0, "{ran:?}");
-        assert_eq!(ran.out, "ready\nworker got TERM\n");
+        assert_eq!(ran.out, "ready\nworker got INT\n");
     }
 
     // -- ssr:stop -----------------------------------------------------------
