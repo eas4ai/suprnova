@@ -506,7 +506,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `mergeDirection`, `deepMerge` for a deep merge or a `match_on`, and
   `rescued`. A shared key names the `Inertia::share`, `share_many`,
   `share_data` or `App::inertia_share*` call that shared it, and the
-  middleware hooks' type for a hook share; a render prop names the line
+  `InertiaConfig::hooks` call for a hook share; a render prop names the line
   that gives its key. Deep paths without metadata are pruned, and
   `propValues` holds what the client received (DT-03).
 - **The DevTools entry endpoints.** `GET /_inertia/devtools/entries`
@@ -1352,6 +1352,50 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   rewrite as well as a read, and each rewrite writes a new file and
   renames it over `_meta.json` under a lock on `_meta.lock`, so an
   interruption leaves the previous index in place (DT-07, DT-08).
+- **A commented-out augmentation no longer hides the generated one.**
+  `generate-types` and `serve` looked for `declare module
+  '@inertiajs/core'` as plain text, so a `frontend/src/global.d.ts` holding
+  only `// declare module '@inertiajs/core' {}` counted as the project's
+  own augmentation: the generated file left out the augmentation and its
+  `import`, and the notice said a comment typed `usePage()`. The scan now
+  reads the file as TypeScript tokens, with `//` and `/* */` comments and
+  the text of `'...'`, `"..."` and template literals set aside, so only a
+  declaration in code counts, and a comment between `declare`, `module`
+  and the name no longer hides a real one (T02).
+- **A DevTools entry and `Request::route_name` name the route that
+  matched by its method.** The router kept one process-wide table from
+  name to pattern, and a request's name was looked up by its pattern
+  alone, so `GET /users` named `users.index` and `POST /users` named
+  `users.store` both reported whichever name the table listed first, and
+  an unnamed `PUT /users` reported one of them too. The router now records
+  each name against the method and pattern it was given for, through
+  `.name(..)`, a route group's names and a resource's names, and the
+  server sets the matched route's name on the request, so each method
+  reports its own and an unnamed one reports none. A request that never
+  went through dispatch still falls back to the pattern lookup (DT-04).
+  `MatchedRoute::name`, which a `Router::bind` resolver reads, had the
+  same pattern-only lookup and now reports the name the request carries.
+- **A hook-shared prop names a file and line.** A prop the middleware
+  hooks' `share` supplied had the hooks' Rust type name as its
+  `shareSource` file, at line `0`, which the extension cannot open.
+  `InertiaConfig::hooks` now takes its caller's location through
+  `#[track_caller]`, and every hook-shared key names that call's file and
+  line (DT-03).
+- **A page whose document fails is recorded as the error the client
+  got.** The render handed DevTools its page before the JSON encoding, the
+  SSR dispatch and the root template ran, so when the root template failed
+  to render the client got a `500` while the entry kept the component, the
+  page object as the response body and `propValues` the client never
+  received. The page is now handed over only once the response is built;
+  when any of those steps fails, the entry records the `500` and its body
+  as a response with no page, no `component` and no prop values (DT-03,
+  DT-04).
+- **Every render prop has a `renderSource`.** A render prop's source was
+  the line below the render call that names its key, and the prop had none
+  when no such line existed: a page rendered with
+  `InertiaResponse::new("Home").with_data(props)` whose struct is defined
+  in another file, or a deployment without its Rust sources. Such a prop
+  now names the render call's own file and line (DT-03).
 
 ## 3.2.1 - 2026-10-05
 

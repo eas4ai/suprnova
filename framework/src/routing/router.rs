@@ -718,6 +718,13 @@ pub struct Router {
         Vec<BoxedMiddleware>,
         Option<crate::ws::WsConfig>,
     )>,
+    /// The name of each named route, keyed like `route_middleware` by the
+    /// method and the pattern as written. The process-wide name table maps
+    /// a name to its pattern for URL generation, and two methods on one
+    /// pattern can carry different names (`users.index` and
+    /// `users.store` on `/users`), so the name of the route a request
+    /// matched is read from here.
+    route_names: HashMap<(Method, String), String>,
     /// Middleware assignments: (method, path) -> boxed middleware instances.
     ///
     /// Keying by `(Method, String)` rather than path alone prevents
@@ -806,6 +813,7 @@ impl Router {
             head_routes: MatchitRouter::new(),
             options_routes: MatchitRouter::new(),
             ws_routes: MatchitRouter::new(),
+            route_names: HashMap::new(),
             route_middleware: HashMap::new(),
             live_routes: HashMap::new(),
             live_mounts: Mutex::new(Some(Vec::new())),
@@ -1207,6 +1215,22 @@ impl Router {
     /// it.
     pub(crate) fn handler_name(&self, method: &Method, pattern: &str) -> Option<&'static str> {
         self.bindings.handler_name(method, pattern)
+    }
+
+    /// Record that the route `(method, pattern)` is named `name`. Every
+    /// site that names a route calls this beside the process-wide
+    /// [`try_register_route_name`], which keeps the name for URL
+    /// generation.
+    pub(crate) fn note_route_name(&mut self, method: Method, pattern: &str, name: &str) {
+        self.route_names
+            .insert((method, pattern.to_string()), name.to_string());
+    }
+
+    /// The name of the route `(method, pattern)`, `None` when it has none.
+    pub(crate) fn route_name(&self, method: &Method, pattern: &str) -> Option<&str> {
+        self.route_names
+            .get(&(method.clone(), pattern.to_string()))
+            .map(String::as_str)
     }
 
     /// Add middleware to the fallback route
@@ -2448,7 +2472,9 @@ impl RouteBuilder {
     /// builder is consumed either way.
     pub fn try_name(self, name: &str) -> Result<Router, FrameworkError> {
         try_register_route_name(name, &self.last_path)?;
-        Ok(self.router)
+        let mut router = self.router;
+        router.note_route_name(self.last_method, &self.last_path, name);
+        Ok(router)
     }
 
     /// Apply middleware to the most recently registered route
@@ -2897,7 +2923,11 @@ impl MultiMethodRouteBuilder {
     /// Fallible sibling of [`MultiMethodRouteBuilder::name`].
     pub fn try_name(self, name: &str) -> Result<Router, FrameworkError> {
         try_register_route_name(name, &self.path)?;
-        Ok(self.router)
+        let mut router = self.router;
+        for method in self.methods {
+            router.note_route_name(method, &self.path, name);
+        }
+        Ok(router)
     }
 
     /// Attach middleware that runs for every method this route was

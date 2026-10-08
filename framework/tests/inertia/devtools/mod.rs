@@ -14,6 +14,7 @@ pub mod endpoints;
 pub mod entry;
 pub mod gate;
 pub mod props;
+pub mod route_and_failure;
 pub mod storage;
 
 use std::path::{Path, PathBuf};

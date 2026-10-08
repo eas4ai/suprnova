@@ -1633,6 +1633,75 @@ fn intt_a_project_without_its_own_augmentation_gets_the_generated_one() {
     assert!(!printed.contains("augmentation"), "no notice:\n{printed}");
 }
 
+/// The augmentation the generated file ends with when the project has none
+/// of its own.
+const GENERATED_AUGMENTATION: &str = "declare module '@inertiajs/core' {\n  export interface InertiaConfig {\n    \
+     sharedPageProps: SharedProps;\n    errorValueType: string;\n  }\n}\n";
+
+#[test]
+fn intt_a_declaration_in_a_comment_or_a_string_is_not_an_augmentation() {
+    for (file, body) in [
+        ("global.d.ts", "// declare module '@inertiajs/core' {}\n"),
+        ("global.d.ts", "/* declare module '@inertiajs/core' {} */\n"),
+        (
+            "lib/inertia.ts",
+            "/**\n * Once had:\n * declare module \"@inertiajs/core\" {}\n */\nexport {}\n",
+        ),
+        (
+            "lib/snippets.ts",
+            "export const single = 'declare module \\'@inertiajs/core\\' {}'\n\
+             export const double = \"declare module '@inertiajs/core' {}\"\n",
+        ),
+        (
+            "lib/template.ts",
+            "export const doc = `\ndeclare module '@inertiajs/core' {}\n${'`'}`\n",
+        ),
+    ] {
+        let dir = project(&[("controllers/home.rs", HOME)]);
+        write_frontend(&dir, file, body);
+        let (ts, printed) =
+            run_generate_types_printing(&dir, &[], "frontend/src/types/inertia-props.ts");
+        assert!(
+            ts.starts_with(&format!("{GENERATED_HEADER}import '@inertiajs/core';\n\n")),
+            "{body:?}: the generated file imports the module:\n{ts}"
+        );
+        assert!(
+            ts.ends_with(GENERATED_AUGMENTATION),
+            "{body:?}: a comment or a string declares nothing, so the generated \
+             augmentation is written:\n{ts}"
+        );
+        assert!(
+            !printed.contains("augmentation"),
+            "{body:?}: no notice:\n{printed}"
+        );
+    }
+}
+
+#[test]
+fn intt_a_declaration_after_a_comment_or_a_string_still_counts() {
+    for body in [
+        "// The project's own augmentation.\n/* See Inertia's docs. */\n\
+         declare module '@inertiajs/core' {\n  export interface InertiaConfig {}\n}\n",
+        "const quote = 'it\\'s // not a comment'\nconst url = \"https://example.test/*\"\n\
+         declare /* the module */ module \"@inertiajs/core\" {}\n",
+        "const doc = `a ${`nested ${'`'}`} template`\ndeclare module '@inertiajs/core' {}\n",
+    ] {
+        let dir = project(&[("controllers/home.rs", HOME)]);
+        write_frontend(&dir, "global.d.ts", body);
+        let (ts, printed) =
+            run_generate_types_printing(&dir, &[], "frontend/src/types/inertia-props.ts");
+        assert!(
+            !ts.contains("declare module") && !ts.contains("@inertiajs/core"),
+            "{body:?}: the project's own augmentation is the only one:\n{ts}"
+        );
+        assert!(
+            printed.contains("frontend/src/global.d.ts")
+                && printed.contains("own augmentation types usePage()"),
+            "{body:?}: the notice names the file:\n{printed}"
+        );
+    }
+}
+
 #[test]
 fn intt_the_generated_files_own_declaration_never_counts() {
     for (args, output) in [

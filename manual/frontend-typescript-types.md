@@ -356,9 +356,11 @@ naming the file:
 `serve` prints the same line once, at start-up, and a regeneration on save
 repeats it only when another file declares the module. A `.vue` or
 `.svelte` script block is not read: an ambient module declaration belongs
-in a TypeScript file. A TypeScript file under `frontend/src` that cannot
-be read stops the generation with its path, as an unreadable Rust source
-does, since it may hold the declaration.
+in a TypeScript file. A declaration inside a comment or a string does not
+count, so a commented-out `// declare module '@inertiajs/core' {}` leaves
+the generated augmentation in place. A TypeScript file under
+`frontend/src` that cannot be read stops the generation with its path, as
+an unreadable Rust source does, since it may hold the declaration.
 
 You can go either way:
 
