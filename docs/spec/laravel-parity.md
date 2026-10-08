@@ -1367,3 +1367,109 @@ Falsifier: a fresh scaffold fails `cargo check`; `GET /notes` answers without cu
 Mechanism: `par-starter-kits`.
 Rationale: Rows K12, K14 and K21 need a server the page can scroll, post JSON to and update; the scaffold's dashboard handler sent one eager prop and nothing paginated, and the data a new application already has is its own users, which no member should browse.
 Status: Agreed 2026-10-08
+
+## Precognition
+
+Laravel Precognition 2.0.0 over framework 13.35.0: live validation through
+the official clients, which read a server that marks every answer, skips
+handler bodies and validates only the fields a request asks about.
+
+[PAR-081] A `Precognitive` route middleware MUST be the opt-in for
+Precognition: every response from a route or group carrying it MUST have
+`Precognition` joined to its `Vary` header (appended to an existing value),
+precognitive or not; a request whose `Precognition` header names `true`
+(any letter case) MUST be marked precognitive by the middleware, and every
+response to a marked request MUST carry `Precognition: true`, whatever
+produced it (a `401`, `403`, `404`, `409` or `423` from a later middleware
+or an extractor included). A route without the middleware MUST ignore the
+header and run as a real request. `Request::is_precognitive()` (marked by
+the middleware) and `Request::is_attempting_precognition()` (the header
+alone) MUST be public, so middleware and rules can read them.
+Falsifier: a response from a route carrying the middleware lacks `Precognition` in `Vary`, or an existing `Vary` value is replaced instead of joined; a `403` or `404` answered to a marked request lacks `Precognition: true`; a route without the middleware answers `204` to a request carrying the header, or a form request on it validates only the listed fields; `is_precognitive()` is true on a route without the middleware, or `is_attempting_precognition()` is false while the header names `TRUE`.
+Mechanism: `par-precognition`.
+Rationale: Rows 002, 003, 006, 028, 029, 040 and 043 of the Precognition group; Laravel's `HandlePrecognitiveRequests` sets `Vary` on every response of the route and `Precognition: true` on a precognitive one, and the official client throws `Did not receive a Precognition response` on any answer without the header, so its `onForbidden` and `onNotFound` handlers never fire against a server that marks only its own `204` and `422`; row 001 keeps the case-insensitive header read.
+Status: Agreed 2026-10-08
+
+[PAR-082] On a marked request the framework MUST run the route's
+extractors (route parameters and bindings resolve, form requests
+validate) and then answer `204` with `Precognition-Success: true` without
+calling the handler body, a closure or a method alike. One code path MUST
+answer every precognitive form request: a form request bound through a
+route parameter MUST check the content type and mark its parse-failure
+`422` as the body-bound path does. A `Precognition::precognitive` helper
+MUST run the closure it is given, answer the response the closure bails
+with (its precognition-specific response on a marked request, its default
+otherwise), and otherwise answer `204` with `Precognition-Success: true`
+on a marked request and the closure's value on any other.
+Falsifier: a handler body runs on a marked request (a row is written, a mail is queued, a counter moves); a marked request whose form request passes answers anything but `204` with `Precognition-Success: true`; a route-parameter-bound form request on a marked request answers a `422` without `Precognition: true`, or accepts a body of an unsupported content type; the helper's bail answers the default response on a marked request that has a precognition-specific one, or the helper returns the closure's value instead of `204` on a marked request.
+Mechanism: `par-precognition`.
+Rationale: Rows 021, 022, 026 and 027 of the Precognition group; Laravel's `PrecognitionControllerDispatcher` and `PrecognitionCallableDispatcher` resolve parameters and abort `204`, so a live validation request never runs a side effect, and `precognitive()` (`Foundation/helpers.php`) is the same shape for code outside the dispatch; Suprnova ran every handler whose extractors passed.
+Status: Agreed 2026-10-08
+
+[PAR-083] `Precognition-Validate-Only` MUST narrow the rules that run, not
+the errors reported: on a marked request only the listed fields' rules run
+through every stage (the derived rules, the synchronous hook and the
+asynchronous hook), so a listed field's database rule runs even when an
+unlisted field fails or does not parse; a listed name MUST match a field
+exactly, `*` standing for one non-empty segment (`tags.*` covers `tags.3`,
+`tags` does not); an empty header value MUST validate nothing and answer
+`204`; errors an after-validation hook adds MUST never be filtered, so any
+hook error answers `422`; and `Request::validate_only()` MUST expose the
+parsed list with `Request::should_validate(field)` applying the match, so
+a handler or rule can narrow its own checks.
+Falsifier: a listed field whose asynchronous rule fails answers `204` because an unlisted field failed an earlier stage; a parse failure on an unlisted field answers `422` for a request whose listed fields parse and pass; `tags` in the list keeps an error on `tags.3`, or `tags.*` drops one; an empty `Precognition-Validate-Only` answers `422` with every error; a hook error is dropped by the list; `should_validate("tags.3")` disagrees with the match the server applied.
+Mechanism: `par-precognition`.
+Rationale: Rows 012, 013, 016, 018, 019, 030 and 039 of the Precognition group; Laravel's `filterPrecognitiveRules` removes unlisted attributes' rules before the validator runs and matches `^name$` with `*` as `[^.]+`, the official client sends an empty list when nothing is touched and clears errors by exact key, and `Precognition::afterValidationHook` answers `204` only when the message bag is empty after the hooks; Suprnova ran every stage with bail-on-first and filtered afterwards by prefix, answering `204` for a field whose check never ran; row 017 keeps the trimmed split.
+Status: Agreed 2026-10-08
+
+[PAR-084] Live validation MUST read the data the official client sends:
+a precognitive `GET` or `DELETE` MUST validate its query parameters
+(`key[]` as a list, a JSON-encoded object as the object), a precognitive
+multipart request MUST validate its files and fields through the same
+path as a JSON body, and validation a handler or middleware runs inline
+through `Request::validate::<T>()` MUST apply the same narrowing and
+answer `204` or `422` with the Precognition headers on a marked request.
+Falsifier: a precognitive `GET` with `?email=` answers `204` while the rule on `email` fails; a precognitive `multipart/form-data` request answers `415`, or reaches a handler with a file the rules reject; `Request::validate::<T>()` on a marked request answers a `422` without `Precognition: true`, validates an unlisted field, or returns the typed value so the handler continues.
+Mechanism: `par-precognition`.
+Rationale: Rows 031, 032, 033, 047 and 049 of the Precognition group; Laravel's `validationData()` is `all()`, query merged with body and files included, and the client sends `GET` and `DELETE` data in the query and multipart with `validateFiles()`; Suprnova's form request read only the body.
+Status: Agreed 2026-10-08
+
+[PAR-085] A marked request MUST NOT save the session (flash data is
+neither aged nor consumed, no session row is written) and MUST NOT become
+the previous URL, in the session middleware and in the Inertia
+middleware's previous-URL store alike.
+Falsifier: a toast flashed before a live validation request is gone from the next page; the session's `updated_at` or payload changes across a marked request that changed nothing; `redirect back` after a marked `GET` lands on the live validation URL.
+Mechanism: `par-precognition`.
+Rationale: Rows 034 and 035 of the Precognition group; Laravel's `StartSession` skips the save and the previous URL for a precognitive request, and inertia-laravel's `shouldStoreCurrentUrl` excludes it; a background validation request that ages flash data uses up the message meant for the next page.
+Status: Agreed 2026-10-08
+
+[PAR-086] The `422` of a precognitive request and of a real one MUST carry
+`{ "message": ..., "errors": { field: [messages] } }` where `message` is
+the first error's message followed by ` (and N more errors)` when N is
+greater than one, ` (and 1 more error)` when it is one, and nothing when
+it is the only error.
+Falsifier: a `422` with three errors carries a fixed banner, `(and 2 more error)`, or no count; a `422` with one error carries a count.
+Mechanism: `par-precognition`.
+Rationale: Row 009 of the Precognition group; Laravel's `ValidationException::summarize` builds the message, and the JSON shape is part of a drop-in even though the official client reads only `errors`.
+Status: Agreed 2026-10-08
+
+[PAR-087] The test client MUST offer `with_precognition()`, setting
+`Precognition: true` on the request, and the test response
+`assert_successful_precognition()`, asserting `204` with
+`Precognition-Success: true`.
+Falsifier: `with_precognition()` sends no `Precognition` header; `assert_successful_precognition()` passes on a `204` without `Precognition-Success: true`, or on a `200`.
+Mechanism: `par-precognition`.
+Rationale: Rows 036 and 037 of the Precognition group; Laravel's `MakesHttpRequests::withPrecognition` and `TestResponse::assertSuccessfulPrecognition`.
+Status: Agreed 2026-10-08
+
+[PAR-088] The manual MUST have a Precognition chapter linked from the
+table of contents: the `Precognitive` middleware, live validation with the
+Vue, React and Svelte clients and Inertia's `withPrecognition`, client
+configuration, arrays and wildcards, rules that differ for live validation
+through `is_precognitive()`, file uploads, side effects, the session rule
+and testing; `manual/validation.md` MUST no longer list unlisted parse
+failures as a divergence.
+Falsifier: `manual/documentation.md` links no Precognition chapter; the chapter lacks a section on one of the listed topics; `manual/validation.md` still says an unlisted malformed field blocks a live validation answer.
+Mechanism: `par-precognition`.
+Rationale: Rows 061 and 063 of the Precognition group; Laravel's `precognition.md` covers these and Suprnova's manual had only scattered mentions.
+Status: Agreed 2026-10-08

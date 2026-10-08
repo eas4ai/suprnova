@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: inertia-starter-kits
+Current: precognition
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -626,3 +626,28 @@ developer writes them in.
 Every commitment inherits the Live gate and the repository gate; a
 commitment is Done only when its mechanisms pass on a committed tree and
 its review is recorded (`sudus review`).
+
+41. precognition - the sixth of the parity rounds the developer ordered on
+   2026-10-07 (17:35), ruled build by the parity default: the thirty-one
+   build rows of the Precognition group (rows 002, 003, 006,
+   009, 012, 013, 016, 018, 019, 021, 022,
+   026, 027, 028, 029, 030, 031, 032, 033,
+   034, 035, 036, 037, 039, 040, 043, 047,
+   049, 061 and 063; row 057 met by PAR-072 already), with
+   rows 001 and 017 kept as the developer listed them.
+   Requirements: PAR-081, PAR-082, PAR-083, PAR-084, PAR-085, PAR-086,
+   PAR-087, PAR-088.
+   Delivery: PAR-081 to PAR-084 in `framework/src/http/precognition.rs`
+   (the middleware, the request marks and predicates, the helper, the
+   validate-only match), `framework/src/http/form_request.rs` and
+   `suprnova-macros/src/request.rs` (rules narrowed before validation,
+   query and multipart data, the inline `Request::validate`), the handler
+   dispatch answering `204`; PAR-085 in `framework/src/session/middleware.rs`
+   and the Inertia middleware's previous-URL store; PAR-086 in
+   `framework/src/http/response.rs`; PAR-087 in `framework/src/testing/`;
+   PAR-088 as `manual/precognition.md` linked from
+   `manual/documentation.md`, with `manual/validation.md` and
+   `manual/requests.md` updated; the scaffold's auth routes carrying the
+   middleware where a kit page validates live; the changelog.
+   Mechanisms: `par-precognition` (the `precognition` tests of the
+   `http`, `session` and `testing` suites).
