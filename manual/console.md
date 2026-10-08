@@ -159,13 +159,21 @@ While the worker runs, `ssr:start` forwards its stdout as output and writes each
 
 The three commands run the `bootstrap` hook and the `http_bootstrap` hook, because the scaffold installs Inertia in `http_bootstrap`. A production image that runs them therefore needs the built frontend manifest, as an image that serves does: `Inertia::install` fails closed in production without it. They bind no port and boot no runtime driver, so a queue or mail backend that is down can't stop them. When no Inertia configuration is installed, they fail with a message that names `Inertia::install`.
 
-The `suprnova` CLI has the same three commands for a worker that runs outside the application binary: `suprnova ssr:start [--runtime] [--bundle]`, `suprnova ssr:stop [--graceful] [--url] [--timeout-ms]`, and `suprnova ssr:check [--url] [--timeout-ms]`. The CLI can't read the installed configuration, so it builds one from its flags and the environment: `SUPRNOVA_SSR_URL`, `SUPRNOVA_SSR_RUNTIME`, `SUPRNOVA_SSR_BUNDLE`, and `SUPRNOVA_SSR_ENSURE_RUNTIME_EXISTS` (`true` or `false`). It runs the same code as the application binary, so the same configuration prints the same messages and exits with the same status.
+The `suprnova` CLI's `ssr:start`, `ssr:stop`, and `ssr:check` run these commands. From the project directory, each one runs the application binary the way `suprnova serve` runs the backend, and passes `--runtime` and `--graceful` through:
+
+```bash
+suprnova ssr:start --runtime bun  # cargo run --bin <app> -- ssr:start --runtime=bun
+suprnova ssr:stop --graceful      # cargo run --bin <app> -- ssr:stop --graceful
+suprnova ssr:check                # cargo run --bin <app> -- ssr:check
+```
+
+The CLI has no SSR configuration of its own, so the configuration the application installed decides the URL, the bundle, the runtime, and the checks. The application's output reaches the CLI's stdout and stderr. Ctrl-C (`SIGINT`) and `SIGTERM` to the CLI are forwarded to the application each time they arrive, so a second one still kills the worker. The CLI exits with the application's status, or with 128 plus the signal number when a signal ended the application. Outside a project, or with a `Cargo.toml` that names no package, the CLI fails and says why.
 
 ### Why Suprnova diverges
 
 Laravel names these commands `inertia:start-ssr`, `inertia:stop-ssr`, and `inertia:check-ssr`. Suprnova keeps the `ssr:*` names the `suprnova` CLI already used. They live on the application binary, next to the worker daemons, because the console binary doesn't run the `http_bootstrap` hook that installs Inertia.
 
-Laravel's `inertia:stop-ssr` waits for the worker without a time limit. `ssr:stop` gives up after the configured SSR timeout (`ssr_timeout`, or `--timeout-ms` for the CLI). With `--graceful`, only a worker that can't be connected to counts as not running: a worker that accepts the connection and never answers is still running, and the command fails.
+Laravel's `inertia:stop-ssr` waits for the worker without a time limit. `ssr:stop` gives up after the configured SSR timeout (`ssr_timeout`). With `--graceful`, only a worker that can't be connected to counts as not running: a worker that accepts the connection and never answers is still running, and the command fails.
 
 ## Defining Commands
 
