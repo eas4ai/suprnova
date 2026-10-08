@@ -7,13 +7,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::FutureExt;
 use serde_json::Value;
 
 use super::config::DevToolsConfig;
 use super::endpoints;
 use super::entry::{self, RequestFacts, Stamp};
-use super::recorder::{self, Recorder, RenderPayload};
+use super::recorder::{self, MultipartOutcome, Recorder, RenderPayload};
 use super::redact::Redactor;
 use super::store::{self, EntriesRepository};
 use super::ulid;
@@ -91,10 +90,10 @@ impl DevToolsMiddleware {
     async fn record(
         &self,
         facts: RequestFacts,
-        payload: Option<RenderPayload>,
+        recorded: Recorded,
         response: HttpResponse,
     ) -> HttpResponse {
-        self.record_with(facts, payload, response, |entry| {
+        self.record_with(facts, recorded, response, |entry| {
             self.redactor.redact_entry(entry);
         })
         .await
@@ -105,10 +104,11 @@ impl DevToolsMiddleware {
     async fn record_with(
         &self,
         facts: RequestFacts,
-        payload: Option<RenderPayload>,
+        recorded: Recorded,
         response: HttpResponse,
         redact: impl FnOnce(&mut Value),
     ) -> HttpResponse {
+        let Recorded { payload, multipart } = recorded;
         let now = crate::clock::now();
         let now_ms = now.timestamp_millis();
         let id = ulid::new_id(u64::try_from(now_ms).unwrap_or_default());
@@ -129,14 +129,17 @@ impl DevToolsMiddleware {
         let tab = facts.tab().map(str::to_string);
         // Building the entry and redacting it run under one guard: a panic
         // in either drops the entry and leaves the response as it is.
-        let built = AssertUnwindSafe(async {
-            let mut entry =
-                entry::build(facts, payload, &response, Stamp { id: &id, at: now }).await;
+        let built = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let mut entry = entry::build(
+                facts,
+                payload,
+                multipart,
+                &response,
+                Stamp { id: &id, at: now },
+            );
             redact(&mut entry);
             entry
-        })
-        .catch_unwind()
-        .await;
+        }));
         let Ok(entry) = built else {
             tracing::debug!(
                 "Inertia DevTools: building or redacting an entry panicked; the entry is dropped"
@@ -196,6 +199,14 @@ impl DevToolsMiddleware {
             }
         }
     }
+}
+
+/// What the rest of the chain told the recorder: the page a render built
+/// and how the multipart extraction ended.
+#[derive(Debug, Default)]
+struct Recorded {
+    payload: Option<RenderPayload>,
+    multipart: Option<MultipartOutcome>,
 }
 
 /// The body of `response` with the entry id tag before its last closing
@@ -280,7 +291,11 @@ impl Middleware for DevToolsMiddleware {
         let response = recorder::scope(Arc::clone(&recorder), next(request)).await;
         let was_ok = response.is_ok();
         let http = response.unwrap_or_else(|response| response);
-        let http = self.record(facts, recorder.take(), http).await;
+        let recorded = Recorded {
+            payload: recorder.take(),
+            multipart: recorder.take_multipart(),
+        };
+        let http = self.record(facts, recorded, http).await;
         if was_ok { Ok(http) } else { Err(http) }
     }
 }
@@ -300,7 +315,9 @@ mod tests {
             .header("X-Handler", "yes");
 
         let recorded = middleware
-            .record_with(facts, None, response, |_| panic!("the redaction failed"))
+            .record_with(facts, Recorded::default(), response, |_| {
+                panic!("the redaction failed")
+            })
             .await;
 
         assert_eq!(recorded.status_code(), 201);

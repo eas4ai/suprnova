@@ -6,8 +6,9 @@ use std::time::Instant;
 use bytes::Bytes;
 use serde_json::{Map, Value, json};
 
-use super::recorder::RenderPayload;
+use super::recorder::{MultipartOutcome, RenderPayload};
 use super::redact::UNSERIALIZABLE;
+use crate::http::upload::MultipartValue;
 use crate::http::{BodyRead, HttpResponse, Request};
 use crate::inertia::prop::header_is_truthy;
 
@@ -63,6 +64,13 @@ enum RequestBody {
     /// A body that failed to arrive; the handler meets the failure when
     /// it reads the body.
     Unreadable,
+    /// A multipart body, left for the handler's extractor, which reads it
+    /// only after the request is authorized and reports what it parsed.
+    Multipart {
+        /// The declared length of the body, if any.
+        length: Option<u64>,
+        query: Option<String>,
+    },
     /// The body, with the content type and query it is read with.
     Read {
         content_type: Option<String>,
@@ -102,7 +110,10 @@ impl RequestFacts {
     /// The handler reads a body that was read here from the copy kept on
     /// the request, as it reads one the CSRF middleware read. A body over
     /// the request body cap, and one that fails to arrive, stay on the
-    /// request for the handler, which answers as it would unrecorded.
+    /// request for the handler, which answers as it would unrecorded. A
+    /// multipart body is never read here: its extractor authorizes the
+    /// request before any byte of the body is read, and tells the
+    /// recorder what it parsed.
     pub(crate) async fn capture(mut request: Request) -> (Request, Self) {
         let started = Instant::now();
         let is_inertia = request.is_inertia();
@@ -172,10 +183,19 @@ impl RequestFacts {
 /// The body of `request`, read now up to the framework's request body
 /// cap, the limit the extractors enforce, whether or not its length is
 /// declared; a body already read by an earlier middleware is taken from
-/// the request.
+/// the request. A multipart body is left for its extractor.
 async fn read_body(request: &mut Request) -> RequestBody {
     let content_type = request.content_type().map(str::to_string);
     let query = request.query().map(str::to_string);
+    if content_type
+        .as_deref()
+        .is_some_and(crate::http::body::is_multipart_form_data)
+    {
+        return RequestBody::Multipart {
+            length: crate::http::body::parse_content_length(request.headers()),
+            query,
+        };
+    }
     match request
         .read_body_up_to(crate::http::body::global_max_request_body_bytes())
         .await
@@ -233,39 +253,82 @@ fn merge_into(into: &mut Map<String, Value>, from: Value) {
     }
 }
 
-/// The parts of a multipart body: text parts as text, a part that is not
-/// text as `[UNSERIALIZABLE]`, and a file part as its name, size and MIME
-/// type, never its bytes. Names are kept as sent.
-async fn multipart_input(content_type: &str, bytes: Bytes) -> Option<Map<String, Value>> {
-    let boundary = multer::parse_boundary(content_type).ok()?;
-    let stream = futures::stream::once(async move { Ok::<Bytes, std::io::Error>(bytes) });
-    let mut multipart = multer::Multipart::new(stream, boundary);
-    let mut input = Map::new();
-    while let Ok(Some(field)) = multipart.next_field().await {
-        let name = field.name().unwrap_or_default().to_string();
-        let file_name = field.file_name().map(str::to_string);
-        let mime = field.content_type().map(ToString::to_string);
-        let data = field.bytes().await.ok()?;
-        let value = match file_name {
-            Some(file_name) => json!({"name": file_name, "size": data.len(), "mimeType": mime}),
-            None => match String::from_utf8(data.to_vec()) {
-                Ok(text) => Value::String(text),
-                Err(_) => Value::String(UNSERIALIZABLE.to_string()),
-            },
+/// The parts of a parsed multipart body for the entry: text parts as
+/// text, a part that is not text as `[UNSERIALIZABLE]`, and a file part
+/// as its name, size and MIME type, never its bytes. Names are kept as
+/// sent, and a later part of a name replaces an earlier one.
+pub(crate) fn multipart_summary(fields: &[(String, MultipartValue)]) -> Map<String, Value> {
+    let mut summary = Map::new();
+    for (name, value) in fields {
+        let value = match value {
+            MultipartValue::File {
+                size,
+                file_name,
+                content_type,
+                ..
+            } => json!({
+                "name": file_name.as_deref().unwrap_or_default(),
+                "size": size,
+                "mimeType": content_type,
+            }),
+            MultipartValue::Text(text) => Value::String(text.clone()),
+            MultipartValue::NonUtf8Text(_) => Value::String(UNSERIALIZABLE.to_string()),
         };
-        input.insert(name, value);
+        summary.insert(name.clone(), value);
     }
-    Some(input)
+    summary
+}
+
+/// The query of a request as input, merged under its body's input.
+fn query_input(query: Option<&str>) -> Map<String, Value> {
+    let mut input = Map::new();
+    if let Some(query) = query.filter(|query| !query.is_empty())
+        && let Ok(parsed) =
+            crate::http::parse_form::<Value>(&Bytes::copy_from_slice(query.as_bytes()))
+    {
+        merge_into(&mut input, parsed);
+    }
+    input
+}
+
+/// `{"status": "omitted", "reason": ...}` for a multipart body the entry
+/// has no summary of, with its declared length as `size`.
+fn multipart_omitted(reason: &str, length: Option<u64>) -> Value {
+    let mut omitted = omitted(reason);
+    if let (Some(length), Value::Object(map)) = (length, &mut omitted) {
+        map.insert("size".to_string(), Value::from(length));
+    }
+    omitted
 }
 
 /// The request body an entry carries, Laravel's `captureRequestBody`: the
 /// JSON body; else the query and form input, uploads summarized; else the
 /// raw text. Redaction runs on the whole entry before it is stored.
-async fn request_body(body: RequestBody) -> Value {
+///
+/// A multipart body is the summary its extractor reported, after the
+/// query; `not-read` when no extractor read it, and `unparsed` when the
+/// extractor failed partway. Its raw text is never kept: redaction reads
+/// keys, and a raw body has none.
+fn request_body(body: RequestBody, multipart: Option<MultipartOutcome>) -> Value {
     let (content_type, bytes, query) = match body {
         RequestBody::NonInertiaWrite => return omitted("non-inertia-request"),
         RequestBody::TooLarge => return omitted("too-large"),
         RequestBody::Unreadable => return omitted("unreadable"),
+        RequestBody::Multipart { length, query } => {
+            return match multipart {
+                Some(MultipartOutcome::Parsed(parts)) => {
+                    let mut input = query_input(query.as_deref());
+                    input.extend(parts);
+                    if input.is_empty() {
+                        empty()
+                    } else {
+                        present(Value::Object(input))
+                    }
+                }
+                Some(MultipartOutcome::Unparsed) => multipart_omitted("unparsed", length),
+                None => multipart_omitted("not-read", length),
+            };
+        }
         RequestBody::Read {
             content_type,
             bytes,
@@ -281,28 +344,14 @@ async fn request_body(body: RequestBody) -> Value {
             Err(_) => body_string(&bytes),
         };
     }
-    let mut input = Map::new();
-    if let Some(query) = query.as_deref().filter(|query| !query.is_empty())
-        && let Ok(parsed) =
-            crate::http::parse_form::<Value>(&Bytes::copy_from_slice(query.as_bytes()))
+    let mut input = query_input(query.as_deref());
+    let lowered = content_type.as_deref().map(str::to_ascii_lowercase);
+    if lowered
+        .as_deref()
+        .is_some_and(|ct| ct.starts_with("application/x-www-form-urlencoded"))
+        && let Ok(parsed) = crate::http::parse_form::<Value>(&bytes)
     {
         merge_into(&mut input, parsed);
-    }
-    let lowered = content_type.as_deref().map(str::to_ascii_lowercase);
-    match lowered.as_deref() {
-        Some(ct) if ct.starts_with("application/x-www-form-urlencoded") => {
-            if let Ok(parsed) = crate::http::parse_form::<Value>(&bytes) {
-                merge_into(&mut input, parsed);
-            }
-        }
-        Some(ct) if ct.starts_with("multipart/form-data") => {
-            if let Some(parts) =
-                multipart_input(content_type.as_deref().unwrap_or(ct), bytes.clone()).await
-            {
-                input.extend(parts);
-            }
-        }
-        _ => {}
     }
     if !input.is_empty() {
         return present(Value::Object(input));
@@ -423,10 +472,12 @@ pub(crate) struct Stamp<'a> {
 }
 
 /// The entry of `facts` answered by `response`, with what the page render
-/// recorded, if a page rendered.
-pub(crate) async fn build(
+/// recorded, if a page rendered, and how the multipart extraction ended,
+/// if one ran.
+pub(crate) fn build(
     facts: RequestFacts,
     payload: Option<RenderPayload>,
+    multipart: Option<MultipartOutcome>,
     response: &HttpResponse,
     stamp: Stamp<'_>,
 ) -> Value {
@@ -466,7 +517,7 @@ pub(crate) async fn build(
         body,
         ..
     } = facts;
-    let request_body = request_body(body).await;
+    let request_body = request_body(body, multipart);
     let (component, props, prop_values, render_source, component_path) = match payload {
         Some(payload) => (
             Value::String(payload.component),

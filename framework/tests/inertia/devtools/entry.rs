@@ -2,17 +2,21 @@
 //! request and response, route and render source, and the DevTools headers
 //! and first-visit tag on the response.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::{Value, json};
 use suprnova::http::text;
+use suprnova::http::upload::{MultipartRequestHooks, UploadedFile};
 use suprnova::{
-    HttpResponse, Inertia, InertiaConfig, InertiaResponse, MiddlewareRegistry, Redirect, Request,
-    Response, Router,
+    FromRequest, HttpResponse, Inertia, InertiaConfig, InertiaResponse, MiddlewareRegistry,
+    MultipartRequest, Redirect, Request, Response, Router,
 };
 
 use super::{
-    app_env, client, devtools, entry_ids, entry_of, inertia, raw_request, raw_send, read_entry,
+    app_env, client, devtools, entry_ids, entry_of, inertia, raw_request, raw_request_on_continue,
+    raw_send, read_entry,
 };
 use crate::protocol_harness::serve;
 
@@ -76,6 +80,7 @@ fn router() -> Router {
             Ok(Inertia::location("https://billing.example/portal"))
         })
         .post("/upload", |_req: Request| async { text("uploaded") })
+        .post("/album", album)
         .post("/echo", |req: Request| async move {
             let (_, bytes) = req.body_bytes().await?;
             Ok(HttpResponse::bytes_body(bytes, "text/plain"))
@@ -104,6 +109,42 @@ fn router() -> Router {
             Ok(page.header("Content-Length", length.to_string()))
         })
         .into()
+}
+
+/// An upload the extractor reads; the test decides its authorization.
+#[derive(MultipartRequest)]
+#[multipart(custom_hooks)]
+struct Album {
+    #[field("title")]
+    title: String,
+    #[field("photo")]
+    photo: UploadedFile,
+}
+
+/// What `Album::authorize` saw, by the request's `X-Run`: whether any of
+/// the body had been read before it.
+fn read_before_authorize() -> &'static Mutex<HashMap<String, bool>> {
+    static SEEN: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    SEEN.get_or_init(Mutex::default)
+}
+
+impl MultipartRequestHooks for Album {
+    /// Notes whether the body was read before it ran, and denies a request
+    /// that carries `X-Deny`.
+    fn authorize(req: &Request) -> bool {
+        if let Some(run) = req.header("X-Run") {
+            read_before_authorize()
+                .lock()
+                .unwrap()
+                .insert(run.to_string(), req.cached_body().is_some());
+        }
+        req.header("X-Deny").is_none()
+    }
+}
+
+async fn album(req: Request) -> Response {
+    let album = Album::from_request(req).await?;
+    text(format!("{} {}", album.title, album.photo.size))
 }
 
 /// A first visit answered with `document`: the page renders, then the
@@ -435,6 +476,9 @@ async fn indt_a_json_body_records_what_it_parses_to_and_malformed_json_its_text(
     );
 }
 
+/// A multipart body with a title, a photo and a part that is not text.
+const ALBUM_BODY: &[u8] = b"--XYZ\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nHoliday\r\n--XYZ\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"beach.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n\xff\xd8\xff\xe0JPEG\r\n--XYZ\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\n\xff\xfe\r\n--XYZ--\r\n";
+
 #[tokio::test]
 async fn indt_an_upload_is_summarized_and_a_text_body_kept_as_text() {
     let dir = tempfile::tempdir().unwrap();
@@ -443,26 +487,38 @@ async fn indt_an_upload_is_summarized_and_a_text_body_kept_as_text() {
         MiddlewareRegistry::new().append(Inertia::middleware(&inertia(devtools(dir.path())))),
     )
     .await;
-    let body = b"--XYZ\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nHoliday\r\n--XYZ\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"beach.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n\xff\xd8\xff\xe0JPEG\r\n--XYZ--\r\n".to_vec();
-    let reply = raw_send(
-        addr,
-        "POST",
-        "/upload",
-        &[
-            ("X-Inertia", b"true"),
-            ("Content-Type", b"multipart/form-data; boundary=XYZ"),
-        ],
-        body,
-    )
-    .await;
+    let multipart: &[(&str, &[u8])] = &[
+        ("X-Inertia", b"true"),
+        ("X-Run", b"summarized"),
+        ("Content-Type", b"multipart/form-data; boundary=XYZ"),
+    ];
+
+    // The extractor parsed the body, after authorization, and handed the
+    // recorder what it read.
+    let reply = raw_send(addr, "POST", "/album", multipart, ALBUM_BODY.to_vec()).await;
     assert_eq!(reply.status, 200);
+    assert_eq!(reply.body, "Holiday 8");
+    assert_eq!(
+        read_before_authorize().lock().unwrap().get("summarized"),
+        Some(&false),
+        "authorization ran before any of the body was read"
+    );
     let entry = read_entry(dir.path(), &reply.headers["x-inertia-devtools-id"]);
     assert_eq!(
         entry["http"]["requestBody"],
         json!({"status": "present", "value": {
             "title": "Holiday",
             "photo": {"name": "beach.jpg", "size": 8, "mimeType": "image/jpeg"},
+            "note": "[UNSERIALIZABLE]",
         }})
+    );
+
+    // A handler that never extracts its upload leaves it unread.
+    let ignored = raw_send(addr, "POST", "/upload", multipart, ALBUM_BODY.to_vec()).await;
+    assert_eq!(ignored.status, 200);
+    assert_eq!(
+        read_entry(dir.path(), &ignored.headers["x-inertia-devtools-id"])["http"]["requestBody"],
+        json!({"status": "omitted", "reason": "not-read", "size": ALBUM_BODY.len()})
     );
 
     let text = raw_send(
@@ -493,6 +549,71 @@ async fn indt_an_upload_is_summarized_and_a_text_body_kept_as_text() {
         read_entry(dir.path(), &binary.headers["x-inertia-devtools-id"])["http"]["requestBody"],
         json!({"status": "omitted", "reason": "binary"})
     );
+}
+
+#[tokio::test]
+async fn indt_a_denied_upload_is_refused_before_any_byte_of_its_body_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let addr = serve(
+        router(),
+        MiddlewareRegistry::new().append(Inertia::middleware(&inertia(devtools(dir.path())))),
+    )
+    .await;
+    // `Expect: 100-continue`: the server asks for the body the first time
+    // anything polls it, so a reply with no `100 Continue` before it means
+    // no byte of the body was read.
+    let head = format!(
+        "POST /album HTTP/1.1\r\nHost: localhost\r\nX-Inertia: true\r\nX-Deny: yes\r\n\
+         X-Run: denied\r\nContent-Type: multipart/form-data; boundary=XYZ\r\n\
+         Content-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+        ALBUM_BODY.len()
+    );
+    let (reply, asked_for_body) = raw_request_on_continue(addr, &head, ALBUM_BODY).await;
+    assert_eq!(reply.status, 403);
+    assert!(
+        !asked_for_body,
+        "something read the body before authorization"
+    );
+    assert_eq!(
+        read_before_authorize().lock().unwrap().get("denied"),
+        Some(&false),
+        "the hook saw a body already read"
+    );
+    assert_eq!(
+        read_entry(dir.path(), &reply.headers["x-inertia-devtools-id"])["http"]["requestBody"],
+        json!({"status": "omitted", "reason": "not-read", "size": ALBUM_BODY.len()})
+    );
+}
+
+#[tokio::test]
+async fn indt_an_upload_whose_parse_fails_records_unparsed_and_never_its_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let addr = serve(
+        router(),
+        MiddlewareRegistry::new().append(Inertia::middleware(&inertia(devtools(dir.path())))),
+    )
+    .await;
+    // The last part never ends: the closing boundary is missing.
+    let body = b"--XYZ\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nHoliday\r\n--XYZ\r\nContent-Disposition: form-data; name=\"password\"\r\n\r\nhunter2\r\n".to_vec();
+    let reply = raw_send(
+        addr,
+        "POST",
+        "/album",
+        &[
+            ("X-Inertia", b"true"),
+            ("Content-Type", b"multipart/form-data; boundary=XYZ"),
+        ],
+        body.clone(),
+    )
+    .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    let id = &reply.headers["x-inertia-devtools-id"];
+    assert_eq!(
+        read_entry(dir.path(), id)["http"]["requestBody"],
+        json!({"status": "omitted", "reason": "unparsed", "size": body.len()})
+    );
+    let stored = std::fs::read_to_string(dir.path().join(format!("{id}.json"))).unwrap();
+    assert!(!stored.contains("hunter2"), "the entry kept the raw body");
 }
 
 /// The head of an Inertia `POST` to `path` that declares a body of

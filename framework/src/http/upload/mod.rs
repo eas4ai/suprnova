@@ -829,6 +829,10 @@ where
         });
     }
 
+    // From here on the body is read. Inertia DevTools, recording this
+    // request, gets the summary of what was parsed, or, from an error
+    // return dropping the report, that the parse failed.
+    let report = crate::inertia::MultipartReport::start();
     let (_parts, body) = req.into_parts();
     // `BodyStream` would yield `Result<Frame<Bytes>, _>` and `Frame<Bytes>`
     // does not impl `Into<Bytes>` (multer's bound). `BodyDataStream` drops
@@ -1043,6 +1047,7 @@ where
         payload.fields.push((name, value));
     }
 
+    report.parsed(&payload.fields);
     Ok(payload)
 }
 

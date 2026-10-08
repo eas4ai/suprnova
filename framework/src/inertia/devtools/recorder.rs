@@ -8,6 +8,12 @@
 //! middleware reads them back after the response is built. Outside the
 //! middleware there is no recorder and the render does no extra work.
 //!
+//! The multipart extraction reports to the same recorder, through a
+//! [`MultipartReport`]: the recorder never reads a multipart body itself,
+//! since the extractor authorizes the request before any byte of it is
+//! read (PAR-042), so the entry's request body is what the extractor
+//! parsed.
+//!
 //! [`InertiaResponse`]: crate::InertiaResponse
 
 use std::collections::HashMap;
@@ -17,15 +23,27 @@ use serde_json::{Map, Value};
 
 use super::classify::PropMeta;
 use super::source::SourceLocation;
+use crate::http::upload::MultipartValue;
 
 tokio::task_local! {
     static RECORDER: Arc<Recorder>;
 }
 
-/// The slot one request's render writes into.
+/// The slot one request's render and multipart extraction write into.
 #[derive(Debug, Default)]
 pub(crate) struct Recorder {
     payload: Mutex<Option<RenderPayload>>,
+    multipart: Mutex<Option<MultipartOutcome>>,
+}
+
+/// How the multipart extraction of a request ended.
+#[derive(Debug, Clone)]
+pub(crate) enum MultipartOutcome {
+    /// The extractor parsed the body: each part by name, text as text and
+    /// a file as its name, size and MIME type.
+    Parsed(Map<String, Value>),
+    /// The extractor started reading the body and failed.
+    Unparsed,
 }
 
 /// What a render recorded, ready for the entry.
@@ -55,6 +73,55 @@ impl Recorder {
     /// What the request's render recorded, if a page rendered.
     pub(crate) fn take(&self) -> Option<RenderPayload> {
         crate::lock::recover(&self.payload).take()
+    }
+
+    /// Keep the summary of the multipart body the extraction parsed.
+    pub(crate) fn multipart_parsed(&self, summary: Map<String, Value>) {
+        *crate::lock::recover(&self.multipart) = Some(MultipartOutcome::Parsed(summary));
+    }
+
+    /// Note that the multipart extraction failed after it began reading.
+    pub(crate) fn multipart_unparsed(&self) {
+        *crate::lock::recover(&self.multipart) = Some(MultipartOutcome::Unparsed);
+    }
+
+    /// How the request's multipart extraction ended, if one ran.
+    pub(crate) fn take_multipart(&self) -> Option<MultipartOutcome> {
+        crate::lock::recover(&self.multipart).take()
+    }
+}
+
+/// The multipart extraction's report to the recorder of the request in
+/// scope: [`parsed`](Self::parsed) hands it the summary of the parts, and
+/// a report dropped without that, as every error return of the parse
+/// drops it, tells it the parse failed. With no recorder in scope it does
+/// nothing.
+pub(crate) struct MultipartReport {
+    recorder: Option<Arc<Recorder>>,
+}
+
+impl MultipartReport {
+    /// The report for the request in scope, made when the extraction
+    /// starts reading the body.
+    pub(crate) fn start() -> Self {
+        Self {
+            recorder: current(),
+        }
+    }
+
+    /// The extraction parsed `fields`.
+    pub(crate) fn parsed(mut self, fields: &[(String, MultipartValue)]) {
+        if let Some(recorder) = self.recorder.take() {
+            recorder.multipart_parsed(super::entry::multipart_summary(fields));
+        }
+    }
+}
+
+impl Drop for MultipartReport {
+    fn drop(&mut self) {
+        if let Some(recorder) = self.recorder.take() {
+            recorder.multipart_unparsed();
+        }
     }
 }
 
