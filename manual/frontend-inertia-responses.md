@@ -2078,9 +2078,13 @@ cd frontend && npm run build:ssr
 suprnova ssr:start
 ```
 
-`suprnova ssr:check` verifies the worker is actually answering - it
-hits the worker's own `GET /health` route, which every `createServer()`
-bundle exposes without any extra code.
+`suprnova ssr:check` asks the SSR gateway's health check whether the
+worker is answering: the HTTP gateway sends `GET /health`, which every
+`createServer()` bundle answers without any extra code. `suprnova ssr:stop`
+stops the worker. The application binary has the same three commands,
+reading the configuration you installed, as in
+`cargo run --bin <app> -- ssr:start`; see
+[Console](console.md#ssr-commands).
 
 ## Configuration
 

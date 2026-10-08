@@ -52,8 +52,9 @@ use crate::models::users::User;
 /// listeners, and job registration here. The HTTP stack (global middleware
 /// and `Inertia::install`) is installed separately via
 /// `.http_bootstrap(|| async { bootstrap::register_http_stack() })` in
-/// `cmd/main.rs`, so it never runs on a process that ships no built frontend
-/// assets.
+/// `cmd/main.rs`, so it never runs on a worker or console process that ships
+/// no built frontend assets. The server and the `ssr:*` commands run it; the
+/// commands read the Inertia configuration it installs.
 pub async fn register() {
     // Initialize database connection
     DB::init().await.expect("Failed to connect to database");
@@ -248,7 +249,9 @@ pub fn inertia_version() -> String {
 /// Register the global middleware chain, in order.
 ///
 /// This is now both the test-harness entry point and the
-/// `.http_bootstrap` hook wired in `cmd/main.rs` - the worker subcommands
+/// `.http_bootstrap` hook wired in `cmd/main.rs`, which the server and the
+/// `ssr:start`, `ssr:stop` and `ssr:check` commands run (the commands read
+/// the Inertia configuration installed below) - the worker subcommands
 /// and the console binary never call it, since they only run
 /// [`register`]. That is what lets a worker or console container image
 /// boot without a built frontend manifest: `Inertia::install` below fails

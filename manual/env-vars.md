@@ -577,8 +577,9 @@ or are honoured by `suprnova serve` / `suprnova ssr:*`.
 |---|---|---|---|
 | `VITE_PORT` | `5765` | `u16` | Port Vite binds to in `suprnova serve`. CLI `--frontend-port` overrides. |
 | `SUPRNOVA_SSR_RUNTIME` | `"node"` | `String` | Runtime to launch the SSR worker under (`suprnova ssr:start`). CLI `--runtime` overrides. |
-| `SUPRNOVA_SSR_BUNDLE` | `frontend/bootstrap/ssr/ssr.js` | `Path` | Path to the built SSR bundle. CLI `--bundle` overrides. |
-| `SUPRNOVA_SSR_URL` | `"http://127.0.0.1:13714"` | `String` | SSR worker URL for `suprnova ssr:check`. CLI `--url` overrides. |
+| `SUPRNOVA_SSR_BUNDLE` | unset | `Path` | Path to the built SSR bundle for `suprnova ssr:start`. Unset, the first conventional path that exists is used (`frontend/bootstrap/ssr/ssr.js` first); set to a missing file, `ssr:start` warns and uses a conventional one when it exists. CLI `--bundle` overrides. |
+| `SUPRNOVA_SSR_URL` | `"http://127.0.0.1:13714"` | `String` | SSR worker URL for `suprnova ssr:check` and `suprnova ssr:stop`, and the worker `suprnova ssr:start` asks to shut down before it starts one. CLI `--url` overrides on `ssr:check` and `ssr:stop`. |
+| `SUPRNOVA_SSR_ENSURE_RUNTIME_EXISTS` | `false` | `bool` | When `true`, `suprnova ssr:start` refuses a runtime it can't find: a path that isn't an executable file, or a name that no `PATH` directory holds as an executable. Accepts `true`/`false`, `1`/`0`, `yes`/`no`, and `on`/`off`; any other value fails the command. |
 
 ## Subsystems with no env vars
 
