@@ -247,8 +247,8 @@ encryption - is documented in
 
 ## Bootstrap
 
-A scaffolded app installs the four protocol-critical middlewares in one
-call inside `bootstrap.rs`:
+A scaffolded app installs the five protocol middlewares in one call
+inside `bootstrap.rs`:
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
@@ -268,17 +268,19 @@ on every response and turns an empty `200` on an Inertia visit into a
 redirect back), `InertiaVersionMiddleware` (emits 409 + `X-Inertia-Location` on
 asset-version mismatch so stale clients reload), `Inertia303Middleware`
 (rewrites 302 → 303 on non-GET Inertia visits so the follow-up is
-unambiguously a GET), and `InertiaValidationRedirectMiddleware` (turns a
-`422` on an Inertia visit into a `303` back to the form page with the
-errors flashed). `InertiaVersionMiddleware` and `Inertia303Middleware`
-used to require separate registration; `Inertia::install` makes all four
-the default. See [Inertia Responses](frontend-inertia-responses.md#bootstrap-inertia-install)
+unambiguously a GET), `InertiaErrorPageMiddleware` (hands the framework's
+own error responses to your error callback or the configured error page,
+and changes nothing without either), and
+`InertiaValidationRedirectMiddleware` (turns a `422` on an Inertia visit
+into a `303` back to the form page with the errors flashed).
+`InertiaVersionMiddleware` and `Inertia303Middleware` used to require
+separate registration; `Inertia::install` makes all five the default. See [Inertia Responses](frontend-inertia-responses.md#bootstrap-inertia-install)
 for the full registration order and what each middleware closes.
 
 When `APP_ENV` names the `local` environment, `install` also registers
-the recorder of the Inertia DevTools browser extension, outermost of the Inertia layer, which
-stores an entry for each request and answers the extension's
-`/_inertia/devtools/entries` endpoints. See
+the recorder of the Inertia DevTools browser extension, outermost of the
+Inertia layer, which stores an entry for each request and answers the
+extension's `/_inertia/devtools/entries` endpoints. See
 [Inertia DevTools](frontend-inertia-devtools.md) to switch it on elsewhere,
 gate it, or turn it off.
 

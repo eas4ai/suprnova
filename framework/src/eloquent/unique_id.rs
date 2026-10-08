@@ -152,9 +152,9 @@ fn generate_ulid_lowercase() -> String {
 /// is deterministic and testable against known vectors - the
 /// timestamp + random source in `generate_ulid_lowercase` is not.
 ///
-/// ULID encodes 128 bits into 26 base32 characters; the leading char
-/// carries only the top 2 bits of `buf[0]` (the remaining 3 bits would
-/// overflow a 130-bit space). Matches the canonical ULID spec and
+/// ULID encodes 128 bits into 26 base32 characters, which hold 130: the
+/// leading char carries only the top 3 bits of `buf[0]`, and its other 2
+/// bits are always zero. Matches the canonical ULID spec and
 /// every mainstream implementation (`ulid-go`, `ulid.js`,
 /// Laravel `Str::ulid()`).
 pub(crate) fn encode_ulid_lowercase(buf: &[u8; 16]) -> String {
@@ -234,7 +234,7 @@ mod tests {
 
     /// All-ones payload encodes to `"7zzzzzzzzzzzzzzzzzzzzzzzzz"` - the
     /// canonical maximum ULID per the spec. The leading char is `'7'`
-    /// (not `'Z'`) because the first character carries only the top 2
+    /// (not `'Z'`) because the first character carries only the top 3
     /// bits of `buf[0]`; the remaining 25 chars each span a full 5-bit
     /// slice of all-ones, which is Crockford index 31 = `'Z'`.
     #[test]
