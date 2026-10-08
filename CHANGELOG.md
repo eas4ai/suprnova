@@ -529,9 +529,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   as Laravel's `app.asset_url`; it defaults to the `ASSET_URL` environment
   variable, and the builder's value wins), else from the manifest's hash,
   else to the empty string. An explicit `.version(...)` or
-  `.version_with(...)` still wins. `MANIFEST_VERSION_FALLBACK` stays exported, but no resolver returns
-  it now, and a client that holds `1.0` from before the upgrade is
-  bounced once (MW-11).
+  `.version_with(...)` still wins. `MANIFEST_VERSION_FALLBACK` stays
+  exported, but no resolver returns it now, and a client that holds `1.0`
+  from before the upgrade is bounced once (MW-11).
 - **The asset-version 409 names an absolute URL and the current
   version.** `InertiaVersionMiddleware` answered a stale Inertia `GET` with
   a root-relative `X-Inertia-Location` (`/users?page=3`) and no version, so

@@ -80,23 +80,7 @@ pub async fn register() {
     );
     crate::live::providers::authorize_live();
 
-    // Inertia shared data - visible on every Inertia response.
-    //
-    // Static values: process-global, set once at boot.
-    App::inertia_share("appName", "Suprnova");
-    App::inertia_share("appVersion", env!("CARGO_PKG_VERSION"));
-
-    // Per-request shared data via the trait. The framework awaits
-    // `share(&req)` on every Inertia response so this can read headers,
-    // session, etc. - see `AppSharedData` below.
-    App::register_inertia_shared(std::sync::Arc::new(AppSharedData));
-
-    // The `lang` prop (active locale, fallback, and where to fetch its
-    // Fluent catalog) on every Inertia response - mirrors the scaffold
-    // template's `bootstrap.rs.tpl`, which registers this the same way
-    // right after its own shared data. The frontend kits' `lib/lang`
-    // wrapper reads this via `initLang(page)`.
-    App::register_inertia_shared(std::sync::Arc::new(LocaleShare));
+    register_inertia_shared_data();
 
     // Broadcasting hub - in-process pub/sub. Registered in the container
     // as `dyn BroadcastHub` so SSE + WS handlers resolve it uniformly.
@@ -395,6 +379,32 @@ pub fn register_http_stack() {
     );
 
     global_middleware!(FeatureMiddleware::new());
+}
+
+/// The Inertia shared data every page carries: the static values through
+/// the `Inertia` facade and the two per-request providers.
+///
+/// `register` calls it at boot. The end-to-end tests that assemble the
+/// router by hand call it too, so a page object they read carries what a
+/// booted application's does.
+pub fn register_inertia_shared_data() {
+    // Static values: process-global, set once at boot, through the facade
+    // Laravel's `Inertia::share` names; a dotted key would nest. A string
+    // serializes, so the `Result` carries no other failure here.
+    Inertia::share("appName", "Suprnova").expect("a string serializes");
+    Inertia::share("appVersion", env!("CARGO_PKG_VERSION")).expect("a string serializes");
+
+    // Per-request shared data via the trait. The framework awaits
+    // `share(&req)` on every Inertia response so this can read headers,
+    // session, etc. - see `AppSharedData` below.
+    App::register_inertia_shared(std::sync::Arc::new(AppSharedData));
+
+    // The `lang` prop (active locale, fallback, and where to fetch its
+    // Fluent catalog) on every Inertia response - mirrors the scaffold
+    // template's `bootstrap.rs.tpl`, which registers this the same way
+    // right after its own shared data. The frontend kits' `lib/lang`
+    // wrapper reads this via `initLang(page)`.
+    App::register_inertia_shared(std::sync::Arc::new(LocaleShare));
 }
 
 /// Register the application's storage disks.
